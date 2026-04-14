@@ -886,7 +886,8 @@ export class Ad4mModel {
     // This includes:
     // - author/timestamp (computed from grouped links)
     // - Properties with comparison operators (gt, gte, lt, lte, between, contains)
-    //   because fn::parse_literal() comparisons in SPARQL subqueries don't work reliably
+    //   because <ad4m://fn/parse_literal>() returns strings, making numeric/date
+    //   comparisons unreliable. Equality, IN, and NOT are pushed to SPARQL.
     // - Relation-based where clauses (e.g., { post: postId } for @BelongsToOne)
     //   which require reverse-link resolution before filtering
     let filteredInstances = instances;
@@ -915,9 +916,9 @@ export class Ad4mModel {
             continue;
           }
 
-          // Filter ALL property conditions in JS (equality, NOT, IN, comparison operators).
-          // SPARQL-level filtering with parse_literal is unreliable across environments,
-          // so we do all property filtering here after hydration resolves values.
+          // Filter ALL property conditions in JS (safety net).
+          // Equality/IN/NOT are also filtered in SPARQL via <ad4m://fn/parse_literal>()
+          // but JS re-validates after hydration resolves values.
           if (!matchesCondition(instance[propertyName], condition)) {
             return false;
           }
@@ -930,7 +931,7 @@ export class Ad4mModel {
     // If limit/offset is used but no explicit order, default to ordering by timestamp (ASC)
     // This ensures consistent pagination behavior
     const effectiveOrder = query.order ||
-      (query.limit !== undefined || query.offset !== undefined ? { timestamp: 'ASC' as 'ASC' } : null);
+      (query.limit !== undefined || query.offset !== undefined ? { createdAt: 'ASC' as 'ASC' } : null);
 
     if (effectiveOrder) {
       const orderEntries = Object.entries(effectiveOrder);

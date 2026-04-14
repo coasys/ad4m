@@ -489,7 +489,8 @@ export async function evaluateCustomGettersForInstance(
             }
           }
         } else {
-          // Legacy SurrealDB-style getter — no longer supported
+          // Legacy SurrealDB-style getter — safety guard for getters that don't match
+          // SPARQL patterns (SELECT/ASK). Logs a warning but does not crash.
           console.warn(`Unsupported legacy getter syntax for property ${propName} — use native SPARQL (SELECT/ASK): ${rawGetter.slice(0, 100)}`);
         }
       } catch (error) {
@@ -576,7 +577,8 @@ export async function evaluateCustomGettersForInstance(
             instance[relName] = values;
           }
         } else {
-          // Legacy SurrealDB-style getter — no longer supported
+          // Legacy SurrealDB-style getter — safety guard for relation getters that don't
+          // match SPARQL patterns (SELECT/ASK). Logs a warning but does not crash.
           console.warn(`Unsupported legacy getter syntax for relation ${relName} — use native SPARQL (SELECT/ASK): ${getter.slice(0, 100)}`);
         }
       } catch (error) {
@@ -653,17 +655,88 @@ export async function hydrateRelations<T>(
     // ── Reverse relations (belongsToOne / belongsToMany) ──────────────────
     // The link goes target→instance, so we query backwards:
     //   predicate = meta.predicate, target = inst.id  →  source is the related id
+    //
+    // PERF: Batch all reverse lookups into a single SPARQL query instead of
+    // N sequential perspective.get() calls (N+1 → 1 optimisation).
     if (meta.kind === 'belongsToOne' || meta.kind === 'belongsToMany') {
-      // Per-instance reverse lookup (can't batch easily across instances)
+      const allIds = instances.map(inst => (inst as any).id).filter(Boolean);
+
+      // Batch query: find all (source, target) pairs for this predicate
+      // where target is one of our instance IDs
+      const sourcesByTarget = new Map<string, string[]>();
+      if (allIds.length > 0) {
+        const sparqlQuery = `SELECT ?source ?target WHERE {
+  GRAPH ?g { ?source <${meta.predicate}> ?target }
+  FILTER(?target IN (${allIds.map(id => `<${id}>`).join(', ')}))
+}`;
+        try {
+          const sparqlResult = await perspective.querySparql(sparqlQuery);
+          // Parse SPARQL results — querySparql returns a flat array of row objects
+          // e.g. [{ source: "uri1", target: "uri2" }, ...]
+          const bindings = Array.isArray(sparqlResult) ? sparqlResult
+            : sparqlResult?.results?.bindings ?? sparqlResult?.bindings ?? [];
+          for (const row of bindings) {
+            const source = row.source?.value ?? row.source;
+            const target = row.target?.value ?? row.target;
+            if (!source || !target) continue;
+            if (!sourcesByTarget.has(target)) sourcesByTarget.set(target, []);
+            sourcesByTarget.get(target)!.push(source);
+          }
+        } catch (e) {
+          // Fallback: sequential queries if SPARQL fails
+          console.warn('Batched reverse relation SPARQL failed, falling back to sequential:', e);
+          for (const inst of instances) {
+            const reverseLinks = await perspective.get(
+              new LinkQuery({ predicate: meta.predicate, target: (inst as any).id })
+            );
+            const sourceIds = reverseLinks
+              .filter(l => l.data.target === (inst as any).id)
+              .map(l => l.data.source);
+            if (sourceIds.length > 0) {
+              sourcesByTarget.set((inst as any).id, sourceIds);
+            }
+          }
+        }
+      }
+
+      // Collect ALL source IDs across all instances for batch hydration
+      const allSourceIds = new Set<string>();
+      for (const ids of sourcesByTarget.values()) {
+        for (const id of ids) allSourceIds.add(id);
+      }
+
+      // Batch-hydrate all related instances at once (1 findAll instead of N)
+      const hydratedMap = new Map<string, any>();
+      if (allSourceIds.size > 0) {
+        const fetchQuery: any = {
+          where: {
+            id: Array.from(allSourceIds),
+            ...(subQuery?.where ?? {}),
+          },
+          ...(subQuery?.order && { order: subQuery.order }),
+          ...(subQuery?.properties && { properties: subQuery.properties }),
+        };
+        try {
+          const allResults = await TargetClass.findAll(perspective, fetchQuery);
+          for (const r of allResults) hydratedMap.set(r.id, r);
+        } catch {
+          // Fallback: hydrate individually
+          await Promise.all(Array.from(allSourceIds).map(async (sid) => {
+            try {
+              const related = new TargetClass(perspective, sid);
+              await related.get(
+                subQuery?.properties ? { properties: subQuery.properties } : undefined
+              );
+              hydratedMap.set(sid, related);
+            } catch { /* skip */ }
+          }));
+        }
+      }
+
+      // Assign hydrated instances to each parent
       for (const inst of instances) {
-        const reverseLinks = await perspective.get(
-          new LinkQuery({ predicate: meta.predicate, target: (inst as any).id })
-        );
-        // Defensive filter: perspective.get may return extra results; ensure
-        // we only use links that genuinely point to this instance.
-        const sourceIds = reverseLinks
-          .filter(l => l.data.target === (inst as any).id)
-          .map(l => l.data.source);
+        const instId = (inst as any).id;
+        const sourceIds = sourcesByTarget.get(instId) ?? [];
 
         if (meta.kind === 'belongsToOne') {
           if (sourceIds.length === 0) {
@@ -671,42 +744,15 @@ export async function hydrateRelations<T>(
             continue;
           }
           const sourceId = sourceIds[sourceIds.length - 1]; // latest-wins
-          try {
-            const related = new TargetClass(perspective, sourceId);
-            await related.get();
-            (inst as any)[relName] = related;
-          } catch {
-            (inst as any)[relName] = null;
-          }
+          (inst as any)[relName] = hydratedMap.get(sourceId) ?? null;
         } else {
           // belongsToMany — return array of hydrated instances
-          let hydrated: any[] = [];
+          let hydrated = sourceIds
+            .map(sid => hydratedMap.get(sid))
+            .filter((v: any): v is any => v != null);
 
-          // If there's a where/order sub-query, delegate to findAll for filtering
-          if (subQuery && (subQuery.where || subQuery.order || subQuery.properties)) {
-            const whereWithIds: Record<string, any> = {
-              id: sourceIds,
-              ...(subQuery.where ?? {}),
-            };
-            hydrated = await TargetClass.findAll(perspective, {
-              where: whereWithIds as any,
-              ...(subQuery.order && { order: subQuery.order as any }),
-              ...(subQuery.properties && { properties: subQuery.properties }),
-            });
-          } else {
-            await Promise.all(sourceIds.map(async (sid: string) => {
-              try {
-                const related = new TargetClass(perspective, sid);
-                await related.get(
-                  subQuery?.properties ? { properties: subQuery.properties } : undefined
-                );
-                hydrated.push(related);
-              } catch { /* skip */ }
-            }));
-          }
-
-          // Apply order (client-side, if not already handled by findAll above)
-          if (subQuery?.order && !(subQuery.where || subQuery.properties)) {
+          // Apply order (client-side)
+          if (subQuery?.order) {
             const orderEntries = Object.entries(subQuery.order);
             hydrated = hydrated.sort((a: any, b: any) => {
               for (const [field, dir] of orderEntries) {

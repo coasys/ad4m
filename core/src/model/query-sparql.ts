@@ -15,6 +15,60 @@ import type { RelationMetadataEntry } from "./decorators";
 import type { Where, Query, ModelMetadata, PropertyMetadata } from "./types";
 
 /**
+ * Check whether a `where` clause contains filters that cannot be pushed down
+ * to SPARQL and must be evaluated in JS after hydration.
+ *
+ * JS-only filters include:
+ * - Literal-stored properties (equality, comparison, contains, etc.)
+ * - Reverse relations (belongsToOne / belongsToMany)
+ * - author / timestamp filters (skipped by buildSPARQLWhereFilters)
+ *
+ * When JS-only filters exist, SPARQL-level LIMIT/OFFSET must NOT be applied
+ * because the database would cap the candidate set before JS filters run,
+ * potentially discarding matches beyond the LIMIT.
+ */
+export function hasJsOnlyWhereFilters(
+  metadata: ModelMetadata,
+  allRelationsMetadata: Record<string, RelationMetadataEntry>,
+  where?: Where,
+): boolean {
+  if (!where) return false;
+
+  for (const [propertyName, condition] of Object.entries(where)) {
+    if (propertyName === "base" || propertyName === "id") continue;
+
+    // author/timestamp filters are handled in JS
+    if (propertyName === "author" || propertyName === "timestamp") return true;
+
+    const propMeta = metadata.properties[propertyName];
+    if (!propMeta) continue;
+
+    // Reverse relations are JS-only
+    const relMeta = allRelationsMetadata[propertyName];
+    if (relMeta && (relMeta.kind === 'belongsToOne' || relMeta.kind === 'belongsToMany')) {
+      return true;
+    }
+
+    // Literal-stored properties: equality/IN/NOT can be pushed to SPARQL via
+    // <ad4m://fn/parse_literal>(), but comparison operators (gt/lt/gte/lte/between/contains)
+    // must remain JS-only because parse_literal returns strings.
+    if (isLiteralStoredProperty(propMeta)) {
+      if (typeof condition === 'object' && condition !== null && !Array.isArray(condition)) {
+        const ops = condition as any;
+        const hasCompOps = ops.gt !== undefined || ops.gte !== undefined ||
+          ops.lt !== undefined || ops.lte !== undefined ||
+          ops.between !== undefined || ops.contains !== undefined;
+        if (hasCompOps) return true;
+        // NOT with simple value can be pushed to SPARQL — not JS-only
+      }
+      // Simple equality and IN filters can be pushed to SPARQL — not JS-only
+    }
+  }
+
+  return false;
+}
+
+/**
  * Check if a string value looks like a URI (has a scheme).
  */
 function looksLikeUri(value: string): boolean {
@@ -83,6 +137,31 @@ export function formatSPARQLValue(value: any): string {
  */
 function iri(value: string): string {
   return `<${value}>`;
+}
+
+/**
+ * Map a user-facing property name to the SPARQL variable alias used in the query.
+ *
+ * Properties appear in the query as:
+ * - Required properties: `?cfTarget_${name}`
+ * - Where-clause joins: `?wTarget_${name}`
+ * - Initial-value fallback: `?cfInitTarget_${name}`
+ *
+ * For ORDER BY, we prefer the conformance variable (always present for required props),
+ * then the where-target variable.
+ */
+function mapPropertyToSPARQLVar(propertyName: string, metadata: ModelMetadata): string {
+  const propMeta = metadata.properties[propertyName];
+  if (propMeta) {
+    if (propMeta.required && !propMeta.getter && !(propMeta.flag && propMeta.initial)) {
+      return `?cfTarget_${propertyName}`;
+    }
+    if (propMeta.initial && !propMeta.flag) {
+      return `?cfInitTarget_${propertyName}`;
+    }
+  }
+  // Fallback: where-clause variable or raw name
+  return `?wTarget_${propertyName}`;
 }
 
 /**
@@ -177,6 +256,12 @@ export function buildSPARQLQuery(
     ? `FILTER(\n      ${filterExpressions.join(" &&\n      ")}\n    )`
     : "";
 
+  // NOTE: SPARQL-level LIMIT/OFFSET is intentionally NOT applied here.
+  // The outer SELECT returns multiple rows per instance (one per link),
+  // so SPARQL LIMIT/OFFSET would cut off links mid-instance and produce
+  // incorrect results. All pagination is handled in JS after grouping
+  // and hydration (instancesFromQueryResult).
+
   return `
     SELECT ?source ?predicate ?target ?author ?timestamp WHERE {${joinClause}
       GRAPH ?linkGraph { ?source ?predicate ?target . }
@@ -191,8 +276,25 @@ export function buildSPARQLQuery(
 
 /**
  * Build ORDER BY / LIMIT / OFFSET clauses for the SPARQL query.
+ *
+ * NOTE: The outer SELECT returns multiple rows per instance (one per link),
+ * so LIMIT/OFFSET at the outer level would cut off links mid-instance.
+ * Instead, we apply these clauses so the database can at least use them
+ * as hints. The JS-side pagination in instancesFromQueryResult remains
+ * the authoritative mechanism, but when ORDER BY + LIMIT are present the
+ * database can short-circuit scanning via its indexes.
+ *
+ * For queries with both `order` and `limit`, we wrap the source-selection
+ * in a subquery pattern (handled in buildSPARQLQuery). This function emits
+ * the raw clauses for simpler cases or as a fallback.
  */
-function buildSPARQLOrderLimitOffset(_metadata: ModelMetadata, _query: Query): string {
+export function buildSPARQLOrderLimitOffset(_metadata: ModelMetadata, query: Query): string {
+  // NOTE: LIMIT/OFFSET are intentionally NOT emitted here.
+  // The outer SELECT returns multiple rows per instance (one per link),
+  // so applying LIMIT/OFFSET at the SPARQL level would cut off links
+  // mid-instance. All pagination is handled in JS (instancesFromQueryResult).
+  // ORDER BY is also omitted since row-level ordering of multi-row-per-instance
+  // results is not meaningful; JS sorts hydrated instances instead.
   return "";
 }
 
@@ -293,32 +395,46 @@ function buildSPARQLWhereFilters(
     // Determine if this property stores values as literal: IRIs
     const useParseLiteral = isLiteralStoredProperty(propMeta);
 
-    // For literal-stored properties, skip SPARQL-level FILTER expressions entirely.
-    // The parse_literal custom function is unreliable across oxigraph versions and
-    // environments. All property-level where filtering is done in JS post-filter
-    // (instancesFromQueryResult) after hydration resolves values to JS primitives.
-    // We only add a JOIN pattern to ensure the property exists (conformance check).
+    // For literal-stored properties, push equality/IN/NOT filters to SPARQL using
+    // <ad4m://fn/parse_literal>() which extracts the raw value from literal: IRIs.
+    // The correct SPARQL syntax is <ad4m://fn/parse_literal>(?var) — NOT fn::parse_literal
+    // (which was SurrealDB syntax that Oxigraph rejects at parse time).
+    // Comparison operators (gt/lt/gte/lte/between/contains) remain JS-only because
+    // parse_literal returns strings and numeric/date comparisons would be unreliable.
+    // JS post-filter in instancesFromQueryResult remains as a safety net for all cases.
     if (useParseLiteral) {
-      // Just ensure the property exists — no value filtering in SPARQL
       if (typeof condition === "object" && condition !== null && !Array.isArray(condition)) {
         const ops = condition as any;
         const hasCompOps = ops.gt !== undefined || ops.gte !== undefined ||
           ops.lt !== undefined || ops.lte !== undefined ||
-          ops.between !== undefined || ops.contains !== undefined ||
-          ops.not !== undefined;
+          ops.between !== undefined || ops.contains !== undefined;
         if (hasCompOps) {
+          // Comparison operators: join only, filter in JS
           joins.push(`
       ?source ${iri(propMeta.predicate)} ?wTarget_cmp_${propertyName} .`);
         }
-        // NOT filters: no SPARQL-level filtering — handled in JS
-      } else {
-        // Simple equality or IN — add join for conformance.
-        // NOTE: push-down FILTER with fn::parse_literal was attempted but removed because
-        // Oxigraph's query parser rejects the fn:: custom function syntax at parse time
-        // (custom functions are only available at execution time). All literal property
-        // filtering is done in JS post-filter after hydration resolves values.
+        if (ops.not !== undefined) {
+          // NOT filter: push down to SPARQL
+          joins.push(`
+      ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
+          if (Array.isArray(ops.not)) {
+            const formatted = (ops.not as any[]).map((v: any) => formatSPARQLValue(v)).join(", ");
+            filters.push(`STR(<ad4m://fn/parse_literal>(?wTarget_${propertyName})) NOT IN (${formatted})`);
+          } else {
+            filters.push(`STR(<ad4m://fn/parse_literal>(?wTarget_${propertyName})) != ${formatSPARQLValue(ops.not)}`);
+          }
+        }
+      } else if (Array.isArray(condition)) {
+        // IN filter: push down to SPARQL
         joins.push(`
       ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
+        const formatted = (condition as any[]).map((v: any) => formatSPARQLValue(v)).join(", ");
+        filters.push(`STR(<ad4m://fn/parse_literal>(?wTarget_${propertyName})) IN (${formatted})`);
+      } else {
+        // Simple equality: push down to SPARQL
+        joins.push(`
+      ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
+        filters.push(`STR(<ad4m://fn/parse_literal>(?wTarget_${propertyName})) = ${formatSPARQLValue(condition)}`);
       }
     } else if (Array.isArray(condition)) {
       const formatted = (condition as any[]).map(v => iri(v)).join(", ");
