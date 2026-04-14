@@ -403,7 +403,15 @@ impl PerspectiveInstance {
     }
 
     async fn nh_sync_loop(&self) {
-        let mut interval = time::interval(Duration::from_secs(3));
+        // Exponential backoff on sync failure. A perspective whose link
+        // language is unreachable (e.g. Holochain timing out because the
+        // parent test long since finished) used to hammer sync() every 3
+        // seconds forever, piling zome calls onto HC for every leaked
+        // instance. Back off up to 5 minutes on repeated failure; reset
+        // to the base interval as soon as a sync succeeds.
+        const BASE_INTERVAL: Duration = Duration::from_secs(3);
+        const MAX_INTERVAL: Duration = Duration::from_secs(300);
+        let mut current_interval = BASE_INTERVAL;
         while !*self.is_teardown.lock().await {
             // Clone the link_language without holding the lock during sync
             let link_language_clone = {
@@ -414,6 +422,7 @@ impl PerspectiveInstance {
             if let Some(mut link_language) = link_language_clone {
                 match link_language.sync().await {
                     Ok(_) => {
+                        current_interval = BASE_INTERVAL;
                         // Transition to Synced state on successful sync
                         let _ = self
                             .update_perspective_state(PerspectiveState::Synced)
@@ -421,6 +430,8 @@ impl PerspectiveInstance {
                     }
                     Err(e) => {
                         log::error!("Error calling sync on link language: {:?}", e);
+                        current_interval =
+                            std::cmp::min(current_interval.saturating_mul(2), MAX_INTERVAL);
                         let _ = self
                             .update_perspective_state(
                                 PerspectiveState::LinkLanguageInstalledButNotSynced,
@@ -429,7 +440,18 @@ impl PerspectiveInstance {
                     }
                 }
             }
-            interval.tick().await;
+            // Sleep in short slices so teardown is observed within ~1s
+            // even when the backoff interval is long.
+            let mut remaining = current_interval;
+            let slice = Duration::from_secs(1);
+            while remaining > Duration::from_millis(0) {
+                if *self.is_teardown.lock().await {
+                    return;
+                }
+                let step = std::cmp::min(slice, remaining);
+                sleep(step).await;
+                remaining = remaining.saturating_sub(step);
+            }
         }
     }
 
@@ -4582,18 +4604,36 @@ impl PerspectiveInstance {
                     }
                     log::debug!("Fallback sync successful for perspective {}, increasing interval to 5 minutes", uuid);
                 } else {
-                    // Reset interval to 30 seconds on failure
-                    *self.fallback_sync_interval.lock().await = Duration::from_secs(30);
+                    // Exponential backoff capped at 5 minutes. Previously
+                    // this path reset the interval to 30s, meaning an
+                    // unreachable link language would be called every 30
+                    // seconds forever, even after repeated timeouts.
+                    let mut guard = self.fallback_sync_interval.lock().await;
+                    let doubled = guard.saturating_mul(2);
+                    let capped = std::cmp::min(doubled, Duration::from_secs(300));
+                    *guard = std::cmp::max(capped, Duration::from_secs(30));
                     log::warn!(
-                        "Fallback sync failed for perspective {}, keeping interval at 30 seconds",
-                        uuid
+                        "Fallback sync failed for perspective {}, backing off to {:?}",
+                        uuid,
+                        *guard
                     );
                 }
             }
 
-            // Get fresh interval for sleep (after potential updates)
+            // Sleep in short slices so teardown is observed promptly even
+            // when the backoff interval is several minutes.
             let sleep_interval = *self.fallback_sync_interval.lock().await;
-            sleep(sleep_interval).await;
+            let mut remaining = sleep_interval;
+            let slice = Duration::from_secs(1);
+            while remaining > Duration::from_millis(0) {
+                if *self.is_teardown.lock().await {
+                    log::debug!("Fallback sync loop ended for perspective {}", uuid);
+                    return;
+                }
+                let step = std::cmp::min(slice, remaining);
+                sleep(step).await;
+                remaining = remaining.saturating_sub(step);
+            }
         }
 
         log::debug!("Fallback sync loop ended for perspective {}", uuid);
