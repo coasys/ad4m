@@ -1,30 +1,13 @@
 /**
- * # Embedding Vector Language — Flat Export Language
+ * # Embedding Vector Language
  *
  * Expression language that compresses expressions into base64 URIs.
  * The "address" IS the compressed expression — no external storage.
- * Flat-export migration of the legacy create()-factory version.
  */
 
 import pako from "https://esm.sh/v135/pako@2.0.4";
 import base64js from "https://esm.sh/v135/base64-js@1.5.1";
-
-// =============================================================================
-// Required metadata
-// =============================================================================
-
-export const name = "embedding-vector-language";
-export const version = "0.1.0";
-
-// =============================================================================
-// Module-level state
-// =============================================================================
-
-let agent: any = null;
-
-// =============================================================================
-// Helpers
-// =============================================================================
+import { defineLanguage, agentCreateSignedExpression } from "@coasys/ad4m-ldk";
 
 function compressUri(uri: string): string {
     const compressed = pako.deflate(uri);
@@ -37,44 +20,45 @@ function decompressUri(compressedString: string): string {
     return new TextDecoder().decode(decompressed);
 }
 
-// =============================================================================
-// Lifecycle
-// =============================================================================
+const language = defineLanguage({
+    name: "embedding-vector-language",
+    version: "0.1.0",
 
-export async function init(): Promise<void> {
-    agent = (globalThis as any).__agentProxy__;
-}
+    async init() {},
+    async teardown() {},
+    interactions() { return []; },
 
-export async function teardown(): Promise<void> {
-    agent = null;
-}
+    expression: {
+        async create(content: object): Promise<string> {
+            try {
+                const expr = agentCreateSignedExpression(content);
+                const exprString = JSON.stringify(expr);
+                return compressUri(exprString);
+            } catch (e) {
+                console.error("caught error", e);
+                return null;
+            }
+        },
 
-export function interactions(): any[] {
-    return [];
-}
+        async get(address: string): Promise<any> {
+            try {
+                const decompressedAddress = decompressUri(address);
+                const expr = JSON.parse(decompressedAddress);
+                return expr;
+            } catch (e) {
+                console.error("caught error", e);
+                return null;
+            }
+        },
+    },
+});
 
-// =============================================================================
-// Expression capability
-// =============================================================================
-
-export async function expressionCreate(content: object): Promise<string> {
-    try {
-        const expr = agent.createSignedExpression(content);
-        const exprString = JSON.stringify(expr);
-        return compressUri(exprString);
-    } catch (e) {
-        console.error("caught error", e);
-        return null;
-    }
-}
-
-export async function expressionGet(address: string): Promise<any> {
-    try {
-        const decompressedAddress = decompressUri(address);
-        const expr = JSON.parse(decompressedAddress);
-        return expr;
-    } catch (e) {
-        console.error("caught error", e);
-        return null;
-    }
-}
+export const {
+    name,
+    version,
+    init,
+    teardown,
+    interactions,
+    expressionGet,
+    expressionCreate,
+} = language;
