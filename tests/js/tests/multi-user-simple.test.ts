@@ -70,6 +70,10 @@ describe("Multi-User Simple integration tests", () => {
     })
 
     after(async () => {
+        // Tear down any surviving perspectives so their background
+        // sync / gossip loops exit cleanly before we kill the executor,
+        // otherwise the event loop idles on pending HC calls.
+        try { await cleanupAllMainExecutorPerspectives(); } catch {}
         await gracefulShutdown(executorProcess, "executor");
         await gracefulShutdown(localServicesProcess, "local services");
         deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
@@ -366,6 +370,8 @@ describe("Multi-User Simple integration tests", () => {
     })
 
     describe("Perspective Isolation", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
         it("should isolate perspectives between users", async () => {
             // Create two users
             const user1Result = await createTestUser("isolation1@example.com", "password1");
@@ -483,6 +489,8 @@ describe("Multi-User Simple integration tests", () => {
     })
 
     describe("Link Authoring and Signatures", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
         it("should have correct authors and valid signatures for user links", async () => {
             // Create two users
             const user1Result = await createTestUser("linkauth1@example.com", "password1");
@@ -541,6 +549,8 @@ describe("Multi-User Simple integration tests", () => {
     });
 
     describe("Subject Creation and SDNA Operations", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
         // Define the test subject class outside the test function
         let TestSubject: any;
         
@@ -636,6 +646,8 @@ describe("Multi-User Simple integration tests", () => {
     });
 
     describe("Agent Profiles and Status", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
         it("should maintain separate agent profiles for different users", async () => {
             // Create two users
             const user1Result = await createTestUser("profile1@example.com", "password1");
@@ -1070,6 +1082,8 @@ describe("Multi-User Simple integration tests", () => {
     });
 
     describe("Multi-User Neighbourhood Sharing", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
         it("should allow multiple local users to share the same neighbourhood", async () => {
             // Create two users
             const user1Result = await createTestUser("nh1@example.com", "password1");
@@ -1808,7 +1822,11 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         after(async function() {
-            this.timeout(20000);
+            this.timeout(60000);
+            // Tear down the perspectives these tests created on the main
+            // executor so their background sync / gossip loops don't
+            // keep running and saturate Holochain for subsequent tests.
+            await cleanupAllMainExecutorPerspectives();
             await gracefulShutdown(node2ExecutorProcess, "node 2 executor");
             deregisterPorts([node2GqlPort, node2HcAdminPort, node2HcAppPort]);
         });
@@ -2257,6 +2275,8 @@ describe("Multi-User Simple integration tests", () => {
     });
 
     describe("Perspective Subscriptions", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
         it("should only notify users about their own perspectives in perspectiveAdded", async () => {
             console.log("\n=== Testing perspective subscription filtering ===");
 
@@ -2556,6 +2576,8 @@ describe("Multi-User Simple integration tests", () => {
     });
 
     describe("Multi-User Notifications", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
         it("should isolate notifications between users", async () => {
             console.log("\n=== Testing notification isolation between users ===");
 
