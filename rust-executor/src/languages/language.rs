@@ -1,3 +1,26 @@
+//! Executor-side view of a loaded Language.
+//!
+//! A thin handle: the content-address of the loaded language plus its
+//! cached capability set. Every method dispatches through
+//! `LanguageController::execute_on_language`, which routes to the
+//! per-language Deno runtime where the actual JS (or Rust-via-WASM) code
+//! runs.
+//!
+//! The `impl` blocks below are grouped by capability, mirroring the
+//! authoritative split in `ad4m-ldk/rust/src/traits.rs`:
+//!
+//! | Block here                    | Rust ALDK trait                   |
+//! |-------------------------------|-----------------------------------|
+//! | lifecycle                     | `Language` (required)             |
+//! | perspective-commit            | `PerspectiveCommitCapability`     |
+//! | perspective-sync              | `PerspectiveSyncCapability`       |
+//! | peers                         | `PeersCapability`                 |
+//! | telepresence                  | `TelepresenceCapability`          |
+//!
+//! Each method checks the cached capability set and early-returns its
+//! default when the language hasn't advertised the matching capability,
+//! so callers can call freely without per-call guards.
+
 use super::byte_array::ByteArray;
 use super::capability::{get_capabilities, Capability};
 use super::LanguageController;
@@ -10,13 +33,6 @@ use deno_core::error::AnyError;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-// The executor-side Language type is intentionally kept as a single struct
-// carrying a cached capability set — the capability carving follows the
-// authoritative split in `ad4m-ldk/rust/src/traits.rs` (Language +
-// ExpressionCapability + Perspective{Commit,Sync,Query}Capability +
-// PeersCapability + TelepresenceCapability + HolochainSignalHandler). Each
-// method here checks the capability once on the Rust side and the JS
-// dispatcher scripts are free to call the underlying function unguarded.
 #[derive(Clone)]
 pub struct Language {
     address: String,
@@ -33,6 +49,10 @@ fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
         Ok(serde_json::from_str::<Option<String>>(&js_result)?)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle — the bits every Language has (ALDK `Language` trait).
+// ---------------------------------------------------------------------------
 impl Language {
     pub fn new(address: String) -> Self {
         let capabilities = get_capabilities(&address);
@@ -51,25 +71,18 @@ impl Language {
     /// The set is populated once in `LanguageRuntime::register_callbacks` and
     /// stored in the global capability registry; `Language::new` reads from
     /// that registry, so a language whose `register_callbacks` has not yet
-    /// run (e.g. an in-flight load) will report an empty capability set.
+    /// run will report an empty capability set.
     pub fn has(&self, cap: Capability) -> bool {
         self.capabilities.contains(&cap)
     }
+}
 
-    pub async fn sync(&mut self) -> Result<(), AnyError> {
-        if !self.has(Capability::PerspectiveSync) {
-            return Ok(());
-        }
-        let controller = LanguageController::global_instance();
-        let script = r#"await language.linksAdapter.sync()"#;
-
-        controller
-            .execute_on_language(&self.address, script)
-            .await
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        Ok(())
-    }
-
+// ---------------------------------------------------------------------------
+// Perspective-commit — ALDK `PerspectiveCommitCapability`.
+// Write a diff; may or may not return the new revision depending on whether
+// the language also exports `perspective-sync`.
+// ---------------------------------------------------------------------------
+impl Language {
     pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<String>, AnyError> {
         if !self.has(Capability::PerspectiveCommit) {
             return Ok(None);
@@ -90,13 +103,34 @@ impl Language {
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         parse_revision(result)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Perspective-sync — ALDK `PerspectiveSyncCapability`.
+// Pull remote state into the language's local store; report the current
+// revision so callers can detect when a perspective is up to date; optionally
+// render the full perspective from scratch.
+// ---------------------------------------------------------------------------
+impl Language {
+    pub async fn sync(&mut self) -> Result<(), AnyError> {
+        if !self.has(Capability::PerspectiveSync) {
+            return Ok(());
+        }
+        let controller = LanguageController::global_instance();
+        let script = r#"await language.linksAdapter.sync()"#;
+
+        controller
+            .execute_on_language(&self.address, script)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(())
+    }
 
     pub async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {
         if !self.has(Capability::PerspectiveCurrentRevision) {
             return Ok(None);
         }
         let controller = LanguageController::global_instance();
-        // Same undefined → null coercion as `commit`.
         let script = r#"JSON.stringify((await language.linksAdapter.currentRevision()) ?? null)"#;
 
         let result = controller
@@ -120,14 +154,41 @@ impl Language {
         let maybe_value = serde_json::from_str(&result)?;
         Ok(maybe_value)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Peers — ALDK `PeersCapability`.
+// Tell the language which local agents to sign/commit as, and query the
+// set of known remote agents for diff fan-out.
+// ---------------------------------------------------------------------------
+impl Language {
+    pub async fn set_local_agents(&mut self, agents: Vec<String>) -> Result<(), AnyError> {
+        if !self.has(Capability::PeersLocal) {
+            return Ok(());
+        }
+        log::debug!("set_local_agents: agents: {:?}", agents);
+        let controller = LanguageController::global_instance();
+        let agents_json = serde_json::to_string(&agents)?;
+        let script = format!(
+            r#"await language.linksAdapter.setLocalAgents({})"#,
+            agents_json
+        );
+
+        log::debug!("set_local_agents script: {}", script);
+        let result = controller
+            .execute_on_language(&self.address, &script)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        log::debug!("set_local_agents result: {}", result);
+        Ok(())
+    }
 
     pub async fn others(&mut self) -> Result<Vec<String>, AnyError> {
         if !self.has(Capability::PeersRemote) {
             return Ok(Vec::new());
         }
         let controller = LanguageController::global_instance();
-        let script =
-            r#"JSON.stringify((await language.linksAdapter.others()) ?? [])"#;
+        let script = r#"JSON.stringify((await language.linksAdapter.others()) ?? [])"#;
 
         let result = controller
             .execute_on_language(&self.address, script)
@@ -136,7 +197,14 @@ impl Language {
         let others_vec = serde_json::from_str(&result)?;
         Ok(others_vec)
     }
+}
 
+// ---------------------------------------------------------------------------
+// Telepresence — ALDK `TelepresenceCapability`.
+// Low-latency online-status + directed/broadcast signals that bypass the
+// durable commit path.
+// ---------------------------------------------------------------------------
+impl Language {
     pub async fn has_telepresence_adapter(&mut self) -> Result<bool, AnyError> {
         // A language has a "telepresence adapter" iff it advertises any
         // telepresence-* capability. Consult the cached set rather than
@@ -193,10 +261,8 @@ impl Language {
         }
         let controller = LanguageController::global_instance();
         let payload_json = serde_json::to_string(&payload)?;
-        // JSON-encode the DID so it becomes a properly quoted JS string
-        // literal. A bare `"{}"` interpolation would break for any DID
-        // containing a `"`, `\`, or newline (unlikely in practice, trivial
-        // to fix correctly).
+        // JSON-encode the DID so it embeds as a properly quoted JS string
+        // literal — defensive against any DID containing `"`, `\`, or newline.
         let did_literal = serde_json::to_string(&remote_agent_did)?;
         let script = format!(
             r#"await language.telepresenceAdapter.sendSignal({}, {})"#,
@@ -225,27 +291,6 @@ impl Language {
             .execute_on_language(&self.address, &script)
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        Ok(())
-    }
-
-    pub async fn set_local_agents(&mut self, agents: Vec<String>) -> Result<(), AnyError> {
-        if !self.has(Capability::PeersLocal) {
-            return Ok(());
-        }
-        log::debug!("set_local_agents: agents: {:?}", agents);
-        let controller = LanguageController::global_instance();
-        let agents_json = serde_json::to_string(&agents)?;
-        let script = format!(
-            r#"await language.linksAdapter.setLocalAgents({})"#,
-            agents_json
-        );
-
-        log::debug!("set_local_agents script: {}", script);
-        let result = controller
-            .execute_on_language(&self.address, &script)
-            .await
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        log::debug!("set_local_agents result: {}", result);
         Ok(())
     }
 }
