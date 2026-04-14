@@ -1,100 +1,89 @@
 /**
- * # AES (Ethereum Attestation Service) Language — Flat Export Language
+ * # AES (Ethereum Attestation Service) Language
  *
  * Expression language that fetches attestations from EAS (easscan.org).
  * Read-only: expressionGet fetches attestations for an Ethereum address,
  * no expressionCreate (attestations are created on-chain).
- * Flat-export migration of the legacy create()-factory version.
  */
 
 import axiod from "https://deno.land/x/axiod/mod.ts";
+import { defineLanguage, agentCreateSignedExpression } from "@coasys/ad4m-ldk";
 
-// =============================================================================
-// Required metadata
-// =============================================================================
+const language = defineLanguage({
+    name: "aes-language",
+    version: "0.1.0",
 
-export const name = "aes-language";
-export const version = "0.1.0";
+    async init() {},
+    async teardown() {},
+    interactions() { return []; },
 
-// =============================================================================
-// Module-level state
-// =============================================================================
+    expression: {
+        isImmutable(_address: string): boolean {
+            return false;
+        },
 
-let agent: any = null;
-
-// =============================================================================
-// Lifecycle
-// =============================================================================
-
-export async function init(): Promise<void> {
-    agent = (globalThis as any).__agentProxy__;
-}
-
-export async function teardown(): Promise<void> {
-    agent = null;
-}
-
-export function interactions(): any[] {
-    return [];
-}
-
-export function isImmutableExpression(_address: string): boolean {
-    return false;
-}
-
-// =============================================================================
-// Expression capability (read-only — no expressionCreate)
-// =============================================================================
-
-export async function expressionGet(ethAddr: string): Promise<any> {
-    let attestations = await axiod.post(
-        "https://easscan.org/graphql",
-        {
-            query: `
-        query Query($attestationsWhere: AttestationWhereInput) {
-          attestations(where: $attestationsWhere) {
-            id
-            data
-            decodedDataJson
-            recipient
-            attester
-            time
-            timeCreated
-            expirationTime
-            revocationTime
-            refUID
-            revocable
-            revoked
-            txid
-            schemaId
-            ipfsHash
-            isOffchain
-          }
-        }
-      `,
-            variables: {
-                attestationsWhere: {
-                    recipient: {
-                        equals: ethAddr,
+        async get(ethAddr: string): Promise<any> {
+            let attestations = await axiod.post(
+                "https://easscan.org/graphql",
+                {
+                    query: `
+                query Query($attestationsWhere: AttestationWhereInput) {
+                  attestations(where: $attestationsWhere) {
+                    id
+                    data
+                    decodedDataJson
+                    recipient
+                    attester
+                    time
+                    timeCreated
+                    expirationTime
+                    revocationTime
+                    refUID
+                    revocable
+                    revoked
+                    txid
+                    schemaId
+                    ipfsHash
+                    isOffchain
+                  }
+                }
+              `,
+                    variables: {
+                        attestationsWhere: {
+                            recipient: {
+                                equals: ethAddr,
+                            },
+                        },
                     },
                 },
-            },
+                {
+                    headers: {
+                        Accept: "application/json",
+                        "Content-Type": "application/json",
+                    },
+                }
+            );
+
+            if (attestations.status !== 200) {
+                console.error("Failed to fetch attestations", attestations);
+                throw new Error("Failed to fetch attestations");
+            }
+
+            let attestationsCleaned = attestations.data.data.attestations;
+            let attestationExpression =
+                agentCreateSignedExpression(attestationsCleaned);
+
+            return attestationExpression;
         },
-        {
-            headers: {
-                Accept: "application/json",
-                "Content-Type": "application/json",
-            },
-        }
-    );
+    },
+});
 
-    if (attestations.status !== 200) {
-        console.error("Failed to fetch attestations", attestations);
-        throw new Error("Failed to fetch attestations");
-    }
-
-    let attestationsCleaned = attestations.data.data.attestations;
-    let attestationExpression = agent.createSignedExpression(attestationsCleaned);
-
-    return attestationExpression;
-}
+export const {
+    name,
+    version,
+    init,
+    teardown,
+    interactions,
+    expressionGet,
+    isImmutableExpression,
+} = language;
