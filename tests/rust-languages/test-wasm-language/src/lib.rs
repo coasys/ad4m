@@ -78,7 +78,7 @@ impl Language for TestLang {
 }
 
 impl ExpressionCapability for TestLang {
-    fn expression_create(&mut self, content: serde_json::Value) -> LanguageResult<Address> {
+    async fn expression_create(&mut self, content: serde_json::Value) -> LanguageResult<Address> {
         // Sign via the host agent — this exercises the agent import.
         // Use the typed wrapper so `content`'s maps serialize as JS
         // objects; the raw import with serde_wasm_bindgen::to_value
@@ -104,7 +104,7 @@ impl ExpressionCapability for TestLang {
         Ok(addr)
     }
 
-    fn expression_get(&mut self, address: Address) -> LanguageResult<Option<Expression>> {
+    async fn expression_get(&mut self, address: Address) -> LanguageResult<Option<Expression>> {
         let raw = rt::storage_get(&address);
         if raw.is_null() || raw.is_undefined() {
             return Ok(None);

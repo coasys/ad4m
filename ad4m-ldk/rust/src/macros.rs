@@ -129,20 +129,38 @@ macro_rules! ad4m_language {
 #[macro_export]
 macro_rules! __ad4m_cap {
     (expression, $lang:ty) => {
+        // Async shims: the trait methods return `impl Future` so they
+        // can call async host imports (`holochain_call`, etc.). The
+        // macro can't hold a `RefCell::borrow_mut()` across an `await`,
+        // so it temporarily takes the language out of the thread_local
+        // slot, runs the async method against the owned value, and puts
+        // it back when the future resolves. This is safe because the
+        // runtime serializes all calls into a given Language via the
+        // JS event loop + language controller mutex — no re-entrant
+        // call can observe the empty slot.
+
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "expressionCreate")]
-        pub fn __ad4m_expression_create(
+        pub async fn __ad4m_expression_create(
             content: ::wasm_bindgen::JsValue,
         ) -> ::std::result::Result<String, ::wasm_bindgen::JsValue> {
             let v: ::serde_json::Value = ::serde_wasm_bindgen::from_value(content)
                 .map_err($crate::errors::LanguageError::from)?;
-            let addr = __ad4m_with(|l| <$lang as $crate::traits::ExpressionCapability>::expression_create(l, v))?;
-            Ok(addr)
+            let mut lang = __AD4M_LANG_STATE.with(|c| c.borrow_mut().take())
+                .expect("Language not initialized (expressionCreate called before init)");
+            let result = <$lang as $crate::traits::ExpressionCapability>::expression_create(&mut lang, v).await;
+            __AD4M_LANG_STATE.with(|c| *c.borrow_mut() = Some(lang));
+            Ok(result?)
         }
+
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "expressionGet")]
-        pub fn __ad4m_expression_get(
+        pub async fn __ad4m_expression_get(
             address: String,
         ) -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
-            let exp = __ad4m_with(|l| <$lang as $crate::traits::ExpressionCapability>::expression_get(l, address))?;
+            let mut lang = __AD4M_LANG_STATE.with(|c| c.borrow_mut().take())
+                .expect("Language not initialized (expressionGet called before init)");
+            let result = <$lang as $crate::traits::ExpressionCapability>::expression_get(&mut lang, address).await;
+            __AD4M_LANG_STATE.with(|c| *c.borrow_mut() = Some(lang));
+            let exp = result?;
             Ok($crate::__serde::to_js(&exp).map_err($crate::errors::LanguageError::from)?)
         }
     };

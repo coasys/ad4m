@@ -74,7 +74,7 @@ assert.equal(mod.name(), "test-wasm-language");
 assert.equal(mod.version(), "0.1.0");
 assert.equal(mod.isPublic(), true);
 
-mod.init();
+await mod.init();
 
 // Capability-presence detection: macro emits ONLY for declared capabilities.
 assert.equal(typeof mod.expressionCreate, "function", "expression declared");
@@ -117,10 +117,10 @@ let ixThrew = false;
 try { mod.expressionInteract("test:dummy", "bogus", {}); } catch { ixThrew = true; }
 assert.equal(ixThrew, true, "unknown interaction name rejected");
 
-// Expression capability — round-trip via storage
-const addr = mod.expressionCreate({ note: "hello" });
+// Expression capability — round-trip via storage (async per spec v1.1)
+const addr = await mod.expressionCreate({ note: "hello" });
 assert.ok(typeof addr === "string" && addr.startsWith("test:"));
-const got = mod.expressionGet(addr);
+const got = await mod.expressionGet(addr);
 assert.ok(got && got.author === "did:test:smoke", "fetched expression has author");
 
 // Host calls observed: agent_create_signed_expression + agent_sign_string_hex

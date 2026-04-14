@@ -55,9 +55,20 @@ pub trait Language: 'static {
 /// `Language::interactions(address)` lifecycle method and invoked
 /// through the `Interaction` object the runtime constructs from that
 /// description — there is no top-level `expressionInteract` export.
+///
+/// Both methods return a `Future` so languages can call async host
+/// imports (`holochain_call`, HTTP via `fetch`, …). Languages whose
+/// implementation is synchronous can simply write `async fn` — a
+/// future that never suspends has no runtime cost.
 pub trait ExpressionCapability: Language {
-    fn expression_create(&mut self, content: serde_json::Value) -> LanguageResult<Address>;
-    fn expression_get(&mut self, address: Address) -> LanguageResult<Option<Expression>>;
+    fn expression_create(
+        &mut self,
+        content: serde_json::Value,
+    ) -> impl std::future::Future<Output = LanguageResult<Address>>;
+    fn expression_get(
+        &mut self,
+        address: Address,
+    ) -> impl std::future::Future<Output = LanguageResult<Option<Expression>>>;
 }
 
 /// `perspective-commit` capability — writing diffs.
