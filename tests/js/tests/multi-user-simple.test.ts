@@ -75,6 +75,33 @@ describe("Multi-User Simple integration tests", () => {
         deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     })
 
+    // Explicitly tear down every perspective on the main executor. Each
+    // test's perspectives (plus the background sync / gossip loops inside
+    // their link languages) otherwise keep running until the executor
+    // shuts down, saturating Holochain with work from long-finished
+    // tests so legitimate sync traffic in later tests times out.
+    // `adminAd4mClient` is the launcher credential and can see / remove
+    // perspectives owned by managed users as well. Called from per-
+    // describe `after()` hooks below — not `afterEach` — because several
+    // of the nested describes intentionally share perspective state
+    // across their own it() blocks.
+    async function cleanupAllMainExecutorPerspectives() {
+        if (!adminAd4mClient) return;
+        try {
+            const all = await adminAd4mClient.perspective.all();
+            for (const p of all) {
+                try {
+                    await adminAd4mClient.perspective.remove(p.uuid);
+                } catch (e) {
+                    // Some tests delete their own perspectives before
+                    // this fires; ignore not-found / permission errors.
+                }
+            }
+        } catch (e) {
+            console.warn("cleanupAllMainExecutorPerspectives error:", e);
+        }
+    }
+
     describe("Multi-User Configuration", () => {
         it("should have multi-user disabled by default and require activation", async () => {
             // Check that multi-user is disabled by default
@@ -2805,6 +2832,14 @@ describe("Multi-User Simple integration tests", () => {
 
         before(async function() {
             this.timeout(300000);
+
+            // Tear down any perspectives (and their background sync /
+            // gossip loops) left behind by earlier describes on the main
+            // executor. Without this, the Flux test's own gossip /
+            // signal traffic competes with dozens of leaked loops for
+            // Holochain resources and the 300s timeout is not enough.
+            console.log("\n=== [Flux Scenario] Cleaning up leftover perspectives on main executor ===");
+            await cleanupAllMainExecutorPerspectives();
 
             console.log("\n=== [Flux Scenario] Setting up remote standalone node (Node 3) ===");
             if (!fs.existsSync(node3AppDataPath)) {
