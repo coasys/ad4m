@@ -25,7 +25,6 @@
       "dependsOn": [
         "@coasys/perspective-diff-sync#build",
         "@coasys/agent-language#build",
-        "@coasys/direct-message-language#build",
         "@coasys/perspective-language#build",
         "@coasys/language-language#build",
         "@coasys/neighbourhood-language#build",

@@ -16,7 +16,6 @@ import neighbourhoodTests from "./neighbourhood";
 import runtimeTests from "./runtime";
 import flatLanguageTests from "./flat-language.test";
 //import { Crypto } from "@peculiar/webcrypto"
-import directMessageTests from "./direct-messages";
 import agentLanguageTests from "./agent-language";
 import socialDNATests from "./social-dna-flow";
 import fetch from "node-fetch";
@@ -196,6 +195,5 @@ describe("Integration tests", function () {
         describe('Agent Language', agentLanguageTests(testContext))
         describe('Language', languageTests(testContext))
         describe('Neighbourhood', neighbourhoodTests(testContext))
-        //describe('Direct Messages', directMessageTests(testContext))
     })
 })
