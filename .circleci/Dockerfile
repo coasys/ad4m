@@ -57,6 +57,9 @@ RUN ~/.cargo/bin/rustup target add wasm32-unknown-unknown
 RUN ~/.cargo/bin/cargo install holochain_cli@0.7.0-dev.10
 RUN ~/.cargo/bin/cargo install kitsune2_bootstrap_srv --git https://github.com/holochain/kitsune2.git --rev ea3c2d42dde92f0889672a41f02f186ad9e75e4c --features "iroh-relay"
 
+# Install wasm-bindgen-cli (required by @coasys/centralized-agent-language)
+RUN ~/.cargo/bin/cargo install wasm-bindgen-cli --version 0.2.117
+
 # Install Deno
 RUN curl -fsSL https://deno.land/install.sh | sh
 RUN echo 'export DENO_INSTALL="/home/circleci/.deno"' >> /home/circleci/.bashrc
