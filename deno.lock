@@ -489,25 +489,6 @@
           ]
         }
       },
-      "bootstrap-languages/direct-message-language": {
-        "packageJson": {
-          "dependencies": [
-            "npm:@coasys/ad4m@*",
-            "npm:@coasys/rollup-plugin-holochain@^0.0.3",
-            "npm:@rollup/plugin-commonjs@14",
-            "npm:@rollup/plugin-node-resolve@8",
-            "npm:@rollup/plugin-typescript@4",
-            "npm:@types/node@18",
-            "npm:rollup-plugin-postcss@^3.1.8",
-            "npm:rollup-plugin-string@3",
-            "npm:rollup-plugin-terser@7",
-            "npm:rollup@^2.3.4",
-            "npm:run-script-os@^1.1.6",
-            "npm:tslib@2",
-            "npm:typescript@^4.2.4"
-          ]
-        }
-      },
       "bootstrap-languages/eas": {
         "packageJson": {
           "dependencies": [

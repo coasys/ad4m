@@ -1,9 +1,16 @@
 //! Typed wrappers around the runtime imports the AD4M executor exposes
 //! to a WASM Language module. Spec §7.
+//!
+//! The extern block uses `module = "ad4m:host"` so wasm-bindgen emits
+//! `import { agentDid, holochainCall, ... } from "ad4m:host"` at the top
+//! of the generated language bundle. The executor registers a synthetic
+//! Deno module at the `ad4m:host` specifier (see
+//! `rust-executor/src/js_core/options.rs` and `wasm_imports.ts`) whose
+//! exports resolve to the same host functions installed on `globalThis`.
 
 use wasm_bindgen::prelude::*;
 
-#[wasm_bindgen]
+#[wasm_bindgen(module = "ad4m:host.ts")]
 extern "C" {
     // ----- Agent (spec §7.1) -----
     #[wasm_bindgen(js_name = "agentDid")]

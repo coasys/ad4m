@@ -32,6 +32,25 @@ pub fn language_module_loader() -> Rc<StringModuleLoader> {
         "https://ad4m.language/wasm_imports.ts",
         include_str!("wasm_imports.ts"),
     );
+    // `ad4m:host.ts` is the import specifier used by Rust-authored Languages
+    // through the ALDK (`#[wasm_bindgen(module = "ad4m:host.ts")]`). The
+    // wasm-bindgen glue emits `import { agentDid, holochainCall, ... }
+    // from "ad4m:host.ts"` at the top of the generated language bundle —
+    // we satisfy that import by registering the same wasm_imports.ts
+    // source under the `ad4m:host.ts` specifier.
+    //
+    // The `.ts` suffix is deliberate: the StringModuleLoader uses the URL
+    // path extension to decide whether to transpile TypeScript, and the
+    // source we register still contains TS type annotations. Without the
+    // suffix, `MediaType::from_path` reports Unknown and Deno loads the
+    // file as raw JS, crashing on the first type annotation.
+    //
+    // The two specifiers (`https://ad4m.language/wasm_imports.ts` and
+    // `ad4m:host.ts`) load as two distinct Deno module instances, but
+    // both close over globalThis extension ops (AGENT, LANGUAGE_CONTROLLER,
+    // __holochainDelegate__) installed by `setupWasmImports()`, so state
+    // stays consistent across the boundary.
+    loader.add_module("ad4m:host.ts", include_str!("wasm_imports.ts"));
     Rc::new(loader)
 }
 

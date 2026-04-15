@@ -1,53 +1,69 @@
 /**
- * # WASM Host Imports (JS/Deno side)
+ * # Host imports for Rust WASM Languages
  *
- * This file defines the host imports that Rust-compiled Language WASM
- * modules link against. Rust languages built with `ad4m-ldk` use
- * `#[wasm_bindgen] extern "C"` to declare imports such as `__agent_did`,
- * `__holochain_call`, `__signal_emit`, etc. — wasm-bindgen then expects
- * those symbols to exist on the JS host at instantiation time. We
- * install them on `globalThis` here, wrapping the matching Deno ops
- * (AGENT, LANGUAGE_CONTROLLER, __holochainDelegate__).
+ * This file is the host-side of the bridge between Rust-authored AD4M
+ * Languages (compiled to WASM via `ad4m-ldk`) and the executor's Deno
+ * extension ops. It exports named functions — `agentDid`,
+ * `holochainCall`, `storageGet`, `emitPerspectiveDiff`, etc. — that the
+ * language bundle imports via `import { ... } from "ad4m:host.ts"`.
  *
- * JS-authored languages do NOT link against any of this. They reach the
- * same underlying ops through the JS ALDK wrappers in
- * `ad4m-ldk/js/src/imports.ts` (or directly via the `AGENT` /
- * `LANGUAGE_CONTROLLER` / `__holochainDelegate__` globals if they're
- * hand-rolled) — but the resulting function calls all end up on the
- * same Deno ops.
+ * The module is registered in the Deno module loader under two
+ * specifiers (see `options.rs::language_module_loader`):
+ *   - `https://ad4m.language/wasm_imports.ts` — historic, reached by
+ *     `./wasm_imports.ts` from `language_bootstrap.js`.
+ *   - `ad4m:host.ts` — the specifier that wasm-bindgen emits when the
+ *     Rust ALDK declares `#[wasm_bindgen(module = "ad4m:host.ts")]`.
  *
- * ## Rust-side declaration example
+ * ## Rust side
+ *
+ * Rust Languages don't touch this file directly. They depend on
+ * `ad4m-ldk/rust`, whose `imports.rs` declares:
  *
  * ```rust
- * #[wasm_bindgen]
+ * #[wasm_bindgen(module = "ad4m:host.ts")]
  * extern "C" {
- *     fn __agent_did() -> String;
- *     fn __agent_sign(payload: &[u8]) -> Vec<u8>;
- *     fn __holochain_call(dna: &str, zome: &str, fn_name: &str, params: JsValue) -> JsValue;
- *     fn __signal_emit(data: JsValue);
+ *     #[wasm_bindgen(js_name = "agentDid")]
+ *     pub fn agent_did() -> String;
+ *     // ...
  * }
  * ```
+ *
+ * wasm-bindgen's codegen then emits an ES module import at the top of
+ * the language bundle and the glue code that unwraps types across the
+ * boundary.
+ *
+ * ## JS-authored Languages
+ *
+ * JS-authored Languages do not import this module. They reach the same
+ * underlying Deno ops through either the JS ALDK wrappers
+ * (`ad4m-ldk/js/src/imports.ts`) or, for hand-rolled languages, the
+ * globals `AGENT` / `LANGUAGE_CONTROLLER` / `__holochainDelegate__`
+ * directly. Both paths and the Rust path converge on the same ops.
  *
  * ## Architecture
  *
  * ```
- * WASM Language (compiled from Rust via ad4m-ldk)
- *     │
- *     │ calls __agent_did(), __signal_emit(), etc.
+ * Rust WASM Language (built with ad4m-ldk)
+ *     │  import { agentDid, holochainCall, ... } from "ad4m:host.ts"
  *     ▼
- * wasm_imports.ts (this file — globalThis functions)
- *     │
- *     │ accesses AGENT / LANGUAGE_CONTROLLER / __holochainDelegate__
+ * wasm_imports.ts  (this file)
+ *     │  accesses AGENT / LANGUAGE_CONTROLLER / __holochainDelegate__
  *     ▼
- * Deno extension JS globals (agent_extension.js, languages_extension.js)
+ * Deno extension globals (agent_extension.js, languages_extension.js)
+ *     │
+ *     ▼
+ * deno_core ops → rust-executor services
  * ```
  *
  * ## Bootstrap integration
  *
  * `language_bootstrap.js` calls `setupWasmImports()` before each
- * language's `init()` and `teardownWasmImports()` after teardown.
- * Both are refcounted so multiple languages sharing an isolate install
- * the globals only once.
+ * language's `init()` and `teardownWasmImports()` after teardown. Both
+ * are refcounted so multiple languages sharing an isolate install the
+ * globalThis helpers only once. The `setup`/`teardown` globals installed
+ * from this file exist for hand-rolled JS languages — Rust languages
+ * receive the same functions as ES module imports and do not need the
+ * globalThis indirection.
  */
 
 // ============================================================================
