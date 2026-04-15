@@ -128,6 +128,7 @@ dependencies = [
  "multibase",
  "multihash",
  "once_cell",
+ "ort",
  "os_info",
  "percent-encoding",
  "portpicker",
@@ -14600,6 +14601,7 @@ checksum = "86d83095ae3c1258738d70ae7a06195c94d966a8e546f0d3609dc90885fb61f5"
 dependencies = [
  "half 2.7.1",
  "js-sys",
+ "libloading 0.8.9",
  "ndarray",
  "ort-sys",
  "thiserror 1.0.69",
