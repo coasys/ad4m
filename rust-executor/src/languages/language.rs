@@ -169,10 +169,7 @@ impl Language {
         log::debug!("set_local_agents: agents: {:?}", agents);
         let controller = LanguageController::global_instance();
         let agents_json = serde_json::to_string(&agents)?;
-        let script = format!(
-            r#"await language.peersSetLocal({})"#,
-            agents_json
-        );
+        let script = format!(r#"await language.peersSetLocal({})"#, agents_json);
 
         log::debug!("set_local_agents script: {}", script);
         let result = controller
@@ -241,8 +238,7 @@ impl Language {
             return Ok(Vec::new());
         }
         let controller = LanguageController::global_instance();
-        let script =
-            r#"JSON.stringify((await language.telepresenceGetOnlineAgents()) ?? [])"#;
+        let script = r#"JSON.stringify((await language.telepresenceGetOnlineAgents()) ?? [])"#;
 
         let result = controller
             .execute_on_language(&self.address, script)
