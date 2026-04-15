@@ -259,13 +259,14 @@ impl LanguageController {
 
         // Register callbacks for adapters and cache the language's capability set.
         info!("Registering callbacks for {}", label);
-        let capabilities = runtime_handle
-            .register_callbacks()
-            .await
-            .map_err(|e| LanguageError::LoadError {
-                address: language_address.clone(),
-                message: format!("Failed to register callbacks: {}", e),
-            })?;
+        let capabilities =
+            runtime_handle
+                .register_callbacks()
+                .await
+                .map_err(|e| LanguageError::LoadError {
+                    address: language_address.clone(),
+                    message: format!("Failed to register callbacks: {}", e),
+                })?;
         capability::register_capabilities(&language_address, capabilities);
         info!("Callbacks registered for {}", label);
 

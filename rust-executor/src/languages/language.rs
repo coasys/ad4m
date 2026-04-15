@@ -241,7 +241,8 @@ impl Language {
             return Ok(Vec::new());
         }
         let controller = LanguageController::global_instance();
-        let script = r#"JSON.stringify((await language.telepresenceAdapter.getOnlineAgents()) ?? [])"#;
+        let script =
+            r#"JSON.stringify((await language.telepresenceAdapter.getOnlineAgents()) ?? [])"#;
 
         let result = controller
             .execute_on_language(&self.address, script)
