@@ -97,14 +97,62 @@ export async function pooledSubscribe(
 
     pool.set(key, newEntry);
 
-    // Set up shared result handler
+    // Set up shared result handler with delta optimization
     subscription.onResult(async (rawResult: any) => {
+        const prevRaw = newEntry.latestRaw;
         newEntry.latestRaw = rawResult;
         newEntry.hydrating = true;
         try {
-            // Hydrate ONCE using the first subscriber's hydrate function
             const firstSub = newEntry.callbacks.values().next().value;
             if (firstSub) {
+                // Delta optimization: if the new result is strictly an addition
+                // (all previous rows still present + new rows), only hydrate the
+                // new rows and append them to the cached hydrated result.
+                const prevArr = Array.isArray(prevRaw) ? prevRaw : [];
+                const newArr = Array.isArray(rawResult) ? rawResult : [];
+                const prevHydrated = newEntry.latestHydrated;
+
+                if (
+                    prevHydrated &&
+                    Array.isArray(prevHydrated) &&
+                    newArr.length > prevArr.length &&
+                    newArr.length - prevArr.length <= 5 // small delta — worth optimizing
+                ) {
+                    // Build a set of source URIs from previous results for quick lookup
+                    const prevSources = new Set(prevArr.map((r: any) => `${r.source}|${r.predicate}|${r.target}`));
+                    const addedRows = newArr.filter((r: any) => !prevSources.has(`${r.source}|${r.predicate}|${r.target}`));
+
+                    // Check that no rows were removed (pure addition)
+                    const newSources = new Set(newArr.map((r: any) => `${r.source}|${r.predicate}|${r.target}`));
+                    const removedRows = prevArr.filter((r: any) => !newSources.has(`${r.source}|${r.predicate}|${r.target}`));
+
+                    if (removedRows.length === 0 && addedRows.length > 0) {
+                        // Verify ALL added rows have sources not in previous results.
+                        // If any added row's source matches an existing source, it means
+                        // an existing instance got new links — we need full rehydration.
+                        const prevSourceIds = new Set(prevArr.map((r: any) => r.source));
+                        const allNewSources = addedRows.every((r: any) => !prevSourceIds.has(r.source));
+
+                        if (allNewSources) {
+                        // Pure addition of new instances — hydrate only the new rows
+                        try {
+                            const deltaHydrated = await firstSub.hydrate(addedRows);
+                            if (Array.isArray(deltaHydrated)) {
+                                const merged = [...prevHydrated, ...deltaHydrated];
+                                newEntry.latestHydrated = merged;
+                                for (const cb of newEntry.callbacks) {
+                                    try { cb.onResult(merged); } catch (e) { /* subscriber error */ }
+                                }
+                                return; // Delta path succeeded
+                            }
+                        } catch {
+                            // Delta hydration failed — fall through to full hydration
+                        }
+                    }
+                    }
+                }
+
+                // Full hydration fallback
                 const hydrated = await firstSub.hydrate(rawResult);
                 newEntry.latestHydrated = hydrated;
                 // Distribute to all callbacks

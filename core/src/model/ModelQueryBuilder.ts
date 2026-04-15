@@ -386,9 +386,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
         const buildFingerprint = (results: any[]) => {
             if (results.length === 0) return '0:';
-            const ids = results.map((r: any) => r.id || '').sort().join(',');
-            const ts = results.map((r: any) => r.updatedAt || r.timestamp || '').join(',');
-            return `${results.length}:${ids}:${ts}`;
+            // Must include relation data (e.g. tags) — not just id/timestamp.
+            // Otherwise @HasMany changes on existing instances are suppressed as duplicates.
+            return JSON.stringify(results, (_, v) =>
+                typeof v === 'function' ? undefined : v
+            );
         };
 
         const hydrate = async (rawResult: any) => {
