@@ -172,13 +172,13 @@ impl Ad4mMcpHandler {
         // wrap in JSON.stringify and parse as JSON so addresses containing
         // quotes / backslashes / whitespace don't get silently corrupted.
         // Coerce undefined/null to JSON null before stringifying for the
-        // same reason as the expressionAdapter.get sweep — a bare
+        // same reason as the expressionGet sweep — a bare
         // JSON.stringify(undefined) yields the JS value undefined, which
         // to_rust_string_lossy then captures as the raw string
         // "undefined" and from_str::<String> fails with a confusing
         // type-mismatch instead of a clear "no address" error.
         let publish_script = format!(
-            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({})) ?? null)"#,
+            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionCreate({})) ?? null)"#,
             input_json
         );
 
@@ -190,7 +190,7 @@ impl Ad4mMcpHandler {
         let trimmed_addr_raw = address_raw.trim();
         if trimmed_addr_raw == "null" || trimmed_addr_raw.is_empty() {
             return Err(format!(
-                "Language language returned no address from expressionAdapter.putAdapter.createPublic when cloning template {} (got {:?})",
+                "Language language returned no address from expressionCreate when cloning template {} (got {:?})",
                 template_address, trimmed_addr_raw
             ));
         }

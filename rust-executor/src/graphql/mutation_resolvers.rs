@@ -1546,16 +1546,16 @@ impl Mutation {
             // `trim_matches('"')` strip or not decode at all.
             //
             // Coerce undefined/null to JSON null before stringifying, for
-            // the same reason we did in the expressionAdapter.get sweep:
+            // the same reason we did in the expressionGet sweep:
             // a bare `JSON.stringify(undefined)` yields the JS value
             // `undefined` (not the string `"undefined"`), which
             // to_rust_string_lossy then captures verbatim and
             // from_str::<String> fails to parse. With `?? null` we always
             // land on valid JSON and can raise a clear
-            // "createPublic returned no address" error instead of a
+            // "expressionCreate returned no address" error instead of a
             // confusing serde parse failure.
             let publish_script = format!(
-                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({})) ?? null)"#,
+                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionCreate({})) ?? null)"#,
                 input_json
             );
 
@@ -1573,7 +1573,7 @@ impl Mutation {
             if trimmed_addr_raw == "null" || trimmed_addr_raw.is_empty() {
                 return Err(FieldError::new(
                     format!(
-                        "Language language returned no address from expressionAdapter.putAdapter.createPublic — got {:?}",
+                        "Language language returned no address from expressionCreate — got {:?}",
                         trimmed_addr_raw
                     ),
                     graphql_value!(null),

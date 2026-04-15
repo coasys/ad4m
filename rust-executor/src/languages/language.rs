@@ -93,7 +93,7 @@ impl Language {
         // resolves to `undefined` for commit-only languages. Coerce to `null`
         // before stringifying so the v8 → Rust boundary round-trips valid JSON.
         let script = format!(
-            r#"JSON.stringify((await language.linksAdapter.commit({})) ?? null)"#,
+            r#"JSON.stringify((await language.perspectiveCommit({})) ?? null)"#,
             diff_json
         );
 
@@ -117,7 +117,7 @@ impl Language {
             return Ok(());
         }
         let controller = LanguageController::global_instance();
-        let script = r#"await language.linksAdapter.sync()"#;
+        let script = r#"await language.perspectiveSyncSync()"#;
 
         controller
             .execute_on_language(&self.address, script)
@@ -131,7 +131,7 @@ impl Language {
             return Ok(None);
         }
         let controller = LanguageController::global_instance();
-        let script = r#"JSON.stringify((await language.linksAdapter.currentRevision()) ?? null)"#;
+        let script = r#"JSON.stringify((await language.perspectiveSyncCurrentRevision()) ?? null)"#;
 
         let result = controller
             .execute_on_language(&self.address, script)
@@ -145,7 +145,7 @@ impl Language {
             return Ok(None);
         }
         let controller = LanguageController::global_instance();
-        let script = r#"JSON.stringify((await language.linksAdapter.render()) ?? null)"#;
+        let script = r#"JSON.stringify((await language.perspectiveSyncRender()) ?? null)"#;
 
         let result = controller
             .execute_on_language(&self.address, script)
@@ -170,7 +170,7 @@ impl Language {
         let controller = LanguageController::global_instance();
         let agents_json = serde_json::to_string(&agents)?;
         let script = format!(
-            r#"await language.linksAdapter.setLocalAgents({})"#,
+            r#"await language.peersSetLocal({})"#,
             agents_json
         );
 
@@ -188,7 +188,7 @@ impl Language {
             return Ok(Vec::new());
         }
         let controller = LanguageController::global_instance();
-        let script = r#"JSON.stringify((await language.linksAdapter.others()) ?? [])"#;
+        let script = r#"JSON.stringify((await language.peersRemote()) ?? [])"#;
 
         let result = controller
             .execute_on_language(&self.address, script)
@@ -225,7 +225,7 @@ impl Language {
         let controller = LanguageController::global_instance();
         let status_json = serde_json::to_string(&status)?;
         let script = format!(
-            r#"await language.telepresenceAdapter.setOnlineStatus({})"#,
+            r#"await language.telepresenceSetOnlineStatus({})"#,
             status_json
         );
 
@@ -242,7 +242,7 @@ impl Language {
         }
         let controller = LanguageController::global_instance();
         let script =
-            r#"JSON.stringify((await language.telepresenceAdapter.getOnlineAgents()) ?? [])"#;
+            r#"JSON.stringify((await language.telepresenceGetOnlineAgents()) ?? [])"#;
 
         let result = controller
             .execute_on_language(&self.address, script)
@@ -266,7 +266,7 @@ impl Language {
         // literal — defensive against any DID containing `"`, `\`, or newline.
         let did_literal = serde_json::to_string(&remote_agent_did)?;
         let script = format!(
-            r#"await language.telepresenceAdapter.sendSignal({}, {})"#,
+            r#"await language.telepresenceSendSignal({}, {})"#,
             did_literal, payload_json
         );
 
@@ -284,7 +284,7 @@ impl Language {
         let controller = LanguageController::global_instance();
         let payload_json = serde_json::to_string(&payload)?;
         let script = format!(
-            r#"await language.telepresenceAdapter.sendBroadcast({})"#,
+            r#"await language.telepresenceSendBroadcast({})"#,
             payload_json
         );
 

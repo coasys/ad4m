@@ -565,12 +565,12 @@ impl LanguageController {
                 })?
         };
 
-        // Get meta from expressionAdapter.get() — JSON-encode the
-        // address so it embeds as a well-formed JS string literal
-        // regardless of any quote/backslash/newline in the input.
+        // Get meta from expressionGet() — JSON-encode the address so it
+        // embeds as a well-formed JS string literal regardless of any
+        // quote/backslash/newline in the input.
         let addr_lit = serde_json::to_string(&address).unwrap_or_else(|_| "\"\"".to_string());
         let meta_script = format!(
-            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
+            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
             addr_lit
         );
 
@@ -586,9 +586,9 @@ impl LanguageController {
 
         let meta = meta_expression.get("data");
 
-        // Get bundle source from languageAdapter.getLanguageSource()
+        // Get bundle source from languageGetSource()
         let source_script = format!(
-            r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource({})"#,
+            r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
             addr_lit
         );
 
@@ -877,7 +877,7 @@ impl LanguageController {
             let language_lit =
                 serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
             let meta_script = format!(
-                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
+                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
                 language_lit
             );
 
@@ -921,7 +921,7 @@ impl LanguageController {
             let language_lit =
                 serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
             let source_script = format!(
-                r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource({})"#,
+                r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
                 language_lit
             );
 
@@ -1443,7 +1443,7 @@ impl LanguageController {
         let source_language_hash_lit =
             serde_json::to_string(&source_language_hash).unwrap_or_else(|_| "\"\"".to_string());
         let meta_script = format!(
-            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
+            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
             source_language_hash_lit
         );
         let meta_result = self
@@ -1463,7 +1463,7 @@ impl LanguageController {
 
         // Get the language source
         let source_script = format!(
-            r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource({})"#,
+            r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
             source_language_hash_lit
         );
         let source_language = self
@@ -1687,7 +1687,7 @@ impl LanguageController {
         let resolved_address_lit =
             serde_json::to_string(&resolved_address).unwrap_or_else(|_| "\"\"".to_string());
         let meta_script = format!(
-            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
+            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
             resolved_address_lit
         );
         let meta_result = self
@@ -1748,7 +1748,7 @@ impl LanguageController {
         if trusted_agents.contains(&language_author) || agent_did == language_author {
             // Trusted author path: fetch source, verify hash, install
             let source_script = format!(
-                r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource({})"#,
+                r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
                 resolved_address_lit
             );
             let language_source = self
@@ -1855,7 +1855,7 @@ impl LanguageController {
                 serde_json::to_string(&template_source_language_address)
                     .unwrap_or_else(|_| "\"\"".to_string());
             let source_meta_script = format!(
-                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
+                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
                 template_source_language_address_lit
             );
             let source_meta_result = self
@@ -1913,7 +1913,7 @@ impl LanguageController {
 
             // Fetch actual source of the language to install
             let source_script = format!(
-                r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource({})"#,
+                r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
                 resolved_address_lit
             );
             let language_source = self
@@ -2076,7 +2076,7 @@ impl LanguageController {
 
         let addr_lit = serde_json::to_string(&address).unwrap_or_else(|_| "\"\"".to_string());
         let meta_script = format!(
-            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
+            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
             addr_lit
         );
 
@@ -2140,7 +2140,7 @@ impl LanguageController {
 
         let addr_lit = serde_json::to_string(&address).unwrap_or_else(|_| "\"\"".to_string());
         let source_script = format!(
-            r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource({})"#,
+            r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
             addr_lit
         );
 
@@ -2238,7 +2238,8 @@ impl LanguageController {
         names.insert(resolved, name.to_string());
     }
 
-    /// Get icon code from a language's expressionUI/settingsUI interfaces.
+    /// Get icon code from a language's expressionIcon / expressionConstructorIcon
+    /// / settingsIcon exports.
     /// Returns (constructorIcon, icon, settingsIcon) as Option<String>.
     pub async fn get_language_icons(
         &self,
@@ -2252,8 +2253,8 @@ impl LanguageController {
                 address,
                 r#"(function() {
                     const lang = globalThis.__ad4m_language_instance__;
-                    if (lang && lang.expressionUI && lang.expressionUI.constructorIcon) {
-                        const code = lang.expressionUI.constructorIcon();
+                    if (lang && typeof lang.expressionConstructorIcon === "function") {
+                        const code = lang.expressionConstructorIcon();
                         return code ? JSON.stringify({code: code}) : JSON.stringify({code: ""});
                     }
                     return "null";
@@ -2284,8 +2285,8 @@ impl LanguageController {
                 address,
                 r#"(function() {
                     const lang = globalThis.__ad4m_language_instance__;
-                    if (lang && lang.expressionUI && lang.expressionUI.icon) {
-                        const code = lang.expressionUI.icon();
+                    if (lang && typeof lang.expressionIcon === "function") {
+                        const code = lang.expressionIcon();
                         return code ? JSON.stringify({code: code}) : JSON.stringify({code: ""});
                     }
                     return "null";
@@ -2316,8 +2317,8 @@ impl LanguageController {
                 address,
                 r#"(function() {
                     const lang = globalThis.__ad4m_language_instance__;
-                    if (lang && lang.settingsUI && lang.settingsUI.settingsIcon) {
-                        const code = lang.settingsUI.settingsIcon();
+                    if (lang && typeof lang.settingsIcon === "function") {
+                        const code = lang.settingsIcon();
                         return code ? JSON.stringify({code: code}) : JSON.stringify({code: ""});
                     }
                     return "null";
@@ -2435,15 +2436,14 @@ impl LanguageController {
         // Fetch from the language runtime
         let escaped_addr =
             serde_json::to_string(expression_address).unwrap_or_else(|_| "\"\"".to_string());
-        // Guard the expressionAdapter existence — a pure link/telepresence
-        // language (no expressionGet / expressionCreate / addressOf exports)
-        // has no expressionAdapter attached by the flat bootstrap shim, and
-        // calling `.get(...)` unconditionally would TypeError. Return null
-        // so the caller treats it as "expression not available".
+        // Guard the expressionGet existence — a pure link/telepresence
+        // language (no expression-get export) would TypeError if we called
+        // it unconditionally. Return null so the caller treats it as
+        // "expression not available".
         let script = format!(
             r#"JSON.stringify(
-                (language.expressionAdapter && typeof language.expressionAdapter.get === "function")
-                    ? (await language.expressionAdapter.get({})) ?? null
+                (typeof language.expressionGet === "function")
+                    ? (await language.expressionGet({})) ?? null
                     : null
             )"#,
             escaped_addr
@@ -2593,30 +2593,25 @@ impl LanguageController {
                 message: format!("Failed to serialize content: {}", e),
             })?;
 
-        // Guard both layers of the expressionAdapter lookup. Spec §5 makes
-        // every expression sub-capability optional, so a language can
-        // legitimately expose `expressionAdapter.get` (read) without a
-        // `putAdapter` (write). Without the guard, any expression_create
-        // against a read-only language TypeErrors deep in v8 with
-        // "Cannot read properties of undefined (reading 'createPublic')"
-        // instead of surfacing a catchable "language is read-only" error.
+        // Spec §5 makes every expression sub-capability optional, so a
+        // language can legitimately expose `expressionGet` (read) without
+        // `expressionCreate` / `expressionAddressOf` (write). Without the
+        // guard, any expression_create against a read-only language
+        // would TypeError on `undefined is not a function` instead of
+        // surfacing a catchable "language is read-only" error.
         let script = format!(
             r#"JSON.stringify(await (async () => {{
-                const put = language.expressionAdapter && language.expressionAdapter.putAdapter;
-                if (!put) {{
-                    throw new Error("Language does not implement expression writes (no putAdapter)");
-                }}
                 let addr;
-                if (typeof put.createPublic === "function") {{
-                    addr = await put.createPublic({});
-                }} else if (typeof put.addressOf === "function") {{
-                    addr = await put.addressOf({});
+                if (typeof language.expressionCreate === "function") {{
+                    addr = await language.expressionCreate({});
+                }} else if (typeof language.expressionAddressOf === "function") {{
+                    addr = await language.expressionAddressOf({});
                 }} else {{
-                    throw new Error("putAdapter has neither createPublic nor addressOf");
+                    throw new Error("Language does not implement expression writes (no expressionCreate / expressionAddressOf)");
                 }}
                 if (addr === undefined || addr === null || typeof addr !== "string") {{
                     throw new Error(
-                        "putAdapter returned a non-string address: " +
+                        "expressionCreate returned a non-string address: " +
                         (addr === undefined ? "undefined" : JSON.stringify(addr))
                     );
                 }}

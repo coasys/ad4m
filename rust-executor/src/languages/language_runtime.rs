@@ -225,49 +225,59 @@ impl LanguageRuntime {
         self.js_core.execute(script).await
     }
 
-    /// Register callbacks for links and telepresence adapters and detect
-    /// the language's capability set.
+    /// Wire the runtime's diff / sync-state / telepresence-signal sinks
+    /// into the language, then return the set of capabilities it exports.
     ///
-    /// Returns the set of capabilities the language actually exports. The
-    /// caller stores the set in the global capability registry so
-    /// `Language::new(address)` can later answer `has(Capability::…)` without
-    /// another v8 round-trip.
+    /// Two independent jobs live under this one v8 round-trip:
+    ///
+    /// 1. **Callback registration.** Language v1 still ships two push
+    ///    channels as explicit exports — `linkSyncAddCallback` and
+    ///    `linkSyncAddSyncStateChangeCallback` — and the telepresence
+    ///    callback via `telepresenceRegisterSignalCallback`. They are
+    ///    effectively setters: the runtime hands in a closure that forwards
+    ///    to `LANGUAGE_CONTROLLER.{perspectiveDiffReceived,syncStateChanged,
+    ///    telepresenceSignalReceived}`, and the language calls it from
+    ///    `handleHolochainSignal` (or wherever) when new data arrives.
+    ///    Without this step no cross-peer diff ever lands in the runtime's
+    ///    perspective store. (The ALDK also exposes direct host imports —
+    ///    `emitPerspectiveDiff` etc. — but current bootstrap languages
+    ///    still use the callback-setter shape, and the capability
+    ///    registration step below doesn't care which mechanism a language
+    ///    picks.)
+    ///
+    /// 2. **Capability probing.** Returns the set of capabilities the
+    ///    language actually exports. The caller stores the set in the
+    ///    global capability registry so `Language::new(address)` can later
+    ///    answer `has(Capability::…)` without another v8 round-trip.
     pub async fn register_callbacks(&self) -> Result<HashSet<Capability>, String> {
-        // JSON-encode the language address so it embeds as a well-formed
-        // JS string literal. Addresses are typically content hashes and
-        // safe in practice, but the defensive fix is trivial.
+        // JSON-encode the language address so it embeds as a proper JS
+        // string literal — defensive against addresses containing quotes,
+        // backslashes, or newlines.
         let addr_lit = serde_json::to_string(&self.language_address)
             .map_err(|e| format!("failed to encode language address: {}", e))?;
 
-        // Register link-sync + telepresence callbacks for languages that
-        // use the callback-registration style (legacy addCallback /
-        // addSyncStateChangeCallback / registerSignalCallback). Language v1
-        // modules emit via the host imports emitPerspectiveDiff /
-        // emitSyncStateChange / emitTelepresenceSignal directly, so they do
-        // not expose those methods; we guard each registration so either
-        // shape loads cleanly.
+        // Wire the runtime's sinks. Each setter is optional; a language
+        // that uses `emitPerspectiveDiff` host imports directly simply
+        // won't export these setters, and the guards below no-op.
         let callback_script = format!(
             r#"
             (function() {{
                 const language = globalThis.__ad4m_language_instance__;
-                if (language && language.linksAdapter) {{
-                    if (typeof language.linksAdapter.addCallback === "function") {{
-                        language.linksAdapter.addCallback((diff) => {{
-                            LANGUAGE_CONTROLLER.perspectiveDiffReceived(diff, {addr_lit});
-                        }});
-                    }}
-                    if (typeof language.linksAdapter.addSyncStateChangeCallback === "function") {{
-                        language.linksAdapter.addSyncStateChangeCallback((state) => {{
-                            LANGUAGE_CONTROLLER.syncStateChanged(state, {addr_lit});
-                        }});
-                    }}
+                if (!language) return "ok";
+                if (typeof language.linkSyncAddCallback === "function") {{
+                    language.linkSyncAddCallback((diff) => {{
+                        LANGUAGE_CONTROLLER.perspectiveDiffReceived(diff, {addr_lit});
+                    }});
                 }}
-                if (language && language.telepresenceAdapter) {{
-                    if (typeof language.telepresenceAdapter.registerSignalCallback === "function") {{
-                        language.telepresenceAdapter.registerSignalCallback((signal, recipientDid) => {{
-                            LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, {addr_lit}, recipientDid);
-                        }});
-                    }}
+                if (typeof language.linkSyncAddSyncStateChangeCallback === "function") {{
+                    language.linkSyncAddSyncStateChangeCallback((state) => {{
+                        LANGUAGE_CONTROLLER.syncStateChanged(state, {addr_lit});
+                    }});
+                }}
+                if (typeof language.telepresenceRegisterSignalCallback === "function") {{
+                    language.telepresenceRegisterSignalCallback((signal, recipientDid) => {{
+                        LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, {addr_lit}, recipientDid);
+                    }});
                 }}
                 return "ok";
             }})()
@@ -285,33 +295,23 @@ impl LanguageRuntime {
                 const language = globalThis.__ad4m_language_instance__;
                 const caps = [];
                 if (!language) return JSON.stringify(caps);
-                if (language.expressionAdapter) {
-                    if (language.expressionAdapter.putAdapter && typeof language.expressionAdapter.putAdapter.createPublic === "function") {
-                        caps.push("expression-create");
-                    }
-                    if (typeof language.expressionAdapter.get === "function") {
-                        caps.push("expression-get");
-                    }
+                if (typeof language.expressionCreate === "function"
+                    || typeof language.expressionAddressOf === "function"
+                    || typeof language.addressOf === "function") {
+                    caps.push("expression-create");
                 }
-                if (language.linksAdapter) {
-                    const la = language.linksAdapter;
-                    if (typeof la.commit === "function") caps.push("perspective-commit");
-                    if (typeof la.sync === "function") caps.push("perspective-sync");
-                    if (typeof la.render === "function") caps.push("perspective-render");
-                    if (typeof la.currentRevision === "function") caps.push("perspective-current-revision");
-                    if (typeof la.setLocalAgents === "function") caps.push("peers-local");
-                    if (typeof la.others === "function") caps.push("peers-remote");
-                }
-                if (language.perspectiveQueryAdapter && typeof language.perspectiveQueryAdapter.run === "function") {
-                    caps.push("perspective-query");
-                }
-                if (language.telepresenceAdapter) {
-                    const ta = language.telepresenceAdapter;
-                    if (typeof ta.setOnlineStatus === "function") caps.push("telepresence-set-status");
-                    if (typeof ta.getOnlineAgents === "function") caps.push("telepresence-get-agents");
-                    if (typeof ta.sendSignal === "function") caps.push("telepresence-send-signal");
-                    if (typeof ta.sendBroadcast === "function") caps.push("telepresence-send-broadcast");
-                }
+                if (typeof language.expressionGet === "function") caps.push("expression-get");
+                if (typeof language.perspectiveCommit === "function") caps.push("perspective-commit");
+                if (typeof language.perspectiveSyncSync === "function") caps.push("perspective-sync");
+                if (typeof language.perspectiveSyncRender === "function") caps.push("perspective-render");
+                if (typeof language.perspectiveSyncCurrentRevision === "function") caps.push("perspective-current-revision");
+                if (typeof language.peersSetLocal === "function") caps.push("peers-local");
+                if (typeof language.peersRemote === "function") caps.push("peers-remote");
+                if (typeof language.perspectiveQueryRun === "function") caps.push("perspective-query");
+                if (typeof language.telepresenceSetOnlineStatus === "function") caps.push("telepresence-set-status");
+                if (typeof language.telepresenceGetOnlineAgents === "function") caps.push("telepresence-get-agents");
+                if (typeof language.telepresenceSendSignal === "function") caps.push("telepresence-send-signal");
+                if (typeof language.telepresenceSendBroadcast === "function") caps.push("telepresence-send-broadcast");
                 if (typeof language.handleHolochainSignal === "function") caps.push("holochain-signal");
                 return JSON.stringify(caps);
             })()
@@ -321,7 +321,7 @@ impl LanguageRuntime {
         let caps = parse_capability_list(raw.trim());
 
         info!(
-            "Registered callbacks for language {}: capabilities={:?}",
+            "Detected capabilities for language {}: {:?}",
             self.language_address, caps
         );
 
