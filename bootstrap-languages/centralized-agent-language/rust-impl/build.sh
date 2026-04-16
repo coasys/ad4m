@@ -23,7 +23,7 @@ WASM_IN="target/wasm32-unknown-unknown/release/centralized_agent_language.wasm"
 
 if ! command -v wasm-bindgen >/dev/null 2>&1; then
     echo "!! wasm-bindgen not installed. Install with:" >&2
-    echo "     cargo install wasm-bindgen-cli --version 0.2.117" >&2
+    echo "     cargo install wasm-bindgen-cli --version 0.2.118" >&2
     exit 1
 fi
 
