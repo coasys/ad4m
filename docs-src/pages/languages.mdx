@@ -1,296 +1,433 @@
-# Languages: Communication Protocols for Agents
+import { Callout } from "nextra-theme-docs";
 
-> **⚠️ New Language Interface (v1.0):** AD4M is migrating from the
-> `create(context)` factory pattern described below to a **flat export
-> model** where each Language is a module of named exports (`init`,
-> `teardown`, `perspectiveCommit`, `expressionGet`, etc.) with no
-> factory function and no context parameter. The runtime provides
-> services via imports (`agentDid()`, `holochainCall()`, `storageGet()`,
-> etc.) rather than a context object. See
-> [`docs/language-interface-spec.md`](https://github.com/coasys/ad4m/blob/dev/docs/language-interface-spec.md)
-> for the full spec and the `@coasys/ad4m-ldk` package for the
-> authoring SDK. The legacy `create()` path continues to work during
-> the transition.
+# Languages: The Protocols of AD4M
 
-## Understanding Languages in AD4M
+## What a Language is
 
-In AD4M, Languages are the fundamental building blocks that define how agents communicate and share data. While we call them "Languages", they could just as well be called "Protocols" or "Data Storage Adapters" – they define the rules and mechanisms by which nodes in the network exchange information.
+In AD4M, a **Language** is a pluggable protocol: it defines how a piece of
+data is stored, retrieved, addressed, and — when it is a shared-state
+Language — how changes to that data propagate between agents.
 
-The term "Language" was chosen deliberately: just as human languages enable people to communicate and share ideas, AD4M Languages enable digital agents to exchange data and interact. Alternative metaphors could have been "Games" or "Dances" – patterns of interaction between agents.
+"Language" is a deliberate metaphor. Just as human languages are the medium
+through which people share meaning, AD4M Languages are the medium through
+which digital agents share data. If a group of people wants to interact,
+they pick a shared language; if a group of AD4M agents wants to
+coordinate around some data, they pick a shared Language.
 
-### Core Mechanism
+A Language is a small piece of code that the AD4M runtime loads into a
+sandboxed isolate and calls via a well-defined interface. Nothing else
+about the runtime is Language-specific. Swap the Language, and the same
+agent can suddenly speak a different protocol — IPFS instead of
+Holochain, a Git repo instead of a SQL database, an inbox instead of a
+shared wiki — without changing anything else in the stack.
 
-At their heart, Languages implement a simple but powerful mechanism:
+## Why Languages: universal addressing across protocols
 
-1. **Storage**: Take some data, store it in a shared space (could be a server, Holochain DHT, blockchain, etc.), and return a URI that points to that data
-2. **Retrieval**: Take a URI and return the previously stored data (called an "[Expression](/expressions)" in AD4M)
+An [Expression](/expressions) in AD4M has a globally unique URL of the
+form:
 
-This mechanism creates a universal way for agents to share and reference information, regardless of where or how it's actually stored. For example:
-- An IPFS Language might store data in the IPFS network and return a CID
-- A Holochain Language might store data in a DHT and return an entry hash
-- A Web2 Language might store data on a server and return a URL
-
-### Universal Addressing Mechanism
-
-AD4M's Language system extends the familiar URI/URL model into a truly universal addressing scheme. Every [Expression](/expressions) (the signed data objects in AD4M) is addressable through a URI that combines:
-1. The Language's unique identifier (a hash of its implementation code)
-2. The Language-specific address for that data
-
-For example:
 ```
-<language_hash>://<language-specific-address>
+<language-hash>://<language-specific-address>
 ```
 
-This means AD4M can seamlessly integrate with and extend existing addressing systems:
-- Web URLs become: `http://example.com/resource`
-- IPFS content becomes: `QmIPFS123://<cid>`
-- Agent DIDs become: `did:key:z6Mk...`
-- Custom protocols become: `QmCustom789://user123/post456`
+The `language-hash` is the content hash of the Language's compiled bundle
+— so every URL carries, in its authority component, a pointer to the
+exact protocol code that can resolve it. Any AD4M runtime that does not
+already have the Language installed can fetch it by hash, verify it
+against the URL, install it, and then resolve the address. This lets
+AD4M span protocols the way HTTP spans servers:
 
-The Language-Language (one of AD4M's bootstrap Languages) makes this system dynamic and extensible:
-1. New Languages can be published and their code verified
-2. Any AD4M instance can discover and install Languages as needed
-3. The system can evolve without central coordination
+- A Git commit:   `QmGitLang…://abcdef1234…`
+- An IPFS CID:    `QmIPFSLang…://QmZXY…`
+- A wiki page:    `QmWikiLang…://article-42`
+- A DID document: `did:key:z6Mk…` (handled by a special built-in case)
+- Your own protocol: `<your-hash>://<your-address>`
 
-This creates a spanning layer across the internet where:
-- Every piece of data has a globally unique address
-- Addresses are self-describing (include their protocol)
-- New protocols can be added dynamically
-- Existing systems can be integrated seamlessly
+AD4M doesn't hardcode which protocols exist. Protocols are Languages,
+Languages can be published, and publishing a Language is just minting a
+new piece of code and letting its hash be its identity.
 
-### Why Languages Matter
+## Capabilities, not a monolith
 
-Languages in AD4M serve several crucial purposes:
-- Define how data is stored and retrieved
-- Specify how agents communicate
-- Enable different storage backends (IPFS, Holochain, centralized servers, etc.)
-- Allow for extensible and pluggable protocols
-- Create semantic meaning through shared understanding
+A Language is not a single object that must implement one big interface.
+It is a **module that exports whichever capabilities it supports**, and
+the runtime introspects the export table at load time to decide what it
+can do. The capabilities are independent:
 
-## Technical Implementation
+| Capability          | What it means                                              |
+|---------------------|------------------------------------------------------------|
+| `expression`        | Mints and serves [Expressions](/expressions) by address    |
+| `perspective-commit`| Writes link diffs into a shared Perspective                |
+| `perspective-query` | Answers queries (SPARQL, link patterns, by-author, Prolog) |
+| `perspective-sync`  | Full-replica CRDT-style bidirectional convergence          |
+| `peers`             | Membership fabric (local + remote agents)                  |
+| `telepresence`      | Ephemeral signals between online agents                    |
+| `language-source`   | Serves the bundle of *other* Languages (language-language) |
+| `ui`, `interactions`| Optional UI hints for clients                              |
 
-At its core, AD4M is a Language runtime. Languages are implemented as JavaScript modules that run in a sandboxed Deno environment within the AD4M executor. This provides:
-- Secure execution environment
-- TypeScript support out of the box
-- Modern ES module system
-- Built-in permissions model
+A few concrete shapes:
 
-### Language Module Contract
+- **A static expression store** exports `expression` (`get` only).
+- **A read-only knowledge graph** exports `perspective-query` (no
+  `perspective-sync`, no `perspective-commit` — the server has the
+  data, the client queries it remotely).
+- **A full-replica link Language** (today's `perspective-diff-sync`)
+  exports `perspective-commit` + `perspective-sync` + `peers`.
+- **A DM inbox** exports `perspective-commit` only — senders write, the
+  inbox owner reads through a separate replication mechanism.
+- **A write-only drop box** exports `perspective-commit` alone.
 
-Every Language module must export a default `create` function with this signature:
+The runtime enforces "presence = capability" at load time: it scans the
+module's exports and caches which capabilities the Language actually
+implements. Downstream, anything that wants to use capability *X* first
+checks whether the Language advertises it, and routes around it if not.
+
+## The interface
+
+v1.0 of the interface is specified in two places that agree with each
+other by design:
+
+- [`ad4m-lang.wit`](https://github.com/coasys/ad4m/blob/dev/docs-src/ad4m-lang.wit)
+  — the **normative** definition in WebAssembly Interface Types.
+  If the prose disagrees, the `.wit` wins.
+- [`language-interface-spec.md`](https://github.com/coasys/ad4m/blob/dev/docs-src/language-interface-spec.md)
+  — the prose spec: lifecycle rules, authoring examples, semantics that
+  WIT can't express.
+
+Conceptually, a Language is an **ES module**. It exports what the
+runtime calls; it imports what the runtime provides.
+
+### Exports: what the runtime calls on the Language
 
 ```typescript
-export default function create(context: LanguageContext): Language | Promise<Language>
+// Lifecycle (always required)
+export async function init(): Promise<void> { /* ... */ }
+export async function teardown(): Promise<void> { /* ... */ }
+
+// Discovery (statically resolvable, before init())
+export const name = "my-language";
+export const version = "1.0.0";
+
+// Capability exports — include only the ones you implement
+export async function expressionCreate(content: string): Promise<string> { /* ... */ }
+export async function expressionGet(addr: string): Promise<Expression | null> { /* ... */ }
+export async function perspectiveCommit(diff: PerspectiveDiff): Promise<void> { /* ... */ }
+export async function perspectiveSync(): Promise<PerspectiveDiff> { /* ... */ }
+// ... etc.
+
+// Optional event handlers the runtime calls when external events arrive
+export function handleHolochainSignal(signal: HolochainSignal): void { /* ... */ }
+export function handleTelepresenceSignal(payload: any, recipientDid?: string): void { /* ... */ }
 ```
 
-This function is the entry point for your Language. The AD4M executor will:
-1. Load your Language module in the Deno sandbox
-2. Call the `create` function with a `LanguageContext`
-3. Use the returned Language object to interact with your implementation
+There is no `create(context)` factory; there is no object returned from
+anywhere. The module itself *is* the Language instance. Each instance
+lives in its own Deno isolate (Languages are mutually sandboxed), and
+module-level state (e.g. `let currentRevision = …`) is per-instance.
 
-### The LanguageContext
+### Imports: what the Language calls on the runtime
 
-The `LanguageContext` provides essential services and capabilities to your Language:
+All runtime services come in via named imports from a single module
+specifier, `ad4m:host`:
 
 ```typescript
-interface LanguageContext {
-    // Access to the agent's signing capabilities
-    agent: AgentService;
-    
-    // For verifying signatures
-    signatures: SignaturesService;
-    
-    // Path for persistent storage
-    storageDirectory: string;
-    
-    // Language-specific settings
-    customSettings: object;
-    
-    // Access to Holochain functionality
-    Holochain?: HolochainLanguageDelegate;
-    
-    // For handling AD4M signals
-    ad4mSignal: Ad4mSignalCB;
-}
+import {
+    // Agent identity
+    agentDid,
+    agentSign,
+    agentCreateSignedExpression,
+
+    // Language context
+    languageAddress,
+    languageSettings,
+
+    // KV storage (core — always available)
+    storageGet,
+    storagePut,
+    storageDelete,
+    storageListKeys,
+
+    // Event emission — Language pushes to runtime
+    emitPerspectiveDiff,
+    emitSyncStateChange,
+    emitTelepresenceSignal,
+    emitSignal,
+
+    // Holochain (optional extension)
+    holochainRegisterDnas,
+    holochainCall,
+
+    // HTTP fetch (for HTTP-backed Languages)
+    httpFetch,
+} from "ad4m:host";
 ```
 
-Key features provided by the context:
+The `ad4m:host` module is a synthetic module the runtime registers
+before loading the Language. The full contract — which globals a host
+must install so these imports work, and what each method does — is in
+[`host-contract.md`](https://github.com/coasys/ad4m/blob/dev/docs-src/host-contract.md).
 
-1. **Agent Service**
-   ```typescript
-   // Sign expressions with the agent's keys
-   const expression = context.agent.createSignedExpression(data);
-   
-   // Get the agent's DID
-   const did = context.agent.did;
-   ```
+### Core vs. optional extensions
 
-2. **Holochain Integration**
-   ```typescript
-   // Register a Holochain DNA
-   await context.Holochain.registerDNAs([{
-     file: dnaPath,
-     nick: 'my-dna'
-   }]);
-   
-   // Call Holochain zome functions
-   const result = await context.Holochain.call(
-     'my-dna',
-     'zome-name',
-     'function-name',
-     payload
-   );
-   ```
+The import surface is explicitly layered:
 
-3. **Storage and Settings**
-   ```typescript
-   // Access persistent storage
-   const storagePath = context.storageDirectory;
-   
-   // Use custom settings
-   const settings = context.customSettings;
-   ```
+- **Core** — every AD4M-compliant runtime implements this. Agent
+  identity, language context, KV storage, event emission, HTTP fetch,
+  runtime utilities. You can write a Language using only core imports
+  and it will run on Deno, a browser, Node, or any other runtime that
+  conforms.
+- **Extensions** — optional. A runtime that does not ship an extension
+  installs neither the globals nor the extension's methods; Languages
+  that import extension functions throw a clear error at call time on
+  such a runtime.
 
-### The Language Interface
+Current extensions:
 
-Here's the core interface that all Languages must implement:
+| Extension       | Exports in `ad4m:host`                      | Runtime needs             |
+|-----------------|---------------------------------------------|---------------------------|
+| `holochain-ext` | `holochainCall`, `holochainRegisterDnas`, … | A Holochain conductor     |
+| `storage-fs-ext`| `readStorageFile`, `writeStorageFile`       | A filesystem-like backend |
+
+A Language declares which extensions it needs by targeting the matching
+**WIT world** — `ad4m-language` (core only), `ad4m-language-holochain`,
+`ad4m-language-fs`, or `ad4m-language-holochain-fs`. A runtime that does
+not support an extension refuses to load a Language targeting its world.
+
+### Storage: prefer the KV, reach for files only if you must
+
+The core KV (`storageGet` / `storagePut` / `storageDelete` /
+`storageListKeys`) is the portable way to persist per-Language data:
+
+- It never throws — on runtimes without a persistent backend it
+  degrades to in-memory-only within an isolate.
+- It is namespace-scoped by `languageAddress()` automatically: two
+  Language instances cannot read each other's keys.
+- It works unchanged on Deno, in a browser with IndexedDB, behind an
+  HTTP API to a remote store, etc.
+
+The File I/O extension is for the cases the KV genuinely cannot
+express: custom storage layouts, very large blobs, or shared paths
+outside per-Language scope (the two test-fixture persistence
+Languages use it, because they need to share a path across agents).
+Every other Language should use the KV.
+
+## Authoring a Language
+
+The typical authoring flow uses the **ALDK** (AD4M Language Development
+Kit), which provides typed wrappers, trait-based APIs, and bundlers that
+wire `ad4m:host` correctly. Two packages, one per language:
+
+- [`@coasys/ad4m-ldk`](https://github.com/coasys/ad4m/tree/dev/ad4m-ldk/js)
+  — JavaScript/TypeScript.
+- [`ad4m-ldk`](https://github.com/coasys/ad4m/tree/dev/ad4m-ldk/rust)
+  — Rust, compiled to WASM via `wasm-bindgen`.
+
+Both resolve to the same runtime interface. A Language compiled from
+Rust and a Language written in TypeScript are indistinguishable from
+the runtime's point of view.
+
+### TypeScript with `defineLanguage`
+
+`defineLanguage({…})` is a pure transform that takes a grouped spec and
+emits the flat named exports the runtime expects.
 
 ```typescript
-interface Language {
-    // Required: Name of the language
-    readonly name: string;
+// index.ts — minimal expression Language in TypeScript
+import {
+    defineLanguage,
+    agentCreateSignedExpression,
+    storageGet,
+    storagePut,
+} from "@coasys/ad4m-ldk";
 
-    // Optional adapters for different functionalities:
+export default defineLanguage({
+    name: "note-store",
+    version: "1.0.0",
 
-    // For languages that store and retrieve expressions
-    readonly expressionAdapter?: ExpressionAdapter;
+    async init() {
+        // Language-specific setup. Runtime imports (e.g. languageSettings)
+        // are callable here.
+    },
 
-    // For languages that handle UI rendering
-    readonly expressionUI?: ExpressionUI;
+    expression: {
+        async create(content) {
+            const expr = agentCreateSignedExpression(content);
+            const s = JSON.stringify(expr);
+            // @ts-ignore — UTILS is a runtime-provided hash helper
+            const hash = UTILS.hash(s);
+            storagePut(hash, s);
+            return hash;
+        },
 
-    // For languages that manage links (used in Neighbourhoods)
-    readonly linksAdapter?: LinkSyncAdapter;
-
-    // For real-time presence and p2p signals
-    readonly telepresenceAdapter?: TelepresenceAdapter;
-
-    // For direct messaging between agents
-    readonly directMessageAdapter?: DirectMessageAdapter;
-
-    // For language-specific settings UI
-    readonly settingsUI?: SettingsUI;
-
-    // Optional: Mark expressions as immutable for caching
-    isImmutableExpression?(expression: Address): boolean;
-
-    // Define available interactions with expressions
-    interactions(expression: Address): Interaction[];
-}
-```
-[Language interface in the API reference](/jsdoc/interfaces/Language) |
-[Language.ts in the codebase](https://github.com/coasys/ad4m/blob/main/core/src/language/Language.ts)
-
-### Types of Languages
-
-AD4M supports several types of Languages for different purposes:
-
-1. **Expression Languages**
-   - Store and retrieve data
-   - Most common type
-   - Example: IPFS-based file storage
-
-2. **Link Languages**
-   - Core building block of Neighbourhoods
-   - Enable shared semantic spaces
-   - Example: Holochain-based p2p links
-
-3. **Direct Message Languages**
-   - Enable agent-to-agent communication
-   - Support private messaging
-   - Example: Encrypted p2p messaging
-
-## Working with Languages
-
-### The Core Expression Mechanism
-
-Before diving into examples, it's important to understand that most Languages (all basic "Expression Languages") operate around the same core pattern:
-
-```typescript
-interface ExpressionAdapter {
-    // Store data and get a reference
-    putAdapter: {
-        createPublic(content: object): Promise<Address>;
-        // or for read-only languages:
-        addressOf(content: object): Promise<Address>;
-    };
-    
-    // Retrieve data using its reference
-    get(address: Address): Promise<Expression | null>;
-}
-```
-
-This simple pattern enables AD4M to create a web of semantic references, where any piece of data can be stored and referenced by its address, regardless of the underlying storage mechanism.
-
-### Installing Languages
-
-```js
-// Install a language from its address
-await ad4m.languages.install("Qm...");
-
-// List all installed languages
-const languages = await ad4m.languages.all();
-```
-
-### Publishing Languages
-
-```js
-// Publish a new language
-const address = await ad4m.languages.publish({
-  name: "my-language",
-  description: "A custom language implementation",
-  sourceCodeLink: "https://github.com/...",
-  bundle: languageBundle
+        async get(address) {
+            const raw = storageGet(address);
+            return raw ? JSON.parse(raw) : null;
+        },
+    },
 });
 ```
 
-### Using Languages
+The ALDK also re-exports the full `ad4m:host` import surface with
+types, so you get auto-complete on `agentDid`, `holochainCall`,
+`emitPerspectiveDiff`, etc., and the TypeScript compiler can check
+your usage.
 
-```js
-// Create an expression in a language
-const expression = await ad4m.expression.create(
-  languageAddress,
-  { content: "Hello, World!" }
-);
+### Rust with `ad4m_language!`
 
-// Retrieve an expression
-const retrieved = await ad4m.expression.get(expression.address);
+The Rust ALDK gives you a trait-based API plus a macro that wires
+the wasm-bindgen exports automatically:
+
+```rust
+// lib.rs — minimal HTTP-backed expression Language in Rust
+use ad4m_ldk::imports as rt;
+use ad4m_ldk::prelude::*;
+
+pub struct NoteStore;
+
+impl Language for NoteStore {
+    fn name()    -> &'static str { "note-store" }
+    fn version() -> &'static str { "1.0.0" }
+
+    async fn init() -> LanguageResult<Self> {
+        Ok(NoteStore)
+    }
+}
+
+impl ExpressionCapability for NoteStore {
+    async fn expression_create(
+        &mut self,
+        content: serde_json::Value,
+    ) -> LanguageResult<Address> {
+        let signed = rt::agent_create_signed_expression_typed(&content);
+        let body = serde_json::to_string(&content).unwrap_or_default();
+        // In a real Language you'd POST to a storage backend, hash
+        // locally, or call Holochain. Here we POST and use the server's
+        // returned URL as the address.
+        rt::http_post_json("https://example.com/notes", &signed)
+            .await
+            .map_err(|e| LanguageError::internal(format!("POST failed: {:?}", e)))
+    }
+
+    async fn expression_get(
+        &mut self,
+        address: Address,
+    ) -> LanguageResult<Option<Expression>> {
+        let body = rt::http_get(&format!("https://example.com/notes/{}", address))
+            .await
+            .map_err(|e| LanguageError::internal(format!("GET failed: {:?}", e)))?;
+        Ok(serde_json::from_str(&body).ok())
+    }
+}
+
+ad4m_language! {
+    language: NoteStore,
+    capabilities: [expression],
+    holochain_signal: false,
+}
 ```
 
-## Built-in Languages
+The `ad4m_language!` macro emits the required `#[no_mangle]` shims for
+exactly the capabilities you list — the WASM export table is minimal
+and export-presence-as-capability detection works correctly. The
+runtime sees the same flat interface it would from a TypeScript
+Language; nothing about the Rust path is special-cased.
 
-AD4M comes with several bootstrap languages:
-- **Agent Language**: Resolves DIDs to agent information
-- **Language Language**: Manages language publication and installation
-- **Perspective Language**: Handles perspective storage and sharing
-- **Neighbourhood Language**: Enables creation of shared spaces
+For a production reference, see
+[`bootstrap-languages/centralized-agent-language/rust-impl/src/lib.rs`](https://github.com/coasys/ad4m/blob/dev/bootstrap-languages/centralized-agent-language/rust-impl/src/lib.rs)
+— the HTTP-backed agent Language — or
+[`bootstrap-languages/agent-language/rust-impl/`](https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/agent-language)
+for a Holochain-backed one.
 
-## Security Considerations
+## Publishing, installing, using
 
-Languages run in a sandboxed environment with:
-- Controlled access to system resources
-- Explicit permission model
-- Isolated execution context
-- Secure communication channels
+Nothing here changed with v1.0: the Language-language still stores and
+serves bundles, and the AD4M client API is unchanged.
 
-For a detailed guide on creating your own Language, see the [Language Development Guide](/developer-guides/languages).
+```javascript
+// Publish: returns the language-hash that becomes your Language's address
+const meta = await ad4m.languages.publish(
+    "/path/to/bundle.js",
+    { name: "note-store", description: "A simple note store" },
+);
 
-# Language Templates
+// Install on another node (or the same one later)
+await ad4m.languages.install(meta.address);
 
-To help you get started with creating your own languages, we have provided some templates that you can use as a starting point. These templates are Deno compatible and provide a basic structure for your language.
+// Use: all Expression operations go through the universal address format
+const exprAddr = await ad4m.expression.create("Hello World", meta.address);
+const expr     = await ad4m.expression.get(`${meta.address}://${exprAddr}`);
+```
 
-- [Expression Language without DNA template](https://github.com/coasys/ad4m-language-template-js)
-- [Expression Language with DNA template](https://github.com/coasys/ad4m-expression-language-with-dna)
-- [Link Language without DNA template](https://github.com/coasys/ad4m-link-template-js)
-- [Link Language with DNA template](https://github.com/coasys/ad4m-link-template-language-dna)
+A published Language is just a file whose content hash is its identity.
+Anyone with the hash can fetch it, verify it hashes to what the URL
+claims, install it, and speak the protocol.
 
-You can clone these repositories and modify them to create your own language. Remember to follow the guidelines for making your language Deno compatible.
+## The built-in Languages
+
+Every AD4M node boots with a small set of **bootstrap Languages** — they
+are in every seed, and the rest of the system relies on them:
+
+| Bootstrap Language             | Role                                                                   |
+|--------------------------------|------------------------------------------------------------------------|
+| `language-language`            | Publishes and serves other Language bundles. The root of addressing.  |
+| `agent-language`                | Resolves DIDs to agent profile Expressions                            |
+| `neighbourhood-language`        | Serves shared Neighbourhood definitions                               |
+| `perspective-language`          | Serves shared Perspective metadata                                    |
+| `perspective-diff-sync`         | The default full-replica link Language used by most Neighbourhoods    |
+| `direct-message-language`       | Per-recipient DM inboxes                                              |
+| `file-storage`                  | Holochain-DHT-backed file blobs                                       |
+| `centralized-file-storage`      | HTTP-backed file blobs (Cloudflare-backed reference impl)             |
+| `eas`                           | Read-only adapter over Ethereum Attestation Service                   |
+| `embedding-vector-language`     | Stores embedding vectors for semantic search                          |
+
+The agent Languages ship as Rust/WASM end-to-end (built with the Rust
+ALDK and wasm-bindgen); the rest are TypeScript-authored with the JS
+ALDK. Both paths produce bundles the runtime treats identically.
+
+## Where to look next
+
+- **Normative definitions.**
+  [`ad4m-lang.wit`](https://github.com/coasys/ad4m/blob/dev/docs-src/ad4m-lang.wit)
+  is the canonical WIT;
+  [`language-interface-spec.md`](https://github.com/coasys/ad4m/blob/dev/docs-src/language-interface-spec.md)
+  is the prose spec.
+- **Host implementer's contract.**
+  [`host-contract.md`](https://github.com/coasys/ad4m/blob/dev/docs-src/host-contract.md)
+  — what a runtime (browser, Node, embedded) has to install to run
+  AD4M Languages.
+- **ALDK source.**
+  [JS ALDK](https://github.com/coasys/ad4m/tree/dev/ad4m-ldk/js) /
+  [Rust ALDK](https://github.com/coasys/ad4m/tree/dev/ad4m-ldk/rust).
+- **Reference bootstrap Languages.**
+  [`bootstrap-languages/`](https://github.com/coasys/ad4m/tree/dev/bootstrap-languages)
+  in the main repo. The persistence fixtures and the two Rust agent
+  Languages are the most complete worked examples.
+
+## Templates
+
+The following template repos are starting points for your own
+Languages. They currently target the pre-v1.0 interface; expect a v1.0
+template update when the migration lands on `main`.
+
+- [Expression Language without DNA](https://github.com/coasys/ad4m-language-template-js)
+- [Expression Language with Holochain DNA](https://github.com/coasys/ad4m-expression-language-with-dna)
+- [Link Language without DNA](https://github.com/coasys/ad4m-link-template-js)
+- [Link Language with Holochain DNA](https://github.com/coasys/ad4m-link-template-language-dna)
+
+## Security model
+
+Languages run in per-instance Deno isolates, mutually sandboxed. The
+runtime grants each isolate a filesystem permission allow-list that
+scopes it to its own storage directory; system Languages additionally
+get CWD access so they can read bundle paths passed in via
+`languagePublish`. Network access is off by default and can only be
+requested by the host, not by the Language. `agentSign` never exposes
+the private key — the Language receives only signatures. The
+`createSignedExpression` wrapper is the only signing path available to
+application-level code, so the attack surface is narrow.
+
+A Language's identity is the content hash of its bundle, so a
+compromised Language is trivially detectable: its address stops
+matching the bundle served under it. Trust decisions (will I install
+this Language? will I accept Expressions authored with it?) are made
+per-agent, at the edges, not by any central registry.
