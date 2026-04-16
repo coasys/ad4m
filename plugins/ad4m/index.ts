@@ -1290,18 +1290,8 @@ Notes:
             wsUrl = opts.url.replace(/^http(s?):/, "ws$1:");
           }
 
-          // Get password from CLI or env var, prompt if not provided
-          let password = opts.password || process.env.AD4M_PASSWORD;
-          if (!password) {
-            const readline = await import("readline");
-            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-            password = await new Promise((resolve) => {
-              rl.question("[ad4m] Enter password for multi-user login: ", (answer) => {
-                rl.close();
-                resolve(answer);
-              });
-            });
-          }
+          // Password from CLI or env var; will be prompted inside setup only when needed
+          const password = opts.password || process.env.AD4M_PASSWORD || undefined;
 
           // Derive MCP endpoint from --url if provided
           let mcpEndpoint = opts.endpoint || endpoint;
