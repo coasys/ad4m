@@ -217,7 +217,7 @@ interface expression {
 ///
 /// A Language exporting ONLY this capability is a write-only drop box:
 /// senders commit but do not observe the resulting state. The sender-side
-/// view of an inbox Language (see `docs/ad4m-social-conventions.md`) is
+/// view of an inbox Language (see `ad4m-social-conventions.md`) is
 /// the motivating example.
 ///
 /// Signing: `commit` does NOT take a signer parameter. The runtime sets
@@ -402,7 +402,7 @@ interface telepresence {
 // is just a Language exporting `perspective-commit` (for senders) plus
 // optionally `perspective-sync` + `peers` (for the owner's multi-device
 // case), with the recipient DID baked into the template at clone time.
-// See `docs/ad4m-social-conventions.md` for the DM-as-inbox pattern,
+// See `ad4m-social-conventions.md` for the DM-as-inbox pattern,
 // the friends-as-perspective convention, and well-known `ad4m://`
 // predicates for inbox discovery.
 
@@ -742,7 +742,7 @@ world ad4m-language-holochain {
 /// core `storage` are unaffected.
 ///
 /// Typical consumer: test fixtures or persistence Languages that need
-/// cross-agent shared paths. See `docs/language-interface-spec.md` §7.6.
+/// cross-agent shared paths. See `language-interface-spec.md` §7.6.
 world ad4m-language-fs {
     include ad4m-language;
     import storage-fs-ext;

@@ -631,7 +631,7 @@ the target state.
   is not in the finalized spec, but the runtime retains it for
   compatibility. To be removed when the social-layer conventions are
   implemented.
-- Verify `docs/language-interface-spec.md` §9–10 authoring examples
+- Verify `language-interface-spec.md` §9–10 authoring examples
   match the actual ALDK APIs we shipped. Fix either the spec or the
   code if they diverged.
 - Full `pnpm build && pnpm test && cargo test` on all supported

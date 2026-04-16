@@ -12,7 +12,7 @@
  * This file is deliberately plain JavaScript (no TypeScript) so that
  * any runtime (Deno, browser, Node) can load it without a transpiler.
  * The runtime only needs to install the three globals above before
- * languages are loaded. See `docs/host-contract.md` for the full
+ * languages are loaded. See `docs-src/host-contract.md` for the full
  * specification of what each global must provide.
  *
  * ## How languages consume this module

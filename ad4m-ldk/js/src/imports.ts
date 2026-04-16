@@ -10,7 +10,7 @@
  * can write `import { agentDid } from "@coasys/ad4m-ldk"` and get
  * full type safety.
  *
- * Spec section 7 (`docs/language-interface-spec.md`).
+ * Spec section 7 (`docs-src/language-interface-spec.md`).
  */
 
 // Re-export everything from the host module.

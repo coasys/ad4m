@@ -4,7 +4,7 @@
  *
  * No state, no side effects. Importable from tests.
  *
- * Spec §9 (`docs/language-interface-spec.md`).
+ * Spec §9 (`docs-src/language-interface-spec.md`).
  */
 
 import type {

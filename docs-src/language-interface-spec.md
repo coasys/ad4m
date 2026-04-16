@@ -24,7 +24,7 @@
 >   `perspective-sync` and `telepresence`.
 > - **Deleted the `direct-message` capability.** DM is now just a
 >   link-sync + telepresence composition with the recipient DID baked
->   into a template clone. See `docs/ad4m-social-conventions.md` for
+>   into a template clone. See `ad4m-social-conventions.md` for
 >   the DM-as-inbox pattern and friends-as-perspective convention.
 > - **Moved `is-public` to the `lifecycle` interface** as a static
 >   privacy hint. `writable` deleted (redundant with export presence of
