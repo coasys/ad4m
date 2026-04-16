@@ -30,7 +30,7 @@ pub struct McpContext {
 pub struct McpServerConfig {
     /// Port to listen on (default: 3001)
     pub port: u16,
-    /// Host to bind to (default: 127.0.0.1)
+    /// Host to bind to (default: 0.0.0.0)
     pub host: String,
 }
 
@@ -38,7 +38,7 @@ impl Default for McpServerConfig {
     fn default() -> Self {
         Self {
             port: 3001,
-            host: "127.0.0.1".to_string(),
+            host: "0.0.0.0".to_string(),
         }
     }
 }
