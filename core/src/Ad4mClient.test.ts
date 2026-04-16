@@ -7,10 +7,22 @@ import { LinkQuery } from './perspectives/LinkQuery';
 const originalEventSource = (global as any).EventSource;
 
 class MockEventSource {
+    static instances: MockEventSource[] = [];
     onmessage: any = null;
     onerror: any = null;
-    close() {}
-    constructor(_url: string) {}
+    closed = false;
+
+    close() {
+        this.closed = true;
+    }
+
+    emit(payload: unknown) {
+        this.onmessage?.({ data: JSON.stringify(payload) });
+    }
+
+    constructor(_url: string) {
+        MockEventSource.instances.push(this);
+    }
 }
 
 let app: ReturnType<typeof express>;
@@ -602,6 +614,31 @@ describe('PerspectiveClient', () => {
     test('queryProlog() runs prolog query', async () => {
         const result = await ad4m.perspective.queryProlog('uuid-1', 'test(X)');
         expect(result).toEqual([{X: 'test'}]);
+    });
+
+    test('subscribeToQueryUpdates() ignores unrelated unified SSE events and accepts object results', async () => {
+        const callback = jest.fn();
+        const unsubscribe = ad4m.perspective.subscribeToQueryUpdates('sub-1', callback);
+        const eventSource = MockEventSource.instances.at(-1)!;
+
+        eventSource.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-ignored' } });
+        eventSource.emit({ type: 'query-subscription-update', subscriptionId: 'sub-2', result: { ignored: true } });
+        expect(callback).not.toHaveBeenCalled();
+
+        eventSource.emit({
+            type: 'query-subscription-update',
+            subscriptionId: 'sub-1',
+            result: [{ id: 'community://1', name: 'REST Smoke Community' }],
+        });
+        expect(callback).toHaveBeenCalledWith([{ id: 'community://1', name: 'REST Smoke Community' }]);
+
+        unsubscribe();
+        eventSource.emit({
+            type: 'query-subscription-update',
+            subscriptionId: 'sub-1',
+            result: [{ id: 'community://2', name: 'Should not arrive' }],
+        });
+        expect(callback).toHaveBeenCalledTimes(1);
     });
 
     test('publishSnapshotByUUID() publishes a snapshot', async () => {

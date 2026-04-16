@@ -118,22 +118,32 @@ export class QuerySubscriptionProxy {
             initialResult = await this.#client.subscribeQuery(this.#uuid, this.#query);
             this.#subscriptionId = initialResult.subscriptionId;
 
-            // Process the initial result immediately for fast UX
-            if (initialResult.result) {
+            // Process the initial result immediately for fast UX.
+            // The REST subscribeQuery() endpoint already returns the initial result,
+            // so treat that as successful initialization instead of waiting for a
+            // follow-up SSE update that may never arrive until the query changes.
+            if (initialResult.result !== undefined) {
                 this.#latestResult = initialResult.result;
                 this.#notifyCallbacks(initialResult.result);
+
+                if (this.#initResolve) {
+                    this.#initResolve(true);
+                    this.#initResolve = undefined;
+                    this.#initReject = undefined;
+                }
             } else {
                 console.warn('⚠️ No initial result returned from subscribeQuery!');
-            }
 
-            // Set up timeout for retry
-            this.#initTimeoutId = setTimeout(() => {
-                console.error('Subscription initialization timed out after 30 seconds. Resubscribing...');
-                // Recursively retry subscription, catching any errors
-                this.subscribe().catch(error => {
-                    console.error('Error during subscription retry after timeout:', error);
-                });
-            }, 30000);
+                // Only keep the initialization timeout when the backend did not
+                // provide an initial result up front.
+                this.#initTimeoutId = setTimeout(() => {
+                    console.error('Subscription initialization timed out after 30 seconds. Resubscribing...');
+                    // Recursively retry subscription, catching any errors
+                    this.subscribe().catch(error => {
+                        console.error('Error during subscription retry after timeout:', error);
+                    });
+                }, 30000);
+            }
             
             // Subscribe to query updates
             this.#unsubscribe = this.#client.subscribeToQueryUpdates(

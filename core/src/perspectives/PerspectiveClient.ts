@@ -32,6 +32,30 @@ export type UuidCallback = (uuid: string) => null
 export type LinkCallback = (link: LinkExpression) => null
 export type SyncStateChangeCallback = (state: PerspectiveState) => null
 
+function normalizeQueryResult(raw: unknown, errorContext: string): { result: AllInstancesResult; isInit: boolean } {
+    let finalResult: unknown = raw
+    let isInit = false
+
+    if (typeof finalResult === 'string' && finalResult.startsWith('#init#')) {
+        finalResult = finalResult.substring(6)
+        isInit = true
+    }
+
+    if (typeof finalResult === 'string') {
+        try {
+            finalResult = JSON.parse(finalResult)
+        } catch (e) {
+            console.error(errorContext, e)
+        }
+    }
+
+    if (isInit && typeof finalResult === 'object' && finalResult !== null) {
+        (finalResult as Record<string, unknown>).isInit = true
+    }
+
+    return { result: finalResult as AllInstancesResult, isInit }
+}
+
 export class PerspectiveClient {
     #restClient: RestClient
     #perspectiveAddedCallbacks: PerspectiveHandleCallback[]
@@ -128,22 +152,12 @@ export class PerspectiveClient {
     }
 
     async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
-        const response = await this.#restClient.post<{ subscriptionId: string, result: string }>(
+        const response = await this.#restClient.post<{ subscriptionId: string, result: unknown }>(
             `/api/v1/perspectives/${encodeURIComponent(uuid)}/subscribe-query`, { query }
         )
         const { subscriptionId, result } = response
-        let finalResult: unknown = result
-        let isInit = false
-        if (typeof finalResult === 'string' && finalResult.startsWith("#init#")) {
-            finalResult = finalResult.substring(6)
-            isInit = true
-        }
-        try {
-            finalResult = JSON.parse(finalResult as string)
-        } catch (e) {
-            console.error('Error parsing subscribeQuery result:', e)
-        }
-        return { subscriptionId, result: finalResult as AllInstancesResult, isInit }
+        const normalized = normalizeQueryResult(result, 'Error parsing subscribeQuery result:')
+        return { subscriptionId, result: normalized.result, isInit: normalized.isInit }
     }
 
     async perspectiveSubscribeSurrealQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
@@ -183,21 +197,14 @@ export class PerspectiveClient {
         const unsub = this.#restClient.subscribe(
             `/api/v1/events/query-subscription/${encodeURIComponent(subscriptionId)}`,
             (data) => {
-                let finalResult: unknown = data.result || data
-                let isInit = false
-                if (typeof finalResult === 'string' && finalResult.startsWith("#init#")) {
-                    finalResult = finalResult.substring(6)
-                    isInit = true
-                }
-                try {
-                    finalResult = JSON.parse(finalResult as string)
-                    if (isInit && typeof finalResult === 'object' && finalResult !== null) {
-                        (finalResult as Record<string, unknown>).isInit = true
-                    }
-                } catch (e) {
-                    console.error('Error parsing query subscription:', e)
-                }
-                onData(finalResult as AllInstancesResult)
+                const event = data as Record<string, unknown>
+                if (event.type !== 'query-subscription-update') return
+
+                const eventSubscriptionId = event.subscriptionId || event.subscription_id
+                if (eventSubscriptionId !== subscriptionId) return
+
+                const normalized = normalizeQueryResult(event.result, 'Error parsing query subscription:')
+                onData(normalized.result)
             }
         )
         this.#querySubscriptionUnsubscribers.set(subscriptionId, unsub)
