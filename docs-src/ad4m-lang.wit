@@ -548,13 +548,24 @@ interface event-emission {
     emit-signal: func(data: string);
 }
 
-/// General runtime utilities — clock, log, cross-Language resolution.
+/// General runtime utilities — content-address hash, clock, log,
+/// cross-Language resolution.
 interface runtime-utils {
     use types.{expression, expression-uri, error};
 
     enum log-level { trace, debug, info, warn, error }
 
     log: func(level: log-level, message: string, structured: option<string>);
+
+    /// Canonical AD4M content-address hash. Input is opaque bytes (passed
+    /// as a string for the v1.0 JSON-boundary; a future revision with the
+    /// Component Model will take `list<u8>`). Output is the deterministic
+    /// address string derived from those bytes via the AD4M hash
+    /// algorithm: SHA-256 → CIDv1 (DAG-Protobuf) → base58btc, prefixed
+    /// with "Qm". Every content-addressed Language uses this to compute
+    /// Expression addresses; runtimes MUST implement it identically so
+    /// two runtimes produce the same address for the same content.
+    hash: func(data: string) -> string;
 
     /// Wall-clock time in milliseconds since the Unix epoch. Runtimes MAY
     /// virtualize time for replay/testing.

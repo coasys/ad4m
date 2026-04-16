@@ -6,7 +6,7 @@
  */
 
 import axiod from "https://deno.land/x/axiod/mod.ts";
-import { defineLanguage, agentCreateSignedExpression } from "@coasys/ad4m-ldk";
+import { defineLanguage, agentCreateSignedExpression, hash } from "@coasys/ad4m-ldk";
 
 const PROXY_URL = "https://bootstrap-store-gateway.perspect3vism.workers.dev/";
 
@@ -20,12 +20,11 @@ const language = defineLanguage({
 
     expression: {
         async create(neighbourhood: object): Promise<string> {
-            // @ts-ignore — UTILS is injected by the runtime
-            const hash = UTILS.hash(JSON.stringify(neighbourhood));
+            const address = hash(JSON.stringify(neighbourhood));
             const expression = agentCreateSignedExpression(neighbourhood);
 
             const neighbourhoodPostData = {
-                key: hash,
+                key: address,
                 value: JSON.stringify(expression),
             };
             const neighbourhoodPostResult = await axiod.post(PROXY_URL, neighbourhoodPostData);
@@ -33,7 +32,7 @@ const language = defineLanguage({
                 console.error("Upload neighbourhood data gets error: ", neighbourhoodPostResult);
             }
 
-            return hash;
+            return address;
         },
 
         async get(address: string): Promise<any> {

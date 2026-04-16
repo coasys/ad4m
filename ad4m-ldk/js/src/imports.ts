@@ -35,6 +35,9 @@ export {
     // HTTP fetch (Spec section 7.2b)
     httpFetch,
 
+    // Runtime utilities (Spec section 7.7)
+    hash,
+
     // Language context (Spec section 7.3)
     languageStorageDirectory,
     languageAddress,

@@ -20,6 +20,7 @@
 // would not).
 import {
     agentCreateSignedExpression,
+    hash,
     languageSettings,
     readStorageFile,
     writeStorageFile,
@@ -62,21 +63,20 @@ export async function expressionGet(address) {
 }
 
 export async function expressionCreate(language) {
-    // @ts-ignore - UTILS is a runtime global provided by the executor
-    const hash = UTILS.hash(language.bundle.toString());
-    if (hash !== language.meta.address) {
+    const computed = hash(language.bundle.toString());
+    if (computed !== language.meta.address) {
         throw new Error(
             `Language Persistence: Can't store language. Address stated in meta differs from actual file\n` +
-            `Wanted: ${language.meta.address}\nGot: ${hash}`
+            `Wanted: ${language.meta.address}\nGot: ${computed}`
         );
     }
     const expression = agentCreateSignedExpression(language.meta);
-    const metaPath = join(storagePath, `meta-${hash}.json`);
-    const bundlePath = join(storagePath, `bundle-${hash}.js`);
+    const metaPath = join(storagePath, `meta-${computed}.json`);
+    const bundlePath = join(storagePath, `bundle-${computed}.js`);
     console.log("Writing meta & bundle path: ", metaPath, bundlePath);
     writeStorageFile(metaPath, JSON.stringify(expression));
     writeStorageFile(bundlePath, language.bundle.toString());
-    return hash;
+    return computed;
 }
 
 export async function languageGetSource(address) {

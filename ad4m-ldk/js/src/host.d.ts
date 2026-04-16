@@ -26,6 +26,12 @@ declare module "ad4m:host" {
     // HTTP fetch (Spec section 7.2b)
     export function httpFetch(url: string, method: string, headersJson: string, body: string): Promise<string>;
 
+    // Runtime utilities (Spec section 7.7)
+    // Canonical AD4M content-address hash: SHA-256 -> CIDv1 -> base58btc,
+    // prefixed with "Qm". The deterministic address function used by
+    // every content-addressed Language.
+    export function hash(data: string): string;
+
     // Language context (Spec section 7.3)
     export function languageStorageDirectory(): string;
     export function languageAddress(): string;

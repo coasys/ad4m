@@ -12,6 +12,7 @@ import {
     languageAddress,
     languageSettings,
     agentCreateSignedExpression,
+    hash,
     storageGet,
     storagePut,
 } from "ad4m:host";
@@ -48,11 +49,10 @@ export async function expressionGet(address: string): Promise<any | null> {
 export async function expressionCreate(content: object): Promise<string> {
     const expr = agentCreateSignedExpression(content);
     const exprString = JSON.stringify(expr);
-    // @ts-ignore
-    const hash = UTILS.hash(exprString);
-    storagePut(hash, exprString);
-    console.log("[note-store-flat] expressionCreate:", hash);
-    return hash;
+    const address = hash(exprString);
+    storagePut(address, exprString);
+    console.log("[note-store-flat] expressionCreate:", address);
+    return address;
 }
 
 // Teardown

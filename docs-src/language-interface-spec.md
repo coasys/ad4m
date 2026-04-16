@@ -605,6 +605,25 @@ permission allow-list) governs which paths a Language can actually
 reach. Paths outside the allowed scope fail with a permission error,
 not a contract violation.
 
+### 7.7 Runtime utilities (core)
+
+Small utility surface every runtime provides.
+
+| Import | Parameters | Returns | Description |
+|---|---|---|---|
+| `hash(data)` | `string` | `string` | Canonical AD4M content-address hash: SHA-256 → CIDv1 (DAG-Protobuf) → base58btc, prefixed with `"Qm"`. |
+
+`hash()` is the function every content-addressed Language uses to
+compute deterministic Expression addresses. Two runtimes MUST produce
+identical output for identical input or Expression URLs stop being
+portable across runtimes.
+
+In the Deno reference implementation the underlying op is also
+exposed as `globalThis.UTILS.hash` for backwards compatibility with
+older Languages; new Languages should import `hash` from `ad4m:host`
+rather than reach for the global. The WIT groups this under the
+`runtime-utils` interface alongside `log` and `now-ms`.
+
 ---
 
 ## 8. Holochain signal routing (Holochain extension)

@@ -8,6 +8,7 @@
 // See local-language-persistence-0.0.9.js for the longer rationale.
 import {
     agentCreateSignedExpression,
+    hash,
     languageSettings,
     readStorageFile,
     writeStorageFile,
@@ -50,8 +51,7 @@ export async function expressionGet(address) {
 export async function expressionCreate(neighbourhood) {
     const expression = agentCreateSignedExpression(neighbourhood);
     const content = JSON.stringify(expression);
-    // @ts-ignore - UTILS is a runtime global provided by the executor
-    const address = UTILS.hash(content);
+    const address = hash(content);
     const neighbourhoodPath = join(storagePath, `neighbourhood-${address}.json`);
     console.log("Writing neighbourhood with path: ", neighbourhoodPath);
     writeStorageFile(neighbourhoodPath, content);

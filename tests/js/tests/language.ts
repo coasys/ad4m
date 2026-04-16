@@ -99,7 +99,7 @@ export default function languageTests(testContext: TestContext) {
                 );
                 expect(canPublishNonHolochainLang.name).to.be.equal(noteMetaInfo.name);
                 //TODO/NOTE: this will break if the note language version is changed
-                expect(canPublishNonHolochainLang.address).to.be.equal("QmzSYwde8DikgT33pPVgVM3FUWyAVFsA2B4cUM7LmA5TtbbP8of");
+                expect(canPublishNonHolochainLang.address).to.be.equal("QmzSYwdnt6h77iqTuxs9Febh3cAAr6GMfRH8VwH3NHbTiYgUWmS");
             
                 //Get meta for source language above and make sure it is correct
                 const sourceLanguageMetaNonHC = await ad4mClient.expression.get(`lang://${canPublishNonHolochainLang.address}`);
@@ -107,7 +107,7 @@ export default function languageTests(testContext: TestContext) {
                 const sourceLanguageMetaNonHCData = JSON.parse(sourceLanguageMetaNonHC.data);
                 expect(sourceLanguageMetaNonHCData.name).to.be.equal(noteMetaInfo.name)
                 expect(sourceLanguageMetaNonHCData.description).to.be.equal(noteMetaInfo.description)
-                expect(sourceLanguageMetaNonHCData.address).to.be.equal("QmzSYwde8DikgT33pPVgVM3FUWyAVFsA2B4cUM7LmA5TtbbP8of")
+                expect(sourceLanguageMetaNonHCData.address).to.be.equal("QmzSYwdnt6h77iqTuxs9Febh3cAAr6GMfRH8VwH3NHbTiYgUWmS")
             })
 
 

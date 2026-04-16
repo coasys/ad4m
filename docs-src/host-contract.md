@@ -7,10 +7,11 @@ work to these globals, making it fully runtime-agnostic.
 
 The contract is split into:
 
-- **Core** — two globals every host must install (`AGENT`,
-  `LANGUAGE_CONTROLLER`). Covers agent identity, language context,
-  events, and the KV store. A language using only core functions runs
-  on any compliant runtime.
+- **Core** — three globals every host must install (`AGENT`,
+  `LANGUAGE_CONTROLLER`, `UTILS`). Covers agent identity, language
+  context, events, KV storage, and the canonical content-address hash
+  function. A language using only core functions runs on any compliant
+  runtime.
 - **Extensions** — additional globals a host *may* install to expose
   capabilities beyond the core. Each extension has its own opt-in
   contract; languages that use an extension must tolerate runtimes
@@ -28,13 +29,13 @@ Language bundle (JS or WASM)
 host.js  (runtime-agnostic, no platform APIs)
     |  accesses core globals and optional extensions
     v
-+------------------+  +----------------------+   optional:
-|  globalThis.     |  |  globalThis.         |  +----------------------+
-|  AGENT           |  |  LANGUAGE_CONTROLLER |  |  globalThis.         |
-|  (core)          |  |  (core + extensions) |  |  __holochainDelegate__|
-+------------------+  +----------------------+  +----------------------+
-    |                      |                         |
-    v                      v                         v
++------------+  +----------------------+  +----------+   optional:
+| globalThis.|  | globalThis.          |  |globalThis|  +----------------------+
+| AGENT      |  | LANGUAGE_CONTROLLER  |  | .UTILS   |  |  globalThis.         |
+| (core)     |  | (core + extensions)  |  | (core)   |  |  __holochainDelegate__|
++------------+  +----------------------+  +----------+  +----------------------+
+    |                    |                      |                |
+    v                    v                      v                v
 Host-specific backend (Deno ops, HTTP API, Web Crypto, IndexedDB, ...)
 ```
 
@@ -120,6 +121,35 @@ installed before any language is loaded.
   gracefully to in-memory-only if the extension is not installed —
   so a runtime can ship a working (non-persistent) KV with no
   filesystem at all.
+
+## `globalThis.UTILS`
+
+Runtime utilities. Must be installed before any language is loaded.
+Currently a small surface; primarily the canonical content-address
+hash function that every content-addressed Language uses to compute
+Expression addresses.
+
+**Reference implementation:** `rust-executor/src/js_core/utils_extension.js`
+
+### Required methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `hash(data)` | `(string) => string` | Canonical AD4M content-address hash. Computes **SHA-256 → CIDv1 (DAG-Protobuf) → base58btc encoding**, then prefixes the result with `"Qm"`. Runtimes MUST implement this identically — two runtimes must produce the same address for the same content, or Expression URLs become non-portable. |
+
+Legacy log helpers (`consoleLog`, `consoleDebug`, `consoleError`,
+`consoleWarn`) also live on `UTILS` in the reference implementation
+but are not part of the public contract; new Languages should use
+`console.log` / `console.error` directly instead.
+
+### Notes
+
+- Exposed to Languages via `ad4m:host`'s `hash()` export (spec §7.7).
+  Languages should import that rather than reaching for `UTILS.hash`
+  directly — the global is an implementation detail.
+- Browser runtimes implement this with Web Crypto + a CIDv1 encoder;
+  Node.js runtimes use `crypto` + `multiformats`. The output format
+  (base58btc CIDv1 Qm-prefixed) is the contract, not the library.
 
 # Optional extensions
 
@@ -233,10 +263,10 @@ The host must register the `ad4m:host` module so that
 
 ## Initialization order
 
-1. Host installs `globalThis.AGENT` and `globalThis.LANGUAGE_CONTROLLER`
-   with the core methods. If the host supports the File I/O extension,
-   it also attaches `readStorageFile` / `writeStorageFile` to
-   `LANGUAGE_CONTROLLER` at this step.
+1. Host installs `globalThis.AGENT`, `globalThis.LANGUAGE_CONTROLLER`,
+   and `globalThis.UTILS` with the core methods. If the host supports
+   the File I/O extension, it also attaches `readStorageFile` /
+   `writeStorageFile` to `LANGUAGE_CONTROLLER` at this step.
 2. Host registers the `ad4m:host` module.
 3. Host loads the language bundle (which imports from `ad4m:host`).
 4. If the host supports the Holochain extension and the language
@@ -280,7 +310,14 @@ globalThis.LANGUAGE_CONTROLLER = {
     registerHolochainSignalHandler: (cellId, addr) => { /* no-op or WebSocket */ },
 };
 
-// 3. Register the ad4m:host module (via import map or bundler alias)
+// 3. Install UTILS (canonical content-address hash)
+//    Output must be the AD4M-canonical format: SHA-256 -> CIDv1 -> base58btc,
+//    prefixed with "Qm". Browser runtimes can use Web Crypto + a CID library.
+globalThis.UTILS = {
+    hash: (data) => canonicalAd4mHash(data),  // SHA-256 -> CIDv1 -> "Qm..."
+};
+
+// 4. Register the ad4m:host module (via import map or bundler alias)
 // 4. Load language bundle
 // 5. Optionally install __holochainDelegate__ via WebSocket to conductor
 // 6. Call language.init()

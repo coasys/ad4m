@@ -6,7 +6,7 @@
  * LanguageSource capability (languageGetSource).
  */
 
-import { defineLanguage, agentCreateSignedExpression } from '@coasys/ad4m-ldk';
+import { defineLanguage, agentCreateSignedExpression, hash } from '@coasys/ad4m-ldk';
 import axiod from "https://deno.land/x/axiod/mod.ts";
 
 // =============================================================================
@@ -18,9 +18,6 @@ const PROXY_URL = "https://bootstrap-store-gateway.perspect3vism.workers.dev";
 // =============================================================================
 // Language definition
 // =============================================================================
-
-// @ts-ignore -- UTILS is injected by the runtime
-const UTILS = () => (globalThis as any).UTILS;
 
 const lang = defineLanguage({
     name: "languages",
@@ -36,16 +33,16 @@ const lang = defineLanguage({
 
     expression: {
         async create(language: any): Promise<string> {
-            const hash = UTILS().hash(language.bundle.toString());
+            const computed = hash(language.bundle.toString());
 
-            if (hash != language.meta.address)
+            if (computed != language.meta.address)
                 throw new Error(
-                    `Language Persistence: Can't store language. Address stated in meta differs from actual file\nWanted: ${language.meta.address}\nGot: ${hash}`
+                    `Language Persistence: Can't store language. Address stated in meta differs from actual file\nWanted: ${language.meta.address}\nGot: ${computed}`
                 );
 
             const expression = agentCreateSignedExpression(language.meta);
 
-            const key = `meta-${hash}`;
+            const key = `meta-${computed}`;
             const metaPostData = {
                 key: key,
                 value: JSON.stringify(expression),
@@ -57,7 +54,7 @@ const lang = defineLanguage({
                 }
 
                 const languageBundleBucketParams = {
-                    key: hash,
+                    key: computed,
                     value: language.bundle.toString(),
                 };
                 const bundlePostResult = await axiod.post(PROXY_URL, languageBundleBucketParams);
@@ -65,11 +62,11 @@ const lang = defineLanguage({
                     console.error("Upload language bundle data gets error: ", bundlePostResult);
                 }
 
-                return hash;
+                return computed;
             } catch (e: any) {
                 if (e.response.status == 400 && e.response.data.includes("Key already exists")) {
                     console.log("[Cloudflare-based Language Language]: Tried to replace existing language. Ignoring...");
-                    return hash;
+                    return computed;
                 }
                 console.error("[Cloudflare-based Language Language]: Error storing Language: ", e.response.data);
                 throw e;

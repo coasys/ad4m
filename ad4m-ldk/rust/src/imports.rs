@@ -45,6 +45,13 @@ extern "C" {
         params: JsValue,
     ) -> Result<JsValue, JsValue>;
 
+    // ----- Runtime utilities (spec §7.7) -----
+    // Canonical AD4M content-address hash: SHA-256 -> CIDv1 -> base58btc,
+    // prefixed with "Qm". The deterministic address function used by
+    // every content-addressed Language.
+    #[wasm_bindgen(js_name = "hash")]
+    pub fn hash(data: &str) -> String;
+
     // ----- HTTP fetch (spec §7.2b) -----
     // Thin wrapper around Deno's native fetch(). `headers_json` is a JSON
     // string of `{ "Header": "Value", ... }` (empty string for no

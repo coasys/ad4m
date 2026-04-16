@@ -6,7 +6,7 @@
  */
 
 import axiod from "https://deno.land/x/axiod/mod.ts";
-import { defineLanguage, agentCreateSignedExpression } from "@coasys/ad4m-ldk";
+import { defineLanguage, agentCreateSignedExpression, hash } from "@coasys/ad4m-ldk";
 
 const PROXY_URL = "https://bootstrap-store-gateway.perspect3vism.workers.dev/";
 
@@ -43,12 +43,11 @@ const language = defineLanguage({
                 data_base64: fileData.data_base64,
             };
 
-            // @ts-ignore — UTILS is injected by the runtime
-            const hash = UTILS.hash(JSON.stringify(fileMetadata));
+            const address = hash(JSON.stringify(fileMetadata));
             const expression = agentCreateSignedExpression(fileMetadata);
 
             const postData = {
-                key: hash,
+                key: address,
                 value: JSON.stringify(expression),
             };
             try {
@@ -58,13 +57,13 @@ const language = defineLanguage({
                 }
             } catch (e: any) {
                 if (e?.response?.status === 400 && e?.response?.data === "Key already exists") {
-                    console.log("File already exists at key:", hash, "— reusing existing upload");
+                    console.log("File already exists at key:", address, "— reusing existing upload");
                 } else {
                     throw e;
                 }
             }
 
-            return hash;
+            return address;
         },
 
         async get(address: string): Promise<any> {

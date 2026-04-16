@@ -236,6 +236,7 @@ emits the flat named exports the runtime expects.
 import {
     defineLanguage,
     agentCreateSignedExpression,
+    hash,
     storageGet,
     storagePut,
 } from "@coasys/ad4m-ldk";
@@ -253,10 +254,9 @@ export default defineLanguage({
         async create(content) {
             const expr = agentCreateSignedExpression(content);
             const s = JSON.stringify(expr);
-            // @ts-ignore — UTILS is a runtime-provided hash helper
-            const hash = UTILS.hash(s);
-            storagePut(hash, s);
-            return hash;
+            const address = hash(s);          // canonical AD4M content hash
+            storagePut(address, s);
+            return address;
         },
 
         async get(address) {

@@ -6,7 +6,7 @@
  * the ad4m:host storage API.
  */
 import type { Address, Interaction, Expression } from "https://esm.sh/v135/@coasys/ad4m@0.5.0";
-import { agentCreateSignedExpression, storageGet, storagePut } from "ad4m:host";
+import { agentCreateSignedExpression, hash, storageGet, storagePut } from "ad4m:host";
 
 export const name = "note-store";
 export const version = "0.0.1";
@@ -32,10 +32,9 @@ export async function expressionGet(address: Address): Promise<Expression | null
 export async function expressionCreate(content: object): Promise<Address> {
     const expr = agentCreateSignedExpression(content);
     const exprString = JSON.stringify(expr);
-    // @ts-ignore
-    const hash = UTILS.hash(exprString);
-    storagePut(hash, exprString);
-    return hash;
+    const address = hash(exprString);
+    storagePut(address, exprString);
+    return address;
 }
 
 export async function teardown(): Promise<void> {}

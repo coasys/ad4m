@@ -141,6 +141,36 @@ export function httpFetch(url, method, headersJson, body) {
 }
 
 // ============================================================================
+// Runtime utilities (Spec section 7.7)
+// ============================================================================
+//
+// Canonical AD4M content-address hash: SHA-256 → CIDv1 (DAG-Protobuf)
+// → base58btc, prefixed with "Qm". This is the hash function that
+// produces AD4M addresses; deterministic and collision-resistant for
+// the purposes of content addressing.
+//
+// The runtime installs the underlying op as globalThis.UTILS.hash for
+// backwards compatibility with older Languages; new Languages should
+// import from ad4m:host instead.
+
+function utils() {
+    var u = globalThis.UTILS;
+    if (!u) {
+        throw new Error(
+            "[ad4m:host] UTILS global is not installed. " +
+            "This is a required runtime-utilities surface; the host " +
+            "must expose globalThis.UTILS.hash as the CIDv1 base58btc " +
+            "hash used throughout AD4M."
+        );
+    }
+    return u;
+}
+
+export function hash(data) {
+    return utils().hash(data);
+}
+
+// ============================================================================
 // Language context (Spec section 7.3)
 // ============================================================================
 
