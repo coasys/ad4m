@@ -182,14 +182,71 @@ export function emitSignal(data) {
 }
 
 // ============================================================================
-// Storage KV (Spec section 7.4)
+// Storage File I/O -- OPTIONAL EXTENSION (Spec section 7.6)
 // ============================================================================
 //
-// Per-language key-value storage with an in-memory cache backed by
-// persistent storage. The actual I/O is delegated to LANGUAGE_CONTROLLER
-// methods (readStorageFile / writeStorageFile) so the host module stays
-// runtime-agnostic. The Deno executor implements these via filesystem;
-// a browser runtime could use localStorage or IndexedDB.
+// Raw read/write access to a filesystem-like storage layer, scoped to a
+// language-chosen path. This is an OPTIONAL extension to the core host
+// interface, analogous to Holochain: runtimes are not required to
+// implement it, and languages that import it must be prepared for it
+// to be unavailable.
+//
+// Most languages should prefer the KV API (storageGet / storagePut)
+// below -- it is part of the core spec and always works. Use the File
+// I/O extension only when you genuinely need:
+//   * Custom storage layouts (e.g. one file per expression)
+//   * Large blobs where the KV's full-rewrite semantics are a problem
+//   * Shared paths outside the per-language storage scope
+//     (e.g. test fixtures storing language bundles in a shared dir)
+//
+// When the extension is installed, the runtime sets up
+// `LANGUAGE_CONTROLLER.readStorageFile` and `writeStorageFile`. When
+// it is not, these exports throw a descriptive error on call.
+
+function fileIoExtension() {
+    var lc = langCtrl();
+    if (!lc || typeof lc.readStorageFile !== "function"
+           || typeof lc.writeStorageFile !== "function") {
+        throw new Error(
+            "[ad4m:host] Storage File I/O extension is not installed on this " +
+            "runtime. readStorageFile/writeStorageFile are an optional extension " +
+            "to the host interface; use the KV API (storageGet/storagePut) for " +
+            "portable storage, or ensure the runtime installs " +
+            "LANGUAGE_CONTROLLER.readStorageFile and writeStorageFile."
+        );
+    }
+    return lc;
+}
+
+export function readStorageFile(path) {
+    return fileIoExtension().readStorageFile(path);
+}
+
+export function writeStorageFile(path, content) {
+    fileIoExtension().writeStorageFile(path, content);
+}
+
+// ============================================================================
+// Storage KV -- CORE (Spec section 7.4)
+// ============================================================================
+//
+// Per-language key-value storage, always available. This is part of the
+// core host interface -- every runtime implements it.
+//
+// Persistence is best-effort: the KV store tries to back the in-memory
+// cache with a single JSON file via LANGUAGE_CONTROLLER.readStorageFile /
+// writeStorageFile (the underlying methods of the optional File I/O
+// extension). If those methods are not installed, or I/O fails, the KV
+// degrades to in-memory-only for the isolate and logs a warning. The
+// storage API itself never throws -- callers don't have to handle the
+// absence of persistence.
+//
+// Note: because the KV uses the same underlying runtime methods as the
+// File I/O extension, a runtime that wants the KV to actually persist
+// has to install those methods. The difference is just in the contract:
+// the KV *gracefully degrades* when they are missing, while the File I/O
+// exports throw a clear error -- because a language importing
+// readStorageFile explicitly has opted into filesystem-like semantics.
 //
 // Design:
 //   * Read-through cache: persistent storage is loaded lazily into an
@@ -215,11 +272,19 @@ function kvFilePath() {
     }
 }
 
+function hasFileIo() {
+    var lc = langCtrl();
+    return !!lc && typeof lc.readStorageFile === "function"
+                && typeof lc.writeStorageFile === "function";
+}
+
 function ensureStorageLoaded() {
     if (__storageLoaded) return;
     __storageLoaded = true;
     var path = kvFilePath();
-    if (!path) {
+    if (!path || !hasFileIo()) {
+        // No File I/O extension installed: the KV is in-memory only for
+        // this isolate. Not an error -- the runtime simply didn't opt in.
         __storagePersistOk = false;
         return;
     }
@@ -249,7 +314,7 @@ function ensureStorageLoaded() {
 function flushStorage() {
     if (!__storagePersistOk) return;
     var path = kvFilePath();
-    if (!path) {
+    if (!path || !hasFileIo()) {
         __storagePersistOk = false;
         return;
     }

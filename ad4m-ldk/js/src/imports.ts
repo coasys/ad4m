@@ -46,9 +46,16 @@ export {
     emitTelepresenceSignal,
     emitSignal,
 
-    // Storage KV (Spec section 7.4)
+    // Storage KV -- CORE (Spec section 7.4)
     storageGet,
     storagePut,
     storageDelete,
     storageListKeys,
+
+    // Storage File I/O -- OPTIONAL EXTENSION (Spec section 7.6)
+    // Throws "[ad4m:host] Storage File I/O extension is not installed ..."
+    // on runtimes that don't install the extension. Prefer the KV API
+    // above unless you specifically need filesystem-like semantics.
+    readStorageFile,
+    writeStorageFile,
 } from "ad4m:host";

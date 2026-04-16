@@ -31,15 +31,5 @@ import {
         languageSettings: () => {
             return language_settings();
         },
-        // Storage file I/O - used by ad4m:host for KV persistence.
-        // These are the only runtime-specific I/O methods in the contract.
-        // Deno executor: delegates to Deno.readTextFileSync / writeTextFileSync.
-        // Browser runtime: would use localStorage, IndexedDB, or HTTP API.
-        readStorageFile: (path) => {
-            return Deno.readTextFileSync(path);
-        },
-        writeStorageFile: (path, content) => {
-            Deno.writeTextFileSync(path, content);
-        },
     };
   })(globalThis);

@@ -5,9 +5,19 @@ provide before any AD4M Language can be loaded. The `ad4m:host` module
 (`rust-executor/src/js_core/host.js`) delegates all platform-specific
 work to these globals, making it fully runtime-agnostic.
 
-A host that installs all three globals correctly can run AD4M Languages
-in any JavaScript environment: Deno (the current executor), a browser,
-Node.js, or an embedded engine.
+The contract is split into:
+
+- **Core** — two globals every host must install (`AGENT`,
+  `LANGUAGE_CONTROLLER`). Covers agent identity, language context,
+  events, and the KV store. A language using only core functions runs
+  on any compliant runtime.
+- **Extensions** — additional globals a host *may* install to expose
+  capabilities beyond the core. Each extension has its own opt-in
+  contract; languages that use an extension must tolerate runtimes
+  that don't provide it (the `ad4m:host` wrappers throw clear errors
+  on call). Current extensions:
+  - Holochain (`__holochainDelegate__`)
+  - Storage File I/O (methods on `LANGUAGE_CONTROLLER`)
 
 ## Overview
 
@@ -16,11 +26,12 @@ Language bundle (JS or WASM)
     |  import { agentDid, holochainCall, ... } from "ad4m:host"
     v
 host.js  (runtime-agnostic, no platform APIs)
-    |  accesses three globals on globalThis
+    |  accesses core globals and optional extensions
     v
-+------------------+  +----------------------+  +----------------------+
-|  globalThis.     |  |  globalThis.         |  |  globalThis.         |
-|  AGENT           |  |  LANGUAGE_CONTROLLER |  |  __holochainDelegate__|
++------------------+  +----------------------+   optional:
+|  globalThis.     |  |  globalThis.         |  +----------------------+
+|  AGENT           |  |  LANGUAGE_CONTROLLER |  |  globalThis.         |
+|  (core)          |  |  (core + extensions) |  |  __holochainDelegate__|
 +------------------+  +----------------------+  +----------------------+
     |                      |                         |
     v                      v                         v
@@ -98,28 +109,31 @@ installed before any language is loaded.
 |--------|-----------|-------------|
 | `registerHolochainSignalHandler(cellIdKey, langAddr)` | `(string, string) => void` | Registers this language as the handler for signals from a Holochain cell. |
 
-#### Storage file I/O (used by KV persistence in `ad4m:host`)
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `readStorageFile(path)` | `(string) => string` | Reads a file from the language's storage directory. Throws if not found (error message should contain "NotFound" or "No such file" for the KV layer to handle gracefully). |
-| `writeStorageFile(path, content)` | `(string, string) => void` | Writes a file to the language's storage directory. |
-
 ### Notes
 
-- `readStorageFile` / `writeStorageFile` are the **only** I/O methods in
-  the entire host contract. All other methods are pure data passing.
-- **Deno executor:** implements these via `Deno.readTextFileSync` /
-  `Deno.writeTextFileSync`.
-- **Browser runtime:** could implement via `localStorage`, `IndexedDB`,
-  or an HTTP API to a remote storage backend.
-- If storage I/O is unavailable, the `ad4m:host` KV layer degrades
-  gracefully to in-memory-only storage.
+- The methods above are **all pure data passing** — no I/O. Any
+  filesystem-like operations belong to the optional Storage File I/O
+  extension (see below), not the core contract.
+- The KV store (`storageGet` / `storagePut` / etc. on `ad4m:host`) is
+  core. In the reference implementation it *reuses* the File I/O
+  extension methods for persistence when available, but degrades
+  gracefully to in-memory-only if the extension is not installed —
+  so a runtime can ship a working (non-persistent) KV with no
+  filesystem at all.
 
-## `globalThis.__holochainDelegate__`
+# Optional extensions
+
+Extensions are capabilities a runtime *may* provide beyond the core
+contract. A language that uses an extension must be written knowing
+the runtime might not implement it: the `ad4m:host` wrappers throw a
+clear error at call time if the extension is missing. Runtimes that
+don't implement an extension simply omit installing its global (for
+Holochain) or its methods (for File I/O on `LANGUAGE_CONTROLLER`).
+
+## Extension: Holochain (`globalThis.__holochainDelegate__`)
 
 Provides Holochain DNA management and zome function calls. Unlike the
-other two globals, this is installed **per-language** by the runtime's
+core globals, this is installed **per-language** by the runtime's
 bootstrap process, just before calling the language's `init()`.
 
 Languages that don't use Holochain never call these methods, so a
@@ -130,13 +144,19 @@ to call a Holochain import without the delegate present.
 **Reference implementation:** `rust-executor/src/js_core/language_bootstrap.js`
 (the `createHolochainDelegate()` function)
 
-### Required methods
+### Methods
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `registerDNAs(dnas, signalCallback)` | `(object[], any) => Promise<object[]>` | Installs Holochain DNAs and returns the resulting app info. `dnas` is an array of `{ path, nick }` objects (or `{ bundle, nick }` for inline bundles). `signalCallback` is currently unused (pass `undefined`). |
 | `call(dnaNick, zome, fnName, params)` | `(string, string, string, any) => Promise<any>` | Calls a Holochain zome function. Returns the deserialized result. |
 | `callAsync(calls, callback)` | `(object[], any) => Promise<any>` | Batch zome call. `calls` is an array of `{ dnaNick, zomeName, fnName, params }`. Returns array of results. |
+
+### `ad4m:host` exports (call-side)
+
+- `holochainRegisterDnas(dnas)`
+- `holochainCall(dnaNick, zome, fnName, params)`
+- `holochainCallAsync(dnaNick, zome, fnName, params)`
 
 ### Notes
 
@@ -146,6 +166,56 @@ to call a Holochain import without the delegate present.
   remote Holochain conductor.
 - If Holochain is not available, simply don't install the global.
   Languages that require it will fail with a clear error at `init()` time.
+
+## Extension: Storage File I/O (methods on `LANGUAGE_CONTROLLER`)
+
+Provides raw read/write access to a filesystem-like storage layer, at
+paths chosen by the language. Unlike the Holochain extension this
+attaches directly to the `LANGUAGE_CONTROLLER` global — it has no
+per-language lifecycle, so a runtime that supports File I/O installs
+the two methods once, alongside the core `LANGUAGE_CONTROLLER` setup.
+
+This extension exists for languages that need storage semantics the
+KV API can't express:
+- Custom storage layouts (one file per expression, nested dirs, …)
+- Large blobs where the KV's full-rewrite-on-put model is a problem
+- Shared paths outside the per-language storage scope (e.g. test
+  fixtures storing language bundles in a directory that must survive
+  across agents)
+
+**The KV store is core and always works**; this extension is only for
+languages that explicitly opt into filesystem-like semantics.
+
+### Methods (on `LANGUAGE_CONTROLLER`)
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `readStorageFile(path)` | `(string) => string` | Reads a file/blob at `path` as a UTF-8 string. Throws if not found (error message should contain "NotFound" or "No such file" for the KV layer to handle gracefully). |
+| `writeStorageFile(path, content)` | `(string, string) => void` | Writes a file/blob at `path` with the given UTF-8 content. Should create parent directories as needed. |
+
+### `ad4m:host` exports (call-side)
+
+- `readStorageFile(path)`
+- `writeStorageFile(path, content)`
+
+Both throw `"[ad4m:host] Storage File I/O extension is not installed …"`
+on runtimes that don't install the methods.
+
+### Notes
+
+- Deno executor: `Deno.readTextFileSync` / `Deno.writeTextFileSync`
+  (sandboxed by Deno's filesystem permission allow-list).
+- Browser runtime: could wrap IndexedDB with a synthetic path scheme
+  (e.g. `idb:/lang-x/bundle-y.js`), use the Origin Private File
+  System, or route to an HTTP API. "Path" is opaque to the contract.
+- The paths passed in must be reachable by the runtime's permission
+  model. Languages that pick a path outside the language's allowed
+  scope will get a permission error, not a contract violation.
+- The KV store (`storageGet` / `storagePut` / etc.) is deliberately
+  decoupled from this extension: it *uses* the same methods when
+  available, but falls back to an in-memory-only mode when they are
+  not, so a runtime can ship a functional KV without implementing
+  File I/O at all.
 
 ## Module registration
 
@@ -163,11 +233,15 @@ The host must register the `ad4m:host` module so that
 
 ## Initialization order
 
-1. Host installs `globalThis.AGENT` and `globalThis.LANGUAGE_CONTROLLER`.
+1. Host installs `globalThis.AGENT` and `globalThis.LANGUAGE_CONTROLLER`
+   with the core methods. If the host supports the File I/O extension,
+   it also attaches `readStorageFile` / `writeStorageFile` to
+   `LANGUAGE_CONTROLLER` at this step.
 2. Host registers the `ad4m:host` module.
 3. Host loads the language bundle (which imports from `ad4m:host`).
-4. Host installs `globalThis.__holochainDelegate__` (if the language
-   uses Holochain).
+4. If the host supports the Holochain extension and the language
+   declares it needs Holochain, host installs
+   `globalThis.__holochainDelegate__`.
 5. Host calls the language's `init()` function.
 6. Language is ready for use.
 
@@ -180,13 +254,15 @@ globalThis.AGENT = {
     // ... or use cached DID + Web Crypto for local signing
 };
 
-// 2. Install LANGUAGE_CONTROLLER
+// 2. Install LANGUAGE_CONTROLLER (core methods)
 globalThis.LANGUAGE_CONTROLLER = {
     languageStorageDirectory: () => "indexeddb://lang-storage/" + langAddr,
     languageAddress: () => langAddr,
     languageSettings: () => settingsJson,
 
-    // Storage via localStorage
+    // OPTIONAL: File I/O extension. Omit these entirely if this runtime
+    // doesn't support raw file I/O — the KV will work in-memory-only and
+    // languages importing readStorageFile will throw a clear error on call.
     readStorageFile: (path) => {
         const data = localStorage.getItem("ad4m-storage:" + path);
         if (data === null) throw new Error("NotFound: " + path);

@@ -68,7 +68,7 @@ extern "C" {
     #[wasm_bindgen(js_name = "languageStorageDirectory")]
     pub fn language_storage_directory() -> String;
 
-    // ----- Storage KV (spec §7.4) -----
+    // ----- Storage KV -- CORE (spec §7.4) -----
     #[wasm_bindgen(js_name = "storageGet")]
     pub fn storage_get(key: &str) -> JsValue;
     #[wasm_bindgen(js_name = "storagePut")]
@@ -77,6 +77,17 @@ extern "C" {
     pub fn storage_delete(key: &str);
     #[wasm_bindgen(js_name = "storageListKeys")]
     pub fn storage_list_keys(prefix: Option<String>) -> Vec<JsValue>;
+
+    // ----- Storage File I/O -- OPTIONAL EXTENSION (spec §7.6) -----
+    // Raw read/write access to a filesystem-like storage layer.
+    // `catch` because the JS wrapper throws on runtimes that don't
+    // install the extension -- Rust callers get Err(JsValue) instead
+    // of a panic. Prefer the KV API above unless you specifically
+    // need filesystem-like semantics.
+    #[wasm_bindgen(js_name = "readStorageFile", catch)]
+    pub fn read_storage_file(path: &str) -> Result<String, JsValue>;
+    #[wasm_bindgen(js_name = "writeStorageFile", catch)]
+    pub fn write_storage_file(path: &str, content: &str) -> Result<(), JsValue>;
 
     // ----- Event emission (spec §7.5) -----
     #[wasm_bindgen(js_name = "emitPerspectiveDiff")]

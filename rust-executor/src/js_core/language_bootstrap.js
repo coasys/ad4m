@@ -58,7 +58,26 @@ if (typeof globalThis.window === "undefined") {
     globalThis.window = globalThis;
 }
 
-// Map of serialised cell_id key → signalCallback for Holochain signal routing.
+// OPTIONAL EXTENSION: Storage File I/O (host-contract.md §"Extension:
+// Storage File I/O"). This is where the Deno executor opts into the
+// extension by attaching readStorageFile / writeStorageFile to
+// LANGUAGE_CONTROLLER. A runtime that doesn't want to expose raw file
+// access (e.g. a pure-browser runtime without IndexedDB) just omits
+// this block and languages that try to import readStorageFile will
+// get a clear error at call time.
+//
+// Kept in the bootstrap (not the extension snapshot) so this opt-in is
+// plainly visible at runtime and easy to audit or swap out.
+if (typeof globalThis.LANGUAGE_CONTROLLER === "object" && globalThis.LANGUAGE_CONTROLLER) {
+    globalThis.LANGUAGE_CONTROLLER.readStorageFile = function(path) {
+        return Deno.readTextFileSync(path);
+    };
+    globalThis.LANGUAGE_CONTROLLER.writeStorageFile = function(path, content) {
+        Deno.writeTextFileSync(path, content);
+    };
+}
+
+// Map of serialised cell_id key -> signalCallback for Holochain signal routing.
 // Key format: `${hex(dnaHash)}:${hex(agentPubkey)}`
 globalThis.__holochainSignalCallbacks__ = new Map();
 

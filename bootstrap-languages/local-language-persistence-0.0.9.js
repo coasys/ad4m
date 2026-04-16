@@ -1,9 +1,29 @@
 // local-language-persistence -- test fixture for AD4M integration tests.
 //
-// A minimal language that persists language meta + bundle files to a
-// local directory. Used by the test setup to stand in for the
-// "languages" (language-language) slot in the bootstrap seed.
-import { languageSettings, agentCreateSignedExpression } from "ad4m:host";
+// A minimal language-language that persists language meta + bundle data
+// via the OPTIONAL Storage File I/O extension (ad4m:host spec §7.6).
+//
+// This language deliberately does NOT use the core KV store: the test
+// harness publishes languages in one executor run and then reads them
+// back from a DIFFERENT per-agent data path in subsequent test runs.
+// The KV is per-agent by design and would be lost across that boundary.
+// This language instead writes to a shared path relative to the test
+// harness's CWD (permitted because the language-language is a system
+// language with CWD access), which survives the per-agent wipe.
+//
+// That cross-agent shared-path behaviour is exactly what the File I/O
+// extension is for. Production languages should prefer the KV API
+// (storageGet/storagePut) -- this fixture is an exception.
+//
+// Only runs on runtimes that install the File I/O extension (Deno
+// executor does; a pure browser runtime without IndexedDB mapping
+// would not).
+import {
+    agentCreateSignedExpression,
+    languageSettings,
+    readStorageFile,
+    writeStorageFile,
+} from "ad4m:host";
 
 export const name = "languages";
 export const version = "0.0.9";
@@ -21,6 +41,9 @@ export async function init() {
         const parsed = settingsJson ? JSON.parse(settingsJson) : null;
         if (parsed && typeof parsed === "object") settings = parsed;
     } catch (_) {}
+    // CWD-relative default matches the test harness layout: tests run
+    // from tests/js/, so this resolves to tests/js/tst-tmp/languages/
+    // which sits OUTSIDE any per-agent data path.
     storagePath = settings.storagePath || "./tst-tmp/languages";
 }
 
@@ -31,8 +54,7 @@ export function interactions(_expression) {
 export async function expressionGet(address) {
     const metaPath = join(storagePath, `meta-${address}.json`);
     try {
-        const text = Deno.readTextFileSync(metaPath);
-        return JSON.parse(text);
+        return JSON.parse(readStorageFile(metaPath));
     } catch (e) {
         console.log("Did not find meta file for given address:" + address, e);
         return null;
@@ -52,15 +74,15 @@ export async function expressionCreate(language) {
     const metaPath = join(storagePath, `meta-${hash}.json`);
     const bundlePath = join(storagePath, `bundle-${hash}.js`);
     console.log("Writing meta & bundle path: ", metaPath, bundlePath);
-    Deno.writeTextFileSync(metaPath, JSON.stringify(expression));
-    Deno.writeTextFileSync(bundlePath, language.bundle.toString());
+    writeStorageFile(metaPath, JSON.stringify(expression));
+    writeStorageFile(bundlePath, language.bundle.toString());
     return hash;
 }
 
 export async function languageGetSource(address) {
     const bundlePath = join(storagePath, `bundle-${address}.js`);
     try {
-        return Deno.readTextFileSync(bundlePath);
+        return readStorageFile(bundlePath);
     } catch {
         throw new Error("Did not find language source for given address:" + address);
     }

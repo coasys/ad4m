@@ -37,9 +37,20 @@ declare module "ad4m:host" {
     export function emitTelepresenceSignal(payload: unknown, recipientDid?: string): void;
     export function emitSignal(data: unknown): void;
 
-    // Storage KV (Spec section 7.4)
+    // Storage KV -- CORE (Spec section 7.4)
+    // Always available; every runtime implements this.
     export function storageGet(key: string): string | null;
     export function storagePut(key: string, value: string): void;
     export function storageDelete(key: string): void;
     export function storageListKeys(prefix?: string): string[];
+
+    // Storage File I/O -- OPTIONAL EXTENSION (Spec section 7.6)
+    // Raw filesystem-like read/write. NOT required by all runtimes.
+    // Languages that import these must be prepared for them to throw
+    // at call time on runtimes that don't install the extension.
+    // Prefer the KV API above unless you specifically need custom
+    // storage layouts, large blobs, or shared paths outside per-
+    // language scope (e.g. test fixtures storing language bundles).
+    export function readStorageFile(path: string): string;
+    export function writeStorageFile(path: string, content: string): void;
 }

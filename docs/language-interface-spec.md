@@ -521,7 +521,7 @@ users at once.
 | `languageAddress()` | `string` |
 | `languageSettings()` | `string` (raw JSON; the JS ALDK re-parses to an object for JS-authored languages) |
 
-### 7.4 Persistent key/value storage
+### 7.4 Persistent key/value storage (core)
 
 Per-Language scoped key/value persistence. The runtime namespaces every
 key by `languageAddress()`, so two Language instances cannot read each
@@ -539,6 +539,12 @@ Storage operations are synchronous from the Language's perspective.
 The runtime is free to back them with any persistent store; Languages
 must not assume durability semantics beyond "writes are visible to
 subsequent reads from the same Language instance."
+
+This API is **core** — every compliant runtime provides it. A runtime
+that has no persistent backend may still implement the KV as
+in-memory-only; writes will be visible to subsequent reads within the
+same Language instance but won't survive restarts. Languages must not
+rely on cross-instance durability.
 
 ### 7.5 Event emission (the language pushes events to the runtime)
 
@@ -560,6 +566,43 @@ runtime has enqueued the event for fan-out.
 > with other shapes are logged as warnings and dropped. A dedicated
 > `AD4M_SIGNAL_TOPIC` + GraphQL subscription is needed to support arbitrary
 > signal payloads (tracked as a follow-up).
+
+### 7.6 Raw file/blob storage (optional extension — `ad4m-language-fs` world)
+
+Raw read/write access to a filesystem-like storage layer. Paths are
+opaque strings chosen by the Language; the runtime maps them to some
+backend (a real filesystem, IndexedDB, object store, HTTP API, …).
+
+This is an **optional extension**, analogous to the Holochain extension
+in §7.2 / §8. Runtimes are not required to implement it; Languages that
+import it must be prepared for the calls to throw on runtimes that
+don't.
+
+| Import | Parameters | Returns |
+|---|---|---|
+| `readStorageFile(path)` | `string` | `string` (UTF-8). Throws if the path is absent; error message contains `"NotFound"` or `"No such file"` so the KV layer can distinguish missing from broken. |
+| `writeStorageFile(path, content)` | `string, string` | `void`. Creates parent directories as needed. |
+
+**When to use:** only when the core KV (§7.4) can't express what you
+need — for example a custom storage layout with one file per
+expression, large blobs where the KV's full-rewrite-on-put is wasteful,
+or shared paths outside the per-Language storage scope (test fixtures
+storing Language bundles). **Default to the KV**; this extension is
+for the rest.
+
+**Behaviour when the extension is missing.** On a runtime that doesn't
+install this extension, calling `readStorageFile` or `writeStorageFile`
+throws `"[ad4m:host] Storage File I/O extension is not installed …"` —
+the same pattern as Holochain imports on non-Holochain runtimes. The
+core KV is deliberately decoupled from this: it uses the same
+underlying runtime methods *when available* for its persistence, but
+falls back to in-memory-only when they aren't, so `storageGet` /
+`storagePut` keep working even without the extension.
+
+**Permissions.** The runtime's sandbox (e.g. Deno's filesystem
+permission allow-list) governs which paths a Language can actually
+reach. Paths outside the allowed scope fail with a permission error,
+not a contract violation.
 
 ---
 
