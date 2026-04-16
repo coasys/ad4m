@@ -509,7 +509,7 @@ async function setupExternalModeViaEmail(
     logger.info("[ad4m-setup] Requesting login verification code...");
     const verifyResult = await mcpCallTool(
       endpoint,
-      "requestLoginVerification",
+      "request_login_verification",
       { email },
       initResp.sessionId,
     );
