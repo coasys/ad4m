@@ -484,6 +484,12 @@ function isUserNotFoundError(error: string | undefined): boolean {
   return lower.includes("user not found") || lower.includes("user does not exist") || lower.includes("account not found");
 }
 
+function isUserAlreadyExistsError(error: string | undefined): boolean {
+  if (!error) return false;
+  const lower = error.toLowerCase();
+  return lower.includes("already exists") || lower.includes("already registered") || lower.includes("duplicate");
+}
+
 /**
 
  * External-mode auth flow using email + password.
@@ -512,7 +518,28 @@ async function setupExternalModeViaEmail(
     const initResp = await mcpInitialize(endpoint);
     logger.info("[ad4m-setup] MCP session initialized");
 
-    // Step 1: Try login_email — returns JWT directly if successful
+    // Step 1: Try signup first (like ad4m-connect does)
+    logger.info("[ad4m-setup] Attempting signup with email + password...");
+    const signupResult = await mcpCallTool(
+      endpoint,
+      "signup",
+      { email, password },
+      initResp.sessionId,
+    );
+    const signupData = extractMcpResultData(signupResult);
+
+    if (signupData?.did) {
+      logger.info(`[ad4m-setup] Signup successful! DID: ${signupData.did}`);
+    } else if (isUserAlreadyExistsError(signupData?.error)) {
+      logger.info("[ad4m-setup] User already exists, continuing to login...");
+    } else {
+      logger.warn(
+        `[ad4m-setup] Signup returned unexpected result: ${JSON.stringify(signupData?.error ?? signupData)}`,
+      );
+      // Continue to login anyway — it may still work
+    }
+
+    // Step 2: Try login_email to get JWT
     logger.info("[ad4m-setup] Attempting login with email + password...");
     const loginResult = await mcpCallTool(
       endpoint,
@@ -523,7 +550,6 @@ async function setupExternalModeViaEmail(
     const loginData = extractMcpResultData(loginResult);
 
     if (loginData?.token) {
-      // Login succeeded — we got a JWT
       logger.info("[ad4m-setup] Login successful! JWT obtained.");
       printConfigSnippet(logger, "external", {
         mcpEndpoint: endpoint,
@@ -533,44 +559,7 @@ async function setupExternalModeViaEmail(
       return;
     }
 
-    if (isUserNotFoundError(loginData?.error)) {
-      // User doesn't exist — try signup first
-      logger.info("[ad4m-setup] User not found. Attempting signup...");
-
-      const signupResult = await mcpCallTool(
-        endpoint,
-        "signup",
-        { email, password },
-        initResp.sessionId,
-      );
-      const signupData = extractMcpResultData(signupResult);
-
-      if (signupData?.did) {
-        logger.info(`[ad4m-setup] Signup successful! DID: ${signupData.did}`);
-        // Now try login again
-        const retryLogin = await mcpCallTool(
-          endpoint,
-          "login_email",
-          { email, password },
-          initResp.sessionId,
-        );
-        const retryData = extractMcpResultData(retryLogin);
-
-        if (retryData?.token) {
-          logger.info("[ad4m-setup] Login after signup successful! JWT obtained.");
-          printConfigSnippet(logger, "external", {
-            mcpEndpoint: endpoint,
-            token: retryData.token,
-            wakeToken,
-          });
-          return;
-        }
-      }
-
-      logger.warn("[ad4m-setup] Signup succeeded but login failed. Check executor logs.");
-    }
-
-    // Fell through — login/signup failed
+    // Fell through — login failed
     logger.warn(
       `[ad4m-setup] Email login failed: ${JSON.stringify(loginData?.error ?? loginData)}`,
     );
