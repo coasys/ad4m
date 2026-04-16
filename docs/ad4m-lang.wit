@@ -15,6 +15,13 @@
 //     introspection of the component's actual export table at load time.
 //     The canonical `ad4m-language` world below lists every capability as an
 //     export; conformant languages fill in only what they implement.
+//   * Core interfaces (always available): lifecycle, agent, language-context,
+//     storage, event-emission, runtime-utils, and the capability exports.
+//     Optional extensions live in dedicated interfaces with their own world
+//     (e.g. `holochain-ext` / `ad4m-language-holochain`,
+//     `storage-fs-ext` / `ad4m-language-fs`). A Language declares which
+//     extensions it needs by targeting the matching world; runtimes that
+//     don't ship an extension refuse to load Languages that need it.
 
 package coasys:ad4m-lang@1.0.0;
 
@@ -496,6 +503,20 @@ interface language-context {
 /// Persistent storage exposed as a key/value handle. Replaces the v0.x
 /// `language-storage-directory` filesystem path so that browser, mobile,
 /// and encrypted runtimes can implement it without exposing a real path.
+///
+/// **Core**: every runtime implements this interface. Values are bytes;
+/// Languages serialize structured data themselves. Keys are scoped per
+/// Language instance by the host, so two Language instances cannot read
+/// each other's entries even if they pick the same key.
+///
+/// **Durability is best-effort.** A runtime that has no persistent
+/// backend MAY implement this as in-memory-only; writes are visible to
+/// subsequent reads within the same Language instance but may not
+/// survive restarts. Languages MUST NOT rely on cross-instance
+/// durability semantics beyond "writes are visible to subsequent reads
+/// from the same Language instance." Languages that genuinely need
+/// filesystem-like semantics (shared paths, custom layouts, large
+/// blobs) import the optional `storage-fs-ext` extension (see below).
 interface storage {
     use types.{error};
 
@@ -543,6 +564,45 @@ interface runtime-utils {
     /// responsible for loading the target Language if it's not already
     /// installed.
     resolve-expression: func(uri: expression-uri) -> result<option<expression>, error>;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Storage File I/O extension (OPTIONAL — extension URI: storage-fs.coasys.ai/v1)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Storage File I/O extension — raw read/write access to a filesystem-like
+/// storage layer at Language-chosen paths. NOT part of the AD4M-LANG/1.0
+/// core: the core `storage` interface (above) is the portable way to persist
+/// per-Language data. This extension exists for the cases core storage cannot
+/// express:
+///   * Custom storage layouts (one file per expression, nested directories)
+///   * Large blobs where the KV's full-rewrite-on-put semantics are wasteful
+///   * Paths OUTSIDE the per-Language storage scope, e.g. shared directories
+///     that survive when per-agent data is wiped (test fixtures storing
+///     Language bundles in a harness-shared path)
+///
+/// Paths are opaque strings; the runtime maps them to some backend (a real
+/// filesystem, IndexedDB with a path-like key scheme, object store, HTTP API,
+/// …). The runtime's sandbox (e.g. Deno's filesystem permission allow-list)
+/// governs which paths the Language can actually reach; out-of-scope paths
+/// fail with a permission error, not a contract violation.
+///
+/// Runtimes that don't ship this extension refuse to load Languages that
+/// target the `ad4m-language-fs` world. Languages that need it MUST target
+/// `ad4m-language-fs` and not the base `ad4m-language` world — host-side
+/// introspection of the world declaration is how the "language needs raw
+/// file I/O" property is advertised.
+interface storage-fs-ext {
+    use types.{error};
+
+    /// Read the file/blob at `path` as UTF-8 bytes. Returns
+    /// `error::not-found` if the path is absent; other failures use
+    /// `error::internal` or `error::permission-denied`.
+    read-file: func(path: string) -> result<list<u8>, error>;
+
+    /// Write the file/blob at `path`. Creates intermediate "directories"
+    /// (or whatever the runtime uses to represent nested paths) as needed.
+    write-file: func(path: string, content: list<u8>) -> result<_, error>;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -671,5 +731,29 @@ world ad4m-language {
 world ad4m-language-holochain {
     include ad4m-language;
     import holochain-ext;
+    export holochain-events;
+}
+
+/// World for Languages that need the Storage File I/O extension.
+/// Runtimes MUST implement `storage-fs-ext` to load components targeting
+/// this world. A runtime that cannot back raw file/blob I/O (e.g. a
+/// sandboxed browser runtime without a suitable path-keyed backend)
+/// simply refuses to load these components; Languages that only use
+/// core `storage` are unaffected.
+///
+/// Typical consumer: test fixtures or persistence Languages that need
+/// cross-agent shared paths. See `docs/language-interface-spec.md` §7.6.
+world ad4m-language-fs {
+    include ad4m-language;
+    import storage-fs-ext;
+}
+
+/// World for Languages that need BOTH Holochain and File I/O extensions.
+/// Runtimes MUST implement both `holochain-ext` and `storage-fs-ext` to
+/// load components targeting this world.
+world ad4m-language-holochain-fs {
+    include ad4m-language;
+    import holochain-ext;
+    import storage-fs-ext;
     export holochain-events;
 }
