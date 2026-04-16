@@ -1,10 +1,10 @@
 /**
  * Typed re-exports of the AD4M host import surface.
  *
- * At runtime, `ad4m:host.ts` is a synthetic Deno module registered by
+ * At runtime, `ad4m:host` is a synthetic Deno module registered by
  * the executor's StringModuleLoader. Language bundles (both JS and
  * Rust/WASM) import from it as a standard ES module. esbuild marks
- * `ad4m:host.ts` as external so the import survives bundling.
+ * `ad4m:host` as external so the import survives bundling.
  *
  * This file re-exports everything so that `@coasys/ad4m-ldk` consumers
  * can write `import { agentDid } from "@coasys/ad4m-ldk"` and get
@@ -51,4 +51,4 @@ export {
     storagePut,
     storageDelete,
     storageListKeys,
-} from "ad4m:host.ts";
+} from "ad4m:host";

@@ -7,7 +7,7 @@
 import { exists } from "https://deno.land/std@0.184.0/fs/mod.ts";
 import { join } from "https://deno.land/std@0.184.0/path/mod.ts";
 import type { Address, Interaction, Expression } from "https://esm.sh/v135/@coasys/ad4m@0.5.0";
-import { languageStorageDirectory, agentCreateSignedExpression } from "ad4m:host.ts";
+import { languageStorageDirectory, agentCreateSignedExpression } from "ad4m:host";
 
 export const name = "note-store";
 export const version = "0.0.1";

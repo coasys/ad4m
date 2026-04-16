@@ -1,13 +1,13 @@
 /**
- * Ambient module declaration for the `ad4m:host.ts` synthetic Deno module.
+ * Ambient module declaration for the `ad4m:host` synthetic Deno module.
  *
- * At runtime, the executor's StringModuleLoader resolves `ad4m:host.ts`
- * to the host import bridge (`rust-executor/src/js_core/host.ts`).
+ * At runtime, the executor's StringModuleLoader resolves `ad4m:host`
+ * to the host import bridge (`rust-executor/src/js_core/host.js`).
  * This declaration lets TypeScript resolve imports from the same
  * specifier at compile time.
  */
 
-declare module "ad4m:host.ts" {
+declare module "ad4m:host" {
     // Agent (Spec section 7.1)
     export function agentDid(): string;
     export function agentSigningKeyId(): string;

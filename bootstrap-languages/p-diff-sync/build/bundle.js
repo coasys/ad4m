@@ -181,7 +181,7 @@ import {
   storagePut,
   storageDelete,
   storageListKeys
-} from "ad4m:host.ts";
+} from "ad4m:host";
 
 // ../../ad4m-ldk/js/lib/defineLanguage.js
 function defineLanguage(spec) {

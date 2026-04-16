@@ -23,7 +23,7 @@ import { LinkQuery } from '../perspectives/LinkQuery';
  * export async function init() {
  *     // No arguments -- context is accessed via host module imports:
  *     //   import { languageStorageDirectory, languageAddress, languageSettings,
- *     //            agentDid, holochainCall, ... } from "ad4m:host.ts";
+ *     //            agentDid, holochainCall, ... } from "ad4m:host";
  *     // Or via the JS ALDK:
  *     //   import { languageStorageDirectory, agentDid, ... } from "@coasys/ad4m-ldk";
  * }

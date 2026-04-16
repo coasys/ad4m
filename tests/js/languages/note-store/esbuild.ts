@@ -5,12 +5,12 @@ import * as esbuild from "https://deno.land/x/esbuild@v0.17.18/mod.js";
 
 import { denoPlugins } from "https://deno.land/x/esbuild_deno_loader@0.7.0/mod.ts";
 
-// Mark ad4m:host.ts as external so the import survives bundling.
+// Mark ad4m:host as external so the import survives bundling.
 const hostExternalPlugin = {
   name: "ad4m-host-external",
   setup(build: any) {
-    build.onResolve({ filter: /^ad4m:host\.ts$/ }, () => ({
-      path: "ad4m:host.ts",
+    build.onResolve({ filter: /^ad4m:host$/ }, () => ({
+      path: "ad4m:host",
       external: true,
     }));
   },

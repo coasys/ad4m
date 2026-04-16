@@ -2,7 +2,7 @@
  * Flat-export version of note-store language.
  * Tests the new Language v1 module pattern.
  *
- * Context accessed via imports from "ad4m:host.ts":
+ * Context accessed via imports from "ad4m:host":
  * - languageStorageDirectory() -- returns storage directory path
  * - languageAddress() -- returns this language's address
  * - languageSettings() -- returns settings JSON string
@@ -14,7 +14,7 @@ import {
     languageAddress,
     languageSettings,
     agentCreateSignedExpression,
-} from "ad4m:host.ts";
+} from "ad4m:host";
 
 // Direct exports (flat pattern)
 export const name = "note-store-flat";

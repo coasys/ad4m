@@ -3,7 +3,7 @@
 // A minimal language that persists neighbourhood expression files to a
 // local directory. Used by the test setup to stand in for the
 // "neighbourhoodLanguage" slot in the bootstrap seed.
-import { languageSettings, agentCreateSignedExpression } from "ad4m:host.ts";
+import { languageSettings, agentCreateSignedExpression } from "ad4m:host";
 
 export const name = "neighbourhood-store";
 export const version = "0.0.6";

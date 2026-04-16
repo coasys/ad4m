@@ -21,7 +21,7 @@ import {
         registerHolochainSignalHandler: (cellIdKey, language_address) => {
             return register_holochain_signal_handler(cellIdKey, language_address);
         },
-        // Language context ops - used by ad4m:host.ts via LANGUAGE_CONTROLLER
+        // Language context ops - used by ad4m:host via LANGUAGE_CONTROLLER
         languageStorageDirectory: () => {
             return language_storage_directory();
         },
@@ -30,6 +30,16 @@ import {
         },
         languageSettings: () => {
             return language_settings();
+        },
+        // Storage file I/O - used by ad4m:host for KV persistence.
+        // These are the only runtime-specific I/O methods in the contract.
+        // Deno executor: delegates to Deno.readTextFileSync / writeTextFileSync.
+        // Browser runtime: would use localStorage, IndexedDB, or HTTP API.
+        readStorageFile: (path) => {
+            return Deno.readTextFileSync(path);
+        },
+        writeStorageFile: (path, content) => {
+            Deno.writeTextFileSync(path, content);
         },
     };
   })(globalThis);
