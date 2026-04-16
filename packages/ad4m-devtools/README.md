@@ -1,6 +1,6 @@
 # AD4M DevTools — Chrome Extension for Real-Time Debugging
 
-A Chrome DevTools panel for debugging AD4M applications. Provides real-time visibility into GraphQL operations, SPARQL queries, subscriptions, notifications, perspectives, and performance — the observability layer that was missing during AD4M development.
+A Chrome DevTools panel for debugging AD4M applications. Provides real-time visibility into REST requests, generated SPARQL traces, subscriptions, notifications, perspectives, and performance — the observability layer that was missing during AD4M development.
 
 ## Quick Start
 
@@ -23,35 +23,37 @@ A Chrome DevTools panel for debugging AD4M applications. Provides real-time visi
 
 ### Performance Bar (always visible)
 Live counters across the top of every tab:
-- **Queries** — total GraphQL operations since page load
+- **Requests** — total REST requests since page load
 - **Errors** — total failed operations
 - **Avg RTT** — rolling average round-trip time
-- **Peak RTT** — highest single operation time
-- **Q/s** — queries per second
+- **Peak RTT** — highest single request time
+- **Req/s** — requests per second
 - **Subs** — active subscription count
-- **WS** — WebSocket connection state
+- **Evt/s** — unified event-stream message rate
+- **REST** — REST bridge detection state
 - **Mem** — estimated memory usage of tracked data
 
 ### Connection Tab
-- WebSocket connection status and auth state
-- SPARQL vs Prolog query count breakdown
+- REST bridge detection and auth token state
+- Unified event-stream activity + active stream count
+- REST request / SPARQL trace / Prolog request breakdown
 - Subscription update rate
 - Executor URL
 
-### Queries Tab (split panel)
-**Left panel** — chronological operation list with:
+### Requests Tab (split panel)
+**Left panel** — chronological request/trace list with:
 - HH:MM:SS.mmm timestamps
-- Type badge (QRY/MUT/SUB)
-- Operation name
+- HTTP method badges (GET/POST/PUT/PATCH/DELETE) or trace badges (SPQ/SSE)
+- Endpoint / label
 - Duration in ms
 - Error badge (❌) on failures
 
-**Right panel** — full operation details:
-- Timestamp, type, duration, payload size
-- **GraphQL query** text
+**Right panel** — full request details:
+- Timestamp, type, transport, method, endpoint, status, duration, payload size
+- **REST request** line + request body
 - **SPARQL query** text (when available)
-- Variables and response (collapsible JSON)
-- **Full call stack** — trace exactly where each query originates
+- Response body and headers
+- **Full call stack** — trace exactly where each request originates
 - Error details with type, message, stack trace, nested errors
 
 **Sub-tabs:**
@@ -75,7 +77,7 @@ Live counters across the top of every tab:
 - **Language status** — installed languages with name, address, load status, timing
 
 ### Export
-**⬇ Export** button in the top bar downloads the full DevTools state as JSON — operations, subscriptions, notifications, performance metrics, getter traces. Share with team for debugging.
+**⬇ Export** button in the top bar downloads the full DevTools state as JSON — requests/traces, subscriptions, notifications, performance metrics, getter traces. Share with team for debugging.
 
 ## Architecture
 
@@ -96,10 +98,10 @@ Live counters across the top of every tab:
 ┌──────────────▼──────────────────────┐
 │ @coasys/ad4m SDK                    │
 │ core/src/devtools/bridge.ts         │
-│ Interceptor • SubscriptionTracker   │
+│ RestClient • SubscriptionTracker    │
 │ PerformanceTracker • NotifMonitor   │
 └──────────────┬──────────────────────┘
-               │ GraphQL over WebSocket
+               │ REST over HTTP + unified SSE
 ┌──────────────▼──────────────────────┐
 │ AD4M Executor                       │
 └─────────────────────────────────────┘
@@ -114,10 +116,10 @@ The bridge is initialized from two places for reliability:
 2. `Ad4mConnect.buildClient()` (ad4m-connect)
 
 DevTools hooks are added in:
+- `RestClient` — wraps all executor HTTP requests with timing, status codes, payload snapshots, and stack traces
 - `ModelQueryBuilder.subscribe()` — tracks subscriptions
-- `Ad4mModel.queryToSPARQL()` — logs generated SPARQL
+- `Ad4mModel.queryToSPARQL()` — logs generated SPARQL traces
 - `hydration.ts` evaluateCustomGettersForInstance — traces getter evaluation
-- `OperationInterceptor` — wraps all GraphQL operations with timing + stack traces
 
 ## Development
 
@@ -138,9 +140,9 @@ Based on real debugging sessions during the SPARQL migration:
 | Issue | How DevTools Helps |
 |-------|-------------------|
 | SurrealDB getter syntax in SPARQL executor | Getter trace shows "unsupported" + the offending query |
-| Stale JWT causing silent WebSocket failures | Connection tab shows auth state + error history |
+| Stale JWT causing REST/SSE auth failures | Connection tab shows auth token state + request errors |
 | Duplicate Preact instances from bundling | Stack traces show which module the hooks resolve from |
 | Notification triggers with invalid SPARQL | Notification tab highlights SurrealDB syntax with red badge |
-| N+1 query patterns in subscriptions | Query list shows duplicate queries with identical SPARQL |
-| SHACL registration taking 500ms | Performance bar shows query timing spikes on startup |
+| N+1 request patterns in subscriptions | Request list shows duplicate endpoint traffic alongside the underlying SPARQL trace |
+| SHACL registration taking 500ms | Performance bar shows request timing spikes on startup |
 | Subscription firing for unrelated predicates | Subscription tab shows fingerprint hit/miss ratio |

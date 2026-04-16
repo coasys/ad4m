@@ -54,6 +54,26 @@ export class Ad4mClient {
         }
     }
 
+    get baseUrl(): string {
+        return this.#baseUrl
+    }
+
+    get executorUrl(): string {
+        return this.#baseUrl
+    }
+
+    get hasAuthToken(): boolean {
+        return Boolean(this.#token)
+    }
+
+    get authenticated(): boolean {
+        return Boolean(this.#token)
+    }
+
+    get activeEventStreams(): number {
+        return this.#restClient.getActiveEventStreams()
+    }
+
     get agent(): AgentClient {
         return this.#agentClient
     }

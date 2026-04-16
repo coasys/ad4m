@@ -1,39 +1,52 @@
 import { PerformanceState } from './types';
 
 const RTT_WINDOW = 100;
-const QPS_WINDOW = 10000; // 10 seconds
+const RATE_WINDOW_MS = 10000; // 10 seconds
 
 export class PerformanceTracker {
   private rttBuffer: number[] = [];
-  private queryTimestamps: number[] = [];
+  private requestTimestamps: number[] = [];
   private subUpdateTimestamps: number[] = [];
-  private wsMessageTimestamps: number[] = [];
-  
-  totalQueries = 0;
+  private eventStreamMessageTimestamps: number[] = [];
+
+  totalRequests = 0;
   totalErrors = 0;
   peakRTT = 0;
-  sparqlQueryCount = 0;
-  prologQueryCount = 0;
+  restRequestCount = 0;
+  sparqlTraceCount = 0;
+  prologRequestCount = 0;
 
-  recordQuery(duration: number, type: 'sparql' | 'prolog' | 'graphql' = 'graphql') {
-    this.totalQueries++;
+  recordRequest(duration: number, queryLanguage?: 'sparql' | 'prolog') {
+    this.totalRequests++;
+    this.restRequestCount++;
     this.rttBuffer.push(duration);
     if (this.rttBuffer.length > RTT_WINDOW) this.rttBuffer.shift();
     if (duration > this.peakRTT) this.peakRTT = duration;
-    this.queryTimestamps.push(Date.now());
-    if (type === 'sparql') this.sparqlQueryCount++;
-    else if (type === 'prolog') this.prologQueryCount++;
+    this.requestTimestamps.push(Date.now());
+    if (queryLanguage === 'prolog') this.prologRequestCount++;
   }
 
-  recordError() { this.totalErrors++; }
-  recordSubscriptionUpdate() { this.subUpdateTimestamps.push(Date.now()); }
-  recordWsMessage() { this.wsMessageTimestamps.push(Date.now()); }
+  recordSparqlTrace() {
+    this.sparqlTraceCount++;
+  }
+
+  recordError() {
+    this.totalErrors++;
+  }
+
+  recordSubscriptionUpdate() {
+    this.subUpdateTimestamps.push(Date.now());
+  }
+
+  recordEventStreamMessage() {
+    this.eventStreamMessageTimestamps.push(Date.now());
+  }
 
   private rateInWindow(timestamps: number[]): number {
     const now = Date.now();
-    const cutoff = now - QPS_WINDOW;
+    const cutoff = now - RATE_WINDOW_MS;
     while (timestamps.length > 0 && timestamps[0] < cutoff) timestamps.shift();
-    return timestamps.length / (QPS_WINDOW / 1000);
+    return timestamps.length / (RATE_WINDOW_MS / 1000);
   }
 
   getState(estimatedMemory: number): PerformanceState {
@@ -41,18 +54,27 @@ export class PerformanceTracker {
       ? Math.round(this.rttBuffer.reduce((a, b) => a + b, 0) / this.rttBuffer.length)
       : 0;
 
+    const requestsPerSecond = Math.round(this.rateInWindow(this.requestTimestamps) * 10) / 10;
+    const eventStreamMessageRate = Math.round(this.rateInWindow(this.eventStreamMessageTimestamps) * 10) / 10;
+
     return {
-      totalQueries: this.totalQueries,
+      totalRequests: this.totalRequests,
       totalErrors: this.totalErrors,
       avgRTT,
       peakRTT: Math.round(this.peakRTT),
-      queriesPerSecond: Math.round(this.rateInWindow(this.queryTimestamps) * 10) / 10,
-      sparqlQueryCount: this.sparqlQueryCount,
-      prologQueryCount: this.prologQueryCount,
+      requestsPerSecond,
+      restRequestCount: this.restRequestCount,
+      sparqlTraceCount: this.sparqlTraceCount,
+      prologRequestCount: this.prologRequestCount,
       activeSubscriptions: 0, // filled by bridge
       subscriptionUpdateRate: Math.round(this.rateInWindow(this.subUpdateTimestamps) * 10) / 10,
-      wsMessageRate: Math.round(this.rateInWindow(this.wsMessageTimestamps) * 10) / 10,
+      eventStreamMessageRate,
       estimatedMemory,
+      totalQueries: this.totalRequests,
+      queriesPerSecond: requestsPerSecond,
+      sparqlQueryCount: this.sparqlTraceCount,
+      prologQueryCount: this.prologRequestCount,
+      wsMessageRate: eventStreamMessageRate,
     };
   }
 }

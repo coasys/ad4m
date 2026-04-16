@@ -25,12 +25,32 @@ const EMPTY_STATE: DevToolsState = {
   subscriptionUpdates: [],
   notifications: [],
   performance: {
-    totalQueries: 0, totalErrors: 0, avgRTT: 0, peakRTT: 0,
-    queriesPerSecond: 0, sparqlQueryCount: 0, prologQueryCount: 0,
-    activeSubscriptions: 0, subscriptionUpdateRate: 0, wsMessageRate: 0,
+    totalRequests: 0,
+    totalErrors: 0,
+    avgRTT: 0,
+    peakRTT: 0,
+    requestsPerSecond: 0,
+    restRequestCount: 0,
+    sparqlTraceCount: 0,
+    prologRequestCount: 0,
+    activeSubscriptions: 0,
+    subscriptionUpdateRate: 0,
+    eventStreamMessageRate: 0,
     estimatedMemory: 0,
+    totalQueries: 0,
+    queriesPerSecond: 0,
+    sparqlQueryCount: 0,
+    prologQueryCount: 0,
+    wsMessageRate: 0,
   },
-  connection: { wsConnected: false, url: '', authenticated: false },
+  connection: {
+    connected: false,
+    transport: 'rest',
+    url: '',
+    authenticated: false,
+    eventStreamConnected: false,
+    activeEventStreams: 0,
+  },
   getterTraces: [],
   languages: [],
 };
@@ -87,7 +107,6 @@ export function App() {
     );
     console.log('[AD4M DevTools Panel] raw:', raw ? 'got data' : 'null');
     if (!raw) {
-      // Diagnostic: check what's available on the page
       const diag = await evalInPage(`(function() {
         var r = {};
         r.windowDevtools = typeof window.__AD4M_DEVTOOLS__;
@@ -112,6 +131,7 @@ export function App() {
       setConnected(true);
     } else {
       setConnected(false);
+      setState(EMPTY_STATE);
     }
   }, []);
 
@@ -126,7 +146,7 @@ export function App() {
   const tabs: { id: Tab; label: string; badge?: boolean }[] = [
     { id: 'connection', label: 'Connection' },
     { id: 'perspectives', label: 'Perspectives' },
-    { id: 'queries', label: 'Queries' },
+    { id: 'queries', label: 'Requests' },
     { id: 'notifications', label: 'Notifications', badge: notifHasErrors },
     { id: 'agent', label: 'Agent' },
   ];

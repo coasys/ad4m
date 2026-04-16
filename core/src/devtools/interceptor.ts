@@ -1,4 +1,4 @@
-import { OperationRecord } from './types';
+import { CompleteOperationOptions, OperationRecord } from './types';
 import { PerformanceTracker } from './performance';
 
 const MAX_OPERATIONS = 500;
@@ -14,26 +14,47 @@ export class OperationInterceptor {
 
   log(op: Partial<OperationRecord>): number {
     const id = nextOpId++;
-    // Capture stack trace to show where the query originates
-    let stackTrace: string | undefined;
-    try {
-      const err = new Error();
-      if (err.stack) {
-        // Remove the first 2 lines (Error + this log method)
-        // and clean up the trace to show the caller chain
-        stackTrace = err.stack.split('\n').slice(2).join('\n');
-      }
-    } catch {}
+    let stackTrace: string | undefined = op.stackTrace;
+
+    if (!stackTrace) {
+      try {
+        const err = new Error();
+        if (err.stack) {
+          stackTrace = err.stack.split('\n').slice(2).join('\n');
+        }
+      } catch {}
+    }
+
+    const startTime = op.startTime || Date.now();
+    const endTime = op.endTime;
+    const duration = op.duration ?? (endTime != null ? Math.max(0, endTime - startTime) : undefined);
+
     const record: OperationRecord = {
       id,
-      type: op.type || 'query',
+      type: op.type || 'request',
+      transport: op.transport || 'rest',
       operationName: op.operationName || 'unknown',
+      method: op.method,
+      path: op.path,
+      url: op.url,
+      queryLanguage: op.queryLanguage,
       query: op.query || '',
       variables: op.variables,
-      startTime: op.startTime || Date.now(),
+      requestBody: op.requestBody,
+      requestHeaders: op.requestHeaders,
+      response: op.response,
+      responseHeaders: op.responseHeaders,
+      statusCode: op.statusCode,
+      errors: op.errors,
+      startTime,
+      endTime,
+      duration,
+      payloadSize: op.payloadSize,
       sparqlQuery: op.sparqlQuery,
+      sparqlResult: op.sparqlResult,
       stackTrace,
     };
+
     this.operations.push(record);
     if (this.operations.length > MAX_OPERATIONS) {
       this.operations.shift();
@@ -41,17 +62,21 @@ export class OperationInterceptor {
     return id;
   }
 
-  complete(id: number, response: any, errors?: any[]) {
+  complete(id: number, response: any, errors?: any[], options?: CompleteOperationOptions) {
     const op = this.operations.find(o => o.id === id);
     if (!op) return;
+
     op.endTime = Date.now();
     op.duration = op.endTime - op.startTime;
     op.response = response;
     op.errors = errors;
-    op.payloadSize = JSON.stringify(response || '').length;
+    op.statusCode = options?.statusCode ?? op.statusCode;
+    op.responseHeaders = options?.responseHeaders ?? op.responseHeaders;
+    op.payloadSize = JSON.stringify(response ?? '').length;
 
-    const queryType = op.sparqlQuery ? 'sparql' : 'graphql';
-    this.perf.recordQuery(op.duration, queryType);
+    if (op.type === 'request') {
+      this.perf.recordRequest(op.duration, op.queryLanguage);
+    }
     if (errors && errors.length > 0) this.perf.recordError();
   }
 
@@ -60,7 +85,6 @@ export class OperationInterceptor {
   }
 
   estimateMemory(): number {
-    // Rough estimate: ~1KB per operation average
     return this.operations.length * 1024;
   }
 }

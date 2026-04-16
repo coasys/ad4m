@@ -161,15 +161,28 @@ body {
 .operation-item.has-error { border-left: 2px solid var(--error); }
 .op-type {
   font-family: var(--mono); font-size: 10px; padding: 1px 4px;
-  border-radius: 2px; font-weight: bold;
+  border-radius: 2px; font-weight: bold; min-width: 34px; text-align: center;
 }
-.op-query { background: #264f78; color: #fff; }
-.op-mutation { background: #4e3a1e; color: var(--warning); }
-.op-subscription { background: #1e4e3a; color: var(--success); }
+.op-request { background: #264f78; color: #fff; }
+.op-trace { background: #3f3f46; color: var(--fg); }
+.op-http { color: #fff; }
+.op-get { background: #1f6feb; }
+.op-post { background: #238636; }
+.op-put { background: #8957e5; }
+.op-patch { background: #bf8700; }
+.op-delete { background: #da3633; }
+.op-sparql { background: #1e4e3a; color: var(--success); }
+.op-prolog { background: #4e3a1e; color: var(--warning); }
+.op-sse { background: #0d5661; color: #9cdcfe; }
 .op-name { flex: 1; color: var(--fg); }
 .op-duration { color: var(--fg-dim); font-family: var(--mono); font-size: 11px; }
 
 .operation-detail { margin-top: 12px; padding: 12px; background: var(--bg2); border-radius: 4px; }
+.request-detail-header {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 12px;
+}
+.request-line { border-left: 3px solid var(--accent); }
 
 /* Code Block */
 .code-block {

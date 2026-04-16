@@ -1,4 +1,15 @@
-import type { AD4MDevTools, DevToolsState, ErrorDetail, GetterTraceRecord, LanguageRecord, NotificationRecord, OperationRecord, SubscriptionRecord, SubscriptionUpdateRecord } from './types';
+import type {
+  AD4MDevTools,
+  CompleteOperationOptions,
+  DevToolsState,
+  ErrorDetail,
+  GetterTraceRecord,
+  LanguageRecord,
+  NotificationRecord,
+  OperationRecord,
+  SubscriptionRecord,
+  SubscriptionUpdateRecord,
+} from './types';
 import { PerformanceTracker } from './performance';
 import { OperationInterceptor } from './interceptor';
 import { SubscriptionTracker } from './subscription-tracker';
@@ -11,9 +22,16 @@ const MAX_LANGUAGES = 100;
 let nextGetterTraceId = 1;
 
 export function initDevToolsBridge(client: any): void {
-  console.log("[AD4M DevTools] initDevToolsBridge called");
   if (typeof globalThis === 'undefined') return;
-  if ((globalThis as any).__AD4M_DEVTOOLS__) return;
+
+  const existing = (globalThis as any).__AD4M_DEVTOOLS__ as AD4MDevTools | undefined;
+  if (existing) {
+    existing._client = client;
+    if ((globalThis as any).window) {
+      (globalThis as any).window.__AD4M_DEVTOOLS__ = existing;
+    }
+    return;
+  }
 
   const perf = new PerformanceTracker();
   const interceptor = new OperationInterceptor(perf);
@@ -23,9 +41,40 @@ export function initDevToolsBridge(client: any): void {
   const subscriptionUpdates: SubscriptionUpdateRecord[] = [];
   const getterTraces: GetterTraceRecord[] = [];
   const languages: LanguageRecord[] = [];
+  const getClient = () => ((globalThis as any).__AD4M_DEVTOOLS__?._client || client);
+
+  const connectionState = () => {
+    const activeClient = getClient();
+    const url = activeClient?.baseUrl || activeClient?.executorUrl || '';
+    const authenticated = Boolean(activeClient?.hasAuthToken || activeClient?.authenticated);
+    const activeEventStreams = Number(activeClient?.activeEventStreams || 0);
+
+    return {
+      connected: Boolean(activeClient),
+      transport: 'rest' as const,
+      url,
+      authenticated,
+      eventStreamConnected: activeEventStreams > 0,
+      activeEventStreams,
+    };
+  };
+
+  const enrichErrors = (errors?: any[]): ErrorDetail[] | undefined =>
+    errors?.map(e => ({
+      message: e?.message || String(e),
+      type: e?.type || e?.name || e?.constructor?.name || (e?.status ? `HTTP ${e.status}` : 'Error'),
+      stack: e?.stack,
+      nested: e?.networkError
+        ? [{
+            message: e.networkError.message,
+            type: 'NetworkError',
+            stack: e.networkError.stack,
+          }]
+        : undefined,
+    }));
 
   const devtools: AD4MDevTools = {
-    _version: '2.0.0',
+    _version: '2.1.0',
     _client: client,
 
     getState(): DevToolsState {
@@ -41,11 +90,7 @@ export function initDevToolsBridge(client: any): void {
         performance: perfState,
         getterTraces,
         languages,
-        connection: {
-          wsConnected: true,
-          url: '',
-          authenticated: true,
-        },
+        connection: connectionState(),
       };
     },
 
@@ -53,14 +98,12 @@ export function initDevToolsBridge(client: any): void {
       return interceptor.log(op);
     },
 
-    completeOperation(id: number, result: any, errors?: any[]) {
-      const enriched: ErrorDetail[] | undefined = errors?.map(e => ({
-        message: e?.message || String(e),
-        type: e?.constructor?.name || e?.extensions?.code || 'Error',
-        stack: e?.stack,
-        nested: e?.networkError ? [{ message: e.networkError.message, type: 'NetworkError', stack: e.networkError.stack }] : undefined,
-      }));
-      interceptor.complete(id, result, enriched);
+    completeOperation(id: number, result: any, errors?: any[], options?: CompleteOperationOptions) {
+      interceptor.complete(id, result, enrichErrors(errors), options);
+    },
+
+    recordEventStreamMessage() {
+      perf.recordEventStreamMessage();
     },
 
     trackSubscription(sub: Partial<SubscriptionRecord>): number {
@@ -72,21 +115,26 @@ export function initDevToolsBridge(client: any): void {
     },
 
     logSparqlQuery(info: { query: string; modelName: string; perspectiveUUID: string }) {
+      const now = Date.now();
       interceptor.log({
-        type: 'query',
-        operationName: `SPARQL:${info.modelName}`,
+        type: 'trace',
+        transport: 'sparql',
+        queryLanguage: 'sparql',
+        operationName: info.modelName ? `SPARQL Trace • ${info.modelName}` : 'SPARQL Trace',
         query: info.query,
         sparqlQuery: info.query,
-        startTime: Date.now(),
+        startTime: now,
+        endTime: now,
+        duration: 0,
       });
-      perf.sparqlQueryCount++;
+      perf.recordSparqlTrace();
     },
 
     logSubscriptionUpdate(update: SubscriptionUpdateRecord) {
       subscriptionUpdates.push(update);
       if (subscriptionUpdates.length > MAX_SUB_UPDATES) subscriptionUpdates.shift();
       perf.recordSubscriptionUpdate();
-      // Also bump the subscription record
+
       const sub = subscriptions.getAll().find(s => s.id === update.subscriptionId);
       if (sub) {
         subscriptions.update(update.subscriptionId, {
@@ -128,7 +176,8 @@ export function initDevToolsBridge(client: any): void {
       const n = notifications.getAll().find(n => n.id === notificationId);
       if (!n) return { error: 'Notification not found' };
       try {
-        const proxy = await client.perspective.byUUID(perspectiveId);
+        const activeClient = getClient();
+        const proxy = await activeClient?.perspective?.byUUID?.(perspectiveId);
         if (!proxy) return { error: 'Perspective not found' };
         const result = await proxy.infer(n.triggerQuery);
         return { success: true, result };
@@ -139,7 +188,8 @@ export function initDevToolsBridge(client: any): void {
 
     async queryLinks(perspectiveId: string, filter?: { source?: string; predicate?: string; target?: string }): Promise<any[]> {
       try {
-        const proxy = await client.perspective.byUUID(perspectiveId);
+        const activeClient = getClient();
+        const proxy = await activeClient?.perspective?.byUUID?.(perspectiveId);
         if (!proxy) return [];
         return await proxy.get(filter || {});
       } catch {
@@ -149,11 +199,10 @@ export function initDevToolsBridge(client: any): void {
 
     async getSubjectClasses(perspectiveId: string): Promise<any[]> {
       try {
-        const proxy = await client.perspective.byUUID(perspectiveId);
+        const activeClient = getClient();
+        const proxy = await activeClient?.perspective?.byUUID?.(perspectiveId);
         if (!proxy) return [];
-        // Try to get subject classes via the SDNA method
         if (proxy.subjectClasses) return await proxy.subjectClasses();
-        // Fallback: infer SHACL shapes
         const result = await proxy.infer(`SELECT ?class ?property WHERE { ?class a sh:NodeShape . ?class sh:property ?prop . ?prop sh:path ?property } LIMIT 100`);
         return result || [];
       } catch {
@@ -163,8 +212,7 @@ export function initDevToolsBridge(client: any): void {
 
     async getLanguages(): Promise<any[]> {
       try {
-        if (client.languages?.all) return await client.languages.all();
-        return [];
+        return await getClient()?.languages?.all?.() || [];
       } catch {
         return [];
       }
@@ -172,8 +220,9 @@ export function initDevToolsBridge(client: any): void {
   };
 
   (globalThis as any).__AD4M_DEVTOOLS__ = devtools;
-  (globalThis as any).window && ((globalThis as any).window.__AD4M_DEVTOOLS__ = devtools);
-  console.log("[AD4M DevTools] Bridge initialized on globalThis and window", Object.keys(devtools));
+  if ((globalThis as any).window) {
+    (globalThis as any).window.__AD4M_DEVTOOLS__ = devtools;
+  }
 }
 
 export type { AD4MDevTools, DevToolsState } from './types';

@@ -1,4 +1,6 @@
 // EventSource may come from DOM lib or a polyfill
+import type { QueryLanguage } from './devtools/types';
+
 declare var EventSource: {
     new(url: string): {
         onmessage: ((event: { data: string }) => void) | null
@@ -18,6 +20,7 @@ export class RestClient {
 
     getBaseUrl(): string { return this.baseUrl; }
     getToken(): string | undefined { return this.token; }
+    getActiveEventStreams(): number { return this._eventSources.size; }
 
     setToken(token: string) {
         this.token = token
@@ -29,50 +32,134 @@ export class RestClient {
         return h
     }
 
+    private devtools(): any {
+        if (typeof globalThis === 'undefined') return undefined
+        return (globalThis as any).__AD4M_DEVTOOLS__
+    }
+
+    private normalizeHeaders(headers: any): Record<string, string> {
+        if (!headers) return {}
+        if (typeof headers.forEach === 'function') {
+            const normalized: Record<string, string> = {}
+            headers.forEach((value: string, key: string) => {
+                normalized[key] = value
+            })
+            return normalized
+        }
+        return { ...(headers as Record<string, string>) }
+    }
+
+    private extractStringField(body: unknown, field: string): string | undefined {
+        if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined
+        const value = (body as Record<string, unknown>)[field]
+        return typeof value === 'string' ? value : undefined
+    }
+
+    private inferQueryLanguage(path: string): QueryLanguage | undefined {
+        if (path.includes('/query/prolog') || path.includes('/subscribe-infer')) return 'prolog'
+        if (path.includes('/subscribe-query') || /\/query(?:$|\?)/.test(path)) return 'sparql'
+        return undefined
+    }
+
+    private async parseResponseBody(response: any): Promise<any> {
+        const text = await response.text()
+        if (!text) return null
+        try {
+            return JSON.parse(text)
+        } catch {
+            return text
+        }
+    }
+
+    private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+        const url = `${this.baseUrl}${path}`
+        const headers = this.headers()
+        const devtools = this.devtools()
+        const queryLanguage = this.inferQueryLanguage(path)
+        const sparqlQuery = queryLanguage === 'sparql'
+            ? this.extractStringField(body, 'query')
+            : undefined
+
+        let operationId: number | undefined
+        try {
+            operationId = devtools?.logOperation?.({
+                type: 'request',
+                transport: 'rest',
+                operationName: `${method} ${path}`,
+                method,
+                path,
+                url,
+                queryLanguage,
+                requestBody: body,
+                requestHeaders: headers,
+                sparqlQuery,
+                startTime: Date.now(),
+            })
+        } catch {}
+
+        let response: any
+        try {
+            response = await fetch(url, {
+                method,
+                headers,
+                body: body !== undefined ? JSON.stringify(body) : undefined,
+            })
+
+            const parsed = await this.parseResponseBody(response)
+            const completeOptions = {
+                statusCode: response.status,
+                responseHeaders: this.normalizeHeaders(response.headers),
+            }
+
+            if (!response.ok) {
+                const message = (typeof parsed === 'string' && parsed) || response.statusText || `HTTP ${response.status}`
+                const error = new Error(message)
+                ;(error as any).name = 'HttpError'
+                ;(error as any).status = response.status
+                ;(error as any).statusCode = response.status
+                try {
+                    if (operationId !== undefined) {
+                        devtools?.completeOperation?.(operationId, parsed, [error], completeOptions)
+                    }
+                } catch {}
+                throw error
+            }
+
+            try {
+                if (operationId !== undefined) {
+                    devtools?.completeOperation?.(operationId, parsed, undefined, completeOptions)
+                }
+            } catch {}
+
+            return parsed as T
+        } catch (error) {
+            try {
+                if (operationId !== undefined && !response) {
+                    devtools?.completeOperation?.(operationId, null, [error])
+                }
+            } catch {}
+            throw error
+        }
+    }
+
     async get<T>(path: string): Promise<T> {
-        const res = await fetch(`${this.baseUrl}${path}`, { headers: this.headers() })
-        if (!res.ok) throw new Error(await res.text())
-        return res.json() as Promise<T>
+        return this.request<T>('GET', path)
     }
 
     async post<T>(path: string, body?: unknown): Promise<T> {
-        const res = await fetch(`${this.baseUrl}${path}`, {
-            method: 'POST',
-            headers: this.headers(),
-            body: body !== undefined ? JSON.stringify(body) : undefined
-        })
-        if (!res.ok) throw new Error(await res.text())
-        return res.json() as Promise<T>
+        return this.request<T>('POST', path, body)
     }
 
     async put<T>(path: string, body?: unknown): Promise<T> {
-        const res = await fetch(`${this.baseUrl}${path}`, {
-            method: 'PUT',
-            headers: this.headers(),
-            body: body !== undefined ? JSON.stringify(body) : undefined
-        })
-        if (!res.ok) throw new Error(await res.text())
-        return res.json() as Promise<T>
+        return this.request<T>('PUT', path, body)
     }
 
     async patch<T>(path: string, body?: unknown): Promise<T> {
-        const res = await fetch(`${this.baseUrl}${path}`, {
-            method: 'PATCH',
-            headers: this.headers(),
-            body: body !== undefined ? JSON.stringify(body) : undefined
-        })
-        if (!res.ok) throw new Error(await res.text())
-        return res.json() as Promise<T>
+        return this.request<T>('PATCH', path, body)
     }
 
     async delete<T>(path: string, body?: unknown): Promise<T> {
-        const res = await fetch(`${this.baseUrl}${path}`, {
-            method: 'DELETE',
-            headers: this.headers(),
-            body: body !== undefined ? JSON.stringify(body) : undefined
-        })
-        if (!res.ok) throw new Error(await res.text())
-        return res.json() as Promise<T>
+        return this.request<T>('DELETE', path, body)
     }
 
     // Shared EventSource instances keyed by full URL to avoid exhausting
@@ -94,13 +181,18 @@ export class RestClient {
         if (!entry) {
             const es = new EventSource(fullUrl)
             entry = { es, callbacks: new Set() }
-            const ref = entry          // stable reference for closure
+            const ref = entry
             es.onmessage = (event) => {
                 let parsed: Record<string, unknown>
-                try { parsed = JSON.parse(event.data) } catch (e) {
+                try {
+                    parsed = JSON.parse(event.data)
+                } catch (e) {
                     console.error('Error parsing SSE data:', e)
                     return
                 }
+                try {
+                    this.devtools()?.recordEventStreamMessage?.()
+                } catch {}
                 for (const cb of ref.callbacks) cb(parsed)
             }
             es.onerror = (e) => { console.error('SSE error:', e) }
@@ -122,7 +214,7 @@ export class RestClient {
 
     /** Close all open EventSource connections */
     closeAll(): void {
-        for (const [url, entry] of this._eventSources) {
+        for (const [, entry] of this._eventSources) {
             entry.es.close()
             entry.callbacks.clear()
         }

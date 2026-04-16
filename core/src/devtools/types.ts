@@ -1,10 +1,23 @@
+export type OperationType = 'request' | 'trace' | 'subscription';
+export type OperationTransport = 'rest' | 'sparql' | 'prolog' | 'sse' | 'internal';
+export type QueryLanguage = 'sparql' | 'prolog';
+
 export interface OperationRecord {
   id: number;
-  type: 'query' | 'mutation' | 'subscription';
+  type: OperationType;
+  transport: OperationTransport;
   operationName: string;
-  query: string;
+  method?: string;
+  path?: string;
+  url?: string;
+  queryLanguage?: QueryLanguage;
+  query?: string;
   variables?: Record<string, any>;
+  requestBody?: any;
+  requestHeaders?: Record<string, string>;
   response?: any;
+  responseHeaders?: Record<string, string>;
+  statusCode?: number;
   errors?: ErrorDetail[];
   startTime: number;
   endTime?: number;
@@ -13,6 +26,11 @@ export interface OperationRecord {
   sparqlQuery?: string;
   sparqlResult?: any;
   stackTrace?: string;
+}
+
+export interface CompleteOperationOptions {
+  statusCode?: number;
+  responseHeaders?: Record<string, string>;
 }
 
 export interface ErrorDetail {
@@ -75,17 +93,24 @@ export interface LanguageRecord {
 }
 
 export interface PerformanceState {
-  totalQueries: number;
+  totalRequests: number;
   totalErrors: number;
   avgRTT: number;
   peakRTT: number;
+  requestsPerSecond: number;
+  restRequestCount: number;
+  sparqlTraceCount: number;
+  prologRequestCount: number;
+  activeSubscriptions: number;
+  subscriptionUpdateRate: number;
+  eventStreamMessageRate: number;
+  estimatedMemory: number;
+  // Legacy aliases kept for compatibility with older panel/export readers.
+  totalQueries: number;
   queriesPerSecond: number;
   sparqlQueryCount: number;
   prologQueryCount: number;
-  activeSubscriptions: number;
-  subscriptionUpdateRate: number;
   wsMessageRate: number;
-  estimatedMemory: number;
 }
 
 export interface DevToolsState {
@@ -97,9 +122,12 @@ export interface DevToolsState {
   getterTraces: GetterTraceRecord[];
   languages: LanguageRecord[];
   connection: {
-    wsConnected: boolean;
+    connected: boolean;
+    transport: 'rest';
     url: string;
     authenticated: boolean;
+    eventStreamConnected: boolean;
+    activeEventStreams: number;
   };
 }
 
@@ -109,7 +137,8 @@ export interface AD4MDevTools {
   updateSubscription(id: number, update: Partial<SubscriptionRecord>): void;
   logSparqlQuery(info: { query: string; modelName: string; perspectiveUUID: string }): void;
   logOperation(op: Partial<OperationRecord>): number;
-  completeOperation(id: number, result: any, errors?: any[]): void;
+  completeOperation(id: number, result: any, errors?: any[], options?: CompleteOperationOptions): void;
+  recordEventStreamMessage(): void;
   registerNotification(notification: NotificationRecord): void;
   updateNotification(id: string, update: Partial<NotificationRecord>): void;
   logSubscriptionUpdate(update: SubscriptionUpdateRecord): void;
