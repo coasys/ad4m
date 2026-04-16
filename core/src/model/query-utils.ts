@@ -84,10 +84,14 @@ export function buildWhereCondition(
         if (ops.not !== undefined) {
             if (Array.isArray(ops.not)) {
                 const formattedValues = ops.not.map((v: any) => formatValue(v)).join(', ');
+                // FILTER NOT EXISTS here is scoped to a specific predicate, not a global scan,
+                // so O(N²) behavior is bounded by the number of values for this property.
                 parts.push(
                     `FILTER NOT EXISTS { ?target <${escapedPredicate}> ?_nval . FILTER(?_nval IN (${formattedValues})) }`,
                 );
             } else {
+                // FILTER NOT EXISTS here is scoped to a specific predicate, not a global scan,
+                // so O(N²) behavior is bounded by the number of values for this property.
                 parts.push(
                     `FILTER NOT EXISTS { ?target <${escapedPredicate}> ${formatValue(ops.not)} }`,
                 );
