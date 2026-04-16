@@ -12,13 +12,9 @@ type SubTab = 'requests' | 'subscriptions' | 'getters';
 
 function formatTimestamp(value?: number) {
   if (!value) return '-';
-  return new Date(value).toLocaleTimeString('en-GB', {
-    hour12: false,
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    fractionalSecondDigits: 3,
-  });
+  const date = new Date(value);
+  const pad = (part: number, size = 2) => String(part).padStart(size, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
 }
 
 function formatDuration(op: any) {
