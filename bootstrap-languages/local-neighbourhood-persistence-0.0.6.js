@@ -1,28 +1,27 @@
-// local-neighbourhood-persistence — test fixture for AD4M integration tests.
+// local-neighbourhood-persistence -- test fixture for AD4M integration tests.
 //
-// A minimal flat-pattern language that persists neighbourhood expression
-// files to a local directory. Used by the test setup to stand in for
-// the "neighbourhoodLanguage" slot in the bootstrap seed.
+// A minimal language that persists neighbourhood expression files to a
+// local directory. Used by the test setup to stand in for the
+// "neighbourhoodLanguage" slot in the bootstrap seed.
+import { languageSettings, agentCreateSignedExpression } from "ad4m:host.ts";
 
 export const name = "neighbourhood-store";
 export const version = "0.0.6";
 
 let storagePath = "";
-let agent = null;
 
 function join(...parts) {
     return parts.join("/").replace(/\/+/g, "/");
 }
 
 export async function init() {
-    const settingsJson = globalThis.languageSettings();
+    const settingsJson = languageSettings();
     let settings = {};
     try {
         const parsed = settingsJson ? JSON.parse(settingsJson) : null;
         if (parsed && typeof parsed === "object") settings = parsed;
     } catch (_) {}
     storagePath = settings.storagePath || "./tst-tmp/";
-    agent = globalThis.__agentProxy__;
 }
 
 export function interactions(_expression) {
@@ -41,7 +40,7 @@ export async function expressionGet(address) {
 }
 
 export async function expressionCreate(neighbourhood) {
-    const expression = agent.createSignedExpression(neighbourhood);
+    const expression = agentCreateSignedExpression(neighbourhood);
     const content = JSON.stringify(expression);
     // @ts-ignore - UTILS is a runtime global provided by the executor
     const address = UTILS.hash(content);

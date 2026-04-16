@@ -1,28 +1,27 @@
-// local-language-persistence — test fixture for AD4M integration tests.
+// local-language-persistence -- test fixture for AD4M integration tests.
 //
-// A minimal flat-pattern language that persists language meta + bundle
-// files to a local directory. Used by the test setup to stand in for
-// the "languages" (language-language) slot in the bootstrap seed.
+// A minimal language that persists language meta + bundle files to a
+// local directory. Used by the test setup to stand in for the
+// "languages" (language-language) slot in the bootstrap seed.
+import { languageSettings, agentCreateSignedExpression } from "ad4m:host.ts";
 
 export const name = "languages";
 export const version = "0.0.9";
 
 let storagePath = "";
-let agent = null;
 
 function join(...parts) {
     return parts.join("/").replace(/\/+/g, "/");
 }
 
 export async function init() {
-    const settingsJson = globalThis.languageSettings();
+    const settingsJson = languageSettings();
     let settings = {};
     try {
         const parsed = settingsJson ? JSON.parse(settingsJson) : null;
         if (parsed && typeof parsed === "object") settings = parsed;
     } catch (_) {}
     storagePath = settings.storagePath || "./tst-tmp/languages";
-    agent = globalThis.__agentProxy__;
 }
 
 export function interactions(_expression) {
@@ -49,7 +48,7 @@ export async function expressionCreate(language) {
             `Wanted: ${language.meta.address}\nGot: ${hash}`
         );
     }
-    const expression = agent.createSignedExpression(language.meta);
+    const expression = agentCreateSignedExpression(language.meta);
     const metaPath = join(storagePath, `meta-${hash}.json`);
     const bundlePath = join(storagePath, `bundle-${hash}.js`);
     console.log("Writing meta & bundle path: ", metaPath, bundlePath);

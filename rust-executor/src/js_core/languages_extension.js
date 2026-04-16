@@ -21,7 +21,7 @@ import {
         registerHolochainSignalHandler: (cellIdKey, language_address) => {
             return register_holochain_signal_handler(cellIdKey, language_address);
         },
-        // Language context ops - used by flat_wasm_imports.ts via globalThis
+        // Language context ops - used by ad4m:host.ts via LANGUAGE_CONTROLLER
         languageStorageDirectory: () => {
             return language_storage_directory();
         },

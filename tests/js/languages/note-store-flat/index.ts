@@ -1,15 +1,20 @@
 /**
  * Flat-export version of note-store language.
- * Tests the new flat export pattern (no create() factory).
- * 
- * NEW INTERFACE: init() takes NO arguments. Context accessed via:
- * - globalThis.languageStorageDirectory() — returns storage directory path
- * - globalThis.languageAddress() — returns this language's address
- * - globalThis.languageSettings() — returns settings JSON string
- * Delegates (agent, holochain) available via globalThis.
+ * Tests the new Language v1 module pattern.
+ *
+ * Context accessed via imports from "ad4m:host.ts":
+ * - languageStorageDirectory() -- returns storage directory path
+ * - languageAddress() -- returns this language's address
+ * - languageSettings() -- returns settings JSON string
  */
 import { exists } from "https://deno.land/std@0.184.0/fs/mod.ts";
 import { join } from "https://deno.land/std@0.184.0/path/mod.ts";
+import {
+    languageStorageDirectory,
+    languageAddress,
+    languageSettings,
+    agentCreateSignedExpression,
+} from "ad4m:host.ts";
 
 // Direct exports (flat pattern)
 export const name = "note-store-flat";
@@ -17,19 +22,14 @@ export const version = "0.1.0";
 
 // Module-level state (set in init)
 let storagePath = "";
-let agent: any = null;
 
 export async function init(): Promise<void> {
-    // Get language context via globalThis (flat export pattern - ESM modules don't auto-access globalThis)
-    storagePath = globalThis.languageStorageDirectory();
-    const languageAddress = globalThis.languageAddress();
-    const settingsJson = globalThis.languageSettings();
+    storagePath = languageStorageDirectory();
+    const addr = languageAddress();
+    const settingsJson = languageSettings();
     const settings = settingsJson ? JSON.parse(settingsJson) : {};
-    
-    // Agent available via globalThis (set by bootstrap before init)
-    agent = globalThis.__agentProxy__;
-    
-    console.log("[note-store-flat] init() called, storage:", storagePath, "address:", languageAddress);
+
+    console.log("[note-store-flat] init() called, storage:", storagePath, "address:", addr);
 }
 
 export function interactions(expressionAddress: string): any[] {
@@ -50,7 +50,7 @@ export async function expressionGet(address: string): Promise<any | null> {
 }
 
 export async function expressionCreate(content: object): Promise<string> {
-    const expr = agent.createSignedExpression(content);
+    const expr = agentCreateSignedExpression(content);
     const exprString = JSON.stringify(expr);
     // @ts-ignore
     const hash = UTILS.hash(exprString);
@@ -58,9 +58,6 @@ export async function expressionCreate(content: object): Promise<string> {
     console.log("[note-store-flat] expressionCreate:", hash);
     return hash;
 }
-
-// Note: addressOf is handled via mod.expressionAddressOf in the bootstrap
-// The bootstrap maps it to putAdapter.addressOf when present
 
 // Teardown
 export async function teardown(): Promise<void> {

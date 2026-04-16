@@ -21,14 +21,11 @@ import { LinkQuery } from '../perspectives/LinkQuery';
  * export const version = "0.1.0";
  * 
  * export async function init() {
- *     // No arguments — context is accessed via runtime imports:
- *     //   globalThis.languageStorageDirectory() — storage directory path
- *     //   globalThis.languageAddress()          — this language's address
- *     //   globalThis.languageSettings()         — settings JSON string
- *     // Delegates on globalThis:
- *     //   globalThis.__agentProxy__      — agent identity & signing
- *     //   globalThis.__holochainDelegate__ — Holochain DNA registration & zome calls
- *     //   globalThis.__ad4mSignal__      — signal emission
+ *     // No arguments -- context is accessed via host module imports:
+ *     //   import { languageStorageDirectory, languageAddress, languageSettings,
+ *     //            agentDid, holochainCall, ... } from "ad4m:host.ts";
+ *     // Or via the JS ALDK:
+ *     //   import { languageStorageDirectory, agentDid, ... } from "@coasys/ad4m-ldk";
  * }
  * 
  * // Capability functions (presence = capability):

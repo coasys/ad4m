@@ -7,16 +7,15 @@
 import { exists } from "https://deno.land/std@0.184.0/fs/mod.ts";
 import { join } from "https://deno.land/std@0.184.0/path/mod.ts";
 import type { Address, Interaction, Expression } from "https://esm.sh/v135/@coasys/ad4m@0.5.0";
+import { languageStorageDirectory, agentCreateSignedExpression } from "ad4m:host.ts";
 
 export const name = "note-store";
 export const version = "0.0.1";
 
 let storagePath = "";
-let agent: any = null;
 
 export async function init(): Promise<void> {
-    storagePath = (globalThis as any).languageStorageDirectory();
-    agent = (globalThis as any).__agentProxy__;
+    storagePath = languageStorageDirectory();
 }
 
 export function interactions(_expressionAddress: Address): Interaction[] {
@@ -36,7 +35,7 @@ export async function expressionGet(address: Address): Promise<Expression | null
 }
 
 export async function expressionCreate(content: object): Promise<Address> {
-    const expr = agent.createSignedExpression(content);
+    const expr = agentCreateSignedExpression(content);
     const exprString = JSON.stringify(expr);
     // @ts-ignore
     const hash = UTILS.hash(exprString);

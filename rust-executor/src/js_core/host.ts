@@ -2,7 +2,7 @@
  * # AD4M Language Host Imports (`ad4m:host.ts`)
  *
  * This ES module is the single source of truth for the host functions
- * that all AD4M Languages — both JS-authored and Rust/WASM — import.
+ * that all AD4M Languages -- both JS-authored and Rust/WASM -- import.
  * It bridges the executor's Deno extension ops (AGENT,
  * LANGUAGE_CONTROLLER, __holochainDelegate__) into the canonical
  * camelCase API surface defined by Spec section 7.
