@@ -213,6 +213,7 @@ async function setupExternalMode(
   wakeToken?: string,
   detectedVia: "mcp" | "graphql" = "mcp",
   executorWsUrl: string = "ws://localhost:12000/graphql",
+  executorUrl?: string,
 ): Promise<void> {
   if (detectedVia === "graphql") {
     // Executor found via GraphQL (MCP is disabled / not available).
@@ -226,7 +227,7 @@ async function setupExternalMode(
     );
 
     try {
-      await setupExternalModeViaGraphQL(logger, executorWsUrl, wakeToken);
+      await setupExternalModeViaGraphQL(logger, executorWsUrl, wakeToken, executorUrl);
       return;
     } catch (e: any) {
       logger.error(
@@ -237,6 +238,7 @@ async function setupExternalMode(
       }
       printConfigSnippet(logger, "external", {
         executorWsUrl,
+        executorUrl,
         token: "<paste-your-jwt-here>",
         wakeToken,
       });
@@ -292,6 +294,8 @@ async function setupExternalMode(
         logger.info("[ad4m-setup] JWT obtained successfully!");
         printConfigSnippet(logger, "external", {
           mcpEndpoint: endpoint,
+          executorWsUrl,
+          executorUrl,
           token: jwtData.token,
           wakeToken,
         });
@@ -306,6 +310,8 @@ async function setupExternalMode(
     );
     printConfigSnippet(logger, "external", {
       mcpEndpoint: endpoint,
+      executorWsUrl,
+      executorUrl,
       token: "<paste-your-jwt-here>",
       wakeToken,
     });
@@ -313,6 +319,8 @@ async function setupExternalMode(
     logger.error(`[ad4m-setup] Auth flow failed: ${e.message}`);
     printConfigSnippet(logger, "external", {
       mcpEndpoint: endpoint,
+      executorWsUrl,
+      executorUrl,
       token: "<paste-your-jwt-here>",
       wakeToken,
     });
@@ -320,17 +328,38 @@ async function setupExternalMode(
 }
 
 /**
- * Prompt the user for a line of input on stdin.
+ * Prompt the user for a line of input.
+ * Opens /dev/tty directly when stdin is not a TTY (e.g. when the process
+ * is spawned by a parent that pipes stdin).
  */
 function promptUser(question: string): Promise<string> {
   const readline = require("readline");
+
+  let input: NodeJS.ReadableStream = process.stdin;
+  let ttyFd: number | undefined;
+
+  // If stdin is not a TTY, open /dev/tty so the user can still type
+  if (!process.stdin.isTTY) {
+    try {
+      ttyFd = fs.openSync("/dev/tty", "r");
+      input = fs.createReadStream("", { fd: ttyFd });
+    } catch {
+      // /dev/tty unavailable (e.g. CI) — fall back to stdin
+    }
+  }
+
   const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
+    input,
+    output: process.stderr, // use stderr so prompts don't pollute stdout capture
+    terminal: true,
   });
+
   return new Promise((resolve) => {
     rl.question(question, (answer: string) => {
       rl.close();
+      if (ttyFd !== undefined) {
+        try { fs.closeSync(ttyFd); } catch { /* ignore */ }
+      }
       resolve(answer.trim());
     });
   });
@@ -349,6 +378,7 @@ async function setupExternalModeViaGraphQL(
   logger: any,
   executorWsUrl: string,
   wakeToken?: string,
+  executorUrl?: string,
 ): Promise<void> {
   const { Ad4mClient } = require("@coasys/ad4m");
   const { ApolloClient, InMemoryCache } = require("@apollo/client/core");
@@ -440,6 +470,7 @@ async function setupExternalModeViaGraphQL(
       logger.warn("[ad4m-setup] No code entered. Setup cancelled.");
       printConfigSnippet(logger, "external", {
         executorWsUrl,
+        executorUrl,
         token: "<paste-your-jwt-here>",
         wakeToken,
       });
@@ -455,6 +486,7 @@ async function setupExternalModeViaGraphQL(
       logger.info("[ad4m-setup] JWT obtained successfully via GraphQL!");
       printConfigSnippet(logger, "external", {
         executorWsUrl,
+        executorUrl,
         token: jwt,
         wakeToken,
       });
@@ -465,6 +497,7 @@ async function setupExternalModeViaGraphQL(
       );
       printConfigSnippet(logger, "external", {
         executorWsUrl,
+        executorUrl,
         token: "<paste-your-jwt-here>",
         wakeToken,
       });
