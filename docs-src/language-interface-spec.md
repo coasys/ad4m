@@ -506,20 +506,21 @@ users at once.
 | `holochainCall(dnaNick, zome, fnName, params)` | `unknown` | Single zome call. Underlying impl puts these into a sync FIFO queue. |
 | `holochainCallAsync(calls, timeoutMs?)` | `unknown[]` | **Batched** parallel zome calls; `calls` is `{dnaNick, zome, fnName, params}[]`. Read-only operations only — concurrent writes will race the source chain. |
 
-> **Runtime note:** The JS ALDK (`@coasys/ad4m-ldk`) and the runtime's
-> `flat_wasm_imports.ts` both expose `holochainCallAsync` as a **single-call
-> convenience wrapper** `(dnaNick, zome, fnName, params) → unknown` that
-> delegates to the batch API internally. Languages needing true batch
-> parallelism should call the underlying `__holochainDelegate__.callAsync`
-> directly until the ALDK exposes a batch variant.
+> **Runtime note:** Both ALDKs (`@coasys/ad4m-ldk` and the Rust crate)
+> expose `holochainCallAsync` as a **single-call convenience wrapper**
+> `(dnaNick, zome, fnName, params) → unknown` that delegates to the
+> batch API in `host.js` internally. Languages needing true batch
+> parallelism can reach the batch form via
+> `globalThis.__holochainDelegate__.callAsync` until the ALDK exposes
+> a batch variant.
 
 ### 7.3 Language context
 
 | Import | Returns |
 |---|---|
-| `languageStorageDirectory()` | `string` |
 | `languageAddress()` | `string` |
 | `languageSettings()` | `string` (raw JSON; the JS ALDK re-parses to an object for JS-authored languages) |
+| `languageStorageDirectory()` | `string` — **legacy**, kept for backwards compatibility. New Languages should use the `storage` KV (§7.4) or the optional File I/O extension (§7.6) instead of constructing paths from this. Candidate for removal in a future revision. |
 
 ### 7.4 Persistent key/value storage (core)
 

@@ -362,27 +362,23 @@ A published Language is just a file whose content hash is its identity.
 Anyone with the hash can fetch it, verify it hashes to what the URL
 claims, install it, and speak the protocol.
 
-## The built-in Languages
+## The core Languages
 
-Every AD4M node boots with a small set of **bootstrap Languages** — they
-are in every seed, and the rest of the system relies on them:
+Every AD4M node boots with a small set of **core Languages**. These are
+the ones the rest of the system actually relies on — without them, an
+agent cannot participate in a Neighbourhood at all:
 
-| Bootstrap Language             | Role                                                                   |
-|--------------------------------|------------------------------------------------------------------------|
-| `language-language`            | Publishes and serves other Language bundles. The root of addressing.  |
-| `agent-language`                | Resolves DIDs to agent profile Expressions                            |
-| `neighbourhood-language`        | Serves shared Neighbourhood definitions                               |
-| `perspective-language`          | Serves shared Perspective metadata                                    |
-| `perspective-diff-sync`         | The default full-replica link Language used by most Neighbourhoods    |
-| `direct-message-language`       | Per-recipient DM inboxes                                              |
-| `file-storage`                  | Holochain-DHT-backed file blobs                                       |
-| `centralized-file-storage`      | HTTP-backed file blobs (Cloudflare-backed reference impl)             |
-| `eas`                           | Read-only adapter over Ethereum Attestation Service                   |
-| `embedding-vector-language`     | Stores embedding vectors for semantic search                          |
+| Core Language           | Role                                                                  |
+|-------------------------|-----------------------------------------------------------------------|
+| `language-language`     | Publishes and serves other Language bundles. The root of addressing. |
+| `agent-language`        | Resolves DIDs to agent profile Expressions                           |
+| `neighbourhood-language`| Serves shared Neighbourhood definitions                              |
+| `perspective-diff-sync` | The default full-replica link Language used by most Neighbourhoods   |
 
-The agent Languages ship as Rust/WASM end-to-end (built with the Rust
-ALDK and wasm-bindgen); the rest are TypeScript-authored with the JS
-ALDK. Both paths produce bundles the runtime treats identically.
+The two agent Language variants (DHT-backed and HTTP-backed) ship as
+Rust/WASM end-to-end, built with the Rust ALDK and wasm-bindgen; the
+rest are TypeScript-authored with the JS ALDK. Both paths produce
+bundles the runtime treats identically.
 
 ## Where to look next
 
@@ -416,18 +412,30 @@ template update when the migration lands on `main`.
 
 ## Security model
 
-Languages run in per-instance Deno isolates, mutually sandboxed. The
-runtime grants each isolate a filesystem permission allow-list that
-scopes it to its own storage directory; system Languages additionally
-get CWD access so they can read bundle paths passed in via
-`languagePublish`. Network access is off by default and can only be
-requested by the host, not by the Language. `agentSign` never exposes
-the private key — the Language receives only signatures. The
-`createSignedExpression` wrapper is the only signing path available to
-application-level code, so the attack surface is narrow.
+Languages run in per-instance Deno isolates, mutually sandboxed.
 
-A Language's identity is the content hash of its bundle, so a
-compromised Language is trivially detectable: its address stops
-matching the bundle served under it. Trust decisions (will I install
-this Language? will I accept Expressions authored with it?) are made
-per-agent, at the edges, not by any central registry.
+**Filesystem.** Each isolate has a permission allow-list scoped to its
+own storage directory (typically `{app_data}/ad4m/languages/{hash}/`).
+System Languages (the bootstrap set) additionally get read/write
+access to the executor's working directory so they can read bundle
+paths passed in via `languagePublish`. Everything outside those paths
+is off-limits and fails with a permission error.
+
+**Network.** Languages can call `httpFetch` and reach Holochain; this
+is necessary because most Languages are network protocols. A future
+release will scope this more tightly — today a Language can reach any
+host the runtime can reach, so trust decisions around which Languages
+to install matter (see below).
+
+**Other capabilities.** FFI, subprocess spawning, reading arbitrary
+environment variables, and loading arbitrary remote ES modules are
+all disabled. `agentSign` never exposes the private key — the
+Language receives only the signature bytes. `agentCreateSignedExpression`
+is the only signing path available to Language code, so the attack
+surface is narrow.
+
+**Identity.** A Language's identity is the content hash of its bundle,
+so a tampered Language is trivially detectable: its hash stops
+matching its address. Trust decisions (will I install this Language?
+will I accept Expressions authored with it?) are made per-agent, at
+the edges, not by any central registry.
