@@ -30,6 +30,8 @@ commands:
             echo "Node: $(node --version)"
             echo "npm: $(npm --version)"
             echo "Rust: $(rustc --version)"
+            echo "Installing wasm-bindgen-cli for Rust WASM builds..."
+            cargo install wasm-bindgen-cli --version 0.2.117
             echo "Deno: $(deno --version | head -1)"
             echo "Go: $(go version)"
             echo "pnpm: $(pnpm --version || echo 'not installed yet')"
