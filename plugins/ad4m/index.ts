@@ -1278,12 +1278,39 @@ Notes:
         .description(
           "Set up the AD4M plugin (discover executor, generate agent, print config)",
         )
-        .option("--endpoint <url>", "MCP endpoint URL", endpoint)
-        .option("--ws <url>", "Executor GraphQL WebSocket URL", executorWsUrl)
-        .option("--email <email>", "Email for multi-user login (optional)")
+        .option("--url <url>", "Executor GraphQL URL (e.g., https://marvin.ad4m.dev/graphql)")
+        .option("--endpoint <url>", "MCP endpoint URL (default: derived from --url or localhost:3001)")
+        .option("--ws <url>", "Executor GraphQL WebSocket URL (derived from --url if not provided)", executorWsUrl)
+        .option("--email <email>", "Email for multi-user login")
+        .option("--password <password>", "Password for multi-user login (will prompt if not provided)")
         .action(async (opts: any) => {
-          const password = process.env.AD4M_PASSWORD;
-          await runSetup(ctx.config, ctx.logger, opts.endpoint, opts.ws, opts.email, password);
+          // Derive ws URL from --url if provided
+          let wsUrl = opts.ws || executorWsUrl;
+          if (opts.url) {
+            wsUrl = opts.url.replace(/^http(s?):/, "ws$1:");
+          }
+
+          // Get password from CLI or env var, prompt if not provided
+          let password = opts.password || process.env.AD4M_PASSWORD;
+          if (!password) {
+            const readline = await import("readline");
+            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+            password = await new Promise((resolve) => {
+              rl.question("[ad4m] Enter password for multi-user login: ", (answer) => {
+                rl.close();
+                resolve(answer);
+              });
+            });
+          }
+
+          // Derive MCP endpoint from --url if provided
+          let mcpEndpoint = opts.endpoint || endpoint;
+          if (opts.url && !opts.endpoint) {
+            const urlObj = new URL(opts.url);
+            mcpEndpoint = `${urlObj.protocol}//${urlObj.host}/mcp`;
+          }
+
+          await runSetup(ctx.config, ctx.logger, mcpEndpoint, wsUrl, opts.email, password, opts.url);
         });
     },
     { commands: ["ad4m-setup"] },

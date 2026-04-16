@@ -37,6 +37,7 @@ export async function runSetup(
   executorWsUrl: string = "ws://localhost:12000/graphql",
   email?: string,
   password?: string,
+  executorUrl?: string,
 ): Promise<void> {
   logger.info("[ad4m-setup] Starting first-run setup...");
 
@@ -88,7 +89,7 @@ export async function runSetup(
         return;
       }
       // Email/password login — use when connecting to a remote multi-user executor
-      await setupExternalModeViaEmail(logger, endpoint, email, password, wakeToken);
+      await setupExternalModeViaEmail(logger, endpoint, email, password, wakeToken, executorWsUrl, executorUrl);
     } else {
       // Default: capability request flow (6-digit code from launcher UI)
       await setupExternalMode(logger, endpoint, wakeToken, running, executorWsUrl);
@@ -496,6 +497,8 @@ async function setupExternalModeViaEmail(
   email: string,
   password: string,
   wakeToken?: string,
+  executorWsUrl: string = "ws://localhost:12000/graphql",
+  executorUrl?: string,
 ): Promise<void> {
   logger.info(`[ad4m-setup] Email verification login to ${endpoint}...`);
   logger.info(`[ad4m-setup] User: ${email}`);
@@ -530,6 +533,8 @@ async function setupExternalModeViaEmail(
       logger.warn("[ad4m-setup] No code entered. Setup cancelled.");
       printConfigSnippet(logger, "external", {
         mcpEndpoint: endpoint,
+        executorWsUrl,
+        executorUrl,
         token: "<setup-cancelled>",
         wakeToken,
       });
@@ -550,6 +555,8 @@ async function setupExternalModeViaEmail(
       logger.info("[ad4m-setup] Login successful! JWT obtained.");
       printConfigSnippet(logger, "external", {
         mcpEndpoint: endpoint,
+        executorWsUrl,
+        executorUrl,
         token: loginData.token,
         wakeToken,
       });
@@ -562,6 +569,8 @@ async function setupExternalModeViaEmail(
     );
     printConfigSnippet(logger, "external", {
       mcpEndpoint: endpoint,
+      executorWsUrl,
+      executorUrl,
       token: "<verification-failed-check-code>",
       wakeToken,
     });
@@ -570,6 +579,8 @@ async function setupExternalModeViaEmail(
     logger.error(`[ad4m-setup] Email verification error: ${e.message}`);
     printConfigSnippet(logger, "external", {
       mcpEndpoint: endpoint,
+      executorWsUrl,
+      executorUrl,
       token: "<error-check-logs>",
       wakeToken,
     });
@@ -642,6 +653,7 @@ function printConfigSnippet(
   } else {
     if (values.mcpEndpoint) config.mcpEndpoint = values.mcpEndpoint;
     if (values.executorWsUrl) config.executorWsUrl = values.executorWsUrl;
+    if (values.executorUrl) config.executorUrl = values.executorUrl;
     if (values.token) config.token = values.token;
   }
 
