@@ -312,6 +312,7 @@ impl LanguageRuntime {
                 if (typeof language.telepresenceGetOnlineAgents === "function") caps.push("telepresence-get-agents");
                 if (typeof language.telepresenceSendSignal === "function") caps.push("telepresence-send-signal");
                 if (typeof language.telepresenceSendBroadcast === "function") caps.push("telepresence-send-broadcast");
+                if (typeof language.languageGetSource === "function") caps.push("language-get-source");
                 if (typeof language.handleHolochainSignal === "function") caps.push("holochain-signal");
                 return JSON.stringify(caps);
             })()
@@ -424,6 +425,7 @@ impl LanguageRuntime {
                                                 Capability::TelepresenceGetAgents => "telepresence-get-agents",
                                                 Capability::TelepresenceSendSignal => "telepresence-send-signal",
                                                 Capability::TelepresenceSendBroadcast => "telepresence-send-broadcast",
+                                                Capability::LanguageGetSource => "language-get-source",
                                                 Capability::HolochainSignal => "holochain-signal",
                                             }).collect();
                                             serde_json::to_string(&names).map_err(|e| e.to_string())

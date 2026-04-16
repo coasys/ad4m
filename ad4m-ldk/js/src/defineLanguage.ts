@@ -56,6 +56,10 @@ export interface TelepresenceCapability {
     registerSignalCallback?(callback: any): Promise<void>;
 }
 
+export interface LanguageSourceCapability {
+    getSource(address: Address): Promise<string>;
+}
+
 // ----- Top-level language spec -----
 
 export interface LanguageSpec {
@@ -70,6 +74,7 @@ export interface LanguageSpec {
     interactions?(address: Address): unknown[];
 
     expression?: ExpressionCapability;
+    languageSource?: LanguageSourceCapability;
     commit?: PerspectiveCommitCapability;
     sync?: PerspectiveSyncCapability;
     query?: PerspectiveQueryCapability;
@@ -102,6 +107,9 @@ export interface FlatLanguageExports {
     isImmutableExpression?(address: Address): boolean;
     expressionIcon?(): string;
     expressionConstructorIcon?(): string;
+
+    // Language source
+    languageGetSource?(address: Address): Promise<string>;
 
     // Perspective-commit
     perspectiveCommit?(diff: PerspectiveDiff): Promise<any>;
@@ -176,6 +184,11 @@ export function defineLanguage(spec: LanguageSpec): FlatLanguageExports {
         if (e.isImmutable) out.isImmutableExpression = e.isImmutable.bind(e);
         if (e.icon) out.expressionIcon = e.icon.bind(e);
         if (e.constructorIcon) out.expressionConstructorIcon = e.constructorIcon.bind(e);
+    }
+
+    // Language source
+    if (spec.languageSource) {
+        out.languageGetSource = spec.languageSource.getSource.bind(spec.languageSource);
     }
 
     // Perspective-commit

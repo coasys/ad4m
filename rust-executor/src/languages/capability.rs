@@ -30,6 +30,7 @@ pub enum Capability {
     TelepresenceGetAgents,
     TelepresenceSendSignal,
     TelepresenceSendBroadcast,
+    LanguageGetSource,
     HolochainSignal,
 }
 
@@ -50,6 +51,7 @@ impl Capability {
             "telepresence-get-agents" => Some(Capability::TelepresenceGetAgents),
             "telepresence-send-signal" => Some(Capability::TelepresenceSendSignal),
             "telepresence-send-broadcast" => Some(Capability::TelepresenceSendBroadcast),
+            "language-get-source" => Some(Capability::LanguageGetSource),
             "holochain-signal" => Some(Capability::HolochainSignal),
             _ => None,
         }

@@ -240,6 +240,20 @@ macro_rules! __ad4m_cap {
         }
     };
 
+    (language_source, $lang:ty) => {
+        // Async shim — same take-run-restore pattern as expression.
+        #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "languageGetSource")]
+        pub async fn __ad4m_language_get_source(
+            address: String,
+        ) -> ::std::result::Result<String, ::wasm_bindgen::JsValue> {
+            let mut lang = __AD4M_LANG_STATE.with(|c| c.borrow_mut().take())
+                .expect("Language not initialized (languageGetSource called before init)");
+            let result = <$lang as $crate::traits::LanguageSourceCapability>::language_get_source(&mut lang, address).await;
+            __AD4M_LANG_STATE.with(|c| *c.borrow_mut() = Some(lang));
+            Ok(result?)
+        }
+    };
+
     (telepresence, $lang:ty) => {
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "telepresenceSetOnlineStatus")]
         pub fn __ad4m_telepresence_set_online_status(

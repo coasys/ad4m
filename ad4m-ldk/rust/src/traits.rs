@@ -110,6 +110,21 @@ pub trait TelepresenceCapability: Language {
     ) -> LanguageResult<serde_json::Value>;
 }
 
+/// `language-source` capability — fetching language source bundles.
+///
+/// Only the "language language" (the bootstrap language that stores and
+/// distributes language bundles) implements this. The executor calls
+/// `language_get_source(address)` when it needs to install a language
+/// from the network.
+///
+/// Async because the implementation typically fetches from a remote store.
+pub trait LanguageSourceCapability: Language {
+    fn language_get_source(
+        &mut self,
+        address: Address,
+    ) -> impl std::future::Future<Output = LanguageResult<String>>;
+}
+
 /// Optional Holochain signal handler. Auto-wired when the language
 /// declares `holochain_signal` in the `ad4m_language!` macro.
 pub trait HolochainSignalHandler: Language {
