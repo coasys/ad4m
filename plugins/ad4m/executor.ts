@@ -340,7 +340,36 @@ export async function isExecutorRunning(
   timeoutMs: number = 3000,
   graphqlHttpUrl: string = "http://localhost:12000/graphql",
 ): Promise<"mcp" | "graphql" | false> {
-  const probe = (url: string, body: string, validate?: (json: any) => boolean): Promise<boolean> =>
+  // MCP probe: the server returns HTTP 422 for requests without proper
+  // initialization (e.g. tools/list before init), but any readable response
+  // (including 422) means the server IS running.
+  const mcpProbe = (url: string, body: string): Promise<boolean> =>
+    new Promise((resolve) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => {
+        controller.abort();
+        resolve(false);
+      }, timeoutMs);
+
+      fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
+        body,
+        signal: controller.signal,
+      })
+        .then(async (res) => {
+          clearTimeout(timeout);
+          // Any HTTP response means the server is there
+          resolve(true);
+        })
+        .catch(() => {
+          clearTimeout(timeout);
+          resolve(false);
+        });
+    });
+
+  // GraphQL probe: requires a valid response with data or errors key
+  const gqlProbe = (url: string, body: string, validate: (json: any) => boolean): Promise<boolean> =>
     new Promise((resolve) => {
       const controller = new AbortController();
       const timeout = setTimeout(() => {
@@ -357,7 +386,6 @@ export async function isExecutorRunning(
         .then(async (res) => {
           clearTimeout(timeout);
           if (!res.ok) return resolve(false);
-          if (!validate) return resolve(true);
           try {
             const json = await res.json();
             resolve(validate(json));
@@ -373,11 +401,11 @@ export async function isExecutorRunning(
 
   // Try MCP and GraphQL in parallel — return the first that succeeds
   const [mcp, gql] = await Promise.all([
-    probe(
+    mcpProbe(
       endpoint,
       JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/list", params: {} }),
     ),
-    probe(
+    gqlProbe(
       graphqlHttpUrl,
       JSON.stringify({ query: "{ agentStatus { isInitialized } }" }),
       // Unauthenticated requests lack AGENT_READ_CAPABILITY so the query
