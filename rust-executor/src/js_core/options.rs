@@ -22,35 +22,18 @@ pub fn language_module_loader() -> Rc<StringModuleLoader> {
         "https://ad4m.language/bootstrap",
         include_str!("language_bootstrap.js"),
     );
-    // language_bootstrap.js does `import ... from "./wasm_imports.ts"`,
-    // which deno_core resolves relative to the bootstrap URL above. Without
-    // this registration the lookup falls through to `to_file_path()` (fails
-    // for https scheme) and then to the modules map (absent) → NotFound,
-    // which would abort loading the bootstrap module and break every
-    // language before init() ever runs.
-    loader.add_module(
-        "https://ad4m.language/wasm_imports.ts",
-        include_str!("wasm_imports.ts"),
-    );
-    // `ad4m:host.ts` is the import specifier used by Rust-authored Languages
-    // through the ALDK (`#[wasm_bindgen(module = "ad4m:host.ts")]`). The
-    // wasm-bindgen glue emits `import { agentDid, holochainCall, ... }
-    // from "ad4m:host.ts"` at the top of the generated language bundle —
-    // we satisfy that import by registering the same wasm_imports.ts
-    // source under the `ad4m:host.ts` specifier.
+    // `ad4m:host.ts` is the canonical import specifier for host imports.
+    // Both JS and Rust/WASM language bundles emit
+    //   `import { agentDid, holochainCall, ... } from "ad4m:host.ts"`
+    // at the top of their output (JS via esbuild `external`, Rust via
+    // wasm-bindgen `#[wasm_bindgen(module = "ad4m:host.ts")]`).
     //
     // The `.ts` suffix is deliberate: the StringModuleLoader uses the URL
     // path extension to decide whether to transpile TypeScript, and the
-    // source we register still contains TS type annotations. Without the
-    // suffix, `MediaType::from_path` reports Unknown and Deno loads the
-    // file as raw JS, crashing on the first type annotation.
-    //
-    // The two specifiers (`https://ad4m.language/wasm_imports.ts` and
-    // `ad4m:host.ts`) load as two distinct Deno module instances, but
-    // both close over globalThis extension ops (AGENT, LANGUAGE_CONTROLLER,
-    // __holochainDelegate__) installed by `setupWasmImports()`, so state
-    // stays consistent across the boundary.
-    loader.add_module("ad4m:host.ts", include_str!("wasm_imports.ts"));
+    // source still contains TS type annotations. Without the suffix,
+    // `MediaType::from_path` reports Unknown and Deno loads the file as
+    // raw JS, crashing on the first type annotation.
+    loader.add_module("ad4m:host.ts", include_str!("host.ts"));
     Rc::new(loader)
 }
 

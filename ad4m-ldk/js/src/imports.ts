@@ -1,103 +1,54 @@
 /**
- * Typed wrappers around the runtime imports the AD4M executor installs
- * on `globalThis` before calling a Language's `init()`.
+ * Typed re-exports of the AD4M host import surface.
  *
- * Spec §7 (`docs/language-interface-spec.md`) defines the canonical
- * import surface. This file is the JS-side counterpart of the WIT
- * imports in `docs/ad4m-lang.wit`.
+ * At runtime, `ad4m:host.ts` is a synthetic Deno module registered by
+ * the executor's StringModuleLoader. Language bundles (both JS and
+ * Rust/WASM) import from it as a standard ES module. esbuild marks
+ * `ad4m:host.ts` as external so the import survives bundling.
  *
- * In production, the executor's `setupWasmImports()` puts every
- * function on `globalThis` before init runs. In tests, you can stub
- * the same names on `globalThis` and these wrappers will pick them up.
+ * This file re-exports everything so that `@coasys/ad4m-ldk` consumers
+ * can write `import { agentDid } from "@coasys/ad4m-ldk"` and get
+ * full type safety.
+ *
+ * Spec section 7 (`docs/language-interface-spec.md`).
  */
 
-import type { DID, Expression, PerspectiveDiff, DnaSpec, AppInfo } from "./types.js";
+// Re-export everything from the host module.
+// The ambient declaration in `host.d.ts` provides types for tsc;
+// the actual module is resolved at runtime by the executor.
+export {
+    // Agent (Spec section 7.1)
+    agentDid,
+    agentSigningKeyId,
+    agentSign,
+    agentSignStringHex,
+    agentCreateSignedExpression,
+    agentGetAllLocalUserDids,
+    agentCreateSignedExpressionForUser,
+    agentDidForUser,
 
-type GlobalAny = Record<string, any>;
-const G: GlobalAny = globalThis as any;
+    // Holochain (Spec section 7.2)
+    holochainRegisterDnas,
+    holochainCall,
+    holochainCallAsync,
 
-function need<T = any>(name: string): T {
-    const fn = G[name];
-    if (typeof fn !== "function") {
-        throw new Error(
-            `[ad4m-ldk] Missing runtime import \`${name}\`. ` +
-            `The AD4M executor must install this on globalThis before init().`
-        );
-    }
-    return fn as T;
-}
+    // HTTP fetch (Spec section 7.2b)
+    httpFetch,
 
-// ============================================================================
-// Agent (spec §7.1)
-// ============================================================================
+    // Language context (Spec section 7.3)
+    languageStorageDirectory,
+    languageAddress,
+    languageSettings,
 
-export function agentDid(): DID { return need("agentDid")(); }
-export function agentSigningKeyId(): string { return need("agentSigningKeyId")(); }
-export function agentSign(payload: Uint8Array): Uint8Array { return need("agentSign")(payload); }
-export function agentSignStringHex(payload: string): string { return need("agentSignStringHex")(payload); }
-export function agentCreateSignedExpression<T = unknown>(data: T): Expression<T> {
-    return need("agentCreateSignedExpression")(data);
-}
-export function agentGetAllLocalUserDids(): DID[] { return need("agentGetAllLocalUserDids")(); }
-export function agentCreateSignedExpressionForUser<T = unknown>(userEmail: string, data: T): Expression<T> {
-    return need("agentCreateSignedExpressionForUser")(userEmail, data);
-}
-export function agentDidForUser(userEmail: string): DID { return need("agentDidForUser")(userEmail); }
+    // Event emission (Spec section 7.5)
+    emitPerspectiveDiff,
+    emitSyncStateChange,
+    emitTelepresenceSignal,
+    emitSignal,
 
-// ============================================================================
-// Holochain (spec §7.2)
-// ============================================================================
-
-// NOTE: Both `holochainRegisterDnas` and `holochainCall` are async — the
-// runtime installs Promise-returning functions via `setupWasmImports`
-// in rust-executor/src/js_core/wasm_imports.ts. Authors MUST await
-// these; the prior `unknown`/`AppInfo[]` synchronous return types were
-// wrong and silently handed a Promise object to the caller.
-export function holochainRegisterDnas(dnas: DnaSpec[]): Promise<AppInfo[]> {
-    return need("holochainRegisterDnas")(dnas);
-}
-export function holochainCall(dnaNick: string, zome: string, fnName: string, params: unknown): Promise<unknown> {
-    return need("holochainCall")(dnaNick, zome, fnName, params);
-}
-export function holochainCallAsync(
-    dnaNick: string, zome: string, fnName: string, params: unknown
-): Promise<unknown> {
-    return need("holochainCallAsync")(dnaNick, zome, fnName, params);
-}
-
-// ============================================================================
-// Language context (spec §7.3)
-// ============================================================================
-
-export function languageAddress(): string { return need("languageAddress")(); }
-export function languageSettings(): string { return need("languageSettings")(); }
-export function languageStorageDirectory(): string { return need("languageStorageDirectory")(); }
-
-// ============================================================================
-// Storage KV (spec §7)
-// ============================================================================
-
-export function storageGet(key: string): string | null { return need("storageGet")(key); }
-export function storagePut(key: string, value: string): void { need("storagePut")(key, value); }
-export function storageDelete(key: string): void { need("storageDelete")(key); }
-export function storageListKeys(prefix?: string): string[] { return need("storageListKeys")(prefix); }
-
-// ============================================================================
-// Event emission (spec §7.5)
-// ============================================================================
-// Languages no longer register callbacks. They emit perspective diffs,
-// sync state changes, telepresence signals, and arbitrary signals via
-// these imports. The runtime fans out to subscribers.
-
-export function emitPerspectiveDiff(diff: PerspectiveDiff): void {
-    need("emitPerspectiveDiff")(diff);
-}
-export function emitSyncStateChange(state: string): void {
-    need("emitSyncStateChange")(state);
-}
-export function emitTelepresenceSignal(payload: unknown, recipientDid?: DID): void {
-    need("emitTelepresenceSignal")(payload, recipientDid);
-}
-export function emitSignal(data: unknown): void {
-    need("emitSignal")(data);
-}
+    // Storage KV (Spec section 7.4)
+    storageGet,
+    storagePut,
+    storageDelete,
+    storageListKeys,
+} from "ad4m:host.ts";

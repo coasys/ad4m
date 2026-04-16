@@ -17,6 +17,10 @@ const ad4mLdkEntry = new URL(
 const ad4mLdkAliasPlugin = {
   name: "ad4m-ldk-alias",
   setup(build: any) {
+    build.onResolve({ filter: /^ad4m:host\.ts$/ }, () => ({
+      path: "ad4m:host.ts",
+      external: true,
+    }));
     build.onResolve({ filter: /^@coasys\/ad4m-ldk$/ }, () => ({
       path: ad4mLdkEntry,
       namespace: "file",

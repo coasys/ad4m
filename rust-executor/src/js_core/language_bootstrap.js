@@ -5,7 +5,6 @@
 
 // Polyfill Node.js Buffer on globalThis – many language bundles depend on it.
 import { Buffer } from "node:buffer";
-import { setupWasmImports, teardownWasmImports } from "./wasm_imports.ts";
 globalThis.Buffer = Buffer;
 
 // Minimal DOM stubs – language bundles that include Svelte Icon components
@@ -294,14 +293,6 @@ async function initLanguage(contextJson) {
     globalThis.__ad4mSignal__ = ad4mSignal;
     globalThis.__agentProxy__ = agentProxy;
 
-    // Install host imports on globalThis (needed before init()).
-    // These provide: languageStorageDirectory(), languageAddress(),
-    // languageSettings(), plus agentDid(), agentSign(), holochainCall(),
-    // signalEmit(), etc. Rust/WASM languages link against these via
-    // wasm-bindgen `extern "C"` imports; JS languages read the same
-    // functions directly off globalThis (or through the JS ALDK wrappers).
-    setupWasmImports();
-
     // init() takes NO arguments — context is accessed via the host
     // import functions installed above. The language calls
     // languageStorageDirectory(), languageAddress(), languageSettings()
@@ -386,24 +377,15 @@ async function initLanguage(contextJson) {
         };
     }
 
-    // Teardown — order matters: run the language's own teardown FIRST
-    // (while host imports like agentDid/storagePut/emitSignal are still
-    // installed on globalThis), THEN tear the imports down. The previous
-    // order crashed any language whose teardown logged via emit_signal
-    // or persisted final state via storage_put, because those globals
-    // had already been deleted.
+    // Teardown — wrap the language's own teardown (if any) in an async
+    // function so the runtime can always `await language.teardown()`.
     if (mod.teardown) {
         const originalTeardown = mod.teardown;
         language.teardown = async () => {
-            try {
-                await originalTeardown();
-            } finally {
-                teardownWasmImports();
-            }
+            await originalTeardown();
         };
     } else {
-        // No language-level teardown — still need to clean up imports.
-        language.teardown = async () => { teardownWasmImports(); };
+        language.teardown = async () => {};
     }
 
     globalThis.__ad4m_language_instance__ = language;
