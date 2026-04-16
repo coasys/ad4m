@@ -478,28 +478,15 @@ async function setupExternalModeViaGraphQL(
 // Email/password login — for connecting to a remote multi-user executor
 // ---------------------------------------------------------------------------
 
-function isUserNotFoundError(error: string | undefined): boolean {
-  if (!error) return false;
-  const lower = error.toLowerCase();
-  return lower.includes("user not found") || lower.includes("user does not exist") || lower.includes("account not found");
-}
-
-function isUserAlreadyExistsError(error: string | undefined): boolean {
-  if (!error) return false;
-  const lower = error.toLowerCase();
-  return lower.includes("already exists") || lower.includes("already registered") || lower.includes("duplicate");
-}
-
 /**
-
- * External-mode auth flow using email + password.
+ * External-mode auth flow using email verification (ad4m-connect flow).
  *
  * Flow:
  * 1. Initialize MCP session (no auth needed)
- * 2. Try `login_email` with email + password
- *    - If user doesn't exist, try `signup` first to create account
- * 3. `login_email` returns a JWT directly
- * 4. Use JWT for MCP authentication
+ * 2. Call `requestLoginVerification` to send a 6-digit code to the email
+ * 3. Prompt user to enter the code
+ * 4. Call `verifyEmailCode` with email + code to get a JWT
+ * 5. Use JWT for MCP authentication
  *
  * Requires the remote executor to have multi-user mode enabled.
  */
@@ -510,41 +497,51 @@ async function setupExternalModeViaEmail(
   password: string,
   wakeToken?: string,
 ): Promise<void> {
-  logger.info(`[ad4m-setup] Email/password login to ${endpoint}...`);
+  logger.info(`[ad4m-setup] Email verification login to ${endpoint}...`);
   logger.info(`[ad4m-setup] User: ${email}`);
 
   try {
-    // Initialize MCP session (no auth needed for login)
+    // Step 1: Initialize MCP session
     const initResp = await mcpInitialize(endpoint);
     logger.info("[ad4m-setup] MCP session initialized");
 
-    // Step 1: Try signup first (like ad4m-connect does)
-    logger.info("[ad4m-setup] Attempting signup with email + password...");
-    const signupResult = await mcpCallTool(
+    // Step 2: Request login verification — sends 6-digit code to email
+    logger.info("[ad4m-setup] Requesting login verification code...");
+    const verifyResult = await mcpCallTool(
       endpoint,
-      "signup",
-      { email, password },
+      "requestLoginVerification",
+      { email },
       initResp.sessionId,
     );
-    const signupData = extractMcpResultData(signupResult);
+    const verifyData = extractMcpResultData(verifyResult);
+    logger.info(`[ad4m-setup] requestLoginVerification result: ${JSON.stringify(verifyData)}`);
 
-    if (signupData?.did) {
-      logger.info(`[ad4m-setup] Signup successful! DID: ${signupData.did}`);
-    } else if (isUserAlreadyExistsError(signupData?.error)) {
-      logger.info("[ad4m-setup] User already exists, continuing to login...");
-    } else {
-      logger.warn(
-        `[ad4m-setup] Signup returned unexpected result: ${JSON.stringify(signupData?.error ?? signupData)}`,
-      );
-      // Continue to login anyway — it may still work
+    // Step 3: Prompt user for the 6-digit code
+    logger.info("");
+    logger.info("[ad4m-setup] A 6-digit verification code has been sent to your email.");
+    logger.info("[ad4m-setup] Please check your inbox and enter the code below.");
+    logger.info("");
+
+    const code = await promptUser(
+      "[ad4m-setup] Enter the 6-digit code from your email: ",
+    );
+
+    if (!code) {
+      logger.warn("[ad4m-setup] No code entered. Setup cancelled.");
+      printConfigSnippet(logger, "external", {
+        mcpEndpoint: endpoint,
+        token: "<setup-cancelled>",
+        wakeToken,
+      });
+      return;
     }
 
-    // Step 2: Try login_email to get JWT
-    logger.info("[ad4m-setup] Attempting login with email + password...");
+    // Step 4: Verify email code to get JWT
+    logger.info("[ad4m-setup] Verifying email code...");
     const loginResult = await mcpCallTool(
       endpoint,
-      "login_email",
-      { email, password },
+      "verifyEmailCode",
+      { email, code, login: true },
       initResp.sessionId,
     );
     const loginData = extractMcpResultData(loginResult);
@@ -559,18 +556,18 @@ async function setupExternalModeViaEmail(
       return;
     }
 
-    // Fell through — login failed
+    // Fell through — verification failed
     logger.warn(
-      `[ad4m-setup] Email login failed: ${JSON.stringify(loginData?.error ?? loginData)}`,
+      `[ad4m-setup] Email verification failed: ${JSON.stringify(loginData?.error ?? loginData)}`,
     );
     printConfigSnippet(logger, "external", {
       mcpEndpoint: endpoint,
-      token: "<login-failed-check-executor-logs>",
+      token: "<verification-failed-check-code>",
       wakeToken,
     });
 
   } catch (e: any) {
-    logger.error(`[ad4m-setup] Email login error: ${e.message}`);
+    logger.error(`[ad4m-setup] Email verification error: ${e.message}`);
     printConfigSnippet(logger, "external", {
       mcpEndpoint: endpoint,
       token: "<error-check-logs>",
