@@ -868,6 +868,7 @@ impl Ad4mMcpHandler {
                         let raw = links[0].data.target.clone();
                         Some(
                             raw.strip_prefix("literal://string:")
+                                .or_else(|| raw.strip_prefix("literal:string:"))
                                 .unwrap_or(&raw)
                                 .to_string(),
                         )
@@ -875,60 +876,48 @@ impl Ad4mMcpHandler {
                     _ => None,
                 };
 
-                // If a getter is available for a collection, use SurrealQL for
-                // conformance-filtered results instead of naive get_links
-                if is_collection {
-                    if let Some(ref getter_expr) = getter {
-                        // Execute the conformance getter via SurrealQL.
-                        // The getter uses 'Base' as placeholder — we already have the
-                        // expression_address which is the node URI.
-                        let safe_addr = expression_address.replace('\'', "\\'");
-                        let query_str = getter_expr.replace("Base", &format!("'{}'", safe_addr));
-                        let full_query = format!(
-                            "SELECT ({}) AS value FROM node WHERE uri = '{}'",
-                            query_str, safe_addr
-                        );
-                        match perspective.surreal_query(full_query).await {
-                            Ok(results) => {
-                                let items: Vec<serde_json::Value> = results
-                                    .into_iter()
-                                    .filter_map(|row| row.get("value").cloned())
-                                    .flat_map(|v| match v {
-                                        serde_json::Value::Array(arr) => arr,
-                                        other => vec![other],
-                                    })
-                                    .filter(|v| {
-                                        !v.is_null()
-                                            && v.as_str() != Some("None")
-                                            && v.as_str() != Some("")
+                // If a getter exists, execute it as SPARQL
+                if let Some(getter_query) = getter {
+                    let sparql =
+                        getter_query.replace("<Base>", &format!("<{}>", expression_address));
+                    match perspective.sparql_query(sparql) {
+                        Ok(result_json) => {
+                            if let Ok(rows) = serde_json::from_str::<
+                                Vec<serde_json::Map<String, serde_json::Value>>,
+                            >(&result_json)
+                            {
+                                let values: Vec<String> = rows
+                                    .iter()
+                                    .filter_map(|r| {
+                                        r.get("target")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string())
                                     })
                                     .collect();
-                                data.insert(prop_name.clone(), serde_json::Value::Array(items));
-                            }
-                            Err(_) => {
-                                // Fall back to naive get_links on SurrealQL error
-                                let value_links = match perspective
-                                    .get_links(&LinkQuery {
-                                        source: Some(expression_address.clone()),
-                                        predicate: Some(predicate.clone()),
-                                        ..Default::default()
-                                    })
-                                    .await
-                                {
-                                    Ok(links) => links,
-                                    Err(_) => continue,
-                                };
-                                let items: Vec<String> =
-                                    value_links.iter().map(|l| l.data.target.clone()).collect();
-                                data.insert(
-                                    prop_name,
-                                    serde_json::Value::Array(
-                                        items.into_iter().map(serde_json::Value::String).collect(),
-                                    ),
-                                );
+                                if is_collection {
+                                    data.insert(
+                                        prop_name,
+                                        serde_json::Value::Array(
+                                            values
+                                                .into_iter()
+                                                .map(serde_json::Value::String)
+                                                .collect(),
+                                        ),
+                                    );
+                                } else if let Some(val) = values.first() {
+                                    data.insert(
+                                        prop_name,
+                                        serde_json::Value::String(Self::resolve_literal_value(val)),
+                                    );
+                                }
                             }
                         }
-                    } else {
+                        Err(e) => {
+                            log::warn!("Failed to execute getter SPARQL for {}: {}", prop_name, e);
+                        }
+                    }
+                } else if is_collection {
+                    {
                         let value_links = match perspective
                             .get_links(&LinkQuery {
                                 source: Some(expression_address.clone()),
@@ -948,46 +937,6 @@ impl Ad4mMcpHandler {
                                 items.into_iter().map(serde_json::Value::String).collect(),
                             ),
                         );
-                    }
-                } else if let Some(ref getter_expr) = getter {
-                    // Scalar with a getter — execute via SurrealQL
-                    let safe_addr = expression_address.replace('\'', "\\'");
-                    let query_str = getter_expr.replace("Base", &format!("'{}'", safe_addr));
-                    let full_query = format!(
-                        "SELECT ({}) AS value FROM node WHERE uri = '{}'",
-                        query_str, safe_addr
-                    );
-                    match perspective.surreal_query(full_query).await {
-                        Ok(results) => {
-                            if let Some(row) = results.first() {
-                                if let Some(val) = row.get("value") {
-                                    if !val.is_null()
-                                        && val.as_str() != Some("None")
-                                        && val.as_str() != Some("")
-                                    {
-                                        data.insert(prop_name, val.clone());
-                                    }
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            // Fall back to get_links
-                            let value_links = match perspective
-                                .get_links(&LinkQuery {
-                                    source: Some(expression_address.clone()),
-                                    predicate: Some(predicate.clone()),
-                                    ..Default::default()
-                                })
-                                .await
-                            {
-                                Ok(links) => links,
-                                Err(_) => continue,
-                            };
-                            if let Some(link) = value_links.first() {
-                                let value = Self::resolve_literal_value(&link.data.target);
-                                data.insert(prop_name, serde_json::Value::String(value));
-                            }
-                        }
                     }
                 } else {
                     let value_links = match perspective
@@ -1434,7 +1383,9 @@ impl Ad4mMcpHandler {
         };
 
         // Find and remove the link with matching target
-        let target = if value.starts_with("literal://") || value.contains("://") {
+        let target = if (value.starts_with("literal://") || value.starts_with("literal:"))
+            || value.contains("://")
+        {
             value.clone()
         } else {
             Self::encode_literal(&value)

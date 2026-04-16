@@ -2,7 +2,7 @@ import { capitalize } from "./util";
 import type { Where } from "./types";
 import { buildSDNA } from "./sdna";
 import { buildSHACL } from "./shacl-gen";
-import { escapeSurrealString } from "../utils";
+import { escapeQueryString } from "../utils";
 import type { ConformanceCondition } from "../shacl/SHACLShape";
 
 // ============================================================================
@@ -32,7 +32,7 @@ export interface RelationMetadataEntry {
     maxCount?: number;
     local?: boolean;
     /**
-     * Custom SurrealQL getter to resolve the relation values.
+     * Custom getter to resolve the relation values.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      */
     getter?: string;
@@ -56,12 +56,24 @@ const propertyRegistry = new WeakMap<Function, Record<string, PropertyMetadataEn
 /** Registry of relation metadata keyed by constructor → { propName → metadata } */
 const relationRegistry = new WeakMap<Function, Record<string, RelationMetadataEntry>>();
 
+/** Memoisation cache for getPropertiesMetadata — avoids repeated prototype-chain walks */
+const propertiesMetadataCache = new WeakMap<Function, Record<string, PropertyMetadataEntry>>();
+
+/** Memoisation cache for getRelationsMetadata — avoids repeated prototype-chain walks */
+const relationsMetadataCache = new WeakMap<Function, Record<string, RelationMetadataEntry>>();
+
+/** Memoisation cache for generateSHACL — avoids recomputing SHACL shapes */
+const shaclCache = new WeakMap<Function, any>();
 
 /**
  * Retrieve property metadata for a given class constructor.
  * Walks the prototype chain so subclass decorators compose with parent decorators.
+ * Results are memoised per class constructor.
  */
 export function getPropertiesMetadata(ctor: Function): Record<string, PropertyMetadataEntry> {
+    const cached = propertiesMetadataCache.get(ctor);
+    if (cached) return cached;
+
     const result: Record<string, PropertyMetadataEntry> = {};
     const chain: Function[] = [];
     let current = ctor;
@@ -73,14 +85,19 @@ export function getPropertiesMetadata(ctor: Function): Record<string, PropertyMe
         const meta = propertyRegistry.get(c);
         if (meta) Object.assign(result, meta);
     }
+    propertiesMetadataCache.set(ctor, result);
     return result;
 }
 
 /**
  * Retrieve relation metadata for a given class constructor.
  * Walks the prototype chain so subclass decorators compose with parent decorators.
+ * Results are memoised per class constructor.
  */
 export function getRelationsMetadata(ctor: Function): Record<string, RelationMetadataEntry> {
+    const cached = relationsMetadataCache.get(ctor);
+    if (cached) return cached;
+
     const result: Record<string, RelationMetadataEntry> = {};
     const chain: Function[] = [];
     let current = ctor;
@@ -92,6 +109,18 @@ export function getRelationsMetadata(ctor: Function): Record<string, RelationMet
         const meta = relationRegistry.get(c);
         if (meta) Object.assign(result, meta);
     }
+    relationsMetadataCache.set(ctor, result);
+    return result;
+}
+
+/**
+ * Get or compute memoised SHACL for a class. Used by @Model decorator.
+ */
+export function getMemoizedSHACL(target: Function, compute: () => any): any {
+    const cached = shaclCache.get(target);
+    if (cached) return cached;
+    const result = compute();
+    shaclCache.set(target, result);
     return result;
 }
 
@@ -137,7 +166,7 @@ export interface Ad4mModelLike {
  *
  * Inspects the target class's property metadata to derive:
  * - `conformanceConditions`: Structured, DB-agnostic conditions (flag & required checks)
- * - `getter`: Pre-computed SurrealQL expression that traverses outgoing links and filters
+ * - `getter`: Pre-computed graph traversal expression that traverses outgoing links and filters
  *   target nodes to only those conforming to the target shape.
  *
  * @param relationPredicate - The relation's predicate URI (e.g. "flux://entry_type")
@@ -151,7 +180,8 @@ export function buildConformanceFilter(
     try {
         const targetProps = getPropertiesMetadata(targetClass);
         const conditions: ConformanceCondition[] = [];
-        const surrealConditions: string[] = [];
+        const sparqlConditions: string[] = [];
+        let varIdx = 0;
 
         // 1. Flags — check predicate + value
         for (const [_propName, propMeta] of Object.entries(targetProps)) {
@@ -161,8 +191,8 @@ export function buildConformanceFilter(
                     predicate: propMeta.through,
                     value: propMeta.initial,
                 });
-                surrealConditions.push(
-                    `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.through)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
+                sparqlConditions.push(
+                    `?target <${escapeQueryString(propMeta.through)}> <${escapeQueryString(propMeta.initial)}> .`
                 );
             }
         }
@@ -175,8 +205,8 @@ export function buildConformanceFilter(
                     type: 'required',
                     predicate: propMeta.through,
                 });
-                surrealConditions.push(
-                    `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.through)}']) > 0`
+                sparqlConditions.push(
+                    `?target <${escapeQueryString(propMeta.through)}> ?_v${varIdx++} .`
                 );
             }
         }
@@ -185,8 +215,7 @@ export function buildConformanceFilter(
             return undefined;
         }
 
-        const escapedPredicate = escapeSurrealString(relationPredicate);
-        const getter = `(->link[WHERE predicate = '${escapedPredicate}'].out[WHERE ${surrealConditions.join(' AND ')}].uri)`;
+        const getter = `SELECT ?target WHERE { <Base> <${escapeQueryString(relationPredicate)}> ?target . ${sparqlConditions.join(' ')} }`;
 
         return { getter, conformanceConditions: conditions };
     } catch (e) {
@@ -233,9 +262,9 @@ export interface PropertyOptions {
     prologSetter?: string;
 
     /**
-     * Custom SurrealQL getter to resolve the property value. Use this for custom graph traversals.
+     * Custom getter to resolve the property value. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
-     * Example: "(<-link[WHERE predicate = 'flux://has_reply'].in.uri)[0]"
+     * Example: "SELECT ?target WHERE { <Base> <flux://has_reply> ?target . } LIMIT 1"
      */
     getter?: string;
 
@@ -268,8 +297,8 @@ function applyPropertyMetadata(opts: PropertyOptions) {
             throw new Error("SubjectProperty requires an 'initial' option if 'required' is true");
         }
 
-        if (!opts.through && !opts.prologGetter) {
-            throw new Error("SubjectProperty requires either 'through' or 'prologGetter' option")
+        if (!opts.through && !opts.prologGetter && !opts.getter) {
+            throw new Error("SubjectProperty requires either 'through' or 'prologGetter' or 'getter' option")
         }
 
         // Write to WeakMap registry (keyed by constructor)
@@ -492,13 +521,13 @@ export function Model(opts: ModelConfig) {
         }
 
         target.generateSHACL = function() {
-            return buildSHACL(
+            return getMemoizedSHACL(target, () => buildSHACL(
                 opts.name,
                 target,
                 getPropertiesMetadata(target),
                 getRelationsMetadata(target),
                 buildConformanceFilter,
-            );
+            ));
         }
 
         Object.defineProperty(target, 'type', {configurable: true});
@@ -523,7 +552,7 @@ export function Model(opts: ModelConfig) {
  * Properties are optional by default. When a model instance is created without
  * providing a value for an optional property, no link is added to the graph.
  * Set `required: true` explicitly when a property must always be present (this
- * also adds a `"literal://string:uninitialized"` sentinel as the initial value
+ * also adds a `"literal:string:uninitialized"` sentinel as the initial value
  * so that the SDNA constructor creates a placeholder link).
  * 
  * @example
@@ -562,7 +591,7 @@ export function Model(opts: ModelConfig) {
  * @param {PropertyOptions} opts - Property configuration
  * @param {string} opts.through - The predicate URI for the property
  * @param {boolean} [opts.required=false] - Whether the property is required (adds query filters and sentinel initial value)
- * @param {string} [opts.initial] - Initial value (defaults to "literal://string:uninitialized" when required)
+ * @param {string} [opts.initial] - Initial value (defaults to "literal:string:uninitialized" when required)
  * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
@@ -575,7 +604,7 @@ export function Property(opts: PropertyOptions) {
         required,
         readOnly: opts.readOnly ?? false,
         resolveLanguage: opts.resolveLanguage ?? "literal",
-        initial: opts.initial ?? (required ? "literal://string:uninitialized" : undefined),
+        initial: opts.initial ?? (required ? "literal:string:uninitialized" : undefined),
     });
 }
 
@@ -659,9 +688,9 @@ export interface RelationOptions {
      *  Cannot be combined with `getter`. */
     target?: () => Ad4mModelLike;
     /**
-     * Custom SurrealQL getter to resolve the relation values. Use this for custom graph traversals.
+     * Custom getter to resolve the relation values. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
-     * Example: "(<-link[WHERE predicate = 'flux://has_reply'].out.uri)"
+     * Example: "SELECT ?target WHERE { ?target <flux://has_reply> <Base> . }"
      *
      * Mutually exclusive with `through` and `target`. When `getter` is provided the
      * relation is read-only (no adder/remover actions are generated).
@@ -750,7 +779,7 @@ function resolveRelationArgs(
         if (opts.where) {
             throw new Error(
                 'Relation decorator: `where` and `getter` are mutually exclusive. ' +
-                'Use `where` for DSL-based filtering, or `getter` for raw SurrealQL.'
+                'Use `where` for DSL-based filtering, or `getter` for raw getter expression.'
             );
         }
         return opts;

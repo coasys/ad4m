@@ -1,21 +1,23 @@
 /**
- * Shared SurrealQL compilation utilities.
+ * Shared query compilation utilities.
  *
  * These functions are used by both the runtime query builder (`Ad4mModel`) and
  * the compile-time SHACL generator (`decorators.ts`).
+ *
+ * All output uses native SPARQL syntax.
  */
 
 import type { WhereCondition, Where, ModelMetadata } from "./types";
-import { escapeSurrealString } from "../utils";
+import { escapeQueryString } from "../utils";
 
 /**
- * Format a JavaScript value for embedding in a SurrealQL expression.
+ * Format a JavaScript value for embedding in a query expression.
  *
  * - Strings are single-quoted with backslash / quote / newline escaping
  * - Numbers and booleans are passed through as-is
  * - Arrays are recursed
  */
-export function formatSurrealValue(value: any): string {
+export function formatQueryValue(value: any): string {
     if (typeof value === 'string') {
         // Escape backslashes first, then single quotes and other special characters
         const escaped = value
@@ -29,38 +31,51 @@ export function formatSurrealValue(value: any): string {
     } else if (typeof value === 'number' || typeof value === 'boolean') {
         return String(value);
     } else if (Array.isArray(value)) {
-        return `[${value.map(v => formatSurrealValue(v)).join(', ')}]`;
+        return `[${value.map(v => formatQueryValue(v)).join(', ')}]`;
     } else {
         return String(value);
     }
 }
 
 /**
- * Compile a single Where condition for a property into a SurrealQL
- * graph-traversal sub-expression.
+ * Compile a single Where condition for a property into a SPARQL triple pattern
+ * that can be embedded in a getter's WHERE clause.
  *
- * Operates on the **target node** — generates `count(->link[WHERE ...]) > 0`
- * style checks that can be used inside a `[WHERE ...]` filter on nodes.
+ * The generated pattern operates on `?target` — e.g.:
+ *   `?target <pred> <value> .`
+ *   `FILTER EXISTS { ?target <pred> ?_v0 }`
  *
  * @param predicate  - The predicate URI for the property
  * @param condition  - The Where condition value
  * @param opts       - Optional settings (e.g. `resolveLanguage`)
- * @returns A single SurrealQL condition string
+ * @returns A single SPARQL condition string
  */
 export function buildWhereCondition(
     predicate: string,
     condition: WhereCondition,
     opts?: { resolveLanguage?: string },
 ): string {
-    const escapedPredicate = escapeSurrealString(predicate);
-    const targetField = opts?.resolveLanguage === 'literal'
-        ? 'fn::parse_literal(out.uri)'
-        : 'out.uri';
+    const escapedPredicate = escapeQueryString(predicate);
+    // For literal-resolved properties, we match against the raw IRI (which is a literal: URI)
+    // For language-resolved properties, we match against the plain URI
+    // For literal-resolved properties, values are stored as IRIs like <literal:string:VALUE>
+    // For language-resolved properties, values are plain URIs
+    const isLiteral = !opts?.resolveLanguage || opts.resolveLanguage === 'literal';
+
+    function formatValue(v: any): string {
+        if (typeof v === 'string') {
+            return isLiteral
+                ? `<literal:string:${escapeQueryString(v)}>`
+                : `<${escapeQueryString(v)}>`;
+        }
+        // Numbers/booleans — also stored as literal:string: in AD4M
+        return `<literal:string:${v}>`;
+    }
 
     if (Array.isArray(condition)) {
-        // Array values → IN clause
-        const formattedValues = (condition as any[]).map(v => formatSurrealValue(v)).join(', ');
-        return `count(->link[WHERE predicate = '${escapedPredicate}' AND ${targetField} IN [${formattedValues}]]) > 0`;
+        // Array values → FILTER IN
+        const formattedValues = (condition as any[]).map(formatValue).join(', ');
+        return `FILTER EXISTS { ?target <${escapedPredicate}> ?_val . FILTER(?_val IN (${formattedValues})) }`;
     } else if (typeof condition === 'object' && condition !== null) {
         // Operator object
         const ops = condition as any;
@@ -68,39 +83,41 @@ export function buildWhereCondition(
 
         if (ops.not !== undefined) {
             if (Array.isArray(ops.not)) {
-                const formattedValues = ops.not.map((v: any) => formatSurrealValue(v)).join(', ');
+                const formattedValues = ops.not.map((v: any) => formatValue(v)).join(', ');
+                // FILTER NOT EXISTS here is scoped to a specific predicate, not a global scan,
+                // so O(N²) behavior is bounded by the number of values for this property.
                 parts.push(
-                    `count(->link[WHERE predicate = '${escapedPredicate}' AND ${targetField} IN [${formattedValues}]]) = 0`,
+                    `FILTER NOT EXISTS { ?target <${escapedPredicate}> ?_nval . FILTER(?_nval IN (${formattedValues})) }`,
                 );
             } else {
+                // FILTER NOT EXISTS here is scoped to a specific predicate, not a global scan,
+                // so O(N²) behavior is bounded by the number of values for this property.
                 parts.push(
-                    `count(->link[WHERE predicate = '${escapedPredicate}' AND ${targetField} = ${formatSurrealValue(ops.not)}]) = 0`,
+                    `FILTER NOT EXISTS { ?target <${escapedPredicate}> ${formatValue(ops.not)} }`,
                 );
             }
         }
 
-        // Comparison operators — ensure property exists (actual comparison
-        // may be post-filtered in JS at runtime, but the SurrealQL condition
-        // is valid for compile-time getter generation too).
+        // Comparison operators — ensure property exists
         const hasComparisonOps =
             ops.gt !== undefined || ops.gte !== undefined ||
             ops.lt !== undefined || ops.lte !== undefined ||
             ops.between !== undefined || ops.contains !== undefined;
         if (hasComparisonOps) {
             parts.push(
-                `count(->link[WHERE predicate = '${escapedPredicate}']) > 0`,
+                `FILTER EXISTS { ?target <${escapedPredicate}> ?_cmp }`,
             );
         }
 
-        return parts.join(' AND ');
+        return parts.join(' ');
     } else {
         // Simple equality
-        return `count(->link[WHERE predicate = '${escapedPredicate}' AND ${targetField} = ${formatSurrealValue(condition)}]) > 0`;
+        return `?target <${escapedPredicate}> ${formatValue(condition)} .`;
     }
 }
 
 /**
- * Compile a full `Where` clause to an array of SurrealQL condition strings.
+ * Compile a full `Where` clause to an array of SPARQL condition strings.
  *
  * When `metadata` is provided, property names are resolved to predicates
  * using the model's property metadata.  When `metadata` is `null`, property

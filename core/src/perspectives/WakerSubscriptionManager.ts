@@ -1,5 +1,5 @@
 /**
- * WakerSubscriptionManager — manages live SurrealDB subscriptions for the waker.
+ * WakerSubscriptionManager — manages live query subscriptions for the waker.
  *
  * Lives in core so it can be imported by both the plugin and integration tests
  * without ESM/CJS import issues.
@@ -32,7 +32,7 @@ export interface WakerLogger {
 }
 
 export interface WakerSubscriptionManagerOptions {
-  /** PerspectiveClient from Ad4mClient (provides perspectiveSubscribeSurrealQuery etc.) */
+  /** PerspectiveClient from Ad4mClient (provides subscribeQuery etc.) */
   perspectiveClient: any;
   /** Logger instance */
   logger: WakerLogger;
@@ -76,7 +76,7 @@ export class WakerSubscriptionManager {
   }
 
   /**
-   * Create a live SurrealDB subscription.
+   * Create a live SPARQL subscription.
    * If a subscription with the same id already exists, it is disposed first.
    */
   async subscribe(sub: WakerSubscription): Promise<void> {
@@ -91,14 +91,14 @@ export class WakerSubscriptionManager {
     this.logger.info(
       `[waker] ${sub.id}: creating subscription (perspective=${sub.perspective}, type=${sub.type})`,
     );
-    this.logger.info(`[waker] ${sub.id}: SurrealQL query:\n${sub.query}`);
+    this.logger.info(`[waker] ${sub.id}: SPARQL query:\n${sub.query}`);
 
     const proxy = new QuerySubscriptionProxy(
       sub.perspective,
       sub.query,
       this.perspectiveClient,
     );
-    proxy.isSurrealDB = true;
+    proxy.isSPARQL = true;
     // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
     // rejects this promise internally when subscribe() fails, and if nobody catches
     // it before the next microtask it crashes the process.
@@ -134,7 +134,7 @@ export class WakerSubscriptionManager {
         `[waker] ${sub.id}: onResult fired — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
       );
 
-      // SurrealDB can deliver non-array values (e.g. false) on disconnect/reconnect — ignore them
+      // Query engine can deliver non-array values (e.g. false) on disconnect/reconnect — ignore them
       if (!Array.isArray(result)) {
         this.logger.warn(
           `[waker] ${sub.id}: ignoring non-array result: ${JSON.stringify(result)}`,
@@ -170,10 +170,9 @@ export class WakerSubscriptionManager {
         for (const msgAddr of newMessages) {
           const parents: string[] = [];
           try {
-            const escaped = msgAddr.replace(/'/g, "\\'");
-            const parentQuery = `SELECT * FROM link WHERE predicate = 'ad4m://has_child' AND target = '${escaped}'`;
+            const parentQuery = `SELECT ?source WHERE { ?source <ad4m://has_child> <${msgAddr}> . }`;
             this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
-            const parentResult = await this.perspectiveClient.querySurrealDB(sub.perspective, parentQuery);
+            const parentResult = await this.perspectiveClient.querySparql(sub.perspective, parentQuery);
             if (Array.isArray(parentResult)) {
               for (const link of parentResult) {
                 if (link && link.source) {

@@ -197,7 +197,7 @@ describe("Ad4mModel — Core CRUD", function () {
 
   it("findOne() returns null for non-existent id", async () => {
     const missing = await TestPost.findOne(perspective, {
-      where: { id: "literal://string:no-such-id" },
+      where: { id: "literal:string:no-such-id" },
     });
     expect(missing).to.be.null;
   });

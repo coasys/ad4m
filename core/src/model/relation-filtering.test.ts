@@ -22,7 +22,7 @@ import {
   SHACLPropertyShape,
   ConformanceCondition,
 } from "../shacl/SHACLShape";
-import { compileWhereClause } from "./surreal-utils";
+import { compileWhereClause } from "./query-utils";
 
 // ============================================================================
 // Test models
@@ -65,7 +65,7 @@ class ParentWithRelations extends Ad4mModel {
   unfilteredItems: string[] = [];
 
   @HasMany({
-    getter: "(<-link[WHERE predicate = 'test://custom'].in.uri)",
+    getter: "SELECT ?target WHERE { ?target <test://custom> ?source . }",
   })
   customItems: string[] = [];
 }
@@ -93,8 +93,8 @@ describe("buildConformanceFilter()", () => {
     expect(reqCond!.predicate).toBe("test://name");
     expect(reqCond!.value).toBeUndefined();
 
-    // Getter string should be a SurrealQL expression
-    expect(result!.getter).toContain("->link[WHERE predicate =");
+    // Getter string should be a SPARQL expression
+    expect(result!.getter).toContain("SELECT ?target WHERE");
     expect(result!.getter).toContain("test://has_flagged");
     expect(result!.getter).toContain("test://type");
     expect(result!.getter).toContain("test://flagged_type");
@@ -130,7 +130,7 @@ describe("buildConformanceFilter()", () => {
       @Property({
         through: "test://computed",
         required: true,
-        getter: "(<-link[WHERE predicate = 'test://custom'].in.uri)[0]",
+        getter: "SELECT ?target WHERE { ?target <test://custom> ?source . } LIMIT 1",
       })
       computed: string = "";
     }
@@ -148,7 +148,7 @@ describe("buildConformanceFilter()", () => {
 // ============================================================================
 
 describe("SHACL shape getter serialization", () => {
-  const testGetter = "(->link[WHERE predicate = 'test://pred'].out[WHERE count(->link[WHERE predicate = 'test://type' AND out.uri = 'test://flag']) > 0].uri)";
+  const testGetter = "SELECT ?target WHERE { <Base> <test://pred> ?target . ?target <test://type> <test://flag> . }";
   const testConditions: ConformanceCondition[] = [
     { type: "flag", predicate: "test://type", value: "test://flag" },
     { type: "required", predicate: "test://name" },
@@ -170,7 +170,7 @@ describe("SHACL shape getter serialization", () => {
     // Verify getter link exists
     const getterLink = links.find(l => l.predicate === "ad4m://getter");
     expect(getterLink).toBeDefined();
-    expect(getterLink!.target).toBe(`literal://string:${testGetter}`);
+    expect(getterLink!.target).toBe(`literal:string:${testGetter}`);
 
     // Verify conditions link exists
     const conditionsLink = links.find(l => l.predicate === "ad4m://conformanceConditions");
@@ -338,7 +338,7 @@ describe("Ad4mModel.getModelMetadata() relation filtering fields", () => {
 
     // Explicit getter provided via decorator (getter-only, no predicate)
     expect(metadata.relations.customItems.getter).toBe(
-      "(<-link[WHERE predicate = 'test://custom'].in.uri)"
+      "SELECT ?target WHERE { ?target <test://custom> ?source . }"
     );
     expect(metadata.relations.customItems.predicate).toBe("");
 
@@ -388,7 +388,7 @@ describe("Relation decorator validation", () => {
       @Model({ name: "InvalidGetterTarget" })
       class _Invalid extends Ad4mModel {
         @HasMany({
-          getter: "(<-link.in.uri)",
+          getter: "SELECT ?target WHERE { ?target ?p ?source . }",
           target: () => FlaggedTarget,
         })
         items: string[] = [];
@@ -401,7 +401,7 @@ describe("Relation decorator validation", () => {
       @Model({ name: "InvalidGetterThrough" })
       class _Invalid extends Ad4mModel {
         @HasMany({
-          getter: "(<-link.in.uri)",
+          getter: "SELECT ?target WHERE { ?target ?p ?source . }",
           through: "test://pred",
         })
         items: string[] = [];
@@ -414,7 +414,7 @@ describe("Relation decorator validation", () => {
       @Model({ name: "ValidGetterOnly" })
       class _Valid extends Ad4mModel {
         @HasMany({
-          getter: "(<-link.in.uri)",
+          getter: "SELECT ?target WHERE { ?target ?p ?source . }",
         })
         items: string[] = [];
       }
@@ -551,7 +551,7 @@ describe("where clause validation", () => {
       class _Invalid extends Ad4mModel {
         @HasMany({
           where: { status: "active" },
-          getter: "(<-link.in.uri)",
+          getter: "SELECT ?target WHERE { ?target ?p ?source . }",
         })
         items: string[] = [];
       }
@@ -574,7 +574,7 @@ describe("where clause validation", () => {
 });
 
 describe("where clause compilation", () => {
-  it("should compile where clause to SurrealQL getter", () => {
+  it("should compile where clause to SPARQL getter", () => {
     @Model({ name: "WhereTarget" })
     class WhereTarget extends Ad4mModel {
       @Property({ through: "test://status", required: true })
@@ -760,7 +760,7 @@ describe("where clause compilation", () => {
 // ============================================================================
 
 describe("compileWhereClause()", () => {
-  it("should compile simple equality to SurrealQL condition", () => {
+  it("should compile simple equality to SPARQL condition", () => {
     const conditions = compileWhereClause(
       { status: "active" },
       { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test" }
@@ -776,7 +776,7 @@ describe("compileWhereClause()", () => {
       { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test" }
     );
     expect(conditions).toHaveLength(1);
-    expect(conditions[0]).toContain("= 0");  // negation
+    expect(conditions[0]).toContain("NOT EXISTS");  // negation
     expect(conditions[0]).toContain("archived");
   });
 

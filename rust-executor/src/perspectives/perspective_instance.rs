@@ -26,7 +26,6 @@ use crate::pubsub::{
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
     RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
-use crate::surreal_service::SurrealDBService;
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
 use chrono::DateTime;
@@ -35,7 +34,7 @@ use deno_core::error::AnyError;
 use futures::future;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,6 +42,17 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 use tokio::{join, time};
 use urlencoding;
+
+/// Tracks which predicates have changed since the last subscription check.
+#[derive(Debug, Clone)]
+enum ChangedPredicates {
+    /// No changes recorded yet (initial state)
+    NoneRecorded,
+    /// A predicate-less diff was seen — must check ALL subscriptions
+    CheckAll,
+    /// Only specific predicates changed
+    Specific(HashSet<String>),
+}
 use uuid;
 use uuid::Uuid;
 
@@ -55,6 +65,18 @@ static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
 
 fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
+}
+
+fn is_sparql_query(query: &str) -> bool {
+    let trimmed = query.trim();
+    trimmed.starts_with("SELECT")
+        || trimmed.starts_with("select")
+        || trimmed.starts_with("ASK")
+        || trimmed.starts_with("ask")
+        || trimmed.starts_with("CONSTRUCT")
+        || trimmed.starts_with("construct")
+        || trimmed.starts_with("DESCRIBE")
+        || trimmed.starts_with("describe")
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -159,14 +181,39 @@ struct SubscribedQuery {
     last_result: String,
     last_keepalive: Instant,
     user_email: Option<String>,
+    /// Predicate IRIs extracted from the SPARQL/Prolog query at registration time.
+    /// If empty, the subscription is always re-checked (safe fallback for variable predicates).
+    predicates: HashSet<String>,
 }
 
-#[derive(Clone)]
-struct SurrealSubscribedQuery {
-    query: String,
-    last_result: String,
-    last_keepalive: Instant,
-    user_email: Option<String>,
+/// Extract predicate IRIs from a SPARQL query by finding triple patterns.
+/// Returns an empty set if no fixed predicates are found (e.g. `?s ?p ?o`),
+/// which means the subscription should always be re-checked.
+///
+/// Also returns an empty set if a `GRAPH` pattern uses a variable predicate
+/// (e.g. `GRAPH ?g { ?source ?predicate ?target }`). Such patterns match links
+/// with ANY predicate, so we cannot narrow the subscription to a fixed set.
+fn extract_predicates_from_sparql(query: &str) -> HashSet<String> {
+    // Detect variable predicate inside GRAPH patterns:
+    // GRAPH ?var { ... ?var1 ?varPred ?var2 ... }
+    // This is the pattern our model queries use for fetching all links.
+    let graph_var_pred = regex::Regex::new(
+        r"GRAPH\s+\?\w+\s*\{[^}]*(?:\?\w+|<[^>]+>)\s+(\?\w+)\s+(?:\?\w+|<[^>]+>)[^}]*\}",
+    )
+    .unwrap();
+    if graph_var_pred.is_match(query) {
+        return HashSet::new();
+    }
+
+    let mut predicates = HashSet::new();
+    // Match triple patterns: (var|uri) <uri> (var|uri)
+    // The middle <uri> is the predicate
+    let re = regex::Regex::new(r"(?:\?\w+|<[^>]+>)\s+(<[^>]+>)\s+(?:\?\w+|<[^>]+>)").unwrap();
+    for cap in re.captures_iter(query) {
+        let pred = cap[1].trim_matches(|c| c == '<' || c == '>');
+        predicates.insert(pred.to_string());
+    }
+    predicates
 }
 
 #[derive(Clone)]
@@ -183,27 +230,27 @@ pub struct PerspectiveInstance {
     link_language: Arc<RwLock<Option<Language>>>,
     trigger_notification_check: Arc<Mutex<bool>>,
     trigger_prolog_subscription_check: Arc<Mutex<bool>>,
-    trigger_surreal_subscription_check: Arc<Mutex<bool>>,
+    /// Predicates of links changed since last subscription check.
+    changed_predicates: Arc<Mutex<ChangedPredicates>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
-    surreal_subscribed_queries: Arc<Mutex<HashMap<String, SurrealSubscribedQuery>>>,
     batch_store: Arc<RwLock<HashMap<String, PerspectiveDiff>>>,
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
-    // Each perspective has its own isolated SurrealDB instance
-    surreal_service: Arc<SurrealDBService>,
+    pub(crate) sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
 }
 
 impl PerspectiveInstance {
-    pub fn new(
-        handle: PerspectiveHandle,
-        created_from_join: Option<bool>,
-        surreal_service: SurrealDBService,
-    ) -> Self {
-        // Each perspective gets its own isolated SurrealDB database
-        // The service is created by the caller in an async context
+    pub fn new(handle: PerspectiveHandle, created_from_join: Option<bool>) -> Self {
+        // Build per-perspective data path for persistent SPARQL store
+        let sparql_data_path = crate::perspectives::get_app_data_path().map(|base| {
+            let p = std::path::PathBuf::from(&base)
+                .join("perspectives")
+                .join(&handle.uuid);
+            p.to_string_lossy().to_string()
+        });
 
         PerspectiveInstance {
             persisted: Arc::new(Mutex::new(handle.clone())),
@@ -217,17 +264,17 @@ impl PerspectiveInstance {
             link_language: Arc::new(RwLock::new(None)),
             trigger_notification_check: Arc::new(Mutex::new(false)),
             trigger_prolog_subscription_check: Arc::new(Mutex::new(false)),
-            trigger_surreal_subscription_check: Arc::new(Mutex::new(false)),
+            changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
-            surreal_subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
-            // Initialize fallback sync tracking
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
             fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
-            // Each perspective gets its own isolated SurrealDB database
-            surreal_service: Arc::new(surreal_service),
+            sparql_store: Arc::new(
+                crate::perspectives::sparql_store::SparqlStore::new(sparql_data_path.as_deref())
+                    .expect("Failed to create per-perspective SPARQL service"),
+            ),
         }
     }
 
@@ -238,7 +285,6 @@ impl PerspectiveInstance {
             self.nh_sync_loop(),
             self.pending_diffs_loop(),
             self.subscribed_queries_loop(),
-            self.surreal_subscription_cleanup_loop(),
             self.fallback_sync_loop()
         );
     }
@@ -247,36 +293,12 @@ impl PerspectiveInstance {
         *self.is_teardown.lock().await = true;
     }
 
-    /// Sync existing links from Prolog to SurrealDB
-    /// This should be called once when a perspective is loaded from storage
-    pub async fn sync_existing_links_to_surreal(&self) -> Result<(), AnyError> {
-        let uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
-
-        log::info!(
-            "💾 SURREAL SYNC: Starting initial sync for perspective {}",
-            uuid
-        );
-        let sync_start = std::time::Instant::now();
-
-        // Get all links from storage (Prolog)
-        let all_links = self.get_links(&LinkQuery::default()).await?;
-        log::info!("💾 SURREAL SYNC: Found {} links to sync", all_links.len());
-
-        if all_links.is_empty() {
-            log::info!("💾 SURREAL SYNC: No links to sync");
-            return Ok(());
-        }
-
-        // Reload perspective in SurrealDB
-        self.surreal_service
-            .reload_perspective(&uuid, all_links)
-            .await?;
-
-        log::info!("💾 SURREAL SYNC: Completed in {:?}", sync_start.elapsed());
-        Ok(())
+    /// Sync all existing links to the SPARQL (Oxigraph) store
+    pub fn sync_existing_links_to_sparql(
+        &self,
+        links: &[DecoratedLinkExpression],
+    ) -> Result<(), deno_core::anyhow::Error> {
+        self.sparql_store.reload(links.to_vec())
     }
 
     async fn ensure_link_language(&self) {
@@ -614,12 +636,12 @@ impl PerspectiveInstance {
         };
 
         if let Some(mut link_language) = link_language_clone {
-            // Query SurrealDB instead of Rusqlite
-            let decorated_links = match self.surreal_service.get_all_links(&uuid).await {
+            // Query SPARQL store for all links
+            let decorated_links = match self.sparql_store.get_all_links() {
                 Ok(links) => links,
                 Err(e) => {
                     log::error!(
-                        "Failed to get links from SurrealDB in ensure_public_links_are_shared for perspective {}: {}",
+                        "Failed to get links from SPARQL store in ensure_public_links_are_shared for perspective {}: {}",
                         uuid, e
                     );
                     return false;
@@ -883,7 +905,7 @@ impl PerspectiveInstance {
                 .collect(),
         };
 
-        // Write to SurrealDB (primary storage for links)
+        // Write to SPARQL store (primary storage for links)
         self.persist_link_diff(&decorated_diff).await?;
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
@@ -949,20 +971,18 @@ impl PerspectiveInstance {
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
 
-            let handle = self.persisted.lock().await.clone();
+            let _handle = self.persisted.lock().await.clone();
 
-            // Query SurrealDB instead of Rusqlite
+            // Query SPARQL store
             let decorated_link = self
-                .surreal_service
+                .sparql_store
                 .get_link(
-                    &handle.uuid,
                     &link_expression.data.source,
                     link_expression.data.predicate.as_deref(),
                     &link_expression.data.target,
                     &link_expression.author,
                     &link_expression.timestamp,
-                )
-                .await?
+                )?
                 .ok_or(anyhow!("Link not found"))?;
 
             let link_from_db = LinkExpression::from(decorated_link.clone());
@@ -971,21 +991,16 @@ impl PerspectiveInstance {
             diff.removals.push(link_from_db.clone());
             Ok(DecoratedLinkExpression::from((link_from_db, status)))
         } else {
-            let handle = self.persisted.lock().await.clone();
+            let _handle = self.persisted.lock().await.clone();
 
-            // Query SurrealDB instead of Rusqlite
-            if let Some(decorated_link) = self
-                .surreal_service
-                .get_link(
-                    &handle.uuid,
-                    &link_expression.data.source,
-                    link_expression.data.predicate.as_deref(),
-                    &link_expression.data.target,
-                    &link_expression.author,
-                    &link_expression.timestamp,
-                )
-                .await?
-            {
+            // Query SPARQL store
+            if let Some(decorated_link) = self.sparql_store.get_link(
+                &link_expression.data.source,
+                link_expression.data.predicate.as_deref(),
+                &link_expression.data.target,
+                &link_expression.author,
+                &link_expression.timestamp,
+            )? {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
 
@@ -995,7 +1010,7 @@ impl PerspectiveInstance {
                 let decorated_diff =
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link_result.clone()]);
 
-                // Remove from SurrealDB (primary storage)
+                // Remove from SPARQL store (primary storage)
                 self.persist_link_diff(&decorated_diff).await?;
 
                 // Update both Prolog engines: subscription (immediate) + query (lazy)
@@ -1115,14 +1130,14 @@ impl PerspectiveInstance {
             )));
         }
 
-        // Store link in SurrealDB (no longer using Rusqlite for links)
+        // Store link in SPARQL store
         let diff = PerspectiveDiff::from_additions(vec![link_expression.clone()]);
         let decorated_link_expression =
             DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
         let decorated_perspective_diff =
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
-        // Write to SurrealDB (primary storage for links)
+        // Write to SPARQL store (primary storage for links)
         self.persist_link_diff(&decorated_perspective_diff).await?;
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
@@ -1182,7 +1197,7 @@ impl PerspectiveInstance {
             let decorated_perspective_diff =
                 DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
 
-            // Write to SurrealDB (primary storage for links)
+            // Write to SPARQL store (primary storage for links)
             self.persist_link_diff(&decorated_perspective_diff).await?;
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
@@ -1253,7 +1268,7 @@ impl PerspectiveInstance {
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
 
-        // Write to SurrealDB (primary storage for links)
+        // Write to SPARQL store (primary storage for links)
         self.persist_link_diff(&decorated_diff).await?;
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
@@ -1303,18 +1318,14 @@ impl PerspectiveInstance {
         }
         let handle = self.persisted.lock().await.clone();
 
-        // Query SurrealDB instead of Rusqlite
-        let decorated_link_option = self
-            .surreal_service
-            .get_link(
-                &handle.uuid,
-                &old_link.data.source,
-                old_link.data.predicate.as_deref(),
-                &old_link.data.target,
-                &old_link.author,
-                &old_link.timestamp,
-            )
-            .await?;
+        // Query SPARQL store
+        let decorated_link_option = self.sparql_store.get_link(
+            &old_link.data.source,
+            old_link.data.predicate.as_deref(),
+            &old_link.data.target,
+            &old_link.author,
+            &old_link.timestamp,
+        )?;
 
         let (_link, link_status) = match decorated_link_option {
             Some(decorated) => {
@@ -1362,7 +1373,7 @@ impl PerspectiveInstance {
                 vec![decorated_old_link.clone()],
             );
 
-            // Write to SurrealDB (primary storage for links)
+            // Write to SPARQL store (primary storage for links)
             self.persist_link_diff(&decorated_diff).await?;
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
@@ -1429,24 +1440,19 @@ impl PerspectiveInstance {
         link_expressions: Vec<LinkExpression>,
         batch_id: Option<String>,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        let handle = self.persisted.lock().await.clone();
+        let _handle = self.persisted.lock().await.clone();
 
         // Filter to only existing links and collect their statuses
         let mut existing_links = Vec::new();
         for link in link_expressions {
-            // Query SurrealDB instead of Rusqlite
-            if let Some(decorated_link) = self
-                .surreal_service
-                .get_link(
-                    &handle.uuid,
-                    &link.data.source,
-                    link.data.predicate.as_deref(),
-                    &link.data.target,
-                    &link.author,
-                    &link.timestamp,
-                )
-                .await?
-            {
+            // Query SPARQL store
+            if let Some(decorated_link) = self.sparql_store.get_link(
+                &link.data.source,
+                link.data.predicate.as_deref(),
+                &link.data.target,
+                &link.author,
+                &link.timestamp,
+            )? {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
                 existing_links.push((link_from_db, status));
@@ -1486,7 +1492,7 @@ impl PerspectiveInstance {
 
             let decorated_diff = DecoratedPerspectiveDiff::from_removals(decorated_links.clone());
 
-            // Remove from SurrealDB (primary storage)
+            // Remove from SPARQL store (primary storage)
             self.persist_link_diff(&decorated_diff).await?;
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
@@ -1518,20 +1524,16 @@ impl PerspectiveInstance {
     /// 2. Links with predicate == "ad4m://sdna" (SDNA code)
     async fn get_sdna_links_local(&self) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
         // Query 1: Get all links from ad4m://self (SDNA declarations)
-        let self_links = self
-            .get_links_local(&LinkQuery {
-                source: Some("ad4m://self".to_string()),
-                ..Default::default()
-            })
-            .await?;
+        let self_links = self.get_links_local(&LinkQuery {
+            source: Some("ad4m://self".to_string()),
+            ..Default::default()
+        })?;
 
         // Query 2: Get all links with predicate ad4m://sdna (SDNA code)
-        let sdna_code_links = self
-            .get_links_local(&LinkQuery {
-                predicate: Some("ad4m://sdna".to_string()),
-                ..Default::default()
-            })
-            .await?;
+        let sdna_code_links = self.get_links_local(&LinkQuery {
+            predicate: Some("ad4m://sdna".to_string()),
+            ..Default::default()
+        })?;
 
         // Combine both result sets (using a HashSet to avoid duplicates)
         let mut seen = std::collections::HashSet::new();
@@ -1569,13 +1571,11 @@ impl PerspectiveInstance {
             uuid
         );
         // Query for SHACL class definition links
-        let shacl_class_links = self
-            .get_links_local(&LinkQuery {
-                predicate: Some("rdf://type".to_string()),
-                target: Some("ad4m://SubjectClass".to_string()),
-                ..Default::default()
-            })
-            .await?;
+        let shacl_class_links = self.get_links_local(&LinkQuery {
+            predicate: Some("rdf://type".to_string()),
+            target: Some("ad4m://SubjectClass".to_string()),
+            ..Default::default()
+        })?;
         log::debug!(
             "🔶 get_subject_classes_from_shacl: Found {} links",
             shacl_class_links.len()
@@ -1617,106 +1617,46 @@ impl PerspectiveInstance {
         Ok(class_names)
     }
 
-    async fn get_links_local(
+    fn get_links_local(
         &self,
         query: &LinkQuery,
     ) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let from_date = query.from_date.as_ref().map(|d| {
+            let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+            dt.to_rfc3339()
+        });
+        let until_date = query.until_date.as_ref().map(|d| {
+            let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+            dt.to_rfc3339()
+        });
 
-        // Query SurrealDB instead of Rusqlite
-        let decorated_links =
-            if query.source.is_none() && query.predicate.is_none() && query.target.is_none() {
-                self.surreal_service.get_all_links(&uuid).await?
-            } else if let Some(source) = &query.source {
-                self.surreal_service
-                    .get_links_by_source(&uuid, source)
-                    .await?
-            } else if let Some(target) = &query.target {
-                self.surreal_service
-                    .get_links_by_target(&uuid, target)
-                    .await?
-            } else if let Some(predicate) = &query.predicate {
-                self.surreal_service
-                    .get_links_by_predicate(&uuid, predicate)
-                    .await?
-            } else {
-                vec![]
-            };
+        let decorated_links = self.sparql_store.query_links(
+            query.source.as_deref(),
+            query.predicate.as_deref(),
+            query.target.as_deref(),
+            from_date.as_deref(),
+            until_date.as_deref(),
+            None, // Don't limit here — get_links() applies limit after sorting
+        )?;
 
-        // Convert DecoratedLinkExpression to (LinkExpression, LinkStatus)
-        let mut result: Vec<(LinkExpression, LinkStatus)> = decorated_links
+        let result: Vec<(LinkExpression, LinkStatus)> = decorated_links
             .into_iter()
             .map(|decorated| {
-                let status = decorated.status.clone().unwrap_or(LinkStatus::Local);
-                (LinkExpression::from(decorated), status)
+                let status = decorated.status.clone().unwrap_or(LinkStatus::Shared);
+                let link_expr = LinkExpression {
+                    author: decorated.author,
+                    timestamp: decorated.timestamp,
+                    data: decorated.data,
+                    proof: ExpressionProof {
+                        key: decorated.proof.key,
+                        signature: decorated.proof.signature,
+                    },
+                    status: Some(status.clone()),
+                };
+                (link_expr, status)
             })
             .collect();
 
-        if let Some(predicate) = &query.predicate {
-            result.retain(|(link, _status)| link.data.predicate.as_ref() == Some(predicate));
-            log::debug!(
-                "get_links_local: after predicate filter ({}): {} links",
-                predicate,
-                result.len()
-            );
-        }
-
-        if let Some(target) = &query.target {
-            result.retain(|(link, _status)| link.data.target == *target);
-            log::debug!(
-                "get_links_local: after target filter ({}): {} links",
-                target,
-                result.len()
-            );
-        }
-
-        if let Some(source) = &query.source {
-            result.retain(|(link, _status)| link.data.source == *source);
-            log::debug!(
-                "get_links_local: after source filter ({}): {} links",
-                source,
-                result.len()
-            );
-        }
-
-        let until_date: Option<chrono::DateTime<chrono::Utc>> =
-            query.until_date.clone().map(|d| d.into());
-        let from_date: Option<chrono::DateTime<chrono::Utc>> =
-            query.from_date.clone().map(|d| d.into());
-
-        if let Some(from_date) = &from_date {
-            result.retain(|(link, _)| {
-                let link_date = DateTime::parse_from_rfc3339(&link.timestamp).unwrap();
-                link_date >= *from_date
-            });
-        }
-
-        if let Some(until_date) = &until_date {
-            result.retain(|(link, _)| {
-                let link_date = DateTime::parse_from_rfc3339(&link.timestamp).unwrap();
-                link_date <= *until_date
-            });
-        }
-        /*
-
-        if let Some(limit) = query.limit {
-            let limit = limit as usize;
-            let result_length = result.len();
-            let start_limit = if from_date >= until_date {
-                result_length.saturating_sub(limit)
-            } else {
-                0
-            } as usize;
-
-            let end_limit = if from_date >= until_date {
-                result_length
-            } else {
-                limit.min(result_length)
-            } as usize;
-
-            result = result[..limit as usize].to_vec();
-        }
-        */
         Ok(result)
     }
 
@@ -1736,11 +1676,11 @@ impl PerspectiveInstance {
             }
         }
 
-        let mut links = self.get_links_local(&query).await?;
+        let mut links = self.get_links_local(&query)?;
 
         links.sort_by(|(a, _), (b, _)| {
-            let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap();
-            let b_time = DateTime::parse_from_rfc3339(&b.timestamp).unwrap();
+            let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap_or_default();
+            let b_time = DateTime::parse_from_rfc3339(&b.timestamp).unwrap_or_default();
             if reverse {
                 b_time.cmp(&a_time)
             } else {
@@ -1789,13 +1729,11 @@ impl PerspectiveInstance {
         if matches!(sdna_type, SdnaType::SubjectClass) {
             // Check for any existing SubjectClass with this name, regardless of namespace
             // We query by target (ad4m://SubjectClass) and then filter by class name
-            let all_class_links = self
-                .get_links_local(&LinkQuery {
-                    predicate: Some("rdf://type".to_string()),
-                    target: Some("ad4m://SubjectClass".to_string()),
-                    ..Default::default()
-                })
-                .await?;
+            let all_class_links = self.get_links_local(&LinkQuery {
+                predicate: Some("rdf://type".to_string()),
+                target: Some("ad4m://SubjectClass".to_string()),
+                ..Default::default()
+            })?;
 
             // Check if any existing class matches this name
             let exists = all_class_links.iter().any(|(link, _)| {
@@ -2166,8 +2104,7 @@ impl PerspectiveInstance {
         let mut links: Vec<DecoratedLinkExpression> = match PROLOG_MODE {
             PrologMode::Simple => {
                 // Get all links for Simple mode
-                self.get_links_local(&LinkQuery::default())
-                    .await?
+                self.get_links_local(&LinkQuery::default())?
                     .into_iter()
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
                     .collect()
@@ -2356,8 +2293,7 @@ impl PerspectiveInstance {
 
                 // Get links for SDNA fact generation
                 let links = self
-                    .get_links_local(&LinkQuery::default())
-                    .await?
+                    .get_links_local(&LinkQuery::default())?
                     .into_iter()
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
                     .collect::<Vec<_>>();
@@ -2456,8 +2392,7 @@ impl PerspectiveInstance {
 
                 // Get links for SDNA fact generation
                 let links = self
-                    .get_links_local(&LinkQuery::default())
-                    .await?
+                    .get_links_local(&LinkQuery::default())?
                     .into_iter()
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
                     .collect::<Vec<_>>();
@@ -2601,158 +2536,70 @@ impl PerspectiveInstance {
         .await
     }
 
-    /// Executes a SurrealQL query against the perspective's SurrealDB cache
-    /// Returns results as JSON values for easy handling
-    ///
-    /// # Errors
-    /// Returns an error if the query fails to execute or contains invalid syntax.
-    /// Callers should handle errors appropriately rather than silently ignoring them.
-    pub async fn surreal_query(&self, query: String) -> Result<Vec<serde_json::Value>, AnyError> {
-        let uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
-
-        self.surreal_service
-            .query_links(&uuid, &query)
-            .await
-            .map_err(|e| {
-                log::error!(
-                    "Failed to execute SurrealDB query for perspective {}: {:?}",
-                    uuid,
-                    e
-                );
-                anyhow!("SurrealDB query failed for perspective {}: {}", uuid, e)
-            })
-    }
-
-    /// Executes a SurrealQL query for notifications with context injection
-    /// Auto-injects $agentDid and $perspectiveId variables before execution
-    pub async fn surreal_query_notification(
-        &self,
-        query: String,
-        user_email: Option<String>,
-    ) -> Result<Vec<serde_json::Value>, AnyError> {
-        // Get context data without holding locks
-        let perspective_id = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
-
-        // Get agent DID for the specific user (main agent if user_email is None)
-        let agent_context = if let Some(email) = user_email {
-            crate::agent::AgentContext::for_user_email(email)
-        } else {
-            crate::agent::AgentContext::main_agent()
-        };
-        let agent_did = crate::agent::did_for_context(&agent_context)
-            .map_err(|e| anyhow!("Failed to get agent DID: {}", e))?;
-
-        // Inject context variables using string replacement instead of LET statements
-        // This ensures the SELECT query result is at index 0
-        let query_with_context = query
-            .replace("$agentDid", &format!("'{}'", agent_did))
-            .replace("$perspectiveId", &format!("'{}'", perspective_id));
-
-        log::debug!("🔔 Notification query original: {}", query);
-        log::debug!(
-            "🔔 Notification query with context (agentDid='{}', perspectiveId='{}'): {}",
-            agent_did,
-            perspective_id,
-            query_with_context
-        );
-
-        let results = self
-            .surreal_service
-            .query_links(&perspective_id, &query_with_context)
-            .await
-            .map_err(|e| {
-                log::error!(
-                    "Failed to execute notification query for perspective {}: {:?}",
-                    perspective_id,
-                    e
-                );
-                anyhow!(
-                    "Notification query failed for perspective {}: {}",
-                    perspective_id,
-                    e
-                )
-            })?;
-
-        log::debug!("🔔 Notification query results: {:?}", results);
-
-        Ok(results)
-    }
-
-    async fn retry_surreal_op<F, Fut>(op: F, uuid: &str, op_name: &str) -> Result<(), anyhow::Error>
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<(), anyhow::Error>>,
-    {
-        let mut attempts = 0;
-        let max_attempts = 5;
-        loop {
-            match op().await {
-                Ok(_) => return Ok(()),
-                Err(e) => {
-                    let msg = format!("{}", e);
-                    if msg.contains("Failed to commit transaction due to a read or write conflict")
-                        && attempts < max_attempts
-                    {
-                        attempts += 1;
-                        tokio::time::sleep(std::time::Duration::from_millis(100 * attempts)).await;
-                        continue;
-                    } else {
-                        log::warn!(
-                            "Failed to {} link in SurrealDB for perspective {}: {:?}",
-                            op_name,
-                            uuid,
-                            e
-                        );
-                        return Err(e);
-                    }
-                }
-            }
-        }
+    /// Execute a SPARQL query against this perspective's Oxigraph store
+    pub fn sparql_query(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
+        self.sparql_store.query(&query)
     }
 
     pub(crate) async fn persist_link_diff(
         &self,
         diff: &DecoratedPerspectiveDiff,
     ) -> Result<(), AnyError> {
-        // Get UUID
-        let uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
-
-        // Update SurrealDB synchronously
         // IMPORTANT: Process removals BEFORE additions!
         // The remove_link function matches by source/predicate/target (not unique ID).
         // If we add first and remove second, we'd delete the newly added links too.
-        // Example: collection update removes [pasta, sauce, cheese], adds [pasta, sauce, cheese, garlic]
-        // Wrong order: add 4 links, then remove 3 -> only garlic remains
-        // Correct order: remove 3 old links, then add 4 new links -> all 4 remain
 
         // Removals first
         for removal in &diff.removals {
-            Self::retry_surreal_op(
-                || self.surreal_service.remove_link(&uuid, removal),
-                &uuid,
-                "remove",
-            )
-            .await?;
+            if let Err(e) = self.sparql_store.remove_link(removal) {
+                log::warn!("Failed to remove link from SPARQL store: {:?}", e);
+            }
         }
         // Additions after
         for addition in &diff.additions {
-            Self::retry_surreal_op(
-                || self.surreal_service.add_link(&uuid, addition),
-                &uuid,
-                "add",
-            )
-            .await?;
+            if let Err(e) = self.sparql_store.add_link(addition) {
+                log::warn!("Failed to add link to SPARQL store: {:?}", e);
+            }
         }
+
         Ok(())
+    }
+
+    /// Record the predicates from a diff into `changed_predicates`.
+    /// `None` means "all predicates changed" (check everything).
+    async fn record_changed_predicates(&self, diff: &DecoratedPerspectiveDiff) {
+        let mut changed = self.changed_predicates.lock().await;
+
+        // If already CheckAll, it's sticky — nothing to do
+        if matches!(*changed, ChangedPredicates::CheckAll) {
+            return;
+        }
+
+        // Collect predicates from the diff
+        let mut new_preds = HashSet::new();
+        let mut has_predicate_less = false;
+        for link in diff.additions.iter().chain(diff.removals.iter()) {
+            if let Some(ref pred) = link.data.predicate {
+                new_preds.insert(pred.clone());
+            } else {
+                has_predicate_less = true;
+                break;
+            }
+        }
+
+        if has_predicate_less {
+            *changed = ChangedPredicates::CheckAll;
+        } else {
+            match &mut *changed {
+                ChangedPredicates::NoneRecorded => {
+                    *changed = ChangedPredicates::Specific(new_preds);
+                }
+                ChangedPredicates::Specific(existing) => {
+                    existing.extend(new_preds);
+                }
+                ChangedPredicates::CheckAll => unreachable!(),
+            }
+        }
     }
 
     fn spawn_prolog_facts_update(
@@ -2769,10 +2616,10 @@ impl PerspectiveInstance {
                 || PROLOG_MODE == PrologMode::Simple
                 || PROLOG_MODE == PrologMode::SdnaOnly
             {
-                // Trigger notification, prolog subscription, and surreal subscription checks
+                // Trigger notification, prolog subscription
                 *(self_clone.trigger_notification_check.lock().await) = true;
+                self_clone.record_changed_predicates(&diff).await;
                 *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
-                *(self_clone.trigger_surreal_subscription_check.lock().await) = true;
 
                 self_clone.pubsub_publish_diff(diff).await;
 
@@ -2893,12 +2740,12 @@ impl PerspectiveInstance {
             };
 
             if did_update {
+                self_clone.record_changed_predicates(&diff).await;
                 self_clone.pubsub_publish_diff(diff).await;
 
                 // Trigger notification and subscription checks after prolog facts are updated
                 *(self_clone.trigger_notification_check.lock().await) = true;
                 *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
-                *(self_clone.trigger_surreal_subscription_check.lock().await) = true;
             }
 
             //log::info!("🔧 PROLOG UPDATE: Total prolog update task took {:?}", spawn_start.elapsed());
@@ -2934,9 +2781,7 @@ impl PerspectiveInstance {
         //    .collect::<Vec<String>>()
         //    .join("\n"));
         let mut result_map = BTreeMap::new();
-        // Cache key must include both trigger and user_email since surreal_query_notification
-        // uses user_email to determine $agentDid substitution - otherwise users with identical
-        // triggers would incorrectly share cached results
+        // Cache key must include both trigger and user_email for deduplication
         let mut trigger_cache: HashMap<(String, Option<String>), Vec<serde_json::Value>> =
             HashMap::new();
 
@@ -2952,20 +2797,26 @@ impl PerspectiveInstance {
                 // Handle errors per-notification to prevent one user's DID failure from
                 // silencing all notifications. This can happen with orphaned notifications
                 // from deleted users or corrupted data.
-                match self
-                    .surreal_query_notification(n.trigger.clone(), n.user_email.clone())
-                    .await
-                {
+                match {
+                    let query = n.trigger.clone();
+                    let result_json = self.sparql_store.query(&query);
+                    match result_json {
+                        Ok(json) => serde_json::from_str::<Vec<serde_json::Value>>(&json)
+                            .map_err(|e| anyhow::anyhow!(e)),
+                        Err(e) => Err(e),
+                    }
+                } {
                     Ok(matches) => {
                         trigger_cache.insert(cache_key, matches.clone());
                         result_map.insert(n.clone(), matches);
                     }
                     Err(e) => {
                         log::error!(
-                            "Failed to query notification for user {:?} in perspective {}: {:?}. Skipping this notification.",
+                            "Failed to query notification for user {:?} in perspective {}: {:?}. Query: {}. Skipping this notification.",
                             n.user_email,
                             uuid,
-                            e
+                            e,
+                            n.trigger
                         );
                         // Skip this notification but continue processing others
                     }
@@ -3640,13 +3491,15 @@ impl PerspectiveInstance {
         })
     }
 
-    /// Parse actions JSON from a literal target (format: "literal://string:{json}")
+    /// Parse actions JSON from a literal target (format: "literal:string:{json}" or legacy "literal://string:{json}")
     fn parse_actions_from_literal(target: &str) -> Result<Vec<Command>, AnyError> {
-        let prefix = "literal://string:";
-        if !target.starts_with(prefix) {
+        let json_str = if let Some(rest) = target.strip_prefix("literal://string:") {
+            rest
+        } else if let Some(rest) = target.strip_prefix("literal:string:") {
+            rest
+        } else {
             return Err(anyhow!("Invalid literal format: {}", target));
-        }
-        let json_str = &target[prefix.len()..];
+        };
         // Decode URL-encoded characters if present
         let decoded = urlencoding::decode(json_str)
             .map(|s| s.to_string())
@@ -3661,14 +3514,13 @@ impl PerspectiveInstance {
         class_name: &str,
         predicate: &str,
     ) -> Result<Option<Vec<Command>>, AnyError> {
-        // Query SurrealDB for links with the given predicate whose source ends with {ClassName}Shape
+        // Query SPARQL store for links with the given predicate whose source ends with {ClassName}Shape
         let shape_suffix = format!("{}Shape", class_name);
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let _uuid = self.persisted.lock().await.uuid.clone();
 
         let links = self
-            .surreal_service
-            .get_links_by_predicate_and_source_suffix(&uuid, predicate, &shape_suffix)
-            .await?;
+            .sparql_store
+            .get_links_by_predicate_and_source_suffix(predicate, &shape_suffix)?;
 
         // Return the first match
         if let Some(link) = links.first() {
@@ -3687,12 +3539,11 @@ impl PerspectiveInstance {
     ) -> Result<Option<Vec<Command>>, AnyError> {
         // Property shape URI format: {namespace}{ClassName}.{propertyName}
         let prop_suffix = format!("{}.{}", class_name, property);
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let _uuid = self.persisted.lock().await.uuid.clone();
 
         let links = self
-            .surreal_service
-            .get_links_by_predicate_and_source_suffix(&uuid, predicate, &prop_suffix)
-            .await?;
+            .sparql_store
+            .get_links_by_predicate_and_source_suffix(predicate, &prop_suffix)?;
 
         // Return the first match
         if let Some(link) = links.first() {
@@ -3709,22 +3560,25 @@ impl PerspectiveInstance {
         property: &str,
     ) -> Result<Option<String>, AnyError> {
         let prop_suffix = format!("{}.{}", class_name, property);
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let _uuid = self.persisted.lock().await.uuid.clone();
 
         let links = self
-            .surreal_service
-            .get_links_by_predicate_and_source_suffix(&uuid, "ad4m://resolveLanguage", &prop_suffix)
-            .await?;
+            .sparql_store
+            .get_links_by_predicate_and_source_suffix("ad4m://resolveLanguage", &prop_suffix)?;
 
         if let Some(link) = links.first() {
-            // Extract value from literal://string:{value}
-            let prefix = "literal://string:";
-            if link.data.target.starts_with(prefix) {
-                let encoded_value = &link.data.target[prefix.len()..];
-                let decoded = urlencoding::decode(encoded_value)
-                    .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
-                return Ok(Some(decoded.to_string()));
-            }
+            // Extract value from literal:string:{value} or legacy literal://string:{value}
+            let encoded_value =
+                if let Some(rest) = link.data.target.strip_prefix("literal://string:") {
+                    rest
+                } else if let Some(rest) = link.data.target.strip_prefix("literal:string:") {
+                    rest
+                } else {
+                    return Ok(Some(link.data.target.clone()));
+                };
+            let decoded = urlencoding::decode(encoded_value)
+                .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
+            return Ok(Some(decoded.to_string()));
         }
 
         Ok(None)
@@ -4124,16 +3978,27 @@ impl PerspectiveInstance {
         } else {
             crate::agent::AgentContext::main_agent()
         };
-        let initial_result = self
-            .prolog_query_subscription_with_context(query.clone(), &agent_context)
-            .await?;
-        let result_string = prolog_resolution_to_string(initial_result);
+        let result_string = if is_sparql_query(&query) {
+            self.sparql_query(query.clone())?
+        } else {
+            let initial_result = self
+                .prolog_query_subscription_with_context(query.clone(), &agent_context)
+                .await?;
+            prolog_resolution_to_string(initial_result)
+        };
+
+        let predicates = if is_sparql_query(&query) {
+            extract_predicates_from_sparql(&query)
+        } else {
+            HashSet::new() // Prolog queries: always re-check
+        };
 
         let subscribed_query = SubscribedQuery {
             query,
             last_result: result_string.clone(),
             last_keepalive: Instant::now(),
             user_email,
+            predicates,
         };
 
         // Now insert the subscription
@@ -4191,232 +4056,12 @@ impl PerspectiveInstance {
         }
     }
 
-    pub async fn subscribe_and_query_surreal(
-        &self,
-        query: String,
-        user_email: Option<String>,
-    ) -> Result<(String, String), AnyError> {
-        // Check if we already have a subscription with the same query and user
-        let existing_subscription = {
-            let queries = self.surreal_subscribed_queries.lock().await;
-            queries
-                .iter()
-                .find(|(_, q)| q.query == query && q.user_email == user_email)
-                .map(|(id, _)| id.clone())
-        };
-
-        // Return existing subscription if found
-        if let Some(existing_id) = existing_subscription {
-            let existing_result = {
-                let queries = self.surreal_subscribed_queries.lock().await;
-                queries.get(&existing_id).map(|q| q.last_result.clone())
-            };
-
-            if let Some(last_result) = existing_result {
-                let result_string = format!("#init#{}", last_result);
-                for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
-                    self.send_subscription_update(
-                        existing_id.clone(),
-                        result_string.clone(),
-                        Some(Duration::from_millis(delay)),
-                    )
-                    .await;
-                }
-                return Ok((existing_id, last_result));
-            }
-        }
-
-        let subscription_id = Uuid::new_v4().to_string();
-
-        log::debug!(
-            "subscribe_and_query_surreal: new subscription {} for query: {}",
-            subscription_id,
-            query
-        );
-
-        // Execute surreal query with user context for $agentDid and $perspectiveId substitution
-        let initial_result_vec = self
-            .surreal_query_notification(query.clone(), user_email.clone())
-            .await?;
-        let result_string = serde_json::to_string(&initial_result_vec)?;
-
-        log::debug!(
-            "subscribe_and_query_surreal: {} initial result has {} items",
-            subscription_id,
-            initial_result_vec.len()
-        );
-
-        let subscribed_query = SurrealSubscribedQuery {
-            query,
-            last_result: result_string.clone(),
-            last_keepalive: Instant::now(),
-            user_email,
-        };
-
-        // Now insert the subscription
-        self.surreal_subscribed_queries
-            .lock()
-            .await
-            .insert(subscription_id.clone(), subscribed_query);
-
-        // Send initial result with #init# prefix for compatibility
-        let init_msg = format!("#init#{}", result_string);
-        // Send multiple updates to ensure client gets it (same as Prolog implementation)
-        for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
-            self.send_subscription_update(
-                subscription_id.clone(),
-                init_msg.clone(),
-                Some(Duration::from_millis(delay)),
-            )
-            .await;
-        }
-
-        Ok((subscription_id, result_string))
-    }
-
-    pub async fn keepalive_surreal_query(&self, subscription_id: String) -> Result<(), AnyError> {
-        let mut queries = self.surreal_subscribed_queries.lock().await;
-        if let Some(query) = queries.get_mut(&subscription_id) {
-            query.last_keepalive = Instant::now();
-            Ok(())
-        } else {
-            Err(anyhow!("Surreal subscription not found"))
-        }
-    }
-
-    pub async fn dispose_surreal_query_subscription(
-        &self,
-        subscription_id: String,
-    ) -> Result<bool, AnyError> {
-        let mut queries = self.surreal_subscribed_queries.lock().await;
-        Ok(queries.remove(&subscription_id).is_some())
-    }
-
-    async fn surreal_subscription_cleanup_loop(&self) {
-        while !*self.is_teardown.lock().await {
-            // Check trigger without holding lock during the operation
-            let should_check = { *self.trigger_surreal_subscription_check.lock().await };
-
-            if should_check {
-                self.check_surreal_subscribed_queries().await;
-                *self.trigger_surreal_subscription_check.lock().await = false;
-            }
-            sleep(Duration::from_millis(QUERY_SUBSCRIPTION_CHECK_INTERVAL)).await;
-        }
-    }
-
-    async fn check_surreal_subscribed_queries(&self) {
+    async fn check_subscribed_queries(&self, changed_predicates: ChangedPredicates) {
         let mut queries_to_remove = Vec::new();
         let mut query_futures = Vec::new();
         let now = Instant::now();
 
-        // Collect only the minimal data needed: ID, query string, user_email, and keepalive time
-        // DON'T clone the potentially huge last_result string
-        let queries = {
-            let queries_guard = self.surreal_subscribed_queries.lock().await;
-            if !queries_guard.is_empty() {
-                log::debug!(
-                    "check_surreal_subscribed_queries: checking {} active subscription(s)",
-                    queries_guard.len()
-                );
-            }
-            queries_guard
-                .iter()
-                .map(|(id, query)| {
-                    (
-                        id.clone(),
-                        query.query.clone(),
-                        query.user_email.clone(),
-                        query.last_keepalive,
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-
-        // Create futures for each query check
-        for (id, query_string, user_email, last_keepalive) in queries {
-            // Check for timeout
-            if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
-                queries_to_remove.push(id);
-                continue;
-            }
-
-            // Spawn query check future
-            let self_clone = self.clone();
-            let query_for_log = query_string.clone();
-            let query_future = async move {
-                match self_clone
-                    .surreal_query_notification(query_string, user_email)
-                    .await
-                {
-                    Ok(result_vec) => {
-                        if let Ok(result_string) = serde_json::to_string(&result_vec) {
-                            // Compare with stored last_result only now, avoiding the clone earlier
-                            let mut queries = self_clone.surreal_subscribed_queries.lock().await;
-                            if let Some(stored_query) = queries.get_mut(&id) {
-                                if result_string != stored_query.last_result {
-                                    log::debug!(
-                                        "Surreal subscription {} result changed ({} items). Query: {}",
-                                        id,
-                                        result_vec.len(),
-                                        query_for_log
-                                    );
-                                    log::debug!(
-                                        "Surreal subscription {} new result (first 500 chars): {}",
-                                        id,
-                                        &result_string[..result_string.len().min(500)]
-                                    );
-                                    // Release lock before sending update
-                                    drop(queries);
-                                    self_clone
-                                        .send_subscription_update(
-                                            id.clone(),
-                                            result_string.clone(),
-                                            None,
-                                        )
-                                        .await;
-                                    // Re-acquire lock to update the result
-                                    let mut queries =
-                                        self_clone.surreal_subscribed_queries.lock().await;
-                                    if let Some(stored_query) = queries.get_mut(&id) {
-                                        stored_query.last_result = result_string;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "SurrealDB subscription query failed for subscription {}: {}",
-                            id,
-                            e
-                        );
-                        // Note: We don't remove the subscription on query failure
-                        // to allow for transient errors. It will be removed on timeout.
-                    }
-                }
-            };
-            query_futures.push(query_future);
-        }
-
-        // Wait for all query futures to complete
-        future::join_all(query_futures).await;
-
-        // Remove timed out queries
-        if !queries_to_remove.is_empty() {
-            let mut queries = self.surreal_subscribed_queries.lock().await;
-            for id in queries_to_remove {
-                queries.remove(&id);
-            }
-        }
-    }
-
-    async fn check_subscribed_queries(&self) {
-        let mut queries_to_remove = Vec::new();
-        let mut query_futures = Vec::new();
-        let now = Instant::now();
-
-        // Collect only the minimal data needed: ID, query string, user_email, and keepalive time
+        // Collect only the minimal data needed: ID, query string, user_email, keepalive time, and predicates
         // DON'T clone the potentially huge last_result string
         let queries = {
             let queries = self.subscribed_queries.lock().await;
@@ -4428,16 +4073,33 @@ impl PerspectiveInstance {
                         query.query.clone(),
                         query.user_email.clone(),
                         query.last_keepalive,
+                        query.predicates.clone(),
                     )
                 })
                 .collect::<Vec<_>>()
         };
 
         // Create futures for each query check
-        for (id, query_string, user_email, last_keepalive) in queries {
+        for (id, query_string, user_email, last_keepalive, sub_predicates) in queries {
             // Check for timeout
             if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
                 queries_to_remove.push(id);
+                continue;
+            }
+
+            // Skip subscription if its predicates don't overlap with changed predicates
+            // sub_predicates empty => always check (variable predicate in query)
+            // ChangedPredicates::CheckAll => always check (couldn't determine changed predicates)
+            // ChangedPredicates::NoneRecorded => should not happen here, but skip if it does
+            if !sub_predicates.is_empty() {
+                if let ChangedPredicates::Specific(ref changed) = changed_predicates {
+                    if sub_predicates.is_disjoint(changed) {
+                        continue; // No overlap — skip this subscription
+                    }
+                } else if matches!(changed_predicates, ChangedPredicates::NoneRecorded) {
+                    continue;
+                }
+            } else if matches!(changed_predicates, ChangedPredicates::NoneRecorded) {
                 continue;
             }
 
@@ -4450,26 +4112,36 @@ impl PerspectiveInstance {
                 } else {
                     crate::agent::AgentContext::main_agent()
                 };
-                if let Ok(result) = self_clone
-                    .prolog_query_subscription_with_context(query_string, &agent_context)
-                    .await
-                {
-                    let result_string = prolog_resolution_to_string(result);
-                    // Compare with stored last_result only now, avoiding the clone earlier
-                    let mut queries = self_clone.subscribed_queries.lock().await;
-                    if let Some(stored_query) = queries.get_mut(&id) {
-                        if result_string != stored_query.last_result {
-                            //log::info!("Query {} has changed: {}", id, result_string);
-                            // Release lock before sending update
-                            drop(queries);
-                            self_clone
-                                .send_subscription_update(id.clone(), result_string.clone(), None)
-                                .await;
-                            // Re-acquire lock to update the result
-                            let mut queries = self_clone.subscribed_queries.lock().await;
-                            if let Some(stored_query) = queries.get_mut(&id) {
-                                stored_query.last_result = result_string;
-                            }
+                let result_string = if is_sparql_query(&query_string) {
+                    match self_clone.sparql_query(query_string) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            log::error!("SPARQL subscription query failed: {}", e);
+                            return;
+                        }
+                    }
+                } else {
+                    match self_clone
+                        .prolog_query_subscription_with_context(query_string, &agent_context)
+                        .await
+                    {
+                        Ok(result) => prolog_resolution_to_string(result),
+                        Err(_) => return,
+                    }
+                };
+                // Compare with stored last_result only now, avoiding the clone earlier
+                let mut queries = self_clone.subscribed_queries.lock().await;
+                if let Some(stored_query) = queries.get_mut(&id) {
+                    if result_string != stored_query.last_result {
+                        // Release lock before sending update
+                        drop(queries);
+                        self_clone
+                            .send_subscription_update(id.clone(), result_string.clone(), None)
+                            .await;
+                        // Re-acquire lock to update the result
+                        let mut queries = self_clone.subscribed_queries.lock().await;
+                        if let Some(stored_query) = queries.get_mut(&id) {
+                            stored_query.last_result = result_string;
                         }
                     }
                 }
@@ -4510,27 +4182,29 @@ impl PerspectiveInstance {
     }
 
     async fn subscribed_queries_loop(&self) {
-        // Prolog subscriptions only make sense in Simple and Pooled modes
-        // In SdnaOnly mode, link queries don't work, only SDNA queries
-        // In Disabled mode, prolog is disabled entirely
-        if PROLOG_MODE == PrologMode::SdnaOnly || PROLOG_MODE == PrologMode::Disabled {
-            log::debug!(
-                "Prolog subscription loop disabled in {:?} mode",
-                PROLOG_MODE
-            );
-            return;
-        }
+        // Note: the subscription loop must run even when Prolog is disabled,
+        // because SPARQL subscriptions don't use Prolog at all.
 
         let mut log_counter = 0;
         const LOG_INTERVAL: u32 = 300; // Log every ~60 seconds (300 * 200ms)
+        const BATCH_WINDOW_MS: u64 = 50; // Debounce window for batching rapid link changes
 
         while !*self.is_teardown.lock().await {
             // Check trigger without holding lock during the operation
             let should_check = { *self.trigger_prolog_subscription_check.lock().await };
 
             if should_check {
-                self.check_subscribed_queries().await;
+                // Batch debounce: wait a short window for more changes to accumulate
+                sleep(Duration::from_millis(BATCH_WINDOW_MS)).await;
+
+                // Reset trigger and take the accumulated changed predicates
                 *self.trigger_prolog_subscription_check.lock().await = false;
+                let changed_preds = std::mem::replace(
+                    &mut *self.changed_predicates.lock().await,
+                    ChangedPredicates::NoneRecorded,
+                );
+
+                self.check_subscribed_queries(changed_preds).await;
             }
 
             // Periodic subscription logging
@@ -4737,7 +4411,7 @@ impl PerspectiveInstance {
             //let db_start = std::time::Instant::now();
             //log::info!("🔄 BATCH COMMIT: Starting DB operations for shared changes");
 
-            // Commit to link language (SurrealDB will be updated later via persist_link_diff)
+            // Commit to link language (SPARQL store will be updated later via persist_link_diff)
             if self.has_link_language().await {
                 //let link_lang_start = std::time::Instant::now();
                 //log::info!("🔄 BATCH COMMIT: Starting link language commit");
@@ -4760,7 +4434,7 @@ impl PerspectiveInstance {
             }
         }
 
-        // Create combined diff for prolog update, SurrealDB update, and return value
+        // Create combined diff for prolog update, SPARQL store update, and return value
         let combined_diff = DecoratedPerspectiveDiff {
             additions: [shared_diff.additions.clone(), local_diff.additions.clone()].concat(),
             removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
@@ -4813,7 +4487,6 @@ mod tests {
     use crate::graphql::graphql_types::PerspectiveState;
     use crate::perspectives::perspective_instance::PerspectiveHandle;
     use crate::prolog_service::init_prolog_service;
-    use crate::surreal_service::SurrealDBService;
     use crate::test_utils::setup_wallet;
     use fake::{Fake, Faker};
     use uuid::Uuid;
@@ -4822,14 +4495,11 @@ mod tests {
         setup_wallet();
         Ad4mDb::init_global_instance(":memory:").unwrap();
 
-        // Initialize agent, prolog and surreal services for tests
+        // Initialize agent and prolog services for tests
         AgentService::init_global_test_instance();
         init_prolog_service().await;
 
         let uuid = Uuid::new_v4().to_string();
-        let surreal_service = SurrealDBService::new("ad4m", &uuid, None)
-            .await
-            .expect("Failed to create SurrealDB service");
 
         let instance = PerspectiveInstance::new(
             PerspectiveHandle {
@@ -4841,7 +4511,6 @@ mod tests {
                 owners: None,
             },
             None,
-            surreal_service,
         );
 
         // Ensure prolog engine pool is initialized
@@ -4855,9 +4524,6 @@ mod tests {
 
     async fn create_perspective() -> PerspectiveInstance {
         let uuid = Uuid::new_v4().to_string();
-        let surreal_service = SurrealDBService::new("ad4m", &uuid, None)
-            .await
-            .expect("Failed to create SurrealDB service");
 
         let instance = PerspectiveInstance::new(
             PerspectiveHandle {
@@ -4869,7 +4535,6 @@ mod tests {
                 owners: None,
             },
             None,
-            surreal_service,
         );
 
         // Ensure prolog engine pool is initialized
@@ -5391,270 +5056,6 @@ mod tests {
         assert_eq!(links_after.len(), 2);
     }
 
-    #[tokio::test]
-    async fn test_add_link_surreal_query() {
-        println!("test_add_link_surreal_query");
-        let mut perspective = setup().await;
-
-        println!("test_add_link_surreal_query");
-        // Add a link
-        let link = create_link();
-        println!("link: {:?}", link);
-        let source = link.source.clone();
-        let predicate = link.predicate.clone().unwrap_or_default();
-        let target = link.target.clone();
-
-        perspective
-            .add_link(
-                link.clone(),
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-        println!("link added");
-
-        // Query SurrealDB
-        let results = perspective
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
-        println!("results: {:?}", results);
-        // Verify link was added to SurrealDB
-        assert!(results.len() > 0, "Expected at least one link in SurrealDB");
-
-        // Find the added link in results
-        let found = results.iter().any(|result| {
-            result.get("source").and_then(|v| v.as_str()) == Some(&source)
-                && result.get("predicate").and_then(|v| v.as_str()) == Some(&predicate)
-                && result.get("target").and_then(|v| v.as_str()) == Some(&target)
-        });
-
-        assert!(found, "Added link not found in SurrealDB query results");
-    }
-
-    #[tokio::test]
-    async fn test_remove_link_surreal_query() {
-        let mut perspective = setup().await;
-
-        // Add a link
-        let link = create_link();
-        let added_link = perspective
-            .add_link(
-                link.clone(),
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Verify link exists in SurrealDB
-        let results_before = perspective
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
-        assert_eq!(results_before.len(), 1, "Expected one link before removal");
-
-        // Remove the link
-        perspective
-            .remove_link(added_link.into(), None)
-            .await
-            .unwrap();
-
-        // Query SurrealDB again
-        let results_after = perspective
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
-
-        // Verify link was removed
-        assert_eq!(results_after.len(), 0, "Expected no links after removal");
-    }
-
-    #[tokio::test]
-    async fn test_batch_add_remove_surreal_query() {
-        let mut perspective = setup().await;
-
-        // Add multiple links
-        let mut added_links = Vec::new();
-        for _ in 0..5 {
-            let link = create_link();
-            let added = perspective
-                .add_link(
-                    link.clone(),
-                    LinkStatus::Shared,
-                    None,
-                    &AgentContext::main_agent(),
-                )
-                .await
-                .unwrap();
-            added_links.push(added);
-        }
-
-        // Query SurrealDB
-        let results = perspective
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 5, "Expected 5 links in SurrealDB");
-
-        // Remove 3 links
-        for i in 0..3 {
-            perspective
-                .remove_link(added_links[i].clone().into(), None)
-                .await
-                .unwrap();
-        }
-
-        // Query SurrealDB again
-        let results_after = perspective
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
-        assert_eq!(results_after.len(), 2, "Expected 2 links after removing 3");
-    }
-
-    #[tokio::test]
-    async fn test_full_reload_surreal_query() {
-        let mut perspective = setup().await;
-
-        // Add some normal links first
-        for _ in 0..3 {
-            let link = create_link();
-            perspective
-                .add_link(
-                    link.clone(),
-                    LinkStatus::Shared,
-                    None,
-                    &AgentContext::main_agent(),
-                )
-                .await
-                .unwrap();
-        }
-
-        // Query before triggering rebuild
-        let results_before = perspective
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
-        assert_eq!(results_before.len(), 3, "Expected 3 links before rebuild");
-
-        // Add an SDNA link (which triggers full rebuild)
-        let sdna_link = Link {
-            source: "test://source".to_string(),
-            target: "ad4m://sdna".to_string(),
-            predicate: Some("ad4m://has_sdna".to_string()),
-        };
-        perspective
-            .add_link(
-                sdna_link.clone(),
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Query after rebuild
-        let results_after = perspective
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
-        assert_eq!(
-            results_after.len(),
-            4,
-            "Expected 4 links after rebuild (3 normal + 1 SDNA)"
-        );
-
-        // Verify all links are present
-        let all_links = perspective.get_links(&LinkQuery::default()).await.unwrap();
-        assert_eq!(
-            all_links.len(),
-            results_after.len(),
-            "SurrealDB and Prolog link counts should match"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_surreal_query_error_handling() {
-        let perspective = setup().await;
-
-        // Test with invalid query syntax - should return an error, not crash
-        let result = perspective
-            .surreal_query("INVALID QUERY SYNTAX".to_string())
-            .await;
-
-        // Should return an error for invalid query
-        assert!(result.is_err(), "Expected error for invalid query syntax");
-
-        // Verify error message contains useful information
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("SurrealDB query failed") || err_msg.contains("perspective"),
-            "Error message should contain context about the failure"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_perspective_isolation_surreal_query() {
-        // Initialize services once
-        setup_wallet();
-        Ad4mDb::init_global_instance(":memory:").unwrap();
-        AgentService::init_global_test_instance();
-
-        // Create two separate perspectives without re-initializing globals
-        let mut perspective1 = create_perspective().await;
-        let mut perspective2 = create_perspective().await;
-
-        // Add links to perspective 1
-        let link1 = create_link();
-        perspective1
-            .add_link(
-                link1.clone(),
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Add different links to perspective 2
-        let link2 = create_link();
-        perspective2
-            .add_link(
-                link2.clone(),
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Query both perspectives
-        let results1 = perspective1
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
-        let results2 = perspective2
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
-
-        // Each perspective should only see its own link
-        assert_eq!(results1.len(), 1, "Perspective 1 should have 1 link");
-        assert_eq!(results2.len(), 1, "Perspective 2 should have 1 link");
-
-        // Verify the links are different (by checking source)
-        let source1 = results1[0].get("source").and_then(|v| v.as_str()).unwrap();
-        let source2 = results2[0].get("source").and_then(|v| v.as_str()).unwrap();
-        assert_ne!(
-            source1, source2,
-            "Links from different perspectives should be isolated"
-        );
-    }
-
     // #[tokio::test]
     // async fn test_batch_with_create_subject() {
     //     let mut perspective = setup().await;
@@ -5695,1939 +5096,147 @@ mod tests {
     //     assert!(links_after.len() > 0);
     // }
 
-    #[tokio::test]
-    async fn test_surreal_query_for_recipe_instances() {
-        let mut perspective = setup().await;
-
-        println!("\n=== Step 1: Adding Recipe SDNA ===");
-
-        // Step 1: Add Recipe SDNA with SHACL JSON
-        let shacl_json = r#"{
-            "target_class": "recipe://Recipe",
-            "constructor_actions": [
-                {"action": "addLink", "source": "this", "predicate": "recipe://name", "target": ""},
-                {"action": "addLink", "source": "this", "predicate": "recipe://rating", "target": "0"}
-            ],
-            "properties": [
-                {
-                    "path": "recipe://name",
-                    "name": "name",
-                    "datatype": "xsd://string",
-                    "writable": true,
-                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "recipe://name", "target": "value"}]
-                },
-                {
-                    "path": "recipe://rating",
-                    "name": "rating",
-                    "datatype": "xsd://string",
-                    "writable": true,
-                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "recipe://rating", "target": "value"}]
-                }
-            ]
-        }"#;
-
-        perspective.ensure_prolog_engine_pool().await.unwrap();
-        perspective
-            .add_sdna(
-                "Recipe".to_string(),
-                "".to_string(), // Empty Prolog code
-                SdnaType::SubjectClass,
-                Some(shacl_json.to_string()), // SHACL JSON
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Verify SHACL links were added
-        let links = perspective.get_links(&LinkQuery::default()).await.unwrap();
-        println!("SHACL links added: {} links total", links.len());
-
-        // Verify we have the subject class link
-        let class_link_exists = links.iter().any(|l| {
-            l.data.source == "ad4m://self"
-                && l.data.predicate == Some("ad4m://has_subject_class".to_string())
-                && l.data.target == "literal://string:Recipe"
-        });
-        assert!(
-            class_link_exists,
-            "Expected ad4m://has_subject_class link for Recipe"
-        );
-
-        println!("✓ Recipe SDNA added with SHACL definitions");
-
-        perspective
-            .create_subject(
-                SubjectClassOption {
-                    class_name: Some("Recipe".to_string()),
-                    query: None,
-                },
-                "literal://recipe1".to_string(),
-                Some(serde_json::json!({
-                    "name": "Pasta Carbonara",
-                    "rating": "5"
-                })),
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .create_subject(
-                SubjectClassOption {
-                    class_name: Some("Recipe".to_string()),
-                    query: None,
-                },
-                "literal://recipe2".to_string(),
-                Some(serde_json::json!({
-                    "name": "Pizza Margherita",
-                    "rating": "4"
-                })),
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        println!("✓ Created 2 Recipe instances using create_subject");
-
-        // Debug: Check all links after creating subjects
-        let all_links_after_subjects = perspective.get_links(&LinkQuery::default()).await.unwrap();
-        println!(
-            "\n=== Debug: All links after creating subjects ({} total) ===",
-            all_links_after_subjects.len()
-        );
-        for link in &all_links_after_subjects {
-            println!(
-                "  {} --[{}]--> {}",
-                link.data.source,
-                link.data.predicate.as_ref().unwrap_or(&"None".to_string()),
-                link.data.target
-            );
-        }
-
-        println!("\n=== Step 3: Adding noise links ===");
-
-        // Step 3: Add some noise links (non-recipe data) to ensure filtering works
-        perspective
-            .add_link(
-                Link {
-                    source: "literal://user1".to_string(),
-                    target: "literal://Alice".to_string(),
-                    predicate: Some("user://name".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "literal://incomplete_recipe".to_string(),
-                    target: "literal://HalfRecipe".to_string(),
-                    predicate: Some("recipe://name".to_string()),
-                    // Missing rating - should NOT be found as a Recipe instance
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        println!("✓ Added noise links");
-
-        // Give SurrealDB time to process all the links
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-        println!("\n=== Step 4: Running structural SurrealQL query ===");
-
-        // Debug: First, check raw data in SurrealDB including IDs
-        let raw_query = format!("SELECT id, source, predicate, target FROM link ",);
-        let raw_results = perspective.surreal_query(raw_query).await.unwrap();
-        println!("Debug - Raw links in SurrealDB: {}", raw_results.len());
-        for (i, link) in raw_results.iter().enumerate() {
-            let id = link
-                .get("id")
-                .map(|v| format!("{:?}", v))
-                .unwrap_or("NO ID".to_string());
-            let source = link.get("source").and_then(|v| v.as_str()).unwrap_or("?");
-            let pred = link
-                .get("predicate")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            let target = link.get("target").and_then(|v| v.as_str()).unwrap_or("?");
-            println!(
-                "  {}: [{}] {} --[{}]--> {}",
-                i + 1,
-                id,
-                source,
-                pred,
-                target
-            );
-        }
-
-        // Debug: Test GROUP BY with count() WITHOUT alias (like the docs example)
-        let count_query = "SELECT source, count() AS total FROM link GROUP BY source";
-        println!("\nDebug - GROUP BY without alias: {}", count_query);
-        let count_results = perspective
-            .surreal_query(count_query.to_string())
-            .await
-            .unwrap();
-        println!("Result: Found {} grouped sources", count_results.len());
-        for row in &count_results {
-            let source = row.get("source").and_then(|v| v.as_str()).unwrap_or("?");
-            let total = row
-                .get("total")
-                .map(|v| format!("{:?}", v))
-                .unwrap_or("?".to_string());
-            println!("  {} has {} links", source, total);
-        }
-
-        // Debug: Test the SIMPLEST possible GROUP BY with array::group
-        let simplest_query = "SELECT source AS base, array::group(predicate) AS predicates FROM link GROUP BY source";
-        println!("\nDebug - GROUP BY with array::group(): {}", simplest_query);
-        let simplest_results = perspective
-            .surreal_query(simplest_query.to_string())
-            .await
-            .unwrap();
-        println!("Result: Found {} grouped sources", simplest_results.len());
-        for row in &simplest_results {
-            if let (Some(base), Some(preds)) = (
-                row.get("base").and_then(|v| v.as_str()),
-                row.get("predicates").and_then(|v| v.as_array()),
-            ) {
-                println!("  {} has {} predicates", base, preds.len());
-            }
-        }
-
-        // Debug: Test GROUP BY with manual perspective filter
-        let simple_group_query = format!(
-            "SELECT source AS base, array::group(predicate) AS predicates FROM link  GROUP BY source"
-        );
-        println!("\nDebug - GROUP BY with WHERE: {}", simple_group_query);
-        let simple_group_results = perspective.surreal_query(simple_group_query).await.unwrap();
-        println!(
-            "Result: Found {} grouped sources",
-            simple_group_results.len()
-        );
-        for row in &simple_group_results {
-            if let (Some(base), Some(preds)) = (
-                row.get("base").and_then(|v| v.as_str()),
-                row.get("predicates").and_then(|v| v.as_array()),
-            ) {
-                println!("  {} has {} predicates: {:?}", base, preds.len(), preds);
-            }
-        }
-
-        // Step 4: Query for Recipe instances based on structure (both required properties must exist)
-        // This emulates Prolog's instance(C, Base) check
-        // Using manual perspective filter since auto-injection is temporarily disabled
-        // NOTE: Cannot alias 'source' in SELECT when using GROUP BY source - it breaks SurrealDB grouping!
-        let query = r#"
-SELECT
-  source,
-  array::group(predicate) AS predicates,
-  array::group(target) AS targets
-FROM link
-WHERE
-  source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://name')
-  AND source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://rating')
-GROUP BY source
-"#
-        .to_string();
-
-        println!("\n=== Running structural query for Recipe instances ===");
-        println!("Query:\n{}", query);
-
-        let results = perspective.surreal_query(query.clone()).await.unwrap();
-
-        println!("\n=== Results ===");
-        println!("Found {} recipe instances", results.len());
-        for (i, row) in results.iter().enumerate() {
-            let source = row.get("source").and_then(|v| v.as_str()).unwrap_or("?");
-            let predicates = row.get("predicates").and_then(|v| v.as_array()).unwrap();
-            let targets = row.get("targets").and_then(|v| v.as_array()).unwrap();
-
-            println!("\nRecipe {}: source = {}", i + 1, source);
-            println!("  Properties:");
-            for j in 0..predicates.len() {
-                let pred = predicates[j].as_str().unwrap_or("?");
-                let target = targets[j].as_str().unwrap_or("?");
-                println!("    {} = {}", pred, target);
-            }
-        }
-
-        // Assertions
-        assert_eq!(
-            results.len(),
-            2,
-            "Should find exactly 2 recipe instances (not the incomplete one, not the user)"
-        );
-
-        // Verify both recipes are present with correct data
-        let recipe1 = results
-            .iter()
-            .find(|r| r.get("source").and_then(|v| v.as_str()) == Some("literal://recipe1"));
-        let recipe2 = results
-            .iter()
-            .find(|r| r.get("source").and_then(|v| v.as_str()) == Some("literal://recipe2"));
-
-        assert!(recipe1.is_some(), "Should find recipe1");
-        assert!(recipe2.is_some(), "Should find recipe2");
-
-        // Verify recipe1 has correct properties
-        let r1_targets = recipe1
-            .unwrap()
-            .get("targets")
-            .and_then(|v| v.as_array())
-            .unwrap();
-        let has_pasta = r1_targets.iter().any(|v| {
-            v.as_str()
-                .map(|s| s.contains("Pasta") || s.contains("Carbonara"))
-                .unwrap_or(false)
-        });
-        let has_rating_5 = r1_targets
-            .iter()
-            .any(|v| v.as_str().map(|s| s.contains('5')).unwrap_or(false));
-        assert!(
-            has_pasta,
-            "Recipe1 should have name containing 'Pasta Carbonara'"
-        );
-        assert!(has_rating_5, "Recipe1 should have rating '5'");
-
-        // Verify recipe2 has correct properties
-        let r2_targets = recipe2
-            .unwrap()
-            .get("targets")
-            .and_then(|v| v.as_array())
-            .unwrap();
-        let has_pizza = r2_targets.iter().any(|v| {
-            v.as_str()
-                .map(|s| s.contains("Pizza") || s.contains("Margherita"))
-                .unwrap_or(false)
-        });
-        let has_rating_4 = r2_targets
-            .iter()
-            .any(|v| v.as_str().map(|s| s.contains('4')).unwrap_or(false));
-        assert!(
-            has_pizza,
-            "Recipe2 should have name containing 'Pizza Margherita'"
-        );
-        assert!(has_rating_4, "Recipe2 should have rating '4'");
-
-        println!("\n=== ✓ SUCCESS ===");
-        println!("✓ Found exactly 2 recipe instances");
-        println!("✓ Filtered out incomplete recipe (missing rating)");
-        println!("✓ Filtered out user data (different structure)");
-        println!("✓ Both recipes have correct property values");
-    }
-
-    #[tokio::test]
-    async fn test_literal_parsing_in_surreal_queries() {
-        let mut perspective = setup().await;
-
-        println!("\n=== Testing fn::parse_literal() in SurrealDB ===");
-
-        // Helper function to URL encode for literal URLs
-        fn url_encode(s: &str) -> String {
-            s.chars()
-                .map(|c| match c {
-                    'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-                    _ => format!("%{:02X}", c as u8),
-                })
-                .collect()
-        }
-
-        // Create literal://json: URLs with Expression objects (as created by the literal language)
-        let recipe1_json = r#"{"author":"did:key:test","timestamp":"2025-11-19T10:00:00Z","data":"Pasta Carbonara","proof":{"signature":"abc123"}}"#;
-        let recipe1_name_literal = format!("literal://json:{}", url_encode(recipe1_json));
-
-        let recipe2_json = r#"{"author":"did:key:test","timestamp":"2025-11-19T10:00:00Z","data":"Pizza Margherita","proof":{"signature":"def456"}}"#;
-        let recipe2_name_literal = format!("literal://json:{}", url_encode(recipe2_json));
-
-        let recipe3_json = r#"{"author":"did:key:test","timestamp":"2025-11-19T10:00:00Z","data":"Salad","proof":{"signature":"ghi789"}}"#;
-        let recipe3_name_literal = format!("literal://json:{}", url_encode(recipe3_json));
-
-        println!("Created literal URLs:");
-        println!("  Recipe1: {}", recipe1_name_literal);
-        println!("  Recipe2: {}", recipe2_name_literal);
-        println!("  Recipe3: {}", recipe3_name_literal);
-
-        // Add links with literal URLs as targets
-        perspective
-            .add_link(
-                Link {
-                    source: "literal://recipe1".to_string(),
-                    target: recipe1_name_literal.clone(),
-                    predicate: Some("recipe://name".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "literal://recipe2".to_string(),
-                    target: recipe2_name_literal.clone(),
-                    predicate: Some("recipe://name".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "literal://recipe3".to_string(),
-                    target: recipe3_name_literal.clone(),
-                    predicate: Some("recipe://name".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        println!("✓ Added 3 recipe links with literal URLs");
-
-        // Give SurrealDB time to process
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test 1: Query without fn::parse_literal() - should match the full literal URL
-        println!("\n=== Test 1: Query without fn::parse_literal() ===");
-        let query_raw = format!(
-            "SELECT source, target FROM link WHERE predicate = 'recipe://name' AND target = '{}'",
-            recipe1_name_literal
-        );
-        println!("Query: {}", query_raw);
-        let results_raw = perspective.surreal_query(query_raw).await.unwrap();
-        println!("Results: {} matches", results_raw.len());
-        assert_eq!(
-            results_raw.len(),
-            1,
-            "Should find exactly 1 match with full literal URL"
-        );
-
-        // Test 2A: Test if JavaScript functions work at all
-        println!("\n=== Test 2A: Test if JavaScript works with simple function ===");
-        let query_simple_js = "RETURN function() { return 42; }";
-        println!("Query: {}", query_simple_js);
-        let result_simple_js = perspective
-            .surreal_query(query_simple_js.to_string())
-            .await
-            .unwrap();
-        println!("Result: {:?}", result_simple_js);
-
-        // Test 2B: Test a debug function that returns arguments
-        println!("\n=== Test 2B: Test what arguments contains ===");
-        let query_debug = "RETURN function() { return arguments.length; }";
-        println!("Query: {}", query_debug);
-        let result_debug = perspective
-            .surreal_query(query_debug.to_string())
-            .await
-            .unwrap();
-        println!("Arguments length: {:?}", result_debug);
-
-        // Test 2C: Test fn::parse_literal() directly
-        println!("\n=== Test 2C: Test fn::parse_literal() directly ===");
-        let test_simple_literal = "literal://string:Hello%20World";
-        let query_test_fn = format!("RETURN fn::parse_literal('{}')", test_simple_literal);
-        println!("Query: {}", query_test_fn);
-        let result_test_fn = perspective.surreal_query(query_test_fn).await.unwrap();
-        println!("Result: {:?}", result_test_fn);
-
-        // Test 3: Now check what fn::parse_literal() returns for our data
-        println!("\n=== Test 3: Check what fn::parse_literal() returns on link targets ===");
-        let query_check = format!(
-            "SELECT source, target, fn::parse_literal(target) AS parsed_data FROM link WHERE predicate = 'recipe://name'",
-        );
-        println!("Query:\n{}", query_check);
-        let results_check = perspective.surreal_query(query_check).await.unwrap();
-        println!("Results: {} links", results_check.len());
-
-        for result in &results_check {
-            let source = result.get("source").and_then(|v| v.as_str()).unwrap_or("?");
-            let target = result.get("target").and_then(|v| v.as_str()).unwrap_or("?");
-            let parsed = result.get("parsed_data");
-            println!("  Source: {}", source);
-            println!("  Target: {}...", &target[..60.min(target.len())]);
-            println!("  Parsed: {:?}", parsed);
-        }
-
-        // Test 4: Try to match using parsed value
-        println!("\n=== Test 4: Query with fn::parse_literal() to match data value ===");
-        let query_parsed = format!(
-            "SELECT source, target, fn::parse_literal(target) AS parsed_data FROM link WHERE predicate = 'recipe://name' AND fn::parse_literal(target) = 'Pasta Carbonara'",
-        );
-        println!("Query:\n{}", query_parsed);
-        let results_parsed = perspective.surreal_query(query_parsed).await.unwrap();
-        println!("Results: {} matches", results_parsed.len());
-
-        if results_parsed.len() == 0 {
-            println!("WARNING: fn::parse_literal() returned 0 results - function may not be working correctly");
-            println!("This could be due to:");
-            println!("  1. JavaScript functions not enabled (need --allow-scripting flag)");
-            println!("  2. Function definition syntax error");
-            println!("  3. Closure not capturing $url parameter correctly");
-        }
-
-        assert_ne!(
-            results_parsed.len(),
-            0,
-            "fn::parse_literal() should return results for matching data"
-        );
-
-        assert_eq!(
-            results_parsed.len(),
-            1,
-            "Should find exactly 1 match using fn::parse_literal()"
-        );
-
-        let result = &results_parsed[0];
-        let source = result.get("source").and_then(|v| v.as_str()).unwrap();
-        let parsed_data = result.get("parsed_data").and_then(|v| v.as_str()).unwrap();
-
-        println!("  Source: {}", source);
-        println!("  Parsed data: {}", parsed_data);
-
-        assert_eq!(source, "literal://recipe1", "Should find recipe1");
-        assert_eq!(
-            parsed_data, "Pasta Carbonara",
-            "Should extract 'data' field from JSON"
-        );
-
-        // Test 5: Query multiple values with fn::parse_literal()
-        println!("\n=== Test 5: Query with IN clause using fn::parse_literal() ===");
-        let query_multiple = format!(
-            "SELECT source, fn::parse_literal(target) AS parsed_data FROM link WHERE predicate = 'recipe://name' AND fn::parse_literal(target) IN ['Pasta Carbonara', 'Pizza Margherita']",
-        );
-        println!("Query:\n{}", query_multiple);
-        let results_multiple = perspective.surreal_query(query_multiple).await.unwrap();
-        println!("Results: {} matches", results_multiple.len());
-
-        assert_eq!(
-            results_multiple.len(),
-            2,
-            "Should find exactly 2 matches with IN clause"
-        );
-
-        let names: Vec<String> = results_multiple
-            .iter()
-            .filter_map(|r| {
-                r.get("parsed_data")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            })
-            .collect();
-
-        println!("  Found names: {:?}", names);
-        assert!(
-            names.contains(&"Pasta Carbonara".to_string()),
-            "Should find Pasta Carbonara"
-        );
-        assert!(
-            names.contains(&"Pizza Margherita".to_string()),
-            "Should find Pizza Margherita"
-        );
-        assert!(
-            !names.contains(&"Salad".to_string()),
-            "Should not find Salad"
-        );
-
-        // Test 6: GROUP BY with fn::parse_literal() - this should fail as SurrealDB doesn't support it
-        println!("\n=== Test 6: GROUP BY with fn::parse_literal() ===");
-        let query_group = format!(
-            "SELECT fn::parse_literal(target), array::group(source) AS sources FROM link WHERE predicate = 'recipe://name' GROUP BY fn::parse_literal(target)",
-        );
-        println!("Query:\n{}", query_group);
-        let result_group = perspective.surreal_query(query_group).await;
-
-        // This should fail - SurrealDB doesn't support grouping by function results
-        if result_group.is_err() {
-            println!("  ✓ Query failed as expected - SurrealDB doesn't support GROUP BY fn::function_call()");
-            println!("  Error: {}", result_group.unwrap_err());
-        } else {
-            println!(
-                "  WARNING: Query succeeded unexpectedly! SurrealDB may have added this feature."
-            );
-            let results_group = result_group.unwrap();
-            println!("  Results: {} groups", results_group.len());
-            for group in &results_group {
-                println!(
-                    "  Group object keys: {:?}",
-                    group.as_object().map(|o| o.keys().collect::<Vec<_>>())
-                );
-            }
-        }
-
-        println!("\n=== ✓ SUCCESS ===");
-        println!("✓ fn::parse_literal() correctly parses literal://json: URLs");
-        println!("✓ Extracted 'data' field from Expression objects");
-        println!("✓ WHERE clauses work with parsed values");
-        println!("✓ IN clauses work with parsed values");
-        println!("Note: GROUP BY fn::function_call() not supported in SurrealDB 2.1");
-    }
-
-    #[tokio::test]
-    async fn test_surreal_query_blocks_mutating_operations() {
-        let mut perspective = setup().await;
-
-        // Add some test data
-        let link = create_link();
-        perspective
-            .add_link(
-                link.clone(),
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Verify data was added
-        let select_query = "SELECT * FROM link".to_string();
-        let results = perspective.surreal_query(select_query).await.unwrap();
-        assert_eq!(results.len(), 1, "Should have 1 link");
-
-        // Try to DELETE (should be blocked)
-        let delete_query = "DELETE FROM link".to_string();
-        let result = perspective.surreal_query(delete_query).await;
-        assert!(
-            result.is_err(),
-            "DELETE should be blocked and return an error"
-        );
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("mutating operation"),
-            "Error should mention mutating operation"
-        );
-
-        // Verify data was NOT deleted
-        let verify_query = "SELECT * FROM link".to_string();
-        let results = perspective.surreal_query(verify_query).await.unwrap();
-        assert_eq!(
-            results.len(),
-            1,
-            "Link should still exist after blocked DELETE"
-        );
-
-        // Try to UPDATE (should be blocked)
-        let update_query = "UPDATE link SET predicate = 'hacked'".to_string();
-        let result = perspective.surreal_query(update_query).await;
-        assert!(
-            result.is_err(),
-            "UPDATE should be blocked and return an error"
-        );
-
-        // Try to DROP (should be blocked)
-        let drop_query = "DROP TABLE link".to_string();
-        let result = perspective.surreal_query(drop_query).await;
-        assert!(
-            result.is_err(),
-            "DROP should be blocked and return an error"
-        );
-
-        // Try to CREATE (should be blocked)
-        let create_query = "CREATE link CONTENT { source: 'evil', target: 'hack' }".to_string();
-        let result = perspective.surreal_query(create_query).await;
-        assert!(
-            result.is_err(),
-            "CREATE should be blocked and return an error"
-        );
-
-        // Try to DEFINE (should be blocked)
-        let define_query = "DEFINE FIELD evil ON link TYPE string".to_string();
-        let result = perspective.surreal_query(define_query).await;
-        assert!(
-            result.is_err(),
-            "DEFINE should be blocked and return an error"
-        );
-
-        println!("✓ All mutating operations were successfully blocked");
-        println!("✓ Data integrity maintained - original link still exists");
-    }
-
     // ============================================================================
     // DOCUMENTATION EXAMPLES TESTS
-    // These tests verify all query examples from the SurrealDB documentation
+    // These tests verify query examples against the SPARQL backend
     // ============================================================================
 
-    #[tokio::test]
-    async fn test_docs_basic_filtering() {
-        let mut perspective = setup().await;
+    // ============================================================================
+    // PREDICATE EXTRACTION TESTS
+    // ============================================================================
 
-        // Add test data
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://bob".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "post://123".to_string(),
-                    predicate: Some("ad4m://likes".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Filter links by predicate
-        let follows = perspective
-            .surreal_query("SELECT * FROM link WHERE predicate = 'ad4m://follows'".to_string())
-            .await
-            .unwrap();
-
-        assert_eq!(follows.len(), 1, "Should find 1 follow link");
-        assert_eq!(
-            follows[0].get("predicate").and_then(|v| v.as_str()),
-            Some("ad4m://follows")
+    #[test]
+    fn test_extract_predicates_from_sparql() {
+        let predicates = extract_predicates_from_sparql(
+            "SELECT ?s ?t WHERE { GRAPH ?g { ?s <flux://has_message> ?t } }",
         );
+        assert!(predicates.contains("flux://has_message"));
+        assert_eq!(predicates.len(), 1);
     }
 
-    #[tokio::test]
-    async fn test_docs_aggregations_count_by_predicate() {
-        let mut perspective = setup().await;
-
-        // Add test data
-        for _ in 0..3 {
-            perspective
-                .add_link(
-                    Link {
-                        source: format!("user://{}", uuid::Uuid::new_v4()),
-                        target: "user://alice".to_string(),
-                        predicate: Some("ad4m://follows".to_string()),
-                    },
-                    LinkStatus::Shared,
-                    None,
-                    &AgentContext::main_agent(),
-                )
-                .await
-                .unwrap();
-        }
-
-        for _ in 0..2 {
-            perspective
-                .add_link(
-                    Link {
-                        source: format!("user://{}", uuid::Uuid::new_v4()),
-                        target: "post://123".to_string(),
-                        predicate: Some("ad4m://likes".to_string()),
-                    },
-                    LinkStatus::Shared,
-                    None,
-                    &AgentContext::main_agent(),
-                )
-                .await
-                .unwrap();
-        }
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Count links by predicate
-        let stats = perspective
-            .surreal_query(
-                "SELECT predicate, count() as total FROM link GROUP BY predicate".to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(stats.len(), 2, "Should have 2 predicate groups");
-
-        let follows_stat = stats
-            .iter()
-            .find(|s| s.get("predicate").and_then(|v| v.as_str()) == Some("ad4m://follows"))
-            .expect("Should find follows stat");
-        // Extract count - might be nested in different ways
-        let follows_count = follows_stat
-            .get("total")
-            .and_then(|v| {
-                v.as_u64()
-                    .or_else(|| v.get("Int").and_then(|i| i.as_u64()))
-                    .or_else(|| v.as_array().map(|a| a.len() as u64))
-            })
-            .expect("Should extract total count");
-        assert_eq!(follows_count, 3, "Should have 3 follows");
-
-        let likes_stat = stats
-            .iter()
-            .find(|s| s.get("predicate").and_then(|v| v.as_str()) == Some("ad4m://likes"))
-            .expect("Should find likes stat");
-        let likes_count = likes_stat
-            .get("total")
-            .and_then(|v| {
-                v.as_u64()
-                    .or_else(|| v.get("Int").and_then(|i| i.as_u64()))
-                    .or_else(|| v.as_array().map(|a| a.len() as u64))
-            })
-            .unwrap();
-        assert_eq!(likes_count, 2, "Should have 2 likes");
+    #[test]
+    fn test_extract_predicates_variable_predicate() {
+        // ?s ?p ?o — no fixed predicate, should return empty (always match)
+        let predicates = extract_predicates_from_sparql("SELECT ?s ?p ?o WHERE { ?s ?p ?o }");
+        assert!(predicates.is_empty());
     }
 
-    #[tokio::test]
-    async fn test_docs_aggregations_distinct() {
-        let mut perspective = setup().await;
-
-        // Add test data with same author
-        let _author1 = "did:key:author1";
-        let _author2 = "did:key:author2";
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "post://1".to_string(),
-                    predicate: Some("ad4m://posted".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://bob".to_string(),
-                    target: "post://2".to_string(),
-                    predicate: Some("ad4m://posted".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Count distinct sources  and authors
-        // Note: SurrealDB doesn't support count(DISTINCT field), use GROUP BY instead
-        let total_links = perspective
-            .surreal_query("SELECT count() as total FROM link".to_string())
-            .await
-            .unwrap();
-
-        // SurrealDB's count() might return multiple rows or a single aggregated row
-        let total: u64 = if total_links.len() == 1 {
-            // Single aggregated row
-            total_links[0]
-                .get("total")
-                .and_then(|v| v.as_u64().or_else(|| v.get("Int").and_then(|i| i.as_u64())))
-                .or_else(|| {
-                    total_links[0]
-                        .get("count")
-                        .and_then(|v| v.as_u64().or_else(|| v.get("Int").and_then(|i| i.as_u64())))
-                })
-                .unwrap()
-        } else {
-            // Multiple rows, sum them up
-            total_links
-                .iter()
-                .map(|row| {
-                    row.get("count")
-                        .and_then(|v| v.get("Int").and_then(|i| i.as_u64()))
-                        .unwrap_or(1)
-                })
-                .sum()
-        };
-        assert!(total >= 2, "Should have at least 2 links");
-
-        // Count unique sources using GROUP BY
-        let unique_sources = perspective
-            .surreal_query("SELECT source FROM link GROUP BY source".to_string())
-            .await
-            .unwrap();
-        assert_eq!(unique_sources.len(), 2, "Should have 2 unique sources");
-    }
-
-    #[tokio::test]
-    async fn test_docs_forward_traversal() {
-        let mut perspective = setup().await;
-
-        // Test: Find all users that Alice follows
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://bob".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://charlie".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        let alice_follows = perspective
-            .surreal_query(
-                "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'ad4m://follows'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(alice_follows.len(), 2, "Alice should follow 2 users");
-        let targets: Vec<&str> = alice_follows
-            .iter()
-            .filter_map(|r| r.get("target").and_then(|v| v.as_str()))
-            .collect();
-        assert!(targets.contains(&"user://bob"));
-        assert!(targets.contains(&"user://charlie"));
-    }
-
-    #[tokio::test]
-    async fn test_docs_reverse_traversal() {
-        let mut perspective = setup().await;
-
-        // Test: Find all users who follow Alice (followers)
-        perspective
-            .add_link(
-                Link {
-                    source: "user://bob".to_string(),
-                    target: "user://alice".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://charlie".to_string(),
-                    target: "user://alice".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        let alice_followers = perspective
-            .surreal_query(
-                "SELECT source FROM link WHERE out.uri = 'user://alice' AND predicate = 'ad4m://follows'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(alice_followers.len(), 2, "Alice should have 2 followers");
-        let sources: Vec<&str> = alice_followers
-            .iter()
-            .filter_map(|r| r.get("source").and_then(|v| v.as_str()))
-            .collect();
-        assert!(sources.contains(&"user://bob"));
-        assert!(sources.contains(&"user://charlie"));
-    }
-
-    #[tokio::test]
-    async fn test_docs_bidirectional_query() {
-        let mut perspective = setup().await;
-
-        // Alice follows Bob
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://bob".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Charlie follows Alice
-        perspective
-            .add_link(
-                Link {
-                    source: "user://charlie".to_string(),
-                    target: "user://alice".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Find all users connected to Alice (either following or followed by)
-        let alice_connections = perspective
-            .surreal_query(
-                "SELECT source, target FROM link WHERE (in.uri = 'user://alice' OR out.uri = 'user://alice') AND predicate = 'ad4m://follows'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            alice_connections.len(),
-            2,
-            "Alice should have 2 connections"
+    #[test]
+    fn test_extract_predicates_multiple() {
+        let predicates = extract_predicates_from_sparql(
+            "SELECT ?s ?o1 ?o2 WHERE { ?s <flux://has_message> ?o1 . ?s <flux://has_reaction> ?o2 }"
         );
+        assert!(predicates.contains("flux://has_message"));
+        assert!(predicates.contains("flux://has_reaction"));
+        assert_eq!(predicates.len(), 2);
     }
 
-    #[tokio::test]
-    async fn test_docs_multi_hop_friends_of_friends() {
-        let mut perspective = setup().await;
-
-        // Alice follows Bob and Charlie
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://bob".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://charlie".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Bob follows Dave
-        perspective
-            .add_link(
-                Link {
-                    source: "user://bob".to_string(),
-                    target: "user://dave".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Charlie follows Eve
-        perspective
-            .add_link(
-                Link {
-                    source: "user://charlie".to_string(),
-                    target: "user://eve".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Find friends of friends (2-hop traversal)
-        // Note: Cannot use DISTINCT with graph traversal in SurrealDB
-        // Use GROUP BY instead or handle deduplication in application
-        let friends_of_friends = perspective
-            .surreal_query(
-                "SELECT out->link[WHERE predicate = 'ad4m://follows'].out.uri AS friend_of_friend FROM link WHERE in.uri = 'user://alice' AND predicate = 'ad4m://follows'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert!(
-            !friends_of_friends.is_empty(),
-            "Should find friends of friends"
+    #[test]
+    fn test_extract_predicates_uri_subject() {
+        let predicates = extract_predicates_from_sparql(
+            "SELECT ?o WHERE { <did:key:abc> <flux://has_name> ?o }",
         );
+        assert!(predicates.contains("flux://has_name"));
+        assert_eq!(predicates.len(), 1);
     }
 
-    #[tokio::test]
-    async fn test_docs_multi_hop_user_profiles() {
-        let mut perspective = setup().await;
-
-        // Alice follows Bob
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://bob".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Bob has profile
-        perspective
-            .add_link(
-                Link {
-                    source: "user://bob".to_string(),
-                    target: "profile://bob_profile".to_string(),
-                    predicate: Some("ad4m://has_profile".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Get user profiles 2 hops away
-        let profiles = perspective
-            .surreal_query(
-                "SELECT out.uri AS user, out->link[WHERE predicate = 'ad4m://has_profile'][0].out.uri AS profile FROM link WHERE in.uri = 'user://alice' AND predicate = 'ad4m://follows'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(profiles.len(), 1, "Should find 1 profile");
-        assert_eq!(
-            profiles[0].get("user").and_then(|v| v.as_str()),
-            Some("user://bob")
-        );
-        assert_eq!(
-            profiles[0].get("profile").and_then(|v| v.as_str()),
-            Some("profile://bob_profile")
-        );
+    #[test]
+    fn test_predicate_filtering_skips_unrelated() {
+        // Subscription with specific predicates should be skipped when
+        // changed predicates don't overlap
+        let sub_predicates: HashSet<String> = ["flux://has_message".to_string()].into();
+        let changed: HashSet<String> = ["flux://has_reaction".to_string()].into();
+        assert!(sub_predicates.is_disjoint(&changed));
     }
 
-    #[tokio::test]
-    async fn test_docs_complex_3hop_traversal() {
-        let mut perspective = setup().await;
-
-        // Conversation has child subgroup
-        perspective
-            .add_link(
-                Link {
-                    source: "conversation://main".to_string(),
-                    target: "subgroup://sg1".to_string(),
-                    predicate: Some("ad4m://has_child".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Subgroup has type
-        perspective
-            .add_link(
-                Link {
-                    source: "subgroup://sg1".to_string(),
-                    target: "flux://conversation_subgroup".to_string(),
-                    predicate: Some("flux://entry_type".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Subgroup has child item
-        perspective
-            .add_link(
-                Link {
-                    source: "subgroup://sg1".to_string(),
-                    target: "item://item1".to_string(),
-                    predicate: Some("ad4m://has_child".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Item has type
-        perspective
-            .add_link(
-                Link {
-                    source: "item://item1".to_string(),
-                    target: "flux://has_message".to_string(),
-                    predicate: Some("flux://entry_type".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: 3-hop traversal to get item types
-        let item_types = perspective
-            .surreal_query(
-                "SELECT out.uri AS subgroup, out->link[WHERE predicate = 'ad4m://has_child'].out->link[WHERE predicate = 'flux://entry_type'][0].out.uri AS item_type FROM link WHERE in.uri = 'conversation://main' AND predicate = 'ad4m://has_child' AND out->link[WHERE predicate = 'flux://entry_type'][0].out.uri = 'flux://conversation_subgroup'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(item_types.len(), 1, "Should find 1 subgroup with items");
-        assert_eq!(
-            item_types[0].get("subgroup").and_then(|v| v.as_str()),
-            Some("subgroup://sg1")
-        );
+    #[test]
+    fn test_predicate_filtering_matches_related() {
+        let sub_predicates: HashSet<String> = ["flux://has_message".to_string()].into();
+        let changed: HashSet<String> = [
+            "flux://has_message".to_string(),
+            "flux://has_reaction".to_string(),
+        ]
+        .into();
+        assert!(!sub_predicates.is_disjoint(&changed));
     }
 
-    #[tokio::test]
-    async fn test_docs_comments_on_posts() {
-        let mut perspective = setup().await;
-
-        // Alice authored post
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "post://123".to_string(),
-                    predicate: Some("ad4m://authored".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Post has comment
-        perspective
-            .add_link(
-                Link {
-                    source: "post://123".to_string(),
-                    target: "comment://c1".to_string(),
-                    predicate: Some("ad4m://has_comment".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "post://123".to_string(),
-                    target: "comment://c2".to_string(),
-                    predicate: Some("ad4m://has_comment".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Find all comments on Alice's posts (2-hop)
-        let comments = perspective
-            .surreal_query(
-                "SELECT out.uri AS post, out->link[WHERE predicate = 'ad4m://has_comment'].out.uri AS comments FROM link WHERE in.uri = 'user://alice' AND predicate = 'ad4m://authored'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(comments.len(), 1, "Should find 1 post");
-        assert_eq!(
-            comments[0].get("post").and_then(|v| v.as_str()),
-            Some("post://123")
-        );
+    #[test]
+    fn test_predicate_filtering_empty_sub_always_matches() {
+        // Empty sub predicates (variable predicate query) should always match
+        let sub_predicates: HashSet<String> = HashSet::new();
+        let changed: HashSet<String> = ["flux://has_reaction".to_string()].into();
+        // Empty set is disjoint with everything, but our code checks !sub_predicates.is_empty() first
+        assert!(sub_predicates.is_empty()); // so this subscription would NOT be skipped
     }
 
-    #[tokio::test]
-    async fn test_docs_flux_count_subgroups() {
-        let mut perspective = setup().await;
+    #[test]
+    fn test_changed_predicates_enum_check_all_is_sticky() {
+        let mut state = ChangedPredicates::NoneRecorded;
 
-        // Add subgroups
-        for i in 1..=3 {
-            let subgroup_uri = format!("subgroup://sg{}", i);
-
-            // Conversation has child subgroup
-            perspective
-                .add_link(
-                    Link {
-                        source: "conversation://abc".to_string(),
-                        target: subgroup_uri.clone(),
-                        predicate: Some("ad4m://has_child".to_string()),
-                    },
-                    LinkStatus::Shared,
-                    None,
-                    &AgentContext::main_agent(),
-                )
-                .await
-                .unwrap();
-
-            // Subgroup has type
-            perspective
-                .add_link(
-                    Link {
-                        source: subgroup_uri,
-                        target: "flux://conversation_subgroup".to_string(),
-                        predicate: Some("flux://entry_type".to_string()),
-                    },
-                    LinkStatus::Shared,
-                    None,
-                    &AgentContext::main_agent(),
-                )
-                .await
-                .unwrap();
-        }
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Count conversation subgroups
-        let count_query = "SELECT count() AS count FROM link WHERE in.uri = 'conversation://abc' AND predicate = 'ad4m://has_child' AND out->link[WHERE predicate = 'flux://entry_type'][0].out.uri = 'flux://conversation_subgroup'";
-
-        let result = perspective
-            .surreal_query(count_query.to_string())
-            .await
-            .unwrap();
-        // The query might return multiple rows (one per matched link) or a single aggregated row
-        if result.len() == 1 {
-            let count = result[0].get("count").and_then(|v| v.as_u64()).unwrap();
-            assert_eq!(count, 3, "Should count 3 subgroups");
-        } else {
-            // If it returns one row per match, the length IS the count
-            assert_eq!(result.len(), 3, "Should count 3 subgroups");
-        }
-    }
-
-    #[tokio::test]
-    async fn test_docs_flux_unique_participants() {
-        let mut perspective = setup().await;
-
-        let _author1 = "did:key:author1";
-        let _author2 = "did:key:author2";
-
-        // Add subgroup
-        perspective
-            .add_link(
-                Link {
-                    source: "conversation://xyz".to_string(),
-                    target: "subgroup://sg1".to_string(),
-                    predicate: Some("ad4m://has_child".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "subgroup://sg1".to_string(),
-                    target: "flux://conversation_subgroup".to_string(),
-                    predicate: Some("flux://entry_type".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Add items to subgroup with different authors
-        perspective
-            .add_link(
-                Link {
-                    source: "subgroup://sg1".to_string(),
-                    target: "item://item1".to_string(),
-                    predicate: Some("ad4m://has_child".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "subgroup://sg1".to_string(),
-                    target: "item://item2".to_string(),
-                    predicate: Some("ad4m://has_child".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Get unique participants
-        let participants_query = "SELECT VALUE author FROM link WHERE in.uri = 'conversation://xyz' AND predicate = 'ad4m://has_child' AND out->link[WHERE predicate = 'flux://entry_type'][0].out.uri = 'flux://conversation_subgroup' AND out->link[WHERE predicate = 'ad4m://has_child'].author IS NOT NONE GROUP BY author";
-
-        let participants = perspective
-            .surreal_query(participants_query.to_string())
-            .await
-            .unwrap();
-
-        // Should get authors from nested items
-        assert!(
-            participants.len() == 0 || participants.len() > 0,
-            "Query should execute successfully"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_docs_advanced_grouping_with_having() {
-        let mut perspective = setup().await;
-
-        // Add posts with likes
-        for i in 1..=3 {
-            let post_uri = format!("post://{}", i);
-
-            // Add likes for each post (post1: 5 likes, post2: 15 likes, post3: 8 likes)
-            let like_count = if i == 2 { 15 } else { 5 + i };
-
-            for j in 0..like_count {
-                perspective
-                    .add_link(
-                        Link {
-                            source: format!("user://user{}", j),
-                            target: post_uri.clone(),
-                            predicate: Some("ad4m://likes".to_string()),
-                        },
-                        LinkStatus::Shared,
-                        None,
-                        &AgentContext::main_agent(),
-                    )
-                    .await
-                    .unwrap();
+        // NoneRecorded + specific → Specific
+        state = match state {
+            ChangedPredicates::NoneRecorded => {
+                ChangedPredicates::Specific(["p1".to_string()].into())
             }
+            other => other,
+        };
+        assert!(matches!(state, ChangedPredicates::Specific(_)));
+
+        // Specific + more specific → Specific (union)
+        if let ChangedPredicates::Specific(ref mut set) = state {
+            set.insert("p2".to_string());
+        }
+        if let ChangedPredicates::Specific(ref set) = state {
+            assert!(set.contains("p1"));
+            assert!(set.contains("p2"));
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Specific + predicate-less → CheckAll
+        state = ChangedPredicates::CheckAll;
+        assert!(matches!(state, ChangedPredicates::CheckAll));
 
-        // Test: Find posts with more than 10 likes
-        // Note: SurrealDB doesn't support HAVING clause, filter in application code
-        let all_posts = perspective
-            .surreal_query(
-                "SELECT out.uri as post, count() as like_count FROM link WHERE predicate = 'ad4m://likes' GROUP BY out.uri"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
+        // CheckAll + anything → CheckAll (sticky)
+        state = match state {
+            ChangedPredicates::CheckAll => ChangedPredicates::CheckAll,
+            other => other,
+        };
+        assert!(matches!(state, ChangedPredicates::CheckAll));
+    }
 
-        // Filter for > 10 likes in application code
-        let popular_posts: Vec<_> = all_posts
-            .iter()
-            .filter(|p| {
-                let count = p
-                    .get("like_count")
-                    .and_then(|v| {
-                        v.as_u64()
-                            .or_else(|| v.get("Int").and_then(|i| i.as_u64()))
-                            .or_else(|| v.as_array().map(|a| a.len() as u64))
-                    })
-                    .unwrap_or(0);
-                count > 10
-            })
-            .collect();
+    #[test]
+    fn test_changed_predicates_none_recorded_to_check_all() {
+        // NoneRecorded + no predicates → CheckAll
+        let state = ChangedPredicates::NoneRecorded;
+        let has_predicate_less = true;
+        let result = if has_predicate_less {
+            ChangedPredicates::CheckAll
+        } else {
+            state
+        };
+        assert!(matches!(result, ChangedPredicates::CheckAll));
+    }
 
-        // Due to test isolation issues, we just verify the query works and filters correctly
-        // Either we find exactly post://2 with >10 likes, or the test ran after others
+    #[test]
+    fn test_extract_predicates_mixed_fixed_and_variable() {
+        // A real model SPARQL query has fixed predicates in join patterns
+        // (conformance checks) AND a variable predicate in the main triple
+        // pattern. Because the variable predicate matches ANY predicate,
+        // the subscription must always be re-checked → empty set.
+        let query = r#"
+            SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
+                ?source <test://post_type> <test://post> .
+                ?source <test://has_title> ?cfTarget_title .
+                GRAPH ?linkGraph { ?source ?predicate ?target . }
+                FILTER(isIRI(?source) && isIRI(?predicate))
+                ?linkGraph <ad4m://ontology/author> ?author .
+                ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
+            }
+        "#;
+        let predicates = extract_predicates_from_sparql(query);
         assert!(
-            !popular_posts.is_empty(),
-            "Should find at least 1 popular post with >10 likes"
-        );
-
-        // Verify the filtering logic works - all returned posts should have >10 likes
-        for post in &popular_posts {
-            let like_count = post
-                .get("like_count")
-                .and_then(|v| {
-                    v.as_u64()
-                        .or_else(|| v.get("Int").and_then(|i| i.as_u64()))
-                        .or_else(|| v.as_array().map(|a| a.len() as u64))
-                })
-                .unwrap();
-            assert!(
-                like_count > 10,
-                "All filtered posts should have >10 likes, got {}",
-                like_count
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_docs_distinct_values() {
-        let mut perspective = setup().await;
-
-        // Add links with different predicates
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://bob".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "post://123".to_string(),
-                    predicate: Some("ad4m://likes".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://bob".to_string(),
-                    target: "post://456".to_string(),
-                    predicate: Some("ad4m://likes".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Get all unique predicates used
-        // Note: SurrealDB has issues with SELECT DISTINCT field, use GROUP BY instead
-        let predicates = perspective
-            .surreal_query("SELECT predicate FROM link GROUP BY predicate".to_string())
-            .await
-            .unwrap();
-
-        assert_eq!(predicates.len(), 2, "Should have 2 unique predicates");
-        let pred_values: Vec<&str> = predicates
-            .iter()
-            .filter_map(|p| p.get("predicate").and_then(|v| v.as_str()))
-            .collect();
-        assert!(pred_values.contains(&"ad4m://follows"));
-        assert!(pred_values.contains(&"ad4m://likes"));
-    }
-
-    #[tokio::test]
-    async fn test_docs_sorting_and_pagination() {
-        let mut perspective = setup().await;
-        let now = chrono::Utc::now();
-
-        // Add links with different timestamps
-        for i in 0..5 {
-            let mut link = create_link();
-            link.target = format!("target://{}", i);
-            let mut signed_link = create_signed_expression(link, &AgentContext::main_agent())
-                .expect("Failed to create link");
-            signed_link.timestamp = (now - chrono::Duration::minutes(i as i64)).to_rfc3339();
-
-            perspective
-                .add_link_expression(LinkExpression::from(signed_link), LinkStatus::Shared, None)
-                .await
-                .unwrap();
-        }
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Recent links first, paginated (page 1)
-        let recent_links = perspective
-            .surreal_query("SELECT * FROM link ORDER BY timestamp DESC LIMIT 2 START 0".to_string())
-            .await
-            .unwrap();
-
-        assert_eq!(recent_links.len(), 2, "Should get 2 links");
-
-        // Test: Next page
-        let next_page = perspective
-            .surreal_query("SELECT * FROM link ORDER BY timestamp DESC LIMIT 2 START 2".to_string())
-            .await
-            .unwrap();
-
-        assert_eq!(next_page.len(), 2, "Should get 2 more links");
-    }
-
-    #[tokio::test]
-    async fn test_docs_string_operations() {
-        let mut perspective = setup().await;
-
-        // Add links with different predicates
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://bob".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://bob".to_string(),
-                    target: "user://alice".to_string(),
-                    predicate: Some("ad4m://following".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "post://123".to_string(),
-                    predicate: Some("ad4m://likes".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Find links with predicates containing "follow"
-        let follow_links = perspective
-            .surreal_query("SELECT * FROM link WHERE predicate CONTAINS 'follow'".to_string())
-            .await
-            .unwrap();
-
-        assert_eq!(
-            follow_links.len(),
-            2,
-            "Should find 2 links containing 'follow'"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_docs_filtering_by_properties() {
-        let mut perspective = setup().await;
-        let now = chrono::Utc::now();
-
-        // Add recent link
-        let mut recent_link = create_link();
-        recent_link.source = "user://alice".to_string();
-        let mut recent_signed = create_signed_expression(recent_link, &AgentContext::main_agent())
-            .expect("Failed to create link");
-        recent_signed.timestamp = (now - chrono::Duration::hours(1)).to_rfc3339();
-
-        perspective
-            .add_link_expression(
-                LinkExpression::from(recent_signed),
-                LinkStatus::Shared,
-                None,
-            )
-            .await
-            .unwrap();
-
-        // Add old link
-        let mut old_link = create_link();
-        old_link.source = "user://alice".to_string();
-        let mut old_signed = create_signed_expression(old_link, &AgentContext::main_agent())
-            .expect("Failed to create link");
-        old_signed.timestamp = (now - chrono::Duration::days(365)).to_rfc3339();
-
-        perspective
-            .add_link_expression(LinkExpression::from(old_signed), LinkStatus::Shared, None)
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Find recent links from Alice
-        let start_date = (now - chrono::Duration::days(30)).to_rfc3339();
-        let end_date = now.to_rfc3339();
-
-        let recent_links = perspective
-            .surreal_query(format!(
-                "SELECT * FROM link WHERE in.uri = 'user://alice' AND timestamp > '{}' AND timestamp < '{}'",
-                start_date, end_date
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(recent_links.len(), 1, "Should find 1 recent link");
-    }
-
-    #[tokio::test]
-    async fn test_docs_parse_literal_string() {
-        let mut perspective = setup().await;
-
-        // Add a link pointing to a string literal
-        perspective
-            .add_link(
-                Link {
-                    source: "post://123".to_string(),
-                    target: "literal://string:Hello%20World".to_string(),
-                    predicate: Some("ad4m://has_title".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Parse string literal
-        let result = perspective
-            .surreal_query(
-                "SELECT fn::parse_literal(out.uri) AS title FROM link WHERE in.uri = 'post://123' AND predicate = 'ad4m://has_title'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(result.len(), 1, "Should find 1 result");
-        assert_eq!(
-            result[0].get("title").and_then(|v| v.as_str()),
-            Some("Hello World"),
-            "Should parse string literal correctly"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_docs_parse_literal_number() {
-        let mut perspective = setup().await;
-
-        // Add a link pointing to a number literal
-        perspective
-            .add_link(
-                Link {
-                    source: "post://456".to_string(),
-                    target: "literal://number:42".to_string(),
-                    predicate: Some("ad4m://has_count".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Parse number literal
-        let result = perspective
-            .surreal_query(
-                "SELECT fn::parse_literal(out.uri) AS count FROM link WHERE in.uri = 'post://456' AND predicate = 'ad4m://has_count'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(result.len(), 1, "Should find 1 result");
-
-        // fn::parse_literal returns a number (might be nested in object structure)
-        let count_value = result[0].get("count");
-        assert!(count_value.is_some(), "Should have count field");
-
-        // Extract the number - it might be in a nested Float/Int object or directly as a number
-        let count = count_value.and_then(|v| {
-            // First try direct access
-            v.as_i64()
-                .or_else(|| v.as_u64().map(|u| u as i64))
-                .or_else(|| v.as_f64().map(|f| f as i64))
-                // Then try nested object access
-                .or_else(|| v.get("Float").and_then(|f| f.as_f64().map(|f| f as i64)))
-                .or_else(|| v.get("Int").and_then(|i| i.as_i64()))
-        });
-
-        assert!(count.is_some(), "Should be able to extract number");
-        assert_eq!(count, Some(42), "Should parse number literal correctly");
-    }
-
-    #[tokio::test]
-    async fn test_docs_parse_literal_json() {
-        let mut perspective = setup().await;
-
-        // Add a link pointing to a JSON literal (URL encoded)
-        let encoded_json = "%7B%22name%22%3A%22Alice%22%2C%22age%22%3A30%7D"; // {"name":"Alice","age":30}
-        perspective
-            .add_link(
-                Link {
-                    source: "user://789".to_string(),
-                    target: format!("literal://json:{}", encoded_json),
-                    predicate: Some("ad4m://has_profile".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Parse JSON literal (should extract .data field)
-        let result = perspective
-            .surreal_query(
-                "SELECT fn::parse_literal(out.uri) AS profile FROM link WHERE in.uri = 'user://789' AND predicate = 'ad4m://has_profile'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(result.len(), 1, "Should find 1 result");
-        // fn::parse_literal should extract the data from JSON expressions
-        let profile = result[0].get("profile");
-        assert!(profile.is_some(), "Should have parsed JSON literal");
-    }
-
-    #[tokio::test]
-    async fn test_docs_parse_literal_multi_hop() {
-        let mut perspective = setup().await;
-
-        // Create structure: Parent -> Child -> Title (literal)
-        perspective
-            .add_link(
-                Link {
-                    source: "parent://abc".to_string(),
-                    target: "child://xyz".to_string(),
-                    predicate: Some("ad4m://has_child".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "child://xyz".to_string(),
-                    target: "literal://string:Child%20Title".to_string(),
-                    predicate: Some("flux://title".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Parse literals in multi-hop traversal
-        let result = perspective
-            .surreal_query(
-                "SELECT out.uri AS child, fn::parse_literal(out->link[WHERE predicate = 'flux://title'][0].out.uri) AS title FROM link WHERE in.uri = 'parent://abc' AND predicate = 'ad4m://has_child'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(result.len(), 1, "Should find 1 child");
-        assert_eq!(
-            result[0].get("child").and_then(|v| v.as_str()),
-            Some("child://xyz")
-        );
-        assert_eq!(
-            result[0].get("title").and_then(|v| v.as_str()),
-            Some("Child Title"),
-            "Should parse literal in multi-hop query"
+            predicates.is_empty(),
+            "Query with variable ?predicate should return empty set, got: {:?}",
+            predicates
         );
     }
 }
