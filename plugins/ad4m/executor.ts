@@ -350,7 +350,7 @@ export async function isExecutorRunning(
 
       fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
         body,
         signal: controller.signal,
       })
