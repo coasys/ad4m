@@ -189,7 +189,22 @@ struct SubscribedQuery {
 /// Extract predicate IRIs from a SPARQL query by finding triple patterns.
 /// Returns an empty set if no fixed predicates are found (e.g. `?s ?p ?o`),
 /// which means the subscription should always be re-checked.
+///
+/// Also returns an empty set if a `GRAPH` pattern uses a variable predicate
+/// (e.g. `GRAPH ?g { ?source ?predicate ?target }`). Such patterns match links
+/// with ANY predicate, so we cannot narrow the subscription to a fixed set.
 fn extract_predicates_from_sparql(query: &str) -> HashSet<String> {
+    // Detect variable predicate inside GRAPH patterns:
+    // GRAPH ?var { ... ?var1 ?varPred ?var2 ... }
+    // This is the pattern our model queries use for fetching all links.
+    let graph_var_pred = regex::Regex::new(
+        r"GRAPH\s+\?\w+\s*\{[^}]*(?:\?\w+|<[^>]+>)\s+(\?\w+)\s+(?:\?\w+|<[^>]+>)[^}]*\}",
+    )
+    .unwrap();
+    if graph_var_pred.is_match(query) {
+        return HashSet::new();
+    }
+
     let mut predicates = HashSet::new();
     // Match triple patterns: (var|uri) <uri> (var|uri)
     // The middle <uri> is the predicate
@@ -5066,5 +5081,29 @@ mod tests {
             state
         };
         assert!(matches!(result, ChangedPredicates::CheckAll));
+    }
+
+    #[test]
+    fn test_extract_predicates_mixed_fixed_and_variable() {
+        // A real model SPARQL query has fixed predicates in join patterns
+        // (conformance checks) AND a variable predicate in the main triple
+        // pattern. Because the variable predicate matches ANY predicate,
+        // the subscription must always be re-checked → empty set.
+        let query = r#"
+            SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
+                ?source <test://post_type> <test://post> .
+                ?source <test://has_title> ?cfTarget_title .
+                GRAPH ?linkGraph { ?source ?predicate ?target . }
+                FILTER(isIRI(?source) && isIRI(?predicate))
+                ?linkGraph <ad4m://ontology/author> ?author .
+                ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
+            }
+        "#;
+        let predicates = extract_predicates_from_sparql(query);
+        assert!(
+            predicates.is_empty(),
+            "Query with variable ?predicate should return empty set, got: {:?}",
+            predicates
+        );
     }
 }
