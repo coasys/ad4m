@@ -2177,11 +2177,27 @@ describe("Multi-User Simple integration tests", () => {
             });
             console.log("Node 2 User 2 added link");
 
+            // Re-exchange agent infos before sync polling — K2 spaces created
+            // during link-language install may need fresh peer info
+            console.log("Re-exchanging agent infos before link sync polling...");
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    const n1Infos = await adminAd4mClient!.runtime.hcAgentInfos();
+                    const n2Infos = await node2AdminClient!.runtime.hcAgentInfos();
+                    await adminAd4mClient!.runtime.hcAddAgentInfos(n2Infos);
+                    await node2AdminClient!.runtime.hcAddAgentInfos(n1Infos);
+                } catch (e) {
+                    console.log(`  Agent info exchange attempt ${attempt} failed:`, e);
+                }
+                if (attempt < 3) await sleep(2000);
+            }
+
             // Wait for cross-node Holochain gossip synchronization with retry
             console.log("\nWaiting for cross-node sync (polling until all users see >= 5 links)...");
-            const syncTimeout = 120000; // 2 minutes max
+            const syncTimeout = 150000; // 2.5 minutes max
             const syncStart = Date.now();
             let synced = false;
+            let pollCount = 0;
 
             let node1User1Links: any[] = [];
             let node1User2Links: any[] = [];
@@ -2190,6 +2206,18 @@ describe("Multi-User Simple integration tests", () => {
 
             while (!synced && Date.now() - syncStart < syncTimeout) {
                 await sleep(5000);
+                pollCount++;
+
+                // Re-exchange agent infos every 30s to help K2 peer discovery
+                if (pollCount % 6 === 0) {
+                    try {
+                        const n1Infos = await adminAd4mClient!.runtime.hcAgentInfos();
+                        const n2Infos = await node2AdminClient!.runtime.hcAgentInfos();
+                        await adminAd4mClient!.runtime.hcAddAgentInfos(n2Infos);
+                        await node2AdminClient!.runtime.hcAddAgentInfos(n1Infos);
+                        console.log("  Re-exchanged agent infos");
+                    } catch (_e) {}
+                }
 
                 node1User1Links = await node1User1Client!.perspective.queryLinks(
                     node1User1Neighbourhood!.uuid, new LinkQuery({})
