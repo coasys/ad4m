@@ -11,6 +11,7 @@ class MockEventSource {
     onmessage: any = null;
     onerror: any = null;
     closed = false;
+    url: string;
 
     close() {
         this.closed = true;
@@ -20,7 +21,8 @@ class MockEventSource {
         this.onmessage?.({ data: JSON.stringify(payload) });
     }
 
-    constructor(_url: string) {
+    constructor(url: string) {
+        this.url = url;
         MockEventSource.instances.push(this);
     }
 }
@@ -416,6 +418,7 @@ afterAll(() => {
 
 beforeEach(() => {
     lastRequest = null;
+    MockEventSource.instances = [];
 });
 
 // ===================== AGENT TESTS =====================
@@ -616,7 +619,27 @@ describe('PerspectiveClient', () => {
         expect(result).toEqual([{X: 'test'}]);
     });
 
-    test('subscribeToQueryUpdates() ignores unrelated unified SSE events and accepts object results', async () => {
+    test('subscribeToQueryUpdates() uses the dedicated query-subscription SSE endpoint', async () => {
+        const callback = jest.fn();
+        const unsubscribe = ad4m.perspective.subscribeToQueryUpdates('sub-1', callback);
+        const eventSource = MockEventSource.instances.at(-1)!;
+
+        expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/query-subscription/sub-1?token=test-token`);
+
+        unsubscribe();
+        expect(eventSource.closed).toBe(true);
+    });
+
+    test('perspective lifecycle subscriptions still use the unified SSE endpoint', async () => {
+        const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
+        freshClient.perspective.addPerspectiveAddedListener(jest.fn());
+        freshClient.perspective.subscribePerspectiveAdded();
+
+        const eventSource = MockEventSource.instances.at(-1)!;
+        expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/unified?token=test-token`);
+    });
+
+    test('subscribeToQueryUpdates() ignores unrelated SSE events and accepts object results', async () => {
         const callback = jest.fn();
         const unsubscribe = ad4m.perspective.subscribeToQueryUpdates('sub-1', callback);
         const eventSource = MockEventSource.instances.at(-1)!;

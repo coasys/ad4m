@@ -4308,18 +4308,18 @@ impl PerspectiveInstance {
             removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
         };
 
-        // Only spawn prolog facts update if there are changes to update
+        // Only update storage / subscription engines when there are changes.
+        // The SPARQL store must be updated first so any subscription re-checks
+        // triggered by update_prolog_engines() see the committed batch state.
         if !combined_diff.additions.is_empty() || !combined_diff.removals.is_empty() {
             //let prolog_start = std::time::Instant::now();
-            //log::info!("🔄 BATCH COMMIT: Starting prolog facts update - {} add, {} rem",
+            //log::info!("🔄 BATCH COMMIT: Starting DB + prolog updates - {} add, {} rem",
             //    combined_diff.additions.len(), combined_diff.removals.len());
 
-            // Update prolog facts once for all changes and wait for completion
-            // Update Prolog: subscription engine (immediate) + query engine (lazy)
-            // Update both Prolog engines: subscription (immediate) + query (lazy)
-            self.update_prolog_engines(combined_diff.clone()).await;
-
             self.persist_link_diff(&combined_diff).await?;
+
+            // Update Prolog: subscription engine (immediate) + query engine (lazy)
+            self.update_prolog_engines(combined_diff.clone()).await;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }
