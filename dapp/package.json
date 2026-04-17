@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@types/node": "^16.7.13",
+    "@types/node": "^22.15.0",
     "@types/react": "^18.0.0",
     "@types/react-dom": "^18.0.0",
     "react": "^18.2.0",
@@ -18,8 +18,8 @@
     "@coasys/ad4m": "*"
   },
   "devDependencies": {
-    "vite": "^5.0.0",
-    "@vitejs/plugin-react": "^4.2.0"
+    "vite": "^6.3.4",
+    "@vitejs/plugin-react": "^4.5.2"
   },
   "scripts": {
     "dev": "vite",

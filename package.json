@@ -51,9 +51,9 @@
     "set-version": "node setVersion.js"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.25.2",
+    "@changesets/cli": "^2.29.5",
     "eslint-config-custom": "*",
-    "patch-package": "^6.5.0",
+    "patch-package": "^8.0.1",
     "prettier": "latest",
     "readline-sync": "1.4.10",
     "turbo": "latest"
@@ -74,6 +74,9 @@
       "@peculiar/webcrypto@1.4.5": "patches/@peculiar__webcrypto@1.4.5.patch",
       "safe-buffer@5.2.1": "patches/safe-buffer@5.2.1.patch",
       "safer-buffer@2.1.2": "patches/safer-buffer@2.1.2.patch"
+    },
+    "overrides": {
+      "@apollo/client": "3.7.10"
     }
   },
   "version": "0.13.0-test-2",

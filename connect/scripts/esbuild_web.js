@@ -1,15 +1,23 @@
 const { default: litPlugin } = require("esbuild-plugin-lit");
 const esbuild = require("esbuild");
 
-esbuild
-  .build({
-    entryPoints: ["./src/web.ts"],
-    bundle: true,
-    format: "esm",
-    minify: true,
-    sourcemap: process.env.NODE_ENV === "dev" ? true : false,
-    outfile: "dist/web.js",
-    watch: process.env.NODE_ENV === "dev" ? true : false,
-    plugins: [litPlugin()],
-  })
-  .catch(() => process.exit(1));
+const buildOptions = {
+  entryPoints: ["./src/web.ts"],
+  bundle: true,
+  format: "esm",
+  minify: true,
+  sourcemap: process.env.NODE_ENV === "dev" ? true : false,
+  outfile: "dist/web.js",
+  plugins: [litPlugin()],
+};
+
+async function main() {
+  if (process.env.NODE_ENV === "dev") {
+    const ctx = await esbuild.context(buildOptions);
+    await ctx.watch();
+  } else {
+    await esbuild.build(buildOptions);
+  }
+}
+
+main().catch(() => process.exit(1));

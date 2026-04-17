@@ -2,7 +2,7 @@ import alias from '@rollup/plugin-alias';
 import nodeResolve from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
 
-module.exports = {
+export default {
   input: 'lib/src/index.js',
   output: [
     {
