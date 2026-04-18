@@ -76,6 +76,5 @@
       "safer-buffer@2.1.2": "patches/safer-buffer@2.1.2.patch"
     }
   },
-  "version": "0.13.0-test-2",
-  "packageManager": "pnpm@9.15.0"
+  "version": "0.12.0"
 }
