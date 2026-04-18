@@ -138,6 +138,23 @@ fn parse_link_mutation_request_empty() {
 }
 
 #[test]
+fn parse_remove_links_bulk_request() {
+    let json = json!({
+        "links": [{
+            "author": "did:test:123",
+            "timestamp": "2024-01-01T00:00:00.000Z",
+            "data": {"source": "a", "predicate": "links_to", "target": "b"},
+            "proof": {"key": "pubkey", "signature": "sig"}
+        }],
+        "batchId": "batch-123"
+    });
+    let req: RemoveLinksBulkRequest = serde_json::from_value(json).unwrap();
+    assert_eq!(req.links.len(), 1);
+    assert_eq!(req.links[0].data.source, "a");
+    assert_eq!(req.batch_id, Some("batch-123".into()));
+}
+
+#[test]
 fn parse_query_request() {
     let json = json!({"engine": "prolog", "query": "triple(X, Y, Z)"});
     let req: QueryRequest = serde_json::from_value(json).unwrap();

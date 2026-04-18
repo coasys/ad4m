@@ -49,7 +49,7 @@ describe("REST Integration", function() {
         gqlPort = ports[0];
         hcAdminPort = ports[1];
         hcAppPort = ports[2];
-        registerPorts(gqlPort, hcAdminPort, hcAppPort);
+        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
 
         executorProcess = await startExecutor(
             appDataPath,
@@ -68,7 +68,7 @@ describe("REST Integration", function() {
         if (executorProcess) {
             await gracefulShutdown(executorProcess);
         }
-        deregisterPorts(gqlPort, hcAdminPort, hcAppPort);
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     });
 
     // === Agent Tests ===
@@ -233,6 +233,48 @@ describe("REST Integration", function() {
 
                 const result = await proxy!.commitBatch(batchId);
                 expect(result).to.exist;
+            });
+
+            it("should stage bulk removeLinks until batch commit", async () => {
+                const proxy = await ad4m.perspective.add("REST Batch Remove Perspective");
+
+                try {
+                    const addBatchId = await proxy.createBatch();
+                    await proxy.addLinks(
+                        [
+                            new Link({ source: "batch-remove://src-1", target: "batch-remove://tgt-1" }),
+                            new Link({ source: "batch-remove://src-2", target: "batch-remove://tgt-2" }),
+                        ],
+                        'shared',
+                        addBatchId
+                    );
+
+                    let currentLinks = await ad4m.perspective.queryLinks(proxy.uuid, {});
+                    expect(currentLinks.length).to.equal(0);
+
+                    const addResult = await proxy.commitBatch(addBatchId);
+                    expect(addResult.additions.length).to.equal(2);
+                    expect(addResult.removals.length).to.equal(0);
+
+                    currentLinks = await ad4m.perspective.queryLinks(proxy.uuid, {});
+                    expect(currentLinks.length).to.equal(2);
+
+                    const removeBatchId = await proxy.createBatch();
+                    const stagedRemovals = await proxy.removeLinks(currentLinks, removeBatchId);
+                    expect(stagedRemovals.length).to.equal(2);
+
+                    currentLinks = await ad4m.perspective.queryLinks(proxy.uuid, {});
+                    expect(currentLinks.length).to.equal(2);
+
+                    const removeResult = await proxy.commitBatch(removeBatchId);
+                    expect(removeResult.additions.length).to.equal(0);
+                    expect(removeResult.removals.length).to.equal(2);
+
+                    currentLinks = await ad4m.perspective.queryLinks(proxy.uuid, {});
+                    expect(currentLinks.length).to.equal(0);
+                } finally {
+                    await ad4m.perspective.remove(proxy.uuid);
+                }
             });
         });
 

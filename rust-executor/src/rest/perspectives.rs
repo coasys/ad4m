@@ -407,6 +407,22 @@ pub async fn remove_links_bulk(
     let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
+    if let Some(batch_id) = body.batch_id {
+        let mut removals = Vec::with_capacity(body.links.len());
+        for link in body.links {
+            let removed = perspective
+                .remove_link(
+                    LinkExpression::from_input_without_proof(link),
+                    Some(batch_id.clone()),
+                )
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            removals.push(removed);
+        }
+
+        return Ok(Json(removals));
+    }
+
     let mutations = LinkMutations {
         additions: vec![],
         removals: body.links,

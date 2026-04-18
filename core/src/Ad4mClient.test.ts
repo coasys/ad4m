@@ -586,6 +586,19 @@ describe('PerspectiveClient', () => {
         expect(lastRequest!.body.links).toHaveLength(2);
     });
 
+    test('removeLinks() forwards batchId in the bulk remove request', async () => {
+        const removed = await ad4m.perspective.removeLinks('uuid-1', [{
+            author: 'a',
+            timestamp: 't',
+            data: { source: 's', predicate: 'p', target: 't' },
+            proof: { valid: true }
+        }] as any, 'batch-id-1');
+        expect(removed).toHaveLength(0);
+        expect(lastRequest!.path).toBe('/api/v1/perspectives/uuid-1/links/remove-bulk');
+        expect(lastRequest!.body.links).toHaveLength(1);
+        expect(lastRequest!.body.batchId).toBe('batch-id-1');
+    });
+
     test('updateLink() updates a link', async () => {
         const link = await ad4m.perspective.updateLink('uuid-1',
             { author: 'a', timestamp: 't', data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true } } as any,

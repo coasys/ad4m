@@ -514,6 +514,7 @@ pub struct AddLinksBulkRequest {
 #[ts(export)]
 pub struct RemoveLinksBulkRequest {
     pub links: Vec<LinkExpressionInput>,
+    pub batch_id: Option<String>,
 }
 
 #[derive(Deserialize, TS)]
