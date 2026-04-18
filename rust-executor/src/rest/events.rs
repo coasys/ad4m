@@ -59,8 +59,8 @@ fn broadcast_to_sse_stream_nested(
         })
 }
 
-use crate::agent::{did_for_context, AgentContext};
 use crate::agent::capabilities::*;
+use crate::agent::{did_for_context, AgentContext};
 use crate::pubsub::{
     get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, AI_MODEL_LOADING_STATUS,
     AI_TRANSCRIPTION_TEXT_TOPIC, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC,
@@ -279,7 +279,8 @@ pub async fn neighbourhood_signal_events(
     check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let current_did = did_for_context(&AgentContext::from_auth_token(context.auth_token.clone())).ok();
+    let current_did =
+        did_for_context(&AgentContext::from_auth_token(context.auth_token.clone())).ok();
 
     let pubsub = get_global_pubsub().await;
     let rx = pubsub.subscribe(&NEIGHBOURHOOD_SIGNAL_TOPIC).await;
@@ -433,7 +434,8 @@ pub async fn unified_events(
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let current_did = did_for_context(&AgentContext::from_auth_token(context.auth_token.clone())).ok();
+    let current_did =
+        did_for_context(&AgentContext::from_auth_token(context.auth_token.clone())).ok();
 
     let pubsub = get_global_pubsub().await;
 
