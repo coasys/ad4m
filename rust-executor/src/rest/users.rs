@@ -141,8 +141,8 @@ pub async fn create_user(
         }
     }
 
-    let did = um::create_user(&email, &body.password)
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let did =
+        um::create_user(&email, &body.password).map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let code = um::create_verification_code(&email, "signup")
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -202,13 +202,9 @@ pub async fn verify_email(
     let email = body.email.trim().to_lowercase();
     let verification_type = body.verification_type.as_deref().unwrap_or("signup");
     let app_name = body.app_name.as_deref().unwrap_or("ad4m");
-    let jwt = crate::user_management::verify_and_login(
-        &email,
-        &body.code,
-        verification_type,
-        app_name,
-    )
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let jwt =
+        crate::user_management::verify_and_login(&email, &body.code, verification_type, app_name)
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(jwt))
 }
