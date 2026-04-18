@@ -135,7 +135,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43d5b281e737544384e969a5ccad3f1cdd24b48086a0fc1b2a5262a26b8f4f4a"
 dependencies = [
  "anstyle",
- "anstyle-parse",
+ "anstyle-parse 0.2.7",
+ "anstyle-query",
+ "anstyle-wincon",
+ "colorchoice",
+ "is_terminal_polyfill",
+ "utf8parse",
+]
+
+[[package]]
+name = "anstream"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "824a212faf96e9acacdbd09febd34438f8f711fb84e09a8916013cd7815ca28d"
+dependencies = [
+ "anstyle",
+ "anstyle-parse 1.0.0",
  "anstyle-query",
  "anstyle-wincon",
  "colorchoice",
@@ -145,15 +160,24 @@ dependencies = [
 
 [[package]]
 name = "anstyle"
-version = "1.0.13"
+version = "1.0.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5192cca8006f1fd4f7237516f40fa183bb07f8fbdfedaa0036de5ea9b0b45e78"
+checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
 name = "anstyle-parse"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7644824f0aa2c7b9384579234ef10eb7efb6a0deb83f9630a49594dd9c15c2"
+dependencies = [
+ "utf8parse",
+]
+
+[[package]]
+name = "anstyle-parse"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52ce7f38b242319f7cabaa6813055467063ecdc9d355bbb4ce0c68908cd8130e"
 dependencies = [
  "utf8parse",
 ]
@@ -732,9 +756,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.56"
+version = "1.2.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aebf35691d1bfb0ac386a69bac2fde4dd276fb618cf8bf4f5318fe285e821bb2"
+checksum = "7a0dd1ca384932ff3641c8718a02769f1698e7563dc6974ffd03346116310423"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -806,9 +830,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.5.60"
+version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2797f34da339ce31042b27d23607e051786132987f595b02ba4f6a6dffb7030a"
+checksum = "b193af5b67834b676abd72466a96c1024e6a6ad978a1f484bd90b85c94041351"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -816,11 +840,11 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.60"
+version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24a241312cea5059b13574bb9b3861cabf758b879c15190b37b6d6fd63ab6876"
+checksum = "714a53001bf66416adb0e2ef5ac857140e7dc3a0c48fb28b2f10762fc4b5069f"
 dependencies = [
- "anstream",
+ "anstream 1.0.0",
  "anstyle",
  "clap_lex",
  "strsim",
@@ -829,9 +853,9 @@ dependencies = [
 
 [[package]]
 name = "clap_derive"
-version = "4.5.55"
+version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a92793da1a46a5f2a02a6f4c46c6496b28c43638adea8306fcb0caa1634f24e5"
+checksum = "1110bd8a634a1ab8cb04345d8d878267d57c3cf1b38d91b71af6686408bbca6a"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -841,9 +865,9 @@ dependencies = [
 
 [[package]]
 name = "clap_lex"
-version = "1.0.0"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
+checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "cmake"
@@ -865,9 +889,9 @@ dependencies = [
 
 [[package]]
 name = "colorchoice"
-version = "1.0.4"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
+checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "colored"
@@ -1928,7 +1952,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 [[package]]
 name = "fixt"
 version = "0.7.0-dev.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "holochain_serialized_bytes",
  "lazy_static",
@@ -2365,8 +2389,8 @@ dependencies = [
 
 [[package]]
 name = "hdi"
-version = "0.8.0-dev.5"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.8.0-dev.7"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "getrandom 0.3.4",
  "hdk_derive",
@@ -2384,8 +2408,8 @@ dependencies = [
 
 [[package]]
 name = "hdk"
-version = "0.7.0-dev.8"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.10"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "getrandom 0.3.4",
  "hdi",
@@ -2401,8 +2425,8 @@ dependencies = [
 
 [[package]]
 name = "hdk_derive"
-version = "0.7.0-dev.5"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.7"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "darling 0.21.3",
  "heck",
@@ -2525,8 +2549,8 @@ dependencies = [
 
 [[package]]
 name = "holo_hash"
-version = "0.7.0-dev.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.6"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "base64",
  "blake2b_simd",
@@ -2552,8 +2576,8 @@ dependencies = [
 
 [[package]]
 name = "holochain"
-version = "0.7.0-dev.14"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.16"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2606,7 +2630,7 @@ dependencies = [
  "nanoid",
  "once_cell",
  "one_err",
- "opentelemetry_api",
+ "opentelemetry 0.31.0",
  "parking_lot",
  "rand 0.9.2",
  "rand-utf8",
@@ -2640,8 +2664,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_cascade"
-version = "0.7.0-dev.14"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.16"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "async-trait",
  "fixt",
@@ -2657,7 +2681,7 @@ dependencies = [
  "holochain_zome_types",
  "kitsune2_api",
  "mockall",
- "opentelemetry_api",
+ "opentelemetry 0.31.0",
  "parking_lot",
  "thiserror 2.0.18",
  "tokio",
@@ -2666,8 +2690,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_conductor_api"
-version = "0.7.0-dev.13"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.15"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "derive_more 2.1.1",
  "holo_hash",
@@ -2696,8 +2720,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_conductor_config"
-version = "0.7.0-dev.13"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.15"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "ansi_term",
  "anyhow",
@@ -2713,8 +2737,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_data"
-version = "0.7.0-dev.3"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "base64",
  "holo_hash",
@@ -2731,8 +2755,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_integrity_types"
-version = "0.7.0-dev.5"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.7"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "derive_builder",
  "holo_hash",
@@ -2752,8 +2776,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_keystore"
-version = "0.7.0-dev.7"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.9"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "base64",
  "derive_more 2.1.1",
@@ -2767,6 +2791,7 @@ dependencies = [
  "must_future",
  "nanoid",
  "one_err",
+ "opentelemetry 0.31.0",
  "parking_lot",
  "schemars 0.9.0",
  "serde",
@@ -2780,18 +2805,32 @@ dependencies = [
 
 [[package]]
 name = "holochain_metrics"
-version = "0.7.0-dev.1"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.3"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
- "influxive",
- "opentelemetry_api",
+ "digest 0.10.7",
+ "dirs",
+ "flate2",
+ "futures",
+ "hex",
+ "hex-literal",
+ "influxdb",
+ "opentelemetry 0.31.0",
+ "opentelemetry_sdk",
+ "reqwest 0.12.28",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
+ "zip 3.0.0",
 ]
 
 [[package]]
 name = "holochain_nonce"
 version = "0.7.0-dev.1"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "getrandom 0.3.4",
  "holochain_secure_primitive",
@@ -2800,8 +2839,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_p2p"
-version = "0.7.0-dev.14"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.16"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "async-trait",
  "base64",
@@ -2823,17 +2862,14 @@ dependencies = [
  "kitsune2_api",
  "kitsune2_bootstrap_srv",
  "kitsune2_core",
- "kitsune2_gossip",
  "kitsune2_transport_iroh",
- "lair_keystore_api 0.6.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "mockall",
- "opentelemetry_api",
+ "opentelemetry 0.31.0",
  "parking_lot",
  "rand 0.9.2",
  "rmp-serde",
  "serde",
  "serde_json",
- "strum",
  "strum_macros",
  "thiserror 2.0.18",
  "tokio",
@@ -2844,7 +2880,7 @@ dependencies = [
 [[package]]
 name = "holochain_secure_primitive"
 version = "0.7.0-dev.1"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "paste",
  "serde",
@@ -2881,8 +2917,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_sqlite"
-version = "0.7.0-dev.10"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.12"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2901,7 +2937,7 @@ dependencies = [
  "kitsune2_api",
  "nanoid",
  "once_cell",
- "opentelemetry_api",
+ "opentelemetry 0.31.0",
  "parking_lot",
  "pretty_assertions",
  "r2d2",
@@ -2922,8 +2958,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_state"
-version = "0.7.0-dev.14"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.16"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "async-recursion",
  "base64",
@@ -2956,8 +2992,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_state_types"
-version = "0.7.0-dev.5"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.7"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "holo_hash",
  "holochain_integrity_types",
@@ -2966,8 +3002,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_test_wasm_common"
-version = "0.7.0-dev.8"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.10"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "hdk",
  "holochain_serialized_bytes",
@@ -2977,7 +3013,7 @@ dependencies = [
 [[package]]
 name = "holochain_timestamp"
 version = "0.7.0-dev.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -2987,7 +3023,7 @@ dependencies = [
 [[package]]
 name = "holochain_trace"
 version = "0.7.0-dev.1"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "chrono",
  "derive_more 2.1.1",
@@ -3002,8 +3038,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_types"
-version = "0.7.0-dev.13"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.15"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3054,7 +3090,7 @@ dependencies = [
 [[package]]
 name = "holochain_util"
 version = "0.7.0-dev.1"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "backtrace",
  "cfg-if",
@@ -3070,8 +3106,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_wasm_test_utils"
-version = "0.7.0-dev.14"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.16"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "holochain_types",
  "strum",
@@ -3126,8 +3162,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_websocket"
-version = "0.7.0-dev.13"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.15"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3144,8 +3180,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_zome_types"
-version = "0.7.0-dev.7"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+version = "0.7.0-dev.9"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "derive_builder",
  "derive_more 2.1.1",
@@ -3245,7 +3281,7 @@ version = "2.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69c3a5eccb191563dc17c9e350fd7584292ab2910824a5750b117d9c466e1734"
 dependencies = [
- "anstream",
+ "anstream 0.6.21",
  "anstyle",
  "backtrace",
  "serde",
@@ -3257,9 +3293,9 @@ dependencies = [
 
 [[package]]
 name = "hybrid-array"
-version = "0.4.7"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1b229d73f5803b562cc26e4da0396c8610a4ee209f4fac8fa4f8d709166dc45"
+checksum = "8655f91cd07f2b9d0c24137bd650fe69617773435ee5ec83022377777ce65ef1"
 dependencies = [
  "typenum",
 ]
@@ -3337,7 +3373,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.2",
+ "socket2 0.6.3",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -3571,28 +3607,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "influxive"
-version = "0.0.6-dev.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
-dependencies = [
- "digest 0.10.7",
- "dirs",
- "flate2",
- "futures",
- "hex",
- "hex-literal",
- "influxdb",
- "opentelemetry_api",
- "reqwest 0.12.28",
- "sha2 0.10.9",
- "tar",
- "tempfile",
- "tokio",
- "tracing",
- "zip 3.0.0",
-]
-
-[[package]]
 name = "influxive-otel-atomic-obs"
 version = "0.0.4-alpha.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3756,7 +3770,7 @@ dependencies = [
  "pin-project-lite",
  "rustc-hash 2.1.1",
  "rustls",
- "socket2 0.6.2",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -3799,7 +3813,7 @@ checksum = "f981dadd5a072a9e0efcd24bdcc388e570073f7e51b33505ceb1ef4668c80c86"
 dependencies = [
  "cfg_aliases",
  "libc",
- "socket2 0.6.2",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -4014,9 +4028,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune2"
-version = "0.4.0-dev.3"
+version = "0.4.0-dev.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abffb5db34bf72501d04ed934b299d7ff31b980395b5e52130125c7c6785e3e0"
+checksum = "b528af51448aed2da863356880abd22091b2db33041bbdc1596adbaa2d8f6027"
 dependencies = [
  "bytes",
  "kitsune2_api",
@@ -4028,9 +4042,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune2_api"
-version = "0.4.0-dev.3"
+version = "0.4.0-dev.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "154a5b33e3678c9bbabe7f864f742feb2681c5be0933b917ffcb05134dbffb98"
+checksum = "f520eb0c66a79ea8f1112ee2b062ae423e5cb9399b05eb26bb3bedcd81172664"
 dependencies = [
  "base64",
  "bytes",
@@ -4045,9 +4059,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune2_bootstrap_client"
-version = "0.4.0-dev.3"
+version = "0.4.0-dev.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08b7d0b429153e1d0edb037803f0bfa42f10bbba3613c30544c95c757e3397d5"
+checksum = "ec32dd2c280a7e9c3585dde2c40be62c9be396a7255fe3aaf536679267dc8c7f"
 dependencies = [
  "base64",
  "kitsune2_api",
@@ -4060,9 +4074,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune2_bootstrap_srv"
-version = "0.4.0-dev.3"
+version = "0.4.0-dev.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67c83f6eb8e683f45d9cec33610e806d302816f3198fdb97b089b2298ee967f5"
+checksum = "632723bf060aa977b682a343c8f4f190640af7866cee48515271322ef6082d44"
 dependencies = [
  "async-channel",
  "axum",
@@ -4075,9 +4089,10 @@ dependencies = [
  "futures",
  "http",
  "iroh",
+ "iroh-base",
  "iroh-relay-holochain",
  "num_cpus",
- "opentelemetry",
+ "opentelemetry 0.30.0",
  "rand 0.8.5",
  "rustls",
  "serde",
@@ -4092,9 +4107,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune2_core"
-version = "0.4.0-dev.3"
+version = "0.4.0-dev.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d218e19b1f2e453d71e32b777ad8f82f7cbec2f236788bc95f69da8cd9ec6ec7"
+checksum = "99aaef93b5bcc2afc187c0c9dc76148df73cfce3e754ce3fd1e43891a2f56844"
 dependencies = [
  "bytes",
  "ed25519-dalek 2.2.0",
@@ -4113,9 +4128,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune2_dht"
-version = "0.4.0-dev.3"
+version = "0.4.0-dev.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26e71f928f7c44e59b67724160c9f0b71aeff4664535bde9bc323f8783f322b6"
+checksum = "e23f47bec2401f302f779bca2dd09f8d0541f04fa6765f1496691db585f447d3"
 dependencies = [
  "bytes",
  "kitsune2_api",
@@ -4124,9 +4139,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune2_gossip"
-version = "0.4.0-dev.3"
+version = "0.4.0-dev.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46752e966411545245341c6a1010cd3bd455dd58f6a68a99819b03b3e984d6a3"
+checksum = "6456b6951fabf32d8a7ceb78fde7d274b74c666abde3ac46c97f8c64f8947189"
 dependencies = [
  "bytes",
  "futures",
@@ -4145,13 +4160,14 @@ dependencies = [
 
 [[package]]
 name = "kitsune2_transport_iroh"
-version = "0.4.0-dev.3"
+version = "0.4.0-dev.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4920ee3e4b03db6fd693c398a783c0cef851626e90e1eb3965ba09ec5be5408e"
+checksum = "f2eddc8ee1602e5b94454a5026c7f25eaf32d842ec39c4109a7e27d0f3774299"
 dependencies = [
  "bytes",
  "iroh",
  "kitsune2_api",
+ "kitsune2_bootstrap_client",
  "n0-watcher",
  "schemars 0.9.0",
  "serde",
@@ -4162,9 +4178,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune2_transport_tx5"
-version = "0.4.0-dev.3"
+version = "0.4.0-dev.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35893dce4cf7d97d9f691eea036ef9583eefff1bf7f3f218125e9403f7d95c9f"
+checksum = "636e3e218afa45c650b4331e8652529b12b5014db0fd2a5a271121730e7dcfc2"
 dependencies = [
  "base64",
  "bytes",
@@ -4288,9 +4304,9 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "libc"
-version = "0.2.182"
+version = "0.2.183"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
+checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 
 [[package]]
 name = "libflate"
@@ -4633,7 +4649,7 @@ checksum = "7843ec2de400bcbc6a6328c958dc38e5359da6e93e72e37bc5246bf1ae776389"
 [[package]]
 name = "mr_bundle"
 version = "0.7.0-dev.1"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.13-kitsune-0.4.0-dev3-coasys#a6f7c61cfabe481ea285aa4131c3fec35d97f135"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
 dependencies = [
  "bytes",
  "dunce",
@@ -4869,7 +4885,7 @@ dependencies = [
  "objc2-system-configuration",
  "pin-project-lite",
  "serde",
- "socket2 0.6.2",
+ "socket2 0.6.3",
  "time",
  "tokio",
  "tokio-util",
@@ -5019,9 +5035,9 @@ dependencies = [
 
 [[package]]
 name = "num_enum"
-version = "0.7.5"
+version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1207a7e20ad57b847bbddc6776b968420d38292bbfe2089accff5e19e82454c"
+checksum = "5d0bca838442ec211fa11de3a8b0e0e8f3a4522575b5c4c06ed722e005036f26"
 dependencies = [
  "num_enum_derive",
  "rustversion",
@@ -5029,9 +5045,9 @@ dependencies = [
 
 [[package]]
 name = "num_enum_derive"
-version = "0.7.5"
+version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff32365de1b6743cb203b710788263c44a03de03802daf96092f2da4fe6ba4d7"
+checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -5145,9 +5161,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.21.3"
+version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
+checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 dependencies = [
  "critical-section",
  "portable-atomic",
@@ -5173,9 +5189,9 @@ dependencies = [
 
 [[package]]
 name = "openssl"
-version = "0.10.75"
+version = "0.10.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08838db121398ad17ab8531ce9de97b244589089e290a384c900cb9ff7434328"
+checksum = "951c002c75e16ea2c65b8c7e4d3d51d5530d8dfa7d060b4776828c88cfb18ecf"
 dependencies = [
  "bitflags 2.9.4",
  "cfg-if",
@@ -5214,9 +5230,9 @@ dependencies = [
 
 [[package]]
 name = "openssl-sys"
-version = "0.9.111"
+version = "0.9.112"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82cab2d520aa75e3c58898289429321eb788c3106963d0dc886ec7a5f4adc321"
+checksum = "57d55af3b3e226502be1526dfdba67ab0e9c96fc293004e79576b2b9edb0dbdb"
 dependencies = [
  "cc",
  "libc",
@@ -5240,6 +5256,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b84bcd6ae87133e903af7ef497404dda70c60d0ea14895fc8a5e6722754fc2a0"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "js-sys",
+ "pin-project-lite",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "opentelemetry_api"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5253,6 +5283,21 @@ dependencies = [
  "pin-project-lite",
  "thiserror 1.0.69",
  "urlencoding",
+]
+
+[[package]]
+name = "opentelemetry_sdk"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e14ae4f5991976fd48df6d843de219ca6d31b01daaab2dad5af2badeded372bd"
+dependencies = [
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
+ "opentelemetry 0.31.0",
+ "percent-encoding",
+ "rand 0.9.2",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5506,7 +5551,7 @@ dependencies = [
  "rand 0.9.2",
  "serde",
  "smallvec",
- "socket2 0.6.2",
+ "socket2 0.6.3",
  "time",
  "tokio",
  "tokio-util",
@@ -5815,7 +5860,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.1",
  "rustls",
- "socket2 0.6.2",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5824,9 +5869,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.13"
+version = "0.11.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1906b49b0c3bc04b5fe5d86a77925ae6524a19b816ae38ce1e426255f1d8a31"
+checksum = "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -5853,7 +5898,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.2",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -6652,9 +6697,9 @@ dependencies = [
 
 [[package]]
 name = "schannel"
-version = "0.1.28"
+version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891d81b926048e76efe18581bf793546b4c0eaf8448d72be8de2bbee5fd166e1"
+checksum = "91c1b7e4904c873ef0710c1f407dde2e6287de2bebc1bbbf7d430bb7cbffd939"
 dependencies = [
  "windows-sys 0.61.2",
 ]
@@ -7109,12 +7154,12 @@ dependencies = [
 
 [[package]]
 name = "socket2"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86f4aa3ad99f2088c990dfa82d367e19cb29268ed67c574d10d0a4bfe71f07e0"
+checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7197,7 +7242,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9f8dee7d9a112df6e28e14f9acd8f47487131d2a9cf9117037d2fad5936a796"
 dependencies = [
  "unicode_categories",
- "winnow 0.7.14",
+ "winnow 0.7.15",
 ]
 
 [[package]]
@@ -7585,9 +7630,9 @@ dependencies = [
 
 [[package]]
 name = "tempfile"
-version = "3.26.0"
+version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82a72c767771b47409d2345987fda8628641887d5466101319899796367354a0"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
  "getrandom 0.4.2",
@@ -7707,9 +7752,9 @@ dependencies = [
 
 [[package]]
 name = "tinyvec"
-version = "1.10.0"
+version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfa5fdc3bce6191a1dbc8c02d5c8bffcf557bafa17c124c5264a458f1b0613fa"
+checksum = "3e61e67053d25a4e82c844e8424039d9745781b3fc4f32b8d55ed50f5f667ef3"
 dependencies = [
  "tinyvec_macros",
 ]
@@ -7732,7 +7777,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
- "socket2 0.6.2",
+ "socket2 0.6.3",
  "tokio-macros",
  "windows-sys 0.61.2",
 ]
@@ -7895,7 +7940,7 @@ dependencies = [
  "toml_datetime 0.7.0",
  "toml_parser",
  "toml_writer",
- "winnow 0.7.14",
+ "winnow 0.7.15",
 ]
 
 [[package]]
@@ -7927,7 +7972,7 @@ dependencies = [
  "serde_spanned 0.6.9",
  "toml_datetime 0.6.11",
  "toml_write",
- "winnow 0.7.14",
+ "winnow 0.7.15",
 ]
 
 [[package]]
@@ -7939,16 +7984,16 @@ dependencies = [
  "indexmap 2.11.1",
  "toml_datetime 0.7.0",
  "toml_parser",
- "winnow 0.7.14",
+ "winnow 0.7.15",
 ]
 
 [[package]]
 name = "toml_parser"
-version = "1.0.9+spec-1.1.0"
+version = "1.0.10+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "702d4415e08923e7e1ef96cd5727c0dfed80b4d2fa25db9647fe5eb6f7c5a4c4"
+checksum = "7df25b4befd31c4816df190124375d5a20c6b6921e2cad937316de3fccd63420"
 dependencies = [
- "winnow 0.7.14",
+ "winnow 1.0.0",
 ]
 
 [[package]]
@@ -7959,9 +8004,9 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "toml_writer"
-version = "1.0.6+spec-1.1.0"
+version = "1.0.7+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab16f14aed21ee8bfd8ec22513f7287cd4a91aa92e44edfe2c17ddd004e92607"
+checksum = "f17aaa1c6e3dc22b1da4b6bba97d066e354c7945cac2f7852d4e4e7ca7a6b56d"
 
 [[package]]
 name = "tower"
@@ -8086,9 +8131,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-subscriber"
-version = "0.3.22"
+version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f30143827ddab0d256fd843b7a66d164e9f271cfa0dde49142c5ca0ca291f1e"
+checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
  "matchers",
  "nu-ansi-term",
@@ -8404,9 +8449,9 @@ dependencies = [
 
 [[package]]
 name = "uuid-rng-internal"
-version = "1.21.0"
+version = "1.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ef224d01f8c31f8c11c90290766fd622fb0a7d7025b9589d4a34a36ccf35b28"
+checksum = "02b76dc0e3c64be846ad2fd1378656e7de2120530d1e83d8f20ca6a0cdba01de"
 dependencies = [
  "getrandom 0.4.2",
 ]
@@ -9494,12 +9539,18 @@ dependencies = [
 
 [[package]]
 name = "winnow"
-version = "0.7.14"
+version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "winnow"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a90e88e4667264a994d34e6d1ab2d26d398dcdca8b7f52bec8668957517fc7d8"
 
 [[package]]
 name = "winreg"
@@ -9749,18 +9800,18 @@ checksum = "2164e798d9e3d84ee2c91139ace54638059a3b23e361f5c11781c2c6459bde0f"
 
 [[package]]
 name = "zerocopy"
-version = "0.8.40"
+version = "0.8.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a789c6e490b576db9f7e6b6d661bcc9799f7c0ac8352f56ea20193b2681532e5"
+checksum = "f2578b716f8a7a858b7f02d5bd870c14bf4ddbbcf3a4c05414ba6503640505e3"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.40"
+version = "0.8.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f65c489a7071a749c849713807783f70672b28094011623e200cb86dcb835953"
+checksum = "7e6cc098ea4d3bd6246687de65af3f920c430e236bee1e3bf2e441463f08a02f"
 dependencies = [
  "proc-macro2",
  "quote",

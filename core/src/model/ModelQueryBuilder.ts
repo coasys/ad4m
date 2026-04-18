@@ -11,6 +11,8 @@ import type {
   Where, Order, IncludeMap, Query,
   AllInstancesResult, ResultsWithTotalCount, PaginationResult,
 } from "./types";
+import { groupSPARQLResults } from "./query-sparql";
+import { pooledSubscribe } from "./subscription-pool";
 
 /** Query builder for Ad4mModel queries.
  * Allows building queries with a fluent interface and either running them once
@@ -38,7 +40,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   private modelClassName: string | null = null;
   private ctor: typeof Ad4mModel;
   private currentSubscription?: any;
-  private useSurrealDBFlag: boolean = true;
+  private engineFlag: 'sparql' | 'prolog' = 'sparql';
 
   constructor(perspective: PerspectiveProxy, ctor: typeof Ad4mModel, query?: Query) {
     this.perspective = perspective;
@@ -261,32 +263,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
-   * Enables or disables SurrealDB query path.
-   * 
-   * @param enabled - Whether to use SurrealDB (default: true, 10-100x faster) or Prolog (legacy)
-   * @returns The query builder for chaining
-   * 
-   * @example
-   * ```typescript
-   * // Use SurrealDB (default)
-   * const recipes = await Recipe.query(perspective)
-   *   .where({ category: "Dessert" })
-   *   .useSurrealDB(true)
-   *   .get();
-   * 
-   * // Use Prolog (legacy)
-   * const recipesProlog = await Recipe.query(perspective)
-   *   .where({ category: "Dessert" })
-   *   .useSurrealDB(false)
-   *   .get();
-   * ```
-   * 
-   * @remarks
-   * Note: Subscriptions (subscribe(), countSubscribe(), paginateSubscribe()) default to SurrealDB live queries
-   * if useSurrealDB(true) is set (default).
+   * Sets the query engine to use.
    */
-  useSurrealDB(enabled: boolean = true): ModelQueryBuilder<T> {
-    this.useSurrealDBFlag = enabled;
+  engine(eng: 'sparql' | 'prolog'): ModelQueryBuilder<T> {
+    this.engineFlag = eng;
     return this;
   }
 
@@ -304,10 +284,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async get(): Promise<T[]> {
     let results: T[];
-    if (this.useSurrealDBFlag) {
-      const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
-      const result = await this.perspective.querySurrealDB(surrealQuery);
-      ({ results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result) as { results: T[] });
+    if (this.engineFlag === 'sparql') {
+      results = await this.executeSparqlQuery();
     } else {
       const query = await this.ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
       const result = await this.perspective.infer(query);
@@ -315,6 +293,32 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     }
 
     return results;
+  }
+
+  /**
+   * Executes the query once using SPARQL and returns the results.
+   */
+  async getSparql(): Promise<T[]> {
+    return this.executeSparqlQuery();
+  }
+
+  /**
+   * Shared SPARQL query execution logic used by both get() and getSparql().
+   */
+  private async executeSparqlQuery(): Promise<T[]> {
+    const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
+    const rawResult = await this.perspective.querySparql(sparqlQuery);
+    const { results } = await this.processSparqlResult(rawResult);
+    return results;
+  }
+
+  /**
+   * Groups raw SPARQL results and hydrates them into model instances.
+   * Centralises the repeated groupSPARQLResults → instancesFromQueryResult pipeline.
+   */
+  private async processSparqlResult(rawResult: any, queryOverride?: Query): Promise<{ results: T[], totalCount: number }> {
+    const grouped = groupSPARQLResults(Array.isArray(rawResult) ? rawResult : []);
+    return await this.ctor.instancesFromQueryResult(this.perspective, queryOverride || this.queryParams, grouped) as { results: T[], totalCount: number };
   }
 
   /**
@@ -341,7 +345,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * Subscribes to the query and receives updates when results change.
    *
    * This method:
-   * 1. Creates and initializes a SurrealDB live query subscription (default)
+   * 1. Creates and initializes a SPARQL live query subscription (default)
    * 2. Sets up the callback to process future updates
    * 3. Returns the initial results immediately
    *
@@ -365,8 +369,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    *
    * @remarks
-   * By default, this uses SurrealDB live queries for real-time updates.
-   * Prolog subscriptions remain available via `.useSurrealDB(false)`.
+   * By default, this uses SPARQL live queries for real-time updates.
+   * Prolog subscriptions remain available via `.useSPARQL(false)`.
    */
   async subscribe(callback: (results: T[]) => void): Promise<T[]> {
     // Clean up any existing subscription
@@ -374,26 +378,44 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
     const ctor = this.ctor;
 
-    if (this.useSurrealDBFlag) {
-        const surrealQuery = await ctor.queryToSurrealQL(this.perspective, this.queryParams);
-        this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
+    if (this.engineFlag === 'sparql') {
+        const sparqlQuery = await ctor.queryToSPARQL(this.perspective, this.queryParams);
 
-        const processResults = async (result: any) => {
-            const { results } = await ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
-            callback(results as T[]);
+        // Track last emitted result fingerprint to suppress duplicate callbacks
+        let lastResultFingerprint: string | null = null;
+
+        const buildFingerprint = (results: any[]) => {
+            if (results.length === 0) return '0:';
+            // Must include relation data (e.g. tags) — not just id/timestamp.
+            // Otherwise @HasMany changes on existing instances are suppressed as duplicates.
+            return JSON.stringify(results, (_, v) =>
+                typeof v === 'function' ? undefined : v
+            );
         };
 
-        this.currentSubscription.onResult(processResults);
-        
-        // Process initial result
-        const { results } = await ctor.instancesFromSurrealResult(
-            this.perspective, 
-            this.queryParams, 
-            this.currentSubscription.result
+        const hydrate = async (rawResult: any) => {
+            const { results } = await this.processSparqlResult(rawResult);
+            return results;
+        };
+
+        const pooled = await pooledSubscribe(
+            this.perspective,
+            sparqlQuery,
+            hydrate,
+            (hydratedResults: T[]) => {
+                const fp = buildFingerprint(hydratedResults);
+                if (fp === lastResultFingerprint) return;
+                lastResultFingerprint = fp;
+                callback(hydratedResults);
+            },
         );
-        // Also invoke callback with initial results so subscribers see them
-        callback(results as T[]);
-        return results as T[];
+
+        // Store dispose function as subscription
+        this.currentSubscription = { dispose: pooled.dispose };
+
+        const initialResults = pooled.initialResult as T[];
+        lastResultFingerprint = buildFingerprint(initialResults);
+        return initialResults;
     } else {
         const query = await ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
         this.currentSubscription = await this.perspective.subscribeInfer(query);
@@ -409,10 +431,30 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
             this.queryParams,
             this.currentSubscription.result
         );
-        // Also invoke callback with initial results so subscribers see them
-        callback(results as T[]);
+        // Initial results returned via Promise only — callback is for subsequent updates
         return results as T[];
     }
+  }
+
+  /**
+   * Subscribes to the query and receives updates using SPARQL.
+   */
+  async subscribeSparql(callback: (results: T[]) => void): Promise<T[]> {
+    this.dispose();
+
+    const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
+    this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
+
+    const processResults = async (result: any) => {
+      const { results } = await this.processSparqlResult(result);
+      callback(results as T[]);
+    };
+
+    this.currentSubscription.onResult(processResults);
+
+    const { results } = await this.processSparqlResult(this.currentSubscription.result);
+    // Initial results returned via Promise only — callback is for subsequent updates
+    return results as T[];
   }
 
   /**
@@ -428,13 +470,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async count(): Promise<number> {
-    if (this.useSurrealDBFlag) {
-      const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
-      const result = await this.perspective.querySurrealDB(surrealQuery);
-      // Use instancesFromSurrealResult to apply JS-level filtering for advanced where conditions
-      // (e.g., gt, gte, lt, lte, between, contains on properties and author/timestamp)
-      // This ensures count() returns the same number as get().length
-      const { totalCount } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+    if (this.engineFlag === 'sparql') {
+      const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
+      const rawResult = await this.perspective.querySparql(sparqlQuery);
+      const { totalCount } = await this.processSparqlResult(rawResult);
       return totalCount;
     } else {
       const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
@@ -444,10 +483,24 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
+   * Gets the total count of matching entities using SPARQL.
+   * Delegates to count() with SPARQL engine forced.
+   */
+  async countSparql(): Promise<number> {
+    const prev = this.engineFlag;
+    this.engineFlag = 'sparql';
+    try {
+      return await this.count();
+    } finally {
+      this.engineFlag = prev;
+    }
+  }
+
+  /**
    * Subscribes to count updates for matching entities.
    *
    * This method:
-   * 1. Creates and initializes a SurrealDB live query subscription for the count (default)
+   * 1. Creates and initializes a SPARQL live query subscription for the count (default)
    * 2. Sets up the callback to process future count updates
    * 3. Returns the initial count immediately
    *
@@ -471,29 +524,25 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    *
    * @remarks
-   * By default, this uses SurrealDB live queries for real-time updates.
-   * Prolog subscriptions remain available via `.useSurrealDB(false)`.
+   * By default, this uses SPARQL live queries for real-time updates.
+   * Prolog subscriptions remain available via `.useSPARQL(false)`.
    */
   async countSubscribe(callback: (count: number) => void): Promise<number> {
     // Clean up any existing subscription
     this.dispose();
 
-    if (this.useSurrealDBFlag) {
-      const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
-      this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
+    if (this.engineFlag === 'sparql') {
+      const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
+      this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
 
       const processResults = async (result: any) => {
-        const { totalCount } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+        const { totalCount } = await this.processSparqlResult(result);
         callback(totalCount);
       };
 
       this.currentSubscription.onResult(processResults);
-      const { totalCount } = await this.ctor.instancesFromSurrealResult(
-        this.perspective, 
-        this.queryParams, 
-        this.currentSubscription.result
-      );
-      callback(totalCount);
+      const { totalCount } = await this.processSparqlResult(this.currentSubscription.result);
+      // Initial count returned via Promise — callback for updates only
       return totalCount;
     } else {
       const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
@@ -506,9 +555,29 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
       this.currentSubscription.onResult(processResults);
       const initialCount = this.currentSubscription.result?.[0]?.TotalCount || 0;
-      callback(initialCount);
+      // Initial count returned via Promise — callback for subsequent updates only
       return initialCount;
     }
+  }
+
+  /**
+   * Subscribes to count updates using SPARQL.
+   */
+  async countSubscribeSparql(callback: (count: number) => void): Promise<number> {
+    this.dispose();
+
+    const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
+    this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
+
+    const processResults = async (result: any) => {
+      const { totalCount } = await this.processSparqlResult(result);
+      callback(totalCount);
+    };
+
+    this.currentSubscription.onResult(processResults);
+    const { totalCount } = await this.processSparqlResult(this.currentSubscription.result);
+    // Initial count returned via Promise — callback for updates only
+    return totalCount;
   }
 
   /**
@@ -528,10 +597,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    if (this.useSurrealDBFlag) {
-      const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, paginationQuery);
-      const result = await this.perspective.querySurrealDB(surrealQuery);
-      const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, result)) as ResultsWithTotalCount<T>;
+    if (this.engineFlag === 'sparql') {
+      const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, paginationQuery);
+      const result = await this.perspective.querySparql(sparqlQuery);
+      const { results, totalCount } = await this.processSparqlResult(result, paginationQuery) as ResultsWithTotalCount<T>;
       return { results, totalCount, pageSize, pageNumber };
     } else {
       const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
@@ -542,10 +611,24 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
+   * Gets a page of results using SPARQL.
+   * Delegates to paginate() with SPARQL engine forced.
+   */
+  async paginateSparql(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
+    const prev = this.engineFlag;
+    this.engineFlag = 'sparql';
+    try {
+      return await this.paginate(pageSize, pageNumber);
+    } finally {
+      this.engineFlag = prev;
+    }
+  }
+
+  /**
    * Subscribes to paginated results updates.
    *
    * This method:
-   * 1. Creates and initializes a SurrealDB live query subscription for the paginated results (default)
+   * 1. Creates and initializes a SPARQL live query subscription for the paginated results (default)
    * 2. Sets up the callback to process future page updates
    * 3. Returns the initial page immediately
    *
@@ -571,8 +654,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    *
    * @remarks
-   * By default, this uses SurrealDB live queries for real-time updates.
-   * Prolog subscriptions remain available via `.useSurrealDB(false)`.
+   * By default, this uses SPARQL live queries for real-time updates.
+   * Prolog subscriptions remain available via `.useSPARQL(false)`.
    */
   async paginateSubscribe(
     pageSize: number, 
@@ -584,19 +667,19 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
 
-    if (this.useSurrealDBFlag) {
-      const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, paginationQuery);
-      this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
+    if (this.engineFlag === 'sparql') {
+      const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, paginationQuery);
+      this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
 
       const processResults = async (result: any) => {
-        const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, result)) as ResultsWithTotalCount<T>;
+        const { results, totalCount } = await this.processSparqlResult(result, paginationQuery) as ResultsWithTotalCount<T>;
         callback({ results, totalCount, pageSize, pageNumber });
       };
 
       this.currentSubscription.onResult(processResults);
-      const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, this.currentSubscription.result)) as ResultsWithTotalCount<T>;
+      const { results, totalCount } = await this.processSparqlResult(this.currentSubscription.result, paginationQuery) as ResultsWithTotalCount<T>;
       const initialPage = { results, totalCount, pageSize, pageNumber };
-      callback(initialPage);
+      // Initial page returned via Promise — callback for subsequent updates only
       return initialPage;
     } else {
       const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
@@ -610,8 +693,26 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       this.currentSubscription.onResult(processResults);
       const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, this.currentSubscription.result)) as ResultsWithTotalCount<T>;
       const initialPrologPage = { results, totalCount, pageSize, pageNumber };
-      callback(initialPrologPage);
+      // Initial page returned via Promise — callback for subsequent updates only
       return initialPrologPage;
+    }
+  }
+
+  /**
+   * Subscribes to paginated results updates using SPARQL.
+   * Delegates to paginateSubscribe() with SPARQL engine forced.
+   */
+  async paginateSubscribeSparql(
+    pageSize: number,
+    pageNumber: number,
+    callback: (results: PaginationResult<T>) => void
+  ): Promise<PaginationResult<T>> {
+    const prev = this.engineFlag;
+    this.engineFlag = 'sparql';
+    try {
+      return await this.paginateSubscribe(pageSize, pageNumber, callback);
+    } finally {
+      this.engineFlag = prev;
     }
   }
 }

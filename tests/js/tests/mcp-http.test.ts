@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor, killByPorts } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch';
 import { McpResponse, mcpHttpRequest, callMcpTool, listMcpTools, initializeMcp } from './mcp-utils';
@@ -43,8 +44,8 @@ const __dirname = path.dirname(__filename);
 // MCP HTTP Client Helpers (imported from shared mcp-utils.ts)
 // ============================================================================
 
-const MCP_PORT = 3001;
-const MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
+let MCP_PORT: number;
+let MCP_BASE_URL: string;
 
 // ============================================================================
 // SHACL definitions for Flux models (Channel and Message)
@@ -157,9 +158,9 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     const TEST_DIR = path.join(__dirname + "/../tst-tmp");
     const appDataPath = path.join(TEST_DIR, "agents", "mcp-http-test");
     const bootstrapSeedPath = path.join(__dirname + "/../bootstrapSeed.json");
-    const gqlPort = 16000;
-    const hcAdminPort = 16001;
-    const hcAppPort = 16002;
+    let gqlPort: number;
+    let hcAdminPort: number;
+    let hcAppPort: number;
     const adminCredential = "mcp-http-test-admin";
 
     let executorProcess: ChildProcess | null = null;
@@ -175,6 +176,10 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     let msg3Addr: string = "";
 
     before(async () => {
+        [gqlPort, hcAdminPort, hcAppPort, MCP_PORT] = await getFreePorts(4);
+        MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
+        registerPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+
         console.log(bootstrapSeedPath);
         console.log(appDataPath);
 
@@ -197,6 +202,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             undefined,          // bootstrapUrl
             undefined,          // relayUrl
             true,               // enableMcp = true
+            MCP_PORT,           // mcpPort
         );
 
         // Wait for servers to settle
@@ -219,6 +225,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         }
         // Port-based kill as safety net
         killByPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
     });
 
     // ========================================================================
@@ -990,7 +997,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
     // ========================================================================
     // 5b. Resolve Language — verify properties with resolve_language produce
-    //     proper literal://json: expressions instead of literal://string:
+    //     proper literal:json: expressions instead of literal:string:
     // ========================================================================
 
     describe("5b. Resolve Language for Boolean/String Properties", function() {
@@ -1010,7 +1017,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             console.log("channel_create with booleans:", resultStr);
         });
 
-        it("should store boolean properties as literal://json: expressions, not literal://string:", async function() {
+        it("should store boolean properties as literal:json: expressions, not literal:string:", async function() {
             // Query the raw links to verify the encoding format
             var links = await callMcpTool(MCP_BASE_URL,'query_links', {
                 perspective_id: perspectiveUuid,
@@ -1019,17 +1026,17 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             console.log("isConversation links:", JSON.stringify(links));
 
-            // The target should be a literal://json: expression (signed expression),
-            // NOT literal://string:false
+            // The target should be a literal:json: expression (signed expression),
+            // NOT literal:string:false
             var linksArr = Array.isArray(links) ? links : (links.links || []);
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("isConversation target:", target);
-            expect(target).to.not.include("literal://string:false");
-            expect(target).to.include("literal://json:");
+            expect(target).to.not.include("literal:string:false");
+            expect(target).to.include("literal:json:");
         });
 
-        it("should store string properties as literal://json: expressions when resolve_language is set", async function() {
+        it("should store string properties as literal:json: expressions when resolve_language is set", async function() {
             var links = await callMcpTool(MCP_BASE_URL,'query_links', {
                 perspective_id: perspectiveUuid,
                 source: resolveTestChannelAddr,
@@ -1041,8 +1048,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("name target:", target);
-            // Should be a signed expression (literal://json:) not a raw string literal
-            expect(target).to.include("literal://json:");
+            // Should be a signed expression (literal:json:) not a raw string literal
+            expect(target).to.include("literal:json:");
         });
 
         it("should resolve boolean values via channel_set_isconversation", async function() {
@@ -1063,8 +1070,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("Updated isConversation target:", target);
-            expect(target).to.not.include("literal://string:true");
-            expect(target).to.include("literal://json:");
+            expect(target).to.not.include("literal:string:true");
+            expect(target).to.include("literal:json:");
         });
 
         it("should resolve string values via set_subject_property with resolve_language", async function() {
@@ -1077,7 +1084,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             expect(result.success).to.be.true;
 
-            // Verify the stored link target uses literal://json: (signed expression)
+            // Verify the stored link target uses literal:json: (signed expression)
             var links = await callMcpTool(MCP_BASE_URL,'query_links', {
                 perspective_id: perspectiveUuid,
                 source: resolveTestChannelAddr,
@@ -1087,7 +1094,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("description target:", target);
-            expect(target).to.include("literal://json:");
+            expect(target).to.include("literal:json:");
         });
 
         it("should resolve boolean values via channel_update (dynamic update)", async function() {
@@ -1107,8 +1114,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("Updated isPinned target:", target);
-            expect(target).to.not.include("literal://string:false");
-            expect(target).to.include("literal://json:");
+            expect(target).to.not.include("literal:string:false");
+            expect(target).to.include("literal:json:");
         });
     });
 
@@ -1127,7 +1134,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         });
 
         it("should add children to a parent address", async function() {
-            // Use a plain string parent — tool should auto-wrap as literal://string:
+            // Use a plain string parent — tool should auto-wrap as literal:string:
             parentAddr = "test-parent-" + Date.now();
             child1Addr = "test-child-1-" + Date.now();
             child2Addr = "test-child-2-" + Date.now();
@@ -1176,8 +1183,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         });
 
         it("should handle pre-wrapped literal URIs", async function() {
-            // If parent is already a literal://string: URI, should not double-wrap
-            var wrappedParent = "literal://string:pre-wrapped-parent-" + Date.now();
+            // If parent is already a literal:string: URI, should not double-wrap
+            var wrappedParent = "literal:string:pre-wrapped-parent-" + Date.now();
             child3Addr = "test-child-3-" + Date.now();
 
             var result = await callMcpTool(MCP_BASE_URL,'add_child', {
@@ -1293,7 +1300,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     data: {
                         source: "flux://profile",
                         predicate: "sioc://has_username",
-                        target: "literal://string:raw-link-user",
+                        target: "literal:string:raw-link-user",
                     },
                     proof: { key: "", signature: "", valid: false, invalid: true },
                 },
@@ -1303,7 +1310,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     data: {
                         source: "flux://profile",
                         predicate: "sioc://has_bio",
-                        target: "literal://string:Set via raw links",
+                        target: "literal:string:Set via raw links",
                     },
                     proof: { key: "", signature: "", valid: false, invalid: true },
                 },
@@ -1341,11 +1348,11 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     // 8. Waker Subscription Integration Tests
     //
     // Tests the full subscription pipeline:
-    //   get_mention_waker_config → SurrealDB subscription → add message with
+    //   get_mention_waker_config → SPARQL subscription → add message with
     //   mention → verify subscription fires with correct result
     // ========================================================================
 
-    describe("8. Waker Subscription (SurrealDB Live Query)", function() {
+    describe("8. Waker Subscription (SPARQL Live Query)", function() {
         // Uses the extracted WakerSubscriptionManager — same code path as the plugin
         let wakerClient: Ad4mClient;
         let wakerPerspectiveUuid: string;
@@ -1390,7 +1397,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             console.log("Waker test channel:", wakerChannelAddr);
         });
 
-        it("should get mention waker config with SurrealQL query", async function() {
+        it("should get mention waker config with SPARQL query", async function() {
             var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
                 perspective_id: wakerPerspectiveUuid,
             }, mcpSessionId);
@@ -1401,11 +1408,11 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(config.names).to.include("wakerbot");
             expect(config.names).to.include("WakerTest");
             expect(config.query).to.be.a('string');
-            expect(config.query).to.include("fn::contains");
-            expect(config.query).to.include("fn::parse_literal");
-            // Query uses direct body-link matching (body predicate from SHACL), not two-hop traversal
-            expect(config.query).to.include("SELECT * FROM link WHERE");
-            console.log("SurrealQL query:", config.query);
+            expect(config.query).to.include("CONTAINS");
+            expect(config.query).to.include("LCASE");
+            // Query uses SPARQL with FILTER for mention matching
+            expect(config.query).to.include("SELECT ?source ?predicate ?target WHERE");
+            console.log("SPARQL query:", config.query);
         });
 
         it("should create WakerSubscriptionManager and receive initial (empty) result via onWake", async function() {
@@ -1648,8 +1655,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             console.log("Channel waker query:", JSON.stringify(config, null, 2));
 
-            expect(config.surreal_query).to.be.a('string');
-            expect(config.surreal_query).to.include("ad4m://has_child");
+            expect(config.query).to.be.a('string');
+            expect(config.query).to.include("ad4m://has_child");
             expect(config.subscription_id).to.be.a('string');
 
             // Use WakerSubscriptionManager to subscribe and verify it works
@@ -1669,7 +1676,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 type: "channel-messages" as const,
                 perspective: wakerPerspectiveUuid,
                 channel: wakerChannelAddr,
-                query: config.surreal_query,
+                query: config.query,
             });
 
             // The subscription should fire with existing children (from the mention test)
@@ -1706,7 +1713,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 type: "mention" as const,
                 perspective: bogusId,
                 channel: "",
-                query: "SELECT * FROM link WHERE predicate = 'ad4m://has_child'",
+                query: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <ad4m://has_child>) }",
             });
 
             // Should not have woken or added to active subscriptions
@@ -1740,7 +1747,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     type: "mention" as const,
                     perspective: bogusId,
                     channel: "",
-                    query: "SELECT * FROM link WHERE predicate = 'ad4m://has_child'",
+                    query: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <ad4m://has_child>) }",
                 });
             } catch {
                 // Expected — subscribe should throw for non-existent perspective

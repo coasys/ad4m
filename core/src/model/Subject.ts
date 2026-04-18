@@ -50,11 +50,11 @@ export class Subject {
             Object.defineProperty(this, p, {
                 configurable: true,
                 get: async () => {
-                    // Use SurrealDB for data queries
+                    // Use SPARQL for data queries
                     try {
-                        return await this.#perspective.getPropertyValueViaSurreal(this.#baseExpression, this.#subjectClassName, p);
+                        return await this.#perspective.getPropertyValueViaSparql(this.#baseExpression, this.#subjectClassName, p);
                     } catch (err) {
-                        console.warn(`Failed to get property ${p} via SurrealDB:`, err);
+                        console.warn(`Failed to get property ${p} via SPARQL:`, err);
                         return undefined;
                     }
                 }
@@ -91,11 +91,11 @@ export class Subject {
             Object.defineProperty(this, c, {
                 configurable: true,
                 get: async () => {
-                    // Use SurrealDB for data queries
+                    // Use SPARQL for data queries
                     try {
-                        return await this.#perspective.getRelationValuesViaSurreal(this.#baseExpression, this.#subjectClassName, c);
+                        return await this.#perspective.getRelationValuesViaSparql(this.#baseExpression, this.#subjectClassName, c);
                     } catch (err) {
-                        console.warn(`Failed to get relation ${c} via SurrealDB:`, err);
+                        console.warn(`Failed to get relation ${c} via SPARQL:`, err);
                         return [];
                     }
                 }

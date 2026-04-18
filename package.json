@@ -64,7 +64,6 @@
   "nohoist": [
     "core"
   ],
-  "packageManager": "pnpm@9.15.0",
   "pnpm": {
     "patchedDependencies": {
       "bn.js@4.12.0": "patches/bn.js@4.12.0.patch",

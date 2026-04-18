@@ -163,6 +163,9 @@ enum Domain {
         enable_mcp: Option<bool>,
         #[arg(long, action)]
         mcp_port: Option<u16>,
+        /// Write the executor PID to this file on startup (removed on clean shutdown).
+        #[arg(long)]
+        pid_file: Option<String>,
     },
     RunLocalHcServices {},
     Eve {
@@ -243,6 +246,7 @@ async fn main() -> Result<()> {
         enable_multi_user,
         enable_mcp,
         mcp_port,
+        pid_file,
     } = args.domain
     {
         let _ = tokio::spawn(async move {
@@ -265,10 +269,13 @@ async fn main() -> Result<()> {
                 enable_multi_user,
                 enable_mcp,
                 mcp_port,
+                pid_file,
                 localhost: None,
                 auto_permit_cap_requests: None,
                 tls: None,
                 log_holochain_metrics: None,
+                hc_relay_url: None,
+                smtp_config: None,
             }).await
         }).await;
         
@@ -337,7 +344,10 @@ async fn main() -> Result<()> {
             hc_bootstrap_url: _,
             connect_holochain: _,
             admin_credential: _,
-            enable_multi_user: _
+            enable_multi_user: _,
+            enable_mcp: _,
+            mcp_port: _,
+            pid_file: _,
         } => unreachable!(),
         Domain::RunLocalHcServices {} => unreachable!(),
         Domain::Eve { command: _ } => unreachable!(),

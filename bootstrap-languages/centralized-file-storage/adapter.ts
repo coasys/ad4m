@@ -53,9 +53,18 @@ class PutAdapter implements PublicSharing {
       key: key,
       value: JSON.stringify(expression),
     };
-    const postResult = await axiod.post(PROXY_URL, postData);
-    if (postResult.status != 200) {
-      console.error("Upload file data gets error: ", postResult);
+    try {
+      const postResult = await axiod.post(PROXY_URL, postData);
+      if (postResult.status != 200) {
+        console.error("Upload file data gets error: ", postResult);
+      }
+    } catch (e: any) {
+      // If the key already exists, that's fine — the file is already uploaded
+      if (e?.response?.status === 400 && e?.response?.data === "Key already exists") {
+        console.log("File already exists at key:", key, "— reusing existing upload");
+      } else {
+        throw e;
+      }
     }
     
     return hash as Address;

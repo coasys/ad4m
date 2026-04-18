@@ -32,6 +32,30 @@ use log::error;
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
+/// Result of an LLM prompt call, with token counts for billing.
+/// Token counts are estimated (chars/4) with the current Kalosum backend.
+/// When Ollama is integrated, these will be exact from the API response.
+pub struct PromptResult {
+    pub text: String,
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    pub model_id: String,
+}
+
+/// Result of an embedding call, with token count for billing.
+pub struct EmbedResult {
+    pub embeddings: Vec<f32>,
+    pub token_count: usize,
+}
+
+/// Rough token count estimation (~4 chars per token for English text).
+/// Used by the Kalosum backend to populate PromptResult/EmbedResult.
+/// Will be replaced by exact counts when Ollama is integrated.
+fn estimate_token_count(text: &str) -> usize {
+    let chars = text.chars().count();
+    (chars + 3) / 4
+}
+
 static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
 static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
 static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 5; // 5 seconds (was 10)
@@ -46,6 +70,12 @@ struct TranscriptionSession {
     samples_tx: futures_channel::mpsc::UnboundedSender<Vec<f32>>,
     drop_tx: oneshot::Sender<()>,
     last_activity: Arc<Mutex<std::time::Instant>>,
+    // Billing context (used by the async whisper task via cloned values;
+    // stored here for potential close-stream reconciliation)
+    #[allow(dead_code)]
+    model_id: String,
+    #[allow(dead_code)]
+    user_email: Option<String>,
 }
 
 #[derive(Clone)]
@@ -941,7 +971,7 @@ impl AIService {
         Ok(())
     }
 
-    pub async fn prompt(&self, task_id: String, prompt: String) -> Result<String> {
+    pub async fn prompt(&self, task_id: String, prompt: String) -> Result<PromptResult> {
         let (result_sender, rx) = oneshot::channel();
 
         // Retrieve the task to find the associated model_id
@@ -950,6 +980,8 @@ impl AIService {
             .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?;
 
         let model_id = Self::replace_model_variables(&task.model_id)?;
+
+        let prompt_tokens = estimate_token_count(&prompt);
 
         let llm_channel = self.llm_channel.lock().await;
         if let Some(sender) = llm_channel.get(&model_id) {
@@ -965,7 +997,15 @@ impl AIService {
             ));
         }
 
-        rx.await?
+        let text = rx.await??;
+        let completion_tokens = estimate_token_count(&text);
+
+        Ok(PromptResult {
+            text,
+            prompt_tokens,
+            completion_tokens,
+            model_id,
+        })
     }
 
     // -------------------------------------
@@ -1028,7 +1068,8 @@ impl AIService {
             .insert(model_name, bert_tx);
     }
 
-    pub async fn embed(&self, model_id: String, text: String) -> Result<Vec<f32>> {
+    pub async fn embed(&self, model_id: String, text: String) -> Result<EmbedResult> {
+        let token_count = estimate_token_count(&text);
         let (result_sender, rx) = oneshot::channel();
         let embedding_channel = self.embedding_channel.lock().await;
         if let Some(sender) = embedding_channel.get(&model_id) {
@@ -1044,7 +1085,11 @@ impl AIService {
             ));
         }
 
-        rx.await?
+        let embeddings = rx.await??;
+        Ok(EmbedResult {
+            embeddings,
+            token_count,
+        })
     }
 
     // -------------------------------------
@@ -1113,8 +1158,12 @@ impl AIService {
         &self,
         model_id: String,
         params: Option<VoiceActivityParams>,
+        auth_token: String,
     ) -> Result<String> {
         let model_size = Self::get_whisper_model_size(model_id.clone())?;
+
+        // Extract user email from token for billing and ownership tracking
+        let user_email = crate::agent::capabilities::user_email_from_token(auth_token.clone());
 
         // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
         // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
@@ -1158,6 +1207,14 @@ impl AIService {
         let (samples_tx, samples_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
         let (drop_tx, drop_rx) = oneshot::channel();
         let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
+
+        // Clone billing context for the async task
+        let billing_email = user_email.clone();
+        let billing_model_id = model_id.clone();
+
+        // Clone the streams map so the thread can remove itself on exit
+        let streams_map = self.transcription_streams.clone();
+        let stream_id_for_cleanup = stream_id.clone();
 
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1207,9 +1264,54 @@ impl AIService {
                     _ = drop_rx => {},
                     _ = async {
                         while let Some(segment) = word_stream.next().await {
-                            //println!("GOT segment: {}", segment.text());
+                            let text = segment.text().to_string();
                             let stream_id_clone = stream_id_clone.clone();
 
+                            // Bill for transcribed words
+                            let word_count = text.split_whitespace().count();
+                            if word_count > 0 {
+                                if let Some(ref email) = billing_email {
+                                    // Resolve model name from ID for rate lookup
+                                    // (host_rates are stored by display name, not UUID)
+                                    let rate_key = crate::db::Ad4mDb::with_global_instance(|db| {
+                                        db.get_model(billing_model_id.clone())
+                                    })
+                                    .ok()
+                                    .flatten()
+                                    .map(|m| m.name)
+                                    .unwrap_or_else(|| billing_model_id.clone());
+
+                                    // Rate must exist — validated when the stream was opened.
+                                    // If lookup fails here, log and skip billing (don't suppress text).
+                                    let rate = crate::db::Ad4mDb::with_global_instance(|db| {
+                                        db.get_host_rate(&rate_key)
+                                    })
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or(0.0);
+                                    let cost = word_count as f64 * rate;
+                                    match crate::billing::bill_compute(
+                                        email,
+                                        cost,
+                                        "ai_transcription",
+                                        Some(&format!(
+                                            "{} words (model: {})",
+                                            word_count,
+                                            billing_model_id,
+                                        )),
+                                    ) {
+                                        Err(crate::billing::BillingError::InsufficientCredits) => {
+                                            log::warn!("Transcription: insufficient credits for user {} — delivering already-computed text, future feeds will be rejected", email);
+                                        }
+                                        Err(e) => {
+                                            log::warn!("Transcription billing failed: {:?}", e);
+                                        }
+                                        Ok(()) => {}
+                                    }
+                                }
+                            }
+
+                            let text_for_pubsub = text.clone();
                             rt.spawn(async move {
                                 let _ = get_global_pubsub()
                                     .await
@@ -1217,7 +1319,7 @@ impl AIService {
                                         &AI_TRANSCRIPTION_TEXT_TOPIC,
                                         &serde_json::to_string(&TranscriptionTextFilter {
                                             stream_id: stream_id_clone.clone(),
-                                            text: segment.text().to_string(),
+                                            text: text_for_pubsub,
                                         })
                                         .expect("TranscriptionTextFilter must be serializable"),
                                     )
@@ -1229,6 +1331,13 @@ impl AIService {
                     } => {}
                 }
             });
+
+            // Clean up the stream entry so feed calls get StreamNotFound
+            // instead of "receiver is gone" errors looping forever
+            rt.block_on(async {
+                streams_map.lock().await.remove(&stream_id_for_cleanup);
+                log::info!("Transcription stream {} cleaned up", stream_id_for_cleanup);
+            });
         });
 
         self.transcription_streams.lock().await.insert(
@@ -1237,6 +1346,8 @@ impl AIService {
                 samples_tx,
                 drop_tx,
                 last_activity,
+                model_id: model_id.clone(),
+                user_email,
             },
         );
 
@@ -1247,10 +1358,13 @@ impl AIService {
         &self,
         stream_id: &String,
         audio_samples: Vec<f32>,
+        auth_token: &str,
     ) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
 
         if let Some(stream) = map_lock.get_mut(stream_id) {
+            // Verify the caller owns this stream
+            Self::verify_stream_ownership(stream, auth_token)?;
             // Update last activity time
             *stream.last_activity.lock().await = std::time::Instant::now();
             stream.samples_tx.send(audio_samples).await.map_err(|e| {
@@ -1262,8 +1376,17 @@ impl AIService {
         }
     }
 
-    pub async fn close_transcription_stream(&self, stream_id: &String) -> Result<()> {
+    pub async fn close_transcription_stream(
+        &self,
+        stream_id: &String,
+        auth_token: &str,
+    ) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
+
+        // Verify ownership before removing
+        if let Some(stream) = map_lock.get(stream_id) {
+            Self::verify_stream_ownership(stream, auth_token)?;
+        }
 
         if let Some(stream) = map_lock.remove(stream_id) {
             stream.drop_tx.send(()).map_err(|_| {
@@ -1274,6 +1397,68 @@ impl AIService {
             })
         } else {
             Err(AIServiceError::StreamNotFound.into())
+        }
+    }
+
+    /// Verify that the caller (identified by auth_token) owns the given transcription session.
+    /// In single-user mode, ownership is not enforced.
+    /// In multi-user mode, both the session and the caller must have valid emails that match.
+    fn verify_stream_ownership(session: &TranscriptionSession, auth_token: &str) -> Result<()> {
+        let multi_user_enabled = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.get_multi_user_enabled().unwrap_or(false)
+        });
+
+        if !multi_user_enabled {
+            // Single-user mode — no ownership enforcement
+            return Ok(());
+        }
+
+        // Multi-user mode: require valid token
+        let caller_email =
+            crate::agent::capabilities::user_email_from_token(auth_token.to_string());
+
+        // If caller has no email, they must still have a valid token (admin/main user)
+        if caller_email.is_none() {
+            if crate::agent::capabilities::decode_jwt(auth_token.to_string()).is_err() {
+                return Err(anyhow!(
+                    "Authorization error: valid token required in multi-user mode"
+                ));
+            }
+            // Admin user (valid token, no email) — allow access to any stream
+            return Ok(());
+        }
+
+        let caller_email = caller_email.unwrap();
+
+        // Session must also have an owner email to enforce ownership
+        let owner_email = match session.user_email.as_ref() {
+            Some(email) => email,
+            // Session has no owner email (created by admin) — only admin can access,
+            // but we already handled the admin case above, so reject.
+            None => {
+                return Err(anyhow!(
+                    "Authorization error: caller does not own this transcription stream"
+                ))
+            }
+        };
+
+        if caller_email == *owner_email {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "Authorization error: caller does not own this transcription stream"
+            ))
+        }
+    }
+
+    /// Verify that a caller (identified by auth_token) is allowed to subscribe to a given stream.
+    /// Returns Ok(()) if access is allowed, or an error if not.
+    pub async fn verify_stream_access(&self, stream_id: &str, auth_token: &str) -> Result<()> {
+        let map_lock = self.transcription_streams.lock().await;
+        if let Some(session) = map_lock.get(stream_id) {
+            Self::verify_stream_ownership(session, auth_token)
+        } else {
+            Err(anyhow!("Transcription stream not found: {}", stream_id))
         }
     }
 
@@ -1497,7 +1682,7 @@ mod tests {
             .embed("bert".into(), "Test string".into())
             .await
             .expect("embed to return a result");
-        assert!(vector.len() > 300)
+        assert!(vector.embeddings.len() > 300)
     }
 
     #[ignore]
@@ -1521,8 +1706,8 @@ mod tests {
             .prompt(task.task_id, "Test string".into())
             .await
             .expect("prompt to return a result");
-        println!("Response: {}", response);
-        assert!(!response.is_empty())
+        println!("Response: {}", response.text);
+        assert!(!response.text.is_empty())
     }
 
     #[ignore]
@@ -1568,7 +1753,11 @@ mod tests {
             .collect::<Result<Vec<_>>>()
             .expect("all prompts to return results");
 
-        let response = responses.join("\n");
+        let response = responses
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         println!("Responses: {}", response);
         assert!(!response.is_empty())
     }
@@ -1675,6 +1864,6 @@ mod tests {
             .prompt(task.task_id.clone(), "Test input".into())
             .await
             .expect("prompt to work after model update");
-        assert!(!response.is_empty());
+        assert!(!response.text.is_empty());
     }
 }

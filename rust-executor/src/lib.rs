@@ -9,22 +9,23 @@ pub mod graphql;
 pub mod holochain_service;
 pub mod js_core;
 pub mod mcp;
+pub mod perspectives;
 mod prolog_service;
 pub mod runtime_service;
-mod surreal_service;
+pub mod unyt_service;
 pub mod user_management;
 pub mod utils;
 mod wallet;
 
 pub mod agent;
 pub mod ai_service;
+pub mod billing;
 mod dapp_server;
 pub mod db;
 pub mod init;
 pub mod languages;
 pub mod logging;
 mod neighbourhoods;
-pub mod perspectives;
 mod pubsub;
 use rustls::crypto::aws_lc_rs;
 #[cfg(test)]
@@ -34,11 +35,12 @@ pub mod types;
 use std::thread::JoinHandle;
 
 use log::{error, info, warn};
+use tokio::sync::oneshot;
 
+use crate::prolog_service::init_prolog_service;
 use crate::{
     agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
-    languages::LanguageController, prolog_service::init_prolog_service,
-    runtime_service::RuntimeService, utils::find_port,
+    languages::LanguageController, runtime_service::RuntimeService, utils::find_port,
 };
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
@@ -119,6 +121,17 @@ async fn holochain_signal_receiver() {
                                 }
                             }
                         };
+                        // Check if this signal is from the Unyt alliance DNA
+                        if unyt_service::is_alliance_cell(&cell_id_key).await {
+                            let payload_json: serde_json::Value =
+                                serde_json::from_str(&payload_str)
+                                    .unwrap_or(serde_json::Value::Null);
+                            tokio::spawn(async move {
+                                unyt_service::handle_signal(&payload_json).await;
+                            });
+                            continue;
+                        }
+
                         let maybe_lang_address: Option<String> = {
                             let handlers = js_core::languages_extension::HOLOCHAIN_SIGNAL_HANDLERS
                                 .read()
@@ -190,10 +203,79 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         }
     }
 
+    // Set up graceful shutdown channel.
+    // The sender is stored globally so runtime_quit and signal handlers can trigger shutdown.
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    {
+        let mut guard = crate::globals::SHUTDOWN_TX.lock().unwrap();
+        *guard = Some(shutdown_tx);
+    }
+
+    // Spawn a task that listens for OS signals (SIGTERM/SIGINT) and triggers shutdown.
+    // This replaces the old ctrlc handler in the CLI binaries with an in-executor handler
+    // that allows graceful cleanup of Holochain conductor and databases.
+    #[cfg(unix)]
+    {
+        tokio::spawn(async {
+            use tokio::signal;
+            let ctrl_c = signal::ctrl_c();
+            let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+
+            tokio::select! {
+                _ = ctrl_c => info!("Received SIGINT, initiating graceful shutdown..."),
+                _ = sigterm.recv() => info!("Received SIGTERM, initiating graceful shutdown..."),
+            }
+
+            // Trigger shutdown via the global channel
+            if let Some(tx) = crate::globals::SHUTDOWN_TX.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+        });
+    }
+
+    // Spawn the shutdown handler that waits for the signal and cleans up
+    tokio::spawn(async move {
+        if shutdown_rx.await.is_ok() {
+            info!("Shutdown signal received, cleaning up...");
+
+            // 1. Shut down Holochain conductor gracefully
+            if let Some(holochain_service) = holochain_service::maybe_get_holochain_service().await
+            {
+                info!("Shutting down Holochain conductor...");
+                match holochain_service.shutdown().await {
+                    Ok(()) => info!("Holochain conductor shut down cleanly"),
+                    Err(e) => warn!("Error shutting down Holochain conductor: {}", e),
+                }
+            }
+
+            // 2. Remove PID file if it was configured
+            let shutdown_config = crate::config::get_global_config();
+            if let Some(ref pid_file) = shutdown_config.pid_file {
+                let _ = std::fs::remove_file(pid_file);
+                info!("Removed PID file: {}", pid_file);
+            }
+
+            info!("Graceful shutdown complete, exiting.");
+            std::process::exit(0);
+        }
+    });
+
     // Initialize logging for CLI (stdout)
     // Respects RUST_LOG environment variable if set
     crate::logging::init_cli_logging(None);
     config.prepare();
+
+    // Write PID file if requested via config.
+    // Test harnesses can set pid_file to get a reliable PID for targeted cleanup.
+    if let Some(ref pid_file) = config.pid_file {
+        let pid = std::process::id();
+        if let Err(e) = std::fs::write(pid_file, pid.to_string()) {
+            warn!("Failed to write PID file {}: {}", pid_file, e);
+        } else {
+            info!("Wrote PID {} to {}", pid, pid_file);
+        }
+    }
 
     // Store config globally so services (e.g. agent mutation resolvers) can access it
     crate::config::set_global_config(config.clone());
@@ -318,8 +400,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         warn!("adminCredential is not set or empty, empty token will possess admin capabilities.");
     }
 
-    info!("Initializing Prolog service...");
-    init_prolog_service().await;
+    {
+        info!("Initializing Prolog service...");
+        init_prolog_service().await;
+    }
 
     find_and_set_port(&mut config.gql_port, 4000, "GraphQL");
     find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");
@@ -343,7 +427,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     // NOTE: load_system_languages() is called directly from Rust in
     // agent_generate/agent_unlock mutation resolvers.
 
-    // Set app data path for perspectives module (needed for file-based SurrealDB)
+    // Set app data path for perspectives module
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
 
     perspectives::initialize_from_db();
@@ -371,6 +455,138 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     // Start holochain signal receiver as standalone task
     tokio::spawn(crate::holochain_signal_receiver());
+
+    // Eagerly install Unyt alliance DNA in the background (only if membrane proof is available).
+    tokio::spawn(async {
+        if unyt_service::get_membrane_proof().is_none() {
+            info!("No Unyt membrane proof stored — skipping eager DNA install");
+            return;
+        }
+        match unyt_service::ensure_installed().await {
+            Ok(()) => info!("Unyt alliance DNA ready"),
+            Err(e) => error!("Failed to install Unyt alliance DNA: {}", e),
+        }
+    });
+
+    // Spawn payment completion polling (every 30 seconds)
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            unyt_service::check_pending_payments().await;
+            unyt_service::check_pending_sends().await;
+        }
+    });
+
+    // Spawn credit change flush loop (every 2 seconds)
+    // When any credit mutation marks a user dirty, this drains the set
+    // and publishes updated HostingUserInfo only for affected users.
+    tokio::spawn(async {
+        use crate::db::Ad4mDb;
+        use crate::pubsub::{
+            get_global_pubsub, COMPUTE_LOG_UPDATED_TOPIC, DIRTY_CREDIT_USERS,
+            HOSTING_USER_INFO_CHANGED_TOPIC, PENDING_COMPUTE_LOG_ENTRIES,
+        };
+
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            // Drain dirty users
+            let dirty_emails: Vec<String> = {
+                let mut set = match DIRTY_CREDIT_USERS.lock() {
+                    Ok(set) => set,
+                    Err(e) => {
+                        error!("Credit flush: failed to lock dirty set: {}", e);
+                        continue;
+                    }
+                };
+                set.drain().collect()
+            };
+
+            if dirty_emails.is_empty() {
+                continue;
+            }
+
+            let pubsub = get_global_pubsub().await;
+            let global_free = match Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Credit flush: get_free_hosting_enabled failed: {}", e);
+                    true // default to free on transient errors to avoid wrongly blocking users
+                }
+            };
+            for email in &dirty_emails {
+                let free_access = if global_free {
+                    true
+                } else {
+                    match Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!(
+                                "Credit flush: get_user_free_access failed for {}: {}",
+                                email, e
+                            );
+                            continue;
+                        }
+                    }
+                };
+                let remaining_credits = if free_access {
+                    "unlimited".to_string()
+                } else {
+                    match Ad4mDb::with_global_instance(|db| db.get_user_credits(email)) {
+                        Ok(credits) => format!("{}", credits),
+                        Err(e) => {
+                            error!("Credit flush: get_user_credits failed for {}: {}", email, e);
+                            continue;
+                        }
+                    }
+                };
+                let hot_wallet_address =
+                    match Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(email)) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!(
+                                "Credit flush: get_user_hot_wallet failed for {}: {}",
+                                email, e
+                            );
+                            continue;
+                        }
+                    };
+
+                let info = crate::graphql::graphql_types::HostingUserInfo {
+                    email: email.clone(),
+                    remaining_credits,
+                    hot_wallet_address,
+                    free_access,
+                };
+
+                if let Ok(json) = serde_json::to_string(&info) {
+                    pubsub
+                        .publish(&HOSTING_USER_INFO_CHANGED_TOPIC, &json)
+                        .await;
+                }
+            }
+
+            // Drain and publish pending compute log entries
+            let pending_entries: Vec<crate::graphql::graphql_types::ComputeLogEntry> = {
+                match PENDING_COMPUTE_LOG_ENTRIES.lock() {
+                    Ok(mut vec) => vec.drain(..).collect(),
+                    Err(e) => {
+                        error!(
+                            "Credit flush: failed to lock pending compute log entries: {}",
+                            e
+                        );
+                        Vec::new()
+                    }
+                }
+            };
+            for entry in pending_entries {
+                if let Ok(json) = serde_json::to_string(&entry) {
+                    pubsub.publish(&COMPUTE_LOG_UPDATED_TOPIC, &json).await;
+                }
+            }
+        }
+    });
 
     // Check if MCP mode is enabled — run MCP server alongside GraphQL
     if config.enable_mcp == Some(true) {

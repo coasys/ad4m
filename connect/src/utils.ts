@@ -67,3 +67,19 @@ export async function connectWebSocket(url, timeout = 10000) {
     }),
   ]);
 }
+
+/** Extract up to 2 initials from a name (first letter of first two words) */
+export function getInitials(name: string): string {
+  const clean = name.trim();
+  if (!clean) return "";
+  const words = clean.split(/\s+/);
+  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+  return clean.slice(0, 2).toUpperCase();
+}
+
+/** Deterministic hue (0-359) from a string — same input always yields same color */
+export function getHue(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  return ((hash % 360) + 360) % 360;
+}
