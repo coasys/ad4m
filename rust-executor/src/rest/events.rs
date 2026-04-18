@@ -59,6 +59,7 @@ fn broadcast_to_sse_stream_nested(
         })
 }
 
+use crate::agent::{did_for_context, AgentContext};
 use crate::agent::capabilities::*;
 use crate::pubsub::{
     get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, AI_MODEL_LOADING_STATUS,
@@ -84,6 +85,27 @@ fn matches_perspective_uuid(msg: &str, uuid: &str) -> bool {
     }
     // Fallback: string containment for backwards compatibility
     msg.contains(uuid)
+}
+
+/// Check whether a pubsub neighbourhood signal should be visible to the
+/// currently authenticated agent.
+///
+/// If the message has no explicit `recipient`, treat it as a broadcast / legacy
+/// event and allow it through. If it does declare a recipient, only emit it to
+/// the matching authenticated DID.
+fn matches_signal_recipient(msg: &str, current_did: Option<&str>) -> bool {
+    match serde_json::from_str::<serde_json::Value>(msg) {
+        Ok(serde_json::Value::Object(map)) => match map.get("recipient") {
+            Some(serde_json::Value::String(recipient)) => {
+                current_did.is_some_and(|did| did == recipient)
+            }
+            Some(serde_json::Value::Null) | None => true,
+            _ => false,
+        },
+        // Backwards compatibility for older raw payloads.
+        Err(_) => true,
+        _ => false,
+    }
 }
 
 /// Wrap a raw pubsub JSON string with a `"type"` field.
@@ -257,6 +279,8 @@ pub async fn neighbourhood_signal_events(
     check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
+    let current_did = did_for_context(&AgentContext::from_auth_token(context.auth_token.clone())).ok();
+
     let pubsub = get_global_pubsub().await;
     let rx = pubsub.subscribe(&NEIGHBOURHOOD_SIGNAL_TOPIC).await;
 
@@ -264,9 +288,13 @@ pub async fn neighbourhood_signal_events(
         .filter_map(|r| async { handle_broadcast_result(r) })
         .filter_map(move |result| {
             let uuid = uuid.clone();
+            let current_did = current_did.clone();
             async move {
                 match result {
-                    Ok(msg) if matches_perspective_uuid(&msg, &uuid) => {
+                    Ok(msg)
+                        if matches_perspective_uuid(&msg, &uuid)
+                            && matches_signal_recipient(&msg, current_did.as_deref()) =>
+                    {
                         Some(Ok(Event::default().data(wrap_event("signal", &msg))))
                     }
                     Err(n) => Some(Ok(Event::default().data(format!(
@@ -405,6 +433,8 @@ pub async fn unified_events(
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
+    let current_did = did_for_context(&AgentContext::from_auth_token(context.auth_token.clone())).ok();
+
     let pubsub = get_global_pubsub().await;
 
     // Agent events
@@ -459,7 +489,23 @@ pub async fn unified_events(
     let s_link_removed = typed_stream!(link_removed_rx, "link-removed");
     let s_link_updated = typed_stream!(link_updated_rx, "link-updated");
 
-    let s_signal = typed_stream!(signal_rx, "signal");
+    let s_signal = BroadcastStream::new(signal_rx)
+        .filter_map(|r| async { handle_broadcast_result(r) })
+        .filter_map(move |result| {
+            let current_did = current_did.clone();
+            async move {
+                match result {
+                    Ok(msg) if matches_signal_recipient(&msg, current_did.as_deref()) => {
+                        Some(Ok(Event::default().data(wrap_event("signal", &msg))))
+                    }
+                    Err(n) => Some(Ok(Event::default().data(format!(
+                        r#"{{"type":"lagged","missed":{},"stream":"signal"}}"#,
+                        n
+                    )))),
+                    _ => None,
+                }
+            }
+        });
 
     let s_msg = broadcast_to_sse_stream_nested(msg_rx, "message-received", "message");
     let s_notif =
@@ -492,7 +538,7 @@ pub async fn unified_events(
 
 #[cfg(test)]
 mod tests {
-    use super::{wrap_event, wrap_event_nested};
+    use super::{matches_signal_recipient, wrap_event, wrap_event_nested};
 
     #[test]
     fn wrap_event_preserves_flat_payloads_for_regular_events() {
@@ -501,6 +547,30 @@ mod tests {
             wrapped,
             r#"{"isUnlocked":true,"type":"agent-status-changed"}"#
         );
+    }
+
+    #[test]
+    fn matches_signal_recipient_allows_broadcasts_without_recipient() {
+        assert!(matches_signal_recipient(
+            r#"{"perspective":{"uuid":"p-1"},"signal":{"data":{"links":[]}}}"#,
+            Some("did:key:z6Mktest"),
+        ));
+    }
+
+    #[test]
+    fn matches_signal_recipient_accepts_matching_recipient() {
+        assert!(matches_signal_recipient(
+            r#"{"perspective":{"uuid":"p-1"},"signal":{"data":{"links":[]}},"recipient":"did:key:z6Mkmatch"}"#,
+            Some("did:key:z6Mkmatch"),
+        ));
+    }
+
+    #[test]
+    fn matches_signal_recipient_rejects_other_recipient() {
+        assert!(!matches_signal_recipient(
+            r#"{"perspective":{"uuid":"p-1"},"signal":{"data":{"links":[]}},"recipient":"did:key:z6Mkother"}"#,
+            Some("did:key:z6Mkself"),
+        ));
     }
 
     #[test]
