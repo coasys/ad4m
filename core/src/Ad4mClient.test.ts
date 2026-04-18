@@ -12,6 +12,7 @@ class MockEventSource {
     onerror: any = null;
     closed = false;
     url: string;
+    init: any;
 
     close() {
         this.closed = true;
@@ -21,8 +22,9 @@ class MockEventSource {
         this.onmessage?.({ data: JSON.stringify(payload) });
     }
 
-    constructor(url: string) {
+    constructor(url: string, init?: any) {
         this.url = url;
+        this.init = init;
         MockEventSource.instances.push(this);
     }
 }
@@ -637,6 +639,52 @@ describe('PerspectiveClient', () => {
 
         const eventSource = MockEventSource.instances.at(-1)!;
         expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/unified?token=test-token`);
+    });
+
+    test('subscriptions keep using the module-native fetch even if global.fetch changes later', async () => {
+        const originalFetch = global.fetch;
+        const fakeFetch = jest.fn(async () => {
+            throw new Error('should not be used by EventSource');
+        }) as any;
+
+        global.fetch = fakeFetch;
+        try {
+            const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
+            freshClient.runtime.addExceptionCallback(jest.fn(() => null));
+            freshClient.runtime.subscribeExceptionOccurred();
+
+            const eventSource = MockEventSource.instances.at(-1)!;
+            expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/unified?token=test-token`);
+            expect(eventSource.init?.fetch).toBeDefined();
+            expect(eventSource.init?.fetch).not.toBe(fakeFetch);
+        } finally {
+            global.fetch = originalFetch;
+        }
+    });
+
+    test('runtime exception subscriptions normalize PascalCase exception types from REST', async () => {
+        const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
+        const callback = jest.fn(() => null);
+        freshClient.runtime.addExceptionCallback(callback);
+        freshClient.runtime.subscribeExceptionOccurred();
+
+        const eventSource = MockEventSource.instances.at(-1)!;
+        eventSource.emit({
+            type: 'exception-occurred',
+            exception: {
+                title: 'Request to authenticate application',
+                message: 'demo-app is waiting for authentication',
+                type: 'CapabilityRequested',
+                addon: '{}',
+            },
+        });
+
+        expect(callback).toHaveBeenCalledWith({
+            title: 'Request to authenticate application',
+            message: 'demo-app is waiting for authentication',
+            type: 'CAPABILITY_REQUESTED',
+            addon: '{}',
+        });
     });
 
     test('subscribeToQueryUpdates() ignores unrelated SSE events and accepts object results', async () => {

@@ -1,14 +1,10 @@
 import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
 import { Ad4mClient } from "@coasys/ad4m";
-import { startExecutor, apolloClient, sleep, gracefulShutdown } from "../utils/utils";
+import { startExecutor, baseUrl, sleep, gracefulShutdown } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import path from "path";
-import fetch from 'node-fetch'
 import { fileURLToPath } from 'url';
-
-//@ts-ignore
-global.fetch = fetch
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,7 +27,7 @@ describe("Integration", () => {
         gqlPort, hcAdminPort, hcAppPort);
 
     console.log("Creating ad4m client")
-    ad4m = new Ad4mClient(apolloClient(gqlPort))
+    ad4m = new Ad4mClient(baseUrl(gqlPort))
     console.log("Generating agent")
     await ad4m.agent.generate("secret")
     console.log("Done")

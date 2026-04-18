@@ -1,6 +1,6 @@
 import { ChildProcess } from "node:child_process";
 import { Ad4mClient } from "@coasys/ad4m";
-import { startExecutor, apolloClient } from "../utils/utils.js";
+import { startExecutor, baseUrl } from "../utils/utils.js";
 import { getFreePorts, registerPorts, deregisterPorts } from "./ports.js";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -89,7 +89,7 @@ export async function startAgent(
   );
   _activeExecutors.add(executorProcess);
 
-  const client = new Ad4mClient(apolloClient(gqlPort, opts.adminCredential));
+  const client = new Ad4mClient(baseUrl(gqlPort), opts.adminCredential);
   await client.agent.generate(opts.passphrase ?? "test-passphrase");
   await client.runtime.setMultiUserEnabled(true);
 
@@ -130,7 +130,7 @@ export async function startAgent(
  * without spawning an extra executor process.
  */
 export function connectClient(gqlPort: number, token?: string): Ad4mClient {
-  return new Ad4mClient(apolloClient(gqlPort, token));
+  return new Ad4mClient(baseUrl(gqlPort), token);
 }
 
 export { TEST_DIR, BOOTSTRAP_SEED };

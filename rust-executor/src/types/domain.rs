@@ -124,6 +124,7 @@ pub struct ExceptionInfo {
 }
 
 #[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ExceptionType {
     #[serde(alias = "LANGUAGE_IS_NOT_LOADED")]
     LanguageIsNotLoaded = 0,
@@ -136,6 +137,19 @@ pub enum ExceptionType {
     CapabilityRequested = 3,
     #[serde(alias = "INSTALL_NOTIFICATION_REQUEST")]
     InstallNotificationRequest = 4,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExceptionType;
+
+    #[test]
+    fn exception_type_serializes_in_screaming_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ExceptionType::CapabilityRequested).unwrap(),
+            "\"CAPABILITY_REQUESTED\""
+        );
+    }
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]

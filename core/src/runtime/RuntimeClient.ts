@@ -20,6 +20,17 @@ export type ExceptionCallback = (info: ExceptionInfo) => null
 export type NotificationTriggeredCallback = (notification: TriggeredNotification) => null
 export type NotificationRequestedCallback = (notification: Notification) => null
 
+function normalizeExceptionType(type: ExceptionInfo['type'] | string): ExceptionInfo['type'] {
+    if (typeof type !== 'string' || type === type.toUpperCase()) {
+        return type as ExceptionInfo['type']
+    }
+
+    return type
+        .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+        .replace(/([A-Z])([A-Z][a-z])/g, '$1_$2')
+        .toUpperCase() as ExceptionInfo['type']
+}
+
 export class RuntimeClient {
     #restClient: RestClient
     #messageReceivedCallbacks: MessageCallback[]
@@ -308,8 +319,13 @@ export class RuntimeClient {
 
     subscribeExceptionOccurred() {
         const unsub = this.#restClient.subscribe('/api/v1/events/runtime', (data) => {
-            if (data.type === 'exception-occurred') {
-                this.#exceptionOccurredCallbacks.forEach(cb => cb(data.exception as ExceptionInfo))
+            if (data.type === 'exception-occurred' && data.exception) {
+                const exception = data.exception as ExceptionInfo
+                const normalizedException = {
+                    ...exception,
+                    type: normalizeExceptionType(exception.type),
+                }
+                this.#exceptionOccurredCallbacks.forEach(cb => cb(normalizedException))
             }
         })
         this.#unsubscribers.push(unsub)

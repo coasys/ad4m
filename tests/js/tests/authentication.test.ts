@@ -4,14 +4,10 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor, quitExecutor } from "../utils/utils";
+import { baseUrl, sleep, startExecutor, quitExecutor } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
-import fetch from 'node-fetch'
 import { ExceptionInfo } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
-
-//@ts-ignore
-global.fetch = fetch
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -41,7 +37,7 @@ describe("Authentication integration tests", () => {
             executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
                 gqlPort, hcAdminPort, hcAppPort);
 
-            ad4mClient = new Ad4mClient(apolloClient(gqlPort), false)
+            ad4mClient = new Ad4mClient(baseUrl(gqlPort), undefined, false)
             await ad4mClient.agent.generate("passphrase")
         })
 
@@ -103,10 +99,10 @@ describe("Authentication integration tests", () => {
             executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
                 gqlPort, hcAdminPort, hcAppPort, false, "123");
        
-            adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "123"), false)
+            adminAd4mClient = new Ad4mClient(baseUrl(gqlPort), "123", false)
             await adminAd4mClient.agent.generate("passphrase")
             
-            unAuthenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort), false)
+            unAuthenticatedAppAd4mClient = new Ad4mClient(baseUrl(gqlPort), undefined, false)
         })
 
         after(async () => {
@@ -214,13 +210,13 @@ describe("Authentication integration tests", () => {
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
             // @ts-ignore
-            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
+            let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(gqlPort), jwt, false)
             expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).to.be.true;
         })
 
         it("user with invalid jwt can not query agent status", async () => {
             // @ts-ignore
-            let ad4mClient = new Ad4mClient(apolloClient(gqlPort, "invalid-jwt"), false)
+            let ad4mClient = new Ad4mClient(baseUrl(gqlPort), "invalid-jwt", false)
 
             const call = async () => {
                 return await ad4mClient!.agent.status()
@@ -249,7 +245,7 @@ describe("Authentication integration tests", () => {
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
             // @ts-ignore
-            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
+            let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(gqlPort), jwt, false)
 
             const call = async () => {
                 return await authenticatedAppAd4mClient!.agent.status()
@@ -278,7 +274,7 @@ describe("Authentication integration tests", () => {
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
             // @ts-ignore
-            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
+            let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(gqlPort), jwt, false)
             expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).to.be.true;
 
             let oldApps = await adminAd4mClient!.agent.getApps();

@@ -1,11 +1,22 @@
-// EventSource may come from DOM lib or a polyfill
+type EventSourceInitCompat = {
+    withCredentials?: boolean
+    fetch?: typeof globalThis.fetch
+}
+
+// EventSource may come from DOM lib or a polyfill.
+// The `eventsource` polyfill supports a custom `fetch` implementation,
+// which we use to preserve Node's native web-stream-based fetch even if
+// callers later overwrite `global.fetch` with `node-fetch`.
 declare var EventSource: {
-    new(url: string): {
+    new(url: string, init?: EventSourceInitCompat): {
         onmessage: ((event: { data: string }) => void) | null
         onerror: ((event: Event) => void) | null
         close(): void
     }
 }
+
+const nativeFetch =
+    typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : undefined
 
 /** Shape of SSE event data parsed from JSON. Callers can narrow via generics. */
 export interface SseEvent {
@@ -96,7 +107,9 @@ export class RestClient {
 
         let entry = this._eventSources.get(fullUrl)
         if (!entry) {
-            const es = new EventSource(fullUrl)
+            const es = nativeFetch
+                ? new EventSource(fullUrl, { fetch: nativeFetch })
+                : new EventSource(fullUrl)
             entry = { es, callbacks: new Set() }
             const ref = entry          // stable reference for closure
             es.onmessage = (event) => {

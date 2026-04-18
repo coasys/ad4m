@@ -13,15 +13,11 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     PropertyOptions,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
-import { startExecutor, apolloClient, quitExecutor } from "../utils/utils";
+import { startExecutor, baseUrl, quitExecutor } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import path from "path";
 import { fileURLToPath } from 'url';
-import fetch from 'node-fetch'
 import sinon from 'sinon';
-
-//@ts-ignore
-global.fetch = fetch
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,7 +41,7 @@ describe("Prolog + Literals", () => {
 
         console.log("Creating ad4m client")
         // @ts-ignore - Apollo Client version mismatch between dependencies
-        ad4m = new Ad4mClient(apolloClient(gqlPort))
+        ad4m = new Ad4mClient(baseUrl(gqlPort))
         console.log("Generating agent")
         await ad4m.agent.generate("secret")
         console.log("Done")

@@ -1,5 +1,5 @@
 import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
-import { rmSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions/index.js";
@@ -9,9 +9,16 @@ import { createClient } from "graphql-ws";
 import path from "path";
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { EventSource } from "eventsource";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// The REST client uses SSE subscriptions, but Node-based test entry points do
+// not provide a global EventSource by default. Polyfill it once here because
+// this helper module is imported by the affected integration test lanes.
+// @ts-ignore
+(global as any).EventSource = EventSource;
 
 export async function isProcessRunning(processName: string): Promise<boolean> {
     const cmd = (() => {
@@ -182,6 +189,13 @@ export async function startExecutor(dataPath: string,
     rmSync(dataPath, { recursive: true, force: true })
     rmSync(effectiveDataPath, { recursive: true, force: true })
     execSync(`${command} init --data-path ${effectiveDataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
+
+    // Symlink legacy dataPath → effectiveDataPath so test helpers that
+    // reference the original path (e.g. injectPublishingAgent.js) still work.
+    if (effectiveDataPath !== dataPath) {
+        mkdirSync(path.dirname(dataPath), { recursive: true });
+        symlinkSync(effectiveDataPath, dataPath);
+    }
     
     console.log("Starting executor")
 
@@ -257,6 +271,10 @@ export async function startExecutor(dataPath: string,
     console.log("Waiting for executor to settle...")
     await executorReady
     return executorProcess;
+}
+
+export function baseUrl(port: number): string {
+    return `http://127.0.0.1:${port}`;
 }
 
 export function apolloClient(port: number, token?: string): ApolloClient<any> {

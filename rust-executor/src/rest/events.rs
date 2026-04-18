@@ -43,6 +43,26 @@ fn broadcast_to_sse_stream(
         })
 }
 
+fn broadcast_to_sse_stream_nested(
+    rx: tokio::sync::broadcast::Receiver<String>,
+    event_type: &'static str,
+    payload_key: &'static str,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    BroadcastStream::new(rx)
+        .filter_map(|r| async { handle_broadcast_result(r) })
+        .map(move |result| match result {
+            Ok(msg) => Ok(Event::default().data(wrap_event_nested(
+                event_type,
+                payload_key,
+                &msg,
+            ))),
+            Err(n) => Ok(Event::default().data(format!(
+                r#"{{"type":"lagged","missed":{},"stream":"{}"}}"#,
+                n, event_type
+            ))),
+        })
+}
+
 use crate::agent::capabilities::*;
 use crate::pubsub::{
     get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, AI_MODEL_LOADING_STATUS,
@@ -87,6 +107,13 @@ fn wrap_event(event_type: &str, raw_json: &str) -> String {
     } else {
         format!(r#"{{"type":"{}","data":{}}}"#, event_type, raw_json)
     }
+}
+
+fn wrap_event_nested(event_type: &str, payload_key: &str, raw_json: &str) -> String {
+    format!(
+        r#"{{"type":"{}","{}":{}}}"#,
+        event_type, payload_key, raw_json
+    )
 }
 
 /// GET /events/agent — SSE: agent-status-changed, apps-changed, agent-updated, hosting-user-info-changed, compute-log-updated
@@ -279,9 +306,9 @@ pub async fn runtime_events(
         .await;
     let exc_rx = pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await;
 
-    let s1 = broadcast_to_sse_stream(msg_rx, "message-received");
-    let s2 = broadcast_to_sse_stream(notif_rx, "notification-triggered");
-    let s3 = broadcast_to_sse_stream(exc_rx, "exception-occurred");
+    let s1 = broadcast_to_sse_stream_nested(msg_rx, "message-received", "message");
+    let s2 = broadcast_to_sse_stream_nested(notif_rx, "notification-triggered", "notification");
+    let s3 = broadcast_to_sse_stream_nested(exc_rx, "exception-occurred", "exception");
 
     let merged = stream::select(s1, stream::select(s2, s3));
     Ok(Sse::new(merged).keep_alive(KeepAlive::default()))
@@ -438,9 +465,10 @@ pub async fn unified_events(
 
     let s_signal = typed_stream!(signal_rx, "signal");
 
-    let s_msg = typed_stream!(msg_rx, "message-received");
-    let s_notif = typed_stream!(notif_rx, "notification-triggered");
-    let s_exc = typed_stream!(exc_rx, "exception-occurred");
+    let s_msg = broadcast_to_sse_stream_nested(msg_rx, "message-received", "message");
+    let s_notif =
+        broadcast_to_sse_stream_nested(notif_rx, "notification-triggered", "notification");
+    let s_exc = broadcast_to_sse_stream_nested(exc_rx, "exception-occurred", "exception");
 
     let s_trans = typed_stream!(trans_rx, "transcription-text");
     let s_loading = typed_stream!(loading_rx, "model-loading-status");
@@ -464,4 +492,28 @@ pub async fn unified_events(
     );
 
     Ok(Sse::new(top).keep_alive(KeepAlive::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{wrap_event, wrap_event_nested};
+
+    #[test]
+    fn wrap_event_preserves_flat_payloads_for_regular_events() {
+        let wrapped = wrap_event("agent-status-changed", r#"{"isUnlocked":true}"#);
+        assert_eq!(wrapped, r#"{"isUnlocked":true,"type":"agent-status-changed"}"#);
+    }
+
+    #[test]
+    fn wrap_event_nested_preserves_inner_exception_type() {
+        let wrapped = wrap_event_nested(
+            "exception-occurred",
+            "exception",
+            r#"{"title":"Request","message":"Waiting","type":"CAPABILITY_REQUESTED","addon":"{}"}"#,
+        );
+        assert_eq!(
+            wrapped,
+            r#"{"type":"exception-occurred","exception":{"title":"Request","message":"Waiting","type":"CAPABILITY_REQUESTED","addon":"{}"}}"#
+        );
+    }
 }

@@ -4,11 +4,7 @@ import fs from "fs-extra";
 import { exit } from "process";
 import { execSync } from "child_process";
 import { fileURLToPath } from 'url';
-import { apolloClient, sleep, startExecutor } from "./utils";
-import fetch from 'node-fetch'
-
-//@ts-ignore
-global.fetch = fetch
+import { baseUrl, sleep, startExecutor } from "./utils";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -94,7 +90,7 @@ async function publish() {
     const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, gqlPort, hcAdminPort, hcAppPort, true);
 
     try {
-        const ad4mClient = new Ad4mClient(apolloClient(gqlPort));
+        const ad4mClient = new Ad4mClient(baseUrl(gqlPort));
         await ad4mClient.agent.generate("passphrase");
 
         for (const [language, languageMeta] of Object.entries(languagesToPublish)) {

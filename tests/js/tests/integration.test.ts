@@ -4,7 +4,7 @@ import { isProcessRunning, sleep } from "../utils/utils";
 import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
 import { fileURLToPath } from 'url';
 import { expect } from "chai";
-import { startExecutor, apolloClient, runHcLocalServices, quitExecutor } from "../utils/utils";
+import { startExecutor, baseUrl, runHcLocalServices, quitExecutor } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'child_process';
 import perspectiveTests from "./perspective";
@@ -18,10 +18,6 @@ import runtimeTests from "./runtime";
 import directMessageTests from "./direct-messages";
 import agentLanguageTests from "./agent-language";
 import socialDNATests from "./social-dna-flow";
-import fetch from "node-fetch";
-
-//@ts-ignore
-global.fetch = fetch
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -124,7 +120,7 @@ describe("Integration tests", function () {
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
           gqlPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!, relayUrl!);
 
-        testContext.alice = new Ad4mClient(apolloClient(gqlPort))
+        testContext.alice = new Ad4mClient(baseUrl(gqlPort))
         testContext.aliceCore = executorProcess
     })
 
@@ -164,7 +160,7 @@ describe("Integration tests", function () {
           bobExecutorProcess = await startExecutor(bobAppDataPath, bobBootstrapSeedPath,
             bobGqlPort, bobHcAdminPort, bobHcAppPort, false, undefined, proxyUrl!, bootstrapUrl!, relayUrl!);
 
-          testContext.bob = new Ad4mClient(apolloClient(bobGqlPort))
+          testContext.bob = new Ad4mClient(baseUrl(bobGqlPort))
           testContext.bobCore = bobExecutorProcess
           await testContext.bob.agent.generate("passphrase")
 
