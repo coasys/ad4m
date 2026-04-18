@@ -928,6 +928,16 @@ async fn route_login_user() {
 }
 
 #[tokio::test]
+async fn route_set_user_free_access() {
+    let s = route_status(Method::POST, "/api/v1/users/free-access").await;
+    assert!(
+        is_route_registered(s),
+        "POST /users/free-access returned {}",
+        s
+    );
+}
+
+#[tokio::test]
 async fn route_verify_email() {
     let s = route_status(Method::POST, "/api/v1/users/verify-email").await;
     assert!(

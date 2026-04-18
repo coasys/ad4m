@@ -369,6 +369,14 @@ pub struct SetMultiUserRequest {
     pub enabled: bool,
 }
 
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetUserFreeAccessRequest {
+    pub email: String,
+    pub enabled: bool,
+}
+
 // ── AI ──
 
 #[derive(Deserialize, TS)]

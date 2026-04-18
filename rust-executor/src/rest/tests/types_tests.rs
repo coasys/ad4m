@@ -350,6 +350,14 @@ fn parse_set_multi_user_request() {
     assert!(req.enabled);
 }
 
+#[test]
+fn parse_set_user_free_access_request() {
+    let json = json!({"email": "user@example.com", "enabled": true});
+    let req: SetUserFreeAccessRequest = serde_json::from_value(json).unwrap();
+    assert_eq!(req.email, "user@example.com");
+    assert!(req.enabled);
+}
+
 // ── AI ──
 
 #[test]

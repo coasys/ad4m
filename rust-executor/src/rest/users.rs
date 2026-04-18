@@ -69,7 +69,11 @@ pub async fn list_users(
     )
     .map_err(|e| ApiError::Forbidden(e))?;
 
-    let users = Ad4mDb::with_global_instance(|db| db.list_users())
+    if !crate::user_management::is_multi_user_enabled() {
+        return Ok(Json(serde_json::json!([])));
+    }
+
+    let users = Ad4mDb::with_global_instance(|db| db.list_user_statistics())
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(serde_json::to_value(users).unwrap_or_default()))
@@ -94,6 +98,38 @@ pub async fn get_user_wallet(
         .ok_or_else(|| ApiError::NotFound("Wallet not found".into()))?;
 
     Ok(Json(wallet))
+}
+
+/// POST /users/free-access — toggle free access for a managed user
+#[rest_handler(
+    POST,
+    "/users/free-access",
+    request = "SetUserFreeAccessRequest",
+    response = "boolean"
+)]
+pub async fn set_user_free_access(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<SetUserFreeAccessRequest>,
+) -> Result<Json<bool>, ApiError> {
+    let context = auth.to_request_context();
+    if !context.is_admin_credential {
+        return Err(ApiError::Forbidden("Admin credential required".into()));
+    }
+
+    let email = body.email.trim().to_lowercase();
+    Ad4mDb::with_global_instance(|db| db.set_user_free_access(&email, body.enabled)).map_err(
+        |e| {
+            let message = e.to_string();
+            if message.contains("User not found") {
+                ApiError::NotFound(message)
+            } else {
+                ApiError::Internal(message)
+            }
+        },
+    )?;
+
+    Ok(Json(true))
 }
 
 /// POST /users — create user

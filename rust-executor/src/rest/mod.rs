@@ -444,7 +444,7 @@ pub fn rest_router(state: AppState) -> Router {
             )
             .route("/runtime/unyt/send-hot", post(runtime::unyt_send_hot))
             .route("/users/credits", post(runtime::users_credits))
-            .route("/users/free-access", post(runtime::users_free_access))
+            .route("/users/free-access", post(users::set_user_free_access))
             .route(
                 "/runtime/host-rates",
                 get(runtime::host_rates_get).put(runtime::host_rates_put),
