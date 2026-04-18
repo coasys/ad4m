@@ -6,14 +6,16 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor, killByPorts } from "../utils/utils";
+import { sleep, startExecutor, killByPorts } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
-import fetch from 'node-fetch';
+import { EventSource } from 'eventsource';
 import { McpResponse, mcpHttpRequest, callMcpTool, listMcpTools, initializeMcp } from './mcp-utils';
 
+// Keep Node's native fetch for REST client calls. The node-fetch override here
+// breaks web-stream/EventSource expectations used by the REST/MCP stack.
 //@ts-ignore
-global.fetch = fetch;
+global.EventSource = EventSource;
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -208,11 +210,11 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         // Wait for servers to settle
         await sleep(3000);
 
-        // Generate agent via GraphQL (no MCP equivalent yet)
-        const adminClient = new Ad4mClient(apolloClient(gqlPort, adminCredential), false);
+        // Generate agent via REST (no MCP equivalent yet)
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${gqlPort}`, adminCredential, false);
         const agentStatus = await adminClient.agent.generate("test-passphrase");
         agentDid = agentStatus.did!;
-        console.log("Agent generated via GraphQL, DID:", agentDid);
+        console.log("Agent generated via REST, DID:", agentDid);
     });
 
     after(async () => {
@@ -1359,8 +1361,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         let wakerChannelAddr: string;
 
         before(async function() {
-            // Create a dedicated Ad4mClient for subscriptions (WS transport needed)
-            wakerClient = new Ad4mClient(apolloClient(gqlPort, adminCredential), false);
+            // Create a dedicated Ad4mClient for subscriptions (REST + SSE transport)
+            wakerClient = new Ad4mClient(`http://127.0.0.1:${gqlPort}`, adminCredential, false);
 
             // Set up a profile so get_mention_waker_config has names to search for
             await callMcpTool(MCP_BASE_URL, 'set_agent_profile', {

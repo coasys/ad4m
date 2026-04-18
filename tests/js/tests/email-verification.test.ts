@@ -4,13 +4,12 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor, runHcLocalServices, quitExecutor } from "../utils/utils";
+import { sleep, startExecutor, runHcLocalServices, quitExecutor } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
-import fetch from 'node-fetch'
 
-//@ts-ignore
-global.fetch = fetch
+// Keep Node's native fetch for REST client calls. The node-fetch override here
+// breaks web-stream/EventSource expectations used by the REST stack.
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -47,18 +46,25 @@ describe("Email Verification with Mock Service", () => {
             fs.mkdirSync(appDataPath, { recursive: true });
         }
 
-        // Start local Holochain services
-        let localServices = await runHcLocalServices();
-        proxyUrl = localServices.proxyUrl;
-        bootstrapUrl = localServices.bootstrapUrl;
-        localServicesProcess = localServices.process;
+        // Prefer local Holochain bootstrap/proxy services when available, but
+        // fall back to the shared dev bootstrap so this suite still runs in
+        // environments where `kitsune2-bootstrap-srv` is not installed.
+        try {
+            const localServices = await runHcLocalServices();
+            proxyUrl = localServices.proxyUrl;
+            bootstrapUrl = localServices.bootstrapUrl;
+            localServicesProcess = localServices.process;
+        } catch (e: any) {
+            console.warn(`Falling back to default bootstrap/proxy URLs: ${e?.message || e}`);
+        }
 
-        // Start executor with local services
-        executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-            gqlPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
+        executorProcess = proxyUrl && bootstrapUrl
+            ? await startExecutor(appDataPath, bootstrapSeedPath,
+                gqlPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl, bootstrapUrl)
+            : await startExecutor(appDataPath, bootstrapSeedPath,
+                gqlPort, hcAdminPort, hcAppPort, false);
 
-        // @ts-ignore - Suppress Apollo type mismatch
-        adminAd4mClient = new Ad4mClient(apolloClient(gqlPort), false)
+        adminAd4mClient = new Ad4mClient(`http://127.0.0.1:${gqlPort}`, undefined, false)
 
         // Generate initial admin agent (needed for JWT signing)
         await adminAd4mClient.agent.generate("passphrase")

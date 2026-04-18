@@ -103,6 +103,8 @@ pub async fn create_user(
     auth: AuthContext,
     Json(body): Json<CreateUserRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    use crate::user_management as um;
+
     let context = auth.to_request_context();
     check_capability(
         &context.capabilities,
@@ -110,7 +112,42 @@ pub async fn create_user(
     )
     .map_err(|e| ApiError::Forbidden(e))?;
 
-    let did = crate::user_management::create_user(&body.email, &body.password)
+    let email = body.email.trim().to_lowercase();
+
+    if !um::is_multi_user_enabled() {
+        return Ok(Json(serde_json::json!({
+            "did": "",
+            "success": false,
+            "error": "Multi-user mode is not enabled"
+        })));
+    }
+
+    let user_exists = Ad4mDb::with_global_instance(|db| db.get_user(&email).is_ok());
+
+    if user_exists {
+        match um::verify_credentials(&email, &body.password) {
+            Ok(()) => {
+                let did = crate::agent::AgentService::get_user_did_by_email(&email)
+                    .map_err(|e| ApiError::Internal(e.to_string()))?;
+                return Ok(Json(serde_json::json!({ "did": did, "success": true })));
+            }
+            Err(e) => {
+                return Ok(Json(serde_json::json!({
+                    "did": "",
+                    "success": false,
+                    "error": e,
+                })));
+            }
+        }
+    }
+
+    let did = um::create_user(&email, &body.password)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let code = um::create_verification_code(&email, "signup")
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    um::send_verification_email(&email, &code, "signup", None)
+        .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(serde_json::json!({ "did": did, "success": true })))
@@ -121,13 +158,13 @@ pub async fn create_user(
     POST,
     "/users/login",
     request = "LoginUserRequest",
-    response = "unknown"
+    response = "string"
 )]
 pub async fn login_user(
     State(_state): State<AppState>,
     auth: AuthContext,
     Json(body): Json<LoginUserRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(
         &context.capabilities,
@@ -135,11 +172,12 @@ pub async fn login_user(
     )
     .map_err(|e| ApiError::Forbidden(e))?;
 
+    let email = body.email.trim().to_lowercase();
     let app_name = body.app_name.as_deref().unwrap_or("ad4m");
-    let jwt = crate::user_management::login_user(&body.email, &body.password, app_name)
+    let jwt = crate::user_management::login_user(&email, &body.password, app_name)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(serde_json::json!({ "jwt": jwt })))
+    Ok(Json(jwt))
 }
 
 /// POST /users/verify-email — verify email code
@@ -147,13 +185,13 @@ pub async fn login_user(
     POST,
     "/users/verify-email",
     request = "VerifyEmailRequest",
-    response = "unknown"
+    response = "string"
 )]
 pub async fn verify_email(
     State(_state): State<AppState>,
     auth: AuthContext,
     Json(body): Json<VerifyEmailRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(
         &context.capabilities,
@@ -161,17 +199,18 @@ pub async fn verify_email(
     )
     .map_err(|e| ApiError::Forbidden(e))?;
 
+    let email = body.email.trim().to_lowercase();
     let verification_type = body.verification_type.as_deref().unwrap_or("signup");
     let app_name = body.app_name.as_deref().unwrap_or("ad4m");
     let jwt = crate::user_management::verify_and_login(
-        &body.email,
+        &email,
         &body.code,
         verification_type,
         app_name,
     )
     .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(serde_json::json!({ "jwt": jwt })))
+    Ok(Json(jwt))
 }
 
 /// POST /dev/email-test — all email test operations (dev-only)
@@ -215,13 +254,27 @@ pub async fn email_test(
             let code = crate::email_service::get_test_code(&email);
             Ok(Json(serde_json::to_value(code).unwrap_or_default()))
         }
-        "clear" => {
+        "clear" | "clear-codes" => {
             crate::email_service::clear_test_codes();
             Ok(Json(serde_json::json!(true)))
         }
         "set-expiry" => {
-            // set_test_expiry is not implemented
-            Err(ApiError::Internal("set_test_expiry not implemented".into()))
+            let email = body
+                .email
+                .ok_or_else(|| ApiError::BadRequest("'email' required".into()))?;
+            let verification_type = body
+                .verification_type
+                .ok_or_else(|| ApiError::BadRequest("'verificationType' required".into()))?;
+            let expires_at = body
+                .expires_at
+                .ok_or_else(|| ApiError::BadRequest("'expiresAt' required".into()))?;
+
+            Ad4mDb::with_global_instance(|db| {
+                db.set_verification_code_expiry(&email, &verification_type, expires_at)
+            })
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+            Ok(Json(serde_json::json!(true)))
         }
         other => Err(ApiError::BadRequest(format!("Unknown action: {}", other))),
     }
@@ -236,11 +289,60 @@ pub async fn email_test(
 )]
 pub async fn request_verification(
     State(_state): State<AppState>,
-    _auth: AuthContext,
-    Json(_body): Json<RequestVerificationRequest>,
+    auth: AuthContext,
+    Json(body): Json<RequestVerificationRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // TODO: implement request_login_verification
-    Err(ApiError::Internal(
-        "request_verification not yet implemented".into(),
-    ))
+    use crate::user_management as um;
+
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+
+    let email = body.email.trim().to_lowercase();
+
+    if !um::is_multi_user_enabled() {
+        return Ok(Json(serde_json::json!({
+            "success": false,
+            "message": "Multi-user mode is not enabled",
+            "requiresPassword": false,
+            "isExistingUser": false,
+        })));
+    }
+
+    let user_exists = Ad4mDb::with_global_instance(|db| db.get_user(&email).is_ok());
+
+    if !user_exists {
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "message": "No account found yet. Provide a password to create one.",
+            "requiresPassword": true,
+            "isExistingUser": false,
+        })));
+    }
+
+    let app_name = body
+        .app_info
+        .as_ref()
+        .and_then(|info| info.get("appName"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("ad4m");
+
+    match um::request_login_code(&email, Some(app_name)).await {
+        Ok(()) => Ok(Json(serde_json::json!({
+            "success": true,
+            "message": "Verification code sent. Use verify_email_code to complete login.",
+            "requiresPassword": false,
+            "isExistingUser": true,
+        }))),
+        Err(e) if e.contains("Please wait") => Ok(Json(serde_json::json!({
+            "success": false,
+            "message": e,
+            "requiresPassword": false,
+            "isExistingUser": true,
+        }))),
+        Err(e) => Err(ApiError::Internal(e.to_string())),
+    }
 }

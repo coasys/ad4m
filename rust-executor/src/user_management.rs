@@ -175,6 +175,10 @@ pub async fn request_login_code(email: &str, app_name: Option<&str>) -> Result<(
         return Err("Multi-user mode is not enabled".to_string());
     }
     user_exists(email)?;
+
+    Ad4mDb::with_global_instance(|db| db.check_and_update_rate_limit(email))
+        .map_err(|e| e.to_string())?;
+
     let code = create_verification_code(email, "login")?;
     send_verification_email(email, &code, "login", app_name).await?;
     Ok(())

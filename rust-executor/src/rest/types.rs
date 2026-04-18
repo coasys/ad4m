@@ -484,6 +484,8 @@ pub struct EmailTestRequest {
     pub action: String,
     pub to: Option<String>,
     pub email: Option<String>,
+    pub verification_type: Option<String>,
+    pub expires_at: Option<i64>,
     pub expiry_seconds: Option<i64>,
 }
 

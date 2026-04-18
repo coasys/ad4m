@@ -482,6 +482,20 @@ fn parse_email_test_request_with_to() {
     assert_eq!(req.to, Some("test@example.com".to_string()));
 }
 
+#[test]
+fn parse_email_test_request_with_expiry_fields() {
+    let json = json!({
+        "action": "set-expiry",
+        "email": "test@example.com",
+        "verificationType": "login",
+        "expiresAt": 1234567890
+    });
+    let req: EmailTestRequest = serde_json::from_value(json).unwrap();
+    assert_eq!(req.email, Some("test@example.com".to_string()));
+    assert_eq!(req.verification_type, Some("login".to_string()));
+    assert_eq!(req.expires_at, Some(1234567890));
+}
+
 // ── Invalid input tests ──
 
 #[test]

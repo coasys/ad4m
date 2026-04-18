@@ -4,14 +4,13 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor, killByPorts } from "../utils/utils";
+import { sleep, startExecutor, killByPorts } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
-import fetch from 'node-fetch';
 import { callMcpTool, initializeMcp } from './mcp-utils';
 
-//@ts-ignore
-global.fetch = fetch;
+// Keep Node's native fetch for REST client calls. The node-fetch override here
+// breaks web-stream/EventSource expectations used by the REST/MCP stack.
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -81,7 +80,7 @@ describe("MCP Authentication HTTP Tests", function() {
         await sleep(3000);
 
         // Generate agent via GraphQL (no MCP equivalent)
-        const adminClient = new Ad4mClient(apolloClient(gqlPort, adminCredential), false);
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${gqlPort}`, adminCredential, false);
         await adminClient.agent.generate("test-passphrase");
         console.log("Agent generated via GraphQL");
     });
@@ -232,7 +231,7 @@ describe("MCP Authentication HTTP Tests", function() {
 
         before(async function() {
             // Enable multi-user mode via GraphQL so email tools work
-            adminClient = new Ad4mClient(apolloClient(gqlPort, adminCredential), false);
+            adminClient = new Ad4mClient(`http://127.0.0.1:${gqlPort}`, adminCredential, false);
             await adminClient.runtime.setMultiUserEnabled(true);
             console.log("Multi-user mode enabled");
         });

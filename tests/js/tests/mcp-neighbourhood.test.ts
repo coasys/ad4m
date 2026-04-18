@@ -14,13 +14,12 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor, killByPorts } from "../utils/utils";
+import { sleep, startExecutor, killByPorts } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
-import fetch from 'node-fetch';
 import { mcpHttpRequest, callMcpTool, initializeMcp } from './mcp-utils';
 
-//@ts-ignore
-global.fetch = fetch;
+// Keep Node's native fetch for REST client calls. The node-fetch override here
+// breaks web-stream/EventSource expectations used by the REST/MCP stack.
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -72,7 +71,7 @@ describe("MCP Neighbourhood Integration Tests", function () {
 
         await sleep(3000);
 
-        const adminClient = new Ad4mClient(apolloClient(GQL_PORT, ADMIN_CREDENTIAL), false);
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${GQL_PORT}`, ADMIN_CREDENTIAL, false);
         await adminClient.agent.generate("test-passphrase");
         console.log("Agent generated");
     });
