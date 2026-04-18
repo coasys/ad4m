@@ -700,10 +700,25 @@ pub async fn execute_commands(
     let commands: Vec<crate::perspectives::perspective_instance::Command> =
         serde_json::from_str(&body.commands)
             .map_err(|e| ApiError::BadRequest(format!("Invalid commands JSON: {}", e)))?;
+    let parameters: Vec<crate::perspectives::perspective_instance::Parameter> = body
+        .parameters
+        .as_ref()
+        .map(|json| {
+            serde_json::from_str(json)
+                .map_err(|e| ApiError::BadRequest(format!("Invalid parameters JSON: {}", e)))
+        })
+        .transpose()?
+        .unwrap_or_default();
     let expression = body.expression.clone();
 
     let result = perspective
-        .execute_commands(commands, expression, vec![], None, &agent_context)
+        .execute_commands(
+            commands,
+            expression,
+            parameters,
+            body.batch_id.clone(),
+            &agent_context,
+        )
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
