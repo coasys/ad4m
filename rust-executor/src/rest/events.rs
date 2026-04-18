@@ -51,11 +51,7 @@ fn broadcast_to_sse_stream_nested(
     BroadcastStream::new(rx)
         .filter_map(|r| async { handle_broadcast_result(r) })
         .map(move |result| match result {
-            Ok(msg) => Ok(Event::default().data(wrap_event_nested(
-                event_type,
-                payload_key,
-                &msg,
-            ))),
+            Ok(msg) => Ok(Event::default().data(wrap_event_nested(event_type, payload_key, &msg))),
             Err(n) => Ok(Event::default().data(format!(
                 r#"{{"type":"lagged","missed":{},"stream":"{}"}}"#,
                 n, event_type
@@ -501,7 +497,10 @@ mod tests {
     #[test]
     fn wrap_event_preserves_flat_payloads_for_regular_events() {
         let wrapped = wrap_event("agent-status-changed", r#"{"isUnlocked":true}"#);
-        assert_eq!(wrapped, r#"{"isUnlocked":true,"type":"agent-status-changed"}"#);
+        assert_eq!(
+            wrapped,
+            r#"{"isUnlocked":true,"type":"agent-status-changed"}"#
+        );
     }
 
     #[test]
