@@ -90,8 +90,9 @@ pub async fn get_agent(
         return Ok(Json(agent));
     }
 
-    // Fallback to main agent for admin/legacy mode
-    let agent = AgentService::with_global_instance(|agent_service| {
+    // Fallback to main agent for admin/legacy mode.
+    let agent = AgentService::with_mutable_global_instance(|agent_service| {
+        agent_service.ensure_main_agent_loaded();
         let mut agent = agent_service
             .agent
             .clone()
@@ -179,7 +180,10 @@ pub async fn get_agent_by_did(
             Ok(Json(None))
         }
     } else {
-        let agent = AgentService::with_global_instance(|agent_service| agent_service.agent.clone());
+        let agent = AgentService::with_mutable_global_instance(|agent_service| {
+            agent_service.ensure_main_agent_loaded();
+            agent_service.agent.clone()
+        });
         Ok(Json(agent))
     }
 }
@@ -704,7 +708,8 @@ pub async fn is_locked(
     State(_state): State<AppState>,
     _auth: AuthContext,
 ) -> Result<Json<bool>, ApiError> {
-    let locked = AgentService::with_global_instance(|agent_service| {
+    let locked = AgentService::with_mutable_global_instance(|agent_service| {
+        agent_service.ensure_main_agent_loaded();
         agent_service
             .agent
             .clone()

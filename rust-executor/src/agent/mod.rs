@@ -551,11 +551,18 @@ impl AgentService {
                     AgentService::with_global_instance(|svc| svc.load_user_agent_profile(email))?;
                 agent.ok_or_else(|| anyhow!("User profile not found for {}", email))
             }
-            None => AgentService::with_global_instance(|svc| {
+            None => AgentService::with_mutable_global_instance(|svc| {
+                svc.ensure_main_agent_loaded();
                 svc.agent
                     .clone()
                     .ok_or_else(|| anyhow!("Agent not initialized"))
             }),
+        }
+    }
+
+    pub fn ensure_main_agent_loaded(&mut self) {
+        if self.agent.is_none() && self.is_initialized() {
+            self.load();
         }
     }
 
