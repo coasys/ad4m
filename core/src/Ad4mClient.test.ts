@@ -29,6 +29,11 @@ class MockEventSource {
     }
 }
 
+/** Return the last element of an array (avoids Array.prototype.at which needs ES2022 lib). */
+function lastOf<T>(arr: T[]): T {
+    return arr[arr.length - 1];
+}
+
 let app: ReturnType<typeof express>;
 let httpServer: any;
 let baseUrl: string;
@@ -538,7 +543,7 @@ describe('AgentClient', () => {
         freshClient.agent.addUpdatedListener(callback);
         freshClient.agent.subscribeAgentUpdated();
 
-        const eventSource = MockEventSource.instances.at(-1)!;
+        const eventSource = lastOf(MockEventSource.instances);
 
         // Server now sends { type: "agent-updated", agent: { did, ... } }
         eventSource.emit({
@@ -560,7 +565,7 @@ describe('AgentClient', () => {
         freshClient.agent.addAgentStatusChangedListener(callback);
         freshClient.agent.subscribeAgentStatusChanged();
 
-        const eventSource = MockEventSource.instances.at(-1)!;
+        const eventSource = lastOf(MockEventSource.instances);
 
         eventSource.emit({
             type: 'agent-status-changed',
@@ -685,7 +690,7 @@ describe('PerspectiveClient', () => {
     test('subscribeToQueryUpdates() uses the dedicated query-subscription SSE endpoint', async () => {
         const callback = jest.fn();
         const unsubscribe = ad4m.perspective.subscribeToQueryUpdates('sub-1', callback);
-        const eventSource = MockEventSource.instances.at(-1)!;
+        const eventSource = lastOf(MockEventSource.instances);
 
         expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/query-subscription/sub-1?token=test-token`);
 
@@ -698,7 +703,7 @@ describe('PerspectiveClient', () => {
         freshClient.perspective.addPerspectiveAddedListener(jest.fn());
         freshClient.perspective.subscribePerspectiveAdded();
 
-        const eventSource = MockEventSource.instances.at(-1)!;
+        const eventSource = lastOf(MockEventSource.instances);
         expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/unified?token=test-token`);
     });
 
@@ -712,7 +717,7 @@ describe('PerspectiveClient', () => {
         await freshClient.perspective.addPerspectiveLinkRemovedListener('uuid-1', [linkRemovedCallback]);
         await freshClient.perspective.addPerspectiveLinkUpdatedListener('uuid-1', [linkUpdatedCallback]);
 
-        const eventSource = MockEventSource.instances.at(-1)!;
+        const eventSource = lastOf(MockEventSource.instances);
         expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/unified?token=test-token`);
 
         eventSource.emit({
@@ -813,7 +818,7 @@ describe('PerspectiveClient', () => {
             freshClient.runtime.addExceptionCallback(jest.fn(() => null));
             freshClient.runtime.subscribeExceptionOccurred();
 
-            const eventSource = MockEventSource.instances.at(-1)!;
+            const eventSource = lastOf(MockEventSource.instances);
             expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/unified?token=test-token`);
             expect(eventSource.init?.fetch).toBeDefined();
             expect(eventSource.init?.fetch).not.toBe(fakeFetch);
@@ -828,7 +833,7 @@ describe('PerspectiveClient', () => {
         freshClient.runtime.addExceptionCallback(callback);
         freshClient.runtime.subscribeExceptionOccurred();
 
-        const eventSource = MockEventSource.instances.at(-1)!;
+        const eventSource = lastOf(MockEventSource.instances);
         eventSource.emit({
             type: 'exception-occurred',
             exception: {
@@ -850,7 +855,7 @@ describe('PerspectiveClient', () => {
     test('subscribeToQueryUpdates() ignores unrelated SSE events and accepts object results', async () => {
         const callback = jest.fn();
         const unsubscribe = ad4m.perspective.subscribeToQueryUpdates('sub-1', callback);
-        const eventSource = MockEventSource.instances.at(-1)!;
+        const eventSource = lastOf(MockEventSource.instances);
 
         eventSource.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-ignored' } });
         eventSource.emit({ type: 'query-subscription-update', subscriptionId: 'sub-2', result: { ignored: true } });
