@@ -400,7 +400,7 @@ export class PerspectiveClient {
         const unsub = this.#restClient.subscribe(
             `/api/v1/events/perspectives/${encodeURIComponent(uuid as string)}/links`,
             (data) => {
-                if (data.type === 'link-added') {
+                if (data.type === 'link-added' && data.perspectiveUuid === uuid) {
                     cb.forEach(c => c(data.link as LinkExpression))
                 }
             }
@@ -415,7 +415,7 @@ export class PerspectiveClient {
         const unsub = this.#restClient.subscribe(
             `/api/v1/events/perspectives/${encodeURIComponent(uuid as string)}/links`,
             (data) => {
-                if (data.type === 'link-removed') {
+                if (data.type === 'link-removed' && data.perspectiveUuid === uuid) {
                     const link = data.link as LinkExpression & { status?: unknown }
                     if (!link.status) {
                         delete link.status
@@ -434,7 +434,7 @@ export class PerspectiveClient {
         const unsub = this.#restClient.subscribe(
             `/api/v1/events/perspectives/${encodeURIComponent(uuid as string)}/links`,
             (data) => {
-                if (data.type === 'link-updated') {
+                if (data.type === 'link-updated' && data.perspectiveUuid === uuid) {
                     const newLink = data.newLink as LinkExpression & { status?: unknown }
                     const oldLink = data.oldLink as LinkExpression & { status?: unknown }
                     if (!newLink.status) {

@@ -654,6 +654,105 @@ describe('PerspectiveClient', () => {
         expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/unified?token=test-token`);
     });
 
+    test('perspective-scoped link subscriptions ignore unified SSE events for other perspectives', async () => {
+        const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
+        const linkAddedCallback = jest.fn();
+        const linkRemovedCallback = jest.fn();
+        const linkUpdatedCallback = jest.fn();
+
+        await freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [linkAddedCallback]);
+        await freshClient.perspective.addPerspectiveLinkRemovedListener('uuid-1', [linkRemovedCallback]);
+        await freshClient.perspective.addPerspectiveLinkUpdatedListener('uuid-1', [linkUpdatedCallback]);
+
+        const eventSource = MockEventSource.instances.at(-1)!;
+        expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/unified?token=test-token`);
+
+        eventSource.emit({
+            type: 'link-added',
+            perspectiveUuid: 'uuid-2',
+            link: {
+                author: 'did:test:123',
+                timestamp: '2024-01-01T00:00:00.000Z',
+                data: { source: 'test://other-added', predicate: 'test://has', target: 'test://value' },
+                proof: { valid: true }
+            }
+        });
+        eventSource.emit({
+            type: 'link-removed',
+            perspectiveUuid: 'uuid-2',
+            link: {
+                author: 'did:test:123',
+                timestamp: '2024-01-01T00:00:00.000Z',
+                data: { source: 'test://other-removed', predicate: 'test://has', target: 'test://value' },
+                proof: { valid: true }
+            }
+        });
+        eventSource.emit({
+            type: 'link-updated',
+            perspectiveUuid: 'uuid-2',
+            oldLink: {
+                author: 'did:test:123',
+                timestamp: '2024-01-01T00:00:00.000Z',
+                data: { source: 'test://other-old', predicate: 'test://has', target: 'test://value' },
+                proof: { valid: true }
+            },
+            newLink: {
+                author: 'did:test:123',
+                timestamp: '2024-01-01T00:00:00.000Z',
+                data: { source: 'test://other-new', predicate: 'test://has', target: 'test://value' },
+                proof: { valid: true }
+            }
+        });
+
+        expect(linkAddedCallback).not.toHaveBeenCalled();
+        expect(linkRemovedCallback).not.toHaveBeenCalled();
+        expect(linkUpdatedCallback).not.toHaveBeenCalled();
+
+        const addedLink = {
+            author: 'did:test:123',
+            timestamp: '2024-01-01T00:00:00.000Z',
+            data: { source: 'test://added', predicate: 'test://has', target: 'test://value' },
+            proof: { valid: true }
+        };
+        const removedLink = {
+            author: 'did:test:123',
+            timestamp: '2024-01-01T00:00:00.000Z',
+            data: { source: 'test://removed', predicate: 'test://has', target: 'test://value' },
+            proof: { valid: true }
+        };
+
+        eventSource.emit({
+            type: 'link-added',
+            perspectiveUuid: 'uuid-1',
+            link: addedLink
+        });
+        eventSource.emit({
+            type: 'link-removed',
+            perspectiveUuid: 'uuid-1',
+            link: removedLink
+        });
+        eventSource.emit({
+            type: 'link-updated',
+            perspectiveUuid: 'uuid-1',
+            oldLink: {
+                author: 'did:test:123',
+                timestamp: '2024-01-01T00:00:00.000Z',
+                data: { source: 'test://updated-old', predicate: 'test://has', target: 'test://value' },
+                proof: { valid: true }
+            },
+            newLink: {
+                author: 'did:test:123',
+                timestamp: '2024-01-01T00:00:00.000Z',
+                data: { source: 'test://updated-new', predicate: 'test://has', target: 'test://value' },
+                proof: { valid: true }
+            }
+        });
+
+        expect(linkAddedCallback).toHaveBeenCalledWith(addedLink);
+        expect(linkRemovedCallback).toHaveBeenCalledWith(removedLink);
+        expect(linkUpdatedCallback).toHaveBeenCalledTimes(1);
+    });
+
     test('subscriptions keep using the module-native fetch even if global.fetch changes later', async () => {
         const originalFetch = global.fetch;
         const fakeFetch = jest.fn(async () => {
