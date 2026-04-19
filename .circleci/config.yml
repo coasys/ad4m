@@ -2,9 +2,6 @@ version: 2.1
 references:
   ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:a0ab4b6358b7314a2ad49e232ba6c53b28a56e7f02641f226b2ed05544cc66d8
 
-# Self-hosted machine runner on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04)
-# Resource class: coasys/marvin
-
 commands:
   setup_env:
     description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
@@ -16,34 +13,54 @@ commands:
       - run:
           name: Setup build environment
           command: |
-            export NVM_DIR="$HOME/.nvm"
-            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" --no-use
-            NODE_PATH=$(nvm which << parameters.node_version >> 2>/dev/null || true)
-            if [ -z "$NODE_PATH" ] || [ ! -x "$NODE_PATH" ]; then
-              echo "Node << parameters.node_version >> not found, installing via nvm..."
-              nvm install << parameters.node_version >>
-              NODE_PATH=$(nvm which << parameters.node_version >>)
+            # Prefer Node already on PATH (e.g. Docker CI image)
+            CURRENT_NODE_MAJOR=$(node --version 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/' || echo "0")
+            if [ "$CURRENT_NODE_MAJOR" = "<< parameters.node_version >>" ]; then
+              echo "Node << parameters.node_version >> already on PATH: $(node --version)"
+              NODE_BIN_DIR=$(dirname "$(which node)")
+            else
+              # Fall back to nvm if available
+              export NVM_DIR="$HOME/.nvm"
+              if [ -s "$NVM_DIR/nvm.sh" ]; then
+                . "$NVM_DIR/nvm.sh" --no-use
+                NODE_PATH=$(nvm which << parameters.node_version >> 2>/dev/null || true)
+                if [ -z "$NODE_PATH" ] || [ ! -x "$NODE_PATH" ]; then
+                  echo "Node << parameters.node_version >> not found via nvm, installing..."
+                  nvm install << parameters.node_version >>
+                  NODE_PATH=$(nvm which << parameters.node_version >>)
+                fi
+                NODE_BIN_DIR=$(dirname "$NODE_PATH")
+              else
+                echo "ERROR: Node << parameters.node_version >> not found and nvm not available"
+                exit 1
+              fi
             fi
-            NODE_BIN_DIR=$(dirname "$NODE_PATH")
             echo "export PATH=\"$NODE_BIN_DIR:$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH\"" >> $BASH_ENV
             source $BASH_ENV
+            # Ensure pnpm is available
+            if ! command -v pnpm &>/dev/null; then
+              echo "pnpm not found, installing..."
+              npm install -g pnpm
+            fi
             echo "Node: $(node --version)"
             echo "npm: $(npm --version)"
-            echo "Rust: $(rustc --version)"
-            echo "Deno: $(deno --version | head -1)"
-            echo "Go: $(go version)"
-            echo "pnpm: $(pnpm --version || echo 'not installed yet')"
+            echo "Rust: $(rustc --version 2>/dev/null || echo 'not installed')"
+            echo "Deno: $(deno --version 2>/dev/null | head -1 || echo 'not installed')"
+            echo "Go: $(go version 2>/dev/null || echo 'not installed')"
+            echo "pnpm: $(pnpm --version)"
 
   setup_integration_test_environment:
     description: "Setup common integration test environment"
     steps:
       - checkout
+      - attach_workspace:
+          at: /tmp/workspace
       - run:
-          name: Restore binaries from local stash (no CircleCI network storage needed — same host)
+          name: Restore binaries from workspace
           command: |
             mkdir -p target/release
-            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
-            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m-executor target/release/ad4m-executor
+            cp /tmp/workspace/release/ad4m target/release/ad4m
+            cp /tmp/workspace/release/ad4m-executor target/release/ad4m-executor
       - setup_env
       - run:
           name: Install dependencies
@@ -60,15 +77,12 @@ commands:
 
 jobs:
   build-and-test:
-    machine: true
-    resource_class: coasys/marvin
+    docker:
+      - image: *ad4m_image
+    resource_class: xlarge
     steps:
       - checkout
       - setup_env
-      - run:
-          name: Clean up stale local artifact stashes (older than 1 day)
-          command: |
-            find /tmp/circleci-artifacts -maxdepth 1 -mindepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
       - run:
           name: cargo fmt --check
           command: cargo fmt --check
@@ -97,10 +111,14 @@ jobs:
           no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
       - run:
-          name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
+          name: Copy binaries for workspace
           command: |
-            mkdir -p /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}
-            cp target/release/ad4m target/release/ad4m-executor /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/
+            mkdir -p /tmp/workspace/release
+            cp target/release/ad4m target/release/ad4m-executor /tmp/workspace/release/
+      - persist_to_workspace:
+          root: /tmp/workspace
+          paths:
+            - release
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
@@ -116,8 +134,9 @@ jobs:
           no_output_timeout: 30m
 
   integration-tests-js:
-    machine: true
-    resource_class: coasys/marvin
+    docker:
+      - image: *ad4m_image
+    resource_class: large
     steps:
       - setup_integration_test_environment
       - run:
@@ -144,8 +163,9 @@ jobs:
           destination: test-logs
 
   integration-tests-multi-user-simple:
-    machine: true
-    resource_class: coasys/marvin
+    docker:
+      - image: *ad4m_image
+    resource_class: large
     steps:
       - setup_integration_test_environment
       - run:
@@ -154,8 +174,9 @@ jobs:
           no_output_timeout: 30m
 
   integration-tests-email-verification:
-    machine: true
-    resource_class: coasys/marvin
+    docker:
+      - image: *ad4m_image
+    resource_class: large
     steps:
       - setup_integration_test_environment
       - run:
@@ -164,8 +185,9 @@ jobs:
           no_output_timeout: 30m
 
   integration-tests-mcp:
-    machine: true
-    resource_class: coasys/marvin
+    docker:
+      - image: *ad4m_image
+    resource_class: large
     steps:
       - setup_integration_test_environment
       - run:
@@ -174,8 +196,9 @@ jobs:
           no_output_timeout: 30m
 
   integration-tests-model:
-    machine: true
-    resource_class: coasys/marvin
+    docker:
+      - image: *ad4m_image
+    resource_class: large
     steps:
       - setup_integration_test_environment
       - run:
@@ -184,16 +207,19 @@ jobs:
           no_output_timeout: 30m
 
   integration-tests-cli:
-    machine: true
-    resource_class: coasys/marvin
+    docker:
+      - image: *ad4m_image
+    resource_class: large
     steps:
       - checkout
+      - attach_workspace:
+          at: /tmp/workspace
       - run:
-          name: Restore binaries from local stash
+          name: Restore binaries from workspace
           command: |
             mkdir -p target/release
-            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
-            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m-executor target/release/ad4m-executor
+            cp /tmp/workspace/release/ad4m target/release/ad4m
+            cp /tmp/workspace/release/ad4m-executor target/release/ad4m-executor
       - setup_env
       - run:
           name: git submodule
@@ -206,8 +232,9 @@ jobs:
           command: ./tests/bats/bin/bats tests/integration.bats
 
   plugin-ad4m-tests:
-    machine: true
-    resource_class: coasys/marvin
+    docker:
+      - image: *ad4m_image
+    resource_class: medium
     steps:
       - checkout
       - run:
