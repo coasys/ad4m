@@ -531,6 +531,48 @@ describe('AgentClient', () => {
         const result = await ad4m.agent.revokeToken('app1');
         expect(result).toEqual([]);
     });
+
+    test('agent-updated SSE event unwraps nested agent payload', async () => {
+        const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
+        const callback = jest.fn();
+        freshClient.agent.addUpdatedListener(callback);
+        freshClient.agent.subscribeAgentUpdated();
+
+        const eventSource = MockEventSource.instances.at(-1)!;
+
+        // Server now sends { type: "agent-updated", agent: { did, ... } }
+        eventSource.emit({
+            type: 'agent-updated',
+            agent: { did: 'did:test:updated', directMessageLanguage: 'lang://dm2', perspective: null, isInitialized: true, isUnlocked: true },
+        });
+
+        expect(callback).toHaveBeenCalledTimes(1);
+        const received = callback.mock.calls[0][0];
+        expect(received.did).toBe('did:test:updated');
+        expect(received.directMessageLanguage).toBe('lang://dm2');
+        // The type field from the SSE envelope must NOT leak into the agent object
+        expect(received).not.toHaveProperty('type');
+    });
+
+    test('agent-status-changed SSE event unwraps nested agent payload', async () => {
+        const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
+        const callback = jest.fn();
+        freshClient.agent.addAgentStatusChangedListener(callback);
+        freshClient.agent.subscribeAgentStatusChanged();
+
+        const eventSource = MockEventSource.instances.at(-1)!;
+
+        eventSource.emit({
+            type: 'agent-status-changed',
+            agent: { did: 'did:test:status', isInitialized: true, isUnlocked: false },
+        });
+
+        expect(callback).toHaveBeenCalledTimes(1);
+        const received = callback.mock.calls[0][0];
+        expect(received.did).toBe('did:test:status');
+        expect(received.isUnlocked).toBe(false);
+        expect(received).not.toHaveProperty('type');
+    });
 });
 
 // ===================== PERSPECTIVE TESTS =====================

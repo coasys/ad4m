@@ -151,9 +151,9 @@ pub async fn agent_events(
     let updated_rx = pubsub.subscribe(&AGENT_UPDATED_TOPIC).await;
     let hosting_rx = pubsub.subscribe(&HOSTING_USER_INFO_CHANGED_TOPIC).await;
 
-    let status_stream = broadcast_to_sse_stream(status_rx, "agent-status-changed");
+    let status_stream = broadcast_to_sse_stream_nested(status_rx, "agent-status-changed", "agent");
     let apps_stream = broadcast_to_sse_stream(apps_rx, "apps-changed");
-    let updated_stream = broadcast_to_sse_stream(updated_rx, "agent-updated");
+    let updated_stream = broadcast_to_sse_stream_nested(updated_rx, "agent-updated", "agent");
     let hosting_stream = broadcast_to_sse_stream(hosting_rx, "hosting-user-info-changed");
 
     let merged = stream::select(
@@ -477,9 +477,9 @@ pub async fn unified_events(
         };
     }
 
-    let s_status = typed_stream!(status_rx, "agent-status-changed");
+    let s_status = broadcast_to_sse_stream_nested(status_rx, "agent-status-changed", "agent");
     let s_apps = typed_stream!(apps_rx, "apps-changed");
-    let s_agent_updated = typed_stream!(agent_updated_rx, "agent-updated");
+    let s_agent_updated = broadcast_to_sse_stream_nested(agent_updated_rx, "agent-updated", "agent");
     let s_hosting = typed_stream!(hosting_rx, "hosting-user-info-changed");
 
     let s_persp_added = typed_stream!(persp_added_rx, "perspective-added");
