@@ -631,3 +631,51 @@ fn parse_audio_ws_params() {
     let params: AudioWsParams = serde_json::from_value(json).unwrap();
     assert_eq!(params.stream_ids, "s1,s2");
 }
+
+// ── Agent infos contract regression tests ──
+
+#[test]
+fn parse_add_agent_infos_request_array() {
+    let json = json!({"agentInfos": ["info1", "info2", "info3"]});
+    let req: AddAgentInfosRequest = serde_json::from_value(json).unwrap();
+    assert_eq!(req.agent_infos, vec!["info1", "info2", "info3"]);
+}
+
+#[test]
+fn parse_add_agent_infos_request_empty_array() {
+    let json = json!({"agentInfos": []});
+    let req: AddAgentInfosRequest = serde_json::from_value(json).unwrap();
+    assert!(req.agent_infos.is_empty());
+}
+
+#[test]
+fn parse_add_agent_infos_request_single_element() {
+    let json = json!({"agentInfos": ["only-one"]});
+    let req: AddAgentInfosRequest = serde_json::from_value(json).unwrap();
+    assert_eq!(req.agent_infos, vec!["only-one"]);
+}
+
+#[test]
+fn reject_add_agent_infos_request_bare_string() {
+    // Regression: the old type accepted a bare string; it must now require an array.
+    let json = json!({"agentInfos": "not-an-array"});
+    assert!(
+        serde_json::from_value::<AddAgentInfosRequest>(json).is_err(),
+        "AddAgentInfosRequest must reject a bare string — the contract requires string[]"
+    );
+}
+
+#[test]
+fn add_agent_infos_roundtrip_with_agent_infos_output() {
+    // Simulate the output of GET /runtime/hc/agent-infos (Vec<String>) being fed
+    // directly into the POST body, confirming the GET→POST contract is compatible.
+    let get_response: Vec<String> = vec![
+        r#"{"agent":"uhCAk...","url_list":["wss://signal.holo.host"]}"#.into(),
+        r#"{"agent":"uhCAk...","url_list":["wss://other.host"]}"#.into(),
+    ];
+    let post_body = json!({"agentInfos": get_response});
+    let req: AddAgentInfosRequest = serde_json::from_value(post_body).unwrap();
+    assert_eq!(req.agent_infos.len(), 2);
+    assert!(req.agent_infos[0].contains("signal.holo.host"));
+    assert!(req.agent_infos[1].contains("other.host"));
+}

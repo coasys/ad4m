@@ -290,7 +290,7 @@ const Profile = (props: Props) => {
   };
 
   const addAgentInfo = async (info: string) => {
-    await client?.runtime.hcAddAgentInfos(info);
+    await client?.runtime.hcAddAgentInfos([info]);
     setShowAddHcAgentInfos(false);
   };
 
