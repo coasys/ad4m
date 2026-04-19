@@ -137,7 +137,7 @@ pub async fn network_metrics(executor_url: String, cap_token: String) -> Result<
 pub async fn hc_add_agent_infos(
     executor_url: String,
     cap_token: String,
-    agent_infos: String,
+    agent_infos: Vec<String>,
 ) -> Result<serde_json::Value> {
     util::post(
         &executor_url,
@@ -306,7 +306,7 @@ impl RuntimeClient {
         network_metrics(self.info.executor_url.clone(), self.info.cap_token.clone()).await
     }
 
-    pub async fn hc_add_agent_infos(&self, agent_infos: String) -> Result<serde_json::Value> {
+    pub async fn hc_add_agent_infos(&self, agent_infos: Vec<String>) -> Result<serde_json::Value> {
         hc_add_agent_infos(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),

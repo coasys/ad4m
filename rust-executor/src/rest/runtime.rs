@@ -635,7 +635,7 @@ pub async fn add_hc_agent_infos(
 
     let hc = get_holochain_service().await;
 
-    hc.add_agent_infos(vec![body.agent_infos])
+    hc.add_agent_infos(body.agent_infos)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 

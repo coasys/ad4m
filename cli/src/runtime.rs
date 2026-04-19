@@ -128,14 +128,16 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
         RuntimeFunctions::HcAddAgentInfos { infos_file } => {
             if let Some(infos_file) = infos_file {
                 let infos = std::fs::read_to_string(infos_file)?;
-                ad4m_client.runtime.hc_add_agent_infos(infos).await?;
+                let parsed: Vec<String> = serde_json::from_str(&infos)?;
+                ad4m_client.runtime.hc_add_agent_infos(parsed).await?;
                 println!("Holochain agent infos added!");
             } else {
                 let mut rl = rustyline::Editor::<()>::new()?;
-                let readline = rl.readline("Please enter the encoded agent infos string: ");
+                let readline = rl.readline("Please enter the encoded agent infos JSON array: ");
                 match readline {
                     Ok(line) => {
-                        ad4m_client.runtime.hc_add_agent_infos(line).await?;
+                        let parsed: Vec<String> = serde_json::from_str(&line)?;
+                        ad4m_client.runtime.hc_add_agent_infos(parsed).await?;
                         println!("Holochain agent infos added!");
                     }
                     Err(_) => println!("Failed to read line"),

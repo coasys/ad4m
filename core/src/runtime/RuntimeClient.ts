@@ -118,8 +118,8 @@ export class RuntimeClient {
         return this.#restClient.post<boolean>('/api/v1/runtime/holochain/restart')
     }
 
-    async hcAddAgentInfos(agentInfos: String): Promise<void> {
-        return this.#restClient.post<void>('/api/v1/runtime/hc/agent-infos', { agentInfos })
+    async hcAddAgentInfos(agentInfos: string[]): Promise<boolean> {
+        return this.#restClient.post<boolean>('/api/v1/runtime/hc/agent-infos', { agentInfos })
     }
 
     async verifyStringSignedByDid(did: string, didSigningKeyId: string, data: string, signedData: string): Promise<boolean> {

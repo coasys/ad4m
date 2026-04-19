@@ -315,7 +315,7 @@ pub struct ImportRequest {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct AddAgentInfosRequest {
-    pub agent_infos: String,
+    pub agent_infos: Vec<String>,
 }
 
 #[derive(Deserialize, TS)]

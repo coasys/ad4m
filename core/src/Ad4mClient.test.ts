@@ -296,8 +296,14 @@ beforeAll(async () => {
     app.post('/api/v1/runtime/friends', (_req, res) => res.json(['did:friend:1', 'did:friend:2', 'did:friend:3']));
     app.delete('/api/v1/runtime/friends', (_req, res) => res.json(['did:friend:1']));
 
-    app.get('/api/v1/runtime/hc/agent-infos', (_req, res) => res.json('hc-agent-info-string'));
-    app.post('/api/v1/runtime/hc/agent-infos', (_req, res) => res.json(null));
+    app.get('/api/v1/runtime/hc/agent-infos', (_req, res) => res.json(['hc-agent-info-1', 'hc-agent-info-2']));
+    app.post('/api/v1/runtime/hc/agent-infos', (req, res) => {
+        if (!Array.isArray(req.body.agentInfos)) {
+            return res.status(400).json({ error: 'agentInfos must be an array' });
+        }
+
+        return res.json(true);
+    });
     app.get('/api/v1/runtime/network-metrics', (_req, res) => res.json('metrics-data'));
     app.post('/api/v1/runtime/holochain/restart', (_req, res) => res.json(true));
 
@@ -1027,6 +1033,17 @@ describe('RuntimeClient', () => {
     test('knownLinkLanguageTemplates() returns templates', async () => {
         const templates = await ad4m.runtime.knownLinkLanguageTemplates();
         expect(templates).toEqual(['lang://template1']);
+    });
+
+    test('hcAgentInfos() returns agent infos list', async () => {
+        const infos = await ad4m.runtime.hcAgentInfos();
+        expect(infos).toEqual(['hc-agent-info-1', 'hc-agent-info-2']);
+    });
+
+    test('hcAddAgentInfos() sends array payload and returns boolean', async () => {
+        const result = await ad4m.runtime.hcAddAgentInfos(['hc-agent-info-1', 'hc-agent-info-2']);
+        expect(result).toBe(true);
+        expect(lastRequest!.body.agentInfos).toEqual(['hc-agent-info-1', 'hc-agent-info-2']);
     });
 
     test('verifyStringSignedByDid() verifies signature', async () => {
