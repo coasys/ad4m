@@ -14,16 +14,25 @@ export class AIClient {
         this.#restClient = sharedRestClient || new RestClient(baseUrl, token);
     }
 
+    private serializeModelInput(model: ModelInput): Record<string, unknown> {
+        const payload: Record<string, unknown> = { ...model };
+        if ('modelType' in payload) {
+            payload.type = payload.modelType;
+            delete payload.modelType;
+        }
+        return payload;
+    }
+
     async getModels(): Promise<Model[]> {
         return this.#restClient.get<Model[]>('/api/v1/ai/models');
     }
 
     async addModel(model: ModelInput): Promise<string> {
-        return this.#restClient.post<string>('/api/v1/ai/models', { model });
+        return this.#restClient.post<string>('/api/v1/ai/models', { model: this.serializeModelInput(model) });
     }
 
     async updateModel(modelId: string, model: ModelInput): Promise<boolean> {
-        return this.#restClient.put<boolean>(`/api/v1/ai/models/${encodeURIComponent(modelId)}`, { model });
+        return this.#restClient.put<boolean>(`/api/v1/ai/models/${encodeURIComponent(modelId)}`, { model: this.serializeModelInput(model) });
     }
 
     async removeModel(modelId: string): Promise<boolean> {

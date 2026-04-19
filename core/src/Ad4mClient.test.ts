@@ -1098,11 +1098,15 @@ describe('AIClient', () => {
     test('addModel() adds a model', async () => {
         const id = await ad4m.ai.addModel({ name: 'New Model', modelType: 'LLM' } as any);
         expect(id).toBe('model-new-id');
+        expect(lastRequest!.body.model.type).toBe('LLM');
+        expect(lastRequest!.body.model.modelType).toBeUndefined();
     });
 
     test('updateModel() updates a model', async () => {
-        const result = await ad4m.ai.updateModel('model-1', { name: 'Updated' } as any);
+        const result = await ad4m.ai.updateModel('model-1', { name: 'Updated', modelType: 'EMBEDDING' } as any);
         expect(result).toBe(true);
+        expect(lastRequest!.body.model.type).toBe('EMBEDDING');
+        expect(lastRequest!.body.model.modelType).toBeUndefined();
     });
 
     test('removeModel() removes a model', async () => {
