@@ -96,6 +96,24 @@ describe("REST Integration", function() {
         });
     });
 
+    // === Holochain Agent Infos Tests ===
+    describe("HC Agent Infos", () => {
+        it("should round-trip hcAgentInfos and hcAddAgentInfos with string[]", async () => {
+            const status = await ad4m.agent.status();
+            if (!status.isInitialized) {
+                await ad4m.agent.generate("secret");
+            }
+
+            const infos = await ad4m.runtime.hcAgentInfos();
+            expect(infos).to.be.an("array");
+
+            // Post the retrieved infos back — must accept string[] and return boolean
+            const result = await ad4m.runtime.hcAddAgentInfos(infos);
+            expect(result).to.be.a("boolean");
+            expect(result).to.equal(true);
+        });
+    });
+
     // === Perspective Tests ===
     describe("Perspectives", () => {
         let perspectiveUuid: string;

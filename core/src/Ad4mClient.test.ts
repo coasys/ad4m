@@ -1140,6 +1140,17 @@ describe('RuntimeClient', () => {
         expect(result).toBe(true);
     });
 
+    test('hcAgentInfos() returns string array', async () => {
+        const infos = await ad4m.runtime.hcAgentInfos();
+        expect(infos).toEqual(['hc-agent-info-1', 'hc-agent-info-2']);
+    });
+
+    test('hcAddAgentInfos() posts string array and returns boolean', async () => {
+        const result = await ad4m.runtime.hcAddAgentInfos(['info-a', 'info-b']);
+        expect(result).toBe(true);
+        expect(lastRequest!.body.agentInfos).toEqual(['info-a', 'info-b']);
+    });
+
     test('restartHolochain() restarts holochain', async () => {
         const result = await ad4m.runtime.restartHolochain();
         expect(result).toBe(true);
