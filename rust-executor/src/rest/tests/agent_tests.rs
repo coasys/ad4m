@@ -83,4 +83,3 @@ fn get_agent_recovers_from_disk_after_memory_cleared() {
         "recovered agent must have a perspective"
     );
 }
-

@@ -479,7 +479,8 @@ pub async fn unified_events(
 
     let s_status = broadcast_to_sse_stream_nested(status_rx, "agent-status-changed", "agent");
     let s_apps = typed_stream!(apps_rx, "apps-changed");
-    let s_agent_updated = broadcast_to_sse_stream_nested(agent_updated_rx, "agent-updated", "agent");
+    let s_agent_updated =
+        broadcast_to_sse_stream_nested(agent_updated_rx, "agent-updated", "agent");
     let s_hosting = typed_stream!(hosting_rx, "hosting-user-info-changed");
 
     let s_persp_added = typed_stream!(persp_added_rx, "perspective-added");
