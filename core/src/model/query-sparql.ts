@@ -331,9 +331,19 @@ export function buildPaginationSubquery(
 
   // Build ORDER BY clause from query.order
   let orderByClause = '';
+  const orderJoinPatterns: string[] = [];
   if (query.order) {
     const orderTerms = Object.entries(query.order).map(([prop, dir]) => {
       const sparqlVar = mapPropertyToSPARQLVar(prop, metadata);
+      // Check if this order property's variable is already bound by existing
+      // join patterns. If not, add an OPTIONAL join so ORDER BY is deterministic.
+      const varAlreadyBound = innerJoin.includes(sparqlVar);
+      if (!varAlreadyBound) {
+        const propMeta = metadata.properties[prop];
+        if (propMeta && propMeta.predicate && !propMeta.getter) {
+          orderJoinPatterns.push(`\n      OPTIONAL { ?source <${propMeta.predicate}> ${sparqlVar} . }`);
+        }
+      }
       return dir === 'DESC' ? `DESC(${sparqlVar})` : `ASC(${sparqlVar})`;
     });
     if (orderTerms.length > 0) {
@@ -355,7 +365,7 @@ export function buildPaginationSubquery(
   const offsetClause = query.offset !== undefined && query.offset > 0 ? `OFFSET ${query.offset}` : '';
 
   return `
-      { SELECT DISTINCT ?source${tsSelect} WHERE {${innerJoin}${tsPattern}
+      { SELECT DISTINCT ?source${tsSelect} WHERE {${innerJoin}${orderJoinPatterns.join('')}${tsPattern}
         FILTER(isIRI(?source))
         ${innerFilter}
       } GROUP BY ?source ${orderByClause} ${limitClause} ${offsetClause} }\n`;

@@ -1,7 +1,7 @@
 import { PerspectiveClient } from "./PerspectiveClient";
 
 // ──────────────────────────────────────────────────────────
-// PerspectiveClient proxy cache (WeakRef)
+// PerspectiveClient proxy cache
 // ──────────────────────────────────────────────────────────
 
 function createMockApolloClient(perspectiveResponse: any) {
@@ -35,7 +35,7 @@ describe("PerspectiveClient proxy cache", () => {
     expect(proxy2).not.toBeNull();
     // Should be the SAME reference (from cache)
     expect(proxy1).toBe(proxy2);
-    // The Apollo query should only happen once (second call uses cache)
+    // Apollo query should only happen once (second call uses cache)
     expect(mockApollo.query).toHaveBeenCalledTimes(1);
   });
 
@@ -69,37 +69,11 @@ describe("PerspectiveClient proxy cache", () => {
     expect(mockApollo.query).toHaveBeenCalledTimes(2);
   });
 
-  it("re-uses cached proxy without re-fetching", async () => {
-    let callCount = 0;
-    const mockApollo = {
-      query: jest.fn(async () => {
-        callCount++;
-        return {
-          data: {
-            perspective: {
-              uuid: "gc-test-uuid",
-              name: `GC Test ${callCount}`,
-              sharedUrl: null,
-              neighbourhood: null,
-              state: "Synced",
-            },
-          },
-        };
-      }),
-      mutate: jest.fn(),
-      subscribe: jest.fn().mockReturnValue({
-        subscribe: jest.fn().mockReturnValue({ unsubscribe: jest.fn() }),
-      }),
-    } as any;
-
+  it("returns null when perspective does not exist", async () => {
+    const mockApollo = createMockApolloClient(null);
     const client = new PerspectiveClient(mockApollo, false);
 
-    const proxy1 = await client.byUUID("gc-test-uuid");
-    expect(proxy1).not.toBeNull();
-    expect(callCount).toBe(1);
-
-    const proxy2 = await client.byUUID("gc-test-uuid");
-    expect(proxy2).toBe(proxy1);
-    expect(callCount).toBe(1);
+    const proxy = await client.byUUID("non-existent-uuid");
+    expect(proxy).toBeNull();
   });
 });

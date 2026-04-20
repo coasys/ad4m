@@ -874,13 +874,22 @@ export class Ad4mModel {
       );
     }
 
-    // Evaluate custom getters for all instances (single pass)
-    // When deepQuery is not explicitly true on collection queries, skip getter evaluation.
-    // Single-instance get() still evaluates getters (handled in getData, not here).
-    const skipGetters = query.deepQuery !== true;
-    if (!skipGetters) {
-      const getterOpts = requestedProperties.length > 0 || query.include
-        ? { requestedProperties, include: query.include }
+    // Evaluate custom getters for all instances (single pass).
+    // By default, collection queries skip getter evaluation unless deepQuery is true.
+    // However, if query.where references getter-backed properties, we must evaluate
+    // those specific getters so the JS post-filter can compare against real values.
+    const whereGetterProperties = query.where
+      ? Object.keys(query.where).filter((propName) => (metadata.properties[propName] as any)?.getter)
+      : [];
+    const shouldEvaluateGetters = query.deepQuery === true || whereGetterProperties.length > 0;
+    if (shouldEvaluateGetters) {
+      const getterRequestedProperties = requestedProperties.length > 0
+        ? Array.from(new Set([...requestedProperties, ...whereGetterProperties]))
+        : query.deepQuery === true
+          ? []  // deepQuery: evaluate all getters
+          : whereGetterProperties;  // only evaluate where-referenced getters
+      const getterOpts = getterRequestedProperties.length > 0 || query.include
+        ? { requestedProperties: getterRequestedProperties, include: query.include }
         : undefined;
       for (const instance of instances) {
         await evaluateCustomGettersForInstance(instance, perspective, metadata, getterOpts);
@@ -1686,8 +1695,31 @@ export class Ad4mModel {
     const opts = propertyNames && propertyNames.length > 0
       ? { requestedProperties: propertyNames }
       : undefined;
+
+    // Determine which property names will actually be evaluated
+    const evaluatedPropertyNames: string[] = [];
+    for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+      if ((propMeta as any).getter) {
+        if (!propertyNames || propertyNames.length === 0 || propertyNames.includes(propName)) {
+          evaluatedPropertyNames.push(propName);
+        }
+      }
+    }
+
     for (const instance of instances) {
       await evaluateCustomGettersForInstance(instance, perspective, metadata, opts);
+      // Sync snapshot so isDirty() doesn't flag getter-only changes.
+      // evaluateGetters() mutates instances in place, but their snapshots
+      // were already taken during hydration. Without this sync, the computed
+      // getter values would make isDirty() return true and save() would try
+      // to write read-only computed properties.
+      const modelInstance = instance as Ad4mModel;
+      if (modelInstance._snapshot) {
+        for (const propName of evaluatedPropertyNames) {
+          const val = (instance as any)[propName];
+          modelInstance._snapshot[propName] = normalizeValue(Array.isArray(val) ? [...val] : val);
+        }
+      }
     }
   }
 

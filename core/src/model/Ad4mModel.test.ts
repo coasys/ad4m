@@ -2427,7 +2427,7 @@ describe("instancesFromQueryResult — SPARQL vs JS pagination", () => {
       ],
     }));
 
-    const query = { limit: 5, offset: 0 };
+    const query = { limit: 5, offset: 10 };
     const result = await (PaginationTestChannel as any).instancesFromQueryResult(mockPerspective, query, grouped);
     expect(result.results.length).toBe(5);
   });
