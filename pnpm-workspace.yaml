@@ -5,6 +5,7 @@ packages:
   - 'ui'
   - 'connect'
   - 'bootstrap-languages/*'
+  - 'ad4m-ldk/js'
   - 'tests/js'
   - 'rust-executor'
   - 'cli'

@@ -379,14 +379,37 @@ impl PerspectiveInstance {
                         break;
                     }
                     Ok(None) => {
+                        // Actively try to install the language on this tick.
+                        // `language_by_address` only CHECKS the loaded-runtimes
+                        // map; it does not trigger an install. Without the
+                        // retry call below, a perspective whose initial
+                        // install in `install_neighbourhood_with_context`
+                        // failed (e.g. the language language was still
+                        // warming up) would stay stuck in
+                        // LinkLanguageFailedToInstall forever, because
+                        // nothing in this loop ever re-attempted the install
+                        // — it just kept asking "is it loaded yet?" to a map
+                        // nothing was writing to.
                         log::debug!(
-                            "Link language {} not installed yet, retrying in 5 seconds",
-                            nh.data.link_language.clone()
+                            "Link language {} not installed yet, attempting install...",
+                            nh.data.link_language
                         );
-                        self.update_perspective_state_log_error(
-                            PerspectiveState::LinkLanguageFailedToInstall,
-                        )
-                        .await;
+                        if let Err(e) =
+                            LanguageController::install_language(nh.data.link_language.clone())
+                                .await
+                        {
+                            log::debug!(
+                                "ensure_link_language: install_language({}) failed, will retry in 5s: {}",
+                                nh.data.link_language, e
+                            );
+                            self.update_perspective_state_log_error(
+                                PerspectiveState::LinkLanguageFailedToInstall,
+                            )
+                            .await;
+                        }
+                        // Loop back around; the next tick will re-enter
+                        // language_by_address and either find the freshly
+                        // installed runtime or schedule another retry.
                     }
                     Err(e) => {
                         log::error!("Error when calling language_by_address: {:?}", e);
@@ -402,7 +425,15 @@ impl PerspectiveInstance {
     }
 
     async fn nh_sync_loop(&self) {
-        let mut interval = time::interval(Duration::from_secs(3));
+        // Exponential backoff on sync failure. A perspective whose link
+        // language is unreachable (e.g. Holochain timing out because the
+        // parent test long since finished) used to hammer sync() every 3
+        // seconds forever, piling zome calls onto HC for every leaked
+        // instance. Back off up to 5 minutes on repeated failure; reset
+        // to the base interval as soon as a sync succeeds.
+        const BASE_INTERVAL: Duration = Duration::from_secs(3);
+        const MAX_INTERVAL: Duration = Duration::from_secs(300);
+        let mut current_interval = BASE_INTERVAL;
         while !*self.is_teardown.lock().await {
             // Clone the link_language without holding the lock during sync
             let link_language_clone = {
@@ -411,8 +442,19 @@ impl PerspectiveInstance {
             };
 
             if let Some(mut link_language) = link_language_clone {
+                // If the loaded link language does not export a
+                // perspective-sync capability, the sync loop has nothing
+                // to do — mark the perspective synced and stop polling
+                // so we don't burn a task slot on a no-op tick forever.
+                if !link_language.has(crate::languages::capability::Capability::PerspectiveSync) {
+                    let _ = self
+                        .update_perspective_state(PerspectiveState::Synced)
+                        .await;
+                    return;
+                }
                 match link_language.sync().await {
                     Ok(_) => {
+                        current_interval = BASE_INTERVAL;
                         // Transition to Synced state on successful sync
                         let _ = self
                             .update_perspective_state(PerspectiveState::Synced)
@@ -420,6 +462,8 @@ impl PerspectiveInstance {
                     }
                     Err(e) => {
                         log::error!("Error calling sync on link language: {:?}", e);
+                        current_interval =
+                            std::cmp::min(current_interval.saturating_mul(2), MAX_INTERVAL);
                         let _ = self
                             .update_perspective_state(
                                 PerspectiveState::LinkLanguageInstalledButNotSynced,
@@ -428,7 +472,18 @@ impl PerspectiveInstance {
                     }
                 }
             }
-            interval.tick().await;
+            // Sleep in short slices so teardown is observed within ~1s
+            // even when the backoff interval is long.
+            let mut remaining = current_interval;
+            let slice = Duration::from_secs(1);
+            while remaining > Duration::from_millis(0) {
+                if *self.is_teardown.lock().await {
+                    return;
+                }
+                let step = std::cmp::min(slice, remaining);
+                sleep(step).await;
+                remaining = remaining.saturating_sub(step);
+            }
         }
     }
 
@@ -508,7 +563,16 @@ impl PerspectiveInstance {
                 log::info!("Committing {} pending diffs...", pending_ids.len());
                 let commit_result = link_language.commit(pending_diffs).await;
                 match commit_result {
-                    Ok(Some(_)) => {
+                    // Spec §5.2 splits perspective-commit (write) from
+                    // perspective-sync (revision read), so a spec-compliant
+                    // flat language that implements only perspective-commit
+                    // returns Ok(None). Previously we treated Ok(None) as
+                    // an error and left the diffs pending forever, so any
+                    // language without a perspective-sync capability could
+                    // never drain its retry queue. The success signal for
+                    // the retry path is "commit didn't throw" — clear the
+                    // diffs regardless of whether a revision came back.
+                    Ok(_) => {
                         Ad4mDb::with_global_instance(|db| {
                             db.clear_pending_diffs(&uuid, pending_ids)
                         })?;
@@ -517,7 +581,6 @@ impl PerspectiveInstance {
                         log::info!("Successfully committed pending diffs");
                         Ok(())
                     }
-                    Ok(None) => Err(anyhow!("No diff returned from commit")),
                     Err(e) => Err(e),
                 }
             } else {
@@ -698,21 +761,27 @@ impl PerspectiveInstance {
             };
 
             if let Some(mut link_language) = link_language_clone {
-                // Got Link Language reference
-                if link_language.current_revision().await?.is_some() {
-                    // Revision set, we are synced
-                    // we are in a healthy Neighbourhood state and should be able to commit
-                    // but let's make sure we're not DoS'ing the link language in bursts
-                    let mut immediate_commits_remaining =
-                        self.immediate_commits_remaining.lock().await;
-                    if *immediate_commits_remaining > 0 {
-                        *immediate_commits_remaining -= 1;
-                        link_language.commit(diff.clone()).await
-                    } else {
-                        Err(anyhow!("Debouncing commit burst"))
-                    }
+                // Spec §5.2 separates perspective-commit from perspective-sync,
+                // so a commit-only flat language has no meaningful notion of
+                // "current revision" — the previous `current_revision().is_some()`
+                // pre-check would always fail for such a language and force
+                // every commit through the pending-diffs retry queue, which is
+                // (a) slow and (b) architecturally wrong: the retry queue is
+                // for transient failures, not for gating healthy commits.
+                //
+                // Drop the pre-check. The DoS counter still throttles bursts
+                // independently, and link_language.commit() itself is the
+                // authoritative signal for whether the commit succeeded — if
+                // the underlying language isn't ready, it throws and the
+                // error path below queues the diff. Legacy languages that
+                // implement perspective-sync still behave correctly because
+                // they throw from commit() when not synced.
+                let mut immediate_commits_remaining = self.immediate_commits_remaining.lock().await;
+                if *immediate_commits_remaining > 0 {
+                    *immediate_commits_remaining -= 1;
+                    link_language.commit(diff.clone()).await
                 } else {
-                    Err(anyhow!("Link Language not synced"))
+                    Err(anyhow!("Debouncing commit burst"))
                 }
             } else {
                 Err(anyhow!("LinkLanguage not available"))
@@ -724,16 +793,25 @@ impl PerspectiveInstance {
         let ok = match commit_result {
             Ok(Some(rev)) => {
                 if rev.trim().is_empty() {
-                    log::warn!("Committed but got no revision from LinkLanguage!\nStoring in pending diffs for later");
-                    false
+                    // Revision came back but was an empty string — a legacy
+                    // language bug; treat as success but flag it so the
+                    // operator sees the oddity. Previously we fell through
+                    // to pending-diffs here, which left flat-commit-only
+                    // languages permanently queued.
+                    log::warn!("LinkLanguage.commit returned an empty revision string; treating as success");
+                    true
                 } else {
                     log::info!("Committed to revision: {}", rev);
                     true
                 }
             }
             Ok(None) => {
-                log::warn!("Committed but got no revision from LinkLanguage!\nStoring in pending diffs for later");
-                false
+                // Spec v1.0 — `perspective-commit` returns nothing. A flat
+                // language that implements only perspective-commit (no
+                // perspective-sync) has no revision to hand back, and the
+                // commit-layer wrapper in language_bootstrap.js emits
+                // `null`. This is the normal success path, NOT a failure.
+                true
             }
             Err(e) => {
                 log::warn!(
@@ -3188,15 +3266,52 @@ impl PerspectiveInstance {
             }
         };
 
+        // Single-pass substitution.
+        //
+        // The previous implementation did a sequential `String::replace`
+        // for each parameter in order, which cascaded: a replacement's
+        // output could contain another parameter's name and get
+        // re-substituted in the next iteration, silently corrupting data
+        // whenever a user-provided value happened to match a later
+        // parameter name. It was also order-dependent for parameters
+        // whose names were prefixes of each other.
+        //
+        // Instead, scan the input once left-to-right. At each position,
+        // try each parameter name (longest first, so that e.g. "foo_bar"
+        // wins over "foo" when both exist) and if one matches, emit its
+        // value and skip past the name without re-scanning the emitted
+        // text. Otherwise advance one UTF-8 character.
+        let mut sorted_params: Vec<&Parameter> = parameters.iter().collect();
+        sorted_params.sort_by_key(|p| std::cmp::Reverse(p.name.len()));
         let replace_parameters = |input: Option<String>| -> Option<String> {
-            if let Some(mut output) = input {
-                for parameter in &parameters {
-                    output = output.replace(&parameter.name, &jsvalue_to_string(&parameter.value));
-                }
-                Some(output)
-            } else {
-                input
+            let input = input?;
+            if sorted_params.is_empty() {
+                return Some(input);
             }
+            let mut output = String::with_capacity(input.len());
+            let bytes = input.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let mut matched = false;
+                for p in &sorted_params {
+                    if p.name.is_empty() {
+                        continue;
+                    }
+                    let name_bytes = p.name.as_bytes();
+                    if bytes[i..].starts_with(name_bytes) {
+                        output.push_str(&jsvalue_to_string(&p.value));
+                        i += name_bytes.len();
+                        matched = true;
+                        break;
+                    }
+                }
+                if !matched {
+                    let ch_len = input[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                    output.push_str(&input[i..i + ch_len]);
+                    i += ch_len;
+                }
+            }
+            Some(output)
         };
 
         for command in commands.iter() {
@@ -4173,18 +4288,36 @@ impl PerspectiveInstance {
                     }
                     log::debug!("Fallback sync successful for perspective {}, increasing interval to 5 minutes", uuid);
                 } else {
-                    // Reset interval to 30 seconds on failure
-                    *self.fallback_sync_interval.lock().await = Duration::from_secs(30);
+                    // Exponential backoff capped at 5 minutes. Previously
+                    // this path reset the interval to 30s, meaning an
+                    // unreachable link language would be called every 30
+                    // seconds forever, even after repeated timeouts.
+                    let mut guard = self.fallback_sync_interval.lock().await;
+                    let doubled = guard.saturating_mul(2);
+                    let capped = std::cmp::min(doubled, Duration::from_secs(300));
+                    *guard = std::cmp::max(capped, Duration::from_secs(30));
                     log::warn!(
-                        "Fallback sync failed for perspective {}, keeping interval at 30 seconds",
-                        uuid
+                        "Fallback sync failed for perspective {}, backing off to {:?}",
+                        uuid,
+                        *guard
                     );
                 }
             }
 
-            // Get fresh interval for sleep (after potential updates)
+            // Sleep in short slices so teardown is observed promptly even
+            // when the backoff interval is several minutes.
             let sleep_interval = *self.fallback_sync_interval.lock().await;
-            sleep(sleep_interval).await;
+            let mut remaining = sleep_interval;
+            let slice = Duration::from_secs(1);
+            while remaining > Duration::from_millis(0) {
+                if *self.is_teardown.lock().await {
+                    log::debug!("Fallback sync loop ended for perspective {}", uuid);
+                    return;
+                }
+                let step = std::cmp::min(slice, remaining);
+                sleep(step).await;
+                remaining = remaining.saturating_sub(step);
+            }
         }
 
         log::debug!("Fallback sync loop ended for perspective {}", uuid);

@@ -1,2 +1,0 @@
-#!/bin/bash
-CARGO_TARGET_DIR=target RUSTFLAGS='--cfg getrandom_backend="custom"' cargo build --release --target wasm32-unknown-unknown -p direct-message -p direct-message-integrity && hc dna pack workdir && hc app pack workdir

@@ -1,8 +1,13 @@
-import type { Address, Interaction, Expression, Language, LanguageContext } from "https://esm.sh/v135/@coasys/ad4m@0.5.0";
-import { exists } from "https://deno.land/std@0.184.0/fs/mod.ts";
-import { join } from "https://deno.land/std@0.184.0/path/mod.ts";
+/**
+ * # Embedding Vector Language
+ *
+ * Expression language that compresses expressions into base64 URIs.
+ * The "address" IS the compressed expression — no external storage.
+ */
+
 import pako from "https://esm.sh/v135/pako@2.0.4";
 import base64js from "https://esm.sh/v135/base64-js@1.5.1";
+import { defineLanguage, agentCreateSignedExpression } from "@coasys/ad4m-ldk";
 
 function compressUri(uri: string): string {
     const compressed = pako.deflate(uri);
@@ -15,39 +20,45 @@ function decompressUri(compressedString: string): string {
     return new TextDecoder().decode(decompressed);
 }
 
-export default function create(context: LanguageContext): Language {
-    function interactions(expressionAddress: Address): Interaction[] {
-        return []
-    }
+const language = defineLanguage({
+    name: "embedding-vector-language",
+    version: "0.1.0",
 
-    return {
-        name: "embedding-vector-language",
-        interactions,
-        expressionAdapter: {
-            get: async (address: Address) => {
-                try {
-                    const decompressedAddress = decompressUri(address);
-                    const expr = JSON.parse(decompressedAddress) as Expression;
-                    return expr
-                } catch (e) {
-                    console.error("caught error", e);
-                    return null;
-                }
-            },
-            putAdapter: {
-                createPublic: async (content: object): Promise<Address> => {
-                    try {
-                        const expr = context.agent.createSignedExpression(content)
-                        const exprString = JSON.stringify(expr)
-                        const compressedExprString = compressUri(exprString);
-                        return compressedExprString
-                    } catch (e) {
-                        console.error("caught error", e);
-                        return null;
-                    }
-                }
+    async init() {},
+    async teardown() {},
+    interactions() { return []; },
+
+    expression: {
+        async create(content: object): Promise<string> {
+            try {
+                const expr = agentCreateSignedExpression(content);
+                const exprString = JSON.stringify(expr);
+                return compressUri(exprString);
+            } catch (e) {
+                console.error("caught error", e);
+                return null;
             }
-        }
-    } as Language
-}
+        },
 
+        async get(address: string): Promise<any> {
+            try {
+                const decompressedAddress = decompressUri(address);
+                const expr = JSON.parse(decompressedAddress);
+                return expr;
+            } catch (e) {
+                console.error("caught error", e);
+                return null;
+            }
+        },
+    },
+});
+
+export const {
+    name,
+    version,
+    init,
+    teardown,
+    interactions,
+    expressionGet,
+    expressionCreate,
+} = language;

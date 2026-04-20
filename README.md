@@ -336,6 +336,19 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 4. Run tests
 5. Submit a pull request to `dev` branch
 
+### Recommended git hooks
+
+Activate the repo-managed pre-commit hook once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+See [`.githooks/README.md`](.githooks/README.md). The main thing it
+catches: accidentally committing `tests/js/bootstrapSeed.json` or
+`tests/js/publishBootstrapSeed.json` in the populated state that an
+interrupted test run leaves behind.
+
 ## Community
 
 [![Discord](https://img.shields.io/discord/887669548969517056?label=Discord&logo=discord&logoColor=white&style=for-the-badge)](https://discord.com/invite/fYGVM66jEz)

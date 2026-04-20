@@ -11,7 +11,7 @@
     "build:linux": "pnpm run build:common",
     "build:macos": "pnpm run build:common",
     "build:windows": "pnpm run build:common",
-    "build:common": "pnpm run rollup-icons && pnpm run rollup-expression-ui && deno run --allow-all esbuild.ts"
+    "build:common": "pnpm run rollup-icons && pnpm run rollup-expression-ui && bash rust-impl/build.sh"
   },
   "author": "",
   "license": "ISC",

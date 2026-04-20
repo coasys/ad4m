@@ -288,6 +288,8 @@
     "https://esm.sh/v135/ajv@6.12.6/denonext/ajv.mjs": "34edf781706f54b55f5507f059be72c1792788f2a7a5b4cdd51797dc90edc180",
     "https://esm.sh/v135/asn1@0.2.6/denonext/asn1.mjs": "6c05654e48e84fa15c3370af7411565cd5e45810b213961c1f1ae71a5faa2468",
     "https://esm.sh/v135/assert-plus@1.0.0/denonext/assert-plus.mjs": "50ebe34b817cc311a7ebbe63d5af0b72ad0ab9e30b6c90e3344c11556e98e2c2",
+    "https://esm.sh/v135/async-mutex@0.4.0": "dc704b8c247bb6c818fac3f6205b1bb872f7efc3ac7eb617f657b5965b59643a",
+    "https://esm.sh/v135/async-mutex@0.4.0/denonext/async-mutex.mjs": "cf505d897cb9ee6fa14993569c7dfad2e0954337adbb38522770201db5115aa2",
     "https://esm.sh/v135/aws-sign2@0.7.0/denonext/aws-sign2.mjs": "acf5add98759b9dedaba54335c791f468b3fc1681f86cdc86306da24b52611e0",
     "https://esm.sh/v135/aws4@1.12.0/denonext/aws4.mjs": "a9bee7397e4d31e972b28d4cba022e92e82a7e277462662aa4d20642b2847d51",
     "https://esm.sh/v135/balanced-match@1.0.2/denonext/balanced-match.mjs": "b2f9737a6fb330aedd4a444eb85ba127d757c49032a528400fc0e2efb70ddca3",
@@ -484,25 +486,6 @@
             "npm:svelte@3",
             "npm:tslib@2",
             "npm:typescript@^4.5.5"
-          ]
-        }
-      },
-      "bootstrap-languages/direct-message-language": {
-        "packageJson": {
-          "dependencies": [
-            "npm:@coasys/ad4m@*",
-            "npm:@coasys/rollup-plugin-holochain@^0.0.3",
-            "npm:@rollup/plugin-commonjs@14",
-            "npm:@rollup/plugin-node-resolve@8",
-            "npm:@rollup/plugin-typescript@4",
-            "npm:@types/node@18",
-            "npm:rollup-plugin-postcss@^3.1.8",
-            "npm:rollup-plugin-string@3",
-            "npm:rollup-plugin-terser@7",
-            "npm:rollup@^2.3.4",
-            "npm:run-script-os@^1.1.6",
-            "npm:tslib@2",
-            "npm:typescript@^4.2.4"
           ]
         }
       },

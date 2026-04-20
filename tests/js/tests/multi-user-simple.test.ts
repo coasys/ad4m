@@ -70,10 +70,41 @@ describe("Multi-User Simple integration tests", () => {
     })
 
     after(async () => {
+        // Tear down any surviving perspectives so their background
+        // sync / gossip loops exit cleanly before we kill the executor,
+        // otherwise the event loop idles on pending HC calls.
+        try { await cleanupAllMainExecutorPerspectives(); } catch {}
         await gracefulShutdown(executorProcess, "executor");
         await gracefulShutdown(localServicesProcess, "local services");
         deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     })
+
+    // Explicitly tear down every perspective on the main executor. Each
+    // test's perspectives (plus the background sync / gossip loops inside
+    // their link languages) otherwise keep running until the executor
+    // shuts down, saturating Holochain with work from long-finished
+    // tests so legitimate sync traffic in later tests times out.
+    // `adminAd4mClient` is the launcher credential and can see / remove
+    // perspectives owned by managed users as well. Called from per-
+    // describe `after()` hooks below — not `afterEach` — because several
+    // of the nested describes intentionally share perspective state
+    // across their own it() blocks.
+    async function cleanupAllMainExecutorPerspectives() {
+        if (!adminAd4mClient) return;
+        try {
+            const all = await adminAd4mClient.perspective.all();
+            for (const p of all) {
+                try {
+                    await adminAd4mClient.perspective.remove(p.uuid);
+                } catch (e) {
+                    // Some tests delete their own perspectives before
+                    // this fires; ignore not-found / permission errors.
+                }
+            }
+        } catch (e) {
+            console.warn("cleanupAllMainExecutorPerspectives error:", e);
+        }
+    }
 
     describe("Multi-User Configuration", () => {
         it("should have multi-user disabled by default and require activation", async () => {
@@ -339,6 +370,8 @@ describe("Multi-User Simple integration tests", () => {
     })
 
     describe("Perspective Isolation", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
         it("should isolate perspectives between users", async () => {
             // Create two users
             const user1Result = await createTestUser("isolation1@example.com", "password1");
@@ -456,6 +489,8 @@ describe("Multi-User Simple integration tests", () => {
     })
 
     describe("Link Authoring and Signatures", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
         it("should have correct authors and valid signatures for user links", async () => {
             // Create two users
             const user1Result = await createTestUser("linkauth1@example.com", "password1");
@@ -514,6 +549,8 @@ describe("Multi-User Simple integration tests", () => {
     });
 
     describe("Subject Creation and SDNA Operations", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
         // Define the test subject class outside the test function
         let TestSubject: any;
         
@@ -609,6 +646,8 @@ describe("Multi-User Simple integration tests", () => {
     });
 
     describe("Agent Profiles and Status", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
         it("should maintain separate agent profiles for different users", async () => {
             // Create two users
             const user1Result = await createTestUser("profile1@example.com", "password1");
@@ -1043,6 +1082,8 @@ describe("Multi-User Simple integration tests", () => {
     });
 
     describe("Multi-User Neighbourhood Sharing", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
         it("should allow multiple local users to share the same neighbourhood", async () => {
             // Create two users
             const user1Result = await createTestUser("nh1@example.com", "password1");
@@ -1781,7 +1822,11 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         after(async function() {
-            this.timeout(20000);
+            this.timeout(60000);
+            // Tear down the perspectives these tests created on the main
+            // executor so their background sync / gossip loops don't
+            // keep running and saturate Holochain for subsequent tests.
+            await cleanupAllMainExecutorPerspectives();
             await gracefulShutdown(node2ExecutorProcess, "node 2 executor");
             deregisterPorts([node2GqlPort, node2HcAdminPort, node2HcAppPort]);
         });
@@ -2132,11 +2177,27 @@ describe("Multi-User Simple integration tests", () => {
             });
             console.log("Node 2 User 2 added link");
 
+            // Re-exchange agent infos before sync polling — K2 spaces created
+            // during link-language install may need fresh peer info
+            console.log("Re-exchanging agent infos before link sync polling...");
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    const n1Infos = await adminAd4mClient!.runtime.hcAgentInfos();
+                    const n2Infos = await node2AdminClient!.runtime.hcAgentInfos();
+                    await adminAd4mClient!.runtime.hcAddAgentInfos(n2Infos);
+                    await node2AdminClient!.runtime.hcAddAgentInfos(n1Infos);
+                } catch (e) {
+                    console.log(`  Agent info exchange attempt ${attempt} failed:`, e);
+                }
+                if (attempt < 3) await sleep(2000);
+            }
+
             // Wait for cross-node Holochain gossip synchronization with retry
             console.log("\nWaiting for cross-node sync (polling until all users see >= 5 links)...");
-            const syncTimeout = 120000; // 2 minutes max
+            const syncTimeout = 150000; // 2.5 minutes max
             const syncStart = Date.now();
             let synced = false;
+            let pollCount = 0;
 
             let node1User1Links: any[] = [];
             let node1User2Links: any[] = [];
@@ -2145,6 +2206,18 @@ describe("Multi-User Simple integration tests", () => {
 
             while (!synced && Date.now() - syncStart < syncTimeout) {
                 await sleep(5000);
+                pollCount++;
+
+                // Re-exchange agent infos every 30s to help K2 peer discovery
+                if (pollCount % 6 === 0) {
+                    try {
+                        const n1Infos = await adminAd4mClient!.runtime.hcAgentInfos();
+                        const n2Infos = await node2AdminClient!.runtime.hcAgentInfos();
+                        await adminAd4mClient!.runtime.hcAddAgentInfos(n2Infos);
+                        await node2AdminClient!.runtime.hcAddAgentInfos(n1Infos);
+                        console.log("  Re-exchanged agent infos");
+                    } catch (_e) {}
+                }
 
                 node1User1Links = await node1User1Client!.perspective.queryLinks(
                     node1User1Neighbourhood!.uuid, new LinkQuery({})
@@ -2230,6 +2303,8 @@ describe("Multi-User Simple integration tests", () => {
     });
 
     describe("Perspective Subscriptions", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
         it("should only notify users about their own perspectives in perspectiveAdded", async () => {
             console.log("\n=== Testing perspective subscription filtering ===");
 
@@ -2529,6 +2604,8 @@ describe("Multi-User Simple integration tests", () => {
     });
 
     describe("Multi-User Notifications", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
         it("should isolate notifications between users", async () => {
             console.log("\n=== Testing notification isolation between users ===");
 
@@ -2793,6 +2870,14 @@ describe("Multi-User Simple integration tests", () => {
 
         before(async function() {
             this.timeout(300000);
+
+            // Tear down any perspectives (and their background sync /
+            // gossip loops) left behind by earlier describes on the main
+            // executor. Without this, the Flux test's own gossip /
+            // signal traffic competes with dozens of leaked loops for
+            // Holochain resources and the 300s timeout is not enough.
+            console.log("\n=== [Flux Scenario] Cleaning up leftover perspectives on main executor ===");
+            await cleanupAllMainExecutorPerspectives();
 
             console.log("\n=== [Flux Scenario] Setting up remote standalone node (Node 3) ===");
             if (!fs.existsSync(node3AppDataPath)) {

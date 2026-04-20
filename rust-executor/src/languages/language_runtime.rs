@@ -1,8 +1,11 @@
 use crate::agent::AgentContext;
 use crate::js_core::JsCore;
+use crate::languages::capability::{parse_capability_list, Capability};
+use crate::languages::LanguageContext;
 use log::{debug, error, info, warn};
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 
@@ -68,7 +71,7 @@ pub(crate) struct LanguageRuntimeRequest {
 #[derive(Debug)]
 pub(crate) enum LanguageOperation {
     Execute(String, AgentContext),
-    LoadModule(String),
+    LoadModule(String, LanguageContext),
     LoadLanguage(JsonValue),
     RegisterCallbacks,
     Teardown,
@@ -114,22 +117,70 @@ impl LanguageRuntime {
 
     /// Load a language bundle from source code directly (no file I/O in JS).
     /// The bundle is loaded as an ES module via Deno's runtime API and its
-    /// default export is captured as `globalThis.languageConstructor`.
-    pub async fn load_module(&self, source: &str) -> Result<(), String> {
+    /// full module namespace is captured as `globalThis.languageModule`.
+    pub async fn load_module(
+        &self,
+        source: &str,
+        language_context: &LanguageContext,
+    ) -> Result<(), String> {
         // Use a synthetic URL unique to this language so Deno's module map
         // doesn't collide if multiple languages are loaded in the same runtime.
         let specifier = format!("https://ad4m.language/{}/bundle.js", self.language_address);
+
+        // Set the language context into the thread-local BEFORE loading the module
+        // This makes language_*() ops available to the language's init()
+        self.js_core.set_language_context(
+            language_context
+                .storage_directory
+                .to_string_lossy()
+                .to_string(),
+            language_context.language_address.clone(),
+            language_context
+                .custom_settings
+                .as_ref()
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+        );
+
         self.js_core
             .load_module_from_source(&specifier, source.to_string())
             .await
             .map_err(|e| format!("Failed to load language bundle: {}", e))?;
 
-        // Capture the default export as globalThis.languageConstructor.
+        // Capture the module namespace as globalThis.languageModule. The
+        // Language v1 module format exports `init()` plus a flat set of
+        // named capability functions (perspectiveSyncSync, perspectiveCommit,
+        // etc.) which the bootstrap dispatcher reads off the namespace.
+        // `init` may live on the namespace itself or on the default export
+        // (depending on whether the language uses `export function init`
+        // vs `export default { init }`); both shapes are normalized to a
+        // single namespace object here.
+        //
         // Note: execute() wraps scripts in `return (expr)`, so this must be
         // a single expression, not statements.
+        //
+        // JSON-encode the specifier so it embeds as a well-formed JS
+        // string literal. The specifier embeds `self.language_address`,
+        // which is technically attacker-controllable via language
+        // resolution paths; a bare `"{}"` splice would let any `"`,
+        // `\`, or newline in the address break the import expression
+        // or inject JS inside the language isolate.
+        let specifier_lit = serde_json::to_string(&specifier)
+            .map_err(|e| format!("failed to encode bundle specifier: {}", e))?;
         let capture_script = format!(
-            r#"import("{}").then(m => {{ globalThis.languageConstructor = m.default && m.default.default ? m.default.default : m.default || m; }})"#,
-            specifier
+            r#"import({}).then(m => {{
+                if (typeof m.init === "function") {{
+                    globalThis.languageModule = m;
+                }} else if (m.default && typeof m.default.init === "function") {{
+                    globalThis.languageModule = m.default;
+                }} else {{
+                    throw new Error(
+                        "Language bundle does not export init() — expected a " +
+                        "Language v1 module with a top-level init function."
+                    );
+                }}
+            }})"#,
+            specifier_lit
         );
         self.js_core
             .execute(&capture_script)
@@ -174,66 +225,123 @@ impl LanguageRuntime {
         self.js_core.execute(script).await
     }
 
-    /// Register callbacks for links and telepresence adapters
-    pub async fn register_callbacks(&self) -> Result<(bool, bool), String> {
-        let addr = &self.language_address;
+    /// Wire the runtime's diff / sync-state / telepresence-signal sinks
+    /// into the language, then return the set of capabilities it exports.
+    ///
+    /// Two independent jobs live under this one v8 round-trip:
+    ///
+    /// 1. **Callback registration.** Language v1 still ships two push
+    ///    channels as explicit exports — `linkSyncAddCallback` and
+    ///    `linkSyncAddSyncStateChangeCallback` — and the telepresence
+    ///    callback via `telepresenceRegisterSignalCallback`. They are
+    ///    effectively setters: the runtime hands in a closure that forwards
+    ///    to `LANGUAGE_CONTROLLER.{perspectiveDiffReceived,syncStateChanged,
+    ///    telepresenceSignalReceived}`, and the language calls it from
+    ///    `handleHolochainSignal` (or wherever) when new data arrives.
+    ///    Without this step no cross-peer diff ever lands in the runtime's
+    ///    perspective store. (The ALDK also exposes direct host imports —
+    ///    `emitPerspectiveDiff` etc. — but current bootstrap languages
+    ///    still use the callback-setter shape, and the capability
+    ///    registration step below doesn't care which mechanism a language
+    ///    picks.)
+    ///
+    /// 2. **Capability probing.** Returns the set of capabilities the
+    ///    language actually exports. The caller stores the set in the
+    ///    global capability registry so `Language::new(address)` can later
+    ///    answer `has(Capability::…)` without another v8 round-trip.
+    pub async fn register_callbacks(&self) -> Result<HashSet<Capability>, String> {
+        // JSON-encode the language address so it embeds as a proper JS
+        // string literal — defensive against addresses containing quotes,
+        // backslashes, or newlines.
+        let addr_lit = serde_json::to_string(&self.language_address)
+            .map_err(|e| format!("failed to encode language address: {}", e))?;
 
-        let links_script = format!(
+        // Wire the runtime's sinks. Each setter is optional; a language
+        // that uses `emitPerspectiveDiff` host imports directly simply
+        // won't export these setters, and the guards below no-op.
+        let callback_script = format!(
             r#"
             (function() {{
                 const language = globalThis.__ad4m_language_instance__;
-                if (language && language.linksAdapter) {{
-                    language.linksAdapter.addCallback((diff) => {{
-                        LANGUAGE_CONTROLLER.perspectiveDiffReceived(diff, "{addr}");
+                if (!language) return "ok";
+                if (typeof language.linkSyncAddCallback === "function") {{
+                    language.linkSyncAddCallback((diff) => {{
+                        LANGUAGE_CONTROLLER.perspectiveDiffReceived(diff, {addr_lit});
                     }});
-                    if (language.linksAdapter.addSyncStateChangeCallback) {{
-                        language.linksAdapter.addSyncStateChangeCallback((state) => {{
-                            LANGUAGE_CONTROLLER.syncStateChanged(state, "{addr}");
-                        }});
-                    }}
-                    return true;
                 }}
-                return false;
+                if (typeof language.linkSyncAddSyncStateChangeCallback === "function") {{
+                    language.linkSyncAddSyncStateChangeCallback((state) => {{
+                        LANGUAGE_CONTROLLER.syncStateChanged(state, {addr_lit});
+                    }});
+                }}
+                if (typeof language.telepresenceRegisterSignalCallback === "function") {{
+                    language.telepresenceRegisterSignalCallback((signal, recipientDid) => {{
+                        LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, {addr_lit}, recipientDid);
+                    }});
+                }}
+                return "ok";
             }})()
             "#,
         );
 
-        let has_links = self.execute(&links_script).await?.trim() == "true";
+        let _ = self.execute(&callback_script).await?;
 
-        let telepresence_script = format!(
-            r#"
-            (function() {{
+        // Detect which capabilities the language actually exports. Returns
+        // a JSON array of kebab-case capability names that parse_capability_list
+        // converts to the typed enum set. Kept as one v8 round-trip per
+        // language load, not per call.
+        let detect_script = r#"
+            (function() {
                 const language = globalThis.__ad4m_language_instance__;
-                if (language && language.telepresenceAdapter) {{
-                    language.telepresenceAdapter.registerSignalCallback((signal, recipientDid) => {{
-                        LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, "{addr}", recipientDid);
-                    }});
-                    return true;
-                }}
-                return false;
-            }})()
-            "#,
-        );
+                const caps = [];
+                if (!language) return JSON.stringify(caps);
+                if (typeof language.expressionCreate === "function"
+                    || typeof language.expressionAddressOf === "function"
+                    || typeof language.addressOf === "function") {
+                    caps.push("expression-create");
+                }
+                if (typeof language.expressionGet === "function") caps.push("expression-get");
+                if (typeof language.perspectiveCommit === "function") caps.push("perspective-commit");
+                if (typeof language.perspectiveSyncSync === "function") caps.push("perspective-sync");
+                if (typeof language.perspectiveSyncRender === "function") caps.push("perspective-render");
+                if (typeof language.perspectiveSyncCurrentRevision === "function") caps.push("perspective-current-revision");
+                if (typeof language.peersSetLocal === "function") caps.push("peers-local");
+                if (typeof language.peersRemote === "function") caps.push("peers-remote");
+                if (typeof language.perspectiveQueryRun === "function") caps.push("perspective-query");
+                if (typeof language.telepresenceSetOnlineStatus === "function") caps.push("telepresence-set-status");
+                if (typeof language.telepresenceGetOnlineAgents === "function") caps.push("telepresence-get-agents");
+                if (typeof language.telepresenceSendSignal === "function") caps.push("telepresence-send-signal");
+                if (typeof language.telepresenceSendBroadcast === "function") caps.push("telepresence-send-broadcast");
+                if (typeof language.languageGetSource === "function") caps.push("language-get-source");
+                if (typeof language.handleHolochainSignal === "function") caps.push("holochain-signal");
+                return JSON.stringify(caps);
+            })()
+        "#;
 
-        let has_telepresence = self.execute(&telepresence_script).await?.trim() == "true";
+        let raw = self.execute(detect_script).await?;
+        let caps = parse_capability_list(raw.trim());
 
         info!(
-            "Registered callbacks for language {}: links={}, telepresence={}",
-            self.language_address, has_links, has_telepresence
+            "Detected capabilities for language {}: {:?}",
+            self.language_address, caps
         );
 
-        Ok((has_links, has_telepresence))
+        Ok(caps)
     }
 
     /// Teardown and cleanup this language runtime
     pub async fn teardown(&self) -> Result<(), String> {
         info!("Tearing down language runtime: {}", self.language_address);
 
+        // Run the language's teardown hook. The bootstrap shim wraps
+        // the language's own teardown() in an async function so the
+        // runtime can always `await language.teardown()`.
         let cleanup_script = r#"
             (async function() {
                 const language = globalThis.__ad4m_language_instance__;
-                if (language && language.cleanup) {
-                    await language.cleanup();
+                if (!language) return;
+                if (typeof language.teardown === "function") {
+                    await language.teardown();
                 }
             })()
         "#;
@@ -245,8 +353,16 @@ impl LanguageRuntime {
             );
         }
 
+        // execute() wraps scripts in `return (expr)`, so a trailing
+        // semicolon on a statement-style expression produces a syntax
+        // error (`return (delete X;);`). Drop the semicolon and let the
+        // delete operator evaluate as the single expression inside the
+        // wrapper. The previous form silently failed at the JS layer
+        // (swallowed by `let _ =`), leaving the instance global dangling
+        // on the isolate — harmless today because the isolate tears
+        // down immediately after, but wrong on its face.
         let _ = self
-            .execute("delete globalThis.__ad4m_language_instance__;")
+            .execute("delete globalThis.__ad4m_language_instance__")
             .await;
 
         info!("Tore down language runtime: {}", self.language_address);
@@ -283,15 +399,35 @@ impl LanguageRuntime {
                                         set_runtime_agent_context(&AgentContext::main_agent());
                                         r
                                     }
-                                    LanguageOperation::LoadModule(path) => {
-                                        self.load_module(&path).await.map(|_| String::new())
+                                    LanguageOperation::LoadModule(path, context) => {
+                                        self.load_module(&path, &context).await.map(|_| String::new())
                                     }
                                     LanguageOperation::LoadLanguage(context) => {
                                         self.load_language(context).await.map(|_| String::new())
                                     }
                                     LanguageOperation::RegisterCallbacks => {
-                                        self.register_callbacks().await.map(|(links, tp)| {
-                                            format!("{{\"links\":{},\"telepresence\":{}}}", links, tp)
+                                        self.register_callbacks().await.and_then(|caps| {
+                                            // Serialize the capability set as a JSON array of
+                                            // kebab-case wire names so the handle side can
+                                            // parse it back into the same enum.
+                                            let names: Vec<&'static str> = caps.iter().map(|c| match c {
+                                                Capability::ExpressionCreate => "expression-create",
+                                                Capability::ExpressionGet => "expression-get",
+                                                Capability::PerspectiveCommit => "perspective-commit",
+                                                Capability::PerspectiveSync => "perspective-sync",
+                                                Capability::PerspectiveRender => "perspective-render",
+                                                Capability::PerspectiveCurrentRevision => "perspective-current-revision",
+                                                Capability::PerspectiveQuery => "perspective-query",
+                                                Capability::PeersLocal => "peers-local",
+                                                Capability::PeersRemote => "peers-remote",
+                                                Capability::TelepresenceSetStatus => "telepresence-set-status",
+                                                Capability::TelepresenceGetAgents => "telepresence-get-agents",
+                                                Capability::TelepresenceSendSignal => "telepresence-send-signal",
+                                                Capability::TelepresenceSendBroadcast => "telepresence-send-broadcast",
+                                                Capability::LanguageGetSource => "language-get-source",
+                                                Capability::HolochainSignal => "holochain-signal",
+                                            }).collect();
+                                            serde_json::to_string(&names).map_err(|e| e.to_string())
                                         })
                                     }
                                     LanguageOperation::Teardown => {

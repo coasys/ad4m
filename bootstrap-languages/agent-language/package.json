@@ -13,7 +13,7 @@
     "build:linux": "pnpm compile-dna && pnpm build:common",
     "build:macos": "pnpm compile-dna && pnpm build:common",
     "build:windows": "pnpm compile-dna-windows && pnpm build:common",
-    "build:common": "pnpm rollup-dna && pnpm rollup-icons && pnpm rollup-expression-ui && deno run --allow-all esbuild.ts"
+    "build:common": "pnpm rollup-icons && pnpm rollup-expression-ui && bash rust-impl/build.sh"
   },
   "author": "",
   "license": "ISC",
