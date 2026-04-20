@@ -828,28 +828,25 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
       { source: "literal:recipe1", predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
     ];
 
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+    // First call returns data, second call returns count (for SPARQL-paginated totalCount)
+    mockPerspective.querySparql
+      .mockResolvedValueOnce(queryResults)
+      .mockResolvedValueOnce([{ count: 1 }]);
 
     const page = await Recipe.paginate(mockPerspective, 10, 1, {}, 'sparql');
 
-    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(1);
+    // paginate now issues 2 SPARQL queries: data + count
+    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(2);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(page.results).toHaveLength(1);
     expect(page.pageSize).toBe(10);
     expect(page.pageNumber).toBe(1);
+    expect(page.totalCount).toBe(1);
   });
 
   it("should use SPARQL when engine is 'sparql' in count()", async () => {
-    // Since count() uses result.length and GROUP BY returns one row per source,
-    // mock 5 recipe sources
-    const queryResults = [
-      ...Array.from({ length: 5 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]).flat()
-    ];
-
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+    // count() now uses an efficient COUNT query that returns [{ count: N }]
+    mockPerspective.querySparql.mockResolvedValue([{ count: 5 }]);
 
     const count = await Recipe.count(mockPerspective, {}, 'sparql');
 
