@@ -11,7 +11,7 @@ import { buildParentQuery, buildAuthorAndTimestampQuery, buildPropertiesQuery, b
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
-import { buildSPARQLQuery, buildSPARQLGetDataQuery, groupSPARQLResults } from "./query-sparql";
+import { buildSPARQLQuery, buildSPARQLGetDataQuery, groupSPARQLResults, buildSPARQLCountQuery, hasJsOnlyWhereFilters } from "./query-sparql";
 import { buildBatchSPARQLQuery } from "./query-sparql-batch";
 import { hydrateBatchResult } from "./hydration-batch";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
@@ -875,11 +875,16 @@ export class Ad4mModel {
     }
 
     // Evaluate custom getters for all instances (single pass)
-    const getterOpts = requestedProperties.length > 0 || query.include
-      ? { requestedProperties, include: query.include }
-      : undefined;
-    for (const instance of instances) {
-      await evaluateCustomGettersForInstance(instance, perspective, metadata, getterOpts);
+    // When deepQuery is not explicitly true on collection queries, skip getter evaluation.
+    // Single-instance get() still evaluates getters (handled in getData, not here).
+    const skipGetters = query.deepQuery !== true;
+    if (!skipGetters) {
+      const getterOpts = requestedProperties.length > 0 || query.include
+        ? { requestedProperties, include: query.include }
+        : undefined;
+      for (const instance of instances) {
+        await evaluateCustomGettersForInstance(instance, perspective, metadata, getterOpts);
+      }
     }
     
     // Filter by where conditions that couldn't be filtered in SPARQL
@@ -965,12 +970,40 @@ export class Ad4mModel {
       });
     }
 
-    // Calculate totalCount BEFORE applying limit/offset
-    const totalCount = filteredInstances.length;
+    // Determine if SPARQL already applied LIMIT/OFFSET (i.e., the pagination
+    // subquery was used).  When it was, skip JS-level slicing — instances are
+    // already the correct page.
+    const allRelsMeta2 = getRelationsMetadata(this as any);
+    const sparqlPaginated = !hasJsOnlyWhereFilters(metadata, allRelsMeta2, query.where)
+      && (query.limit !== undefined || query.offset !== undefined);
 
-    // Apply offset and limit in JavaScript
+    // Calculate totalCount BEFORE applying limit/offset.
+    // When SPARQL already paginated, filteredInstances.length is the page size,
+    // not the total — use a separate COUNT query for the real total.
+    let totalCount: number;
+    if (sparqlPaginated) {
+      try {
+        const countSparql = buildSPARQLCountQuery(metadata, allRelsMeta2, query, this);
+        const countResult = await perspective.querySparql(countSparql);
+        if (Array.isArray(countResult) && countResult.length > 0) {
+          const row = countResult[0];
+          const val = row.count?.value ?? row.count;
+          totalCount = typeof val === 'number' ? val : parseInt(String(val), 10);
+          if (isNaN(totalCount)) totalCount = filteredInstances.length;
+        } else {
+          totalCount = filteredInstances.length;
+        }
+      } catch {
+        // Fallback: if count query fails, use what we have
+        totalCount = filteredInstances.length;
+      }
+    } else {
+      totalCount = filteredInstances.length;
+    }
+
+    // Apply offset and limit in JavaScript — only when SPARQL didn't already paginate
     let paginatedInstances = filteredInstances;
-    if (query.offset !== undefined || query.limit !== undefined) {
+    if (!sparqlPaginated && (query.offset !== undefined || query.limit !== undefined)) {
       const start = query.offset || 0;
       const end = query.limit ? start + query.limit : undefined;
       paginatedInstances = filteredInstances.slice(start, end);
@@ -1233,12 +1266,9 @@ export class Ad4mModel {
    * @private
    */
   public static async countQueryToSPARQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
-    // Use the same query as the main query (with GROUP BY), just without LIMIT/OFFSET
-    // We'll count the number of rows returned (one row per source)
-    const countQuery = { ...query };
-    delete countQuery.limit;
-    delete countQuery.offset;
-    return await this.queryToSPARQL(perspective, countQuery);
+    const metadata = this.getModelMetadata();
+    const allRelMeta = getRelationsMetadata(this as any);
+    return buildSPARQLCountQuery(metadata, allRelMeta, query, this);
   }
 
   /**
@@ -1266,11 +1296,28 @@ export class Ad4mModel {
       : engine;
 
     if (resolvedEngine === 'sparql') {
-      const sparqlQuery = await this.queryToSPARQL(perspective, query);
-      const rawResult = await perspective.querySparql(sparqlQuery);
-      const grouped = groupSPARQLResults(rawResult);
-      const { totalCount } = await this.instancesFromQueryResult(perspective, query, grouped);
-      return totalCount;
+      // When query has JS-only where filters (gt, between, author, timestamp, etc.),
+      // we must fall back to full hydration + JS filtering to get accurate count.
+      const metadata = this.getModelMetadata();
+      const allRelMeta = getRelationsMetadata(this as any);
+      if (hasJsOnlyWhereFilters(metadata, allRelMeta, query.where)) {
+        // Fall back to full query + JS filter path for accurate count
+        const sparqlQuery = await this.queryToSPARQL(perspective, query);
+        const rawResult = await perspective.querySparql(sparqlQuery);
+        const grouped = groupSPARQLResults(rawResult);
+        const { totalCount } = await this.instancesFromQueryResult(perspective, query, grouped);
+        return totalCount;
+      }
+      // No JS-only filters — use efficient COUNT query
+      const countSparql = await this.countQueryToSPARQL(perspective, query);
+      const countResult = await perspective.querySparql(countSparql);
+      if (Array.isArray(countResult) && countResult.length > 0) {
+        const row = countResult[0];
+        const val = row.count?.value ?? row.count;
+        const parsed = typeof val === 'number' ? val : parseInt(String(val), 10);
+        return isNaN(parsed) ? 0 : parsed;
+      }
+      return 0;
     } else {
       const result = await perspective.infer(await this.countQueryToProlog(perspective, query));
       return result?.[0]?.TotalCount || 0;
@@ -1603,6 +1650,44 @@ export class Ad4mModel {
           }
         }
       }
+    }
+  }
+
+  /**
+   * Evaluate SPARQL getters for a batch of instances on demand.
+   *
+   * Use after a shallow collection query (the default) to resolve
+   * getter-backed properties for visible items only.  This avoids the
+   * O(N × getters) cost of evaluating every getter on every instance in
+   * a large collection query.
+   *
+   * @param instances - Array of model instances to evaluate getters on
+   * @param perspective - The perspective to query against
+   * @param propertyNames - Optional list of getter-backed property names to evaluate.
+   *                        If omitted, all getters are evaluated.
+   *
+   * @example
+   * ```typescript
+   * const messages = await Message.findAll(perspective, { parent: channel, limit: 30 });
+   * // messages[i].replyingTo is undefined (getter skipped by default)
+   *
+   * // Evaluate getters for the visible subset
+   * await Message.evaluateGetters(messages.slice(0, 10), perspective, ['replyingTo']);
+   * // messages[0..9].replyingTo is now populated
+   * ```
+   */
+  static async evaluateGetters<T extends Ad4mModel>(
+    instances: T[],
+    perspective: PerspectiveProxy,
+    propertyNames?: string[],
+  ): Promise<void> {
+    if (instances.length === 0) return;
+    const metadata = this.getModelMetadata();
+    const opts = propertyNames && propertyNames.length > 0
+      ? { requestedProperties: propertyNames }
+      : undefined;
+    for (const instance of instances) {
+      await evaluateCustomGettersForInstance(instance, perspective, metadata, opts);
     }
   }
 

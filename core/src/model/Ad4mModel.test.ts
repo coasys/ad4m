@@ -606,14 +606,15 @@ describe("Ad4mModel.queryToSPARQL()", () => {
 
   // ---- ORDER BY, LIMIT, OFFSET are JS post-processed ----
 
-  it("should NOT include ORDER BY/LIMIT/OFFSET in SPARQL (pagination is JS-only)", async () => {
+  it("should include ORDER BY/LIMIT/OFFSET in SPARQL pagination subquery", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { order: { name: "ASC" }, limit: 10, offset: 5 });
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
-    // Pagination is handled in JS, not SPARQL
-    expect(norm).not.toContain("ORDER BY");
-    expect(norm).not.toContain("LIMIT");
-    expect(norm).not.toContain("OFFSET");
+    // SPARQL-level pagination via subquery
+    expect(norm).toContain("ORDER BY");
+    expect(norm).toContain("LIMIT 10");
+    expect(norm).toContain("OFFSET 5");
+    expect(norm).toContain("SELECT DISTINCT ?source");
   });
 });
 describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {

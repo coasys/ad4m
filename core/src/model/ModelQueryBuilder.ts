@@ -11,7 +11,8 @@ import type {
   Where, Order, IncludeMap, Query,
   AllInstancesResult, ResultsWithTotalCount, PaginationResult,
 } from "./types";
-import { groupSPARQLResults } from "./query-sparql";
+import { groupSPARQLResults, hasJsOnlyWhereFilters } from "./query-sparql";
+import { getRelationsMetadata } from "./decorators";
 import { pooledSubscribe } from "./subscription-pool";
 
 /** Query builder for Ad4mModel queries.
@@ -223,6 +224,29 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   properties(properties: string[]): ModelQueryBuilder<T> {
     this.queryParams.properties = properties;
+    return this;
+  }
+
+  /**
+   * Opts in to evaluating SPARQL property getters during collection hydration.
+   *
+   * By default, collection queries skip getter evaluation for performance.
+   * Call `.deepQuery()` when you need getter-backed properties in the result set.
+   *
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * const messages = await Message.query(perspective)
+   *   .parent(channel)
+   *   .deepQuery()
+   *   .limit(30)
+   *   .get();
+   * // messages[i].replyingTo is populated
+   * ```
+   */
+  deepQuery(): ModelQueryBuilder<T> {
+    (this.queryParams as any).deepQuery = true;
     return this;
   }
 
@@ -471,10 +495,25 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async count(): Promise<number> {
     if (this.engineFlag === 'sparql') {
-      const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
-      const rawResult = await this.perspective.querySparql(sparqlQuery);
-      const { totalCount } = await this.processSparqlResult(rawResult);
-      return totalCount;
+      // When query has JS-only where filters, fall back to full hydration
+      const metadata = this.ctor.getModelMetadata();
+      const allRelMeta = getRelationsMetadata(this.ctor as any);
+      if (hasJsOnlyWhereFilters(metadata, allRelMeta, this.queryParams.where)) {
+        const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
+        const rawResult = await this.perspective.querySparql(sparqlQuery);
+        const { totalCount } = await this.processSparqlResult(rawResult);
+        return totalCount;
+      }
+      // Use efficient COUNT query — no hydration
+      const countSparql = await this.ctor.countQueryToSPARQL(this.perspective, this.queryParams);
+      const countResult = await this.perspective.querySparql(countSparql);
+      if (Array.isArray(countResult) && countResult.length > 0) {
+        const row = countResult[0] as any;
+        const val = row.count?.value ?? row.count;
+        const parsed = typeof val === 'number' ? val : parseInt(String(val), 10);
+        return isNaN(parsed) ? 0 : parsed;
+      }
+      return 0;
     } else {
       const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
       const result = await this.perspective.infer(query);
