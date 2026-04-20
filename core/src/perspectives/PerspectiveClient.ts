@@ -57,6 +57,7 @@ export class PerspectiveClient {
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
     #aiClient?: AIClient
+    #proxyCache: Map<string, WeakRef<PerspectiveProxy>>
 
     constructor(client: ApolloClient<any>, subscribe: boolean = true) {
         this.#apolloClient = client
@@ -64,6 +65,7 @@ export class PerspectiveClient {
         this.#perspectiveUpdatedCallbacks = []
         this.#perspectiveRemovedCallbacks = []
         this.#perspectiveSyncStateChangeCallbacks = []
+        this.#proxyCache = new Map()
 
         if(subscribe) {
             this.subscribePerspectiveAdded()
@@ -100,6 +102,9 @@ export class PerspectiveClient {
     }
 
     async byUUID(uuid: string): Promise<PerspectiveProxy|null> {
+        const cached = this.#proxyCache.get(uuid)?.deref()
+        if (cached) return cached
+
         const { perspective } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`query perspective($uuid: String!) {
                 perspective(uuid: $uuid) {
@@ -109,7 +114,9 @@ export class PerspectiveClient {
             variables: { uuid }
         }))
         if(!perspective) return null
-        return new PerspectiveProxy(perspective, this)
+        const proxy = new PerspectiveProxy(perspective, this)
+        this.#proxyCache.set(uuid, new WeakRef(proxy))
+        return proxy
     }
 
     async snapshotByUUID(uuid: string): Promise<Perspective|null> {
