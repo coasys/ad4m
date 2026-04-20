@@ -256,11 +256,32 @@ export function buildSPARQLQuery(
     ? `FILTER(\n      ${filterExpressions.join(" &&\n      ")}\n    )`
     : "";
 
-  // NOTE: SPARQL-level LIMIT/OFFSET is intentionally NOT applied here.
-  // The outer SELECT returns multiple rows per instance (one per link),
-  // so SPARQL LIMIT/OFFSET would cut off links mid-instance and produce
-  // incorrect results. All pagination is handled in JS after grouping
-  // and hydration (instancesFromQueryResult).
+  // Determine if SPARQL-level pagination is safe.
+  // When JS-only where filters exist, we must NOT limit at the SPARQL level
+  // because the database would cap candidates before JS filters run.
+  const canPaginateInSPARQL = !hasJsOnlyWhereFilters(metadata, allRelationsMetadata, query.where)
+    && (query.limit !== undefined || query.offset !== undefined);
+
+  // Build a pagination subquery that constrains ?source to only the page
+  // of interest.  This avoids fetching all links for all matching instances.
+  const paginationSubquery = canPaginateInSPARQL
+    ? buildPaginationSubquery(joinPatterns, filterExpressions, metadata, query)
+    : '';
+
+  if (paginationSubquery) {
+    // Use the pagination subquery to constrain ?source, then fetch all links
+    // for those sources only.
+    return `
+    SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
+      ${paginationSubquery}${joinClause}
+      GRAPH ?linkGraph { ?source ?predicate ?target . }
+      FILTER(isIRI(?source) && isIRI(?predicate))
+      ?linkGraph <ad4m://ontology/author> ?author .
+      ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
+      ${filterClause}
+    }
+  `.trim();
+  }
 
   return `
     SELECT ?source ?predicate ?target ?author ?timestamp WHERE {${joinClause}
@@ -279,23 +300,147 @@ export function buildSPARQLQuery(
  *
  * NOTE: The outer SELECT returns multiple rows per instance (one per link),
  * so LIMIT/OFFSET at the outer level would cut off links mid-instance.
- * Instead, we apply these clauses so the database can at least use them
- * as hints. The JS-side pagination in instancesFromQueryResult remains
- * the authoritative mechanism, but when ORDER BY + LIMIT are present the
- * database can short-circuit scanning via its indexes.
- *
- * For queries with both `order` and `limit`, we wrap the source-selection
- * in a subquery pattern (handled in buildSPARQLQuery). This function emits
- * the raw clauses for simpler cases or as a fallback.
+ * This function is kept for backward compatibility and always returns "".
+ * SPARQL-level pagination is handled via a subquery in buildSPARQLQuery
+ * using buildPaginationSubquery().
  */
 export function buildSPARQLOrderLimitOffset(_metadata: ModelMetadata, query: Query): string {
-  // NOTE: LIMIT/OFFSET are intentionally NOT emitted here.
-  // The outer SELECT returns multiple rows per instance (one per link),
-  // so applying LIMIT/OFFSET at the SPARQL level would cut off links
-  // mid-instance. All pagination is handled in JS (instancesFromQueryResult).
-  // ORDER BY is also omitted since row-level ordering of multi-row-per-instance
-  // results is not meaningful; JS sorts hydrated instances instead.
   return "";
+}
+
+/**
+ * Build an inner subquery that selects DISTINCT ?source URIs with
+ * ORDER BY, LIMIT, and OFFSET applied at the instance level.
+ *
+ * Because the outer SELECT returns multiple rows per instance (one per link),
+ * we cannot apply LIMIT/OFFSET there.  Instead this subquery constrains
+ * ?source to only the instances on the requested page.
+ *
+ * @internal — used by buildSPARQLQuery when SPARQL-level pagination is safe.
+ */
+export function buildPaginationSubquery(
+  joinPatterns: string[],
+  filterExpressions: string[],
+  metadata: ModelMetadata,
+  query: Query,
+): string {
+  const innerJoin = joinPatterns.join('\n');
+  const innerFilter = filterExpressions.length > 0
+    ? `FILTER(\n      ${filterExpressions.join(' &&\n      ')}\n    )`
+    : '';
+
+  // Build ORDER BY clause from query.order
+  let orderByClause = '';
+  if (query.order) {
+    const orderTerms = Object.entries(query.order).map(([prop, dir]) => {
+      const sparqlVar = mapPropertyToSPARQLVar(prop, metadata);
+      return dir === 'DESC' ? `DESC(${sparqlVar})` : `ASC(${sparqlVar})`;
+    });
+    if (orderTerms.length > 0) {
+      orderByClause = `ORDER BY ${orderTerms.join(' ')}`;
+    }
+  }
+
+  // Default ordering by timestamp when paginating without explicit order
+  if (!orderByClause && (query.limit !== undefined || query.offset !== undefined)) {
+    orderByClause = 'ORDER BY ASC(?pg_minTs)';
+  }
+
+  // We need a timestamp aggregate for default ordering
+  const needsTimestamp = !query.order && (query.limit !== undefined || query.offset !== undefined);
+  const tsSelect = needsTimestamp ? ' (MIN(?pg_ts) AS ?pg_minTs)' : '';
+  const tsPattern = needsTimestamp ? `\n      OPTIONAL { GRAPH ?pg_g { ?source ?pg_p ?pg_t . } ?pg_g <ad4m://ontology/timestamp> ?pg_ts . }` : '';
+
+  const limitClause = query.limit !== undefined ? `LIMIT ${query.limit}` : '';
+  const offsetClause = query.offset !== undefined && query.offset > 0 ? `OFFSET ${query.offset}` : '';
+
+  return `
+      { SELECT DISTINCT ?source${tsSelect} WHERE {${innerJoin}${tsPattern}
+        FILTER(isIRI(?source))
+        ${innerFilter}
+      } GROUP BY ?source ${orderByClause} ${limitClause} ${offsetClause} }\n`;
+}
+
+/**
+ * Build a SPARQL COUNT query that returns the total number of matching
+ * instances WITHOUT hydrating them.  Uses the same WHERE clause as
+ * buildSPARQLQuery but wraps it in SELECT (COUNT(DISTINCT ?source) AS ?count).
+ *
+ * LIMIT/OFFSET from the query are stripped internally — this always counts
+ * the full result set.
+ */
+export function buildSPARQLCountQuery(
+  metadata: ModelMetadata,
+  allRelationsMetadata: Record<string, RelationMetadataEntry>,
+  query: Query,
+  modelClass: any,
+): string {
+  // Build the same join/filter patterns as buildSPARQLQuery
+  const joinPatterns: string[] = [];
+  const filterExpressions: string[] = [];
+
+  if (query.parent) {
+    const parentPredicate = resolveParentPredicate(query.parent, modelClass);
+    joinPatterns.push(`\n      ${iri(query.parent.id)} ${iri(parentPredicate)} ?source .`);
+  }
+
+  let hasConformance = false;
+  for (const [, propMeta] of Object.entries(metadata.properties)) {
+    if (propMeta.required) {
+      if (propMeta.getter) continue;
+      hasConformance = true;
+      if (propMeta.flag && propMeta.initial) {
+        joinPatterns.push(`\n      ?source ${iri(propMeta.predicate)} ${iri(propMeta.initial)} .`);
+      } else {
+        joinPatterns.push(`\n      ?source ${iri(propMeta.predicate)} ?cfTarget_${propMeta.name} .`);
+      }
+    }
+  }
+
+  if (!hasConformance) {
+    for (const [, propMeta] of Object.entries(metadata.properties)) {
+      if (propMeta.initial) {
+        hasConformance = true;
+        if (propMeta.flag) {
+          joinPatterns.push(`\n      ?source ${iri(propMeta.predicate)} ${iri(propMeta.initial)} .`);
+        } else {
+          joinPatterns.push(`\n      ?source ${iri(propMeta.predicate)} ?cfInitTarget_${propMeta.name} .`);
+        }
+        break;
+      }
+    }
+  }
+
+  if (!hasConformance && joinPatterns.length === 0) {
+    const knownPredicates: string[] = [];
+    for (const [, propMeta] of Object.entries(metadata.properties)) {
+      if (propMeta.predicate) knownPredicates.push(iri(propMeta.predicate));
+    }
+    if (metadata.relations) {
+      for (const [, relMeta] of Object.entries(metadata.relations)) {
+        if (relMeta.predicate) knownPredicates.push(iri(relMeta.predicate));
+      }
+    }
+    if (knownPredicates.length > 0) {
+      joinPatterns.push(`\n      { SELECT DISTINCT ?source WHERE { ?source ?cf_structPred ?cf_structTarget . FILTER(?cf_structPred IN (${knownPredicates.join(", ")})) } }`);
+    }
+  }
+
+  const { joins: userJoins, filters: userFilters } = buildSPARQLWhereFilters(metadata, allRelationsMetadata, query.where);
+  joinPatterns.push(...userJoins);
+  filterExpressions.push(...userFilters);
+
+  const joinClause = joinPatterns.join('\n');
+  const filterClause = filterExpressions.length > 0
+    ? `FILTER(\n      ${filterExpressions.join(' &&\n      ')}\n    )`
+    : '';
+
+  return `
+    SELECT (COUNT(DISTINCT ?source) AS ?count) WHERE {${joinClause}
+      FILTER(isIRI(?source))
+      ${filterClause}
+    }
+  `.trim();
 }
 
 /**

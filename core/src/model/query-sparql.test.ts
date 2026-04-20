@@ -1,4 +1,4 @@
-import { buildSPARQLOrderLimitOffset, buildSPARQLQuery, hasJsOnlyWhereFilters } from './query-sparql';
+import { buildSPARQLOrderLimitOffset, buildSPARQLQuery, buildSPARQLCountQuery, buildPaginationSubquery, hasJsOnlyWhereFilters } from './query-sparql';
 
 // Minimal stubs for ModelMetadata — buildSPARQLOrderLimitOffset only uses the query arg
 const emptyMetadata: any = { properties: {}, relations: {} };
@@ -64,21 +64,23 @@ describe('hasJsOnlyWhereFilters', () => {
   });
 });
 
-describe('buildSPARQLQuery — pagination handled in JS, not SPARQL', () => {
+describe('buildSPARQLQuery — SPARQL-level pagination via subquery', () => {
   const modelClass: any = {};
 
-  it('does NOT include LIMIT/OFFSET in SPARQL even when query has them', () => {
+  it('includes LIMIT/OFFSET in a pagination subquery when query has them and no JS-only filters', () => {
     const query = { limit: 10, offset: 0, where: { category: 'some://uri' } };
     const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
-    // SPARQL should NOT contain LIMIT/OFFSET — pagination is done in JS
-    expect(sparql).not.toContain('LIMIT');
-    expect(sparql).not.toContain('OFFSET');
+    // SPARQL should contain LIMIT inside the pagination subquery
+    expect(sparql).toContain('LIMIT 10');
     // The outer query should still exist
     expect(sparql).toContain('SELECT ?source ?predicate ?target');
+    // Should have a subquery pattern
+    expect(sparql).toContain('SELECT DISTINCT ?source');
   });
 
-  it('does NOT include LIMIT/OFFSET even with JS-only where filters', () => {
-    const query = { limit: 10, offset: 0, where: { name: 'Pasta' } };
+  it('does NOT include LIMIT/OFFSET when JS-only where filters exist', () => {
+    // author is a JS-only filter
+    const query = { limit: 10, offset: 0, where: { author: 'did:key:abc' } };
     const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
     expect(sparql).not.toContain('LIMIT');
     expect(sparql).not.toContain('OFFSET');
@@ -86,7 +88,7 @@ describe('buildSPARQLQuery — pagination handled in JS, not SPARQL', () => {
 });
 
 describe('buildSPARQLOrderLimitOffset', () => {
-  it('always returns empty string (pagination is handled in JS)', () => {
+  it('always returns empty string (pagination uses subquery pattern instead)', () => {
     expect(buildSPARQLOrderLimitOffset(emptyMetadata, {})).toBe('');
     expect(buildSPARQLOrderLimitOffset(emptyMetadata, { limit: 50 })).toBe('');
     expect(buildSPARQLOrderLimitOffset(emptyMetadata, { limit: 50, offset: 100 })).toBe('');
@@ -154,8 +156,9 @@ describe('buildSPARQLQuery — structural correctness', () => {
     };
     const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
     expect(sparql).toContain('<flux://channel-123>');
-    // No SPARQL-level pagination
-    expect(sparql).not.toContain('LIMIT');
+    // SPARQL-level pagination via subquery
+    expect(sparql).toContain('LIMIT 50');
+    expect(sparql).toContain('SELECT DISTINCT ?source');
   });
 
   it('does not allow injection through where clause IRI values', () => {
