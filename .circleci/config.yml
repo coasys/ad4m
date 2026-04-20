@@ -1,6 +1,6 @@
 version: 2.1
 references:
-  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:a0ab4b6358b7314a2ad49e232ba6c53b28a56e7f02641f226b2ed05544cc66d8
+  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
 
 # Self-hosted machine runner on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04)
 # Resource class: coasys/marvin
@@ -30,6 +30,8 @@ commands:
             echo "Node: $(node --version)"
             echo "npm: $(npm --version)"
             echo "Rust: $(rustc --version)"
+            echo "Installing wasm-bindgen-cli for Rust WASM builds..."
+            cargo install wasm-bindgen-cli --version 0.2.118
             echo "Deno: $(deno --version | head -1)"
             echo "Go: $(go version)"
             echo "pnpm: $(pnpm --version || echo 'not installed yet')"

@@ -1,34 +1,72 @@
-import type { Address, Language, LanguageContext, ExpressionUI, Interaction } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
-import Adapter from "./adapter.ts";
+/**
+ * # Neighbourhood Store
+ *
+ * Expression language that stores neighbourhood metadata via a centralized
+ * proxy (Cloudflare Workers KV).
+ */
 
-function interactions(expression: Address): Interaction[] {
-  return [];
-}
+import axiod from "https://deno.land/x/axiod/mod.ts";
+import { defineLanguage, agentCreateSignedExpression, hash } from "@coasys/ad4m-ldk";
 
-export class UI implements ExpressionUI {
-  icon(): string {
-    return "";
-  }
+const PROXY_URL = "https://bootstrap-store-gateway.perspect3vism.workers.dev/";
 
-  constructorIcon(): string {
-    return "";
-  }
-}
+const language = defineLanguage({
+    name: "neighbourhood-store",
+    version: "0.1.0",
 
-export const name = "neighbourhood-store";
+    async init() {},
+    async teardown() {},
+    interactions() { return []; },
 
-export const PROXY_URL = "https://bootstrap-store-gateway.perspect3vism.workers.dev/";
+    expression: {
+        async create(neighbourhood: object): Promise<string> {
+            const address = hash(JSON.stringify(neighbourhood));
+            const expression = agentCreateSignedExpression(neighbourhood);
 
-export default async function create(context: LanguageContext): Promise<Language> {
-  //const Holochain = context.Holochain as HolochainLanguageDelegate;
-  //await Holochain.registerDNAs([{ file: DNA, nick: DNA_NICK }]);
-  const expressionAdapter = new Adapter(context);
-  //const expressionUI = new UI();
+            const neighbourhoodPostData = {
+                key: address,
+                value: JSON.stringify(expression),
+            };
+            const neighbourhoodPostResult = await axiod.post(PROXY_URL, neighbourhoodPostData);
+            if (neighbourhoodPostResult.status != 200) {
+                console.error("Upload neighbourhood data gets error: ", neighbourhoodPostResult);
+            }
 
-  return {
+            return address;
+        },
+
+        async get(address: string): Promise<any> {
+            const cid = address.toString();
+
+            let presignedUrl;
+            try {
+                const getPresignedUrl = await axiod.get(PROXY_URL + `?key=${cid}`);
+                presignedUrl = getPresignedUrl.data.url;
+            } catch (e) {
+                console.error("Get neighbourhood failed at getting presigned url", e);
+                return null;
+            }
+
+            let neighbourhoodObject;
+            try {
+                const getNeighbourhoodObject = await axiod.get(presignedUrl);
+                neighbourhoodObject = getNeighbourhoodObject.data;
+            } catch (e) {
+                console.error("Get meta information failed at getting meta information", e);
+                return null;
+            }
+
+            return neighbourhoodObject;
+        },
+    },
+});
+
+export const {
     name,
-    expressionAdapter,
-    //expressionUI,
+    version,
+    init,
+    teardown,
     interactions,
-  } as Language;
-}
+    expressionGet,
+    expressionCreate,
+} = language;

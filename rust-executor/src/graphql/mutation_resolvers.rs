@@ -1537,8 +1537,25 @@ impl Mutation {
                 )
             })?;
 
+            // Wrap in JSON.stringify so we can round-trip a valid JSON
+            // string across the v8 -> Rust boundary. Without the wrapper,
+            // `to_rust_string_lossy` returns the raw JS string contents,
+            // and any address containing a `"`, `\`, or leading/trailing
+            // whitespace (rare for content hashes, trivially legal for
+            // DIDs) would either be silently corrupted by the old
+            // `trim_matches('"')` strip or not decode at all.
+            //
+            // Coerce undefined/null to JSON null before stringifying, for
+            // the same reason we did in the expressionGet sweep:
+            // a bare `JSON.stringify(undefined)` yields the JS value
+            // `undefined` (not the string `"undefined"`), which
+            // to_rust_string_lossy then captures verbatim and
+            // from_str::<String> fails to parse. With `?? null` we always
+            // land on valid JSON and can raise a clear
+            // "expressionCreate returned no address" error instead of a
+            // confusing serde parse failure.
             let publish_script = format!(
-                r#"await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({})"#,
+                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionCreate({})) ?? null)"#,
                 input_json
             );
 
@@ -1552,8 +1569,26 @@ impl Mutation {
                     )
                 })?;
 
-            // Strip surrounding quotes from the address
-            let address = address_raw.trim().trim_matches('"').to_string();
+            let trimmed_addr_raw = address_raw.trim();
+            if trimmed_addr_raw == "null" || trimmed_addr_raw.is_empty() {
+                return Err(FieldError::new(
+                    format!(
+                        "Language language returned no address from expressionCreate — got {:?}",
+                        trimmed_addr_raw
+                    ),
+                    graphql_value!(null),
+                ));
+            }
+
+            let address: String = serde_json::from_str(trimmed_addr_raw).map_err(|e| {
+                FieldError::new(
+                    format!(
+                        "Failed to parse published language address: {} ({:?})",
+                        e, address_raw
+                    ),
+                    graphql_value!(null),
+                )
+            })?;
 
             // Load the templated language into a per-language runtime
             let bundle_on_disk = crate::utils::languages_directory()
@@ -1565,6 +1600,11 @@ impl Mutation {
                 }
             }
 
+            // Override the cached language name with the templated name.
+            // load_language() above caches the name from the source code's
+            // `export const name = ...`, but templating overrides the meta
+            // name without rewriting the source export.
+            controller.set_language_name(&address, &input_name).await;
             Ok(LanguageRef {
                 address,
                 name: input_name,

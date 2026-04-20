@@ -15,6 +15,7 @@ use std::env::current_dir;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::sync::Mutex as TokioMutex;
 use url::Url;
 
@@ -38,11 +39,39 @@ pub struct JsCore {
     loaded_modules: Arc<TokioMutex<HashSet<String>>>,
 }
 
+// Dummy LanguageController placeholder — use a real type if available
+pub type LanguageController = ();
+
+/// Per-language-instance runtime state.
+/// Stored in a thread-local and accessed by Deno ops via languages_extension.rs.
+#[derive(Clone)]
+pub struct IsolateState {
+    pub agent_did: Option<String>,
+    pub agent_signing_key_id: Option<String>,
+    pub language_controller_ref: Arc<StdMutex<Option<LanguageController>>>,
+    /// Language context — set by the runtime before calling init()
+    pub language_storage_directory: Option<String>,
+    pub language_address: Option<String>,
+    pub language_settings: Option<String>,
+}
+
+impl IsolateState {
+    pub fn new() -> Self {
+        Self {
+            agent_did: None,
+            agent_signing_key_id: None,
+            language_controller_ref: Arc::new(StdMutex::new(None)),
+            language_storage_directory: None,
+            language_address: None,
+            language_settings: None,
+        }
+    }
+}
+
 pub struct ExternWrapper(pub ExternIO);
 
 impl std::fmt::Display for ExternWrapper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        //Write the bytes to string like: [0, 1, 3]
         let bytes = self.0.as_bytes();
         let mut bytes_str = String::from("[");
         for (i, byte) in bytes.iter().enumerate() {
@@ -83,7 +112,6 @@ impl JsCore {
         // Build the filesystem allow list
         let mut allowed_paths = vec![storage_dir_str.clone()];
         if is_system_language {
-            // System/bootstrap languages get CWD access (for shared test storage, etc.)
             if let Ok(cwd) = std::env::current_dir() {
                 let cwd_str = cwd.to_string_lossy().to_string();
                 info!("System language also gets CWD access: {}", cwd_str);
@@ -93,17 +121,13 @@ impl JsCore {
 
         let permissions_opts = PermissionsOptions {
             allow_all: false,
-            // Filesystem: scoped to storage dir (+ CWD for system languages)
             allow_read: Some(allowed_paths.clone()),
             deny_read: None,
             allow_write: Some(allowed_paths),
             deny_write: None,
-            // Network: allowed (languages make HTTP requests to peers, DHT nodes, etc.)
             allow_net: Some(vec![]),
             deny_net: None,
-            // Module imports: only from our synthetic domain (for the bundle capture script)
             allow_import: Some(vec!["ad4m.language".to_string()]),
-            // Everything else: denied
             allow_env: None,
             deny_env: None,
             allow_sys: None,
@@ -165,6 +189,21 @@ impl JsCore {
             worker: Arc::new(TokioMutex::new(worker)),
             loaded_modules: Arc::new(TokioMutex::new(HashSet::new())),
         }
+    }
+
+    /// Set the language context into the thread-local IsolateState.
+    /// Must be called before init_for_language() so the Deno ops can read it.
+    pub fn set_language_context(
+        &self,
+        storage_directory: String,
+        language_address: String,
+        language_settings: String,
+    ) {
+        let mut state = IsolateState::new();
+        state.language_storage_directory = Some(storage_directory);
+        state.language_address = Some(language_address);
+        state.language_settings = Some(language_settings);
+        languages_extension::init_isolate_state(state);
     }
 
     pub async fn load_module(&self, file_path: &str) -> Result<(), AnyError> {
@@ -263,8 +302,20 @@ impl JsCore {
 
         let resolve_fut = {
             let mut worker = self.worker.lock().await;
-            let execute_async = worker.execute_script("js_core", wrapped_script.into());
-            worker.js_runtime.resolve(execute_async.unwrap())
+            // `execute_script` returns Err on a JS syntax error (e.g. a
+            // dispatcher format! call that produced unbalanced braces or
+            // an invalid identifier). The previous `.unwrap()` panicked
+            // the entire language runtime thread in that case, which
+            // aborted the per-isolate tokio runtime and left the
+            // LanguageRuntimeHandle channel dangling — every subsequent
+            // request to the language would stall on the oneshot
+            // response forever. Propagate the compile error as a normal
+            // AnyError so the caller gets `Err(String)` back and the
+            // thread keeps running.
+            let execute_async = worker
+                .execute_script("js_core", wrapped_script.into())
+                .map_err(|e| anyhow!("Failed to compile script: {}", e))?;
+            worker.js_runtime.resolve(execute_async)
         };
 
         Ok(SmartGlobalVariableFuture::new(

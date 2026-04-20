@@ -1,0 +1,770 @@
+// AD4M Language Interface — canonical WIT definition.
+//
+// This file is the normative source of truth for the AD4M Language interface
+// at version 1.0. The companion document `language-interface-spec.md` provides
+// prose explanation, examples, and the lifecycle / semantics rules that WIT
+// itself cannot express. Where the two disagree, this file wins.
+//
+// Conventions used here:
+//   * All identifiers are kebab-case (per WIT idiom).
+//   * Anything more complex than a primitive crosses the boundary as
+//     JSON-encoded `string`. A future v1.1 binding using the WebAssembly
+//     Component Model with rich types is anticipated.
+//   * The "presence = capability" rule (a language supports full-replica
+//     sync iff it exports the `perspective-sync` interface, etc.) is enforced by host
+//     introspection of the component's actual export table at load time.
+//     The canonical `ad4m-language` world below lists every capability as an
+//     export; conformant languages fill in only what they implement.
+//   * Core interfaces (always available): lifecycle, agent, language-context,
+//     storage, event-emission, runtime-utils, and the capability exports.
+//     Optional extensions live in dedicated interfaces with their own world
+//     (e.g. `holochain-ext` / `ad4m-language-holochain`,
+//     `storage-fs-ext` / `ad4m-language-fs`). A Language declares which
+//     extensions it needs by targeting the matching world; runtimes that
+//     don't ship an extension refuse to load Languages that need it.
+
+package coasys:ad4m-lang@1.0.0;
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Core types
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Types shared across every interface in this package.
+interface types {
+    /// A Decentralized Identifier in any DID method, e.g. "did:key:z6Mk…".
+    type did = string;
+
+    /// A Language-scoped address, e.g. "QmAbc123". Combined with a Language
+    /// hash this forms the global Expression URI `<lang-hash>://<address>`.
+    type address = string;
+
+    /// Cryptographic hash identifying a Language by its compiled bytecode.
+    type language-hash = string;
+
+    /// Globally addressable URI of an Expression: "<language-hash>://<address>".
+    type expression-uri = string;
+
+    /// Cryptographic signature carried alongside Expressions and Links.
+    record signature {
+        signature: string,
+        key: string,
+    }
+
+    /// A signed data object minted by a Language. The exact shape of `data`
+    /// is Language-defined; in v1.0 it crosses the WIT boundary as JSON.
+    record expression {
+        author: did,
+        timestamp: u64,
+        data: string,
+        proof: signature,
+    }
+
+    /// A semantic-web triple stored inside a Perspective.
+    record link {
+        source: expression-uri,
+        predicate: expression-uri,
+        target: expression-uri,
+    }
+
+    /// A signed Link. Links are the unit of synchronization in a Neighbourhood.
+    record link-expression {
+        author: did,
+        timestamp: u64,
+        data: link,
+        proof: signature,
+    }
+
+    /// A Perspective is a (sub-)collection of LinkExpressions.
+    record perspective {
+        links: list<link-expression>,
+    }
+
+    /// Difference between two Perspective revisions.
+    record perspective-diff {
+        additions: list<link-expression>,
+        removals: list<link-expression>,
+    }
+
+    /// A Perspective wrapped as an Expression. Used as the payload of
+    /// telepresence signals, status updates, and direct messages.
+    record perspective-expression {
+        author: did,
+        timestamp: u64,
+        data: perspective,
+        proof: signature,
+    }
+
+    /// Sync state of a Link Sync Language.
+    enum sync-state {
+        loading-from-storage,
+        load-failed,
+        connected,
+        synced,
+        not-synced,
+    }
+
+    /// Information about an online agent in a telepresence-capable Language.
+    record online-agent {
+        did: did,
+        status: perspective-expression,
+    }
+
+    /// Standard error returned across the WIT boundary.
+    record error {
+        code: error-code,
+        message: string,
+    }
+
+    enum error-code {
+        not-implemented,
+        invalid-argument,
+        not-found,
+        permission-denied,
+        unavailable,
+        already-exists,
+        timeout,
+        internal,
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Lifecycle (REQUIRED export)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Required lifecycle exports. Every conformant Language MUST export this
+/// interface. The host invokes `name`, `version`, and `is-public` BEFORE
+/// `init`, so they MUST be statically resolvable (no per-instance state
+/// may be consulted).
+interface lifecycle {
+    use types.{error};
+
+    /// Statically discoverable Language name (e.g. "@coasys/note-store").
+    name: func() -> string;
+
+    /// Statically discoverable semver of the Language implementation.
+    version: func() -> string;
+
+    /// Are links/Expressions stored by this Language publicly readable on
+    /// the network? This is a property of the *implementation*, not of
+    /// the caller's permissions — a `true` answer means "don't commit
+    /// anything here you wouldn't want in public." Runtimes and UIs use
+    /// it as a privacy hint (warn before committing, annotate the
+    /// Perspective, etc.). Statically resolvable.
+    is-public: func() -> bool;
+
+    /// Initialize per-instance state. The Language SHOULD fetch its context
+    /// lazily via the imported `language-context`, `agent`, and `storage`
+    /// interfaces. MUST be called exactly once before any capability call.
+    init: func() -> result<_, error>;
+
+    /// Release all resources. After teardown returns, no other operation
+    /// MAY be invoked on this instance.
+    teardown: func() -> result<_, error>;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Capability exports (each is OPTIONAL — presence indicates the capability)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Expression capability — for Languages that mint and serve Expressions.
+///
+/// A Language implements EITHER `create` (for Languages that mint new
+/// content) OR `address-of` (for read-only Languages where addresses are
+/// deterministically derived from content), or both. The host uses export
+/// presence to decide.
+interface expression {
+    use types.{expression, error};
+
+    /// Mint a new Expression. Implemented by Languages with mutable or
+    /// immutable storage. Returns the new Expression's address.
+    create: func(content: string) -> result<string, error>;
+
+    /// Compute the deterministic address of `content` without storing it.
+    /// Implemented by read-only Languages (e.g. URL-iframe, FOAF predicates).
+    address-of: func(content: string) -> result<string, error>;
+
+    /// Retrieve an Expression by address. Returns `none` if not found.
+    get: func(address: string) -> result<option<expression>, error>;
+
+    /// Per-expression cache hint: is this specific Expression guaranteed
+    /// never to change? The host caches Expressions reported immutable
+    /// aggressively, bypassing subsequent `get` calls. Languages MAY
+    /// conservatively return `false` for any address; hosts MUST tolerate
+    /// a Language not implementing this export at all (treat as `false`).
+    is-immutable: func(address: string) -> bool;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Perspective capabilities: commit, query, sync (all independent)
+// ────────────────────────────────────────────────────────────────────────────
+//
+// The three perspective capabilities are orthogonal. A Language exports
+// whichever subset it supports:
+//
+//   perspective-commit  — write diffs into the shared state
+//   perspective-query   — read via request/response without local replica
+//   perspective-sync    — bidirectional full-replica convergence (CRDT-style)
+//
+// Full-sync Neighbourhoods (today's p-diff-sync) export all three. A DM
+// inbox exports commit (+ typically sync and peers for the owner's
+// multi-device case). A read-only DHT-backed knowledge graph exports only
+// query. A public wiki exports commit + query. And so on.
+//
+// `peers` (separate interface below) is the membership fabric that
+// perspective-sync and telepresence both rely on.
+
+/// Write capability — commit diffs into a shared Perspective.
+///
+/// A Language exporting ONLY this capability is a write-only drop box:
+/// senders commit but do not observe the resulting state. The sender-side
+/// view of an inbox Language (see `ad4m-social-conventions.md`) is
+/// the motivating example.
+///
+/// Signing: `commit` does NOT take a signer parameter. The runtime sets
+/// an ambient "acting agent" context before dispatching any Language
+/// export, and the Language consults that context via the `agent`
+/// import (`agent.sign`, `agent.did`, etc.) when signing the diff. See
+/// the prose spec §7 for the ambient-acting-agent contract.
+interface perspective-commit {
+    use types.{perspective-diff, error};
+
+    /// Commit a diff into the shared Perspective. Fire-and-forget from
+    /// the caller's point of view: no revision or state is returned.
+    /// Languages that track a revision expose it separately via
+    /// `perspective-sync.current-revision`.
+    commit: func(diff: perspective-diff) -> result<_, error>;
+}
+
+/// Read capability — answer queries against a shared Perspective.
+///
+/// Exported by Languages that serve reads WITHOUT requiring a full local
+/// replica: DHT-backed knowledge graphs, remote SPARQL endpoints, large
+/// append-only archives. A Language that replicates locally (exports
+/// `perspective-sync`) typically ALSO exports this interface to answer
+/// queries against the local replica. A Language that answers queries
+/// without any local replica exports this WITHOUT `perspective-sync` —
+/// that's the whole point of the split.
+///
+/// In v1.0 SPARQL 1.1 is the recommended query language; structured
+/// link-pattern queries are first-class for simple cases. Prolog is
+/// supported for backwards compatibility but languages MAY omit it and
+/// runtimes SHOULD prefer SPARQL where both are available.
+///
+/// The legacy `getByAuthor` / `getAll` / `linkQuery` / `prologQuery` /
+/// `infer` / `supportsPrologQueries` operations are all coalesced here.
+interface perspective-query {
+    use types.{did, expression, link-expression, perspective, error};
+
+    enum query-kind {
+        /// Find expressions authored by a given DID. Paginated.
+        expressions-by-author,
+        /// List all expressions in the Language store. Paginated.
+        expressions-all,
+        /// Pattern-match links by source/predicate/target/timestamps.
+        link-pattern,
+        /// SPARQL 1.1 query over the Language's link graph. Recommended.
+        sparql,
+        /// Prolog query — supported for backwards compatibility.
+        prolog,
+    }
+
+    /// Statically advertises which query kinds the Language supports.
+    /// Read once by the host at Language load time.
+    supported-kinds: func() -> list<query-kind>;
+
+    record by-author-query {
+        author: did,
+        count: u32,
+        page: u32,
+    }
+
+    record all-query {
+        /// Optional Language-specific filter, JSON-encoded.
+        filter: option<string>,
+        count: u32,
+        page: u32,
+    }
+
+    record link-pattern-query {
+        source: option<string>,
+        predicate: option<string>,
+        target: option<string>,
+        from-date: option<u64>,
+        until-date: option<u64>,
+        limit: option<u32>,
+    }
+
+    /// A query request. Tagged variant covering every supported kind.
+    variant request {
+        by-author(by-author-query),
+        all(all-query),
+        link-pattern(link-pattern-query),
+        /// SPARQL 1.1 query string.
+        sparql(string),
+        /// Prolog query string.
+        prolog(string),
+    }
+
+    /// A query response. The variant case matches the request case:
+    ///   by-author / all  → expressions
+    ///   link-pattern     → links
+    ///   sparql           → sparql-results (SPARQL 1.1 JSON Results format)
+    ///   prolog           → prolog-bindings (JSON-encoded list of var maps)
+    ///
+    /// Languages MUST return `error::not-implemented` for kinds they do
+    /// not advertise via `supported-kinds`.
+    variant response {
+        expressions(list<expression>),
+        links(list<link-expression>),
+        perspective(perspective),
+        sparql-results(string),
+        prolog-bindings(string),
+    }
+
+    /// Execute a query.
+    run: func(req: request) -> result<response, error>;
+}
+
+/// Full-replica sync capability — bidirectional CRDT-style state
+/// convergence between peers.
+///
+/// Exported by Languages that replicate the full shared Perspective
+/// locally and keep it in sync with remote participants (today's
+/// p-diff-sync is the canonical example). Languages exporting this
+/// capability typically also export `peers` for membership routing.
+///
+/// Note the absence of `commit` here — committing is a separate
+/// capability (`perspective-commit`). A full-sync Language exports
+/// both. A read-only replicator would export `perspective-sync` alone
+/// (though that's unusual).
+interface perspective-sync {
+    use types.{perspective, perspective-diff, error};
+
+    /// Sync with the network and return any new diff observed since
+    /// the previous call. The Language MAY also push diffs out-of-band
+    /// by calling `event-emission.emit-perspective-diff` (e.g. when an
+    /// async signal arrives via a transport-specific event handler).
+    sync: func() -> result<perspective-diff, error>;
+
+    /// Return the full Perspective at the current revision.
+    render: func() -> result<perspective, error>;
+
+    /// Current revision identifier, if the Language tracks one. Useful
+    /// for caching and for detecting whether `sync()` produced new
+    /// state.
+    current-revision: func() -> result<option<string>, error>;
+}
+
+/// Peer fabric membership — in-push and out-pull of the agent set
+/// participating in a shared instance.
+///
+/// Exported by Languages that operate on a multi-agent peer set, i.e.
+/// Languages exporting `perspective-sync` or `telepresence`. Pure
+/// commit-only drop boxes and pure query-only backends don't need it.
+/// The spec does NOT enforce this: a Language could export sync or
+/// telepresence without `peers`, but the behavior in that case is
+/// degenerate (no multi-local-agent support, no way to enumerate
+/// remotes). Treat `peers` as a de-facto prerequisite for peer-fabric
+/// capabilities.
+interface peers {
+    use types.{did, error};
+
+    /// Update the set of local agents participating in this instance.
+    /// Called by the runtime at instance creation and whenever a local
+    /// agent joins or leaves the node. Used for:
+    ///   - routing incoming telepresence signals to the right local
+    ///     agent
+    ///   - advertising local membership to remote peers via `remote`
+    ///     (remote peers see us as "Alice and Bob both live here")
+    ///   - excluding all local agents from `remote()` on the local side
+    /// NOT used for commit signing — that's handled by the runtime's
+    /// ambient acting-agent context consumed by `agent.sign` /
+    /// `agent.did`.
+    set-local: func(agents: list<did>) -> result<_, error>;
+
+    /// DIDs of remote agents currently participating in this instance
+    /// (excludes all local agents from the most recent `set-local`
+    /// call).
+    remote: func() -> result<list<did>, error>;
+}
+
+/// Telepresence capability — ephemeral signals between online agents.
+interface telepresence {
+    use types.{did, perspective-expression, online-agent, error};
+
+    set-online-status: func(status: perspective-expression) -> result<_, error>;
+    get-online-agents: func() -> result<list<online-agent>, error>;
+    send-signal: func(recipient: did, payload: perspective-expression) -> result<_, error>;
+    send-broadcast: func(payload: perspective-expression) -> result<_, error>;
+}
+
+// Direct Message is NOT a first-class capability in v1.0. A DM inbox
+// is just a Language exporting `perspective-commit` (for senders) plus
+// optionally `perspective-sync` + `peers` (for the owner's multi-device
+// case), with the recipient DID baked into the template at clone time.
+// See `ad4m-social-conventions.md` for the DM-as-inbox pattern,
+// the friends-as-perspective convention, and well-known `ad4m://`
+// predicates for inbox discovery.
+
+/// Language-Source capability — implemented by the Language Language, which
+/// stores other Languages' source bundles.
+interface language-source {
+    use types.{address, error};
+
+    get-source: func(addr: address) -> result<string, error>;
+}
+
+/// UI capability — JS source for web components rendering Expressions and
+/// the Language's settings panel.
+interface ui {
+    expression-icon: func() -> string;
+    expression-constructor-icon: func() -> string;
+    settings-icon: func() -> string;
+}
+
+/// Interactions capability — describes user-invocable actions on a given
+/// Expression of this Language.
+interface interactions {
+    use types.{address};
+
+    record parameter {
+        name: string,
+        type-name: string,
+    }
+
+    record interaction {
+        label: string,
+        name: string,
+        parameters: list<parameter>,
+    }
+
+    list-for: func(addr: address) -> list<interaction>;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Asynchronous event handler exports
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Event handlers — operations the host calls on the Language when external
+/// events arrive. Each is OPTIONAL; the host invokes only those the Language
+/// actually exports.
+///
+/// Extension-specific event handlers (e.g. `holochain-events.handle-holochain-signal`)
+/// live in their own interfaces alongside the extension that produces them.
+interface event-handlers {
+    use types.{perspective-expression, did};
+
+    /// An incoming telepresence signal from another agent.
+    /// `recipient-did` is `some` for directed signals, `none` for broadcasts.
+    handle-telepresence-signal: func(
+        payload: perspective-expression,
+        recipient-did: option<did>,
+    );
+
+    /// Resource-constrained host hooks (mobile, browser). All optional.
+    on-pause: func();
+    on-resume: func();
+    on-memory-pressure: func();
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Imports — runtime services the Language calls
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Agent identity services.
+interface agent {
+    use types.{did, expression, error};
+
+    /// DID of the primary local agent for this Language instance.
+    did: func() -> did;
+    signing-key-id: func() -> string;
+    sign: func(payload: list<u8>) -> result<list<u8>, error>;
+    sign-string-hex: func(payload: string) -> result<string, error>;
+    create-signed-expression: func(data: string) -> result<expression, error>;
+
+    /// Multi-user nodes: list every local agent DID.
+    all-local-user-dids: func() -> list<did>;
+    did-for-user: func(email: string) -> result<did, error>;
+    create-signed-expression-for-user: func(
+        email: string,
+        data: string,
+    ) -> result<expression, error>;
+}
+
+/// Per-instance Language context: own address and configuration.
+interface language-context {
+    /// The address of *this* Language on the network.
+    address: func() -> string;
+
+    /// Custom settings for this instance, JSON-encoded.
+    settings: func() -> string;
+}
+
+/// Persistent storage exposed as a key/value handle. Replaces the v0.x
+/// `language-storage-directory` filesystem path so that browser, mobile,
+/// and encrypted runtimes can implement it without exposing a real path.
+///
+/// **Core**: every runtime implements this interface. Values are bytes;
+/// Languages serialize structured data themselves. Keys are scoped per
+/// Language instance by the host, so two Language instances cannot read
+/// each other's entries even if they pick the same key.
+///
+/// **Durability is best-effort.** A runtime that has no persistent
+/// backend MAY implement this as in-memory-only; writes are visible to
+/// subsequent reads within the same Language instance but may not
+/// survive restarts. Languages MUST NOT rely on cross-instance
+/// durability semantics beyond "writes are visible to subsequent reads
+/// from the same Language instance." Languages that genuinely need
+/// filesystem-like semantics (shared paths, custom layouts, large
+/// blobs) import the optional `storage-fs-ext` extension (see below).
+interface storage {
+    use types.{error};
+
+    get: func(key: string) -> result<option<list<u8>>, error>;
+    put: func(key: string, value: list<u8>) -> result<_, error>;
+    delete: func(key: string) -> result<bool, error>;
+    list-keys: func(prefix: string) -> result<list<string>, error>;
+}
+
+/// Event emission — the Language pushes events to the runtime, which fans
+/// them out to subscribed clients internally. Fire-and-forget; the runtime
+/// MUST NOT block the Language while delivering.
+interface event-emission {
+    use types.{perspective-diff, perspective-expression, sync-state, did};
+
+    /// A new perspective diff is available.
+    emit-perspective-diff: func(diff: perspective-diff);
+
+    /// Sync state changed.
+    emit-sync-state-change: func(state: sync-state);
+
+    /// Forward an incoming telepresence signal to AD4M subscribers.
+    emit-telepresence-signal: func(
+        payload: perspective-expression,
+        recipient-did: option<did>,
+    );
+
+    /// General-purpose AD4M signal-bus emission. JSON-encoded.
+    emit-signal: func(data: string);
+}
+
+/// General runtime utilities — content-address hash, clock, log,
+/// cross-Language resolution.
+interface runtime-utils {
+    use types.{expression, expression-uri, error};
+
+    enum log-level { trace, debug, info, warn, error }
+
+    log: func(level: log-level, message: string, structured: option<string>);
+
+    /// Canonical AD4M content-address hash. Input is opaque bytes (passed
+    /// as a string for the v1.0 JSON-boundary; a future revision with the
+    /// Component Model will take `list<u8>`). Output is the deterministic
+    /// address string derived from those bytes via the AD4M hash
+    /// algorithm: SHA-256 → CIDv1 (DAG-Protobuf) → base58btc, prefixed
+    /// with "Qm". Every content-addressed Language uses this to compute
+    /// Expression addresses; runtimes MUST implement it identically so
+    /// two runtimes produce the same address for the same content.
+    hash: func(data: string) -> string;
+
+    /// Wall-clock time in milliseconds since the Unix epoch. Runtimes MAY
+    /// virtualize time for replay/testing.
+    now-ms: func() -> u64;
+
+    /// Resolve an Expression in *another* Language by URI. The host is
+    /// responsible for loading the target Language if it's not already
+    /// installed.
+    resolve-expression: func(uri: expression-uri) -> result<option<expression>, error>;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Storage File I/O extension (OPTIONAL — extension URI: storage-fs.coasys.ai/v1)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Storage File I/O extension — raw read/write access to a filesystem-like
+/// storage layer at Language-chosen paths. NOT part of the AD4M-LANG/1.0
+/// core: the core `storage` interface (above) is the portable way to persist
+/// per-Language data. This extension exists for the cases core storage cannot
+/// express:
+///   * Custom storage layouts (one file per expression, nested directories)
+///   * Large blobs where the KV's full-rewrite-on-put semantics are wasteful
+///   * Paths OUTSIDE the per-Language storage scope, e.g. shared directories
+///     that survive when per-agent data is wiped (test fixtures storing
+///     Language bundles in a harness-shared path)
+///
+/// Paths are opaque strings; the runtime maps them to some backend (a real
+/// filesystem, IndexedDB with a path-like key scheme, object store, HTTP API,
+/// …). The runtime's sandbox (e.g. Deno's filesystem permission allow-list)
+/// governs which paths the Language can actually reach; out-of-scope paths
+/// fail with a permission error, not a contract violation.
+///
+/// Runtimes that don't ship this extension refuse to load Languages that
+/// target the `ad4m-language-fs` world. Languages that need it MUST target
+/// `ad4m-language-fs` and not the base `ad4m-language` world — host-side
+/// introspection of the world declaration is how the "language needs raw
+/// file I/O" property is advertised.
+interface storage-fs-ext {
+    use types.{error};
+
+    /// Read the file/blob at `path` as UTF-8 bytes. Returns
+    /// `error::not-found` if the path is absent; other failures use
+    /// `error::internal` or `error::permission-denied`.
+    read-file: func(path: string) -> result<list<u8>, error>;
+
+    /// Write the file/blob at `path`. Creates intermediate "directories"
+    /// (or whatever the runtime uses to represent nested paths) as needed.
+    write-file: func(path: string, content: list<u8>) -> result<_, error>;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Holochain extension (OPTIONAL — extension URI: holochain.coasys.ai/v1)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Holochain extension — runtime services the Language calls.
+/// NOT part of the AD4M-LANG/1.0 core. Languages that use Holochain as their
+/// transport import this interface; runtimes that don't ship Holochain refuse
+/// to load such Languages.
+///
+/// Languages that import `holochain-ext` typically also export
+/// `holochain-events` (below) to receive signals routed back by the host
+/// via the DnaHash → instance map built at `register-dnas`.
+interface holochain-ext {
+    use types.{error};
+
+    record dna-spec {
+        nick: string,
+        source: dna-source,
+    }
+
+    variant dna-source {
+        path(string),
+        bytes(list<u8>),
+    }
+
+    record app-info {
+        app-id: string,
+        dna-hash: string,
+        cell-id: string,
+    }
+
+    record zome-call {
+        dna-nick: string,
+        zome: string,
+        fn-name: string,
+        params: string,
+    }
+
+    register-dnas: func(dnas: list<dna-spec>) -> result<list<app-info>, error>;
+
+    call: func(
+        dna-nick: string,
+        zome: string,
+        fn-name: string,
+        params: string,
+    ) -> result<string, error>;
+
+    /// Batched parallel zome calls. Read-only operations only — concurrent
+    /// writes will race the source chain.
+    call-async: func(
+        calls: list<zome-call>,
+        timeout-ms: option<u32>,
+    ) -> result<list<string>, error>;
+}
+
+/// Holochain extension — event handlers the Language exports to receive
+/// signals from registered DNAs. NOT part of the core; only meaningful in
+/// combination with `holochain-ext`.
+interface holochain-events {
+    use types.{did};
+
+    /// A signal arrived from a Holochain DNA registered by this Language.
+    /// `dna-nick` identifies which DNA inside the Language; `agent-did`
+    /// identifies which local agent the cell belongs to (relevant for
+    /// multi-user nodes). `signal-data` is JSON-encoded.
+    handle-holochain-signal: func(
+        dna-nick: string,
+        agent-did: did,
+        signal-data: string,
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Worlds
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Minimum world: just lifecycle plus the always-available imports. A
+/// Language targeting this world implements no capabilities (degenerate;
+/// useful only for tests and templates).
+world ad4m-language-minimal {
+    import agent;
+    import language-context;
+    import storage;
+    import event-emission;
+    import runtime-utils;
+
+    export lifecycle;
+}
+
+/// Canonical world for AD4M Languages. Lists every capability as an export;
+/// at load time the host introspects the component's actual export table
+/// and decides which capabilities are present (the "presence = capability"
+/// rule). Conformant Languages target this world and fill in only the
+/// exports they implement; the rest are absent.
+///
+/// (Note: WIT 0.2 worlds nominally require all listed exports. The Component
+/// Model is moving toward optional exports; until that lands, bindgen-strict
+/// implementations MAY split this into one world per capability combination.
+/// The semantic intent is host-side introspection regardless.)
+world ad4m-language {
+    import agent;
+    import language-context;
+    import storage;
+    import event-emission;
+    import runtime-utils;
+
+    export lifecycle;
+    export expression;
+    export perspective-commit;
+    export perspective-query;
+    export perspective-sync;
+    export peers;
+    export telepresence;
+    export language-source;
+    export ui;
+    export interactions;
+    export event-handlers;
+}
+
+/// World for Languages that need the Holochain extension. Runtimes MUST
+/// implement `holochain-ext` to load components targeting this world.
+/// Languages typically also export `holochain-events` to receive routed
+/// signals.
+world ad4m-language-holochain {
+    include ad4m-language;
+    import holochain-ext;
+    export holochain-events;
+}
+
+/// World for Languages that need the Storage File I/O extension.
+/// Runtimes MUST implement `storage-fs-ext` to load components targeting
+/// this world. A runtime that cannot back raw file/blob I/O (e.g. a
+/// sandboxed browser runtime without a suitable path-keyed backend)
+/// simply refuses to load these components; Languages that only use
+/// core `storage` are unaffected.
+///
+/// Typical consumer: test fixtures or persistence Languages that need
+/// cross-agent shared paths. See `language-interface-spec.md` §7.6.
+world ad4m-language-fs {
+    include ad4m-language;
+    import storage-fs-ext;
+}
+
+/// World for Languages that need BOTH Holochain and File I/O extensions.
+/// Runtimes MUST implement both `holochain-ext` and `storage-fs-ext` to
+/// load components targeting this world.
+world ad4m-language-holochain-fs {
+    include ad4m-language;
+    import holochain-ext;
+    import storage-fs-ext;
+    export holochain-events;
+}
