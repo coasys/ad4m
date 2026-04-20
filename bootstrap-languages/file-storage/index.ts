@@ -13,7 +13,7 @@ import {
     holochainCall,
 } from "@coasys/ad4m-ldk";
 import { FileStorage } from "./file-storage.ts";
-import { DNA, DNA_NICK } from "./build/dna.js";
+import { BUNDLE, DNA_NICK } from "./build/happ.js";
 import type { FileExpression, FileMetadata } from "./types.ts";
 
 const language = defineLanguage({
@@ -21,7 +21,8 @@ const language = defineLanguage({
     version: "0.1.0",
 
     async init() {
-        await holochainRegisterDnas([{ file: DNA, nick: DNA_NICK } as any]);
+        const dnaBundle = Buffer.from(BUNDLE, "base64");
+        await holochainRegisterDnas([{ file: dnaBundle, nick: DNA_NICK } as any]);
     },
 
     async teardown() {},
