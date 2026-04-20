@@ -1,7 +1,7 @@
 import { PerspectiveClient } from "./PerspectiveClient";
 
 // ──────────────────────────────────────────────────────────
-//  WS-7: PerspectiveClient proxy cache
+// PerspectiveClient proxy cache (WeakRef)
 // ──────────────────────────────────────────────────────────
 
 function createMockApolloClient(perspectiveResponse: any) {

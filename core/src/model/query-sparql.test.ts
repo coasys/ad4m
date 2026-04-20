@@ -245,10 +245,10 @@ describe('buildSPARQLQuery — IRI correctness', () => {
 });
 
 // ──────────────────────────────────────────────────────────
-//  WS-1: SPARQL-level pagination
+// SPARQL-level pagination (LIMIT/OFFSET in generated queries)
 // ──────────────────────────────────────────────────────────
 
-describe('WS-1: SPARQL-level pagination', () => {
+describe('SPARQL-level pagination', () => {
   const modelClass: any = {};
 
   it('includes LIMIT in SPARQL when query specifies limit', () => {

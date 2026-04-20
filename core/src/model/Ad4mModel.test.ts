@@ -2398,7 +2398,7 @@ describe("Lazy Conformance Filters", () => {
 });
 
 // ──────────────────────────────────────────────────────────
-//  WS-1: instancesFromQueryResult pagination behaviour
+// instancesFromQueryResult — SPARQL vs JS pagination behaviour
 // ──────────────────────────────────────────────────────────
 
 describe("instancesFromQueryResult — SPARQL vs JS pagination", () => {
@@ -2448,7 +2448,7 @@ describe("instancesFromQueryResult — SPARQL vs JS pagination", () => {
 });
 
 // ──────────────────────────────────────────────────────────
-//  WS-2: deepQuery opt-in — getter evaluation
+// deepQuery opt-in — getter evaluation on collection queries
 // ──────────────────────────────────────────────────────────
 
 describe("deepQuery opt-in — getter evaluation", () => {
