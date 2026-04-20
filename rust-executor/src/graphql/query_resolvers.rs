@@ -122,21 +122,28 @@ impl Query {
 
         if !did_match {
             // Look up the agent expression via the agent language
+            log::info!("agentByDID: looking up remote agent expression for {}", did);
             let controller = LanguageController::global_instance();
             let agent_lang = controller.get_agent_language().await;
             if let Ok(lang) = agent_lang {
                 let lang_address = lang.address().to_string();
+                log::info!("agentByDID: fetching expression from agent language {} for {}", lang_address, did);
                 match controller.get_expression(&lang_address, &did).await {
                     Ok(Some(expr_json)) => {
-                        let agent: Option<Agent> = serde_json::from_value(
-                            expr_json
-                                .get("data")
-                                .cloned()
-                                .unwrap_or(serde_json::Value::Null),
-                        )
-                        .ok();
-                        // Verify link signatures in the agent's perspective,
-                        // same as agent_me() does
+                        let data_val = expr_json
+                            .get("data")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
+                        let agent: Option<Agent> = serde_json::from_value(data_val.clone()).ok();
+                        if agent.is_none() {
+                            log::warn!(
+                                "agentByDID: got expression for {} but failed to deserialize 'data' as Agent. data keys: {:?}",
+                                did,
+                                data_val.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                            );
+                        } else {
+                            log::info!("agentByDID: successfully resolved agent for {}", did);
+                        }
                         let agent = agent.map(|mut a| {
                             if a.perspective.is_some() {
                                 a.perspective.as_mut().unwrap().verify_link_signatures();
@@ -145,7 +152,10 @@ impl Query {
                         });
                         Ok(agent)
                     }
-                    Ok(None) => Ok(None),
+                    Ok(None) => {
+                        log::info!("agentByDID: no expression found for {} (not yet on DHT?)", did);
+                        Ok(None)
+                    }
                     Err(e) => {
                         log::warn!("agentByDID: failed to get expression for {}: {}", did, e);
                         Err(FieldError::new(
@@ -155,6 +165,7 @@ impl Query {
                     }
                 }
             } else {
+                log::warn!("agentByDID: agent language not available, cannot look up {}", did);
                 Ok(None)
             }
         } else {

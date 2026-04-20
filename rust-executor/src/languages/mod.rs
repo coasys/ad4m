@@ -2455,15 +2455,23 @@ impl LanguageController {
         let result = self.execute_on_language(lang_address, &script).await?;
 
         if result.trim() == "null" || result.trim() == "undefined" || result.is_empty() {
+            log::debug!("get_expression({}, {}): language returned null/empty", lang_address, expression_address);
             return Ok(None);
         }
 
         let mut expr_json: JsonValue =
-            serde_json::from_str(&result).map_err(|e| LanguageError::SerializationError {
-                message: format!("Failed to parse expression: {}", e),
+            serde_json::from_str(&result).map_err(|e| {
+                log::warn!(
+                    "get_expression({}, {}): JSON parse failed. Raw result (first 500 chars): {}. Error: {}",
+                    lang_address, expression_address, &result[..result.len().min(500)], e
+                );
+                LanguageError::SerializationError {
+                    message: format!("Failed to parse expression: {}", e),
+                }
             })?;
 
         if expr_json.is_null() {
+            log::debug!("get_expression({}, {}): parsed to JSON null", lang_address, expression_address);
             return Ok(None);
         }
 

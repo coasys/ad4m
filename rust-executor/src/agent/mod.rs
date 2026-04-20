@@ -517,15 +517,26 @@ impl AgentService {
     /// Works for both the main agent and managed users.
     /// Strips link decorations before publishing.
     pub async fn publish_agent_to_language(context: &AgentContext) -> Result<(), AnyError> {
+        log::info!("publish_agent_to_language: starting for context {:?}", context.user_email);
         let controller = crate::languages::LanguageController::global_instance();
         let agent_lang = controller
             .get_agent_language()
             .await
-            .map_err(|e| anyhow!("Agent language not available: {}", e))?;
+            .map_err(|e| {
+                log::error!("publish_agent_to_language: agent language not available: {}", e);
+                anyhow!("Agent language not available: {}", e)
+            })?;
+
+        let lang_addr = agent_lang.address().to_string();
+        log::info!("publish_agent_to_language: agent language address={}", lang_addr);
 
         let agent = Self::get_agent_for_context(context)?;
         let context_did = did_for_context(context)?;
         if agent.did != context_did {
+            log::error!(
+                "publish_agent_to_language: DID mismatch! stored={}, signing={}",
+                agent.did, context_did
+            );
             return Err(anyhow!(
                 "DID mismatch: stored profile has DID {} but signing context resolves to {}",
                 agent.did,
@@ -533,12 +544,22 @@ impl AgentService {
             ));
         }
         let agent_json = agent_to_publish_json(&agent)?;
+        log::info!(
+            "publish_agent_to_language: calling expression_create for did={} on language {}",
+            agent.did, lang_addr
+        );
         controller
             .expression_create(agent_lang.address(), agent_json, context)
             .await
-            .map_err(|e| anyhow!("Failed to publish agent to language: {}", e))?;
+            .map_err(|e| {
+                log::error!(
+                    "publish_agent_to_language: expression_create FAILED for did={}: {}",
+                    agent.did, e
+                );
+                anyhow!("Failed to publish agent to language: {}", e)
+            })?;
 
-        log::info!("Published agent {} to agent language", agent.did);
+        log::info!("publish_agent_to_language: SUCCESS — published agent {} to language {}", agent.did, lang_addr);
         Ok(())
     }
 
