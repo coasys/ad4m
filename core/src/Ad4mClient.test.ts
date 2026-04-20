@@ -32,6 +32,15 @@ import { PerspectiveState } from "./perspectives/PerspectiveHandle";
 
 jest.setTimeout(15000)
 
+/** Wait for a mock function to reach the expected call count (with timeout). */
+async function waitForCalls(fn: jest.Mock, count: number, timeoutMs = 2000): Promise<void> {
+    const start = Date.now();
+    while (fn.mock.calls.length < count) {
+        if (Date.now() - start > timeoutMs) break;
+        await new Promise(r => setTimeout(r, 50));
+    }
+}
+
 async function createGqlServer(port: number) {
     const schema = await buildSchema({
         resolvers: [
@@ -730,6 +739,7 @@ describe('Ad4mClient', () => {
             link.target = 'perspective://Qm34589a3ccc0'
             await perspective.add(link)
 
+            await waitForCalls(linkAdded, 1)
             expect(linkAdded).toBeCalledTimes(1)
             expect(linkRemoved).toBeCalledTimes(0)
 
@@ -738,6 +748,7 @@ describe('Ad4mClient', () => {
             await perspective.addListener('link-removed', linkRemoved)
             await perspective.remove(testLink)
 
+            await waitForCalls(linkRemoved, 1)
             expect(linkAdded).toBeCalledTimes(1)
             expect(linkRemoved).toBeCalledTimes(1)
         })
@@ -750,6 +761,7 @@ describe('Ad4mClient', () => {
             await perspective.addListener('link-added', linkAdded)
             await perspective.add({source: 'root', target: 'neighbourhood://Qm12345'})
 
+            await waitForCalls(linkAdded, 1)
             expect(linkAdded).toBeCalledTimes(1)
 
             linkAdded.mockClear();
@@ -759,7 +771,10 @@ describe('Ad4mClient', () => {
             await perspective.removeListener('link-added', linkAdded)
             await perspective.add({source: 'root', target: 'neighbourhood://Qm123456'})
 
-            expect(linkAdded).toBeCalledTimes(1)
+            // After removeListener, the callback should NOT fire again.
+            // Give the subscription time to deliver (if it were still active).
+            await new Promise(r => setTimeout(r, 200));
+            expect(linkAdded).toBeCalledTimes(0)
         })
 
         it('addSyncStateChangeListener() smoke test', async () => {
@@ -770,6 +785,7 @@ describe('Ad4mClient', () => {
             await perspective.addSyncStateChangeListener(syncState)
             await perspective.add({source: 'root', target: 'neighbourhood://Qm12345'})
 
+            await waitForCalls(syncState, 1)
             expect(syncState).toBeCalledTimes(1)
             expect(syncState).toBeCalledWith(PerspectiveState.Synced)
         })
