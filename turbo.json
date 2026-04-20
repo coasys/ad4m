@@ -43,6 +43,39 @@
     "@coasys/ad4m-ldk#build": {
       "outputs": ["lib/**"]
     },
+    "@coasys/perspective-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/perspective-diff-sync#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/agent-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/centralized-agent-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/centralized-perspective-diff-sync#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/centralized-file-storage#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/language-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/neighbourhood-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/file-storage#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/eas#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/embedding-vector-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
 
     "build-dapp": {
       "dependsOn": ["@coasys/ad4m#build", "@coasys/ad4m-connect#build", "@coasys/dapp#build"],
