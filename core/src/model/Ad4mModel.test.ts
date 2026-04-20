@@ -2396,3 +2396,195 @@ describe("Lazy Conformance Filters", () => {
     expect(shacl.name).toBe("LazyParent2");
   });
 });
+
+// ──────────────────────────────────────────────────────────
+//  WS-1: instancesFromQueryResult pagination behaviour
+// ──────────────────────────────────────────────────────────
+
+describe("instancesFromQueryResult — SPARQL vs JS pagination", () => {
+  @Model({ name: "PaginationTestChannel" })
+  class PaginationTestChannel extends Ad4mModel {
+    @Flag({ through: "flux://entry_type", value: "flux://channel" })
+    type: string = "";
+
+    @Property({ through: "flux://name", resolveLanguage: "literal" })
+    name: string = "";
+  }
+
+  const mockPerspective: any = {
+    uuid: "test-uuid",
+    querySparql: jest.fn().mockResolvedValue([]),
+    get: jest.fn().mockResolvedValue([]),
+    getExpression: jest.fn().mockResolvedValue(null),
+  };
+
+  it("does NOT slice results when SPARQL pagination was applied", async () => {
+    const grouped = Array.from({ length: 5 }, (_, i) => ({
+      source_uri: `flux://ch-${i}`,
+      links: [
+        { predicate: "flux://entry_type", target: "flux://channel", author: "did:key:a", timestamp: String(1000 + i) },
+        { predicate: "flux://name", target: `literal:string:Channel${i}`, author: "did:key:a", timestamp: String(1000 + i) },
+      ],
+    }));
+
+    const query = { limit: 5, offset: 0 };
+    const result = await (PaginationTestChannel as any).instancesFromQueryResult(mockPerspective, query, grouped);
+    expect(result.results.length).toBe(5);
+  });
+
+  it("applies JS-level slicing as fallback when JS-only filters exist", async () => {
+    const grouped = Array.from({ length: 10 }, (_, i) => ({
+      source_uri: `flux://ch-${i}`,
+      links: [
+        { predicate: "flux://entry_type", target: "flux://channel", author: "did:key:a", timestamp: String(1000 + i) },
+        { predicate: "flux://name", target: `literal:string:Ch${i}`, author: "did:key:a", timestamp: String(1000 + i) },
+      ],
+    }));
+
+    const query = { limit: 3, offset: 0, where: { author: "did:key:a" } };
+    const result = await (PaginationTestChannel as any).instancesFromQueryResult(mockPerspective, query, grouped);
+    expect(result.results.length).toBe(3);
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+//  WS-2: deepQuery opt-in — getter evaluation
+// ──────────────────────────────────────────────────────────
+
+describe("deepQuery opt-in — getter evaluation", () => {
+  @Model({ name: "DeepQueryTestMessage" })
+  class DeepQueryTestMessage extends Ad4mModel {
+    @Flag({ through: "flux://entry_type", value: "flux://message" })
+    type: string = "";
+
+    @Property({ through: "flux://body", resolveLanguage: "literal" })
+    body: string = "";
+
+    @Property({
+      through: "flux://has_reply",
+      getter: `SELECT ?target WHERE { ?source <flux://has_reply> ?target . } LIMIT 1`,
+    })
+    replyingTo?: string;
+
+    @ReadOnly({
+      through: "flux://is_popular",
+      getter: `ASK WHERE { ?source <flux://is_popular> "true" . }`,
+    })
+    isPopular: boolean = false;
+
+    @HasMany({ through: "flux://reaction" })
+    reactions: string[] = [];
+  }
+
+  let sparqlCalls: string[];
+  const mockPerspective: any = {
+    uuid: "test-uuid",
+    querySparql: jest.fn(async (q: string) => {
+      sparqlCalls.push(q);
+      return [];
+    }),
+    get: jest.fn().mockResolvedValue([]),
+    getExpression: jest.fn().mockResolvedValue(null),
+    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("DeepQueryTestMessage"),
+  };
+
+  beforeEach(() => {
+    sparqlCalls = [];
+    mockPerspective.querySparql.mockClear();
+    mockPerspective.get.mockClear();
+  });
+
+  function makeMessageRows(count: number) {
+    return Array.from({ length: count }, (_, i) => ({
+      source_uri: `flux://msg-${i}`,
+      links: [
+        { predicate: "flux://entry_type", target: "flux://message", author: "did:key:a", timestamp: String(2000 + i) },
+        { predicate: "flux://body", target: `literal:string:Hello${i}`, author: "did:key:a", timestamp: String(2000 + i) },
+      ],
+    }));
+  }
+
+  it("skips getter evaluation on collection queries by default", async () => {
+    const grouped = makeMessageRows(5);
+    const result = await (DeepQueryTestMessage as any).instancesFromQueryResult(mockPerspective, {}, grouped);
+    expect(result.results.length).toBe(5);
+
+    const getterCalls = sparqlCalls.filter(
+      (q) => q.includes("flux://has_reply") || q.includes("flux://is_popular")
+    );
+    expect(getterCalls.length).toBe(0);
+  });
+
+  it("evaluates getter properties when deepQuery is true", async () => {
+    const grouped = makeMessageRows(3);
+    const result = await (DeepQueryTestMessage as any).instancesFromQueryResult(mockPerspective, { deepQuery: true }, grouped);
+    expect(result.results.length).toBe(3);
+
+    const getterCalls = sparqlCalls.filter(
+      (q) => q.includes("flux://has_reply") || q.includes("flux://is_popular")
+    );
+    expect(getterCalls.length).toBe(6); // 3 instances × 2 getters
+  });
+
+  it("single-instance get() still evaluates getters by default", async () => {
+    const instance = new DeepQueryTestMessage(mockPerspective, "flux://msg-single");
+    mockPerspective.querySparql.mockImplementation(async (q: string) => {
+      sparqlCalls.push(q);
+      if (q.includes("flux://msg-single") && !q.includes("flux://has_reply") && !q.includes("flux://is_popular")) {
+        return [
+          { source: "flux://msg-single", predicate: "flux://entry_type", target: "flux://message", author: "did:key:a", timestamp: "3000" },
+          { source: "flux://msg-single", predicate: "flux://body", target: "literal:string:Hello", author: "did:key:a", timestamp: "3000" },
+        ];
+      }
+      return [];
+    });
+
+    await instance.get();
+    const getterCalls = sparqlCalls.filter(
+      (q) => q.includes("flux://has_reply") || q.includes("flux://is_popular")
+    );
+    expect(getterCalls.length).toBe(2);
+  });
+
+  describe("Ad4mModel.evaluateGetters()", () => {
+    it("resolves getters for a batch of instances", async () => {
+      const grouped = makeMessageRows(4);
+      const result = await (DeepQueryTestMessage as any).instancesFromQueryResult(mockPerspective, {}, grouped);
+      sparqlCalls = [];
+
+      await DeepQueryTestMessage.evaluateGetters(result.results.slice(0, 2), mockPerspective, ["replyingTo"]);
+
+      const replyCalls = sparqlCalls.filter((q) => q.includes("flux://has_reply"));
+      expect(replyCalls.length).toBe(2);
+      const popularCalls = sparqlCalls.filter((q) => q.includes("flux://is_popular"));
+      expect(popularCalls.length).toBe(0);
+    });
+
+    it("evaluates all getters when propertyNames is omitted", async () => {
+      const grouped = makeMessageRows(2);
+      const result = await (DeepQueryTestMessage as any).instancesFromQueryResult(mockPerspective, {}, grouped);
+      sparqlCalls = [];
+
+      await DeepQueryTestMessage.evaluateGetters(result.results, mockPerspective);
+
+      const replyCalls = sparqlCalls.filter((q) => q.includes("flux://has_reply"));
+      const popularCalls = sparqlCalls.filter((q) => q.includes("flux://is_popular"));
+      expect(replyCalls.length).toBe(2);
+      expect(popularCalls.length).toBe(2);
+    });
+
+    it("handles empty array gracefully", async () => {
+      sparqlCalls = [];
+      await DeepQueryTestMessage.evaluateGetters([], mockPerspective);
+      expect(sparqlCalls.length).toBe(0);
+    });
+  });
+
+  describe("deepQuery via ModelQueryBuilder", () => {
+    it("deepQuery() method sets deepQuery flag on queryParams", () => {
+      const builder = DeepQueryTestMessage.query(mockPerspective);
+      (builder as any).deepQuery();
+      expect((builder as any).queryParams.deepQuery).toBe(true);
+    });
+  });
+});

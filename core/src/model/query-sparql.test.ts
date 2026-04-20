@@ -244,6 +244,94 @@ describe('buildSPARQLQuery — IRI correctness', () => {
   });
 });
 
+// ──────────────────────────────────────────────────────────
+//  WS-1: SPARQL-level pagination
+// ──────────────────────────────────────────────────────────
+
+describe('WS-1: SPARQL-level pagination', () => {
+  const modelClass: any = {};
+
+  it('includes LIMIT in SPARQL when query specifies limit', () => {
+    const query = { limit: 30 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('LIMIT 30');
+    expect(sparql).toContain('SELECT DISTINCT ?source');
+  });
+
+  it('includes OFFSET in SPARQL when query specifies offset > 0', () => {
+    const query = { limit: 20, offset: 40 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('LIMIT 20');
+    expect(sparql).toContain('OFFSET 40');
+  });
+
+  it('does NOT include OFFSET when offset is 0', () => {
+    const query = { limit: 10, offset: 0 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('LIMIT 10');
+    expect(sparql).not.toContain('OFFSET');
+  });
+
+  it('includes ORDER BY in subquery when query.order is specified', () => {
+    const query = { limit: 10, order: { name: 'DESC' as const } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('ORDER BY DESC(');
+    expect(sparql).toContain('LIMIT 10');
+  });
+
+  it('defaults to ORDER BY timestamp when paginating without explicit order', () => {
+    const query = { limit: 30 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('ORDER BY ASC(?pg_minTs)');
+  });
+
+  it('does NOT push pagination to SPARQL when JS-only where filters exist (author)', () => {
+    const query = { limit: 10, where: { author: 'did:key:abc' } };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('LIMIT');
+    expect(sparql).not.toContain('OFFSET');
+  });
+
+  it('does NOT push pagination to SPARQL when JS-only where filters exist (gt operator)', () => {
+    const meta: any = {
+      properties: {
+        rating: { name: 'rating', predicate: 'flux://rating', required: true, resolveLanguage: 'literal' },
+      },
+      relations: {},
+    };
+    const query = { limit: 10, where: { rating: { gt: 5 } } };
+    const sparql = buildSPARQLQuery(meta, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('LIMIT');
+  });
+
+  it('wraps pagination in a subquery (outer SELECT fetches all links for the page)', () => {
+    const query = { limit: 5, offset: 10 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('SELECT ?source ?predicate ?target ?author ?timestamp');
+    expect(sparql).toContain('SELECT DISTINCT ?source');
+    expect(sparql).toContain('LIMIT 5');
+    expect(sparql).toContain('OFFSET 10');
+  });
+
+  describe('buildSPARQLCountQuery', () => {
+    it('returns a COUNT(DISTINCT ?source) query', () => {
+      const query = { parent: { id: 'flux://ch-1', predicate: 'flux://has_child' } };
+      const countSparql = buildSPARQLCountQuery(emptyMetadata, emptyRelations, query, modelClass);
+      expect(countSparql).toContain('COUNT(DISTINCT ?source)');
+      expect(countSparql).toContain('?count');
+      expect(countSparql).toContain('<flux://ch-1>');
+    });
+
+    it('does NOT include LIMIT/OFFSET (counts full result set)', () => {
+      const query = { limit: 10, offset: 20, parent: { id: 'flux://ch-1', predicate: 'flux://has_child' } };
+      const countSparql = buildSPARQLCountQuery(emptyMetadata, emptyRelations, query, modelClass);
+      expect(countSparql).not.toContain('LIMIT');
+      expect(countSparql).not.toContain('OFFSET');
+      expect(countSparql).toContain('COUNT(DISTINCT ?source)');
+    });
+  });
+});
+
 describe('buildSPARQLQuery — set-difference patterns', () => {
   const modelClass: any = {};
 
