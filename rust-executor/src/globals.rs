@@ -28,3 +28,9 @@ lazy_static! {
 
 /// Raw JSON data for the mainnet seed, included at buildtime from the mainnet_seed.json file
 pub const MAINNET_JSON: &str = include_str!("mainnet_seed.json");
+
+/// Raw JSON data for the devnet seed, included at buildtime from the devnet_seed.json file
+pub const DEVNET_JSON: &str = include_str!("devnet_seed.json");
+
+/// Whether this is a production build (built with `--features production`)
+pub const IS_PRODUCTION_BUILD: bool = cfg!(feature = "production");
