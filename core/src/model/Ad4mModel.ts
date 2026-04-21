@@ -11,7 +11,7 @@ import { buildParentQuery, buildAuthorAndTimestampQuery, buildPropertiesQuery, b
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
-import { buildSPARQLQuery, buildSPARQLGetDataQuery, groupSPARQLResults, buildSPARQLCountQuery, hasJsOnlyWhereFilters } from "./query-sparql";
+import { buildSPARQLQuery, buildSPARQLGetDataQuery, groupSPARQLResults, buildSPARQLCountQuery, hasJsOnlyWhereFilters, parseSparqlCount } from "./query-sparql";
 import { buildBatchSPARQLQuery } from "./query-sparql-batch";
 import { hydrateBatchResult } from "./hydration-batch";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
@@ -793,7 +793,8 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy,
     query: Query,
-    result: any[]
+    result: any[],
+    computeTotalCount: boolean = false
   ): Promise<ResultsWithTotalCount<T>> {
     if (!result || result.length === 0) return { results: [], totalCount: 0 };
     
@@ -994,19 +995,13 @@ export class Ad4mModel {
     // Calculate totalCount BEFORE applying limit/offset.
     // When SPARQL already paginated, filteredInstances.length is the page size,
     // not the total — use a separate COUNT query for the real total.
+    // Only run the COUNT query when the caller actually needs it (computeTotalCount=true).
     let totalCount: number;
-    if (sparqlPaginated) {
+    if (sparqlPaginated && computeTotalCount) {
       try {
         const countSparql = buildSPARQLCountQuery(metadata, allRelsMeta2, query, this);
         const countResult = await perspective.querySparql(countSparql);
-        if (Array.isArray(countResult) && countResult.length > 0) {
-          const row = countResult[0];
-          const val = row.count?.value ?? row.count;
-          totalCount = typeof val === 'number' ? val : parseInt(String(val), 10);
-          if (isNaN(totalCount)) totalCount = filteredInstances.length;
-        } else {
-          totalCount = filteredInstances.length;
-        }
+        totalCount = parseSparqlCount(countResult) ?? filteredInstances.length;
       } catch {
         // Fallback: if count query fails, use what we have
         totalCount = filteredInstances.length;
@@ -1195,7 +1190,7 @@ export class Ad4mModel {
       const sparqlQuery = await this.queryToSPARQL(perspective, query);
       const rawResult = await perspective.querySparql(sparqlQuery);
       const grouped = groupSPARQLResults(rawResult);
-      return await this.instancesFromQueryResult(perspective, query, grouped);
+      return await this.instancesFromQueryResult(perspective, query, grouped, true);
     } else {
       const prologQuery = await this.queryToProlog(perspective, query);
       const result = await perspective.infer(prologQuery);
@@ -1241,7 +1236,7 @@ export class Ad4mModel {
       const sparqlQuery = await this.queryToSPARQL(perspective, paginationQuery);
       const rawResult = await perspective.querySparql(sparqlQuery);
       const grouped = groupSPARQLResults(rawResult);
-      const { results, totalCount } = await this.instancesFromQueryResult(perspective, paginationQuery, grouped);
+      const { results, totalCount } = await this.instancesFromQueryResult(perspective, paginationQuery, grouped, true);
       return { results, totalCount, pageSize, pageNumber };
     } else {
       const prologQuery = await this.queryToProlog(perspective, paginationQuery);
@@ -1321,19 +1316,12 @@ export class Ad4mModel {
         const sparqlQuery = await this.queryToSPARQL(perspective, query);
         const rawResult = await perspective.querySparql(sparqlQuery);
         const grouped = groupSPARQLResults(rawResult);
-        const { totalCount } = await this.instancesFromQueryResult(perspective, query, grouped);
-        return totalCount;
+        const { totalCount } = await this.instancesFromQueryResult(perspective, query, grouped, true);        return totalCount;
       }
       // No JS-only filters — use efficient COUNT query
       const countSparql = await this.countQueryToSPARQL(perspective, query);
       const countResult = await perspective.querySparql(countSparql);
-      if (Array.isArray(countResult) && countResult.length > 0) {
-        const row = countResult[0];
-        const val = row.count?.value ?? row.count;
-        const parsed = typeof val === 'number' ? val : parseInt(String(val), 10);
-        return isNaN(parsed) ? 0 : parsed;
-      }
-      return 0;
+      return parseSparqlCount(countResult) ?? 0;
     } else {
       const result = await perspective.infer(await this.countQueryToProlog(perspective, query));
       return result?.[0]?.TotalCount || 0;

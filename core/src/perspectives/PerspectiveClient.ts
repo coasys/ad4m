@@ -287,6 +287,8 @@ export class PerspectiveClient {
             }`,
             variables: { uuid, name }
         }))
+        // Evict stale proxy — getOrCreateProxy will create a fresh one with updated handle
+        this.#proxyCache.delete(uuid)
         return this.getOrCreateProxy(perspectiveUpdate)
     }
 
@@ -484,7 +486,8 @@ export class PerspectiveClient {
                 this.#perspectiveUpdatedCallbacks.forEach(cb => {
                     cb(handle)
                 })
-                // Update cached proxy in-place
+                // Evict stale proxy and create fresh one with updated handle
+                this.#proxyCache.delete(handle.uuid)
                 this.getOrCreateProxy(handle)
             },
             error: (e) => console.error(e)

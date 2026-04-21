@@ -11,7 +11,7 @@ import type {
   Where, Order, IncludeMap, Query,
   AllInstancesResult, ResultsWithTotalCount, PaginationResult,
 } from "./types";
-import { groupSPARQLResults, hasJsOnlyWhereFilters } from "./query-sparql";
+import { groupSPARQLResults, hasJsOnlyWhereFilters, parseSparqlCount } from "./query-sparql";
 import { getRelationsMetadata } from "./decorators";
 import { pooledSubscribe } from "./subscription-pool";
 
@@ -340,9 +340,9 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * Groups raw SPARQL results and hydrates them into model instances.
    * Centralises the repeated groupSPARQLResults → instancesFromQueryResult pipeline.
    */
-  private async processSparqlResult(rawResult: any, queryOverride?: Query): Promise<{ results: T[], totalCount: number }> {
+  private async processSparqlResult(rawResult: any, queryOverride?: Query, computeTotalCount: boolean = false): Promise<{ results: T[], totalCount: number }> {
     const grouped = groupSPARQLResults(Array.isArray(rawResult) ? rawResult : []);
-    return await this.ctor.instancesFromQueryResult(this.perspective, queryOverride || this.queryParams, grouped) as { results: T[], totalCount: number };
+    return await this.ctor.instancesFromQueryResult(this.perspective, queryOverride || this.queryParams, grouped, computeTotalCount) as { results: T[], totalCount: number };
   }
 
   /**
@@ -501,19 +501,13 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       if (hasJsOnlyWhereFilters(metadata, allRelMeta, this.queryParams.where)) {
         const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
         const rawResult = await this.perspective.querySparql(sparqlQuery);
-        const { totalCount } = await this.processSparqlResult(rawResult);
+        const { totalCount } = await this.processSparqlResult(rawResult, undefined, true);
         return totalCount;
       }
       // Use efficient COUNT query — no hydration
       const countSparql = await this.ctor.countQueryToSPARQL(this.perspective, this.queryParams);
       const countResult = await this.perspective.querySparql(countSparql);
-      if (Array.isArray(countResult) && countResult.length > 0) {
-        const row = countResult[0] as any;
-        const val = row.count?.value ?? row.count;
-        const parsed = typeof val === 'number' ? val : parseInt(String(val), 10);
-        return isNaN(parsed) ? 0 : parsed;
-      }
-      return 0;
+      return parseSparqlCount(countResult) ?? 0;
     } else {
       const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
       const result = await this.perspective.infer(query);
@@ -575,12 +569,12 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
 
       const processResults = async (result: any) => {
-        const { totalCount } = await this.processSparqlResult(result);
+        const { totalCount } = await this.processSparqlResult(result, undefined, true);
         callback(totalCount);
       };
 
       this.currentSubscription.onResult(processResults);
-      const { totalCount } = await this.processSparqlResult(this.currentSubscription.result);
+      const { totalCount } = await this.processSparqlResult(this.currentSubscription.result, undefined, true);
       // Initial count returned via Promise — callback for updates only
       return totalCount;
     } else {
@@ -609,12 +603,12 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
 
     const processResults = async (result: any) => {
-      const { totalCount } = await this.processSparqlResult(result);
+      const { totalCount } = await this.processSparqlResult(result, undefined, true);
       callback(totalCount);
     };
 
     this.currentSubscription.onResult(processResults);
-    const { totalCount } = await this.processSparqlResult(this.currentSubscription.result);
+    const { totalCount } = await this.processSparqlResult(this.currentSubscription.result, undefined, true);
     // Initial count returned via Promise — callback for updates only
     return totalCount;
   }
@@ -639,7 +633,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     if (this.engineFlag === 'sparql') {
       const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, paginationQuery);
       const result = await this.perspective.querySparql(sparqlQuery);
-      const { results, totalCount } = await this.processSparqlResult(result, paginationQuery) as ResultsWithTotalCount<T>;
+      const { results, totalCount } = await this.processSparqlResult(result, paginationQuery, true) as ResultsWithTotalCount<T>;
       return { results, totalCount, pageSize, pageNumber };
     } else {
       const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
@@ -720,14 +714,14 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       const fullQuery = { ...(this.queryParams || {}), count: true };
 
       const processResults = async (result: any) => {
-        const { results: allResults, totalCount } = await this.processSparqlResult(result, fullQuery) as ResultsWithTotalCount<T>;
+        const { results: allResults, totalCount } = await this.processSparqlResult(result, fullQuery, true) as ResultsWithTotalCount<T>;
         const start = pageSize * (pageNumber - 1);
         const results = allResults.slice(start, start + pageSize);
         callback({ results, totalCount, pageSize, pageNumber });
       };
 
       this.currentSubscription.onResult(processResults);
-      const { results: allResults, totalCount } = await this.processSparqlResult(this.currentSubscription.result, fullQuery) as ResultsWithTotalCount<T>;
+      const { results: allResults, totalCount } = await this.processSparqlResult(this.currentSubscription.result, fullQuery, true) as ResultsWithTotalCount<T>;
       const start = pageSize * (pageNumber - 1);
       const results = allResults.slice(start, start + pageSize);
       const initialPage = { results, totalCount, pageSize, pageNumber };

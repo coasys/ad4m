@@ -91,7 +91,7 @@ describe('PerspectiveClient proxy cache', () => {
         expect(fetched).toBe(added)
     })
 
-    it('update() updates cached proxy in-place', async () => {
+    it('update() evicts and recreates cached proxy', async () => {
         const originalHandle = makeHandle('uuid-u', 'Original')
         const updatedHandle = makeHandle('uuid-u', 'Updated')
         const queryFn = jest.fn().mockResolvedValue({
@@ -110,9 +110,9 @@ describe('PerspectiveClient proxy cache', () => {
         expect(original.name).toBe('Original')
 
         const updated = await client.update('uuid-u', 'Updated')
-        expect(updated).toBe(original) // same reference
+        expect(updated).not.toBe(original) // new reference after eviction
         expect(updated.name).toBe('Updated')
-        expect(original.name).toBe('Updated') // updated in-place
+                expect(original.name).toBe('Original') // old reference retains stale data
     })
 
     it('remove() evicts from cache', async () => {

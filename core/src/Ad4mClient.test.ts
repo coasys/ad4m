@@ -36,7 +36,11 @@ jest.setTimeout(15000)
 async function waitForCalls(fn: jest.Mock, count: number, timeoutMs = 2000): Promise<void> {
     const start = Date.now();
     while (fn.mock.calls.length < count) {
-        if (Date.now() - start > timeoutMs) break;
+        if (Date.now() - start > timeoutMs) {
+            throw new Error(
+                `waitForCalls timed out after ${timeoutMs}ms: expected ${count} calls but received ${fn.mock.calls.length}`
+            );
+        }
         await new Promise(r => setTimeout(r, 50));
     }
 }
@@ -849,7 +853,7 @@ describe('Ad4mClient', () => {
             expect(fetched.name).toBe('updated-name')
         })
 
-        it('remove() then byUUID() returns null (cache eviction)', async () => {
+        it('remove() evicts proxy from cache (new reference on next fetch)', async () => {
             // First populate cache
             const p = await ad4mClient.perspective.byUUID('00003')
             expect(p).toBeTruthy()

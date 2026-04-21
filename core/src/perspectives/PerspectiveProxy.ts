@@ -408,6 +408,12 @@ export class PerspectiveProxy {
     /** Update the proxy's internal handle and public fields in-place.
      *  Keeps the same object reference so all holders see the update. */
     updateHandle(handle: PerspectiveHandle): void {
+        if (handle.uuid !== this.#handle.uuid) {
+            throw new Error(
+                `PerspectiveProxy.updateHandle: UUID mismatch — proxy is bound to "${this.#handle.uuid}" but received handle with UUID "${handle.uuid}". ` +
+                `This would silently diverge from listeners registered under the original UUID.`
+            );
+        }
         this.#handle = handle;
         this.uuid = handle.uuid;
         this.name = handle.name;

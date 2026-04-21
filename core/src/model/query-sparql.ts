@@ -632,3 +632,19 @@ function buildSPARQLWhereFilters(
 
   return { joins, filters };
 }
+
+/**
+ * Parse a SPARQL COUNT result row into a number.
+ * Handles `row.count?.value` (RDF binding), `row.count` (direct number/string),
+ * NaN results, and empty/malformed results.
+ *
+ * @returns The parsed count, or `null` if the result cannot be interpreted.
+ */
+export function parseSparqlCount(result: any[]): number | null {
+  if (!Array.isArray(result) || result.length === 0) return null;
+  const row = result[0];
+  const val = row.count?.value ?? row.count;
+  if (val === undefined || val === null) return null;
+  const parsed = typeof val === 'number' ? val : parseInt(String(val), 10);
+  return isNaN(parsed) ? null : parsed;
+}
