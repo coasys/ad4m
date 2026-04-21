@@ -34,7 +34,7 @@ pub async fn list_languages(
 
     let mut handles = Vec::new();
     for lang_ref in refs {
-        let settings = controller.get_settings_public(&lang_ref.address);
+        let settings = controller.get_settings_public(&lang_ref.address).await;
         let settings_str = if settings.is_null() {
             None
         } else {
@@ -81,7 +81,7 @@ pub async fn get_language(
 
     if controller.is_language_loaded(&address).await {
         let name = controller.get_language_name(&address).await;
-        let settings = controller.get_settings_public(&address);
+        let settings = controller.get_settings_public(&address).await;
         let settings_str = if settings.is_null() {
             None
         } else {
