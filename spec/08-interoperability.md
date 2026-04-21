@@ -35,9 +35,17 @@ This section defines what an alternative AD4M implementation MUST and SHOULD sup
 
 ### 8.2.5 Language Interface
 
-- **MUST** support loading JavaScript Language modules via a `create(context)` function.
-- **MUST** provide `LanguageContext` with `AgentService` and `SignaturesService`.
-- **MUST** support `ExpressionAdapter` (get/put) and `LinkSyncAdapter` interfaces.
+- **MUST** support loading JavaScript Language modules that export flat functions at the module level (the v1.0 flat export model).
+- **MUST** support capability detection via export introspection (the "presence = capability" rule).
+- **MUST** provide the core runtime imports: `agent` (identity/signing), `language-context`, `storage` (core KV), `event-emission`, and `runtime-utils` (including the canonical `hash()` function).
+- **MUST** support the `lifecycle` exports (`name`, `version`, `isPublic`, `init`, `teardown`).
+- **MUST** support the `expression` capability exports (`expressionCreate`, `expressionGet`).
+- **MUST** support the `perspective-commit`, `perspective-sync`, and `perspective-query` capability exports.
+- **MUST** support the `peers` capability exports (`peersSetLocal`, `peersRemote`).
+- **MUST** implement the `ad4m:host` module (or equivalent) for Language imports.
+- **SHOULD** support the Holochain extension (`holochain-ext`) for Holochain-backed Languages.
+- **SHOULD** support the Storage File I/O extension (`storage-fs-ext`).
+- Implementations MUST NOT use the deprecated `create(context)` factory or `LanguageContext` parameter for new Language loading. The `LanguageContext` is replaced by import functions (`languageAddress()`, `languageSettings()`, `storageGet/Put`, etc.).
 
 ### 8.2.6 Neighbourhood Protocol
 
@@ -48,15 +56,19 @@ This section defines what an alternative AD4M implementation MUST and SHOULD sup
 ### 8.2.7 Expression URLs
 
 - **MUST** parse and generate expression URLs in the format `<language_address>://<expression_address>`.
-- **MUST** handle `literal://` scheme for inline data.
+- **MUST** handle `literal:` scheme for inline data (v1.0 format: `literal:<type>:<encoded_value>`, no `//`).
+- **MUST** reject the deprecated `literal://` format.
 - **MUST** handle `did:` scheme as references to the Agent Language.
+- All AD4M URIs MUST be valid IRIs without requiring `to_iri` / `from_iri` transformation.
 
 ## 8.3 SHOULD Requirements
 
 ### 8.3.1 SDNA
 
 - **MUST** support SHACL-based SDNA for subject class definitions and instance resolution.
-- **SHOULD** support SurrealDB for performant queries over the link graph.
+- **MUST** support SPARQL 1.1 queries over the link graph (via Oxigraph or an equivalent engine).
+- **SHOULD** implement the custom SPARQL functions `fn::parse_literal` and `fn::strip_html` for literal value filtering.
+- **MAY** support Prolog for SHACL inference and backward compatibility.
 - **MAY** support custom SHACL rules (SPARQL-based constraints) for advanced reasoning.
 
 ### 8.3.2 Capability Tokens
@@ -66,13 +78,14 @@ This section defines what an alternative AD4M implementation MUST and SHOULD sup
 
 ### 8.3.3 Holochain Integration
 
-- **SHOULD** support Holochain-backed Languages via `HolochainLanguageDelegate`.
+- **SHOULD** support Holochain-backed Languages via the Holochain extension (`holochainRegisterDnas`, `holochainCall`, `holochainCallAsync`).
 - **SHOULD** be able to run p-diff-sync DNA for neighbourhood sync.
+- **SHOULD** route Holochain signals to Languages via the `handleHolochainSignal` export.
 - Without Holochain support, an implementation can still interoperate using centralized Language variants.
 
 ### 8.3.4 Telepresence
 
-- **SHOULD** support `TelepresenceAdapter` for online status and signaling.
+- **SHOULD** support telepresence capabilities (`telepresenceSetStatus`, `telepresenceGetAgents`, `telepresenceSendSignal`, `telepresenceSendBroadcast`) for online status and signaling.
 - **SHOULD** support the `neighbourhoodSignal` subscription.
 
 ### 8.3.5 Language Templating
@@ -81,7 +94,9 @@ This section defines what an alternative AD4M implementation MUST and SHOULD sup
 
 ### 8.3.6 Direct Messages
 
-- **SHOULD** support `DirectMessageAdapter` for peer-to-peer messaging.
+- **SHOULD** support the DM-as-inbox pattern: Languages exporting `perspective-commit` for senders, with the recipient DID baked into a template clone.
+- **SHOULD** support the `ad4m://inbox` predicate for inbox discovery.
+- **SHOULD** support the `ad4m://friend-of` predicate for friend management.
 
 ## 8.4 MAY Requirements
 
@@ -118,8 +133,12 @@ Where:
 - `expression_address` is the remainder after `://`
 
 Special cases:
-- `literal://<content>` — inline literal content
+- `literal:<type>:<encoded_value>` — inline literal content (v1.0 format, no `//`)
 - `did:<method>:<id>` — DID references (no `://`)
+
+### IRI Compatibility
+
+All AD4M URIs are valid IRIs (Internationalized Resource Identifiers). The v1.0 `literal:` format (without `//`) ensures RFC 3986 compliance. The `to_iri` / `from_iri` conversion functions from earlier versions have been removed — they are no longer necessary.
 
 ## 8.6 Conformance Testing
 

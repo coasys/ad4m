@@ -47,12 +47,38 @@ An agent publishes their profile as an Expression in the Agent Language:
 ```typescript
 interface Agent {
   did: string;
-  directMessageLanguage?: string;  // Address of DM Language
   perspective?: Perspective;       // Profile data as links
 }
 ```
 
 The agent's profile `perspective` contains links that represent profile properties (name, avatar, etc.) — the schema is application-defined through SDNA.
+
+> **v1.0 change:** The `directMessageLanguage` field has been removed from the Agent shape. Inbox discovery is now handled via the `ad4m://inbox` predicate in the agent's public perspective (see [Social Conventions](../docs-src/ad4m-social-conventions.md) §3.1).
+>
+> **Migration:** Implementations MAY emit a one-release compatibility shim that projects the old field onto the `ad4m://inbox` predicate on read:
+> ```sparql
+> SELECT ?inbox WHERE {
+>   <did:key:z6Mk...> <ad4m://inbox> ?inbox .
+> }
+> ```
+
+### Social Conventions
+
+The following well-known `ad4m://` predicates are defined for social-layer interoperability (see [Social Conventions](../docs-src/ad4m-social-conventions.md)):
+
+| Predicate | Meaning | Example |
+|-----------|---------|--------|
+| `ad4m://inbox` | Language instance the agent uses as their DM inbox | `(agentDid) →[ad4m://inbox]→ (languageRef)` |
+| `ad4m://friend-of` | Agent considers another agent a friend (asymmetric) | `(did1) →[ad4m://friend-of]→ (did2)` |
+| `ad4m://profile` | Expression URI resolving to agent's profile | `(agentDid) →[ad4m://profile]→ (expressionUri)` |
+| `ad4m://presence` | Language instance exposing agent's real-time presence | `(agentDid) →[ad4m://presence]→ (languageRef)` |
+
+These predicates are stored as links in perspectives. Which perspective (public, private, shared) is an application/runtime choice. Applications that want to interoperate across AD4M implementations SHOULD use these predicates.
+
+Key conventions:
+- **Direct Messages** are not a first-class capability. A DM inbox is a Language exporting `perspective-commit` with the recipient DID baked into the template. See [Language Interface §3.7](./03-language-interface.md#37-direct-messages-not-a-capability).
+- **Friends** are `ad4m://friend-of` links in a perspective, replacing the v0.x local SQLite table. Friendship is asymmetric by default; applications may layer symmetric/handshake semantics on top.
+- **Encryption** is the template's responsibility, not the spec's.
 
 ## 2.4 Agent Status
 
