@@ -41,8 +41,8 @@ AD4M has been demonstrated as a protocol (not just an implementation) through th
 ## Key Changes in v1.0
 
 - **Language Interface v1.0:** Flat export model replaces adapter classes. `LinkSyncAdapter` split into `perspective-commit`, `perspective-sync`, `perspective-query`. WIT is the normative source. ALDK provides JS and Rust authoring toolkits.
-- **SPARQL as sole backend:** SurrealDB removed. Oxigraph in-process SPARQL 1.1 engine with disk persistence. Direct triple + named graph storage model.
-- **Literal URI format:** `literal://` → `literal:` for RFC 3986 compliance. `to_iri`/`from_iri` removed.
+- **SPARQL as sole backend:** Oxigraph in-process SPARQL 1.1 engine with disk persistence. Direct triple + named graph storage model.
+- **Literal URI format:** `literal:<type>:<encoded_value>` for RFC 3986 compliance.
 - **Social conventions:** `directMessageLanguage` removed from Agent shape. DM inbox, friends, profile, and presence use `ad4m://` predicates in perspectives.
 - **Ad4mModel:** New decorator API with WeakMap registry. SPARQL query engine. Transactions, eager loading (`include`), reactive queries (`subscribe`).
 - **P-Diff-Sync:** `latest_revision` zome extern. Gossip uses `revisionHexes`. Exponential backoff, active peer discovery.

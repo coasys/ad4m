@@ -432,7 +432,7 @@ subscription.unsubscribe();
 
 ## 10.7 Query Engine — SPARQL
 
-Ad4mModel translates the Query DSL into **SPARQL 1.1** queries against the Oxigraph triple store. This replaces the earlier SurrealDB-based query path.
+Ad4mModel translates the Query DSL into **SPARQL 1.1** queries against the Oxigraph triple store.
 
 ### Storage Model
 

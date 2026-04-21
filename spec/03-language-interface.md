@@ -47,7 +47,7 @@ Per-instance state therefore lives at module level (JS) or in `thread_local!` / 
    discards the module instance.
 ```
 
-`init()` takes **no arguments**. The old `LanguageContext` object (storage directory, custom settings, language address) is replaced by imports the Language calls during `init()`.
+`init()` takes **no arguments**. Runtime services (storage directory, custom settings, language address) are accessed via the `ad4m:host` import module.
 
 ### Required Lifecycle Exports
 
@@ -548,10 +548,10 @@ interface InteractionParameter {
 }
 ```
 
-## 3.16 Things Deliberately Omitted from v1.0
+## 3.16 Design Decisions
 
 - **Capability flags / manifest files** — capability is determined exclusively by export presence.
 - **Callback registration** — no `addCallback`, no `removeCallback`. Languages emit events via `emit*` imports.
-- **`create(context)` factory** — replaced by per-perspective module instantiation + lazy context fetch via imports.
-- **`DirectMessageAdapter`** — DM is a composition pattern over existing capabilities (see §3.7).
+- **No factory function** — Languages are per-perspective module instances; runtime services are accessed via `ad4m:host` imports.
+- **No `DirectMessageAdapter`** — DM is a composition pattern over existing capabilities (see §3.7).
 - **`this` pointer in JavaScript** — all exports are top-level functions; state lives in module-level bindings.

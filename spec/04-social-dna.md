@@ -6,7 +6,7 @@ Social DNA (SDNA) defines data schemas over the link graph in a Perspective. It 
 
 SDNA enables applications to work with typed objects (e.g., "Message", "Post", "Channel") while the underlying storage is always links. The SHACL shapes describe the expected graph structure, property constraints, and cardinality rules.
 
-> **Historical note:** Prior to v0.12.0, subject classes were defined using Prolog rules. SHACL is now the sole normative representation for subject class definitions.
+> **Historical note:** Prior to v0.12.0, subject classes were defined using Prolog rules. SHACL is the sole normative representation for subject class definitions.
 
 ## 4.2 SDNA Link Structure
 
@@ -298,7 +298,7 @@ The primary query engine is an in-process **Oxigraph** SPARQL 1.1 engine with di
 
 SPARQL is used for:
 - Ad4mModel query execution (all `findAll`, `findOne`, `count`, etc. translate to SPARQL)
-- Direct queries via `perspectiveQuerySurreal` (name retained for backward compatibility; actually executes SPARQL)
+- Direct queries via `perspectiveQuerySparql`
 - Custom queries from applications
 
 Custom SPARQL functions:
@@ -328,8 +328,6 @@ Prolog remains available for SHACL inference and subject-class resolution:
 - Constructor/destructor action resolution
 
 New implementations SHOULD prioritize SPARQL query support for all data operations and use Prolog only for SHACL inference where needed.
-
-> **v1.0 change:** SurrealDB has been completely removed. All query operations that previously used SurrealDB now use SPARQL via Oxigraph. The `perspectiveQuerySurreal` GraphQL operation name is retained for backward compatibility but executes SPARQL queries.
 
 ## 4.7 Flows
 

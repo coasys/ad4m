@@ -38,8 +38,7 @@ MAJOR.MINOR.PATCH
 3. Existing capability export signatures MUST NOT change in MINOR versions.
 4. New optional imports MAY be added to the runtime services.
 5. The WIT file (`ad4m-lang.wit`) is the canonical interface definition; new versions of the WIT SHOULD follow WIT versioning conventions (package version in the `package` declaration).
-6. Languages that target a specific WIT world (`ad4m-language`, `ad4m-language-holochain`, etc.) declare their extension requirements; runtimes that don't support a required extension refuse to load the Language.
-7. The deprecated `create(context)` factory and adapter-class model from v0.x SHOULD be removed from runtime support in the next MAJOR version.
+6. Languages that target a specific WIT world (`ad4m-language`, `ad4m-language-holochain`, etc.) declare their extension requirements; runtimes that do not support a required extension refuse to load the Language.
 
 ## 9.3 Compatibility Matrix
 

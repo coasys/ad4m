@@ -38,8 +38,8 @@ type Query {
   perspective(uuid: String!): PerspectiveHandle
   perspectives: [PerspectiveHandle!]!
   perspectiveQueryLinks(uuid: String!, query: LinkQuery!): [DecoratedLinkExpression!]!
-  perspectiveQuerySurreal(uuid: String!, query: String!): String!
-  perspectiveQuerySPARQL(uuid: String!, query: String!): String!
+  perspectiveQueryProlog(uuid: String!, query: String!): String!
+  perspectiveQuerySparql(uuid: String!, query: String!): String!
   perspectiveSnapshot(uuid: String!): Perspective!
 }
 
@@ -278,7 +278,7 @@ type RuntimeInfo {
 
 ### Query Engine Notes
 
-- `perspectiveQuerySurreal` — Name retained for backward compatibility. In v1.0 this operation executes **SPARQL** queries against the Oxigraph triple store (SurrealDB has been removed). The query string MUST be valid SPARQL 1.1. Only read-only queries (SELECT/ASK/CONSTRUCT/DESCRIBE) are accepted; UPDATE operations are rejected.
-- `perspectiveQuerySPARQL` — Explicit SPARQL query operation (same behavior as `perspectiveQuerySurreal`). Clients SHOULD prefer this operation name.
+- `perspectiveQuerySparql` — Executes a SPARQL 1.1 query against the Oxigraph triple store. The query string MUST be valid SPARQL 1.1. Only read-only queries (SELECT/ASK/CONSTRUCT/DESCRIBE) are accepted; UPDATE operations are rejected.
+- `perspectiveQueryProlog` — Executes a Prolog query for SHACL inference and subject-class resolution.
 - `perspectiveQueryLinks` — Structured link-pattern queries, translated internally to SPARQL.
-- The `Agent` type no longer includes a `directMessageLanguage` field. Inbox discovery uses `ad4m://inbox` predicate links in the agent's public perspective (see [§2.3](./02-agent-model.md#23-agent-expression)).
+- The `Agent` type does not include a `directMessageLanguage` field. Inbox discovery uses `ad4m://inbox` predicate links in the agent's public perspective (see [§2.3](./02-agent-model.md#23-agent-expression)).

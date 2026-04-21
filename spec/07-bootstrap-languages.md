@@ -39,8 +39,6 @@ When an agent updates their profile:
 2. Store it in the Holochain DHT via the Agent Language
 3. Other agents retrieve it by DID
 
-> **v1.0 change:** The Agent Expression no longer contains a `directMessageLanguage` field. See [§2.3](./02-agent-model.md#23-agent-expression).
-
 ### Neighbourhood Language
 
 **Purpose:** Stores neighbourhood definitions (how to join a shared Perspective).
@@ -60,10 +58,6 @@ A `NeighbourhoodExpression` contains:
 
 - **Type:** Expression Language
 - **Details:** Implementation-defined. Used for sharing Perspective state.
-
-### Direct Message Language
-
-> **Removed in v1.0.** Direct Messages are no longer a bootstrap language. DM functionality is now achieved through the composition of `perspective-commit` + `perspective-sync` + `peers` capabilities, with the recipient DID baked into a template clone. See [Language Interface §3.7](./03-language-interface.md#37-direct-messages-not-a-capability) and [Social Conventions](../docs-src/ad4m-social-conventions.md) for the DM-as-inbox pattern.
 
 ### File Storage Language
 
@@ -101,8 +95,6 @@ This is a **template language** — each Neighbourhood gets its own instance wit
 7. Start GraphQL server
 8. Ready for client connections
 ```
-
-> **v1.0 change:** Step 4e (Direct Message Language) has been removed from the bootstrap sequence. The bootstrap flow now has 6 system languages instead of 7. The API surface remains GraphQL (not REST).
 
 ## 7.4 Language Installation
 
