@@ -2418,7 +2418,7 @@ describe("instancesFromQueryResult — SPARQL vs JS pagination", () => {
     getExpression: jest.fn().mockResolvedValue(null),
   };
 
-  it("JS-level slicing is a no-op when results already match the page", async () => {
+  it("does NOT slice results when SPARQL pagination was applied", async () => {
     const grouped = Array.from({ length: 5 }, (_, i) => ({
       source_uri: `flux://ch-${i}`,
       links: [
@@ -2427,10 +2427,13 @@ describe("instancesFromQueryResult — SPARQL vs JS pagination", () => {
       ],
     }));
 
-    // When SPARQL already returned the correct page, JS slice is a no-op
-    const query = { limit: 5, offset: 0 };
+    const query = { limit: 5, offset: 10 };
     const result = await (PaginationTestChannel as any).instancesFromQueryResult(mockPerspective, query, grouped);
+
+    // sparqlPaginated = true (limit+offset present, no JS-only where filters),
+    // so JS should NOT re-slice — all 5 items come through as-is.
     expect(result.results.length).toBe(5);
+    expect(result.totalCount).toBe(5);
   });
 
   it("applies JS-level slicing as fallback when JS-only filters exist", async () => {

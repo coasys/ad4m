@@ -716,13 +716,20 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, subscriptionParams);
       this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
 
+      // Query for processSparqlResult has NO limit/offset — gets all results, totalCount via count:true
+      const fullQuery = { ...(this.queryParams || {}), count: true };
+
       const processResults = async (result: any) => {
-        const { results, totalCount } = await this.processSparqlResult(result, paginationQuery) as ResultsWithTotalCount<T>;
+        const { results: allResults, totalCount } = await this.processSparqlResult(result, fullQuery) as ResultsWithTotalCount<T>;
+        const start = pageSize * (pageNumber - 1);
+        const results = allResults.slice(start, start + pageSize);
         callback({ results, totalCount, pageSize, pageNumber });
       };
 
       this.currentSubscription.onResult(processResults);
-      const { results, totalCount } = await this.processSparqlResult(this.currentSubscription.result, paginationQuery) as ResultsWithTotalCount<T>;
+      const { results: allResults, totalCount } = await this.processSparqlResult(this.currentSubscription.result, fullQuery) as ResultsWithTotalCount<T>;
+      const start = pageSize * (pageNumber - 1);
+      const results = allResults.slice(start, start + pageSize);
       const initialPage = { results, totalCount, pageSize, pageNumber };
       // Initial page returned via Promise — callback for subsequent updates only
       return initialPage;
