@@ -112,6 +112,22 @@ export const sharedStyles = css`
     box-shadow: 0 0 0 4px rgba(244, 54, 127, 0.2);
   }
 
+  button.danger-secondary {
+    background: #00091e5c;
+    color: var(--ac-danger-color);
+    border: 1px solid var(--ac-danger-color);
+  }
+
+  button.danger-secondary:hover:not(:disabled) {
+    background: rgba(244, 54, 127, 0.12);
+  }
+
+  button.danger-secondary:focus-visible:not(:disabled) {
+    outline: 2px solid var(--ac-danger-color);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px rgba(244, 54, 127, 0.2);
+  }
+
   button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
@@ -121,27 +137,37 @@ export const sharedStyles = css`
     width: 100%;
   }
 
-  .back-button,
   .close-button {
     position: absolute;
     top: 20px;
+    right: 20px;
     cursor: pointer;
   }
 
-  .back-button {
-    left: 20px;
-  }
-
-  .close-button {
-    right: 20px;
-  }
-
-  .back-button svg,
   .close-button svg {
     width: 28px;
     height: 28px;
     color: white;
     opacity: 0.5;
+  }
+
+  .back-button {
+    all: unset;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.5);
+  }
+
+  .back-button svg {
+    width: 22px;
+    height: 22px;
+  }
+
+  .back-button:hover {
+    color: rgba(255, 255, 255, 0.8);
   }
 
   /* Inputs */
@@ -203,6 +229,7 @@ export const sharedStyles = css`
     display: flex;
     flex-direction: column;
     gap: 30px;
+    padding: 2px;
   }
 
   .box {
@@ -265,5 +292,19 @@ export const sharedStyles = css`
   .state.danger p,
   .state.danger svg {
     color: var(--ac-danger-color);
+  }
+
+  /* Spinners */
+  .spinner {
+    width: 24px;
+    height: 24px;
+    border: 3px solid var(--ac-border-color-light);
+    border-top-color: var(--ac-primary-color);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
   }
 `;

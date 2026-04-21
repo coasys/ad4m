@@ -12,6 +12,20 @@ use crate::wallet::Wallet;
 pub mod capabilities;
 pub mod signatures;
 
+/// Validate that a user email is safe to use as a filesystem path segment.
+/// Rejects path separators, "..", null bytes, and other unsafe characters.
+fn validate_user_email_for_path(email: &str) -> Result<(), AnyError> {
+    if email.is_empty() {
+        return Err(anyhow!("User email cannot be empty"));
+    }
+    if email.contains('/') || email.contains('\\') || email.contains('\0') || email.contains("..") {
+        return Err(anyhow!(
+            "Invalid user email: contains unsafe path characters"
+        ));
+    }
+    Ok(())
+}
+
 /// Context for determining which agent to use for operations
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentContext {
@@ -182,11 +196,43 @@ pub fn create_signed_expression<T: Serialize>(
     })
 }
 
-pub fn sign_string_hex(data: String) -> Result<String, AnyError> {
+pub fn sign_string_hex_for_context(
+    data: String,
+    context: &AgentContext,
+) -> Result<String, AnyError> {
     let payload_bytes = signatures::hash_message(&data);
-    let signature = sign_for_context(&payload_bytes, &AgentContext::main_agent())?;
+    let signature = sign_for_context(&payload_bytes, context)?;
     let sig_hex = hex::encode(signature);
     Ok(sig_hex)
+}
+
+pub fn sign_string_hex(data: String) -> Result<String, AnyError> {
+    sign_string_hex_for_context(data, &AgentContext::main_agent())
+}
+
+/// Convert an Agent's decorated perspective to plain LinkExpressions for publishing.
+/// Returns a JSON value with non-decorated types (no proof.valid/invalid, no status).
+fn agent_to_publish_json(agent: &Agent) -> Result<serde_json::Value, AnyError> {
+    use crate::types::{LinkExpression, Perspective as PlainPerspective};
+
+    let plain_perspective = agent.perspective.as_ref().map(|p| PlainPerspective {
+        links: p
+            .links
+            .iter()
+            .cloned()
+            .map(|d| {
+                let mut le = LinkExpression::from(d);
+                le.status = None;
+                le
+            })
+            .collect(),
+    });
+
+    Ok(serde_json::json!({
+        "did": agent.did,
+        "directMessageLanguage": agent.direct_message_language,
+        "perspective": plain_perspective,
+    }))
 }
 
 pub struct AgentSignature {
@@ -454,6 +500,7 @@ impl AgentService {
         user_email: &str,
         agent: &Agent,
     ) -> Result<(), AnyError> {
+        validate_user_email_for_path(user_email)?;
         // Create user-specific profile directory
         let user_profile_dir = format!("{}/{}", self.users_dir, user_email);
         std::fs::create_dir_all(&user_profile_dir)?;
@@ -466,75 +513,54 @@ impl AgentService {
         Ok(())
     }
 
-    /// Publish agent to the agent language (decentralized storage)
-    pub async fn publish_user_agent_to_language(
-        user_email: &str,
-        agent: &Agent,
-        js_handle: &mut crate::js_core::JsCoreHandle,
-    ) -> Result<(), AnyError> {
-        // Create a context-aware agent service that can sign with the user's key
-        // We need to inject this into the language context temporarily
-        let agent_json = serde_json::to_string(agent)?;
+    /// Unified method to publish an agent profile to the agent language.
+    /// Works for both the main agent and managed users.
+    /// Strips link decorations before publishing.
+    pub async fn publish_agent_to_language(context: &AgentContext) -> Result<(), AnyError> {
+        let controller = crate::languages::LanguageController::global_instance();
+        let agent_lang = controller
+            .get_agent_language()
+            .await
+            .map_err(|e| anyhow!("Agent language not available: {}", e))?;
 
-        let script = format!(
-            r#"
-            (async () => {{
-                // Get the agent language
-                const agentLanguage = core.languageController.getAgentLanguage();
-                if (!agentLanguage || !agentLanguage.expressionAdapter) {{
-                    throw new Error("Agent language not available");
-                }}
-                
-                const userAgent = {};
-                
-                // Set the agent service context to this user temporarily
-                // The agent language uses the same agent service instance from core
-                const originalContext = core.agentService.getUserContext();
-                core.agentService.setUserContext("{}");
-                
-                try {{
-                    // Get the putAdapter like in storeAgentProfile()
-                    const putAdapter = agentLanguage.expressionAdapter.putAdapter;
-                    if (!putAdapter) {{
-                        throw new Error("No putAdapter found in agent language");
-                    }}
-                    
-                    // Now call createPublic - the agent service will return the user's DID and sign with user's key
-                    await putAdapter.createPublic(userAgent);
-                    
-                    return "success";
-                }} finally {{
-                    // Restore the original context
-                    core.agentService.setUserContext(originalContext);
-                }}
-            }})()
-            "#,
-            agent_json, user_email
-        );
+        let agent = Self::get_agent_for_context(context)?;
+        let context_did = did_for_context(context)?;
+        if agent.did != context_did {
+            return Err(anyhow!(
+                "DID mismatch: stored profile has DID {} but signing context resolves to {}",
+                agent.did,
+                context_did
+            ));
+        }
+        let agent_json = agent_to_publish_json(&agent)?;
+        controller
+            .expression_create(agent_lang.address(), agent_json, context)
+            .await
+            .map_err(|e| anyhow!("Failed to publish agent to language: {}", e))?;
 
-        let result = js_handle.execute(script).await;
+        log::info!("Published agent {} to agent language", agent.did);
+        Ok(())
+    }
 
-        match result {
-            Ok(_) => {
-                log::info!(
-                    "Successfully published agent {} to agent language",
-                    agent.did
-                );
-                Ok(())
+    /// Get the Agent data for a given context (main agent or managed user).
+    pub fn get_agent_for_context(context: &AgentContext) -> Result<Agent, AnyError> {
+        match &context.user_email {
+            Some(email) => {
+                let agent =
+                    AgentService::with_global_instance(|svc| svc.load_user_agent_profile(email))?;
+                agent.ok_or_else(|| anyhow!("User profile not found for {}", email))
             }
-            Err(e) => {
-                log::error!(
-                    "Failed to publish agent {} to agent language: {}",
-                    agent.did,
-                    e
-                );
-                Err(anyhow!("Failed to publish agent to language: {}", e))
-            }
+            None => AgentService::with_global_instance(|svc| {
+                svc.agent
+                    .clone()
+                    .ok_or_else(|| anyhow!("Agent not initialized"))
+            }),
         }
     }
 
     /// Load agent profile for a specific user
     pub fn load_user_agent_profile(&self, user_email: &str) -> Result<Option<Agent>, AnyError> {
+        validate_user_email_for_path(user_email)?;
         let profile_path = format!("{}/{}/profile.json", self.users_dir, user_email);
 
         if !std::path::Path::new(&profile_path).exists() {
@@ -554,7 +580,9 @@ impl AgentService {
         )
         .expect("Failed to write agent profile file");
 
-        // TODO: once language controller is moved add updating agent profile here
+        // Note: callers who need the agent published to the agent language
+        // should call publish_agent_to_language() separately (this method
+        // is sync and cannot await).
     }
 
     pub fn save_agent_profile(&mut self, agent: Agent) {
@@ -662,12 +690,17 @@ impl AgentService {
                 .expect("Failed to read agent profile file");
             self.agent =
                 Some(serde_json::from_str(&file_profile).expect("Failed to parse agent profile"));
+        } else if let Some(agent) = dump.agent {
+            // Restore agent profile from agent.json (save() embeds it there).
+            // agentProfile.json may not exist if the profile was only saved via save().
+            self.agent = Some(agent);
         } else {
-            let did_clone = dump.did.clone();
-            let did = check_keys_and_create(did_clone).id.clone();
-
+            // No profile anywhere - create a minimal placeholder with just the DID.
+            // DO NOT call check_keys_and_create() here because that would initialize
+            // wallet keys without a passphrase, making is_unlocked() return true
+            // before the user has actually entered their password.
             self.agent = Some(Agent {
-                did,
+                did: dump.did.clone(),
                 perspective: Some(Perspective { links: vec![] }),
                 direct_message_language: None,
             });

@@ -20,15 +20,6 @@
         },
         "resource": "../bootstrap-languages/centralized-agent-language/build/bundle.js"
     },
-    "directMessageLanguage": {
-        "meta": {
-            "name": "directMessageLanguage", 
-            "description": "Holochain based language for direct messages on ad4m",
-            "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/direct-message-language", 
-            "possibleTemplateParams": ["recipient_did", "recipient_hc_agent_pubkey"]
-        },
-        "resource": "../bootstrap-languages/direct-message-language/build/bundle.js"
-    },
     "neighbourhoodLanguage": {
         "meta": {
             "name": "neighbourhoodLanguage", 

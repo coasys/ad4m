@@ -13,7 +13,6 @@ use deno_core::SourceCodeCacheInfo;
 use deno_error::JsErrorClass;
 use deno_lib::util::hash::FastInsecureHasher;
 use deno_runtime::transpile::maybe_transpile_source;
-use log::info;
 use std::collections::HashMap;
 use url::Url;
 
@@ -89,15 +88,14 @@ impl ModuleLoader for StringModuleLoader {
         _request_module_type: RequestedModuleType,
     ) -> ModuleLoadResponse {
         match module_specifier.to_file_path() {
-            Ok(path) => match std::fs::read_to_string(path) {
+            Ok(path) => match std::fs::read_to_string(&path) {
                 Ok(code) => ModuleLoadResponse::Sync(maybe_transpile(module_specifier, code)),
                 Err(e) => {
-                    log::error!("Error reading file: {}", e);
+                    log::error!("Error reading file {:?}: {}", path, e);
                     ModuleLoadResponse::Sync(Err(ModuleLoaderError::NotFound))
                 }
             },
             Err(_err) => {
-                info!("Module is not a file path, importing as raw module string");
                 let module_code = self.modules.get(module_specifier.as_str()).cloned();
 
                 ModuleLoadResponse::Sync(match module_code {

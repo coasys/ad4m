@@ -16,7 +16,7 @@ jobs:
       - name: setup node
         uses: actions/setup-node@v3
         with:
-          node-version: 18
+          node-version: 24
 
       - uses: pnpm/action-setup@v4
 
@@ -46,7 +46,7 @@ jobs:
       matrix:
         #platform: [GH-hosted-ubuntu, macos-latest, windows-latest]
         platform: [GH-hosted-ubuntu, macos-latest]
-        node-version: [18.x]
+        node-version: [24.x]
 
     needs:
       - create-release
@@ -380,7 +380,7 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
+      image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
     steps:
       - uses: actions/checkout@v3
 
@@ -461,14 +461,6 @@ jobs:
           tag: ${{ env.NPM_TAG }}
           access: public
 
-      - name: Publish executor
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: executor/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
-
       - name: Publish Test runner
         uses: JS-DevTools/npm-publish@v1
         with:
@@ -501,7 +493,7 @@ jobs:
   
      - uses: actions/setup-node@v3
        with:
-         node-version: '18.x'
+         node-version: '24.x'
   
      - name: Cache cargo
        id: cache-cargo
@@ -522,7 +514,6 @@ jobs:
   
      - run: rustup target add wasm32-unknown-unknown
      - run: pnpm install
-     - run: pnpm build-core-executor
      - run: cargo install cargo-workspaces || echo "cargo-workspaces already installed"
      - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
      - run: cargo workspaces publish --from-git

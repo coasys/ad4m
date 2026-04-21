@@ -1,31 +1,43 @@
 // Cleanup script: kill ad4m-executor processes by port, NOT by name.
 // Killing by name (e.g. pkill / kill-process-by-name) would kill executors
 // belonging to OTHER concurrent CI jobs on the same machine.
-// Each test file uses a unique port range, so port-based kills are safe.
+// Each test file uses dynamically allocated ports (via getFreePorts), so we
+// rely on the port registry written by helpers/ports.ts to know which ports
+// to kill between test runs.
 
 import { execSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-// Ports used by individual test files in the test-all sequence.
-// NOTE: Do NOT include setup ports (publishTestLangs.ts: 15700/15703/15706).
-// Those belong to the prepare phase and are cleaned up by each job's own
-// cleanup_processes() or by publishTestLangs.ts itself when it exits.
-// Including them here would kill the setup executor of OTHER concurrent CI
-// jobs sharing this self-hosted runner.
-const TEST_PORTS = [
-  15000, 15001, 15002,        // app.test.ts
-  15100, 15101, 15102,        // authentication.test.ts (suite 1)
-  15200, 15201, 15202, 15203, // authentication.test.ts (suite 2)
-  15300, 15301, 15302,        // integration.test.ts
-  15600, 15601, 15602,        // simple.test.ts
-  15800, 15801, 15802,        // multi-user-connect.test.ts
-  15900, 15901, 15902,        // multi-user-simple.test.ts
-  15920, 15921, 15922,        // email-verification.test.ts
-  16600, 16601, 16602,        // prolog-and-literals.test.ts
-];
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
+// ---------------------------------------------------------------------------
+// Port registry: written by getFreePorts/registerPorts in helpers/ports.ts.
+// Lives at tst-tmp/active-ports.json (relative to tests/js/).
+// If a test is force-killed without running after(), stale entries remain
+// and cleanup.js uses them to kill the orphaned executor processes.
+// ---------------------------------------------------------------------------
+const REGISTRY_PATH = path.resolve(__dirname, '..', 'tst-tmp', 'active-ports.json');
+
+function readRegistry() {
+  try {
+    if (fs.existsSync(REGISTRY_PATH)) {
+      return JSON.parse(fs.readFileSync(REGISTRY_PATH, 'utf8'));
+    }
+  } catch { /* ignore */ }
+  return [];
+}
+
+const registryPorts = readRegistry();
+
+// ---------------------------------------------------------------------------
+// Kill all registered ports
+// ---------------------------------------------------------------------------
 async function cleanup() {
   let killed = 0;
-  for (const port of TEST_PORTS) {
+  for (const port of registryPorts) {
     try {
       execSync(`lsof -ti:${port} | xargs -r kill -9`, { stdio: 'ignore' });
       killed++;
@@ -33,6 +45,13 @@ async function cleanup() {
       // Port not in use — that's fine
     }
   }
+
+  // Clear the registry once we've processed it (avoids killing stale entries
+  // from a completely different run if the file wasn't cleaned up).
+  if (registryPorts.length > 0) {
+    try { fs.unlinkSync(REGISTRY_PATH); } catch { /* non-fatal */ }
+  }
+
   if (killed > 0) {
     console.log(`cleanup: killed processes on ${killed} ports`);
   }

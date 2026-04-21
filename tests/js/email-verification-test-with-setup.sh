@@ -74,6 +74,13 @@ sleep 3
 # Step 4: Run the email-verification test
 echo "🧪 Running Email-Verification test..."
 pnpm run test-email-verification
+TEST_EXIT_CODE=$?
 
-echo "✅ Email-verification test with setup complete!"
+if [ $TEST_EXIT_CODE -ne 0 ]; then
+    echo "❌ Email-verification test failed with exit code $TEST_EXIT_CODE"
+else
+    echo "✅ Email-verification test with setup complete!"
+fi
+
+exit $TEST_EXIT_CODE
 

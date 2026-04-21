@@ -96,6 +96,19 @@ export interface AD4MAction {
 }
 
 /**
+ * A single structured conformance condition for relation filtering.
+ * DB-agnostic representation that can be translated to any query language.
+ */
+export interface ConformanceCondition {
+  /** Type of check: 'flag' (predicate + value) or 'required' (predicate exists) */
+  type: 'flag' | 'required';
+  /** The predicate URI to check on the target node */
+  predicate: string;
+  /** For 'flag' conditions: the expected value */
+  value?: string;
+}
+
+/**
  * SHACL Property Shape
  * Represents constraints on a single property path
  */
@@ -147,6 +160,20 @@ export interface SHACLPropertyShape {
 
   /** AD4M-specific: Remover action for collection properties */
   remover?: AD4MAction[];
+
+  /** AD4M-specific: Pre-computed SPARQL getter expression for reading this relation/property.
+   *  For relations with a target model, this encodes conformance filtering
+   *  so that Rust/MCP can execute the exact same query as the JS runtime. */
+  getter?: string;
+
+  /** AD4M-specific: Structured conformance conditions (DB-agnostic).
+   *  Each condition describes a check on the target node (flag match or required property). */
+  conformanceConditions?: ConformanceCondition[];
+
+  /** sh:class — the target SHACL node shape URI that linked nodes must conform to.
+   *  Set automatically when a relation has a `target` model. Enables typed construction
+   *  on the Rust/MCP side by referencing the full target shape. */
+  class?: string;
 }
 
 /**
@@ -169,6 +196,9 @@ export class SHACLShape {
   /** AD4M-specific: Destructor actions for removing instances */
   destructor_actions?: AD4MAction[];
 
+  /** Parent shape URIs for model inheritance (sh:node references) */
+  parentShapes: string[];
+
   /**
    * Create a new SHACL Shape
    * @param targetClassOrShapeUri - If one argument: the target class (shape URI auto-derived as {class}Shape)
@@ -189,6 +219,19 @@ export class SHACLShape {
       this.nodeShapeUri = `${namespace}${localName}Shape`;
     }
     this.properties = [];
+    this.parentShapes = [];
+  }
+
+  /**
+   * Add a parent shape reference (sh:node) for model inheritance.
+   * When a @Model class extends another @Model, the child shape
+   * references the parent shape so SHACL validators can walk the
+   * class hierarchy.
+   */
+  addParentShape(parentShapeUri: string): void {
+    if (!this.parentShapes.includes(parentShapeUri)) {
+      this.parentShapes.push(parentShapeUri);
+    }
   }
 
   /**
@@ -226,6 +269,11 @@ export class SHACLShape {
     
     if (this.targetClass) {
       turtle += `  sh:targetClass <${this.targetClass}> ;\n`;
+    }
+
+    // Emit sh:node references for parent shapes (model inheritance)
+    for (const parentUri of this.parentShapes) {
+      turtle += `  sh:node <${parentUri}> ;\n`;
     }
     
     // Add property shapes
@@ -308,21 +356,23 @@ export class SHACLShape {
       });
     }
 
-    // Constructor actions
-    if (this.constructor_actions && this.constructor_actions.length > 0) {
+    // Constructor actions — always emit, even for an empty array.
+    // An empty `[]` tells the executor the shape is valid but has no
+    // required initial links (all-optional model with no @Flag).
+    if (this.constructor_actions) {
       links.push({
         source: this.nodeShapeUri,
         predicate: "ad4m://constructor",
-        target: `literal://string:${JSON.stringify(this.constructor_actions)}`
+        target: `literal:string:${JSON.stringify(this.constructor_actions)}`
       });
     }
 
-    // Destructor actions
-    if (this.destructor_actions && this.destructor_actions.length > 0) {
+    // Destructor actions — same rationale as constructor.
+    if (this.destructor_actions) {
       links.push({
         source: this.nodeShapeUri,
         predicate: "ad4m://destructor",
-        target: `literal://string:${JSON.stringify(this.destructor_actions)}`
+        target: `literal:string:${JSON.stringify(this.destructor_actions)}`
       });
     }
     
@@ -378,7 +428,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "sh://minCount",
-          target: `literal://${prop.minCount}^^xsd:integer`
+          target: `literal:${prop.minCount}^^xsd:integer`
         });
       }
       
@@ -386,7 +436,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "sh://maxCount",
-          target: `literal://${prop.maxCount}^^xsd:integer`
+          target: `literal:${prop.maxCount}^^xsd:integer`
         });
       }
       
@@ -394,7 +444,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "sh://pattern",
-          target: `literal://${prop.pattern}`
+          target: `literal:${prop.pattern}`
         });
       }
       
@@ -402,7 +452,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "sh://minInclusive",
-          target: `literal://${prop.minInclusive}`
+          target: `literal:${prop.minInclusive}`
         });
       }
       
@@ -410,7 +460,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "sh://maxInclusive",
-          target: `literal://${prop.maxInclusive}`
+          target: `literal:${prop.maxInclusive}`
         });
       }
       
@@ -418,7 +468,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "sh://hasValue",
-          target: `literal://${prop.hasValue}`
+          target: `literal:${prop.hasValue}`
         });
       }
       
@@ -427,7 +477,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://local",
-          target: `literal://${prop.local}`
+          target: `literal:${prop.local}`
         });
       }
       
@@ -435,7 +485,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://writable",
-          target: `literal://${prop.writable}`
+          target: `literal:${prop.writable}`
         });
       }
 
@@ -443,7 +493,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://resolveLanguage",
-          target: `literal://string:${prop.resolveLanguage}`
+          target: `literal:string:${prop.resolveLanguage}`
         });
       }
 
@@ -452,7 +502,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://setter",
-          target: `literal://string:${JSON.stringify(prop.setter)}`
+          target: `literal:string:${JSON.stringify(prop.setter)}`
         });
       }
 
@@ -460,7 +510,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://adder",
-          target: `literal://string:${JSON.stringify(prop.adder)}`
+          target: `literal:string:${JSON.stringify(prop.adder)}`
         });
       }
 
@@ -468,7 +518,31 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://remover",
-          target: `literal://string:${JSON.stringify(prop.remover)}`
+          target: `literal:string:${JSON.stringify(prop.remover)}`
+        });
+      }
+
+      if (prop.getter) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://getter",
+          target: `literal:string:${prop.getter}`
+        });
+      }
+
+      if (prop.conformanceConditions && prop.conformanceConditions.length > 0) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://conformanceConditions",
+          target: `literal:string:${JSON.stringify(prop.conformanceConditions)}`
+        });
+      }
+
+      if (prop.class) {
+        links.push({
+          source: propShapeId,
+          predicate: "sh://class",
+          target: prop.class
         });
       }
     }
@@ -493,7 +567,7 @@ export class SHACLShape {
     );
     if (constructorLink) {
       try {
-        const jsonStr = constructorLink.target.replace('literal://string:', '');
+        const jsonStr = constructorLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
         shape.constructor_actions = JSON.parse(jsonStr);
       } catch (e) {
         // Ignore parse errors
@@ -506,7 +580,7 @@ export class SHACLShape {
     );
     if (destructorLink) {
       try {
-        const jsonStr = destructorLink.target.replace('literal://string:', '');
+        const jsonStr = destructorLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
         shape.destructor_actions = JSON.parse(jsonStr);
       } catch (e) {
         // Ignore parse errors
@@ -560,8 +634,8 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "sh://minCount"
       );
       if (minCountLink) {
-        // Handle both formats: literal://5^^xsd:integer and literal://number:5
-        let val = minCountLink.target.replace('literal://', '').replace(/\^\^.*$/, '');
+        // Handle both formats: literal:5^^xsd:integer and literal:number:5
+        let val = minCountLink.target.replace(/^literal:\/\/|^literal:/, '').replace(/\^\^.*$/, '');
         if (val.startsWith('number:')) val = val.substring(7);
         prop.minCount = parseInt(val);
       }
@@ -570,8 +644,8 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "sh://maxCount"
       );
       if (maxCountLink) {
-        // Handle both formats: literal://5^^xsd:integer and literal://number:5
-        let val = maxCountLink.target.replace('literal://', '').replace(/\^\^.*$/, '');
+        // Handle both formats: literal:5^^xsd:integer and literal:number:5
+        let val = maxCountLink.target.replace(/^literal:\/\/|^literal:/, '').replace(/\^\^.*$/, '');
         if (val.startsWith('number:')) val = val.substring(7);
         prop.maxCount = parseInt(val);
       }
@@ -580,15 +654,15 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "sh://pattern"
       );
       if (patternLink) {
-        prop.pattern = patternLink.target.replace('literal://', '');
+        prop.pattern = patternLink.target.replace(/^literal:\/\/|^literal:/, '');
       }
       
       const minInclusiveLink = links.find(l =>
         l.source === propShapeId && l.predicate === "sh://minInclusive"
       );
       if (minInclusiveLink) {
-        // Handle both formats: literal://5 and literal://number:5
-        let val = minInclusiveLink.target.replace('literal://', '');
+        // Handle both formats: literal:5 and literal:number:5
+        let val = minInclusiveLink.target.replace(/^literal:\/\/|^literal:/, '');
         if (val.startsWith('number:')) val = val.substring(7);
         prop.minInclusive = parseFloat(val);
       }
@@ -597,8 +671,8 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "sh://maxInclusive"
       );
       if (maxInclusiveLink) {
-        // Handle both formats: literal://5 and literal://number:5
-        let val = maxInclusiveLink.target.replace('literal://', '');
+        // Handle both formats: literal:5 and literal:number:5
+        let val = maxInclusiveLink.target.replace(/^literal:\/\/|^literal:/, '');
         if (val.startsWith('number:')) val = val.substring(7);
         prop.maxInclusive = parseFloat(val);
       }
@@ -607,7 +681,7 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "sh://hasValue"
       );
       if (hasValueLink) {
-        prop.hasValue = hasValueLink.target.replace('literal://', '');
+        prop.hasValue = hasValueLink.target.replace(/^literal:\/\/|^literal:/, '');
       }
       
       // AD4M-specific
@@ -615,8 +689,8 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "ad4m://local"
       );
       if (localLink) {
-        // Handle both formats: literal://true and literal://boolean:true
-        let val = localLink.target.replace('literal://', '');
+        // Handle both formats: literal:true and literal:boolean:true
+        let val = localLink.target.replace(/^literal:\/\/|^literal:/, '');
         if (val.startsWith('boolean:')) val = val.substring(8);
         prop.local = val === 'true';
       }
@@ -625,8 +699,8 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "ad4m://writable"
       );
       if (writableLink) {
-        // Handle both formats: literal://true and literal://boolean:true
-        let val = writableLink.target.replace('literal://', '');
+        // Handle both formats: literal:true and literal:boolean:true
+        let val = writableLink.target.replace(/^literal:\/\/|^literal:/, '');
         if (val.startsWith('boolean:')) val = val.substring(8);
         prop.writable = val === 'true';
       }
@@ -635,7 +709,7 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "ad4m://resolveLanguage"
       );
       if (resolveLangLink) {
-        prop.resolveLanguage = resolveLangLink.target.replace('literal://string:', '');
+        prop.resolveLanguage = resolveLangLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
       }
 
       // Parse action arrays
@@ -644,7 +718,7 @@ export class SHACLShape {
       );
       if (setterLink) {
         try {
-          const jsonStr = setterLink.target.replace('literal://string:', '');
+          const jsonStr = setterLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
           prop.setter = JSON.parse(jsonStr);
         } catch (e) {
           // Ignore parse errors
@@ -656,7 +730,7 @@ export class SHACLShape {
       );
       if (adderLink) {
         try {
-          const jsonStr = adderLink.target.replace('literal://string:', '');
+          const jsonStr = adderLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
           prop.adder = JSON.parse(jsonStr);
         } catch (e) {
           // Ignore parse errors
@@ -668,11 +742,37 @@ export class SHACLShape {
       );
       if (removerLink) {
         try {
-          const jsonStr = removerLink.target.replace('literal://string:', '');
+          const jsonStr = removerLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
           prop.remover = JSON.parse(jsonStr);
         } catch (e) {
           // Ignore parse errors
         }
+      }
+
+      const getterLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://getter"
+      );
+      if (getterLink) {
+        prop.getter = getterLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
+      }
+
+      const conditionsLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://conformanceConditions"
+      );
+      if (conditionsLink) {
+        try {
+          const jsonStr = conditionsLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
+          prop.conformanceConditions = JSON.parse(jsonStr);
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+
+      const classLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "sh://class"
+      );
+      if (classLink) {
+        prop.class = classLink.target;
       }
 
       shape.addProperty(prop);
@@ -691,6 +791,7 @@ export class SHACLShape {
     return {
       node_shape_uri: this.nodeShapeUri,
       target_class: this.targetClass,
+      parent_shapes: this.parentShapes.length > 0 ? this.parentShapes : undefined,
       properties: this.properties.map(p => ({
         path: p.path,
         name: p.name,
@@ -708,6 +809,9 @@ export class SHACLShape {
         setter: p.setter,
         adder: p.adder,
         remover: p.remover,
+        getter: p.getter,
+        conformance_conditions: p.conformanceConditions,
+        class: p.class,
       })),
       constructor_actions: this.constructor_actions,
       destructor_actions: this.destructor_actions,
@@ -740,6 +844,9 @@ export class SHACLShape {
         setter: p.setter,
         adder: p.adder,
         remover: p.remover,
+        getter: p.getter,
+        conformanceConditions: p.conformance_conditions,
+        class: p.class,
       });
     }
     
@@ -748,6 +855,11 @@ export class SHACLShape {
     }
     if (json.destructor_actions) {
       shape.destructor_actions = json.destructor_actions;
+    }
+    if (json.parent_shapes) {
+      for (const ps of json.parent_shapes) {
+        shape.addParentShape(ps);
+      }
     }
     
     return shape;

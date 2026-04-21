@@ -11,7 +11,7 @@ async function main() {
             bootstrapSeed["trustedAgents"].push(didData["did"]);
             fs.writeFileSync(bootstrapSeedPath, JSON.stringify(bootstrapSeed));
         } else {
-            throw new Error(`Could not find boostrapSeed at path: ${bootstrapSeedPath}`)
+            throw new Error(`Could not find bootstrapSeed at path: ${bootstrapSeedPath}`)
         }
     } else {
         throw new Error(`Could not find publishingAgent at path: ${publishingAgentPath}`)

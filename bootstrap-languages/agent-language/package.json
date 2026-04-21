@@ -13,7 +13,7 @@
     "build:linux": "pnpm compile-dna && pnpm build:common",
     "build:macos": "pnpm compile-dna && pnpm build:common",
     "build:windows": "pnpm compile-dna-windows && pnpm build:common",
-    "build:common": "pnpm rollup-dna && pnpm rollup-icons && pnpm rollup-expression-ui && deno run --allow-all esbuild.ts"
+    "build:common": "pnpm rollup-icons && pnpm rollup-expression-ui && bash rust-impl/build.sh"
   },
   "author": "",
   "license": "ISC",
@@ -44,5 +44,5 @@
     "md5": "^2.3.0",
     "postcss": "^8.2.1"
   },
-  "version": "0.12.0-rc1-dev.2"
+  "version": "0.13.0-test-2"
 }

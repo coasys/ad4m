@@ -2,10 +2,10 @@ packages:
   # all packages in direct subdirs of packages/
   - 'core'
   - 'docs-src'
-  - 'executor'
   - 'ui'
   - 'connect'
   - 'bootstrap-languages/*'
+  - 'ad4m-ldk/js'
   - 'tests/js'
   - 'rust-executor'
   - 'cli'

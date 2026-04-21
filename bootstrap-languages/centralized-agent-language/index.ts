@@ -1,34 +1,69 @@
-import type { Address, Language, LanguageContext, HolochainLanguageDelegate, Interaction } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
-import ExpressionAdapter from "./adapter.ts";
-import Icon from "./build/Icon.js";
-import ConstructorIcon from "./build/ConstructorIcon.js";
-import { UI } from "./build/expressionUI.js";
+/**
+ * # Centralized Agent Expression Store
+ *
+ * Expression language that stores agent expressions via a centralized
+ * server (socket.ad4m.dev).
+ */
 
-function iconFor(expression: Address): string {
-  return Icon as unknown as string;
-}
+import axiod from "https://deno.land/x/axiod/mod.ts";
+import {
+    defineLanguage,
+    agentDid,
+    agentCreateSignedExpression,
+} from "@coasys/ad4m-ldk";
 
-function constructorIcon(): string {
-  return ConstructorIcon as unknown as string;
-}
+const language = defineLanguage({
+    name: "centralized-agent-expression-store",
+    version: "0.1.0",
 
-function interactions(expression: Address): Interaction[] {
-  return [];
-}
+    async init() {},
+    async teardown() {},
+    interactions() { return []; },
 
-//!@ad4m-template-variable
-export const name = "centralized-agent-expression-store";
+    expression: {
+        async create(content: any): Promise<string> {
+            if (!content["did"] || !content["perspective"] || !content["perspective"].links)
+                throw "Content must be an Agent object";
 
-export default async function create(context: LanguageContext): Promise<Language> {
-  const expressionAdapter = new ExpressionAdapter(context);
-  const expressionUI = new UI();
+            const agentObj = content;
+            if (agentObj.did != agentDid())
+                throw "Can't set Agent Expression for foreign DID - only for self";
 
-  return {
+            if (!agentObj.directMessageLanguage) agentObj.directMessageLanguage = undefined;
+
+            agentObj.perspective!.links.forEach((link: any) => {
+                delete link.proof.valid;
+                delete link.proof.invalid;
+            });
+
+            const expression = agentCreateSignedExpression(agentObj);
+
+            await axiod.post("https://socket.ad4m.dev/agent", {
+                data: {
+                    did: agentObj.did,
+                    expression,
+                },
+            });
+
+            return agentObj.did;
+        },
+
+        async get(did: string): Promise<any> {
+            console.log("Getting expression with did", did);
+            const data = await axiod.get("https://socket.ad4m.dev/agent", {
+                params: { did },
+            });
+            return data.data.expression;
+        },
+    },
+});
+
+export const {
     name,
-    expressionAdapter,
-    iconFor,
-    constructorIcon,
+    version,
+    init,
+    teardown,
     interactions,
-    expressionUI,
-  } as Language;
-}
+    expressionGet,
+    expressionCreate,
+} = language;

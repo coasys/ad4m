@@ -6,8 +6,10 @@ use futures::StreamExt;
 use log::error;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::BroadcastStream;
@@ -17,20 +19,27 @@ type Message = String;
 
 pub struct PubSub {
     subscribers: Mutex<HashMap<Topic, broadcast::Sender<Message>>>,
+    subscribers_sync: std::sync::Mutex<HashMap<Topic, broadcast::Sender<Message>>>,
 }
 
 impl PubSub {
     pub fn new() -> Self {
         Self {
             subscribers: Mutex::new(HashMap::new()),
+            subscribers_sync: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
     pub async fn subscribe(&self, topic: &Topic) -> broadcast::Receiver<Message> {
         let mut subscribers = self.subscribers.lock().await;
+        let mut subscribers_sync = self.subscribers_sync.lock().unwrap();
         let sender = subscribers
             .entry(topic.to_owned())
-            .or_insert_with(|| broadcast::channel(10000).0); // 10000 message buffer
+            .or_insert_with(|| broadcast::channel(10000).0);
+        // Keep sync map in sync
+        subscribers_sync
+            .entry(topic.to_owned())
+            .or_insert_with(|| sender.clone());
         sender.subscribe()
     }
 
@@ -38,6 +47,15 @@ impl PubSub {
         let subscribers = self.subscribers.lock().await;
         if let Some(sender) = subscribers.get(topic) {
             let _ = sender.send(message.clone()); // Ignore if no receivers
+        }
+    }
+
+    /// Synchronous publish that doesn't require tokio runtime.
+    /// Uses a separate std::sync::Mutex to avoid blocking the async runtime.
+    pub fn publish_sync(&self, topic: &Topic, message: &Message) {
+        let subscribers = self.subscribers_sync.lock().unwrap();
+        if let Some(sender) = subscribers.get(topic) {
+            let _ = sender.send(message.clone());
         }
     }
 }
@@ -57,11 +75,14 @@ pub(crate) async fn subscribe_and_process<
             Ok(msg) => match serde_json::from_str::<T>(&msg) {
                 Ok(data) => {
                     if let Some(filter) = &filter {
-                        if &data
+                        let data_filter = data
                             .get_filter()
-                            .expect("Could not get filter on T where we expected to filter")
-                            != filter
-                        {
+                            .expect("Could not get filter on T where we expected to filter");
+                        if &data_filter != filter {
+                            log::debug!(
+                                "PubSub filter mismatch on topic {}: data_filter and subscription_filter differ",
+                                topic
+                            );
                             return futures::future::ready(None);
                         }
                     }
@@ -112,8 +133,59 @@ lazy_static::lazy_static! {
     pub static ref AI_TRANSCRIPTION_TEXT_TOPIC: String = "ai-transcription-text-topic".to_owned();
     pub static ref AI_MODEL_LOADING_STATUS: String = "ai-model-loading-status".to_owned();
     pub static ref PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC: String = "perspective-query-subscription-topic".to_owned();
+    pub static ref HOSTING_USER_INFO_CHANGED_TOPIC: String = "hosting-user-info-changed-topic".to_owned();
+    pub static ref COMPUTE_LOG_UPDATED_TOPIC: String = "compute-log-updated-topic".to_owned();
+}
+
+/// Per-user dirty set for batched credit change notifications.
+/// When credits are mutated, the affected user's email is inserted.
+/// A background flush loop periodically drains the set and publishes
+/// updated HostingUserInfo only for the affected users.
+pub static DIRTY_CREDIT_USERS: LazyLock<std::sync::Mutex<HashSet<String>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+
+pub fn mark_credits_dirty(email: &str) {
+    if let Ok(mut set) = DIRTY_CREDIT_USERS.lock() {
+        set.insert(email.to_owned());
+    }
+}
+
+/// Buffer a compute log entry for async publication.
+/// The flush loop will drain these and publish to the subscription topic.
+pub static PENDING_COMPUTE_LOG_ENTRIES: LazyLock<
+    std::sync::Mutex<Vec<crate::graphql::graphql_types::ComputeLogEntry>>,
+> = LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+pub fn push_compute_log_entry(
+    id: i64,
+    email: &str,
+    operation: &str,
+    summary: Option<&str>,
+    cost: f64,
+    credits_after: f64,
+) {
+    let entry = crate::graphql::graphql_types::ComputeLogEntry {
+        id: id as i32,
+        user_email: email.to_owned(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        operation: operation.to_owned(),
+        summary: summary.map(|s| s.to_owned()),
+        cost,
+        credits_after,
+    };
+    match PENDING_COMPUTE_LOG_ENTRIES.lock() {
+        Ok(mut vec) => vec.push(entry),
+        Err(e) => error!(
+            "Failed to lock PENDING_COMPUTE_LOG_ENTRIES for compute log entry id={}: {}",
+            id, e
+        ),
+    }
 }
 
 pub async fn get_global_pubsub() -> Arc<PubSub> {
+    GLOBAL_PUB_SUB.clone()
+}
+
+pub fn get_global_pubsub_sync() -> Arc<PubSub> {
     GLOBAL_PUB_SUB.clone()
 }

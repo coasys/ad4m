@@ -16,7 +16,7 @@ jobs:
       - name: setup node
         uses: actions/setup-node@v3
         with:
-          node-version: 18
+          node-version: 24
 
       - uses: pnpm/action-setup@v4
 
@@ -24,6 +24,17 @@ jobs:
         uses: denoland/setup-deno@v1
         with:
           deno-version: v1.32.4
+
+      - name: Delete existing tag (idempotent re-runs)
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          echo "Deleting tag $TAG if it exists..."
+          curl -s -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$TAG" || true
+          echo "Tag cleanup done"
 
       - name: Create Tags From
         id: create_tag
@@ -41,12 +52,52 @@ jobs:
           prerelease: true
 
   # ============================================================================
+  # Generate V8 Deno Snapshot — runs on Linux, artifact shared to Windows
+  # Windows cannot build generate_snapshot.exe due to irreconcilable CRT
+  # mismatch (surrealdb-librocksdb-sys mt_static /MT vs V8/deno /MD).
+  # The snapshot is architecture-specific (x86_64) but OS-independent.
+  # ============================================================================
+  generate-deno-snapshot:
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
+
+    needs:
+      - create-release
+
+    steps:
+    - name: Fetch source code
+      uses: actions/checkout@v3
+
+    - name: Use Node.js 24.x
+      uses: actions/setup-node@v3
+      with:
+        node-version: 24.x
+
+    - uses: pnpm/action-setup@v4
+
+    - name: pnpm Install
+      run: pnpm install --no-frozen-lockfile
+
+    - name: Generate deno snapshot
+      env:
+        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      run: |
+        cd rust-executor && pnpm run build-deno-snapshot && cd ..
+
+    - name: Upload snapshot artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: deno-snapshot
+        path: rust-executor/CUSTOM_DENO_SNAPSHOT.bin
+        retention-days: 1
+
   # Linux Binary Build - Uses Docker container (all deps pre-installed)
   # ============================================================================
   build-launcher-binary-linux:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
+      image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
 
     needs:
       - create-release
@@ -69,14 +120,17 @@ jobs:
     - name: pnpm Install
       run: pnpm install --no-frozen-lockfile
 
-    - name: Install core dependencies
-      run: cd ./core && pnpm install --no-frozen-lockfile
-
     - name: Build AD4M-CLI
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
       run: pnpm build-libs
 
     - name: Build Launcher binary
       run: pnpm run package-ad4m
+      env:
+        # GitHub Actions container jobs don't always inherit the full system
+        # PKG_CONFIG_PATH. Set it explicitly so soup3-sys/webkit can find .pc files.
+        PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
 
     - name: Upload Release Deb Asset
       id: upload-release-deb-asset
@@ -150,7 +204,7 @@ jobs:
   build-launcher-binary-linux-cuda:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
+      image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
 
     needs:
       - create-release
@@ -174,14 +228,16 @@ jobs:
     - name: pnpm Install
       run: pnpm install --no-frozen-lockfile
 
-    - name: Install core dependencies
-      run: cd ./core && pnpm install --no-frozen-lockfile
-
     - name: Build AD4M-CLI
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
       run: pnpm build-libs
 
     - name: Build Launcher binary with CUDA
       run: pnpm run package-ad4m:cuda
+      env:
+        PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
+        CUDA_COMPUTE_CAP: "80"
 
     - name: Upload Release AppImage CUDA Asset
       id: upload-release-appimage-cuda-asset
@@ -209,7 +265,14 @@ jobs:
   # macOS Binary Build - Uses aggressive caching (Docker not available on macOS)
   # ============================================================================
   build-launcher-binary-macos:
-    runs-on: macos-latest
+    runs-on: macos-14
+
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      # ARM64 B/BL range fix: -ld_classic is set in .cargo/config.toml
+      # via [target.aarch64-apple-darwin] rustflags to ensure it reaches
+      # cargo through turbo. ld_classic generates branch island stubs.
 
     needs:
       - create-release
@@ -218,7 +281,22 @@ jobs:
     - name: Fetch source code
       uses: actions/checkout@v3
 
+    - name: Select Xcode 15.4 (has ld-classic for branch islands)
+      run: |
+        sudo xcode-select -s /Applications/Xcode_15.4.app
+        xcodebuild -version
+        # Verify ld-classic binary exists at the path used in .cargo/config.toml
+        ls -la "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld-classic"
+
     # Rust toolchain configured via rust-toolchain.toml
+    - name: Select Xcode 15.4 (has ld_classic for branch islands)
+      run: |
+        sudo xcode-select -s /Applications/Xcode_15.4.app
+        xcodebuild -version
+        xcrun ld -v 2>&1 | head -1 || true
+        # Verify ld_classic exists
+        ls -la /Applications/Xcode_15.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld-classic || true
+
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
@@ -235,7 +313,7 @@ jobs:
           ui/src-tauri
         cache-targets: true
         cache-all-crates: true
-        shared-key: "staging-v3-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
+        shared-key: "staging-v12-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
 
     - name: Install GO
       uses: actions/setup-go@v4
@@ -255,10 +333,10 @@ jobs:
 
     - uses: pnpm/action-setup@v4
 
-    - name: Use Node.js 18.x
+    - name: Use Node.js 24.x
       uses: actions/setup-node@v3
       with:
-        node-version: 18.x
+        node-version: 24.x
         cache: 'pnpm'
 
     # Cache Homebrew packages
@@ -286,10 +364,7 @@ jobs:
         path: ui
 
     - name: pnpm Install
-      run: pnpm install
-
-    - name: Install core dependencies
-      run: cd ./core && pnpm install
+      run: pnpm install --no-frozen-lockfile
 
     #- name: Decrypt and install certificates
     #  env:
@@ -304,11 +379,13 @@ jobs:
     #    mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
     #    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "actions" build.keychain
 
-    - name: Update cargo git deps (ensure pre-built V8 from coasys/rusty_v8 tag)
-      working-directory: rust-executor
-      run: cargo update -p v8 2>/dev/null || cargo update 2>/dev/null || true
-
     - name: Build AD4M-CLI
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+        # Use system git instead of libgit2 so cargo does NOT auto-fetch git submodules.
+        # coasys/deno.git has heavy chromium submodules (wpt, buildtools, abseil-cpp)
+        # that cause SecureTransport/network errors on macOS runners.
+        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       run: pnpm build-libs
 
     - name: Build Launcher binary
@@ -384,12 +461,27 @@ jobs:
   build-launcher-binary-windows:
     runs-on: windows-latest
 
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
     needs:
       - create-release
+      - generate-deno-snapshot
 
     steps:
     - name: Fetch source code
       uses: actions/checkout@v3
+
+    - name: Enable long paths (Windows MAX_PATH workaround for deno git dep)
+      shell: powershell
+      run: |
+        git config --global core.longpaths true
+        reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
+
+    # NOTE: Do NOT install NASM here! aws-lc-sys 0.35.0 detects NASM via
+    # test_nasm_command() and tries to use it through cmake, which fails.
+    # Without NASM, it falls back to prebuilt .obj files (controlled by
+    # AWS_LC_SYS_PREBUILT_NASM=1 in .cargo/config.toml).
 
     # Rust toolchain configured via rust-toolchain.toml
     - name: Install Rust toolchain
@@ -407,7 +499,7 @@ jobs:
           ui/src-tauri
         cache-targets: true
         cache-all-crates: true
-        shared-key: "staging-windows-v2-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
+        shared-key: "staging-windows-v11-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
 
     - name: Install GO
       uses: actions/setup-go@v4
@@ -427,10 +519,10 @@ jobs:
 
     - uses: pnpm/action-setup@v4
 
-    - name: Use Node.js 18.x
+    - name: Use Node.js 24.x
       uses: actions/setup-node@v3
       with:
-        node-version: 18.x
+        node-version: 24.x
         cache: 'pnpm'
 
     - name: Install protobuf compiler
@@ -443,18 +535,45 @@ jobs:
         path: ui
 
     - name: pnpm Install
-      run: pnpm install
+      run: pnpm install --no-frozen-lockfile
 
-    - name: Install core dependencies
-      run: cd ./core && pnpm install
+    - name: Hide ALL NASM executables (force aws-lc-sys prebuilt-nasm)
+      run: |
+        # aws-lc-sys runs "nasm -version" to detect NASM. If found, it skips
+        # prebuilt-nasm and relies on cmake to use NASM — which fails silently.
+        # Hide ALL nasm.exe to force the prebuilt .obj mechanism.
+        $nasms = @(Get-Command nasm -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
+        foreach ($n in $nasms) {
+          Write-Host "Hiding: $n"
+          Rename-Item $n "$n.hidden" -ErrorAction SilentlyContinue
+        }
+        @("C:\Strawberry\c\bin\nasm.exe", "C:\Program Files\NASM\nasm.exe") | ForEach-Object {
+          if (Test-Path $_) { Rename-Item $_ "$_.hidden"; Write-Host "Hid: $_" }
+        }
+        $check = Get-Command nasm -ErrorAction SilentlyContinue
+        if ($check) { Write-Host "WARNING: nasm still found at $($check.Source)!" }
+        else { Write-Host "OK: nasm not found on PATH" }
 
-    - name: Update cargo git deps (ensure pre-built V8 from coasys/rusty_v8 tag)
-      working-directory: rust-executor
-      shell: bash
-      run: cargo update -p v8 2>/dev/null || cargo update 2>/dev/null || true
+    - name: Build JS dependencies
+      run: |
+        # Build JS deps in turbo dependency order (turbo itself breaks
+        # aws-lc-sys prebuilt-nasm, so we bypass it for cargo).
+        cd core && pnpm run build && cd ..
+        cd connect && pnpm run build && cd ..
+        cd dapp && pnpm run build && cd ..
+
+    - name: Download deno snapshot from Linux build
+      uses: actions/download-artifact@v4
+      with:
+        name: deno-snapshot
+        path: rust-executor/
 
     - name: Build AD4M-CLI
-      run: pnpm build-libs
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+        RUSTFLAGS: -C target-feature=+crt-static
+        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      run: cargo build --release
 
     - name: Build Launcher binary
       run: pnpm run package-ad4m
@@ -505,14 +624,20 @@ jobs:
         asset_content_type: application/octet-stream
 
   # ============================================================================
-  # NPM Publish - Uses Docker container (all deps pre-installed)
+  # NPM Publish - Plain ubuntu runner (no Docker needed, just TS build + publish)
   # ============================================================================
   npm-publish:
     runs-on: ubuntu-latest
-    container:
-      image: coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
     steps:
       - uses: actions/checkout@v3
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v3
+        with:
+          node-version: 24.x
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Extract version
         id: extract_version
@@ -524,31 +649,16 @@ jobs:
         run: |
           STRING="${{ steps.extract_version.outputs.version }}"
           if [[ $STRING == *-* ]]; then
-            echo "CONTAINS_PRERELEASE=true" >> $GITHUB_ENV
-          else
-            echo "CONTAINS_PRERELEASE=false" >> $GITHUB_ENV
-          fi
-
-      # Rust toolchain configured via rust-toolchain.toml (auto-detected by rustup)
-      - name: Verify Rust toolchain
-        run: rustc --version && cargo --version
-
-      - name: Install deps
-        run: pnpm install --no-frozen-lockfile
-
-      - name: Install core dependencies
-        run: cd ./core && pnpm install --no-frozen-lockfile
-
-      - name: Build modules
-        run: pnpm run build-npm-packages
-
-      - name: Set NPM tag
-        run: |
-          if [ "$CONTAINS_PRERELEASE" = "true" ]; then
             echo "NPM_TAG=next" >> $GITHUB_ENV
           else
             echo "NPM_TAG=latest" >> $GITHUB_ENV
           fi
+
+      - name: Install deps
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build modules
+        run: pnpm run build-npm-packages
 
       - name: Change Package Visibility to Public
         run: |
@@ -556,60 +666,29 @@ jobs:
           sed -i 's/"private": true/"private": false/' package.json
 
       - name: Publish core
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: core/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd core && npm publish --access public --tag ${{ env.NPM_TAG }}
 
       - name: Publish connect
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: connect/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd connect && npm publish --access public --tag ${{ env.NPM_TAG }}
 
       - name: Publish ad4m hook helpers
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: ad4m-hooks/helpers/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd ad4m-hooks/helpers && npm publish --access public --tag ${{ env.NPM_TAG }}
 
       - name: Publish ad4m react hooks
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: ad4m-hooks/react/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd ad4m-hooks/react && npm publish --access public --tag ${{ env.NPM_TAG }}
+
 
       - name: Publish ad4m vue hooks
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: ad4m-hooks/vue/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd ad4m-hooks/vue && npm publish --access public --tag ${{ env.NPM_TAG }}
 
       - name: Publish executor
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: executor/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd executor && npm publish --access public --tag ${{ env.NPM_TAG }}
+
 
       - name: Publish Test runner
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: test-runner/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd test-runner && npm publish --access public --tag ${{ env.NPM_TAG }}
+
+
 
   # ============================================================================
   # Crates Publish - Uses Docker container
@@ -617,7 +696,7 @@ jobs:
   crates-publish:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
+      image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
     steps:
       - uses: actions/checkout@v3
 
@@ -628,6 +707,15 @@ jobs:
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm build-core-executor
       - run: ls -al executor/lib
-      - run: cargo install cargo-workspaces || echo "cargo-workspaces already installed"
       - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - run: cargo workspaces publish --from-git
+      - name: Publish ad4m-client crate
+        working-directory: rust-client
+        run: |
+          set +e
+          OUTPUT=$(cargo publish --allow-dirty 2>&1)
+          EXIT=$?
+          set -e
+          echo "$OUTPUT"
+          if [ $EXIT -ne 0 ]; then
+            echo "$OUTPUT" | grep -q "already exists" && echo "Already published — OK" || exit $EXIT
+          fi

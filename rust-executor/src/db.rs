@@ -44,6 +44,29 @@ struct ExpressionSchema {
 
 pub type Ad4mDbResult<T> = Result<T, AnyError>;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentRequest {
+    pub id: i64,
+    pub user_email: String,
+    pub amount_hot: String,
+    pub proposal_action_hash: Option<String>,
+    pub status: String,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputeLogEntry {
+    pub id: i64,
+    pub user_email: String,
+    pub timestamp: String,
+    pub operation: String,
+    pub summary: Option<String>,
+    pub cost: f64,
+    pub credits_after: f64,
+}
+
 use std::sync::{Arc, Mutex};
 
 lazy_static! {
@@ -326,9 +349,97 @@ impl Ad4mDb {
             [],
         );
 
+        // Helper to run ALTER TABLE ADD COLUMN migrations, ignoring "duplicate column name"
+        // errors (column already exists from a previous migration) but propagating all others.
+        let alter_add_column = |sql: &str| -> Result<(), AnyError> {
+            match conn.execute(sql, []) {
+                Ok(_) => Ok(()),
+                Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        };
+
         // Add user_email column to notifications table for multi-user support
         // This column tracks which user created the notification (NULL for main agent)
-        let _ = conn.execute("ALTER TABLE notifications ADD COLUMN user_email TEXT", []);
+        alter_add_column("ALTER TABLE notifications ADD COLUMN user_email TEXT")?;
+
+        // Add hosting columns to users table
+        alter_add_column("ALTER TABLE users ADD COLUMN remaining_credits REAL DEFAULT 0")?;
+        alter_add_column("ALTER TABLE users ADD COLUMN hot_wallet_address TEXT")?;
+        // Clear duplicate hot_wallet_address bindings (keep account row intact)
+        conn.execute_batch(
+            "UPDATE users SET hot_wallet_address = NULL WHERE rowid NOT IN (SELECT MIN(rowid) FROM users WHERE hot_wallet_address IS NOT NULL GROUP BY hot_wallet_address) AND hot_wallet_address IS NOT NULL",
+        )?;
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_hot_wallet_address ON users(hot_wallet_address) WHERE hot_wallet_address IS NOT NULL",
+        )?;
+        alter_add_column("ALTER TABLE users ADD COLUMN free_access BOOLEAN DEFAULT 0")?;
+
+        // Host rates table — stores per-item pricing used for credit deduction
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS host_rates (
+                description TEXT PRIMARY KEY,
+                price_in_hot REAL NOT NULL
+            )",
+        )?;
+
+        // Payment requests table for tracking mHOT payment proposals
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS payment_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_email TEXT NOT NULL,
+                amount_hot TEXT NOT NULL,
+                proposal_action_hash TEXT UNIQUE,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT
+            )",
+        )?;
+        // Dedup before creating unique index to handle legacy duplicate rows
+        conn.execute_batch(
+            "DELETE FROM payment_requests WHERE id NOT IN (SELECT MIN(id) FROM payment_requests WHERE proposal_action_hash IS NOT NULL GROUP BY proposal_action_hash) AND proposal_action_hash IS NOT NULL",
+        )?;
+        // Add unique index for existing databases that already created the table without UNIQUE
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_requests_proposal_hash ON payment_requests(proposal_action_hash) WHERE proposal_action_hash IS NOT NULL",
+        )?;
+
+        // Pending outgoing sends (proposals we created to send funds)
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pending_sends (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipient TEXT NOT NULL,
+                amount_hot TEXT NOT NULL,
+                proposal_action_hash TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT
+            )",
+        )?;
+        // Dedup before creating unique index to handle legacy duplicate rows
+        conn.execute_batch(
+            "DELETE FROM pending_sends WHERE id NOT IN (SELECT MIN(id) FROM pending_sends WHERE proposal_action_hash IS NOT NULL GROUP BY proposal_action_hash) AND proposal_action_hash IS NOT NULL",
+        )?;
+        // Add unique index for existing databases that already created the table without UNIQUE
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_sends_proposal_hash ON pending_sends(proposal_action_hash)",
+        )?;
+
+        // Compute activity log — one row per billing event
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS compute_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_email TEXT NOT NULL,
+                timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                operation TEXT NOT NULL,
+                summary TEXT,
+                cost REAL NOT NULL,
+                credits_after REAL NOT NULL
+            )",
+        )?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_compute_log_user_time ON compute_log(user_email, timestamp)",
+        )?;
 
         Ok(Self { conn })
     }
@@ -1480,7 +1591,7 @@ impl Ad4mDb {
         Ok(links?)
     }
 
-    /// Check if a perspective's links have been migrated from Rusqlite to SurrealDB
+    /// Check if a perspective's links have been migrated from Rusqlite
     ///
     /// # Arguments
     /// * `perspective_uuid` - UUID of the perspective to check
@@ -1496,7 +1607,7 @@ impl Ad4mDb {
         Ok(count > 0)
     }
 
-    /// Mark a perspective as having been migrated from Rusqlite to SurrealDB
+    /// Mark a perspective as having been migrated from Rusqlite
     ///
     /// This function is idempotent - calling it multiple times for the same perspective is safe.
     ///
@@ -1513,7 +1624,7 @@ impl Ad4mDb {
 
     /// Delete all links for a perspective from Rusqlite storage
     ///
-    /// This should only be called after successfully migrating links to SurrealDB.
+    /// This should only be called after successfully migrating links.
     ///
     /// # Arguments
     /// * `perspective_uuid` - UUID of the perspective whose links should be deleted
@@ -2078,6 +2189,24 @@ impl Ad4mDb {
         //     serde_json::to_value(model_status)?,
         // );
 
+        // Export users
+        let users: Vec<serde_json::Value> = self
+            .conn
+            .prepare("SELECT username, did, password_hash, last_seen, remaining_credits, hot_wallet_address, free_access FROM users")?
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "username": row.get::<_, String>(0)?,
+                    "did": row.get::<_, String>(1)?,
+                    "password_hash": row.get::<_, String>(2)?,
+                    "last_seen": row.get::<_, Option<i64>>(3)?,
+                    "remaining_credits": row.get::<_, Option<f64>>(4)?,
+                    "hot_wallet_address": row.get::<_, Option<String>>(5)?,
+                    "free_access": row.get::<_, Option<bool>>(6)?
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("users".to_string(), serde_json::to_value(users)?);
+
         // Export friends
         let mut stmt = self.conn.prepare("SELECT friend FROM friends")?;
         let friends: Vec<String> = stmt
@@ -2102,6 +2231,61 @@ impl Ad4mDb {
         export_data.insert(
             "known_link_languages".to_string(),
             serde_json::to_value(languages)?,
+        );
+
+        // Export host_rates
+        let host_rates: Vec<serde_json::Value> = self
+            .conn
+            .prepare("SELECT description, price_in_hot FROM host_rates")?
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "description": row.get::<_, String>(0)?,
+                    "price_in_hot": row.get::<_, f64>(1)?
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("host_rates".to_string(), serde_json::to_value(host_rates)?);
+
+        // Export payment_requests
+        let payment_requests: Vec<serde_json::Value> = self
+            .conn
+            .prepare("SELECT id, user_email, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests")?
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, i64>(0)?,
+                    "user_email": row.get::<_, String>(1)?,
+                    "amount_hot": row.get::<_, String>(2)?,
+                    "proposal_action_hash": row.get::<_, Option<String>>(3)?,
+                    "status": row.get::<_, String>(4)?,
+                    "created_at": row.get::<_, String>(5)?,
+                    "completed_at": row.get::<_, Option<String>>(6)?
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert(
+            "payment_requests".to_string(),
+            serde_json::to_value(payment_requests)?,
+        );
+
+        // Export pending_sends
+        let pending_sends: Vec<serde_json::Value> = self
+            .conn
+            .prepare("SELECT id, recipient, amount_hot, proposal_action_hash, status, created_at, completed_at FROM pending_sends")?
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, i64>(0)?,
+                    "recipient": row.get::<_, String>(1)?,
+                    "amount_hot": row.get::<_, String>(2)?,
+                    "proposal_action_hash": row.get::<_, String>(3)?,
+                    "status": row.get::<_, String>(4)?,
+                    "created_at": row.get::<_, String>(5)?,
+                    "completed_at": row.get::<_, Option<String>>(6)?
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert(
+            "pending_sends".to_string(),
+            serde_json::to_value(pending_sends)?,
         );
 
         Ok(serde_json::Value::Object(export_data))
@@ -2534,6 +2718,50 @@ impl Ad4mDb {
         //     }
         // }
 
+        // Import users
+        if let Some(users) = data.get("users") {
+            match serde_json::from_value::<Vec<serde_json::Value>>(users.clone()) {
+                Ok(users) => {
+                    result.users.total = users.len() as i32;
+                    log::debug!("Importing {} users", users.len());
+                    for user in users {
+                        let username = user["username"].as_str().unwrap_or("<unknown>");
+                        match self.conn.execute(
+                            "INSERT OR REPLACE INTO users (username, did, password_hash, last_seen, remaining_credits, hot_wallet_address, free_access) 
+                                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![
+                                user["username"].as_str().unwrap_or(""),
+                                user["did"].as_str().unwrap_or(""),
+                                user["password_hash"].as_str().unwrap_or(""),
+                                user["last_seen"].as_i64(),
+                                user["remaining_credits"].as_f64(),
+                                user["hot_wallet_address"].as_str(),
+                                user["free_access"].as_bool()
+                            ],
+                        ) {
+                            Ok(_) => result.users.imported += 1,
+                            Err(e) => {
+                                result.users.failed += 1;
+                                result.users.errors.push(format!(
+                                    "Failed to import user {}: {}",
+                                    username, e
+                                ));
+                                log::warn!("Failed to import user {}: {}", username, e)
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    result.users.failed = 1;
+                    result
+                        .users
+                        .errors
+                        .push(format!("Failed to parse users: {}", e));
+                    log::warn!("Failed to parse users: {}", e)
+                }
+            }
+        }
+
         // Import friends
         if let Some(friends) = data.get("friends") {
             match serde_json::from_value::<Vec<String>>(friends.clone()) {
@@ -2640,6 +2868,73 @@ impl Ad4mDb {
             }
         }
 
+        // Import host_rates
+        if let Some(host_rates) = data.get("host_rates") {
+            if let Ok(rates) = serde_json::from_value::<Vec<serde_json::Value>>(host_rates.clone())
+            {
+                log::debug!("Importing {} host_rates", rates.len());
+                for rate in rates {
+                    if let Err(e) = self.conn.execute(
+                        "INSERT OR REPLACE INTO host_rates (description, price_in_hot) VALUES (?1, ?2)",
+                        params![
+                            rate["description"].as_str().unwrap_or(""),
+                            rate["price_in_hot"].as_f64().unwrap_or(0.0)
+                        ],
+                    ) {
+                        log::warn!("Failed to import host_rate: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Import payment_requests
+        if let Some(payment_requests) = data.get("payment_requests") {
+            if let Ok(requests) =
+                serde_json::from_value::<Vec<serde_json::Value>>(payment_requests.clone())
+            {
+                log::debug!("Importing {} payment_requests", requests.len());
+                for req in requests {
+                    if let Err(e) = self.conn.execute(
+                        "INSERT OR IGNORE INTO payment_requests (user_email, amount_hot, proposal_action_hash, status, created_at, completed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            req["user_email"].as_str().unwrap_or(""),
+                            req["amount_hot"].as_str().unwrap_or("0"),
+                            req["proposal_action_hash"].as_str(),
+                            req["status"].as_str().unwrap_or("pending"),
+                            req["created_at"].as_str().unwrap_or(""),
+                            req["completed_at"].as_str()
+                        ],
+                    ) {
+                        log::warn!("Failed to import payment_request: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Import pending_sends
+        if let Some(pending_sends) = data.get("pending_sends") {
+            if let Ok(sends) =
+                serde_json::from_value::<Vec<serde_json::Value>>(pending_sends.clone())
+            {
+                log::debug!("Importing {} pending_sends", sends.len());
+                for send in sends {
+                    if let Err(e) = self.conn.execute(
+                        "INSERT OR IGNORE INTO pending_sends (recipient, amount_hot, proposal_action_hash, status, created_at, completed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            send["recipient"].as_str().unwrap_or(""),
+                            send["amount_hot"].as_str().unwrap_or("0"),
+                            send["proposal_action_hash"].as_str().unwrap_or(""),
+                            send["status"].as_str().unwrap_or("pending"),
+                            send["created_at"].as_str().unwrap_or(""),
+                            send["completed_at"].as_str()
+                        ],
+                    ) {
+                        log::warn!("Failed to import pending_send: {}", e);
+                    }
+                }
+            }
+        }
+
         Ok(result)
     }
 
@@ -2738,6 +3033,503 @@ impl Ad4mDb {
         Self::verify_password(password, &user.password_hash)
     }
 
+    // Hosting credit & access functions
+
+    pub fn get_user_credits(&self, email: &str) -> Ad4mDbResult<f64> {
+        let credits: f64 = self.conn.query_row(
+            "SELECT COALESCE(remaining_credits, 0) FROM users WHERE username = ?1",
+            [email],
+            |row| row.get(0),
+        )?;
+        Ok(credits)
+    }
+
+    /// Validate that a credit amount is finite and non-negative.
+    fn validate_credit_amount(amount: f64) -> Ad4mDbResult<()> {
+        if amount.is_nan() || amount.is_infinite() {
+            return Err(anyhow!("Invalid credit amount: must be a finite number"));
+        }
+        if amount < 0.0 {
+            return Err(anyhow!("Invalid credit amount: must be non-negative"));
+        }
+        Ok(())
+    }
+
+    /// Require that an UPDATE affected at least one row, otherwise the user was not found.
+    fn require_user_row(rows: usize, email: &str) -> Ad4mDbResult<()> {
+        if rows == 0 {
+            return Err(anyhow!("User not found: {}", email));
+        }
+        Ok(())
+    }
+
+    pub fn set_user_credits(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
+        Self::validate_credit_amount(amount)?;
+        let rows = self.conn.execute(
+            "UPDATE users SET remaining_credits = ?1 WHERE username = ?2",
+            params![amount, email],
+        )?;
+        Self::require_user_row(rows, email)
+    }
+
+    pub fn add_user_credits(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
+        Self::validate_credit_amount(amount)?;
+        let rows = self.conn.execute(
+            "UPDATE users SET remaining_credits = COALESCE(remaining_credits, 0) + ?1 WHERE username = ?2",
+            params![amount, email],
+        )?;
+        Self::require_user_row(rows, email)
+    }
+
+    pub fn deduct_user_credits(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
+        Self::validate_credit_amount(amount)?;
+        let rows = self.conn.execute(
+            "UPDATE users SET remaining_credits = MAX(0, COALESCE(remaining_credits, 0) - ?1) WHERE username = ?2",
+            params![amount, email],
+        )?;
+        Self::require_user_row(rows, email)
+    }
+
+    /// Atomically check that the user has sufficient credits and deduct them.
+    /// Returns Ok(()) if free_access is enabled or credits were successfully reserved.
+    /// Returns Err if credits are insufficient or the user is not found.
+    pub fn deduct_user_credits_if_available(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
+        Self::validate_credit_amount(amount)?;
+        let rows = self.conn.execute(
+            "UPDATE users SET remaining_credits = remaining_credits - ?1 WHERE username = ?2 AND COALESCE(remaining_credits, 0) >= ?1",
+            params![amount, email],
+        )?;
+        if rows == 0 {
+            // Distinguish user-not-found from insufficient credits
+            let exists: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE username = ?1)",
+                [email],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(anyhow!("User not found: {}", email));
+            }
+            return Err(anyhow!("Insufficient compute credits"));
+        }
+        Ok(())
+    }
+
+    /// Atomically deduct credits AND insert a compute log entry in a single transaction.
+    /// Returns the credits_after value on success.
+    pub fn deduct_credits_and_log(
+        &self,
+        email: &str,
+        amount: f64,
+        operation: &str,
+        summary: Option<&str>,
+    ) -> Ad4mDbResult<(i64, f64)> {
+        Self::validate_credit_amount(amount)?;
+        let tx = self.conn.unchecked_transaction()?;
+
+        // Deduct credits, clamped to 0 (never negative).
+        // Any user with credits > 0 is charged; the balance floors at 0.
+        let rows = tx.execute(
+            "UPDATE users SET remaining_credits = MAX(remaining_credits - ?1, 0) WHERE username = ?2 AND COALESCE(remaining_credits, 0) > 0",
+            params![amount, email],
+        )?;
+        if rows == 0 {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE username = ?1)",
+                [email],
+                |row| row.get(0),
+            )?;
+            // tx is dropped here → auto-rollback
+            if !exists {
+                return Err(anyhow!("User not found: {}", email));
+            }
+            return Err(anyhow!("Insufficient compute credits"));
+        }
+
+        // Read the resulting balance within the same transaction
+        let credits_after: f64 = tx.query_row(
+            "SELECT COALESCE(remaining_credits, 0) FROM users WHERE username = ?1",
+            [email],
+            |row| row.get(0),
+        )?;
+
+        // Insert the audit log entry
+        tx.execute(
+            "INSERT INTO compute_log (user_email, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![email, operation, summary, amount, credits_after],
+        )?;
+        let row_id = tx.last_insert_rowid();
+
+        tx.commit()?;
+        Ok((row_id, credits_after))
+    }
+
+    // ── Compute activity log ────────────────────────────────────────────
+
+    /// Insert a compute log entry after a billing event.
+    pub fn insert_compute_log(
+        &self,
+        email: &str,
+        operation: &str,
+        summary: Option<&str>,
+        cost: f64,
+        credits_after: f64,
+    ) -> Ad4mDbResult<i64> {
+        self.conn.execute(
+            "INSERT INTO compute_log (user_email, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![email, operation, summary, cost, credits_after],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Query compute log entries for a user, ordered newest-first.
+    /// If `since` is provided (ISO 8601), only entries after that timestamp are returned.
+    pub fn get_compute_log(
+        &self,
+        email: &str,
+        since: Option<&str>,
+        limit: i64,
+    ) -> Ad4mDbResult<Vec<ComputeLogEntry>> {
+        let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match since {
+            Some(ts) => (
+                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log WHERE user_email = ?1 AND timestamp > ?2 ORDER BY id DESC LIMIT ?3",
+                vec![Box::new(email.to_string()), Box::new(ts.to_string()), Box::new(limit)],
+            ),
+            None => (
+                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log WHERE user_email = ?1 ORDER BY id DESC LIMIT ?2",
+                vec![Box::new(email.to_string()), Box::new(limit)],
+            ),
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+        let entries = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                Ok(ComputeLogEntry {
+                    id: row.get(0)?,
+                    user_email: row.get(1)?,
+                    timestamp: row.get(2)?,
+                    operation: row.get(3)?,
+                    summary: row.get(4)?,
+                    cost: row.get(5)?,
+                    credits_after: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(entries)
+    }
+
+    /// Query compute log entries for ALL users (admin). Newest-first.
+    pub fn get_compute_log_all(
+        &self,
+        since: Option<&str>,
+        limit: i64,
+    ) -> Ad4mDbResult<Vec<ComputeLogEntry>> {
+        let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match since {
+            Some(ts) => (
+                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log WHERE timestamp > ?1 ORDER BY id DESC LIMIT ?2",
+                vec![Box::new(ts.to_string()), Box::new(limit)],
+            ),
+            None => (
+                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log ORDER BY id DESC LIMIT ?1",
+                vec![Box::new(limit)],
+            ),
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+        let entries = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                Ok(ComputeLogEntry {
+                    id: row.get(0)?,
+                    user_email: row.get(1)?,
+                    timestamp: row.get(2)?,
+                    operation: row.get(3)?,
+                    summary: row.get(4)?,
+                    cost: row.get(5)?,
+                    credits_after: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(entries)
+    }
+
+    /// Delete log entries older than the given ISO 8601 timestamp.
+    pub fn cleanup_compute_log(&self, before: &str) -> Ad4mDbResult<usize> {
+        let rows = self.conn.execute(
+            "DELETE FROM compute_log WHERE timestamp < ?1",
+            params![before],
+        )?;
+        Ok(rows)
+    }
+
+    pub fn get_user_hot_wallet(&self, email: &str) -> Ad4mDbResult<Option<String>> {
+        let result: Option<String> = self.conn.query_row(
+            "SELECT hot_wallet_address FROM users WHERE username = ?1",
+            [email],
+            |row| row.get(0),
+        )?;
+        Ok(result)
+    }
+
+    pub fn set_user_hot_wallet(&self, email: &str, address: &str) -> Ad4mDbResult<()> {
+        match self.conn.execute(
+            "UPDATE users SET hot_wallet_address = ?1 WHERE username = ?2",
+            params![address, email],
+        ) {
+            Ok(rows) => Self::require_user_row(rows, email),
+            Err(rusqlite::Error::SqliteFailure(err, _))
+                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(anyhow!(
+                    "Wallet address {} is already associated with another user",
+                    address
+                ))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn get_user_free_access(&self, email: &str) -> Ad4mDbResult<bool> {
+        let free_access: bool = self.conn.query_row(
+            "SELECT COALESCE(free_access, 0) FROM users WHERE username = ?1",
+            [email],
+            |row| row.get(0),
+        )?;
+        Ok(free_access)
+    }
+
+    pub fn set_user_free_access(&self, email: &str, enabled: bool) -> Ad4mDbResult<()> {
+        let rows = self.conn.execute(
+            "UPDATE users SET free_access = ?1 WHERE username = ?2",
+            params![enabled, email],
+        )?;
+        Self::require_user_row(rows, email)
+    }
+
+    // Host rates management functions
+
+    pub fn set_host_rates(&self, rates: &[(String, f64)]) -> Ad4mDbResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM host_rates", [])?;
+        let mut stmt =
+            tx.prepare("INSERT INTO host_rates (description, price_in_hot) VALUES (?1, ?2)")?;
+        for (desc, price) in rates {
+            stmt.execute(params![desc, price])?;
+        }
+        drop(stmt);
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_host_rates(&self) -> Ad4mDbResult<Vec<(String, f64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT description, price_in_hot FROM host_rates")?;
+        let rates = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rates)
+    }
+
+    pub fn get_host_rate(&self, description: &str) -> Ad4mDbResult<Option<f64>> {
+        let result = self.conn.query_row(
+            "SELECT price_in_hot FROM host_rates WHERE description = ?1",
+            [description],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(price) => Ok(Some(price)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    // Payment request management functions
+
+    pub fn create_payment_request(
+        &self,
+        email: &str,
+        amount_hot: &str,
+        action_hash: &str,
+    ) -> Ad4mDbResult<i64> {
+        let rows = self.conn.execute(
+            "INSERT OR IGNORE INTO payment_requests (user_email, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
+            params![email, amount_hot, action_hash],
+        )?;
+        if rows > 0 {
+            Ok(self.conn.last_insert_rowid())
+        } else {
+            let id: i64 = self.conn.query_row(
+                "SELECT id FROM payment_requests WHERE proposal_action_hash = ?1",
+                params![action_hash],
+                |row| row.get(0),
+            )?;
+            Ok(id)
+        }
+    }
+
+    pub fn complete_payment_request(&self, action_hash: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE payment_requests SET status = 'completed', completed_at = datetime('now') WHERE proposal_action_hash = ?1 AND status = 'pending'",
+            params![action_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn reject_payment_request(&self, action_hash: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE payment_requests SET status = 'rejected', completed_at = datetime('now') WHERE proposal_action_hash = ?1 AND status = 'pending'",
+            params![action_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_payment_request_by_hash(
+        &self,
+        action_hash: &str,
+    ) -> Ad4mDbResult<Option<PaymentRequest>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, user_email, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE proposal_action_hash = ?1",
+        )?;
+        let mut requests = stmt
+            .query_map(params![action_hash], |row| {
+                Ok(PaymentRequest {
+                    id: row.get(0)?,
+                    user_email: row.get(1)?,
+                    amount_hot: row.get(2)?,
+                    proposal_action_hash: row.get(3)?,
+                    status: row.get(4)?,
+                    created_at: row.get(5)?,
+                    completed_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(requests.pop())
+    }
+
+    pub fn get_pending_payment_requests(&self) -> Ad4mDbResult<Vec<PaymentRequest>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, user_email, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE status = 'pending'",
+        )?;
+        let requests = stmt
+            .query_map([], |row| {
+                Ok(PaymentRequest {
+                    id: row.get(0)?,
+                    user_email: row.get(1)?,
+                    amount_hot: row.get(2)?,
+                    proposal_action_hash: row.get(3)?,
+                    status: row.get(4)?,
+                    created_at: row.get(5)?,
+                    completed_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(requests)
+    }
+
+    pub fn create_pending_send(
+        &self,
+        recipient: &str,
+        amount_hot: &str,
+        proposal_hash: &str,
+    ) -> Ad4mDbResult<i64> {
+        let rows = self.conn.execute(
+            "INSERT OR IGNORE INTO pending_sends (recipient, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
+            params![recipient, amount_hot, proposal_hash],
+        )?;
+        if rows > 0 {
+            Ok(self.conn.last_insert_rowid())
+        } else {
+            let id: i64 = self.conn.query_row(
+                "SELECT id FROM pending_sends WHERE proposal_action_hash = ?1",
+                params![proposal_hash],
+                |row| row.get(0),
+            )?;
+            Ok(id)
+        }
+    }
+
+    pub fn complete_pending_send(&self, proposal_hash: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE pending_sends SET status = 'completed', completed_at = datetime('now') WHERE proposal_action_hash = ?1 AND status = 'pending'",
+            params![proposal_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn reject_pending_send(&self, proposal_hash: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE pending_sends SET status = 'rejected', completed_at = datetime('now') WHERE proposal_action_hash = ?1 AND status = 'pending'",
+            params![proposal_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_pending_send_by_hash(
+        &self,
+        proposal_hash: &str,
+    ) -> Ad4mDbResult<Option<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT recipient, amount_hot, proposal_action_hash FROM pending_sends WHERE proposal_action_hash = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![proposal_hash], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        match rows.next() {
+            Some(Ok(row)) => Ok(Some(row)),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(None),
+        }
+    }
+
+    pub fn get_pending_sends(&self) -> Ad4mDbResult<Vec<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT recipient, amount_hot, proposal_action_hash FROM pending_sends WHERE status = 'pending'",
+        )?;
+        let sends = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sends)
+    }
+
+    /// Get all sends (for transaction history display)
+    pub fn get_all_sends(&self) -> Ad4mDbResult<Vec<(String, String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT recipient, amount_hot, status, created_at FROM pending_sends ORDER BY created_at DESC",
+        )?;
+        let sends = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sends)
+    }
+
+    /// Get all payment requests (for transaction history display)
+    pub fn get_all_payment_requests(&self) -> Ad4mDbResult<Vec<(String, String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT user_email, amount_hot, status, created_at FROM payment_requests ORDER BY created_at DESC",
+        )?;
+        let requests = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(requests)
+    }
+
+    pub fn get_user_by_hot_wallet_address(&self, address: &str) -> Ad4mDbResult<Option<String>> {
+        let result = self
+            .conn
+            .query_row(
+                "SELECT username FROM users WHERE hot_wallet_address = ?1",
+                [address],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(result)
+    }
+
     // Settings management functions
     pub fn get_setting(&self, key: &str) -> Ad4mDbResult<Option<String>> {
         let result = self
@@ -2767,6 +3559,20 @@ impl Ad4mDb {
 
     pub fn set_multi_user_enabled(&self, enabled: bool) -> Ad4mDbResult<()> {
         self.set_setting("multi_user_enabled", if enabled { "true" } else { "false" })
+    }
+
+    pub fn get_free_hosting_enabled(&self) -> Ad4mDbResult<bool> {
+        match self.get_setting("free_hosting_enabled")? {
+            Some(value) => Ok(value == "true"),
+            None => Ok(true), // Default to free hosting
+        }
+    }
+
+    pub fn set_free_hosting_enabled(&self, enabled: bool) -> Ad4mDbResult<()> {
+        self.set_setting(
+            "free_hosting_enabled",
+            if enabled { "true" } else { "false" },
+        )
     }
 
     // Email verification functions
@@ -4408,5 +5214,102 @@ mod tests {
         );
 
         println!("✅ User list ordering tests passed");
+    }
+
+    #[test]
+    fn test_payment_requests_crud() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create a user first
+        db.add_user("alice@example.com", "did:test:alice", "hash123")
+            .unwrap();
+
+        // Create payment request
+        let id = db
+            .create_payment_request("alice@example.com", "100.5", "uhCAkABC123")
+            .unwrap();
+        assert!(id > 0);
+
+        // Should appear in pending list
+        let pending = db.get_pending_payment_requests().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].user_email, "alice@example.com");
+        assert_eq!(pending[0].amount_hot, "100.5");
+        assert_eq!(
+            pending[0].proposal_action_hash.as_deref(),
+            Some("uhCAkABC123")
+        );
+        assert_eq!(pending[0].status, "pending");
+
+        // Complete it
+        db.complete_payment_request("uhCAkABC123").unwrap();
+
+        // No longer pending
+        let pending = db.get_pending_payment_requests().unwrap();
+        assert_eq!(pending.len(), 0);
+
+        // Completing again is a no-op (already completed)
+        db.complete_payment_request("uhCAkABC123").unwrap();
+
+        println!("✅ Payment requests CRUD tests passed");
+    }
+
+    #[test]
+    fn test_get_user_by_hot_wallet_address() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create users
+        db.add_user("alice@example.com", "did:test:alice", "hash1")
+            .unwrap();
+        db.add_user("bob@example.com", "did:test:bob", "hash2")
+            .unwrap();
+
+        // No wallet set yet
+        let result = db.get_user_by_hot_wallet_address("uhCAkXYZ").unwrap();
+        assert!(result.is_none());
+
+        // Set wallet
+        db.set_user_hot_wallet("alice@example.com", "uhCAkXYZ")
+            .unwrap();
+
+        // Should find alice
+        let result = db.get_user_by_hot_wallet_address("uhCAkXYZ").unwrap();
+        assert_eq!(result, Some("alice@example.com".to_string()));
+
+        // Bob's wallet not set
+        let result = db.get_user_by_hot_wallet_address("uhCAkOther").unwrap();
+        assert!(result.is_none());
+
+        println!("✅ Reverse wallet lookup tests passed");
+    }
+
+    #[test]
+    fn test_multiple_payment_requests() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        db.add_user("alice@example.com", "did:test:alice", "hash1")
+            .unwrap();
+
+        // Create multiple requests
+        db.create_payment_request("alice@example.com", "50", "hash1")
+            .unwrap();
+        db.create_payment_request("alice@example.com", "75", "hash2")
+            .unwrap();
+        db.create_payment_request("alice@example.com", "100", "hash3")
+            .unwrap();
+
+        let pending = db.get_pending_payment_requests().unwrap();
+        assert_eq!(pending.len(), 3);
+
+        // Complete one
+        db.complete_payment_request("hash2").unwrap();
+
+        let pending = db.get_pending_payment_requests().unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(pending
+            .iter()
+            .all(|r| r.proposal_action_hash.as_deref() != Some("hash2")));
+
+        println!("✅ Multiple payment requests tests passed");
     }
 }

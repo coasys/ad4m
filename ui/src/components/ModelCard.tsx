@@ -57,8 +57,9 @@ export default function ModelCard(props: {
           <j-text variant="heading-sm" size="600" color="primary-800">
             {name}
           </j-text>
-          {modelType === "LLM" && (
-            <j-flex gap="300">
+          <j-flex gap="300">
+            {modelType === "LLM" && (
+              <>
               {model.default ? (
                 <j-button variant="subtle" size="sm" disabled>
                   Default
@@ -68,7 +69,8 @@ export default function ModelCard(props: {
                   Set Default
                 </j-button>
               )}
-
+              </>
+            )}
               <j-button variant="subtle" size="sm" onClick={editModel}>
                 <j-icon name="pencil-square" size="sm" />
               </j-button>
@@ -76,13 +78,7 @@ export default function ModelCard(props: {
               <j-button variant="subtle" size="sm" onClick={removeModel}>
                 <j-icon name="trash" size="sm" />
               </j-button>
-            </j-flex>
-          )}
-          {modelType == "TRANSCRIPTION" && (
-            <j-button variant="subtle" size="sm" onClick={editModel}>
-              <j-icon name="pencil-square" size="sm" />
-            </j-button>
-          )}
+          </j-flex>
         </j-flex>
       </j-box>
       <j-flex direction="column" gap="400">

@@ -26,12 +26,94 @@ use crate::{
         sign_device_key,
     },
     holochain_service::get_holochain_service,
-    pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC},
+    languages::LanguageController,
+    pubsub::{
+        get_global_pubsub, mark_credits_dirty, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC,
+    },
 };
 use base64::prelude::*;
 
 // Use the shared can_access_perspective function from query_resolvers
 use super::query_resolvers::can_access_perspective;
+
+/// Deduct compute credits for a user after an operation completes.
+/// Only looks up the rate and bills when billing is actually active.
+/// No-ops in single-user mode, free hosting, or free-access users.
+fn deduct_compute_credits(
+    auth_token: &str,
+    rate_key: &str,
+    quantity: f64,
+    operation: &str,
+    summary: Option<&str>,
+) -> FieldResult<()> {
+    if !is_billing_active(auth_token)? {
+        return Ok(());
+    }
+    let rate = match Ad4mDb::with_global_instance(|db| db.get_host_rate(rate_key)) {
+        Ok(Some(rate)) => rate,
+        Ok(None) => {
+            return Err(FieldError::new(
+                format!("No host rate configured for '{}'", rate_key),
+                graphql_value!(null),
+            ))
+        }
+        Err(e) => {
+            return Err(FieldError::new(
+                format!("Failed to read host rate: {}", e),
+                graphql_value!(null),
+            ))
+        }
+    };
+    let amount = quantity * rate;
+    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        crate::billing::bill_compute(email, amount, operation, summary)
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+    }
+    Ok(())
+}
+
+/// Read-only credit check. Returns Ok(()) if the user can afford compute.
+/// Used as a fast pre-check before expensive operations; the actual deduction
+/// happens after the operation via deduct_compute_credits with the exact cost.
+fn check_compute_credits(auth_token: &str) -> FieldResult<()> {
+    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+        if global_free {
+            return Ok(());
+        }
+        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+        if !free {
+            let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
+                .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+            if credits <= 0.0 {
+                return Err(FieldError::new(
+                    "Insufficient compute credits",
+                    graphql_value!(null),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns true if billing is active for this user (not free hosting, not free access).
+/// Returns false if there's no user email (single-user / local mode) or if hosting/user is free.
+fn is_billing_active(auth_token: &str) -> FieldResult<bool> {
+    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+        if global_free {
+            return Ok(false);
+        }
+        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+        Ok(!free)
+    } else {
+        Ok(false)
+    }
+}
 
 // Helper function to get perspective with access control
 async fn get_perspective_with_access_control(
@@ -163,8 +245,16 @@ impl Mutation {
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_CREATE_CAPABILITY)?;
-        let agent = AgentService::with_mutable_global_instance(|agent_service| {
+        let mut agent = AgentService::with_mutable_global_instance(|agent_service| {
             agent_service.create_new_keys();
+
+            // Set the direct message language from bootstrap seed
+            let dm_language =
+                RuntimeService::with_global_instance(|rt| rt.get_direct_message_language());
+            if let Some(ref mut agent) = agent_service.agent {
+                agent.direct_message_language = Some(dm_language);
+            }
+
             agent_service.save(passphrase.clone());
 
             // Store passphrase so future wallet modifications (e.g., adding user keys) can be saved
@@ -173,14 +263,43 @@ impl Mutation {
             agent_service.dump().clone()
         });
 
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentGenerate", {{ passphrase: "{}" }})
-            )"#,
-            passphrase
+        // Start Holochain conductor (previously done via JS core.initHolochain)
+        let config = crate::config::get_global_config();
+        let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
+            &config,
+            passphrase.clone(),
         );
-        js.execute(script).await?;
+
+        let mut init_errors: Vec<String> = Vec::new();
+
+        if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
+            log::error!("Error initializing Holochain: {:?}", e);
+            init_errors.push(format!("Holochain init failed: {}", e));
+        } else {
+            log::info!("Holochain init complete");
+        }
+
+        // Load system languages (previously done via JS core.initLanguages)
+        let language_language_only = config.language_language_only.unwrap_or(false);
+        let controller = LanguageController::global_instance();
+        if let Err(e) = controller
+            .load_system_languages(language_language_only)
+            .await
+        {
+            log::error!("Error loading system languages: {:?}", e);
+            init_errors.push(format!("Failed to load system languages: {}", e));
+        } else {
+            log::info!("System languages loaded");
+        }
+
+        // Publish agent expression to the agent language
+        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
+            log::warn!("Error publishing agent expression: {}", e);
+        }
+
+        if !init_errors.is_empty() {
+            agent.error = Some(init_errors.join("; "));
+        }
 
         get_global_pubsub()
             .await
@@ -232,7 +351,9 @@ impl Mutation {
         auth_info: AuthInfoInput,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
-        let auth_info: AuthInfo = auth_info.into();
+        let auth_info: AuthInfo = auth_info.try_into().map_err(|e: String| {
+            coasys_juniper::FieldError::new(e, coasys_juniper::Value::null())
+        })?;
         let request_id = request_capability(auth_info.clone()).await;
         if context.auto_permit_cap_requests {
             println!("======================================");
@@ -295,7 +416,7 @@ impl Mutation {
         &self,
         context: &RequestContext,
         passphrase: String,
-        holochain: bool,
+        _holochain: bool,
     ) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)?;
 
@@ -307,6 +428,8 @@ impl Mutation {
             agent_ref.unlock(passphrase.clone())?
         }
 
+        let mut init_errors: Vec<String> = Vec::new();
+
         if agent_instance
             .lock()
             .expect("agent lock")
@@ -314,14 +437,50 @@ impl Mutation {
             .expect("agent instance")
             .is_unlocked()
         {
-            let mut js = context.js_handle.clone();
-            let script = format!(
-                r#"JSON.stringify(
-                    await core.callResolver("Mutation", "agentUnlock", {{ passphrase: "{}", holochain: "{}" }})
-                )"#,
-                passphrase, holochain
-            );
-            js.execute(script).await?;
+            // Start Holochain conductor if not already running (previously done via JS core.callResolver)
+            if crate::holochain_service::maybe_get_holochain_service()
+                .await
+                .is_none()
+            {
+                log::info!("Holochain service not initialized. Initializing...");
+                let config = crate::config::get_global_config();
+                let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
+                    &config,
+                    passphrase.clone(),
+                );
+
+                if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
+                    log::error!("Error initializing Holochain: {:?}", e);
+                    init_errors.push(format!("Holochain init failed: {}", e));
+                } else {
+                    log::info!("Holochain init complete");
+                }
+            } else {
+                log::info!("Holochain service already initialized");
+            }
+
+            // Load system languages (previously done via JS core.initLanguages)
+            let config = crate::config::get_global_config();
+            let language_language_only = config.language_language_only.unwrap_or(false);
+            let controller = LanguageController::global_instance();
+            if let Err(e) = controller
+                .load_system_languages(language_language_only)
+                .await
+            {
+                log::error!("Error loading system languages: {:?}", e);
+                init_errors.push(format!("Failed to load system languages: {}", e));
+            } else {
+                log::info!("System languages loaded");
+            }
+
+            log::info!("AD4M init complete");
+
+            // Publish agent expression to the agent language
+            if let Err(e) =
+                AgentService::publish_agent_to_language(&AgentContext::main_agent()).await
+            {
+                log::warn!("Error publishing agent expression: {}", e);
+            }
         }
 
         let mut agent = {
@@ -338,6 +497,8 @@ impl Mutation {
             .is_unlocked()
         {
             agent.error = Some("Failed to unlock agent".to_string());
+        } else if !init_errors.is_empty() {
+            agent.error = Some(init_errors.join("; "));
         }
 
         get_global_pubsub()
@@ -357,16 +518,38 @@ impl Mutation {
         direct_message_language: String,
     ) -> FieldResult<Agent> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentUpdateDirectMessageLanguage", {{ directMessageLanguage: "{}" }})
-            )"#,
-            direct_message_language
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Agent> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let agent = AgentService::with_mutable_global_instance(|agent_service| {
+            if let Some(ref mut agent) = agent_service.agent {
+                agent.direct_message_language = Some(direct_message_language.clone());
+                let updated_agent = agent.clone();
+                if let Some(ref passphrase) = agent_service.passphrase {
+                    agent_service.save(passphrase.clone());
+                }
+                Ok(updated_agent)
+            } else {
+                Err(FieldError::new("Agent not initialized", Value::null()))
+            }
+        })?;
+
+        // Publish updated agent to agent language
+        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
+            log::warn!(
+                "Failed to publish agent expression after DM language update: {}",
+                e
+            );
+        }
+
+        // Notify subscribers
+        get_global_pubsub()
+            .await
+            .publish(
+                &AGENT_UPDATED_TOPIC,
+                &serde_json::to_string(&agent).unwrap(),
+            )
+            .await;
+
+        Ok(agent)
     }
 
     async fn agent_update_public_perspective(
@@ -411,10 +594,10 @@ impl Mutation {
             })?;
 
             // Publish the updated agent to the agent language
-            let mut js_handle = context.js_handle.clone();
-            if let Err(e) =
-                AgentService::publish_user_agent_to_language(&user_email, &agent, &mut js_handle)
-                    .await
+            if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::for_user_email(
+                user_email.clone(),
+            ))
+            .await
             {
                 log::warn!(
                     "Failed to publish updated user {} profile to agent language: {}",
@@ -426,18 +609,52 @@ impl Mutation {
 
             Ok(agent)
         } else {
-            // Fallback to JS implementation for main agent
-            let mut js = context.js_handle.clone();
-            let perspective_json = serde_json::to_string(&perspective)?;
-            let script = format!(
-                r#"JSON.stringify(
-                    await core.callResolver("Mutation", "agentUpdatePublicPerspective", {{ perspective: {} }})
-                )"#,
-                perspective_json
-            );
-            let result = js.execute(script).await?;
-            let result: JsResultType<Agent> = serde_json::from_str(&result)?;
-            result.get_graphql_result()
+            // Main agent path: update perspective and publish to agent language
+            let decorated_links: Vec<DecoratedLinkExpression> = perspective
+                .links
+                .iter()
+                .map(|link_input| DecoratedLinkExpression::try_from(link_input.clone()))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let agent = AgentService::with_mutable_global_instance(|agent_service| {
+                if let Some(ref mut agent) = agent_service.agent {
+                    agent.perspective = Some(Perspective {
+                        links: decorated_links,
+                    });
+                    let updated = agent.clone();
+                    if let Some(ref passphrase) = agent_service.passphrase {
+                        agent_service.save(passphrase.clone());
+                    }
+                    Ok(updated)
+                } else {
+                    Err(FieldError::new("Agent not initialized", Value::null()))
+                }
+            })?;
+
+            // Publish updated agent to agent language
+            AgentService::publish_agent_to_language(&AgentContext::main_agent())
+                .await
+                .map_err(|e| {
+                    log::warn!(
+                        "Failed to publish agent expression after profile update: {}",
+                        e
+                    );
+                    FieldError::new(
+                        format!("Profile updated but failed to publish: {}", e),
+                        Value::null(),
+                    )
+                })?;
+
+            // Notify subscribers
+            get_global_pubsub()
+                .await
+                .publish(
+                    &AGENT_UPDATED_TOPIC,
+                    &serde_json::to_string(&agent).unwrap(),
+                )
+                .await;
+
+            Ok(agent)
         }
     }
 
@@ -559,9 +776,8 @@ impl Mutation {
         })?;
 
         // Publish the agent to the agent language
-        let mut js_handle = context.js_handle.clone();
         if let Err(e) =
-            AgentService::publish_user_agent_to_language(&email, &initial_agent, &mut js_handle)
+            AgentService::publish_agent_to_language(&AgentContext::for_user_email(email.clone()))
                 .await
         {
             log::warn!("Failed to publish user {} to agent language: {}", did, e);
@@ -1222,41 +1438,21 @@ impl Mutation {
         language_address: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &EXPRESSION_CREATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
 
-        // Get user context from JWT token
-        let user_email =
-            crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
+        let controller = LanguageController::global_instance();
+        let content_json: serde_json::Value =
+            serde_json::from_str(&content).unwrap_or(serde_json::Value::String(content.clone()));
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
-        let script = if let Some(user_email) = user_email {
-            // User context: set agent service context temporarily
-            format!(
-                r#"JSON.stringify(
-                    await (async () => {{
-                        const originalContext = core.agentService.getUserContext();
-                        core.agentService.setUserContext("{}");
-                        try {{
-                            return await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }});
-                        }} finally {{
-                            core.agentService.setUserContext(originalContext);
-                        }}
-                    }})()
-                )"#,
-                user_email, content, language_address
-            )
-        } else {
-            // Main agent context: call directly
-            format!(
-                r#"JSON.stringify(
-                    await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }})
-                )"#,
-                content, language_address
-            )
-        };
-
-        let result = js.execute(script).await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        controller
+            .expression_create(&language_address, content_json, &agent_context)
+            .await
+            .map_err(|e| {
+                FieldError::new(
+                    format!("Failed to create expression on {}: {}", language_address, e),
+                    Value::null(),
+                )
+            })
     }
 
     async fn expression_interact(
@@ -1266,49 +1462,30 @@ impl Mutation {
         url: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &EXPRESSION_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
 
-        // Get user context from JWT token
-        let user_email =
-            crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
+        let controller = LanguageController::global_instance();
+        if let Ok((lang_address, _)) = LanguageController::parse_expr_url(&url) {
+            if controller.is_language_loaded(&lang_address).await {
+                match controller
+                    .expression_interact(&url, &interaction_call)
+                    .await
+                {
+                    Ok(Some(result)) => return Ok(result),
+                    Ok(None) => return Ok("null".to_string()),
+                    Err(e) => {
+                        return Err(FieldError::new(
+                            format!("expression_interact failed for {}: {}", url, e),
+                            Value::null(),
+                        ));
+                    }
+                }
+            }
+        }
 
-        let interaction_call_json = serde_json::to_string(&interaction_call)?;
-        let script = if let Some(user_email) = user_email {
-            // User context: set agent service context temporarily
-            format!(
-                r#"JSON.stringify(
-                    await (async () => {{
-                        const originalContext = core.agentService.getUserContext();
-                        core.agentService.setUserContext("{}");
-                        try {{
-                            return await core.callResolver(
-                                "Mutation",
-                                "expressionInteract",
-                                {{ interactionCall: {}, url: "{}" }},
-                            );
-                        }} finally {{
-                            core.agentService.setUserContext(originalContext);
-                        }}
-                    }})()
-                )"#,
-                user_email, interaction_call_json, url
-            )
-        } else {
-            // Main agent context: call directly
-            format!(
-                r#"JSON.stringify(
-                await core.callResolver(
-                    "Mutation",
-                    "expressionInteract",
-                    {{ interactionCall: {}, url: "{}" }},
-                ))"#,
-                interaction_call_json, url
-            )
-        };
-
-        let result = js.execute(script).await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        Err(FieldError::new(
+            format!("Language not loaded for expression URL: {}", url),
+            Value::null(),
+        ))
     }
 
     async fn language_apply_template_and_publish(
@@ -1318,19 +1495,126 @@ impl Mutation {
         template_data: String,
     ) -> FieldResult<LanguageRef> {
         check_capability(&context.capabilities, &LANGUAGE_CREATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "languageApplyTemplateAndPublish",
-                {{ sourceLanguageHash: "{}", templateData: JSON.stringify({}) }},
-            ))"#,
-            source_language_hash, template_data
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<LanguageRef> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        // Check if the language language is loaded on the Rust side
+        let controller = LanguageController::global_instance();
+        let language_language_loaded = {
+            let sys = controller.system_addresses.lock().await;
+            sys.language_language.is_some()
+        };
+
+        if language_language_loaded {
+            // Rust-side implementation
+            let template_map: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(&template_data).map_err(|e| {
+                    FieldError::new(
+                        format!("Invalid template_data JSON: {}", e),
+                        graphql_value!(null),
+                    )
+                })?;
+
+            let input = controller
+                .language_apply_template_on_source(&source_language_hash, template_map)
+                .await
+                .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+
+            let input_name = input.meta.name.clone();
+
+            // Save the templated bundle locally so it can be loaded into a runtime
+            if let Err(e) = controller.save_language_bundle(&input.bundle, None) {
+                log::warn!("Failed to save templated language bundle locally: {}", e);
+            }
+
+            let language_language_address = {
+                let sys = controller.system_addresses.lock().await;
+                sys.language_language.clone().unwrap()
+            };
+
+            let input_json = serde_json::to_string(&input).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to serialize language input: {}", e),
+                    graphql_value!(null),
+                )
+            })?;
+
+            // Wrap in JSON.stringify so we can round-trip a valid JSON
+            // string across the v8 -> Rust boundary. Without the wrapper,
+            // `to_rust_string_lossy` returns the raw JS string contents,
+            // and any address containing a `"`, `\`, or leading/trailing
+            // whitespace (rare for content hashes, trivially legal for
+            // DIDs) would either be silently corrupted by the old
+            // `trim_matches('"')` strip or not decode at all.
+            //
+            // Coerce undefined/null to JSON null before stringifying, for
+            // the same reason we did in the expressionGet sweep:
+            // a bare `JSON.stringify(undefined)` yields the JS value
+            // `undefined` (not the string `"undefined"`), which
+            // to_rust_string_lossy then captures verbatim and
+            // from_str::<String> fails to parse. With `?? null` we always
+            // land on valid JSON and can raise a clear
+            // "expressionCreate returned no address" error instead of a
+            // confusing serde parse failure.
+            let publish_script = format!(
+                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionCreate({})) ?? null)"#,
+                input_json
+            );
+
+            let address_raw = controller
+                .execute_on_language(&language_language_address, &publish_script)
+                .await
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to publish language: {}", e),
+                        graphql_value!(null),
+                    )
+                })?;
+
+            let trimmed_addr_raw = address_raw.trim();
+            if trimmed_addr_raw == "null" || trimmed_addr_raw.is_empty() {
+                return Err(FieldError::new(
+                    format!(
+                        "Language language returned no address from expressionCreate — got {:?}",
+                        trimmed_addr_raw
+                    ),
+                    graphql_value!(null),
+                ));
+            }
+
+            let address: String = serde_json::from_str(trimmed_addr_raw).map_err(|e| {
+                FieldError::new(
+                    format!(
+                        "Failed to parse published language address: {} ({:?})",
+                        e, address_raw
+                    ),
+                    graphql_value!(null),
+                )
+            })?;
+
+            // Load the templated language into a per-language runtime
+            let bundle_on_disk = crate::utils::languages_directory()
+                .join(&address)
+                .join("bundle.js");
+            if bundle_on_disk.exists() {
+                if let Err(e) = controller.load_language(bundle_on_disk, false).await {
+                    log::warn!("Failed to load templated language into runtime: {}", e);
+                }
+            }
+
+            // Override the cached language name with the templated name.
+            // load_language() above caches the name from the source code's
+            // `export const name = ...`, but templating overrides the meta
+            // name without rewriting the source export.
+            controller.set_language_name(&address, &input_name).await;
+            Ok(LanguageRef {
+                address,
+                name: input_name,
+            })
+        } else {
+            Err(FieldError::new(
+                "Language language not loaded - cannot apply template and publish".to_string(),
+                graphql_value!(null),
+            ))
+        }
     }
 
     async fn language_publish(
@@ -1340,23 +1624,89 @@ impl Mutation {
         language_path: String,
     ) -> FieldResult<LanguageMeta> {
         check_capability(&context.capabilities, &LANGUAGE_CREATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let language_meta_json = serde_json::to_string(&language_meta)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "languagePublish",
-                {{ languageMeta: {}, languagePath: "{}" }},
-            ))"#,
-            language_meta_json, language_path
-        );
 
-        let result = js.execute(script).await?;
-        println!("language_publish result: {:?}", result);
-        let result: JsResultType<LanguageMeta> = serde_json::from_str(&result)?;
-        println!("language_publish result 1: {:?}", result);
-        result.get_graphql_result()
+        let controller = LanguageController::global_instance();
+
+        // Read the language bundle from disk
+        let bundle = std::fs::read_to_string(&language_path).map_err(|e| {
+            FieldError::new(
+                format!("Failed to read language bundle: {}", e),
+                graphql_value!(null),
+            )
+        })?;
+
+        // Save the bundle locally
+        let (hash, _bundle_path) = controller
+            .save_language_bundle(&bundle, None)
+            .map_err(|e| {
+                FieldError::new(
+                    format!("Failed to save language bundle: {}", e),
+                    graphql_value!(null),
+                )
+            })?;
+
+        // Build meta with the computed address.
+        // Note: `author` and `templated` are NOT included in the data –
+        // they come from the Expression envelope (author) or are derived (templated).
+        // This matches the old JS LanguageMetaInternal behavior.
+        let meta = LanguageMeta {
+            name: language_meta.name.clone(),
+            address: hash.clone(),
+            description: Some(language_meta.description.clone()),
+            possible_template_params: language_meta.possible_template_params.clone(),
+            source_code_link: language_meta.source_code_link.clone(),
+            ..LanguageMeta::default()
+        };
+
+        // Publish to the language language
+        let language_language_address = {
+            let sys = controller.system_addresses.lock().await;
+            sys.language_language.clone().ok_or_else(|| {
+                FieldError::new("Language language not loaded", graphql_value!(null))
+            })?
+        };
+
+        // Create the language language input
+        let language_input = LanguageLanguageInput {
+            bundle: bundle.clone(),
+            meta: meta.clone(),
+        };
+
+        let content = serde_json::to_value(&language_input).map_err(|e| {
+            FieldError::new(
+                format!("Failed to serialize language input: {}", e),
+                graphql_value!(null),
+            )
+        })?;
+
+        let agent_context = crate::agent::AgentContext::main_agent();
+        controller
+            .expression_create(&language_language_address, content, &agent_context)
+            .await
+            .map_err(|e| {
+                FieldError::new(
+                    format!("Failed to publish language: {}", e),
+                    graphql_value!(null),
+                )
+            })?;
+
+        // Load the language into a per-language runtime
+        let bundle_on_disk = crate::utils::languages_directory()
+            .join(&hash)
+            .join("bundle.js");
+        if bundle_on_disk.exists() {
+            if let Err(e) = controller.load_language(bundle_on_disk, false).await {
+                log::warn!("Failed to load published language into runtime: {}", e);
+            }
+        }
+
+        // Build the response meta with all fields for GraphQL
+        let response_meta = LanguageMeta {
+            author: crate::agent::did(),
+            templated: Some(false),
+            ..meta
+        };
+        Ok(response_meta)
     }
 
     async fn language_remove(
@@ -1365,19 +1715,12 @@ impl Mutation {
         address: String,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &LANGUAGE_DELETE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "languageRemove",
-                {{ address: "{}" }},
-            ))"#,
-            address
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let mut controller = LanguageController::global_instance();
+        controller
+            .language_remove(&address)
+            .await
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+        Ok(true)
     }
 
     async fn language_write_settings(
@@ -1387,19 +1730,39 @@ impl Mutation {
         settings: String,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &LANGUAGE_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "languageWriteSettings",
-                {{ languageAddress: "{}", settings: "{}" }},
-            ))"#,
-            language_address, settings
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let controller = LanguageController::global_instance();
+        if controller.is_language_loaded(&language_address).await {
+            let settings_json: serde_json::Value = serde_json::from_str(&settings)
+                .unwrap_or(serde_json::Value::String(settings.clone()));
+
+            controller
+                .write_settings(&language_address, settings_json)
+                .await
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to write settings: {}", e),
+                        graphql_value!(null),
+                    )
+                })?;
+
+            controller
+                .reload_language(&language_address)
+                .await
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to reload language after settings change: {}", e),
+                        graphql_value!(null),
+                    )
+                })?;
+
+            return Ok(true);
+        }
+
+        Err(FieldError::new(
+            format!("Language not loaded: {}", language_address),
+            graphql_value!(null),
+        ))
     }
 
     async fn neighbourhood_join_from_url(
@@ -1647,17 +2010,18 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-        Ok(perspective
+        let result = perspective
             .add_link(
                 link.into(),
                 link_status_from_input(status)?,
                 batch_id,
                 &agent_context,
             )
-            .await?)
+            .await?;
+
+        Ok(result)
     }
 
     async fn perspective_add_link_expression(
@@ -1672,11 +2036,23 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
+        check_compute_credits(&context.auth_token)?;
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let link = crate::types::LinkExpression::try_from(link)?;
-        Ok(perspective
+        let result = perspective
             .add_link_expression(link, link_status_from_input(status)?, batch_id)
-            .await?)
+            .await?;
+
+        if let Err(e) = deduct_compute_credits(
+            &context.auth_token,
+            "link write",
+            1.0,
+            "link_write",
+            Some(&format!("1 link in perspective {}", uuid)),
+        ) {
+            log::warn!("Call exceeded compute credits (add_link_expression): result returned but future calls will fail. Details: {:?}", e);
+        }
+        Ok(result)
     }
 
     async fn perspective_add_links(
@@ -1691,16 +2067,19 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
+
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-        Ok(perspective
+        let result = perspective
             .add_links(
                 links.into_iter().map(|l| l.into()).collect(),
                 link_status_from_input(status)?,
                 batch_id,
                 &agent_context,
             )
-            .await?)
+            .await?;
+
+        Ok(result)
     }
 
     async fn perspective_link_mutations(
@@ -1714,11 +2093,14 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
+
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-        Ok(perspective
+        let result = perspective
             .link_mutations(mutations, link_status_from_input(status)?, &agent_context)
-            .await?)
+            .await?;
+
+        Ok(result)
     }
 
     async fn perspective_publish_snapshot(
@@ -1974,32 +2356,6 @@ impl Mutation {
         })
     }
 
-    async fn perspective_subscribe_surreal_query(
-        &self,
-        context: &RequestContext,
-        uuid: String,
-        query: String,
-    ) -> FieldResult<QuerySubscription> {
-        check_capability(
-            &context.capabilities,
-            &perspective_query_capability(vec![uuid.clone()]),
-        )?;
-
-        // Extract user context from auth token
-        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
-        let user_email = agent_context.user_email;
-
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        let (subscription_id, result_string) = perspective
-            .subscribe_and_query_surreal(query, user_email)
-            .await?;
-
-        Ok(QuerySubscription {
-            subscription_id,
-            result: result_string,
-        })
-    }
-
     async fn perspective_keep_alive_query(
         &self,
         context: &RequestContext,
@@ -2013,22 +2369,6 @@ impl Mutation {
 
         let perspective = get_perspective_with_access_control(&uuid, context).await?;
         perspective.keepalive_query(subscription_id).await?;
-        Ok(true)
-    }
-
-    async fn perspective_keep_alive_surreal_query(
-        &self,
-        context: &RequestContext,
-        uuid: String,
-        subscription_id: String,
-    ) -> FieldResult<bool> {
-        check_capability(
-            &context.capabilities,
-            &perspective_query_capability(vec![uuid.clone()]),
-        )?;
-
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        perspective.keepalive_surreal_query(subscription_id).await?;
         Ok(true)
     }
 
@@ -2049,51 +2389,16 @@ impl Mutation {
             .await?)
     }
 
-    async fn perspective_dispose_surreal_query_subscription(
-        &self,
-        context: &RequestContext,
-        uuid: String,
-        subscription_id: String,
-    ) -> FieldResult<bool> {
-        check_capability(
-            &context.capabilities,
-            &perspective_query_capability(vec![uuid.clone()]),
-        )?;
-
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        Ok(perspective
-            .dispose_surreal_query_subscription(subscription_id)
-            .await?)
-    }
-
     async fn runtime_add_friends(
         &self,
         context: &RequestContext,
         dids: Vec<String>,
     ) -> FieldResult<Vec<String>> {
         check_capability(&context.capabilities, &RUNTIME_FRIENDS_CREATE_CAPABILITY)?;
-        let cloned_did = dids.clone();
         let friends = RuntimeService::with_global_instance(|runtime_service| {
             runtime_service.add_friend(dids);
             runtime_service.get_friends()
         });
-
-        // TODO: remove this when language controller is moved.
-        let mut js = context.js_handle.clone();
-        let dids_json = serde_json::to_string(&cloned_did)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeAddFriends",
-                {{ dids: {} }},
-            ))"#,
-            dids_json,
-        );
-        let result = js.execute(script).await?;
-        // TODO: what is this for? result is not used.. should this error if it can't be parsed?
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()?;
 
         Ok(friends)
     }
@@ -2132,21 +2437,13 @@ impl Mutation {
             return Ok(false);
         }
 
-        let mut js = context.js_handle.clone();
-        let message_json = serde_json::to_string(&message)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeFriendSendMessage",
-                {{ did: "{}", message: {} }},
-            ))"#,
-            did, message_json,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        let get_graphql_result = result.get_graphql_result()?;
-        Ok(get_graphql_result)
+        // Direct message sending requires DM language - not yet ported to Rust
+        log::warn!("runtime_friend_send_message: DM language interaction not yet ported to Rust");
+        let _ = message;
+        Err(FieldError::new(
+            "DM send not implemented in Rust",
+            Value::Null,
+        ))
     }
 
     async fn runtime_hc_add_agent_infos(
@@ -2199,7 +2496,17 @@ impl Mutation {
 
     async fn runtime_quit(&self, context: &RequestContext) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_QUIT_CAPABILITY)?;
-        std::process::exit(0);
+        // Trigger graceful shutdown via the global shutdown channel.
+        // The main loop will shut down Holochain conductor, flush state, and exit cleanly.
+        // If the shutdown channel is already consumed, assume shutdown is in progress and return success.
+        if let Some(tx) = crate::globals::SHUTDOWN_TX.lock().unwrap().take() {
+            log::info!("runtime_quit: sending graceful shutdown signal");
+            let _ = tx.send(());
+            Ok(true)
+        } else {
+            log::warn!("runtime_quit: shutdown channel already consumed, shutdown is in progress");
+            Ok(true)
+        }
     }
 
     async fn runtime_remove_friends(
@@ -2239,20 +2546,10 @@ impl Mutation {
         status: PerspectiveInput,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_MY_STATUS_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let status_json = serde_json::to_string(&status)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeSetStatus",
-                {{ status: {} }},
-            ))"#,
-            status_json,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        // Runtime status setting requires DM language - not yet ported to Rust
+        log::warn!("runtime_set_status: not yet ported to Rust");
+        let _ = status;
+        Ok(true)
     }
 
     async fn runtime_set_multi_user_enabled(
@@ -2264,6 +2561,28 @@ impl Mutation {
         Ad4mDb::with_global_instance(|db| {
             db.set_multi_user_enabled(enabled)
                 .map_err(|e| FieldError::new(e.to_string(), Value::null()))?;
+            Ok(enabled)
+        })
+    }
+
+    async fn runtime_set_free_hosting_enabled(
+        &self,
+        context: &RequestContext,
+        enabled: bool,
+    ) -> FieldResult<bool> {
+        if !context.is_admin_credential {
+            return Err(FieldError::new("Admin credentials required", Value::null()));
+        }
+        Ad4mDb::with_global_instance(|db| {
+            db.set_free_hosting_enabled(enabled)
+                .map_err(|e| FieldError::new(e.to_string(), Value::null()))?;
+            // Mark all users dirty so the credit flush loop pushes updated
+            // HostingUserInfo (with the new freeAccess value) to clients.
+            if let Ok(users) = db.list_users() {
+                for u in users {
+                    mark_credits_dirty(&u.username);
+                }
+            }
             Ok(enabled)
         })
     }
@@ -2587,10 +2906,44 @@ impl Mutation {
         prompt: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
-        Ok(AIService::global_instance()
+        check_compute_credits(&context.auth_token)?;
+
+        let result = AIService::global_instance()
             .await?
             .prompt(task_id, prompt)
-            .await?)
+            .await?;
+
+        let total_tokens = result.prompt_tokens + result.completion_tokens;
+        // Look up rate by model name (the host_rates key is just the model name)
+        let model_name =
+            match Ad4mDb::with_global_instance(|db| db.get_model(result.model_id.clone())) {
+                Ok(Some(m)) => m.name,
+                Ok(None) => {
+                    log::warn!(
+                        "Model not found in DB for model_id={}, using default rate",
+                        result.model_id
+                    );
+                    String::new()
+                }
+                Err(e) => {
+                    log::error!("DB error looking up model_id={}: {}", result.model_id, e);
+                    String::new()
+                }
+            };
+        if let Err(e) = deduct_compute_credits(
+            &context.auth_token,
+            &model_name,
+            total_tokens as f64,
+            "ai_prompt",
+            Some(&format!(
+                "{}: {} prompt + {} completion tokens",
+                model_name, result.prompt_tokens, result.completion_tokens
+            )),
+        ) {
+            log::warn!("Call exceeded compute credits (ai_prompt, model={}, tokens={}): result returned but future calls will fail. Details: {:?}", model_name, total_tokens, e);
+        }
+
+        Ok(result.text)
     }
 
     async fn ai_embed(
@@ -2600,11 +2953,24 @@ impl Mutation {
         text: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
-        let vector = AIService::global_instance()
+        check_compute_credits(&context.auth_token)?;
+
+        let result = AIService::global_instance()
             .await?
             .embed(model_id, text)
             .await?;
-        let json_string = serde_json::to_string(&vector)
+
+        if let Err(e) = deduct_compute_credits(
+            &context.auth_token,
+            "embedding per token",
+            result.token_count as f64,
+            "ai_embed",
+            Some(&format!("{} tokens", result.token_count)),
+        ) {
+            log::warn!("Call exceeded compute credits (ai_embed, tokens={}): result returned but future calls will fail. Details: {:?}", result.token_count, e);
+        }
+
+        let json_string = serde_json::to_string(&result.embeddings)
             .map_err(|e| FieldError::from(format!("Failed to serialize vector: {}", e)))?;
 
         // Compress the JSON string using zlib compression
@@ -2623,9 +2989,36 @@ impl Mutation {
         params: Option<VoiceActivityParamsInput>,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
+        check_compute_credits(&context.auth_token)?;
+
+        // When billing is active, verify a rate is configured for this model
+        // before spinning up the stream (and loading the Whisper model).
+        if is_billing_active(&context.auth_token)? {
+            let rate_key = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+                .ok()
+                .flatten()
+                .map(|m| m.name)
+                .unwrap_or_else(|| model_id.clone());
+            let has_rate = Ad4mDb::with_global_instance(|db| db.get_host_rate(&rate_key))
+                .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+            if has_rate.is_none() {
+                return Err(FieldError::new(
+                    format!(
+                        "No host rate configured for '{}' — cannot open transcription stream",
+                        rate_key
+                    ),
+                    graphql_value!(null),
+                ));
+            }
+        }
+
         Ok(AIService::global_instance()
             .await?
-            .open_transcription_stream(model_id, params.map(|p| p.into()))
+            .open_transcription_stream(
+                model_id,
+                params.map(|p| p.into()),
+                context.auth_token.clone(),
+            )
             .await?)
     }
 
@@ -2637,13 +3030,14 @@ impl Mutation {
         audio: Vec<f64>,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
+        check_compute_credits(&context.auth_token)?;
         let audio_f32: Vec<f32> = audio.into_iter().map(|x| x as f32).collect();
         let service = AIService::global_instance().await?;
 
         // Feed each stream individually
         for stream_id in &stream_ids {
             if let Err(e) = service
-                .feed_transcription_stream(stream_id, audio_f32.clone())
+                .feed_transcription_stream(stream_id, audio_f32.clone(), &context.auth_token)
                 .await
             {
                 log::warn!("Error feeding stream {}: {}", stream_id, e);
@@ -2661,7 +3055,7 @@ impl Mutation {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
         AIService::global_instance()
             .await?
-            .close_transcription_stream(&stream_id)
+            .close_transcription_stream(&stream_id, &context.auth_token)
             .await?;
         Ok(String::from("true"))
     }
@@ -2773,5 +3167,378 @@ impl Mutation {
         log::info!("Holochain service has been restarted successfully.");
 
         Ok(true)
+    }
+
+    async fn runtime_set_hot_wallet_address(
+        &self,
+        context: &RequestContext,
+        address: String,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_UPDATE_CAPABILITY)?;
+
+        let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
+            FieldError::new(
+                "Setting hot wallet address requires multi-user authentication",
+                Value::null(),
+            )
+        })?;
+
+        Ad4mDb::with_global_instance(|db| {
+            db.set_user_hot_wallet(&user_email, &address).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to set hot wallet address: {}", e),
+                    Value::null(),
+                )
+            })
+        })?;
+
+        Ok(true)
+    }
+
+    async fn runtime_request_payment(
+        &self,
+        context: &RequestContext,
+        #[allow(non_snake_case)] amountHOT: String,
+    ) -> FieldResult<PaymentRequestResult> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_UPDATE_CAPABILITY)?;
+
+        // When free hosting is enabled, payments are not applicable
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+        if global_free {
+            return Ok(PaymentRequestResult {
+                success: false,
+                message: "Payments are disabled — this host is configured for free access."
+                    .to_string(),
+            });
+        }
+
+        let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
+            FieldError::new(
+                "Payment requests require multi-user authentication",
+                Value::null(),
+            )
+        })?;
+
+        // Validate amountHOT is a positive number
+        let parsed_amount: f64 = amountHOT.trim().parse().map_err(|_| {
+            FieldError::new(
+                format!("Invalid amountHOT '{}': must be a valid number", amountHOT),
+                Value::null(),
+            )
+        })?;
+        if parsed_amount <= 0.0 {
+            return Err(FieldError::new(
+                format!("amountHOT must be positive, got {}", parsed_amount),
+                Value::null(),
+            ));
+        }
+
+        // Look up user's wHOT wallet address (= Holochain AgentPubKey)
+        let wallet_address = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
+            .map_err(|e| FieldError::new(format!("DB error: {}", e), Value::null()))?;
+
+        let wallet_address = match wallet_address {
+            Some(addr) if !addr.is_empty() => addr,
+            _ => {
+                return Ok(PaymentRequestResult {
+                    success: false,
+                    message: "User has not set their wHOT wallet address. Call setHotWalletAddress first.".to_string(),
+                });
+            }
+        };
+
+        // Create payment proposal via Unyt alliance DNA
+        let note = format!("AD4M hosting top-up: {} wHOT for {}", amountHOT, user_email);
+        match crate::unyt_service::create_proposal(&amountHOT, &wallet_address, Some(&note)).await {
+            Ok(proposal_hash) => {
+                // Record the payment request in the DB — fail the whole operation if this doesn't persist
+                if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                    db.create_payment_request(&user_email, &amountHOT, &proposal_hash)
+                }) {
+                    log::error!("Failed to record payment request in DB: {}", e);
+                    return Err(FieldError::new(
+                        format!("Payment proposal created but failed to persist: {}", e),
+                        Value::null(),
+                    ));
+                }
+
+                log::info!(
+                    "Created wHOT payment proposal {} for user={} amount={}",
+                    proposal_hash,
+                    user_email,
+                    amountHOT
+                );
+
+                Ok(PaymentRequestResult {
+                    success: true,
+                    message: format!(
+                        "Payment proposal created (hash: {}). Awaiting approval in user's wHOT wallet.",
+                        proposal_hash
+                    ),
+                })
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                log::error!(
+                    "Failed to create wHOT payment proposal for user={}: {}",
+                    user_email,
+                    err_str
+                );
+                let message = if err_str.contains("No Global Definition found") {
+                    "The host is still syncing the Unyt currency network. Please try again in a few minutes."
+                        .to_string()
+                } else if err_str.contains("CellDisabled") {
+                    "The host's Unyt service is temporarily unavailable. Please try again later."
+                        .to_string()
+                } else {
+                    format!("Failed to create payment proposal: {}", err_str)
+                };
+                Ok(PaymentRequestResult {
+                    success: false,
+                    message,
+                })
+            }
+        }
+    }
+
+    async fn runtime_set_user_credits(
+        &self,
+        context: &RequestContext,
+        email: String,
+        amount: f64,
+    ) -> FieldResult<bool> {
+        // Admin-only: only the launcher's admin credential can set user credits
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can set user credits",
+                Value::null(),
+            ));
+        }
+
+        if amount < 0.0 || amount.is_nan() || amount.is_infinite() {
+            return Err(FieldError::new(
+                "Invalid credit amount: must be a finite, non-negative number",
+                Value::null(),
+            ));
+        }
+
+        Ad4mDb::with_global_instance(|db| {
+            db.set_user_credits(&email, amount).map_err(|e| {
+                FieldError::new(format!("Failed to set user credits: {}", e), Value::null())
+            })
+        })?;
+
+        mark_credits_dirty(&email);
+        Ok(true)
+    }
+
+    async fn runtime_set_user_free_access(
+        &self,
+        context: &RequestContext,
+        email: String,
+        enabled: bool,
+    ) -> FieldResult<bool> {
+        // Admin-only: only the launcher's admin credential can grant/revoke free access
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can set user free access",
+                Value::null(),
+            ));
+        }
+
+        Ad4mDb::with_global_instance(|db| {
+            db.set_user_free_access(&email, enabled).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to set user free access: {}", e),
+                    Value::null(),
+                )
+            })
+        })?;
+
+        mark_credits_dirty(&email);
+        Ok(true)
+    }
+
+    /// Reinstall the Unyt alliance DNA (e.g. after version update).
+    async fn runtime_reinstall_unyt_dna(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<PaymentRequestResult> {
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can reinstall the Unyt DNA",
+                Value::null(),
+            ));
+        }
+
+        match crate::unyt_service::reinstall().await {
+            Ok(()) => Ok(PaymentRequestResult {
+                success: true,
+                message: "Unyt alliance DNA reinstalled successfully".to_string(),
+            }),
+            Err(e) => Ok(PaymentRequestResult {
+                success: false,
+                message: format!("Failed to reinstall: {}", e),
+            }),
+        }
+    }
+
+    /// Send wHOT from the host's wallet to an external address.
+    async fn runtime_send_hot(
+        &self,
+        context: &RequestContext,
+        recipient: String,
+        amount: String,
+    ) -> FieldResult<PaymentRequestResult> {
+        // Admin-only: only the host operator can send from the wallet
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can send wHOT",
+                Value::null(),
+            ));
+        }
+
+        // Validate inputs
+        let recipient = recipient.trim().to_string();
+        if recipient.is_empty() {
+            return Err(FieldError::new(
+                "recipient must not be empty",
+                Value::null(),
+            ));
+        }
+        let parsed_amount: f64 = amount.parse().map_err(|_| {
+            FieldError::new(
+                format!("amount '{}' is not a valid number", amount),
+                Value::null(),
+            )
+        })?;
+        if parsed_amount <= 0.0 {
+            return Err(FieldError::new(
+                "amount must be greater than 0",
+                Value::null(),
+            ));
+        }
+
+        match crate::unyt_service::send_hot(&recipient, &amount, Some("AD4M host withdrawal")).await
+        {
+            Ok(commitment_hash) => Ok(PaymentRequestResult {
+                success: true,
+                message: format!(
+                    "Sent {} wHOT to {} (commitment: {})",
+                    amount, recipient, commitment_hash
+                ),
+            }),
+            Err(e) => Ok(PaymentRequestResult {
+                success: false,
+                message: format!("Failed to send wHOT: {}", e),
+            }),
+        }
+    }
+
+    /// Set host rates used for credit deduction.
+    /// Expects a JSON string: [{"description": "...", "priceInHOT": 0.01}, ...]
+    async fn runtime_set_host_rates(
+        &self,
+        context: &RequestContext,
+        rates_json: String,
+    ) -> FieldResult<bool> {
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can set host rates",
+                Value::null(),
+            ));
+        }
+
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&rates_json)
+            .map_err(|e| FieldError::new(format!("Invalid rates JSON: {}", e), Value::null()))?;
+
+        let rates: Vec<(String, f64)> = parsed
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let desc = item
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        FieldError::new(
+                            format!("Rate entry {} missing or empty 'description'", i),
+                            Value::null(),
+                        )
+                    })?;
+                let price = item
+                    .get("priceInHOT")
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| {
+                        FieldError::new(
+                            format!("Rate entry {} missing 'priceInHOT'", i),
+                            Value::null(),
+                        )
+                    })?;
+                if price < 0.0 {
+                    return Err(FieldError::new(
+                        format!("Rate entry {} has negative priceInHOT", i),
+                        Value::null(),
+                    ));
+                }
+                Ok((desc.to_string(), price))
+            })
+            .collect::<FieldResult<Vec<_>>>()?;
+
+        Ad4mDb::with_global_instance(|db| {
+            db.set_host_rates(&rates).map_err(|e| {
+                FieldError::new(format!("Failed to set host rates: {}", e), Value::null())
+            })
+        })?;
+
+        Ok(true)
+    }
+
+    /// Store a membrane proof for Unyt alliance DNA installation.
+    /// The proof should be base64-encoded bytes from the joining server.
+    async fn runtime_set_unyt_membrane_proof(
+        &self,
+        context: &RequestContext,
+        proof: String,
+    ) -> FieldResult<PaymentRequestResult> {
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can set the membrane proof",
+                Value::null(),
+            ));
+        }
+
+        match crate::unyt_service::set_membrane_proof(&proof) {
+            Ok(()) => {
+                // Trigger DNA installation now that we have the proof
+                match crate::unyt_service::ensure_installed().await {
+                    Ok(()) => {
+                        log::info!("Unyt alliance DNA installed after membrane proof was set");
+                        Ok(PaymentRequestResult {
+                            success: true,
+                            message: "Membrane proof stored and DNA installed.".to_string(),
+                        })
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Failed to install Unyt alliance DNA after membrane proof: {}",
+                            e
+                        );
+                        Ok(PaymentRequestResult {
+                            success: false,
+                            message: format!(
+                                "Membrane proof stored but DNA installation failed: {}",
+                                e
+                            ),
+                        })
+                    }
+                }
+            }
+            Err(e) => Ok(PaymentRequestResult {
+                success: false,
+                message: format!("Failed to store membrane proof: {}", e),
+            }),
+        }
     }
 }

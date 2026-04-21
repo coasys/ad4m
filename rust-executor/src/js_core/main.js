@@ -55,14 +55,4 @@ Error.captureStackTrace = function (err, constructorOpt) {
     } else {
       err.stack = err.stack || err.toString();
     }
-} 
-
-import { init } from 'https://ad4m.runtime/executor'
-
-async function initCore(config) {
-    const core = await init(config)
-    globalThis.core = core
-    return core
 }
-
-globalThis.initCore = initCore

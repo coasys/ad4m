@@ -1,7 +1,9 @@
 import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { Ad4mClient } from "@coasys/ad4m";
-import { startExecutor, apolloClient, sleep } from "../utils/utils";
+import { startExecutor, apolloClient, sleep, gracefulShutdown } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import path from "path";
 import fetch from 'node-fetch'
 import { fileURLToPath } from 'url';
@@ -16,14 +18,16 @@ describe("Integration", () => {
   const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
   const appDataPath = path.join(TEST_DIR, "agents", "simpleAlice");
   const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-  const gqlPort = 15600
-  const hcAdminPort = 15601
-  const hcAppPort = 15602
+  let gqlPort: number;
+  let hcAdminPort: number;
+  let hcAppPort: number;
 
   let ad4m: Ad4mClient | null = null
   let executorProcess: ChildProcess | null = null
 
   before(async () => {
+    [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+    registerPorts([gqlPort, hcAdminPort, hcAppPort]);
     executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
         gqlPort, hcAdminPort, hcAppPort);
 
@@ -35,18 +39,24 @@ describe("Integration", () => {
   })
 
   after(async () => {
-    if (executorProcess) {
-      while (!executorProcess?.killed) {
-        let status  = executorProcess?.kill();
-        console.log("killed executor with", status);
-        await sleep(500);
-      }
-    }
+    await gracefulShutdown(executorProcess, "executor");
+    deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
   })
 
   it("should get agent status", async () => {
     let result = await ad4m!.agent.status()
     expect(result).to.not.be.null
     expect(result!.isInitialized).to.be.true
+  })
+
+  it("uses the Rust-authored agent-language bundle", () => {
+    const bundlePath = path.join(
+      __dirname,
+      "../../../bootstrap-languages/agent-language/build/bundle.js",
+    );
+    const bundle = readFileSync(bundlePath, "utf8");
+    // inline.mjs embeds the wasm bytes as base64 under this exact name;
+    // a TS-authored fallback would not contain it.
+    expect(bundle).to.include("__wasmB64");
   })
 })

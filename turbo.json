@@ -1,6 +1,6 @@
 {
   "$schema": "https://turborepo.org/schema.json",
-  "pipeline": {
+  "tasks": {
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
@@ -13,29 +13,25 @@
     },
     "build-libs": {
       "dependsOn": [
+        "@coasys/ad4m-ldk#build",
         "@coasys/dapp#build",
         "@coasys/ad4m#build",
         "@coasys/ad4m-connect#build",
-        "@coasys/ad4m-executor#build",
         "@coasys/rust-ad4m-executor#build",
         "@coasys/ad4m-cli#build"
       ],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
-    "build-core-executor": {
-      "dependsOn": ["@coasys/ad4m#build", "@coasys/ad4m-executor#build", "@coasys/dapp#build"],
-      "outputs": ["dist/**", "lib/**", "build/**"]
-    },
     "build-languages": {
       "dependsOn": [
+        "@coasys/ad4m-ldk#build",
         "@coasys/perspective-diff-sync#build",
         "@coasys/agent-language#build",
-        "@coasys/direct-message-language#build",
         "@coasys/perspective-language#build",
         "@coasys/language-language#build",
         "@coasys/neighbourhood-language#build",
         "@coasys/file-storage#build",
-        
+
         "@coasys/centralized-perspective-diff-sync#build",
         "@coasys/centralized-agent-language#build",
         "@coasys/centralized-file-storage#build",
@@ -44,6 +40,42 @@
       ],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
+    "@coasys/ad4m-ldk#build": {
+      "outputs": ["lib/**"]
+    },
+    "@coasys/perspective-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/perspective-diff-sync#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/agent-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/centralized-agent-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/centralized-perspective-diff-sync#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/centralized-file-storage#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/language-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/neighbourhood-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/file-storage#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/eas#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/embedding-vector-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
 
     "build-dapp": {
       "dependsOn": ["@coasys/ad4m#build", "@coasys/ad4m-connect#build", "@coasys/dapp#build"],
@@ -51,23 +83,24 @@
     },
 
     "@coasys/rust-ad4m-executor#build": {
-      "dependsOn": ["@coasys/dapp#build", "@coasys/ad4m-executor#build", "build-core-executor"],
+      "dependsOn": ["@coasys/dapp#build"],
       "outputs": ["dist/**", "lib/**", "build/**", "CUSTOM_DENO_SNAPSHOT.bin"],
       "cache": false
     },
 
     "@coasys/ad4m-cli#build": {
       "dependsOn": ["@coasys/dapp#build", "@coasys/rust-ad4m-executor#build"],
-      "outputs": ["dist/**", "lib/**", "build/**"]
+      "outputs": ["dist/**", "lib/**", "build/**"],
+      "cache": false
     },
 
     "ad4m-launcher#package-ad4m": {
-      "dependsOn": ["build-core-executor"],
+      "dependsOn": [],
       "outputs": ["dist/**"]
     },
 
     "ad4m-launcher#package-ad4m:cuda": {
-      "dependsOn": ["build-core-executor"],
+      "dependsOn": [],
       "outputs": ["dist/**"]
     },
 

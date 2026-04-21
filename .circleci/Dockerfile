@@ -38,7 +38,7 @@ ENV GOPATH=/go
 ENV PATH="$GOPATH/bin:/usr/local/go/bin:$PATH"
 
 # Install Node
-RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && apt-get install -y nodejs
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs
 
 
 USER circleci
@@ -56,6 +56,9 @@ RUN ~/.cargo/bin/rustup target add wasm32-unknown-unknown
 # Install hc
 RUN ~/.cargo/bin/cargo install holochain_cli@0.7.0-dev.10
 RUN ~/.cargo/bin/cargo install kitsune2_bootstrap_srv --git https://github.com/holochain/kitsune2.git --rev ea3c2d42dde92f0889672a41f02f186ad9e75e4c --features "iroh-relay"
+
+# Install wasm-bindgen-cli (required by @coasys/centralized-agent-language)
+RUN ~/.cargo/bin/cargo install wasm-bindgen-cli --version 0.2.118
 
 # Install Deno
 RUN curl -fsSL https://deno.land/install.sh | sh
@@ -92,10 +95,25 @@ RUN apt-get install -y gnupg2 wget && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
     rm cuda-keyring_1.1-1_all.deb && \
     apt-get update && \
-    apt-get install -y cuda-toolkit-12-5 && \
+    apt-get install -y cuda-toolkit-12-5 libcudnn9-dev-cuda-12 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# cuDNN headers land in the Debian multiarch path /usr/include/x86_64-linux-gnu/
+# but cudarc v0.13.9 only searches /usr/local/cuda*/include/cudnn.h.
+# Symlink every cudnn header into the CUDA include dir so cudarc finds them.
+RUN for f in /usr/include/x86_64-linux-gnu/cudnn*.h; do \
+        ln -sf "$f" "/usr/local/cuda-12.5/include/$(basename $f)"; \
+    done
 
 ENV PATH="/usr/local/cuda-12.5/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/usr/local/cuda-12.5/lib64"
+
+
+# nvidia-smi is part of the NVIDIA driver, not the toolkit.
+# In a CI build container (no GPU), create a stub so build scripts that probe for it don't fail.
+# bindgen_cuda v0.1.5 calls `nvidia-smi --query-gpu=compute_cap --format=csv`
+# and expects a CSV header + value. The stub handles both plain and query modes.
+RUN printf '#!/bin/bash\nif echo "$*" | grep -q "query-gpu"; then\n  FIELDS=$(echo "$*" | sed -n "s/.*--query-gpu=\\([^ ]*\\).*/\\1/p")\n  echo "$FIELDS"\n  echo "8.0"\nelse\n  echo "NVIDIA-SMI 535.00  Driver Version: 535.00  CUDA Version: 12.5"\nfi\nexit 0\n' > /usr/local/bin/nvidia-smi && \
+    chmod +x /usr/local/bin/nvidia-smi
 
 USER circleci

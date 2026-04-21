@@ -1,21 +1,44 @@
-import type { Address, Interaction, Language, LanguageContext } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
-import Adapter from './adapter.ts'
-import { UI } from "./build/expressionUI.js";
+/**
+ * # Perspective Language
+ *
+ * Expression language for storing/retrieving Perspective objects.
+ * Currently a stub — get() and create() are not implemented.
+ */
 
-function interactions(expression: Address): Interaction[] {
-    return []
-}
+import { defineLanguage } from '@coasys/ad4m-ldk';
+import Icon from './build/Icon.js';
+import ConstructorIcon from './build/ConstructorIcon.js';
 
-export default function create(context: LanguageContext): Language {
-    const expressionAdapter = new Adapter(context)
-    const expressionUI = new UI()
+const language = defineLanguage({
+    name: "perspective-language",
+    version: "0.1.0",
 
-    return {
-        name: 'perspective-language',
-        expressionAdapter,
-        expressionUI,
-        interactions,
-    } as Language
-}
+    async init() {},
+    async teardown() {},
+    interactions() { return []; },
 
-export const name: string = "perspective-language"
+    expression: {
+        async get(_address) {
+            console.log("PerspectiveLanguage: Sorry language has not been implemented yet!");
+            return null;
+        },
+        async create(_content) {
+            console.log("PerspectiveLanguage: Sorry language has not been implemented yet!");
+            return "";
+        },
+        icon() { return Icon; },
+        constructorIcon() { return ConstructorIcon; },
+    },
+});
+
+export const {
+    name,
+    version,
+    init,
+    teardown,
+    interactions,
+    expressionGet,
+    expressionCreate,
+    expressionIcon,
+    expressionConstructorIcon,
+} = language;

@@ -4,7 +4,8 @@ import fs from "fs";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor } from "../utils/utils";
+import { apolloClient, sleep, startExecutor, quitExecutor } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import fetch from 'node-fetch'
 import { ChildProcess } from "child_process";
 
@@ -21,9 +22,9 @@ describe("Apps integration tests", () => {
   const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
   const appDataPath = path.join(TEST_DIR, "agents", "apps-agent");
   const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-  const gqlPort = 15000
-  const hcAdminPort = 15001
-  const hcAppPort = 15002
+  let gqlPort: number;
+  let hcAdminPort: number;
+  let hcAppPort: number;
 
   let adminAd4mClient: Ad4mClient | null = null
   let unAuthenticatedAppAd4mClient: Ad4mClient | null = null
@@ -32,6 +33,8 @@ describe("Apps integration tests", () => {
   let executorProcess: ChildProcess | null = null
 
   before(async () => {
+    [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+    registerPorts([gqlPort, hcAdminPort, hcAppPort]);
     if(!fs.existsSync(TEST_DIR)) {
         throw Error("Please ensure that prepare-test is run before running tests!");
     }
@@ -51,12 +54,9 @@ describe("Apps integration tests", () => {
 
   after(async () => {
     if (executorProcess) {
-      while (!executorProcess?.killed) {
-        let status = executorProcess?.kill();
-        console.log("killed executor with", status);
-        await sleep(500);
-      }
+      await quitExecutor(executorProcess, gqlPort, "123");
     }
+    deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
   })
 
   it("once token issued user can get all authenticated apps", async () => {

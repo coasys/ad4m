@@ -1,34 +1,51 @@
 version: 2.1
 references:
-  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
+  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
 
 # Self-hosted machine runner on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04)
 # Resource class: coasys/marvin
 
 commands:
   setup_env:
-    description: "Set up build environment (Node 18, Rust, Deno, Go, pnpm)"
+    description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
+    parameters:
+      node_version:
+        type: string
+        default: "24"
     steps:
       - run:
           name: Setup build environment
           command: |
-            # Add all tool paths directly to PATH — no NVM sourcing (nvm use prints to stdout
-            # which corrupts subshell commands in cargo build scripts like libffi's libtool)
-            echo 'export PATH="$HOME/.nvm/versions/node/v18.20.8/bin:$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH"' >> $BASH_ENV
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" --no-use
+            NODE_PATH=$(nvm which << parameters.node_version >> 2>/dev/null || true)
+            if [ -z "$NODE_PATH" ] || [ ! -x "$NODE_PATH" ]; then
+              echo "Node << parameters.node_version >> not found, installing via nvm..."
+              nvm install << parameters.node_version >>
+              NODE_PATH=$(nvm which << parameters.node_version >>)
+            fi
+            NODE_BIN_DIR=$(dirname "$NODE_PATH")
+            echo "export PATH=\"$NODE_BIN_DIR:$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH\"" >> $BASH_ENV
             source $BASH_ENV
             echo "Node: $(node --version)"
             echo "npm: $(npm --version)"
             echo "Rust: $(rustc --version)"
+            echo "Installing wasm-bindgen-cli for Rust WASM builds..."
+            cargo install wasm-bindgen-cli --version 0.2.118
             echo "Deno: $(deno --version | head -1)"
             echo "Go: $(go version)"
-            echo "pnpm: $(pnpm --version)"
+            echo "pnpm: $(pnpm --version || echo 'not installed yet')"
 
   setup_integration_test_environment:
     description: "Setup common integration test environment"
     steps:
       - checkout
-      - attach_workspace:
-          at: .
+      - run:
+          name: Restore binaries from local stash (no CircleCI network storage needed — same host)
+          command: |
+            mkdir -p target/release
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m-executor target/release/ad4m-executor
       - setup_env
       - run:
           name: Install dependencies
@@ -37,9 +54,11 @@ commands:
           name: Install core dependencies
           command: cd ./core && pnpm install --no-frozen-lockfile
       - run:
+          name: Build core package
+          command: cd ./core && pnpm run build
+      - run:
           name: Build bootstrap languages
           command: pnpm run build-languages
-
 
 jobs:
   build-and-test:
@@ -48,6 +67,10 @@ jobs:
     steps:
       - checkout
       - setup_env
+      - run:
+          name: Clean up stale local artifact stashes (older than 1 day)
+          command: |
+            find /tmp/circleci-artifacts -maxdepth 1 -mindepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
       - run:
           name: cargo fmt --check
           command: cargo fmt --check
@@ -61,12 +84,12 @@ jobs:
           name: Install core dependencies
           command: cd ./core && pnpm install --no-frozen-lockfile
       - run:
-          name: Build core executor
-          command: pnpm run build-core-executor
-      - run:
           name: Build deno snapshot
           command: pnpm run build-deno-snapshot
           no_output_timeout: 30m
+      - run:
+          name: Remove stale binaries (self-hosted runner incremental cache)
+          command: rm -f target/release/ad4m target/release/ad4m-executor
       - run:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
@@ -75,11 +98,11 @@ jobs:
           name: cargo clippy
           no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
-      - persist_to_workspace:
-          root: .
-          paths:
-            - ./target/release/ad4m
-            - ./target/release/ad4m-executor
+      - run:
+          name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
+          command: |
+            mkdir -p /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}
+            cp target/release/ad4m target/release/ad4m-executor /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
@@ -103,6 +126,24 @@ jobs:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
           no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: always
+          command: |
+            mkdir -p /tmp/test-artifacts
+            shopt -s nullglob
+            for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
+              agent_id="$(basename "$(dirname "$ad4m_dir")")"
+              mkdir -p "/tmp/test-artifacts/$agent_id"
+              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+              cp -r "$ad4m_dir/holochain" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+            done
+            # Capture port state for debugging
+            lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+      - store_artifacts:
+          when: always
+          path: /tmp/test-artifacts
+          destination: test-logs
 
   integration-tests-multi-user-simple:
     machine: true
@@ -124,13 +165,37 @@ jobs:
           command: cd ./tests/js && ./email-verification-test-with-setup.sh
           no_output_timeout: 30m
 
+  integration-tests-mcp:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_integration_test_environment
+      - run:
+          name: Run MCP integration tests
+          command: cd ./tests/js && pnpm install && pnpm run test-mcp
+          no_output_timeout: 30m
+
+  integration-tests-model:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_integration_test_environment
+      - run:
+          name: Run Ad4mModel unit + integration tests
+          command: cd ./tests/js && pnpm run test-model
+          no_output_timeout: 30m
+
   integration-tests-cli:
     machine: true
     resource_class: coasys/marvin
     steps:
       - checkout
-      - attach_workspace:
-          at: .
+      - run:
+          name: Restore binaries from local stash
+          command: |
+            mkdir -p target/release
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m-executor target/release/ad4m-executor
       - setup_env
       - run:
           name: git submodule
@@ -142,11 +207,26 @@ jobs:
           name: Run integration test script
           command: ./tests/bats/bin/bats tests/integration.bats
 
+  plugin-ad4m-tests:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          working_directory: plugins/ad4m
+          command: npm install
+      - run:
+          name: Run tests
+          working_directory: plugins/ad4m
+          command: npm test
+
 workflows:
   version: 2
   build-and-test:
     jobs:
       - build-and-test
+      - plugin-ad4m-tests
       - integration-tests-js:
           requires:
             - build-and-test
@@ -154,5 +234,11 @@ workflows:
           requires:
             - build-and-test
       - integration-tests-email-verification:
+          requires:
+            - build-and-test
+      - integration-tests-mcp:
+          requires:
+            - build-and-test
+      - integration-tests-model:
           requires:
             - build-and-test
