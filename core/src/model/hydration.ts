@@ -456,7 +456,7 @@ export async function evaluateCustomGettersForInstance(
   instance: any,
   perspective: PerspectiveProxy,
   metadata: ModelMetadata,
-  options?: { requestedProperties?: string[]; include?: Record<string, any> }
+  options?: { requestedProperties?: string[]; include?: Record<string, any>; skipPropertyGetters?: boolean }
 ): Promise<void> {
   const safeBaseExpression = `<${instance.id}>`;
 
@@ -465,7 +465,8 @@ export async function evaluateCustomGettersForInstance(
   const projectionActive = options?.requestedProperties && options.requestedProperties.length > 0;
   const projectionSet = projectionActive ? new Set(options!.requestedProperties) : null;
 
-  // Evaluate property getters
+  // Evaluate property getters (skip when caller only wants relation type-filtering)
+  if (!options?.skipPropertyGetters) {
   for (const [propName, propMeta] of Object.entries(metadata.properties)) {
     if (projectionSet && !projectionSet.has(propName)) continue;
     if ((propMeta as any).getter) {
@@ -498,6 +499,7 @@ export async function evaluateCustomGettersForInstance(
       }
     }
   }
+  } // end skipPropertyGetters guard
 
   // Evaluate relation getters (explicit or auto-generated from target)
   for (const [relName, relMeta] of Object.entries(metadata.relations)) {

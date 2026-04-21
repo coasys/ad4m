@@ -874,23 +874,28 @@ export class Ad4mModel {
       );
     }
 
-    // Evaluate custom getters for all instances (single pass).
-    // By default, collection queries skip getter evaluation unless deepQuery is true.
-    // However, if query.where references getter-backed properties, we must evaluate
-    // those specific getters so the JS post-filter can compare against real values.
+    // Evaluate custom getters for all instances.
+    // Relation getters (type-conformance filtering) always run — they ensure
+    // correctness of @HasMany/@HasOne targets. Property getters only run when
+    // deepQuery is true or when where conditions reference getter-backed properties.
     const whereGetterProperties = query.where
       ? Object.keys(query.where).filter((propName) => (metadata.properties[propName] as any)?.getter)
       : [];
-    const shouldEvaluateGetters = query.deepQuery === true || whereGetterProperties.length > 0;
-    if (shouldEvaluateGetters) {
-      const getterRequestedProperties = requestedProperties.length > 0
-        ? Array.from(new Set([...requestedProperties, ...whereGetterProperties]))
-        : query.deepQuery === true
-          ? []  // deepQuery: evaluate all getters
-          : whereGetterProperties;  // only evaluate where-referenced getters
-      const getterOpts = getterRequestedProperties.length > 0 || query.include
-        ? { requestedProperties: getterRequestedProperties, include: query.include }
-        : undefined;
+    const shouldEvaluatePropertyGetters = query.deepQuery === true || whereGetterProperties.length > 0;
+    {
+      const skipPropertyGetters = !shouldEvaluatePropertyGetters;
+      const getterRequestedProperties = shouldEvaluatePropertyGetters
+        ? (requestedProperties.length > 0
+          ? Array.from(new Set([...requestedProperties, ...whereGetterProperties]))
+          : query.deepQuery === true
+            ? []  // deepQuery: evaluate all getters
+            : whereGetterProperties)  // only evaluate where-referenced getters
+        : [];
+      const getterOpts = {
+        ...(getterRequestedProperties.length > 0 && { requestedProperties: getterRequestedProperties }),
+        ...(query.include && { include: query.include }),
+        skipPropertyGetters,
+      };
       for (const instance of instances) {
         await evaluateCustomGettersForInstance(instance, perspective, metadata, getterOpts);
       }
