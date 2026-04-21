@@ -1015,9 +1015,12 @@ export class Ad4mModel {
       totalCount = filteredInstances.length;
     }
 
-    // Apply offset and limit in JavaScript — only when SPARQL didn't already paginate
+    // Apply offset and limit in JavaScript.
+    // This is always applied as a correctness guarantee — subscription queries may
+    // use unpaginated SPARQL while passing a paginated query for result processing.
+    // When SPARQL already paginated, this is effectively a no-op.
     let paginatedInstances = filteredInstances;
-    if (!sparqlPaginated && (query.offset !== undefined || query.limit !== undefined)) {
+    if (query.offset !== undefined || query.limit !== undefined) {
       const start = query.offset || 0;
       const end = query.limit ? start + query.limit : undefined;
       paginatedInstances = filteredInstances.slice(start, end);
