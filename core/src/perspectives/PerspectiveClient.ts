@@ -278,10 +278,13 @@ export class PerspectiveClient {
             }`,
             variables: { uuid, name }
         }))
-        return new PerspectiveProxy(perspectiveUpdate, this)
+        const proxy = new PerspectiveProxy(perspectiveUpdate, this)
+        this.#proxyCache.set(uuid, proxy)
+        return proxy
     }
 
     async remove(uuid: string): Promise<{perspectiveRemove: boolean}> {
+        this.#proxyCache.delete(uuid)
         return unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveRemove($uuid: String!) {
                 perspectiveRemove(uuid: $uuid)

@@ -76,4 +76,53 @@ describe("PerspectiveClient proxy cache", () => {
     const proxy = await client.byUUID("non-existent-uuid");
     expect(proxy).toBeNull();
   });
+
+  it("updates cache on perspective.update()", async () => {
+    const mockApollo = {
+      query: jest.fn().mockResolvedValue({
+        data: { perspective: { uuid: "upd-uuid", name: "Original", sharedUrl: null, neighbourhood: null, state: "Synced" } },
+      }),
+      mutate: jest.fn().mockResolvedValue({
+        data: { perspectiveUpdate: { uuid: "upd-uuid", name: "Updated", sharedUrl: null, neighbourhood: null, state: "Synced" } },
+      }),
+      subscribe: jest.fn().mockReturnValue({
+        subscribe: jest.fn().mockReturnValue({ unsubscribe: jest.fn() }),
+      }),
+    } as any;
+
+    const client = new PerspectiveClient(mockApollo, false);
+    const proxy1 = await client.byUUID("upd-uuid");
+    expect(proxy1!.name).toBe("Original");
+
+    await client.update("upd-uuid", "Updated");
+    const proxy2 = await client.byUUID("upd-uuid");
+    expect(proxy2!.name).toBe("Updated");
+    // byUUID should return the updated cached proxy without querying again
+    expect(mockApollo.query).toHaveBeenCalledTimes(1);
+  });
+
+  it("evicts cache on perspective.remove()", async () => {
+    const mockApollo = {
+      query: jest.fn().mockResolvedValue({
+        data: { perspective: { uuid: "rm-uuid", name: "ToRemove", sharedUrl: null, neighbourhood: null, state: "Synced" } },
+      }),
+      mutate: jest.fn().mockResolvedValue({
+        data: { perspectiveRemove: true },
+      }),
+      subscribe: jest.fn().mockReturnValue({
+        subscribe: jest.fn().mockReturnValue({ unsubscribe: jest.fn() }),
+      }),
+    } as any;
+
+    const client = new PerspectiveClient(mockApollo, false);
+    await client.byUUID("rm-uuid");
+    expect(mockApollo.query).toHaveBeenCalledTimes(1);
+
+    await client.remove("rm-uuid");
+    // After remove, byUUID should query again (cache evicted)
+    mockApollo.query.mockResolvedValueOnce({ data: { perspective: null } });
+    const proxy = await client.byUUID("rm-uuid");
+    expect(proxy).toBeNull();
+    expect(mockApollo.query).toHaveBeenCalledTimes(2);
+  });
 });
