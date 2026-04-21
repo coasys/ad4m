@@ -57,6 +57,7 @@ export class PerspectiveClient {
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
     #aiClient?: AIClient
+    #proxyCache: Map<string, PerspectiveProxy> = new Map()
 
     constructor(client: ApolloClient<any>, subscribe: boolean = true) {
         this.#apolloClient = client
@@ -70,6 +71,18 @@ export class PerspectiveClient {
             this.subscribePerspectiveUpdated()
             this.subscribePerspectiveRemoved()
         }
+    }
+
+    /** Get or create a proxy for a UUID. If the proxy exists in cache, update its handle and return it. */
+    private getOrCreateProxy(handle: PerspectiveHandle): PerspectiveProxy {
+        const existing = this.#proxyCache.get(handle.uuid)
+        if (existing) {
+            existing.updateHandle(handle)
+            return existing
+        }
+        const proxy = new PerspectiveProxy(handle, this)
+        this.#proxyCache.set(handle.uuid, proxy)
+        return proxy
     }
 
     setExpressionClient(client: ExpressionClient) {
@@ -96,10 +109,13 @@ export class PerspectiveClient {
                 }
             }`
         }))
-        return perspectives.map(handle => new PerspectiveProxy(handle, this))
+        return perspectives.map(handle => this.getOrCreateProxy(handle))
     }
 
     async byUUID(uuid: string): Promise<PerspectiveProxy|null> {
+        const cached = this.#proxyCache.get(uuid)
+        if (cached) return cached
+
         const { perspective } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`query perspective($uuid: String!) {
                 perspective(uuid: $uuid) {
@@ -109,7 +125,7 @@ export class PerspectiveClient {
             variables: { uuid }
         }))
         if(!perspective) return null
-        return new PerspectiveProxy(perspective, this)
+        return this.getOrCreateProxy(perspective)
     }
 
     async snapshotByUUID(uuid: string): Promise<Perspective|null> {
@@ -259,7 +275,7 @@ export class PerspectiveClient {
             }`,
             variables: { name }
         }))
-        return new PerspectiveProxy(perspectiveAdd, this)
+        return this.getOrCreateProxy(perspectiveAdd)
     }
 
     async update(uuid: string, name: string): Promise<PerspectiveProxy> {
@@ -271,10 +287,11 @@ export class PerspectiveClient {
             }`,
             variables: { uuid, name }
         }))
-        return new PerspectiveProxy(perspectiveUpdate, this)
+        return this.getOrCreateProxy(perspectiveUpdate)
     }
 
     async remove(uuid: string): Promise<{perspectiveRemove: boolean}> {
+        this.#proxyCache.delete(uuid)
         return unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveRemove($uuid: String!) {
                 perspectiveRemove(uuid: $uuid)
@@ -441,9 +458,12 @@ export class PerspectiveClient {
             }
         `}).subscribe({
             next: result => {
+                const handle = result.data.perspectiveAdded
                 this.#perspectiveAddedCallbacks.forEach(cb => {
-                    cb(result.data.perspectiveAdded)
+                    cb(handle)
                 })
+                // Populate cache so subsequent byUUID() calls get a hit
+                this.getOrCreateProxy(handle)
             },
             error: (e) => console.error(e)
         })
@@ -460,9 +480,12 @@ export class PerspectiveClient {
             }
         `}).subscribe({
             next: result => {
+                const handle = result.data.perspectiveUpdated
                 this.#perspectiveUpdatedCallbacks.forEach(cb => {
-                    cb(result.data.perspectiveUpdated)
+                    cb(handle)
                 })
+                // Update cached proxy in-place
+                this.getOrCreateProxy(handle)
             },
             error: (e) => console.error(e)
         })
@@ -500,9 +523,12 @@ export class PerspectiveClient {
             }
         `}).subscribe({
             next: result => {
+                const uuid = result.data.perspectiveRemoved
                 this.#perspectiveRemovedCallbacks.forEach(cb => {
-                    cb(result.data.perspectiveRemoved)
+                    cb(uuid)
                 })
+                // Evict from cache
+                this.#proxyCache.delete(uuid)
             },
             error: (e) => console.error(e)
         })

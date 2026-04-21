@@ -771,7 +771,10 @@ describe('Ad4mClient', () => {
             await perspective.removeListener('link-added', linkAdded)
             await perspective.add({source: 'root', target: 'neighbourhood://Qm123456'})
 
-            expect(linkAdded).toBeCalledTimes(1)
+            // With proxy caching, removeListener operates on the same proxy,
+            // so the callback should NOT fire after removal.
+            await new Promise<void>(resolve => setTimeout(resolve, 500))
+            expect(linkAdded).toBeCalledTimes(0)
         })
 
         it('addSyncStateChangeListener() smoke test', async () => {
@@ -830,6 +833,41 @@ describe('Ad4mClient', () => {
                 'expression1',
             );
             expect(result).toBeTruthy();
+        })
+
+        it('byUUID() returns same reference on repeated calls (proxy cache hit)', async () => {
+            const p1 = await ad4mClient.perspective.byUUID('00001')
+            const p2 = await ad4mClient.perspective.byUUID('00001')
+            expect(p1).toBe(p2) // strict reference equality
+        })
+
+        it('update() then byUUID() returns updated name (in-place update)', async () => {
+            const updated = await ad4mClient.perspective.update('00001', 'updated-name')
+            expect(updated.name).toBe('updated-name')
+            const fetched = await ad4mClient.perspective.byUUID('00001')
+            expect(fetched).toBe(updated) // same reference
+            expect(fetched.name).toBe('updated-name')
+        })
+
+        it('remove() then byUUID() returns null (cache eviction)', async () => {
+            // First populate cache
+            const p = await ad4mClient.perspective.byUUID('00003')
+            expect(p).toBeTruthy()
+            // Remove evicts from cache
+            await ad4mClient.perspective.remove('00003')
+            // Now byUUID should query server — server returns a new handle for any uuid
+            // but the cache was cleared, so a new proxy is created
+            const p2 = await ad4mClient.perspective.byUUID('00003')
+            expect(p2).not.toBe(p) // different reference after eviction + re-fetch
+        })
+
+        it('all() returns cached proxies for known UUIDs', async () => {
+            // First get a proxy via byUUID
+            const p1 = await ad4mClient.perspective.byUUID('00001')
+            // all() should return the same cached proxy for '00001'
+            const allPerspectives = await ad4mClient.perspective.all()
+            const match = allPerspectives.find(p => p.uuid === '00001')
+            expect(match).toBe(p1) // same reference
         })
     })
 

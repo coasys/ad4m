@@ -405,6 +405,18 @@ export class PerspectiveProxy {
         this.#client.addPerspectiveSyncStateChangeListener(this.#handle.uuid, this.#perspectiveSyncStateChangeCallbacks)
     }
 
+    /** Update the proxy's internal handle and public fields in-place.
+     *  Keeps the same object reference so all holders see the update. */
+    updateHandle(handle: PerspectiveHandle): void {
+        this.#handle = handle;
+        this.uuid = handle.uuid;
+        this.name = handle.name;
+        this.owners = handle.owners;
+        this.sharedUrl = handle.sharedUrl;
+        this.neighbourhood = handle.neighbourhood;
+        this.state = handle.state;
+    }
+
     /**
      * Escapes special regex characters in a string to prevent ReDoS attacks
      * and regex injection when building dynamic regular expressions.
