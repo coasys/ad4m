@@ -168,8 +168,17 @@ impl Ad4mMcpHandler {
         let input_json = serde_json::to_string(&input)
             .map_err(|e| format!("Failed to serialize cloned language: {}", e))?;
 
+        // See the matching comment in mutation_resolvers.rs publish path:
+        // wrap in JSON.stringify and parse as JSON so addresses containing
+        // quotes / backslashes / whitespace don't get silently corrupted.
+        // Coerce undefined/null to JSON null before stringifying for the
+        // same reason as the expressionGet sweep — a bare
+        // JSON.stringify(undefined) yields the JS value undefined, which
+        // to_rust_string_lossy then captures as the raw string
+        // "undefined" and from_str::<String> fails with a confusing
+        // type-mismatch instead of a clear "no address" error.
         let publish_script = format!(
-            r#"await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({})"#,
+            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionCreate({})) ?? null)"#,
             input_json
         );
 
@@ -178,7 +187,20 @@ impl Ad4mMcpHandler {
             .await
             .map_err(|e| format!("Failed to publish cloned language: {}", e))?;
 
-        let address = address_raw.trim().trim_matches('"').to_string();
+        let trimmed_addr_raw = address_raw.trim();
+        if trimmed_addr_raw == "null" || trimmed_addr_raw.is_empty() {
+            return Err(format!(
+                "Language language returned no address from expressionCreate when cloning template {} (got {:?})",
+                template_address, trimmed_addr_raw
+            ));
+        }
+
+        let address: String = serde_json::from_str(trimmed_addr_raw).map_err(|e| {
+            format!(
+                "Failed to parse published cloned language address: {} ({:?})",
+                e, address_raw
+            )
+        })?;
 
         // Load into runtime - use the saved bundle path
         // Verify the saved hash matches the published address

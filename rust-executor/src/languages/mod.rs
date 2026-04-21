@@ -1,10 +1,12 @@
 mod byte_array;
+pub mod capability;
 pub mod error;
 pub mod language;
 pub mod language_context;
 pub mod language_runtime;
 pub mod language_runtime_handle;
 pub mod literal;
+pub mod wasm_delegate;
 
 pub use literal::{literal_decode, literal_encode};
 
@@ -138,11 +140,51 @@ impl LanguageController {
     ) -> Result<String, LanguageError> {
         info!("Loading language from bundle: {:?}", bundle_path);
 
-        // Read bundle to calculate IPFS hash
-        let bundle_content = fs::read_to_string(&bundle_path)?;
-        let language_address = self.calculate_language_hash(&bundle_content);
+        // Read bundle once and reuse both for the hash and for the
+        // module source we hand to the runtime. The previous code read
+        // the same file twice (once here, once again below before
+        // `load_module`), which doubled the syscall cost and — more
+        // importantly — opened a TOCTOU window where the on-disk bytes
+        // could change between the two reads and produce a
+        // hash/address mismatch against the loaded module content.
+        let bundle_source =
+            fs::read_to_string(&bundle_path).map_err(|e| LanguageError::LoadError {
+                address: format!("{:?}", bundle_path),
+                message: format!("Failed to read language bundle {:?}: {}", bundle_path, e),
+            })?;
+        let language_address = self.calculate_language_hash(&bundle_source);
 
         info!("Language address: {}", language_address);
+
+        // If a runtime already exists for this address, tear it down first.
+        // Without this, a second load_language for the same address would
+        // spawn a new thread + isolate and silently replace the map entry,
+        // leaving the previous language instance's teardown() hook
+        // uninvoked — leaking holochain cells, timers, FS watchers and
+        // any other per-runtime resources the old instance held. The
+        // thread itself does eventually exit when all handle clones drop
+        // (the channel closes, `process_requests` breaks out of its loop),
+        // but the JS-side teardown never runs.
+        {
+            let existing = {
+                let runtimes = self.runtimes.lock().await;
+                runtimes.get(&language_address).cloned()
+            };
+            if let Some(old) = existing {
+                warn!(
+                    "Language {} already loaded — tearing down previous runtime before reload",
+                    language_address
+                );
+                if let Err(e) = old.teardown().await {
+                    warn!(
+                        "Failed to teardown previous runtime for {}: {} (continuing with reload)",
+                        language_address, e
+                    );
+                }
+                let mut runtimes = self.runtimes.lock().await;
+                runtimes.remove(&language_address);
+            }
+        }
 
         // Get language settings if they exist
         let custom_settings = self.get_settings(&language_address).ok();
@@ -185,16 +227,12 @@ impl LanguageController {
             message: e,
         })?;
 
-        // Read the language bundle in Rust and pass source code to JS
-        // (the JS sandbox should NOT do file operations)
-        let bundle_source =
-            std::fs::read_to_string(&bundle_path).map_err(|e| LanguageError::LoadError {
-                address: language_address.clone(),
-                message: format!("Failed to read language bundle {:?}: {}", bundle_path, e),
-            })?;
         info!("Loading module for language {}", language_address);
+        // Get JSON representation BEFORE moving language_context
+        let language_context_json = language_context.to_json();
+
         runtime_handle
-            .load_module(bundle_source)
+            .load_module(bundle_source, language_context)
             .await
             .map_err(|e| LanguageError::LoadError {
                 address: language_address.clone(),
@@ -205,7 +243,7 @@ impl LanguageController {
         // Initialize the language with context
         info!("Initializing language {}", language_address);
         runtime_handle
-            .load_language(language_context.to_json())
+            .load_language(language_context_json)
             .await
             .map_err(|e| LanguageError::LoadError {
                 address: language_address.clone(),
@@ -219,15 +257,17 @@ impl LanguageController {
 
         info!("Language initialized: {}", label);
 
-        // Register callbacks for adapters
+        // Register callbacks for adapters and cache the language's capability set.
         info!("Registering callbacks for {}", label);
-        runtime_handle
-            .register_callbacks()
-            .await
-            .map_err(|e| LanguageError::LoadError {
-                address: language_address.clone(),
-                message: format!("Failed to register callbacks: {}", e),
-            })?;
+        let capabilities =
+            runtime_handle
+                .register_callbacks()
+                .await
+                .map_err(|e| LanguageError::LoadError {
+                    address: language_address.clone(),
+                    message: format!("Failed to register callbacks: {}", e),
+                })?;
+        capability::register_capabilities(&language_address, capabilities);
         info!("Callbacks registered for {}", label);
 
         // Cache the language name for use by other log sites
@@ -247,12 +287,30 @@ impl LanguageController {
 
     /// Unload a language and clean up
     pub async fn unload_language(&self, language_address: &str) -> Result<(), LanguageError> {
+        // Resolve system aliases up front — the runtimes map is keyed
+        // by the real content hash, so a caller passing "did" would
+        // otherwise silently no-op.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(language_address)
+                .cloned()
+                .unwrap_or_else(|| language_address.to_string())
+        };
+        let language_address = resolved.as_str();
+
         let label = self.language_label(language_address).await;
         info!("Unloading language: {}", label);
 
-        let mut runtimes = self.runtimes.lock().await;
-        if let Some(runtime) = runtimes.remove(language_address) {
-            // Teardown the runtime (cleanup language instance, drop thread)
+        // Remove from the runtimes map first and drop the guard before
+        // awaiting teardown — teardown tears down the worker thread and
+        // can take arbitrarily long, and holding the runtimes lock across
+        // that await would block every other languages operation.
+        let removed = {
+            let mut runtimes = self.runtimes.lock().await;
+            runtimes.remove(language_address)
+        };
+        if let Some(runtime) = removed {
             runtime
                 .teardown()
                 .await
@@ -261,11 +319,13 @@ impl LanguageController {
                     message: format!("Failed to teardown runtime: {}", e),
                 })?;
         }
-        drop(runtimes);
 
         // Remove cached name
         let mut names = self.language_names.lock().await;
         names.remove(language_address);
+
+        // Drop the cached capability set so a later reload re-detects it.
+        capability::remove_capabilities(language_address);
 
         info!("Successfully unloaded language: {}", label);
         Ok(())
@@ -295,6 +355,20 @@ impl LanguageController {
         language_address: &str,
         script: &str,
     ) -> Result<String, LanguageError> {
+        // Resolve system aliases ("did", "lang", "neighbourhood",
+        // "perspective") once at the bottom so every caller — including
+        // helpers like get_language_icons that were written to accept
+        // whatever the GraphQL resolver passed in — works with the real
+        // content hash that the runtimes map is keyed by.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(language_address)
+                .cloned()
+                .unwrap_or_else(|| language_address.to_string())
+        };
+        let language_address = resolved.as_str();
+
         // Try Rust-side per-language runtime first
         let handle = {
             let runtimes = self.runtimes.lock().await;
@@ -324,6 +398,18 @@ impl LanguageController {
         script: &str,
         agent_context: &AgentContext,
     ) -> Result<String, LanguageError> {
+        // Mirror execute_on_language: resolve system aliases so callers
+        // can pass "did" / "lang" / "neighbourhood" / "perspective"
+        // interchangeably with the real content hash.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(language_address)
+                .cloned()
+                .unwrap_or_else(|| language_address.to_string())
+        };
+        let language_address = resolved.as_str();
+
         let handle = {
             let runtimes = self.runtimes.lock().await;
             runtimes.get(language_address).cloned()
@@ -382,7 +468,20 @@ impl LanguageController {
         language_address: &str,
         settings: JsonValue,
     ) -> Result<(), LanguageError> {
-        let language_dir = languages_directory().join(language_address);
+        // Resolve system aliases ("did", "lang", "neighbourhood",
+        // "perspective") to their real content hash before touching
+        // the filesystem. Otherwise settings would get written to
+        // e.g. `languages/did/settings.json`, a directory that has
+        // no bundle.js and is never read by the runtime, so the
+        // write silently no-ops from the caller's perspective.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(language_address)
+                .cloned()
+                .unwrap_or_else(|| language_address.to_string())
+        };
+        let language_dir = languages_directory().join(&resolved);
         fs::create_dir_all(&language_dir)?;
 
         let settings_path = language_dir.join("settings.json");
@@ -466,10 +565,13 @@ impl LanguageController {
                 })?
         };
 
-        // Get meta from expressionAdapter.get()
+        // Get meta from expressionGet() — JSON-encode the address so it
+        // embeds as a well-formed JS string literal regardless of any
+        // quote/backslash/newline in the input.
+        let addr_lit = serde_json::to_string(&address).unwrap_or_else(|_| "\"\"".to_string());
         let meta_script = format!(
-            r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get("{}"))"#,
-            address
+            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
+            addr_lit
         );
 
         let meta_result = self
@@ -484,10 +586,10 @@ impl LanguageController {
 
         let meta = meta_expression.get("data");
 
-        // Get bundle source from languageAdapter.getLanguageSource()
+        // Get bundle source from languageGetSource()
         let source_script = format!(
-            r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource("{}")"#,
-            address
+            r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
+            addr_lit
         );
 
         let bundle_source = self
@@ -498,10 +600,22 @@ impl LanguageController {
                 message: format!("Failed to get language source: {}", e),
             })?;
 
-        if bundle_source.is_empty() {
+        // `execute_on_language` returns whatever v8 stringifies the
+        // expression result to. A language-language whose
+        // `getLanguageSource({addr})` returns null/undefined (e.g.
+        // address unknown to the language language) produces the literal
+        // strings "null" / "undefined" here, which would otherwise be
+        // written to disk as bundle.js and then fail much later with an
+        // opaque hash mismatch. Reject the common nullish shapes up
+        // front with a useful error.
+        let trimmed_source = bundle_source.trim();
+        if trimmed_source.is_empty() || trimmed_source == "null" || trimmed_source == "undefined" {
             return Err(LanguageError::LoadError {
                 address: address.to_string(),
-                message: "Language source is empty".to_string(),
+                message: format!(
+                    "Language language returned no source for address {} (got {:?}) — the address may be unknown to the language language or the language-language bundle is stale",
+                    address, trimmed_source
+                ),
             });
         }
 
@@ -760,9 +874,11 @@ impl LanguageController {
             Some(serde_json::from_str(&content)?)
         } else if let Some(ref ll_addr) = language_language_address {
             // Fetch from language language with retry logic (up to 10 retries)
+            let language_lit =
+                serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
             let meta_script = format!(
-                r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get("{}"))"#,
-                language
+                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
+                language_lit
             );
 
             let mut meta_result = None;
@@ -795,39 +911,80 @@ impl LanguageController {
         let source = if bundle_path.exists() {
             Some(fs::read_to_string(&bundle_path)?)
         } else if let Some(ref ll_addr) = language_language_address {
+            // Match the meta fetch retry policy: up to 10 attempts with
+            // linear backoff. Previously the source fetch was one-shot,
+            // which meant that if the language language was still warming
+            // up the meta call could succeed on retry N while the source
+            // call failed instantly on the first attempt, aborting the
+            // whole install with a confusing "no source available" error
+            // even though a retry would have succeeded.
+            let language_lit =
+                serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
             let source_script = format!(
-                r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource("{}")"#,
-                language
+                r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
+                language_lit
             );
 
-            match controller
-                .execute_on_language(ll_addr, &source_script)
-                .await
-            {
-                Ok(s) if !s.is_empty() => Some(s),
-                Ok(_) => None,
-                Err(e) => {
-                    warn!(
-                        "Error getting language source from language language: {}",
-                        e
-                    );
-                    None
+            let mut source_result: Option<String> = None;
+            for retry in 0..10 {
+                match controller
+                    .execute_on_language(ll_addr, &source_script)
+                    .await
+                {
+                    Ok(s) => {
+                        // A language-language that returns null/undefined
+                        // for an unknown address stringifies to the literal
+                        // "null" / "undefined" here. Treat those as
+                        // "source not available" — but still retry in case
+                        // the LL is mid-warmup and hasn't yet materialized
+                        // the expression.
+                        let trimmed = s.trim();
+                        if !(trimmed.is_empty() || trimmed == "null" || trimmed == "undefined") {
+                            source_result = Some(s);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Error getting language source from language language: {}\nRetrying...",
+                            e
+                        );
+                    }
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(5000 * (retry + 1))).await;
             }
+
+            source_result
         } else {
             None
         };
 
         // If we have source, save and load into a per-language runtime
         if let Some(source) = source {
-            // Compute hash and verify it matches the expected address
+            // Compute hash and verify it matches the expected address.
+            //
+            // Previously this returned Ok(()) on mismatch, which left
+            // callers (e.g. `neighbourhood_publish_from_perspective_with_context`
+            // in neighbourhoods.rs) believing the language had been
+            // installed even though nothing was loaded. The neighbourhood
+            // would then be published referencing a link_language that
+            // this node could not actually use, surfacing much later as
+            // a mysterious sync failure. Propagate the hash mismatch as
+            // a hard error so the caller knows the install did not
+            // happen.
             let hash = controller.calculate_language_hash(&source);
             if hash != language {
                 error!("install_language: COULDN'T VERIFY HASH OF LANGUAGE!");
                 error!("install_language: Address: {}", language);
                 error!("install_language: Computed hash: {}", hash);
-                error!("install_language: LANGUAGE WILL BE IGNORED");
-                return Ok(());
+                error!("install_language: LANGUAGE WILL NOT BE INSTALLED");
+                return Err(anyhow::anyhow!(
+                    "install_language: hash mismatch for {} (computed {}). \
+                     The language language returned source that does not match \
+                     the requested content address; refusing to install.",
+                    language,
+                    hash
+                ));
             }
 
             // Save language bundle to disk
@@ -927,12 +1084,26 @@ impl LanguageController {
     pub async fn language_by_address(address: Address) -> Result<Option<Language>, AnyError> {
         let controller = Self::global_instance();
 
+        // Resolve system aliases ("did", "lang", "neighbourhood",
+        // "perspective") up front. Otherwise the Language we return
+        // carries the alias as its address, and every subsequent
+        // execute_on_language call (Language::sync, Language::commit,
+        // ...) misses the runtimes map — which is keyed by the real
+        // content hash — and fails with NotFound.
+        let resolved = {
+            let aliases = controller.language_aliases.lock().await;
+            aliases
+                .get(&address)
+                .cloned()
+                .unwrap_or_else(|| address.clone())
+        };
+
         // Only return a Language if the runtime is actually loaded and can execute.
         // On the old JS-executor branch, a single JsCore worker could load languages on-demand,
         // so checking for the bundle on disk was sufficient. With per-language isolated runtimes,
         // the runtime must be explicitly started before the language can be used.
-        if controller.is_language_loaded(&address).await {
-            return Ok(Some(Language::new(address)));
+        if controller.is_language_loaded(&resolved).await {
+            return Ok(Some(Language::new(resolved)));
         }
 
         Ok(None)
@@ -1003,15 +1174,22 @@ impl LanguageController {
                     let variable_name = parts[1];
 
                     if let Some(value) = template_data.get(variable_name) {
-                        let replacement = match value {
-                            JsonValue::String(s) => {
-                                format!("{} {} = \"{}\"", variable_type, variable_name, s)
-                            }
-                            other => {
-                                format!("{} {} = {}", variable_type, variable_name, other)
-                            }
-                        };
-                        source_lines[variable_index] = replacement;
+                        // Always route through serde_json::to_string so the
+                        // templated value is a valid JS *expression*. Plain
+                        // string interpolation via `"{}"` broke the moment a
+                        // template value contained a quote, backslash, or
+                        // newline — the resulting bundle would no longer parse
+                        // and the failure surfaced deep in Deno's module loader
+                        // with no link back to the template site. JSON is a
+                        // strict subset of JS expressions, so any serde_json
+                        // value round-trips safely.
+                        let literal =
+                            serde_json::to_string(value).unwrap_or_else(|_| match value {
+                                JsonValue::String(s) => format!("\"{}\"", s),
+                                other => other.to_string(),
+                            });
+                        source_lines[variable_index] =
+                            format!("{} {} = {}", variable_type, variable_name, literal);
                     }
                 }
             }
@@ -1029,7 +1207,14 @@ impl LanguageController {
             }
             if let (Some(idx), JsonValue::String(happ_str)) = (happ_index, happ_value) {
                 info!("happIndex: {}", idx);
-                source_lines[idx] = format!("var happ = \"{}\"", happ_str);
+                // Same JS-literal escaping concern as the variable loop
+                // above — the happ blob is typically base64 and safe in
+                // practice, but a bundle that ever ships non-base64 data
+                // here (or a crafted template input) would otherwise break
+                // JS parsing.
+                let literal =
+                    serde_json::to_string(happ_str).unwrap_or_else(|_| format!("\"{}\"", happ_str));
+                source_lines[idx] = format!("var happ = {}", literal);
             }
         }
     }
@@ -1255,9 +1440,11 @@ impl LanguageController {
         };
 
         // Get the language expression (meta)
+        let source_language_hash_lit =
+            serde_json::to_string(&source_language_hash).unwrap_or_else(|_| "\"\"".to_string());
         let meta_script = format!(
-            r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get("{}"))"#,
-            source_language_hash
+            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
+            source_language_hash_lit
         );
         let meta_result = self
             .execute_on_language(&language_language_address, &meta_script)
@@ -1276,17 +1463,25 @@ impl LanguageController {
 
         // Get the language source
         let source_script = format!(
-            r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource("{}")"#,
-            source_language_hash
+            r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
+            source_language_hash_lit
         );
         let source_language = self
             .execute_on_language(&language_language_address, &source_script)
             .await?;
 
-        if source_language.is_empty() {
+        // Same nullish-stringification guard as install_language_from_address:
+        // a language language returning null/undefined for an unknown hash
+        // surfaces here as the literal "null" / "undefined" string and
+        // would otherwise be spliced into the templated source.
+        let trimmed_source = source_language.trim();
+        if trimmed_source.is_empty() || trimmed_source == "null" || trimmed_source == "undefined" {
             return Err(LanguageError::LoadError {
                 address: source_language_hash.to_string(),
-                message: "Could not get source language".to_string(),
+                message: format!(
+                    "Could not get source language for {} (got {:?})",
+                    source_language_hash, trimmed_source
+                ),
             });
         }
 
@@ -1388,6 +1583,31 @@ impl LanguageController {
     /// Remove a language: unload runtime, remove Holochain app, delete files.
     /// Port of JS languageRemove method.
     pub async fn language_remove(&mut self, address: &str) -> Result<(), LanguageError> {
+        // Resolve system aliases so "did" / "perspective" / ... end up
+        // operating on the real content hash — otherwise the Holochain
+        // app removal and the on-disk cleanup would target bogus
+        // directories/app-ids while the real language stayed on disk.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(address)
+                .cloned()
+                .unwrap_or_else(|| address.to_string())
+        };
+        let address = resolved.as_str();
+
+        // Drop Holochain signal handler entries BEFORE unloading the
+        // runtime. The central signal loop in lib.rs reads
+        // HOLOCHAIN_SIGNAL_HANDLERS to decide where to route, then spawns
+        // a task that calls `execute_on_language(lang_addr, …)`. If we
+        // unload the runtime first and drop the handler entries only at
+        // the end, every signal arriving in the gap gets routed onto the
+        // torn-down runtime and surfaces as a NotFound warning. Dropping
+        // the handlers up front means in-flight signals take the "no
+        // per-language runtime registered" debug branch instead — quieter
+        // and honest about the state of the system.
+        crate::js_core::languages_extension::drop_holochain_signal_handlers_for_language(address);
+
         // Teardown the per-language Rust runtime (if loaded there).
         // Errors here (e.g. runtime not loaded, teardown failure) must not abort
         // the rest of the removal – the JS version always continued to remove the
@@ -1419,6 +1639,16 @@ impl LanguageController {
                 language_path.display(),
                 e
             );
+        }
+
+        // Drop any alias entries that pointed at this hash. Leaving
+        // a stale "did" → <removed-hash> mapping behind would cause
+        // subsequent lookups through the alias to keep resolving to
+        // a removed language and fail with NotFound rather than
+        // letting a fresh install register a new alias target.
+        {
+            let mut aliases = self.language_aliases.lock().await;
+            aliases.retain(|_alias, target| target != address);
         }
 
         Ok(())
@@ -1454,9 +1684,11 @@ impl LanguageController {
         };
 
         // Fetch language expression (meta) from language language
+        let resolved_address_lit =
+            serde_json::to_string(&resolved_address).unwrap_or_else(|_| "\"\"".to_string());
         let meta_script = format!(
-            r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get("{}"))"#,
-            resolved_address
+            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
+            resolved_address_lit
         );
         let meta_result = self
             .execute_on_language(&language_language_address, &meta_script)
@@ -1516,17 +1748,18 @@ impl LanguageController {
         if trusted_agents.contains(&language_author) || agent_did == language_author {
             // Trusted author path: fetch source, verify hash, install
             let source_script = format!(
-                r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource("{}")"#,
-                resolved_address
+                r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
+                resolved_address_lit
             );
             let language_source = self
                 .execute_on_language(&language_language_address, &source_script)
                 .await?;
 
-            if language_source.is_empty() {
+            let trimmed = language_source.trim();
+            if trimmed.is_empty() || trimmed == "null" || trimmed == "undefined" {
                 return Err(LanguageError::LoadError {
                     address: resolved_address,
-                    message: "Could not get language source".to_string(),
+                    message: format!("Could not get language source (got {:?})", trimmed),
                 });
             }
 
@@ -1560,6 +1793,14 @@ impl LanguageController {
                     address: resolved_address.clone(),
                     message: format!("Failed to install language: {}", e),
                 })?;
+
+            // Override cached name with meta name (the source code export
+            // may differ from the templated/published meta name).
+            if let Some(meta_name) = language_meta_data.get("name").and_then(|n| n.as_str()) {
+                if !meta_name.is_empty() {
+                    self.set_language_name(&resolved_address, meta_name).await;
+                }
+            }
 
             Ok(Language::new(resolved_address))
         } else {
@@ -1610,9 +1851,12 @@ impl LanguageController {
             }
 
             // Get source language meta and verify its author is trusted
+            let template_source_language_address_lit =
+                serde_json::to_string(&template_source_language_address)
+                    .unwrap_or_else(|_| "\"\"".to_string());
             let source_meta_script = format!(
-                r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get("{}"))"#,
-                template_source_language_address
+                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
+                template_source_language_address_lit
             );
             let source_meta_result = self
                 .execute_on_language(&language_language_address, &source_meta_script)
@@ -1669,17 +1913,18 @@ impl LanguageController {
 
             // Fetch actual source of the language to install
             let source_script = format!(
-                r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource("{}")"#,
-                resolved_address
+                r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
+                resolved_address_lit
             );
             let language_source = self
                 .execute_on_language(&language_language_address, &source_script)
                 .await?;
 
-            if language_source.is_empty() {
+            let trimmed = language_source.trim();
+            if trimmed.is_empty() || trimmed == "null" || trimmed == "undefined" {
                 return Err(LanguageError::LoadError {
                     address: resolved_address,
-                    message: "Could not get language source".to_string(),
+                    message: format!("Could not get language source (got {:?})", trimmed),
                 });
             }
 
@@ -1701,6 +1946,13 @@ impl LanguageController {
                     address: resolved_address.clone(),
                     message: format!("Failed to install language: {}", e),
                 })?;
+
+            // Override cached name with meta name from the template
+            if let Some(meta_name) = language_meta_data.get("name").and_then(|n| n.as_str()) {
+                if !meta_name.is_empty() {
+                    self.set_language_name(&resolved_address, meta_name).await;
+                }
+            }
 
             Ok(Language::new(resolved_address))
         }
@@ -1740,21 +1992,52 @@ impl LanguageController {
 
     /// Get installed languages, optionally filtered by a property name.
     pub async fn get_installed_languages(&self, filter: Option<&str>) -> Vec<LanguageRef> {
-        let runtimes = self.runtimes.lock().await;
-        let names = self.language_names.lock().await;
+        // Snapshot (address, handle) pairs and the name map under the
+        // respective locks, then DROP the locks before iterating.
+        // Previously both `runtimes` and `language_names` were held
+        // across `handle.execute(check_script).await` inside the loop,
+        // which serialized every other language operation in the
+        // process for the full duration of the filter pass and risked
+        // a self-deadlock if any filter path ever needed to re-enter
+        // the controller. Snapshot-then-iterate keeps the semantics
+        // identical without holding global locks across the channel
+        // round-trip.
+        let snapshot: Vec<(String, LanguageRuntimeHandle)> = {
+            let runtimes = self.runtimes.lock().await;
+            runtimes
+                .iter()
+                .map(|(addr, handle)| (addr.clone(), handle.clone()))
+                .collect()
+        };
+        let names: std::collections::HashMap<String, String> = {
+            let guard = self.language_names.lock().await;
+            guard.clone()
+        };
         let mut result = Vec::new();
 
-        for (address, handle) in runtimes.iter() {
+        for (address, handle) in snapshot.iter() {
             // Check filter if provided
             if let Some(prop) = filter {
+                // Escape the filter name as a proper JS string literal. A
+                // naked `"{}"` interpolation let any quote/backslash/newline
+                // in `prop` break out of the JS string — either syntax
+                // erroring the isolate or (worse) allowing injection from a
+                // GraphQL caller. `serde_json::to_string` produces a valid
+                // JS string literal for any Unicode input.
+                let prop_literal =
+                    serde_json::to_string(prop).unwrap_or_else(|_| "\"\"".to_string());
                 let check_script = format!(
-                    r#"JSON.stringify(Object.keys(language).includes("{}"))"#,
-                    prop
+                    r#"JSON.stringify(Object.keys(language).includes({}))"#,
+                    prop_literal
                 );
                 match handle.execute(check_script).await {
                     Ok(res) => {
-                        let trimmed = res.trim().trim_matches('"');
-                        if trimmed != "true" {
+                        // `JSON.stringify(bool)` yields "true" or "false"
+                        // with no surrounding quotes; parse as JSON rather
+                        // than string-matching so any whitespace or v8
+                        // lossy-conversion quirks still produce the right
+                        // boolean.
+                        if !matches!(serde_json::from_str::<bool>(res.trim()), Ok(true)) {
                             continue;
                         }
                     }
@@ -1794,9 +2077,10 @@ impl LanguageController {
                 })?
         };
 
+        let addr_lit = serde_json::to_string(&address).unwrap_or_else(|_| "\"\"".to_string());
         let meta_script = format!(
-            r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get("{}"))"#,
-            address
+            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
+            addr_lit
         );
 
         let meta_result = self
@@ -1857,9 +2141,10 @@ impl LanguageController {
                 })?
         };
 
+        let addr_lit = serde_json::to_string(&address).unwrap_or_else(|_| "\"\"".to_string());
         let source_script = format!(
-            r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource("{}")"#,
-            address
+            r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
+            addr_lit
         );
 
         self.execute_on_language(&language_language_address, &source_script)
@@ -1915,30 +2200,64 @@ impl LanguageController {
     }
 
     /// Get settings for a language (public accessor)
-    pub fn get_settings_public(&self, language_address: &str) -> JsonValue {
-        self.get_settings(language_address)
-            .unwrap_or(JsonValue::Null)
+    pub async fn get_settings_public(&self, language_address: &str) -> JsonValue {
+        // Resolve system aliases so "did" reads from the real hash's
+        // settings.json, not a non-existent `languages/did/settings.json`.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(language_address)
+                .cloned()
+                .unwrap_or_else(|| language_address.to_string())
+        };
+        self.get_settings(&resolved).unwrap_or(JsonValue::Null)
     }
 
     /// Get cached language name for an address
     pub async fn get_language_name(&self, address: &str) -> String {
+        // Resolve system aliases so GraphQL callers asking for "did"
+        // get the same result as callers asking for the real hash.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(address)
+                .cloned()
+                .unwrap_or_else(|| address.to_string())
+        };
         let names = self.language_names.lock().await;
-        names.get(address).cloned().unwrap_or_default()
+        names.get(&resolved).cloned().unwrap_or_default()
     }
 
-    /// Get icon code from a language's expressionUI/settingsUI interfaces.
+    /// Override the cached language name (e.g. after templating).
+    pub async fn set_language_name(&self, address: &str, name: &str) {
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(address)
+                .cloned()
+                .unwrap_or_else(|| address.to_string())
+        };
+        let mut names = self.language_names.lock().await;
+        names.insert(resolved, name.to_string());
+    }
+
+    /// Get icon code from a language's expressionIcon / expressionConstructorIcon
+    /// / settingsIcon exports.
     /// Returns (constructorIcon, icon, settingsIcon) as Option<String>.
     pub async fn get_language_icons(
         &self,
         address: &str,
     ) -> (Option<String>, Option<String>, Option<String>) {
+        // execute_on_language resolves aliases internally now, but
+        // keep this note so future refactors don't "helpfully"
+        // pre-resolve and double-lock.
         let constructor_icon = match self
             .execute_on_language(
                 address,
                 r#"(function() {
                     const lang = globalThis.__ad4m_language_instance__;
-                    if (lang && lang.expressionUI && lang.expressionUI.constructorIcon) {
-                        const code = lang.expressionUI.constructorIcon();
+                    if (lang && typeof lang.expressionConstructorIcon === "function") {
+                        const code = lang.expressionConstructorIcon();
                         return code ? JSON.stringify({code: code}) : JSON.stringify({code: ""});
                     }
                     return "null";
@@ -1947,11 +2266,18 @@ impl LanguageController {
             .await
         {
             Ok(result) => {
-                let trimmed = result.trim().trim_matches('"');
+                // The inner IIFE returns either the JS string "null"
+                // (literal, not the JSON value) or `JSON.stringify({code})`.
+                // `to_rust_string_lossy` captures JS string contents
+                // verbatim, with no enclosing quotes, so a direct trim +
+                // literal "null" compare is correct — the trim_matches
+                // used to live here was dead code operating on a value
+                // that never has outer quotes.
+                let trimmed = result.trim();
                 if trimmed == "null" {
                     None
                 } else {
-                    Some(result.trim().to_string())
+                    Some(trimmed.to_string())
                 }
             }
             Err(_) => None,
@@ -1962,8 +2288,8 @@ impl LanguageController {
                 address,
                 r#"(function() {
                     const lang = globalThis.__ad4m_language_instance__;
-                    if (lang && lang.expressionUI && lang.expressionUI.icon) {
-                        const code = lang.expressionUI.icon();
+                    if (lang && typeof lang.expressionIcon === "function") {
+                        const code = lang.expressionIcon();
                         return code ? JSON.stringify({code: code}) : JSON.stringify({code: ""});
                     }
                     return "null";
@@ -1972,11 +2298,18 @@ impl LanguageController {
             .await
         {
             Ok(result) => {
-                let trimmed = result.trim().trim_matches('"');
+                // The inner IIFE returns either the JS string "null"
+                // (literal, not the JSON value) or `JSON.stringify({code})`.
+                // `to_rust_string_lossy` captures JS string contents
+                // verbatim, with no enclosing quotes, so a direct trim +
+                // literal "null" compare is correct — the trim_matches
+                // used to live here was dead code operating on a value
+                // that never has outer quotes.
+                let trimmed = result.trim();
                 if trimmed == "null" {
                     None
                 } else {
-                    Some(result.trim().to_string())
+                    Some(trimmed.to_string())
                 }
             }
             Err(_) => None,
@@ -1987,8 +2320,8 @@ impl LanguageController {
                 address,
                 r#"(function() {
                     const lang = globalThis.__ad4m_language_instance__;
-                    if (lang && lang.settingsUI && lang.settingsUI.settingsIcon) {
-                        const code = lang.settingsUI.settingsIcon();
+                    if (lang && typeof lang.settingsIcon === "function") {
+                        const code = lang.settingsIcon();
                         return code ? JSON.stringify({code: code}) : JSON.stringify({code: ""});
                     }
                     return "null";
@@ -1997,11 +2330,18 @@ impl LanguageController {
             .await
         {
             Ok(result) => {
-                let trimmed = result.trim().trim_matches('"');
+                // The inner IIFE returns either the JS string "null"
+                // (literal, not the JSON value) or `JSON.stringify({code})`.
+                // `to_rust_string_lossy` captures JS string contents
+                // verbatim, with no enclosing quotes, so a direct trim +
+                // literal "null" compare is correct — the trim_matches
+                // used to live here was dead code operating on a value
+                // that never has outer quotes.
+                let trimmed = result.trim();
                 if trimmed == "null" {
                     None
                 } else {
-                    Some(result.trim().to_string())
+                    Some(trimmed.to_string())
                 }
             }
             Err(_) => None,
@@ -2024,14 +2364,33 @@ impl LanguageController {
 
         let escaped_addr =
             serde_json::to_string(expression_address).unwrap_or_else(|_| "\"\"".to_string());
+        // Three hardening fixes in one script:
+        //   1. `typeof === "function"` guard instead of a truthy check —
+        //      a language that exports `isImmutableExpression` as a
+        //      non-function truthy value (stub, object, constant) would
+        //      otherwise TypeError deep in v8 on the call site.
+        //   2. Wrap the awaited result in `JSON.stringify(...)` and parse
+        //      it Rust-side as a bool. A bare `true`/`false` does
+        //      round-trip through `to_rust_string_lossy`, but a language
+        //      that returns a truthy non-bool (e.g. the string "yes")
+        //      would silently be treated as false by a `== "true"`
+        //      compare — the JSON parse rejects it loudly instead.
+        //   3. Coerce any non-bool result to `false` in JS via `!!` so
+        //      `JSON.stringify` always yields a valid boolean literal.
         let script = format!(
-            r#"language.isImmutableExpression ? await language.isImmutableExpression({}) : false"#,
+            r#"JSON.stringify(
+                (typeof language.isImmutableExpression === "function")
+                    ? !!(await language.isImmutableExpression({}))
+                    : false
+            )"#,
             escaped_addr
         );
 
         let result = self.execute_on_language(lang_address, &script).await?;
-        let trimmed = result.trim();
-        Ok(trimmed == "true")
+        Ok(matches!(
+            serde_json::from_str::<bool>(result.trim()),
+            Ok(true)
+        ))
     }
 
     /// Get an expression from a language.
@@ -2080,8 +2439,16 @@ impl LanguageController {
         // Fetch from the language runtime
         let escaped_addr =
             serde_json::to_string(expression_address).unwrap_or_else(|_| "\"\"".to_string());
+        // Guard the expressionGet existence — a pure link/telepresence
+        // language (no expression-get export) would TypeError if we called
+        // it unconditionally. Return null so the caller treats it as
+        // "expression not available".
         let script = format!(
-            r#"JSON.stringify(await language.expressionAdapter.get({}))"#,
+            r#"JSON.stringify(
+                (typeof language.expressionGet === "function")
+                    ? (await language.expressionGet({})) ?? null
+                    : null
+            )"#,
             escaped_addr
         );
 
@@ -2128,12 +2495,22 @@ impl LanguageController {
                 expr.data = crate::js_core::utils::sort_json_value(&expr.data);
                 match crate::agent::signatures::verify(&expr) {
                     Ok(valid) => {
-                        log::warn!(
-                            "verify_expression_proof: author={}, valid={}, sig={}",
-                            expr.author,
-                            valid,
-                            &expr.proof.signature[..20.min(expr.proof.signature.len())]
-                        );
+                        // Happy-path verification runs on every get_expression
+                        // call, so logging at WARN flooded production logs with
+                        // one entry per expression read. Route success through
+                        // debug and only escalate on actual invalid signatures.
+                        if valid {
+                            log::debug!(
+                                "verify_expression_proof: author={}, valid=true",
+                                expr.author
+                            );
+                        } else {
+                            log::warn!(
+                                "verify_expression_proof: INVALID signature for author={}, sig={}",
+                                expr.author,
+                                &expr.proof.signature[..20.min(expr.proof.signature.len())]
+                            );
+                        }
                         if let Some(proof) = expr_json.get_mut("proof") {
                             proof["valid"] = JsonValue::Bool(valid);
                             proof["invalid"] = JsonValue::Bool(!valid);
@@ -2219,12 +2596,30 @@ impl LanguageController {
                 message: format!("Failed to serialize content: {}", e),
             })?;
 
+        // Spec §5 makes every expression sub-capability optional, so a
+        // language can legitimately expose `expressionGet` (read) without
+        // `expressionCreate` / `expressionAddressOf` (write). Without the
+        // guard, any expression_create against a read-only language
+        // would TypeError on `undefined is not a function` instead of
+        // surfacing a catchable "language is read-only" error.
         let script = format!(
-            r#"JSON.stringify(
-                language.expressionAdapter.putAdapter.createPublic
-                    ? await language.expressionAdapter.putAdapter.createPublic({})
-                    : await language.expressionAdapter.putAdapter.addressOf({})
-            )"#,
+            r#"JSON.stringify(await (async () => {{
+                let addr;
+                if (typeof language.expressionCreate === "function") {{
+                    addr = await language.expressionCreate({});
+                }} else if (typeof language.expressionAddressOf === "function") {{
+                    addr = await language.expressionAddressOf({});
+                }} else {{
+                    throw new Error("Language does not implement expression writes (no expressionCreate / expressionAddressOf)");
+                }}
+                if (addr === undefined || addr === null || typeof addr !== "string") {{
+                    throw new Error(
+                        "expressionCreate returned a non-string address: " +
+                        (addr === undefined ? "undefined" : JSON.stringify(addr))
+                    );
+                }}
+                return addr;
+            }})())"#,
             content_json, content_json
         );
 
@@ -2232,8 +2627,19 @@ impl LanguageController {
             .execute_on_language_with_context(&resolved_address, &script, agent_context)
             .await?;
 
-        // Strip surrounding quotes from the result (it's a JSON-encoded string)
-        let expression_address = result.trim().trim_matches('"').to_string();
+        // The dispatcher returns `JSON.stringify(<string>)`, which is the
+        // quoted string literal. Parse it as a JSON string so we get the
+        // unquoted value back — trim_matches('"') used to work for simple
+        // ASCII addresses but would mangle any address containing
+        // embedded quotes, backslashes, or non-ASCII, all of which the
+        // "did:…" scheme happily allows.
+        let expression_address: String =
+            serde_json::from_str(result.trim()).map_err(|e| LanguageError::SerializationError {
+                message: format!(
+                    "expressionCreate dispatcher returned a non-string result: {} ({:?})",
+                    e, result
+                ),
+            })?;
 
         // Special case: for the "did" scheme, the expression address IS the full URL
         // (e.g. "did:key:z6Mk..."), so don't prefix with "did://"
@@ -2262,11 +2668,32 @@ impl LanguageController {
 
         let escaped_addr =
             serde_json::to_string(&expression_address).unwrap_or_else(|_| "\"\"".to_string());
+        // `interactions` is optional in the flat Language interface
+        // (spec §5.7) — both JS and Rust ALDK languages may omit it. The
+        // dispatcher must not crash when it is absent; return an empty
+        // list instead so GraphQL callers see "no interactions" rather
+        // than an opaque TypeError from deep inside the v8 isolate.
+        // Tolerate three degenerate but realistic interactions() shapes:
+        //   * absent (handled by the typeof guard)
+        //   * returns null/undefined — a buggy author ships a stub that
+        //     forgets to return [], and we'd crash the whole isolate on
+        //     `null.map`
+        //   * returns a Promise — the spec is sync, but JS authors who
+        //     reflexively mark everything `async` would produce a Promise
+        //     here; `Promise.prototype.map` is undefined → TypeError.
+        // Normalize all three into an empty array before mapping.
         let script = format!(
             r#"JSON.stringify(
-                language.interactions({}).map(ic => ({{
-                    label: ic.label, name: ic.name, parameters: ic.parameters
-                }}))
+                await (async () => {{
+                    const raw = typeof language.interactions === "function"
+                        ? language.interactions({})
+                        : [];
+                    const list = await Promise.resolve(raw);
+                    if (!Array.isArray(list)) return [];
+                    return list.map(ic => ({{
+                        label: ic.label, name: ic.name, parameters: ic.parameters
+                    }}));
+                }})()
             )"#,
             escaped_addr
         );
@@ -2295,16 +2722,85 @@ impl LanguageController {
         let escaped_addr =
             serde_json::to_string(&expression_address).unwrap_or_else(|_| "\"\"".to_string());
         let escaped_name = serde_json::to_string(&call.name).unwrap_or_else(|_| "\"\"".to_string());
+
+        // `parameters_stringified` crosses the GraphQL boundary as a raw
+        // string and is interpolated into a JS script below. Previously
+        // the field was trusted as "a JS argument expression" and spliced
+        // in unchecked, which was a script-injection vector: a caller
+        // could submit `"); await evil(); ("` to break out of the call
+        // context and run arbitrary JS inside the language isolate.
+        //
+        // Restrict the accepted shape to "valid JSON value" before
+        // interpolation. JSON is a strict subset of JS expressions, so
+        // any string that parses cleanly as JSON is safe to splice into
+        // a JS expression position, and a rejection error here gives the
+        // GraphQL caller a clear signal that the shape is wrong.
+        //
+        // The canonical shape is a single JSON object/array that the
+        // language's execute/expressionInteract receives as its sole
+        // argument — matching how JS/Rust ALDK authors already build
+        // the field today.
+        let validated_params: String = {
+            let trimmed = call.parameters_stringified.trim();
+            if trimmed.is_empty() {
+                // Empty string → pass `undefined` so the callee still
+                // receives an explicit single argument slot.
+                "undefined".to_string()
+            } else {
+                match serde_json::from_str::<JsonValue>(trimmed) {
+                    Ok(v) => serde_json::to_string(&v).unwrap_or_else(|_| "null".to_string()),
+                    Err(e) => {
+                        return Err(LanguageError::SerializationError {
+                            message: format!(
+                                "interaction parameters_stringified must be a JSON value: {}",
+                                e
+                            ),
+                        });
+                    }
+                }
+            }
+        };
+        // Two execution paths, in priority order:
+        //   1. JS-authored languages may attach a callable `execute`
+        //      directly on the interaction object returned from
+        //      interactions() — invoke it.
+        //   2. Rust ALDK languages cannot do that (interactions cross
+        //      the wasm-bindgen boundary as plain JSON). They expose a
+        //      top-level `expressionInteract(addr, name, params)`
+        //      export instead — fall back to it.
+        // The runtime first verifies the interaction *name* exists in
+        // the descriptor list either way, so unknown names still error.
         let script = format!(
             r#"JSON.stringify(
-                await (async () => {{
-                    const interaction = language.interactions({})
-                        .find(i => i.name === {});
+                (await (async () => {{
+                    const raw = typeof language.interactions === "function"
+                        ? language.interactions({})
+                        : [];
+                    const list = Array.isArray(await Promise.resolve(raw))
+                        ? await Promise.resolve(raw)
+                        : [];
+                    const interaction = list.find(i => i.name === {});
                     if (!interaction) throw new Error("No interaction named " + {});
-                    return await interaction.execute({});
-                }})()
+                    if (typeof interaction.execute === "function") {{
+                        return await interaction.execute({});
+                    }}
+                    if (typeof language.expressionInteract === "function") {{
+                        return await language.expressionInteract({}, {}, {});
+                    }}
+                    throw new Error(
+                        "Interaction " + {} + " is not executable: " +
+                        "the language exposes neither interaction.execute() nor a top-level expressionInteract() export"
+                    );
+                }})()) ?? null
             )"#,
-            escaped_addr, escaped_name, escaped_name, call.parameters_stringified
+            escaped_addr,
+            escaped_name,
+            escaped_name,
+            validated_params,
+            escaped_addr,
+            escaped_name,
+            validated_params,
+            escaped_name,
         );
 
         let result = self.execute_on_language(&lang_address, &script).await?;
@@ -2329,13 +2825,25 @@ impl LanguageController {
 
     /// Reload a language: unload and re-load from disk.
     pub async fn reload_language(&self, address: &str) -> Result<(), LanguageError> {
+        // Resolve system aliases so reload works whether the caller
+        // passes the real hash or an alias like "did" / "perspective".
+        // unload_language / load_language both key by raw address,
+        // so an unresolved alias would silently no-op the unload and
+        // then fail to find bundle.js on the load side.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(address)
+                .cloned()
+                .unwrap_or_else(|| address.to_string())
+        };
         let is_system = {
             let sys = self.system_addresses.lock().await;
-            sys.system_language_set.contains(address)
+            sys.system_language_set.contains(&resolved)
         };
-        self.unload_language(address).await?;
+        self.unload_language(&resolved).await?;
 
-        let bundle_path = languages_directory().join(address).join("bundle.js");
+        let bundle_path = languages_directory().join(&resolved).join("bundle.js");
         if bundle_path.exists() {
             self.load_language(bundle_path, is_system).await?;
         }

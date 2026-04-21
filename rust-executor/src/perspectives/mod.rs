@@ -335,6 +335,39 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
     if let Some(ref instance) = removed_instance {
         instance.teardown_background_tasks().await;
 
+        // Drop any link-language -> perspective cache entries that
+        // pointed at this uuid. Without this, the cache keeps a
+        // stale PerspectiveHandle forever; the slow-path fallback
+        // self-heals for the async lookup but `publish_telepresence_signal_sync`
+        // in handle_telepresence_signal_from_link_language uses the
+        // cached handle DIRECTLY without verifying get_perspective
+        // still returns Some, so signals would keep flowing for a
+        // removed perspective until the cache entry was overwritten.
+        {
+            let handle_snapshot = instance.persisted.lock().await.clone();
+            if let Some(nh) = &handle_snapshot.neighbourhood {
+                let mut cache = LINK_LANG_TO_PERSPECTIVE_HANDLE.write().unwrap();
+                cache.remove(&nh.data.link_language);
+            }
+        }
+
+        // Clean up RocksDB directory for this perspective
+        if let Some(data_path) = get_app_data_path() {
+            let db_path =
+                std::path::Path::new(&data_path).join(format!("surrealdb_perspectives/{}", uuid));
+            if db_path.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&db_path) {
+                    log::warn!(
+                        "Failed to remove SurrealDB directory for perspective {}: {}",
+                        uuid,
+                        e
+                    );
+                } else {
+                    log::debug!("Cleaned up SurrealDB directory for perspective {}", uuid);
+                }
+            }
+        }
+
         // Publish one removal event per owner so each user gets their own notification
         let handle = instance.persisted.lock().await.clone();
         let pubsub = get_global_pubsub().await;
