@@ -4,7 +4,7 @@
 
 **Perspective-Diff-Sync** (p-diff-sync) is the reference Link Language implementation that powers Neighbourhood synchronization. It uses a **Holochain DNA** to maintain a distributed DAG (Directed Acyclic Graph) of diffs, similar to a git commit history.
 
-While p-diff-sync is the reference implementation, alternative Link Languages can be created. The `LinkSyncAdapter` interface (see [Language Interface](./03-language-interface.md#35-link-languages-linksyncadapter)) is the abstraction boundary.
+While p-diff-sync is the reference implementation, alternative Link Languages can be created. The [Language Interface](./03-language-interface.md) defines three orthogonal perspective capabilities (`perspective-commit`, `perspective-sync`, `perspective-query`) and the `peers` interface as the abstraction boundary. P-diff-sync exports all four.
 
 ## 5.2 Architecture
 
@@ -15,13 +15,17 @@ While p-diff-sync is the reference implementation, alternative Link Languages ca
 │  │    PerspectiveInstance        │  │
 │  │    (manages local state)      │  │
 │  └──────────┬────────────────────┘  │
-│             │ LinkSyncAdapter       │
+│             │ Flat Language Exports   │
 │  ┌──────────▼────────────────────┐  │
-│  │    p-diff-sync (TypeScript)   │  │
-│  │    - linksAdapter.ts          │  │
-│  │    - telepresenceAdapter.ts   │  │
+│  │    p-diff-sync (ALDK)         │  │
+│  │    - perspectiveCommit        │  │
+│  │    - perspectiveSyncSync      │  │
+│  │    - perspectiveSyncRender    │  │
+│  │    - perspectiveQueryRun      │  │
+│  │    - peersSetLocal/Remote     │  │
+│  │    - telepresence*            │  │
 │  └──────────┬────────────────────┘  │
-│             │ HolochainLanguageDelegate │
+│             │ Holochain Extension     │
 │  ┌──────────▼────────────────────┐  │
 │  │    Holochain Runtime          │  │
 │  │    perspective_diff_sync DNA  │  │
@@ -99,8 +103,8 @@ struct HashBroadcast {
 ### Commit Flow
 
 1. Agent creates/removes links locally
-2. Executor batches changes and calls `commit(diff)` on the LinkSyncAdapter
-3. The TypeScript adapter calls the `commit` zome function
+2. Executor batches changes and calls `perspectiveCommit(diff)` on the Language instance
+3. The Language (via ALDK) calls the `commit` zome function
 4. The zome:
    a. Gets the current revision (latest local commit hash)
    b. Creates a `PerspectiveDiffEntryReference` entry with the diff and parent hash
@@ -139,6 +143,21 @@ Sync state is determined by comparing revisions:
 - If the majority of peers share the same revision → `Synced`
 - Otherwise → `LinkLanguageInstalledButNotSynced`
 
+### Signal Routing
+
+Signal routing uses the flat Language export model. When a Holochain signal arrives:
+1. The runtime routes it via the DnaHash → Language instance map.
+2. The Language's `handleHolochainSignal` export processes the signal.
+3. The Language calls `emitPerspectiveDiff` / `emitTelepresenceSignal` as appropriate.
+
+This replaces the older adapter callback model. See [Language Interface §3.9](./03-language-interface.md#39-event-handler-exports-runtime--language).
+
+### Gossip Protocol
+
+The gossip protocol uses `revisionHexes` in summaries for efficient comparison between peers. Key behaviors:
+- **Exponential backoff** in sync loops when no new data is available, reducing network overhead.
+- **Active peer discovery** — the gossip cycle actively discovers new peers rather than passively waiting for signals.
+
 ## 5.5 Telepresence
 
 ### Online Status
@@ -174,6 +193,7 @@ The p-diff-sync DNA exposes these zome functions:
 |----------|-------|--------|-------------|
 | `commit` | `CommitInput` | `ActionHash` | Commit a diff |
 | `current_revision` | `()` | `Option<ActionHash>` | Get current revision |
+| `latest_revision` | `()` | `Option<ActionHash>` | Get latest known revision (including from peers) |
 | `sync` | `String` (DID) | `Option<ActionHash>` | Broadcast current revision |
 | `pull` | `PullArguments` | `PullResult` | Pull diffs from a revision |
 | `render` | `()` | `Perspective` | Get full rendered state |

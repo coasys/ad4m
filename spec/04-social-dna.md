@@ -17,7 +17,7 @@ SDNA definitions are stored as links within the Perspective itself, using specia
 | Source | Predicate | Target | Purpose |
 |--------|-----------|--------|---------|
 | `ad4m://self` | `ad4m://has_sdna` | `ad4m://sdna_<ClassName>` | Declares a subject class |
-| `ad4m://sdna_<ClassName>` | `ad4m://sdna_type` | `literal://string:subject_class` | Marks it as a subject class |
+| `ad4m://sdna_<ClassName>` | `ad4m://sdna_type` | `literal:string:subject_class` | Marks it as a subject class |
 | `ad4m://sdna_<ClassName>` | `sh:targetClass` | `<class_uri>` | The SHACL target class URI |
 | `ad4m://sdna_<ClassName>` | `sh:property` | `ad4m://sdna_<ClassName>_prop_<N>` | Links to property shapes |
 
@@ -29,12 +29,12 @@ Each property shape is a node with links describing the constraint:
 |--------|-----------|--------|---------|
 | `ad4m://sdna_<ClassName>_prop_<N>` | `sh:path` | `<predicate_uri>` | The link predicate for this property |
 | `ad4m://sdna_<ClassName>_prop_<N>` | `sh:datatype` | `xsd:string` | Data type |
-| `ad4m://sdna_<ClassName>_prop_<N>` | `sh:maxCount` | `literal://number:1` | Scalar property (single value) |
-| `ad4m://sdna_<ClassName>_prop_<N>` | `sh:minCount` | `literal://number:1` | Required property |
+| `ad4m://sdna_<ClassName>_prop_<N>` | `sh:maxCount` | `literal:number:1` | Scalar property (single value) |
+| `ad4m://sdna_<ClassName>_prop_<N>` | `sh:minCount` | `literal:number:1` | Required property |
 | `ad4m://sdna_<ClassName>_prop_<N>` | `sh:class` | `<class_uri>` | Reference to another Subject Class |
 | `ad4m://sdna_<ClassName>_prop_<N>` | `ad4m://initial` | `<value>` | Default value on creation |
 | `ad4m://sdna_<ClassName>_prop_<N>` | `ad4m://resolveLanguage` | `<language_name>` | Expression language for value resolution |
-| `ad4m://sdna_<ClassName>_prop_<N>` | `ad4m://writable` | `literal://boolean:true` | Property can be updated |
+| `ad4m://sdna_<ClassName>_prop_<N>` | `ad4m://writable` | `literal:boolean:true` | Property can be updated |
 
 ### Cardinality Rules
 
@@ -49,14 +49,14 @@ Each property shape is a node with links describing the constraint:
 
 | Source | Predicate | Target | Purpose |
 |--------|-----------|--------|---------|
-| `ad4m://self` | `ad4m://has_flow` | `literal://...` | Declares a flow definition |
+| `ad4m://self` | `ad4m://has_flow` | `literal:...` | Declares a flow definition |
 
 ### Legacy SDNA (Deprecated)
 
 | Source | Predicate | Target | Purpose |
 |--------|-----------|--------|---------|
-| `ad4m://self` | `ad4m://has_subject_class` | `literal://...` | Legacy subject class (deprecated, use SHACL) |
-| `ad4m://self` | `ad4m://has_custom_sdna` | `literal://...` | Custom SHACL rules |
+| `ad4m://self` | `ad4m://has_sdna` | `literal:...` | Declares a subject class |
+| `ad4m://self` | `ad4m://has_custom_sdna` | `literal:...` | Custom SHACL rules |
 
 ## 4.3 Subject Classes
 
@@ -127,15 +127,15 @@ class Todo extends Ad4mModel {
 **Stored as Links:**
 ```
 (ad4m://self) --ad4m://has_sdna--> (ad4m://sdna_Todo)
-(ad4m://sdna_Todo) --ad4m://sdna_type--> (literal://string:subject_class)
+(ad4m://sdna_Todo) --ad4m://sdna_type--> (literal:string:subject_class)
 (ad4m://sdna_Todo) --sh:targetClass--> (todo://Todo)
 (ad4m://sdna_Todo) --sh:property--> (ad4m://sdna_Todo_prop_0)
 
 # Property shape for "state":
 (ad4m://sdna_Todo_prop_0) --sh:path--> (todo://state)
 (ad4m://sdna_Todo_prop_0) --sh:datatype--> (xsd:string)
-(ad4m://sdna_Todo_prop_0) --sh:maxCount--> (literal://number:1)
-(ad4m://sdna_Todo_prop_0) --sh:minCount--> (literal://number:1)
+(ad4m://sdna_Todo_prop_0) --sh:maxCount--> (literal:number:1)
+(ad4m://sdna_Todo_prop_0) --sh:minCount--> (literal:number:1)
 (ad4m://sdna_Todo_prop_0) --ad4m://initial--> (todo://ready)
 
 # ... and so on for each property
@@ -292,45 +292,44 @@ await perspective.addShacl('Recipe', shape);
 
 AD4M provides two query engines for working with Social DNA and perspective data:
 
-### SurrealDB (Recommended)
+### SPARQL (Primary)
 
-SurrealDB provides 10-100x faster performance for most queries:
+The primary query engine is an in-process **Oxigraph** SPARQL 1.1 engine with disk persistence. Each AD4M link is stored as a named graph triple with metadata in the default graph (see [§1.9](./01-core-data-model.md#19-link-storage-model-named-graphs)).
 
-```typescript
-// Find all todos in "done" state
-const doneTodos = await perspective.querySurrealDB(
-  "SELECT * FROM link WHERE predicate = 'todo://state' AND target = 'todo://done'"
-);
+SPARQL is used for:
+- Ad4mModel query execution (all `findAll`, `findOne`, `count`, etc. translate to SPARQL)
+- Direct queries via `perspectiveQuerySurreal` (name retained for backward compatibility; actually executes SPARQL)
+- Custom queries from applications
 
-// Graph traversal using indexed fields
-const alicePosts = await perspective.querySurrealDB(
-  "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'authored'"
-);
+Custom SPARQL functions:
+- `fn::parse_literal(term)` — Decodes `literal:string:...` URIs into plain string literals
+- `fn::strip_html(term)` — Strips HTML tags from literal values
+
+Query validation ensures only read-only queries (SELECT/ASK/CONSTRUCT/DESCRIBE) are accepted from user-facing APIs.
+
+```sparql
+# Example: Find all todos in "done" state
+SELECT ?todo WHERE {
+  GRAPH ?g { ?todo <todo://state> <todo://done> }
+}
+
+# Example: Find posts by author with literal content
+SELECT ?post ?content WHERE {
+  GRAPH ?g1 { ?post <post://has_content> ?raw }
+  BIND(fn:parse_literal(?raw) AS ?content)
+}
 ```
 
-`Ad4mModel` uses SurrealDB by default for `findAll()` and query builder operations.
+### Prolog (Inference Only)
 
-### Custom SHACL Rules
+Prolog remains available for SHACL inference and subject-class resolution:
+- `generatePrologFactsFromShacl()` converts SHACL shapes to Prolog facts
+- Subject class conformance checking via open-world subquery patterns
+- Constructor/destructor action resolution
 
-For complex reasoning beyond standard property constraints, SHACL's advanced features (SPARQL-based constraints, rules) can be used. Custom SHACL rules can be added via `ad4m://has_custom_sdna` links:
+New implementations SHOULD prioritize SPARQL query support for all data operations and use Prolog only for SHACL inference where needed.
 
-```typescript
-// SHACL constraint on a property
-@Property({
-  through: "todo://state",
-  shaclConstraint: `
-    sh:sparql [
-      sh:select """
-        SELECT $this WHERE {
-          $this <rdf://type> <todo://Todo> .
-        }
-      """ ;
-    ]
-  `
-})
-```
-
-New implementations SHOULD prioritise SurrealDB query support for performance-critical operations and SHACL for schema validation and constraint checking.
+> **v1.0 change:** SurrealDB has been completely removed. All query operations that previously used SurrealDB now use SPARQL via Oxigraph. The `perspectiveQuerySurreal` GraphQL operation name is retained for backward compatibility but executes SPARQL queries.
 
 ## 4.7 Flows
 
@@ -374,7 +373,8 @@ For alternative implementations:
 | Subject class instance resolution | **MUST** | Match expressions against SHACL shapes |
 | Property get/set via link operations | **MUST** | Core CRUD operations |
 | Collection operations | **MUST** | Add/remove/set for multi-value properties |
-| SurrealDB query support | **SHOULD** | Primary query engine |
+| SPARQL query support | **MUST** | Primary query engine (Oxigraph or equivalent) |
+| Prolog inference | **SHOULD** | For SHACL inference and subject-class resolution |
 | SHACL custom rules | **MAY** | For advanced constraint checking and reasoning |
 | Flow support | **MAY** | State machine functionality |
 | `Ad4mModel` / decorator API | **MAY** | Client-side convenience; not required in the executor |

@@ -12,7 +12,7 @@ MAJOR.MINOR.PATCH
 - **MINOR** — New optional features, new GraphQL fields/types, new Language adapter interfaces
 - **PATCH** — Clarifications, bug fixes in the spec, non-functional changes
 
-**Current version:** 0.1.0 (Draft)
+**Current version:** 1.0.0 (Draft)
 
 ## 9.2 Compatibility Principles
 
@@ -33,9 +33,13 @@ MAJOR.MINOR.PATCH
 
 ### Language Interface Evolution
 
-1. New optional adapter interfaces MAY be added (e.g., `TelepresenceAdapter` was added after `LinkSyncAdapter`).
-2. Existing adapter method signatures MUST NOT change in MINOR versions.
-3. New optional methods MAY be added to existing adapters (implementations that don't support them should not break).
+1. The v1.0 Language interface uses a **flat export model** — Languages export named functions at the module level.
+2. New optional capability exports MAY be added in MINOR versions.
+3. Existing capability export signatures MUST NOT change in MINOR versions.
+4. New optional imports MAY be added to the runtime services.
+5. The WIT file (`ad4m-lang.wit`) is the canonical interface definition; new versions of the WIT SHOULD follow WIT versioning conventions (package version in the `package` declaration).
+6. Languages that target a specific WIT world (`ad4m-language`, `ad4m-language-holochain`, etc.) declare their extension requirements; runtimes that don't support a required extension refuse to load the Language.
+7. The deprecated `create(context)` factory and adapter-class model from v0.x SHOULD be removed from runtime support in the next MAJOR version.
 
 ## 9.3 Compatibility Matrix
 
@@ -45,9 +49,10 @@ MAJOR.MINOR.PATCH
 | Link/Expression types | MAJOR | Core data model changes break interop |
 | GraphQL API | MINOR | New fields/operations don't break existing clients |
 | SDNA SHACL shapes | MINOR | New shapes are additive |
-| Language interfaces | MINOR | New adapters are optional |
+| Language interface (WIT) | MINOR | New capabilities are optional exports |
 | P-Diff-Sync DNA | Implementation-defined | DNA changes require new Neighbourhoods |
 | Bootstrap Languages | Implementation-defined | Can be swapped for alternatives |
+| SPARQL store schema | Implementation-defined | Named graph model is stable; query functions may evolve |
 
 ## 9.4 Migration Strategy
 
@@ -84,5 +89,5 @@ type RuntimeInfo {
 Since not all implementations will support all features, clients SHOULD use feature detection:
 
 1. Check for optional GraphQL fields/types via introspection
-2. Check `neighbourhoodHasTelepresenceAdapter` before using telepresence features
+2. Check `neighbourhoodHasTelepresence` before using telepresence features
 3. Handle graceful degradation when optional features are unavailable

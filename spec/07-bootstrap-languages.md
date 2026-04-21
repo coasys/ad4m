@@ -6,16 +6,18 @@ AD4M bootstraps itself using a set of **system languages** — special Languages
 
 The bootstrapping process creates a self-referential system: Languages are stored and retrieved via the Language Language, agents are registered via the Agent Language, and neighbourhoods are published via the Neighbourhood Language.
 
+All bootstrap Languages have been migrated to the **ALDK** (AD4M Language Development Kit) — JS and Rust implementations using the flat export model described in [§3](./03-language-interface.md).
+
 ## 7.2 System Languages
 
 ### Language Language
 
 **Purpose:** Stores and retrieves Language source code (JavaScript bundles).
 
-- **Type:** Expression Language with `LanguageAdapter`
+- **Type:** Expression Language with Language management capabilities
 - **Storage:** Cloudflare Workers KV (via a gateway proxy at `https://bootstrap-store-gateway.perspect3vism.workers.dev`)
 - **Address scheme:** Content hash of the Language bundle
-- **Interfaces implemented:** `ExpressionAdapter`, `LanguageAdapter`
+- **Capabilities exported:** `expressionCreate`, `expressionGet`, `languageGetSource`
 
 When a Language is published:
 1. The source bundle is uploaded to the KV store
@@ -28,13 +30,16 @@ When a Language is published:
 
 - **Type:** Expression Language backed by Holochain
 - **Address scheme:** The agent's DID (e.g., `did:key:z6Mk...`)
-- **Interfaces implemented:** `ExpressionAdapter` with `PublicSharing`
+- **Capabilities exported:** `expressionCreate`, `expressionGet`
 - **Holochain DNA:** `agent-language` — stores `Expression<Agent>` entries keyed by DID
+- **Implementation:** Ported to **Rust ALDK** (`ad4m-ldk` crate)
 
 When an agent updates their profile:
-1. Create a signed `Expression<Agent>` containing their DID, profile links, and DM language address
+1. Create a signed `Expression<Agent>` containing their DID and profile links
 2. Store it in the Holochain DHT via the Agent Language
 3. Other agents retrieve it by DID
+
+> **v1.0 change:** The Agent Expression no longer contains a `directMessageLanguage` field. See [§2.3](./02-agent-model.md#23-agent-expression).
 
 ### Neighbourhood Language
 
@@ -43,7 +48,7 @@ When an agent updates their profile:
 - **Type:** Expression Language
 - **Storage:** Cloudflare Workers KV (same gateway as Language Language)
 - **Address scheme:** Content hash of the neighbourhood definition
-- **Interfaces implemented:** `ExpressionAdapter` with `PublicSharing`
+- **Capabilities exported:** `expressionCreate`, `expressionGet`
 
 A `NeighbourhoodExpression` contains:
 - The address of the Link Language to install
@@ -58,10 +63,7 @@ A `NeighbourhoodExpression` contains:
 
 ### Direct Message Language
 
-**Purpose:** Enables private peer-to-peer messaging between agents.
-
-- **Type:** Language with `DirectMessageAdapter`
-- **Holochain DNA:** `direct-message-language`
+> **Removed in v1.0.** Direct Messages are no longer a bootstrap language. DM functionality is now achieved through the composition of `perspective-commit` + `perspective-sync` + `peers` capabilities, with the recipient DID baked into a template clone. See [Language Interface §3.7](./03-language-interface.md#37-direct-messages-not-a-capability) and [Social Conventions](../docs-src/ad4m-social-conventions.md) for the DM-as-inbox pattern.
 
 ### File Storage Language
 
@@ -74,8 +76,9 @@ A `NeighbourhoodExpression` contains:
 
 **Purpose:** Template for creating Link Languages that power Neighbourhoods.
 
-- **Type:** Link Language with `LinkSyncAdapter` and `TelepresenceAdapter`
+- **Type:** Link Language with `perspective-commit`, `perspective-sync`, `perspective-query`, `peers`, and `telepresence` capabilities
 - **Holochain DNA:** `perspective_diff_sync`
+- **Implementation:** Updated for flat v1.0 exports + ALDK
 - **See:** [P-Diff-Sync Protocol](./05-p-diff-sync.md)
 
 This is a **template language** — each Neighbourhood gets its own instance with a unique Holochain DNA. The template is instantiated by applying parameters (primarily the DNA hash).
@@ -91,14 +94,15 @@ This is a **template language** — each Neighbourhood gets its own instance wit
    b. Agent Language        — for agent identity
    c. Neighbourhood Language — for neighbourhood definitions
    d. Perspective Language  — for perspective snapshots
-   e. Direct Message Language
-   f. File Storage Language
-   g. P-Diff-Sync template
+   e. File Storage Language
+   f. P-Diff-Sync template
 5. Generate agent DID (if first run)
 6. Publish agent expression to Agent Language
 7. Start GraphQL server
 8. Ready for client connections
 ```
+
+> **v1.0 change:** Step 4e (Direct Message Language) has been removed from the bootstrap sequence. The bootstrap flow now has 6 system languages instead of 7. The API surface remains GraphQL (not REST).
 
 ## 7.4 Language Installation
 
@@ -106,9 +110,10 @@ When a Language address is encountered (e.g., in a Neighbourhood definition):
 
 1. Check local cache for the Language bundle
 2. If not cached, fetch from the Language Language by address
-3. Load the JavaScript bundle in the Deno runtime
-4. Call the `create(context)` function to instantiate the Language
-5. Register adapters with the executor
+3. Load the module (JavaScript under Deno, or WASM instance)
+4. Runtime introspects exports for capability detection (see [§3.3](./03-language-interface.md#33-capability-discovery))
+5. Call `init()` to initialize the Language instance
+6. Register detected capabilities with the executor
 
 ## 7.5 Language Templates
 
@@ -137,7 +142,10 @@ These are JavaScript modules (not full Languages) that run within the executor.
 
 For environments without Holochain, centralized fallback implementations exist:
 
+### Centralized Agent Language
+
 - `centralized-agent-language` — Agent profiles via HTTP
+- **Implementation:** Ported to **Rust ALDK** (`ad4m-ldk` crate)
 - `centralized-p-diff-sync` — Link sync via a central server
 - `centralized-file-storage` — File storage via HTTP
 

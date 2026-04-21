@@ -17,7 +17,7 @@ interface Link {
 All `source` and `target` values MUST be valid URIs beginning with a scheme matching the pattern `[a-zA-Z][a-zA-Z0-9+\-._]*:`. Examples:
 - `did:key:z6Mk...`
 - `expression://Qm...`
-- `literal://json(...)`
+- `literal:json(%7B%22key%22%3A%22value%22%7D)`
 - `ad4m://self`
 
 The predicate, if present and non-empty, MUST also be a valid URI.
@@ -170,7 +170,7 @@ When an agent joins a neighbourhood:
 1. Resolve the neighbourhood expression from the Neighbourhood Language
 2. Install the Link Language specified in `linkLanguage`
 3. Create a local Perspective backed by the Link Language
-4. Begin syncing via the Link Language's `LinkSyncAdapter`
+4. Begin syncing via the Link Language's `perspective-sync` capability
 
 ## 1.6 ExpressionRef (Expression URLs)
 
@@ -179,11 +179,62 @@ Expressions are referenced by URIs of the form `<language_address>://<expression
 ```
 QmHashOfLanguage://QmHashOfExpression
 did:key:z6MkExample
-literal://json({"key":"value"})
+literal:json(%7B%22key%22%3A%22value%22%7D)
 ```
 
-The special `literal://` scheme encodes data inline without requiring a Language. The `did:` scheme is treated as a reference to the Agent Language.
+The special `literal:` scheme (see §1.8) encodes data inline without requiring a Language. The `did:` scheme is treated as a reference to the Agent Language.
+
+> **All AD4M URIs are valid IRIs.** The v1.0 literal format change (§1.8) ensures that no AD4M URI requires escaping or transformation to be used as an RDF IRI. The `to_iri` / `from_iri` conversion functions from earlier versions have been removed.
 
 ## 1.7 Address
 
-An Address is simply a `string` — the interpretation is Language-specific. For content-addressed Languages, this is typically a hash. For the Agent Language, it's a DID.
+An Address is simply a `string` — the interpretation is Language-specific. For content-addressed Languages, this is typically a hash (SHA-256 → CIDv1 → base58btc, prefixed with `"Qm"`). For the Agent Language, it's a DID.
+
+## 1.8 Literal URI Format
+
+The `literal:` scheme encodes data inline without requiring a Language:
+
+```
+literal:<type>:<rfc3986_percent_encoded_value>
+```
+
+Supported types:
+
+| Type | Example |
+|------|--------|
+| `string` | `literal:string:Hello%20World` |
+| `number` | `literal:number:42` |
+| `boolean` | `literal:boolean:true` |
+| `json` | `literal:json:%7B%22key%22%3A%22value%22%7D` |
+
+Values are encoded using RFC 3986 percent-encoding via `encodeRFC3986URIComponent()`.
+
+> **v1.0 format change:** The `literal://` format (with double-slash authority component) is no longer supported. The v1.0 format uses `literal:` (no `//`) for RFC 3986 compliance — `literal://` implied an authority component which was semantically incorrect. The `Literal.fromUrl()` constructor MUST reject `literal://` URLs with a clear error message.
+
+```typescript
+// v0.x (DEPRECATED — no longer accepted):
+"literal://string:Hello%20World"
+
+// v1.0:
+"literal:string:Hello%20World"
+```
+
+## 1.9 Link Storage Model (Named Graphs)
+
+In the reference implementation, each AD4M link is stored in the SPARQL triple store (Oxigraph) using a **named graph** model:
+
+1. The direct triple `(source, predicate, target)` is stored in a **named graph** whose IRI is derived from the SHA-256 hash of the link data + timestamp (e.g., `link:<hash32>`).
+2. Metadata about the link (author, timestamp, proof, status) is stored as additional triples in the **default graph**, keyed by the named graph IRI.
+
+Metadata ontology URIs:
+
+| URI | Purpose |
+|-----|---------|
+| `ad4m://ontology/author` | DID of the link author |
+| `ad4m://ontology/timestamp` | ISO 8601 timestamp |
+| `ad4m://ontology/proofKey` | Public key from proof |
+| `ad4m://ontology/proofSignature` | Signature bytes (hex) |
+| `ad4m://ontology/proofValid` | Whether signature verification passed |
+| `ad4m://ontology/status` | `"Shared"` or `"Local"` |
+
+This model enables efficient SPARQL queries over both link data and metadata, supports named graph-scoped operations, and aligns with standard RDF quad storage.
