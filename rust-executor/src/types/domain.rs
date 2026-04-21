@@ -480,6 +480,7 @@ impl PerspectiveExpression {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PerspectiveState {
     #[default]
     Private,
