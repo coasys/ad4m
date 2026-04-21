@@ -293,20 +293,14 @@ pub async fn apply_template_and_publish(
             .ok_or_else(|| ApiError::Internal("Language language address not available".into()))?
     };
 
-    let input_json = serde_json::to_string(&input)
+    let content = serde_json::to_value(&input)
         .map_err(|e| ApiError::Internal(format!("Failed to serialize language input: {}", e)))?;
 
-    let publish_script = format!(
-        r#"await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({})"#,
-        input_json
-    );
-
-    let address_raw = controller
-        .execute_on_language(&language_language_address, &publish_script)
+    let agent_context = crate::agent::AgentContext::main_agent();
+    let address = controller
+        .expression_create(&language_language_address, content, &agent_context)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to publish language: {}", e)))?;
-
-    let address = address_raw.trim().trim_matches('"').to_string();
 
     // Load the templated language into a per-language runtime
     let bundle_on_disk = crate::utils::languages_directory()
