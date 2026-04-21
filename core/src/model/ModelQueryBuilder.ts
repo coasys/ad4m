@@ -707,7 +707,13 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
 
     if (this.engineFlag === 'sparql') {
-      const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, paginationQuery);
+      // Subscribe to the FULL result set (no LIMIT/OFFSET) so the subscription
+      // detects changes anywhere in the dataset (e.g. new items beyond current page).
+      // Pagination is applied in JS when processing each update.
+      const subscriptionParams = { ...(this.queryParams || {}) };
+      delete subscriptionParams.limit;
+      delete subscriptionParams.offset;
+      const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, subscriptionParams);
       this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
 
       const processResults = async (result: any) => {
