@@ -57,7 +57,6 @@ export class PerspectiveClient {
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
     #aiClient?: AIClient
-    #proxyCache: Map<string, PerspectiveProxy>
 
     constructor(client: ApolloClient<any>, subscribe: boolean = true) {
         this.#apolloClient = client
@@ -65,7 +64,6 @@ export class PerspectiveClient {
         this.#perspectiveUpdatedCallbacks = []
         this.#perspectiveRemovedCallbacks = []
         this.#perspectiveSyncStateChangeCallbacks = []
-        this.#proxyCache = new Map()
 
         if(subscribe) {
             this.subscribePerspectiveAdded()
@@ -102,9 +100,6 @@ export class PerspectiveClient {
     }
 
     async byUUID(uuid: string): Promise<PerspectiveProxy|null> {
-        const cached = this.#proxyCache.get(uuid)
-        if (cached) return cached
-
         const { perspective } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`query perspective($uuid: String!) {
                 perspective(uuid: $uuid) {
@@ -114,9 +109,7 @@ export class PerspectiveClient {
             variables: { uuid }
         }))
         if(!perspective) return null
-        const proxy = new PerspectiveProxy(perspective, this)
-        this.#proxyCache.set(uuid, proxy)
-        return proxy
+        return new PerspectiveProxy(perspective, this)
     }
 
     async snapshotByUUID(uuid: string): Promise<Perspective|null> {
@@ -278,13 +271,10 @@ export class PerspectiveClient {
             }`,
             variables: { uuid, name }
         }))
-        const proxy = new PerspectiveProxy(perspectiveUpdate, this)
-        this.#proxyCache.set(uuid, proxy)
-        return proxy
+        return new PerspectiveProxy(perspectiveUpdate, this)
     }
 
     async remove(uuid: string): Promise<{perspectiveRemove: boolean}> {
-        this.#proxyCache.delete(uuid)
         return unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveRemove($uuid: String!) {
                 perspectiveRemove(uuid: $uuid)
