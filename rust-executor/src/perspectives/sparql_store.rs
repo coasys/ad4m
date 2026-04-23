@@ -97,14 +97,12 @@ fn strip_html_fn(args: &[Term]) -> Option<Term> {
 /// Only SELECT, ASK, CONSTRUCT, and DESCRIBE queries are accepted.
 /// UPDATE operations (INSERT, DELETE, DROP, etc.) will fail to parse as a Query.
 pub fn validate_readonly_query(query: &str) -> Result<(), Error> {
-    let _ = SparqlEvaluator::new()
-        .parse_query(query)
-        .map_err(|e| {
-            anyhow!(
-                "Query is not valid read-only SPARQL (only SELECT/ASK/CONSTRUCT/DESCRIBE allowed): {}",
-                e
-            )
-        })?;
+    let _ = SparqlEvaluator::new().parse_query(query).map_err(|e| {
+        anyhow!(
+            "Query is not valid read-only SPARQL (only SELECT/ASK/CONSTRUCT/DESCRIBE allowed): {}",
+            e
+        )
+    })?;
     Ok(())
 }
 
@@ -358,9 +356,9 @@ impl SparqlStore {
         let ont_status = NamedNodeRef::new_unchecked(ONT_STATUS);
 
         // Search direct triples in the default graph
-        for quad_result in self
-            .store
-            .quads_for_pattern(s_ref, p_ref, t_ref, Some(GraphNameRef::DefaultGraph))
+        for quad_result in
+            self.store
+                .quads_for_pattern(s_ref, p_ref, t_ref, Some(GraphNameRef::DefaultGraph))
         {
             let quad = quad_result?;
 
@@ -400,8 +398,7 @@ impl SparqlStore {
                     _ => continue,
                 };
 
-                let reifier_subject: NamedOrBlankNodeRef =
-                    reifier_node.as_ref().into();
+                let reifier_subject: NamedOrBlankNodeRef = reifier_node.as_ref().into();
 
                 let get_annotation = |pred_node: NamedNodeRef| -> String {
                     self.store
@@ -759,11 +756,7 @@ impl SparqlStore {
         }
 
         // Check if there are any named graphs (old storage model)
-        let has_named_graphs = self
-            .store
-            .named_graphs()
-            .next()
-            .is_some();
+        let has_named_graphs = self.store.named_graphs().next().is_some();
 
         if !has_named_graphs {
             // No old data to migrate, just set version
@@ -829,7 +822,11 @@ impl SparqlStore {
                 let predicate = match solution.get("predicate") {
                     Some(Term::NamedNode(n)) => {
                         let s = n.as_str().to_string();
-                        if s.is_empty() { None } else { Some(s) }
+                        if s.is_empty() {
+                            None
+                        } else {
+                            Some(s)
+                        }
                     }
                     _ => continue,
                 };
@@ -920,7 +917,10 @@ impl SparqlStore {
         // Set migration version
         self.set_migration_version(2)?;
 
-        log::info!("Migration complete: {} links migrated to reifier format", count);
+        log::info!(
+            "Migration complete: {} links migrated to reifier format",
+            count
+        );
         Ok(count)
     }
 }
@@ -1105,12 +1105,18 @@ mod tests {
         let svc = new_service();
         // Two different links with same s/p/o but different timestamps
         let link1 = make_link_with_ts(
-            "ad4m://src", "ad4m://pred", "ad4m://tgt",
-            "2024-01-01T00:00:00Z", "did:key:z6Mk1",
+            "ad4m://src",
+            "ad4m://pred",
+            "ad4m://tgt",
+            "2024-01-01T00:00:00Z",
+            "did:key:z6Mk1",
         );
         let link2 = make_link_with_ts(
-            "ad4m://src", "ad4m://pred", "ad4m://tgt",
-            "2024-01-02T00:00:00Z", "did:key:z6Mk2",
+            "ad4m://src",
+            "ad4m://pred",
+            "ad4m://tgt",
+            "2024-01-02T00:00:00Z",
+            "did:key:z6Mk2",
         );
         svc.add_link(&link1).unwrap();
         svc.add_link(&link2).unwrap();
@@ -1130,8 +1136,15 @@ mod tests {
         svc.add_link(&link).unwrap();
 
         // No named graphs should exist
-        let named: Vec<_> = svc.store.named_graphs().collect::<Result<Vec<_>, _>>().unwrap();
-        assert!(named.is_empty(), "No named graphs should be used in reifier model");
+        let named: Vec<_> = svc
+            .store
+            .named_graphs()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            named.is_empty(),
+            "No named graphs should be used in reifier model"
+        );
     }
 
     #[test]
