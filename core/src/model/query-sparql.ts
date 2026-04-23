@@ -259,8 +259,13 @@ export function buildSPARQLQuery(
   // Determine if SPARQL-level pagination is safe.
   // When JS-only where filters exist, we must NOT limit at the SPARQL level
   // because the database would cap candidates before JS filters run.
+  // Without an explicit ORDER BY, SPARQL OFFSET/LIMIT produces non-deterministic
+  // ordering across different query plans and index traversals. Fall back to
+  // JS-level slicing in that case to preserve the grouping order from the full
+  // result set.
   const canPaginateInSPARQL = !hasJsOnlyWhereFilters(metadata, allRelationsMetadata, query.where)
-    && (query.limit !== undefined || query.offset !== undefined);
+    && (query.limit !== undefined || query.offset !== undefined)
+    && query.order !== undefined && Object.keys(query.order).length > 0;
 
   // Build a pagination subquery that constrains ?source to only the page
   // of interest.  This avoids fetching all links for all matching instances.
@@ -329,10 +334,16 @@ export function buildPaginationSubquery(
     ? `FILTER(\n      ${filterExpressions.join(' &&\n      ')}\n    )`
     : '';
 
-  // Build ORDER BY clause from query.order
+  // Build ORDER BY clause from query.order.
+  // When ORDER BY references non-grouped variables we must use SAMPLE()
+  // aggregates so the query is valid SPARQL 1.1.
   let orderByClause = '';
   const orderJoinPatterns: string[] = [];
+  const sampleProjections: string[] = [];  // e.g. (SAMPLE(?cfTarget_title) AS ?pg_sort_0)
+  const needsGroupBy = query.order && Object.keys(query.order).length > 0;
+
   if (query.order) {
+    let sortIdx = 0;
     const orderTerms = Object.entries(query.order).map(([prop, dir]) => {
       const sparqlVar = mapPropertyToSPARQLVar(prop, metadata);
       // Check if this order property's variable is already bound by existing
@@ -344,26 +355,29 @@ export function buildPaginationSubquery(
           orderJoinPatterns.push(`\n      OPTIONAL { ?source <${propMeta.predicate}> ${sparqlVar} . }`);
         }
       }
-      return dir === 'DESC' ? `DESC(${sparqlVar})` : `ASC(${sparqlVar})`;
+      // Use SAMPLE() aggregate so ORDER BY is valid with GROUP BY ?source.
+      const sortAlias = `?pg_sort_${sortIdx++}`;
+      sampleProjections.push(`(SAMPLE(${sparqlVar}) AS ${sortAlias})`);
+      return dir === 'DESC' ? `DESC(${sortAlias})` : `ASC(${sortAlias})`;
     });
     if (orderTerms.length > 0) {
       orderByClause = `ORDER BY ${orderTerms.join(' ')}`;
     }
   }
 
-  // No default ordering — when no explicit order is specified, results come in
-  // natural (insertion) order.
-  const tsSelect = '';
-  const tsPattern = '';
-
   const limitClause = query.limit !== undefined ? `LIMIT ${query.limit}` : '';
   const offsetClause = query.offset !== undefined && query.offset > 0 ? `OFFSET ${query.offset}` : '';
 
+  // When there's no ORDER BY, DISTINCT alone handles deduplication — no GROUP BY needed.
+  // When there IS ORDER BY, use GROUP BY ?source with SAMPLE() aggregates for the sort keys.
+  const sampleSelect = sampleProjections.length > 0 ? ' ' + sampleProjections.join(' ') : '';
+  const groupByClause = needsGroupBy ? 'GROUP BY ?source' : '';
+
   return `
-      { SELECT DISTINCT ?source${tsSelect} WHERE {${innerJoin}${orderJoinPatterns.join('')}${tsPattern}
+      { SELECT DISTINCT ?source${sampleSelect} WHERE {${innerJoin}${orderJoinPatterns.join('')}
         FILTER(isIRI(?source))
         ${innerFilter}
-      } GROUP BY ?source ${orderByClause} ${limitClause} ${offsetClause} }\n`;
+      } ${groupByClause} ${orderByClause} ${limitClause} ${offsetClause} }\n`;
 }
 
 /**

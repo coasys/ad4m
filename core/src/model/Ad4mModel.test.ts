@@ -833,7 +833,8 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
       .mockResolvedValueOnce(queryResults)
       .mockResolvedValueOnce([{ count: 1 }]);
 
-    const page = await Recipe.paginate(mockPerspective, 10, 1, {}, 'sparql');
+    // Include order to trigger SPARQL-level pagination (data + count queries)
+    const page = await Recipe.paginate(mockPerspective, 10, 1, { order: { name: 'ASC' as const } }, 'sparql');
 
     // paginate now issues 2 SPARQL queries: data + count
     expect(mockPerspective.querySparql).toHaveBeenCalledTimes(2);
@@ -2427,10 +2428,11 @@ describe("instancesFromQueryResult — SPARQL vs JS pagination", () => {
       ],
     }));
 
-    const query = { limit: 5, offset: 10 };
+    // Include order to trigger SPARQL-level pagination (subquery with ORDER BY)
+    const query = { limit: 5, offset: 10, order: { name: 'ASC' as const } };
     const result = await (PaginationTestChannel as any).instancesFromQueryResult(mockPerspective, query, grouped);
 
-    // sparqlPaginated = true (limit+offset present, no JS-only where filters),
+    // sparqlPaginated = true (limit+offset+order present, no JS-only where filters),
     // so JS should NOT re-slice — all 5 items come through as-is.
     expect(result.results.length).toBe(5);
     expect(result.totalCount).toBe(5);

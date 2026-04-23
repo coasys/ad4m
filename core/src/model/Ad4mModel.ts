@@ -990,7 +990,8 @@ export class Ad4mModel {
     // already the correct page.
     const allRelsMeta2 = getRelationsMetadata(this as any);
     const sparqlPaginated = !hasJsOnlyWhereFilters(metadata, allRelsMeta2, query.where)
-      && (query.limit !== undefined || query.offset !== undefined);
+      && (query.limit !== undefined || query.offset !== undefined)
+      && query.order !== undefined && Object.keys(query.order).length > 0;
 
     // Calculate totalCount BEFORE applying limit/offset.
     // When SPARQL already paginated, filteredInstances.length is the page size,

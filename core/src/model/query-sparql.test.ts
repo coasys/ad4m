@@ -67,8 +67,8 @@ describe('hasJsOnlyWhereFilters', () => {
 describe('buildSPARQLQuery — SPARQL-level pagination via subquery', () => {
   const modelClass: any = {};
 
-  it('includes LIMIT/OFFSET in a pagination subquery when query has them and no JS-only filters', () => {
-    const query = { limit: 10, offset: 0, where: { category: 'some://uri' } };
+  it('includes LIMIT/OFFSET in a pagination subquery when query has them, no JS-only filters, and ORDER BY', () => {
+    const query = { limit: 10, offset: 0, where: { category: 'some://uri' }, order: { name: 'ASC' as const } };
     const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
     // SPARQL should contain LIMIT inside the pagination subquery
     expect(sparql).toContain('LIMIT 10');
@@ -76,6 +76,16 @@ describe('buildSPARQLQuery — SPARQL-level pagination via subquery', () => {
     expect(sparql).toContain('SELECT ?source ?predicate ?target');
     // Should have a subquery pattern
     expect(sparql).toContain('SELECT DISTINCT ?source');
+  });
+
+  it('does NOT use SPARQL-level pagination when limit/offset present but no ORDER BY', () => {
+    const query = { limit: 10, offset: 0, where: { category: 'some://uri' } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    // Without ORDER BY, SPARQL pagination is not used — JS-level slicing handles it
+    expect(sparql).not.toContain('LIMIT');
+    expect(sparql).not.toContain('OFFSET');
+    // No subquery needed
+    expect(sparql).not.toContain('SELECT DISTINCT');
   });
 
   it('does NOT include LIMIT/OFFSET when JS-only where filters exist', () => {
@@ -153,6 +163,7 @@ describe('buildSPARQLQuery — structural correctness', () => {
       offset: 0,
       parent: { id: 'flux://channel-123', predicate: 'flux://has_message' },
       where: { category: 'some://uri' },
+      order: { name: 'ASC' as const },
     };
     const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
     expect(sparql).toContain('<flux://channel-123>');
@@ -251,23 +262,31 @@ describe('buildSPARQLQuery — IRI correctness', () => {
 describe('SPARQL-level pagination', () => {
   const modelClass: any = {};
 
-  it('includes LIMIT in SPARQL when query specifies limit', () => {
-    const query = { limit: 30 };
-    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+  it('includes LIMIT in SPARQL when query specifies limit + order', () => {
+    const query = { limit: 30, order: { name: 'ASC' as const } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
     expect(sparql).toContain('LIMIT 30');
     expect(sparql).toContain('SELECT DISTINCT ?source');
   });
 
-  it('includes OFFSET in SPARQL when query specifies offset > 0', () => {
-    const query = { limit: 20, offset: 40 };
+  it('does NOT push LIMIT to SPARQL when no ORDER BY is specified', () => {
+    const query = { limit: 30 };
     const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    // Without ORDER BY, SPARQL-level pagination is not used
+    expect(sparql).not.toContain('LIMIT');
+    expect(sparql).not.toContain('SELECT DISTINCT');
+  });
+
+  it('includes OFFSET in SPARQL when query specifies offset > 0 with order', () => {
+    const query = { limit: 20, offset: 40, order: { name: 'ASC' as const } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
     expect(sparql).toContain('LIMIT 20');
     expect(sparql).toContain('OFFSET 40');
   });
 
   it('does NOT include OFFSET when offset is 0', () => {
-    const query = { limit: 10, offset: 0 };
-    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    const query = { limit: 10, offset: 0, order: { name: 'ASC' as const } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
     expect(sparql).toContain('LIMIT 10');
     expect(sparql).not.toContain('OFFSET');
   });
@@ -276,6 +295,28 @@ describe('SPARQL-level pagination', () => {
     const query = { limit: 10, order: { name: 'DESC' as const } };
     const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
     expect(sparql).toContain('ORDER BY DESC(');
+    expect(sparql).toContain('LIMIT 10');
+  });
+
+  it('uses SAMPLE() aggregate for ORDER BY variables in pagination subquery (SPARQL 1.1 compliance)', () => {
+    const query = { limit: 5, order: { name: 'ASC' as const } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    // Must use SAMPLE() to aggregate the order variable under GROUP BY
+    expect(sparql).toMatch(/SAMPLE\(/);
+    expect(sparql).toMatch(/AS \?pg_sort_0/);
+    expect(sparql).toContain('GROUP BY ?source');
+    expect(sparql).toContain('ORDER BY ASC(?pg_sort_0)');
+  });
+
+  it('omits GROUP BY when ORDER BY is present (uses SAMPLE() aggregate instead)', () => {
+    // When ORDER BY is present, GROUP BY ?source is used with SAMPLE() aggregates.
+    // The old redundant GROUP BY (without ORDER BY) no longer applies because
+    // SPARQL-level pagination is only used when ORDER BY is present.
+    const query = { limit: 10, order: { name: 'ASC' as const } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('GROUP BY ?source');
+    expect(sparql).toContain('SAMPLE(');
+    expect(sparql).toContain('SELECT DISTINCT ?source');
     expect(sparql).toContain('LIMIT 10');
   });
 
@@ -307,12 +348,22 @@ describe('SPARQL-level pagination', () => {
   });
 
   it('wraps pagination in a subquery (outer SELECT fetches all links for the page)', () => {
-    const query = { limit: 5, offset: 10 };
-    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    const query = { limit: 5, offset: 10, order: { name: 'DESC' as const } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
     expect(sparql).toContain('SELECT ?source ?predicate ?target ?author ?timestamp');
     expect(sparql).toContain('SELECT DISTINCT ?source');
     expect(sparql).toContain('LIMIT 5');
     expect(sparql).toContain('OFFSET 10');
+  });
+
+  it('does NOT wrap pagination in a subquery when no ORDER BY (JS slicing preserves natural order)', () => {
+    const query = { limit: 5, offset: 10 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    // Should be a plain SELECT without subquery
+    expect(sparql).toContain('SELECT ?source ?predicate ?target ?author ?timestamp');
+    expect(sparql).not.toContain('SELECT DISTINCT');
+    expect(sparql).not.toContain('LIMIT');
+    expect(sparql).not.toContain('OFFSET');
   });
 
   describe('buildSPARQLCountQuery', () => {
