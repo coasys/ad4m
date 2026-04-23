@@ -279,10 +279,12 @@ describe('SPARQL-level pagination', () => {
     expect(sparql).toContain('LIMIT 10');
   });
 
-  it('defaults to ORDER BY timestamp when paginating without explicit order', () => {
+  it('does NOT default to ORDER BY timestamp when paginating without explicit order', () => {
     const query = { limit: 30 };
     const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
-    expect(sparql).toContain('ORDER BY ASC(?pg_minTs)');
+    expect(sparql).not.toContain('ORDER BY');
+    expect(sparql).not.toContain('pg_minTs');
+    expect(sparql).not.toContain('GRAPH ?pg_g');
   });
 
   it('does NOT push pagination to SPARQL when JS-only where filters exist (author)', () => {

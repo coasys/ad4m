@@ -351,15 +351,10 @@ export function buildPaginationSubquery(
     }
   }
 
-  // Default ordering by timestamp when paginating without explicit order
-  if (!orderByClause && (query.limit !== undefined || query.offset !== undefined)) {
-    orderByClause = 'ORDER BY ASC(?pg_minTs)';
-  }
-
-  // We need a timestamp aggregate for default ordering
-  const needsTimestamp = !query.order && (query.limit !== undefined || query.offset !== undefined);
-  const tsSelect = needsTimestamp ? ' (MIN(?pg_ts) AS ?pg_minTs)' : '';
-  const tsPattern = needsTimestamp ? `\n      OPTIONAL { GRAPH ?pg_g { ?source ?pg_p ?pg_t . } ?pg_g <ad4m://ontology/timestamp> ?pg_ts . }` : '';
+  // No default ordering — when no explicit order is specified, results come in
+  // natural (insertion) order.
+  const tsSelect = '';
+  const tsPattern = '';
 
   const limitClause = query.limit !== undefined ? `LIMIT ${query.limit}` : '';
   const offsetClause = query.offset !== undefined && query.offset > 0 ? `OFFSET ${query.offset}` : '';
