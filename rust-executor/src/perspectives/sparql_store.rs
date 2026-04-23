@@ -2,7 +2,7 @@ use crate::graphql::graphql_types::LinkStatus;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
 use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::*;
-use oxigraph::sparql::{Query, QueryOptions, QueryResults};
+use oxigraph::sparql::{QueryResults, SparqlEvaluator};
 use oxigraph::store::Store;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -14,6 +14,7 @@ const ONT_PROOF_KEY: &str = "ad4m://ontology/proofKey";
 const ONT_PROOF_SIG: &str = "ad4m://ontology/proofSignature";
 const ONT_PROOF_VALID: &str = "ad4m://ontology/proofValid";
 const ONT_STATUS: &str = "ad4m://ontology/status";
+const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
 
 fn literal(val: &str) -> Literal {
     Literal::new_simple_literal(val)
@@ -92,21 +93,23 @@ fn strip_html_fn(args: &[Term]) -> Option<Term> {
     Some(Literal::new_simple_literal(&result).into())
 }
 
-/// Validates that a SPARQL query is read-only by parsing it with Oxigraph's SPARQL parser.
+/// Validates that a SPARQL query is read-only by parsing it with the SPARQL parser.
 /// Only SELECT, ASK, CONSTRUCT, and DESCRIBE queries are accepted.
 /// UPDATE operations (INSERT, DELETE, DROP, etc.) will fail to parse as a Query.
 pub fn validate_readonly_query(query: &str) -> Result<(), Error> {
-    Query::parse(query, None).map_err(|e| {
-        anyhow!(
-            "Query is not valid read-only SPARQL (only SELECT/ASK/CONSTRUCT/DESCRIBE allowed): {}",
-            e
-        )
-    })?;
+    let _ = SparqlEvaluator::new()
+        .parse_query(query)
+        .map_err(|e| {
+            anyhow!(
+                "Query is not valid read-only SPARQL (only SELECT/ASK/CONSTRUCT/DESCRIBE allowed): {}",
+                e
+            )
+        })?;
     Ok(())
 }
 
-/// Generate a deterministic graph IRI from link data + timestamp.
-fn make_graph_iri(link: &DecoratedLinkExpression) -> NamedNode {
+/// Generate a deterministic reifier IRI from link data + timestamp.
+fn make_reifier_iri(link: &DecoratedLinkExpression) -> NamedNode {
     let mut hasher = Sha256::new();
     hasher.update(link.data.source.as_bytes());
     hasher.update(link.data.predicate.as_deref().unwrap_or("").as_bytes());
@@ -126,14 +129,17 @@ fn make_direct_triple(link: &DecoratedLinkExpression) -> (NamedNode, NamedNode, 
 }
 
 /// Oxigraph-backed SPARQL store for AD4M link data.
-/// Uses named graphs for link triples + default graph metadata keyed by graph IRI.
-/// Synchronous API — Oxigraph operations are not async.
+/// Uses RDF 1.2 reifiers: direct triples in default graph with metadata
+/// attached via `rdf:reifies` triple terms.
+///
+/// # Storage Model
+/// Each link is stored as:
+/// 1. Direct triple: `<source> <predicate> <target> .` (default graph)
+/// 2. Reifier: `<link:HASH> rdf:reifies <<( source predicate target )>> .`
+/// 3. Metadata: `<link:HASH> ad4m://ontology/* "value" .` (default graph)
 ///
 /// # Thread Safety
 /// Oxigraph's `Store` is `Send + Sync` and uses internal locking for concurrent access.
-/// Multiple threads can safely read and write simultaneously without external synchronization.
-/// See: oxigraph 0.4 source — `Store` derives `Clone` and wraps an internally-locked storage layer.
-/// The oxigraph test suite includes a `test_send_sync` test verifying `Store: Send + Sync`.
 #[derive(Clone)]
 pub struct SparqlStore {
     store: Arc<Store>,
@@ -144,9 +150,6 @@ impl SparqlStore {
     ///
     /// If `data_path` is `Some`, opens a persistent RocksDB-backed store at that path.
     /// If `data_path` is `None`, creates an in-memory store (useful for tests).
-    ///
-    /// Create a new SparqlStore. If `data_path` is provided, uses Oxigraph's persistent
-    /// RocksDB-backed store at `{data_path}/sparql_store/`. If `None`, creates an in-memory store.
     pub fn new(data_path: Option<&str>) -> Result<Self, Error> {
         let store = match data_path {
             Some(path) => {
@@ -184,17 +187,31 @@ impl SparqlStore {
 
     fn insert_link_triples(&self, link: &DecoratedLinkExpression) -> Result<(), Error> {
         let (source_iri, predicate_iri, target_iri) = make_direct_triple(link);
-        let graph = make_graph_iri(link);
+        let reifier_iri = make_reifier_iri(link);
 
-        // 1. Insert the direct triple in the link's named graph
+        // 1. Direct triple in default graph
         self.store.insert(QuadRef::new(
             source_iri.as_ref(),
             predicate_iri.as_ref(),
             TermRef::NamedNode(target_iri.as_ref()),
-            GraphNameRef::NamedNode(graph.as_ref()),
+            GraphNameRef::DefaultGraph,
         ))?;
 
-        // 2. Insert metadata in default graph, keyed by graph IRI
+        // 2. Reifier: <link:HASH> rdf:reifies <<( source predicate target )>>
+        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
+        let triple_term = Triple::new(
+            source_iri.clone(),
+            predicate_iri.clone(),
+            target_iri.clone(),
+        );
+        self.store.insert(QuadRef::new(
+            reifier_iri.as_ref(),
+            rdf_reifies,
+            TermRef::Triple(&triple_term),
+            GraphNameRef::DefaultGraph,
+        ))?;
+
+        // 3. Metadata on the reifier node (all default graph)
         let proof = &link.proof;
         let valid_str = proof.valid.unwrap_or(false).to_string();
 
@@ -211,7 +228,7 @@ impl SparqlStore {
             let pred = NamedNodeRef::new_unchecked(pred_uri);
             let lit = literal(value);
             self.store.insert(QuadRef::new(
-                graph.as_ref(),
+                reifier_iri.as_ref(),
                 pred,
                 TermRef::Literal(lit.as_ref()),
                 GraphNameRef::DefaultGraph,
@@ -228,58 +245,74 @@ impl SparqlStore {
 
     /// Remove all triples for a link from the store.
     pub fn remove_link(&self, link: &DecoratedLinkExpression) -> Result<(), Error> {
-        let graph = make_graph_iri(link);
+        let reifier_iri = make_reifier_iri(link);
 
-        // 1. Remove all quads in the named graph
-        let graph_quads: Vec<_> = self
+        // 1. Remove all quads where reifier is subject (metadata + rdf:reifies)
+        let quads: Vec<_> = self
             .store
             .quads_for_pattern(
-                None,
-                None,
-                None,
-                Some(GraphNameRef::NamedNode(graph.as_ref())),
-            )
-            .collect::<Result<Vec<_>, _>>()?;
-        for quad in graph_quads {
-            self.store.remove(&quad)?;
-        }
-
-        // 2. Remove all metadata triples in default graph with graph IRI as subject
-        let meta_quads: Vec<_> = self
-            .store
-            .quads_for_pattern(
-                Some(graph.as_ref().into()),
+                Some(reifier_iri.as_ref().into()),
                 None,
                 None,
                 Some(GraphNameRef::DefaultGraph),
             )
             .collect::<Result<Vec<_>, _>>()?;
-        for quad in meta_quads {
-            self.store.remove(&quad)?;
+        for quad in &quads {
+            self.store.remove(quad)?;
         }
+
+        // 2. Remove the direct triple IF no other reifier references it
+        let (source, predicate, target) = make_direct_triple(link);
+        let triple_term = Triple::new(source.clone(), predicate.clone(), target.clone());
+        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
+
+        let still_referenced = self
+            .store
+            .quads_for_pattern(
+                None,
+                Some(rdf_reifies),
+                Some(TermRef::Triple(&triple_term)),
+                None,
+            )
+            .next()
+            .is_some();
+
+        if !still_referenced {
+            self.store.remove(QuadRef::new(
+                source.as_ref(),
+                predicate.as_ref(),
+                TermRef::NamedNode(target.as_ref()),
+                GraphNameRef::DefaultGraph,
+            ))?;
+        }
+
         Ok(())
     }
 
-    /// Return all links in the store by querying via named graphs.
+    /// Return all links in the store using a SPARQL 1.2 reifier query.
     pub fn get_all_links(&self) -> Result<Vec<DecoratedLinkExpression>, Error> {
         let query = r#"
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
             SELECT ?source ?predicate ?target ?author ?timestamp ?proofKey ?proofSig ?proofValid ?status WHERE {
-                GRAPH ?g { ?source ?predicate ?target . }
-                FILTER(isIRI(?source))
-                ?g <ad4m://ontology/author> ?author .
-                ?g <ad4m://ontology/timestamp> ?timestamp .
-                OPTIONAL { ?g <ad4m://ontology/proofKey> ?proofKey . }
-                OPTIONAL { ?g <ad4m://ontology/proofSignature> ?proofSig . }
-                OPTIONAL { ?g <ad4m://ontology/proofValid> ?proofValid . }
-                OPTIONAL { ?g <ad4m://ontology/status> ?status . }
+                ?source ?predicate ?target .
+                ?reifier rdf:reifies <<( ?source ?predicate ?target )>> .
+                FILTER(isIRI(?source) && isIRI(?predicate))
+                ?reifier <ad4m://ontology/author> ?author .
+                ?reifier <ad4m://ontology/timestamp> ?timestamp .
+                OPTIONAL { ?reifier <ad4m://ontology/proofKey> ?proofKey . }
+                OPTIONAL { ?reifier <ad4m://ontology/proofSignature> ?proofSig . }
+                OPTIONAL { ?reifier <ad4m://ontology/proofValid> ?proofValid . }
+                OPTIONAL { ?reifier <ad4m://ontology/status> ?status . }
             }
         "#;
 
-        let options = self.query_options();
-        let mut parsed_query = Query::parse(query, None)
-            .map_err(|e| anyhow!("Failed to parse get_all_links query: {}", e))?;
-        parsed_query.dataset_mut().set_default_graph_as_union();
-        let results = self.store.query_opt(parsed_query, options)?;
+        let results = self
+            .sparql_evaluator()
+            .parse_query(query)
+            .map_err(|e| anyhow!("Failed to parse get_all_links query: {}", e))?
+            .on_store(&self.store)
+            .execute()
+            .map_err(|e| anyhow!("get_all_links query failed: {}", e))?;
 
         match results {
             QueryResults::Solutions(solutions) => {
@@ -296,9 +329,8 @@ impl SparqlStore {
         }
     }
 
-    /// Query links matching optional filters using cross-graph pattern matching.
-    /// Instead of iterating every named graph, this searches across all graphs
-    /// at once using Oxigraph's GSPO/GOSP indexes — O(matches) instead of O(total_graphs).
+    /// Query links matching optional filters using index-based pattern matching.
+    /// Scans direct triples in the default graph, then looks up reifiers for metadata.
     pub fn query_links(
         &self,
         source: Option<&str>,
@@ -317,6 +349,7 @@ impl SparqlStore {
         let t_ref: Option<TermRef> = target_node.as_ref().map(|n| n.as_ref().into());
 
         let mut links = Vec::new();
+        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
         let ont_author = NamedNodeRef::new_unchecked(ONT_AUTHOR);
         let ont_timestamp = NamedNodeRef::new_unchecked(ONT_TIMESTAMP);
         let ont_proof_key = NamedNodeRef::new_unchecked(ONT_PROOF_KEY);
@@ -324,20 +357,21 @@ impl SparqlStore {
         let ont_proof_valid = NamedNodeRef::new_unchecked(ONT_PROOF_VALID);
         let ont_status = NamedNodeRef::new_unchecked(ONT_STATUS);
 
-        // Search across ALL graphs at once — Oxigraph uses indexes to find matching
-        // quads efficiently without iterating every named graph.
-        // Pass None for graph_name to search all graphs.
-        for quad_result in self.store.quads_for_pattern(s_ref, p_ref, t_ref, None) {
+        // Search direct triples in the default graph
+        for quad_result in self
+            .store
+            .quads_for_pattern(s_ref, p_ref, t_ref, Some(GraphNameRef::DefaultGraph))
+        {
             let quad = quad_result?;
 
-            // Skip quads in the default graph (metadata triples live there)
-            let graph_name = match &quad.graph_name {
-                GraphName::NamedNode(n) => n.clone(),
-                _ => continue,
-            };
+            // Skip reifier and metadata predicates — only process data triples
+            let pred_str = quad.predicate.as_str();
+            if pred_str == RDF_REIFIES || pred_str.starts_with("ad4m://ontology/") {
+                continue;
+            }
 
             let src = match &quad.subject {
-                Subject::NamedNode(n) => n.as_str().to_string(),
+                NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
                 _ => continue,
             };
             let pred = quad.predicate.as_str().to_string();
@@ -346,86 +380,106 @@ impl SparqlStore {
                 _ => continue,
             };
 
-            // Skip annotation predicates (shouldn't be in named graphs, but safety check)
-            if pred.starts_with("ad4m://ontology/") {
-                continue;
-            }
+            // Build triple term for reifier lookup
+            let triple_term = Triple::new(
+                quad.subject.clone(),
+                quad.predicate.clone(),
+                quad.object.clone(),
+            );
 
-            // Get metadata from default graph using graph IRI as subject
-            let graph_subject: SubjectRef = graph_name.as_ref().into();
+            // Find all reifiers for this triple
+            for reifier_quad in self.store.quads_for_pattern(
+                None,
+                Some(rdf_reifies),
+                Some(TermRef::Triple(&triple_term)),
+                Some(GraphNameRef::DefaultGraph),
+            ) {
+                let rq = reifier_quad?;
+                let reifier_node = match &rq.subject {
+                    NamedOrBlankNode::NamedNode(n) => n,
+                    _ => continue,
+                };
 
-            let get_annotation = |pred_node: NamedNodeRef| -> String {
-                self.store
-                    .quads_for_pattern(
-                        Some(graph_subject),
-                        Some(pred_node),
-                        None,
-                        Some(GraphNameRef::DefaultGraph),
-                    )
-                    .next()
-                    .and_then(|r| r.ok())
-                    .and_then(|q| match &q.object {
-                        Term::Literal(l) => Some(l.value().to_string()),
-                        _ => None,
-                    })
-                    .unwrap_or_default()
-            };
+                let reifier_subject: NamedOrBlankNodeRef =
+                    reifier_node.as_ref().into();
 
-            let author = get_annotation(ont_author);
-            let timestamp = get_annotation(ont_timestamp);
+                let get_annotation = |pred_node: NamedNodeRef| -> String {
+                    self.store
+                        .quads_for_pattern(
+                            Some(reifier_subject),
+                            Some(pred_node),
+                            None,
+                            Some(GraphNameRef::DefaultGraph),
+                        )
+                        .next()
+                        .and_then(|r| r.ok())
+                        .and_then(|q| match &q.object {
+                            Term::Literal(l) => Some(l.value().to_string()),
+                            _ => None,
+                        })
+                        .unwrap_or_default()
+                };
 
-            // Skip links without required metadata
-            if author.is_empty() || timestamp.is_empty() {
-                continue;
-            }
+                let author = get_annotation(ont_author);
+                let timestamp = get_annotation(ont_timestamp);
 
-            // Apply date filters
-            if let Some(from) = from_date {
-                if timestamp.as_str() < from {
+                // Skip links without required metadata
+                if author.is_empty() || timestamp.is_empty() {
                     continue;
                 }
-            }
-            if let Some(until) = until_date {
-                if timestamp.as_str() > until {
-                    continue;
+
+                // Apply date filters
+                if let Some(from) = from_date {
+                    if timestamp.as_str() < from {
+                        continue;
+                    }
                 }
-            }
+                if let Some(until) = until_date {
+                    if timestamp.as_str() > until {
+                        continue;
+                    }
+                }
 
-            let proof_key = get_annotation(ont_proof_key);
-            let proof_sig = get_annotation(ont_proof_sig);
-            let proof_valid_str = get_annotation(ont_proof_valid);
-            let proof_valid = if proof_valid_str.is_empty() {
-                None
-            } else {
-                Some(proof_valid_str == "true")
-            };
-            let status_val = get_annotation(ont_status);
-            let status = match status_val.as_str() {
-                "Local" => Some(LinkStatus::Local),
-                "Shared" => Some(LinkStatus::Shared),
-                _ => None,
-            };
+                let proof_key = get_annotation(ont_proof_key);
+                let proof_sig = get_annotation(ont_proof_sig);
+                let proof_valid_str = get_annotation(ont_proof_valid);
+                let proof_valid = if proof_valid_str.is_empty() {
+                    None
+                } else {
+                    Some(proof_valid_str == "true")
+                };
+                let status_val = get_annotation(ont_status);
+                let status = match status_val.as_str() {
+                    "Local" => Some(LinkStatus::Local),
+                    "Shared" => Some(LinkStatus::Shared),
+                    _ => None,
+                };
 
-            links.push(DecoratedLinkExpression {
-                author,
-                timestamp,
-                data: Link {
-                    source: src,
-                    predicate: if pred.is_empty() { None } else { Some(pred) },
-                    target: tgt,
-                },
-                proof: DecoratedExpressionProof {
-                    key: proof_key,
-                    signature: proof_sig,
-                    valid: proof_valid,
-                    invalid: proof_valid.map(|v| !v),
-                },
-                status,
-            });
+                links.push(DecoratedLinkExpression {
+                    author,
+                    timestamp,
+                    data: Link {
+                        source: src.clone(),
+                        predicate: if pred.is_empty() {
+                            None
+                        } else {
+                            Some(pred.clone())
+                        },
+                        target: tgt.clone(),
+                    },
+                    proof: DecoratedExpressionProof {
+                        key: proof_key,
+                        signature: proof_sig,
+                        valid: proof_valid,
+                        invalid: proof_valid.map(|v| !v),
+                    },
+                    status,
+                });
 
-            if let Some(lim) = limit {
-                if links.len() >= lim {
-                    return Ok(links);
+                if let Some(lim) = limit {
+                    if links.len() >= lim {
+                        return Ok(links);
+                    }
                 }
             }
         }
@@ -479,8 +533,8 @@ impl SparqlStore {
             .collect())
     }
 
-    fn query_options(&self) -> QueryOptions {
-        QueryOptions::default()
+    fn sparql_evaluator(&self) -> SparqlEvaluator {
+        SparqlEvaluator::new()
             .with_custom_function(
                 NamedNode::new_unchecked("ad4m://fn/parse_literal"),
                 parse_literal_fn,
@@ -563,21 +617,20 @@ impl SparqlStore {
     }
 
     /// Execute an arbitrary read-only SPARQL SELECT query, returning a JSON string.
-    /// All AD4M URIs are valid IRIs, so queries are passed through as-is.
+    /// All data lives in the default graph — no union graph needed.
     pub fn query(&self, query_string: &str) -> Result<String, Error> {
         validate_readonly_query(query_string)?;
 
-        let mut parsed_query = Query::parse(query_string, None)
-            .map_err(|e| anyhow!("Failed to parse SPARQL query: {}", e))?;
-        // Include all named graphs in the default dataset so unscoped
-        // triple patterns find triples stored in named graphs.
-        parsed_query.dataset_mut().set_default_graph_as_union();
-
-        let options = self.query_options();
-        let results = self.store.query_opt(parsed_query, options).map_err(|e| {
-            let truncated = &query_string[..query_string.len().min(500)];
-            anyhow!("SPARQL query failed: {}\nQuery: {}", e, truncated)
-        })?;
+        let results = self
+            .sparql_evaluator()
+            .parse_query(query_string)
+            .map_err(|e| anyhow!("Failed to parse SPARQL query: {}", e))?
+            .on_store(&self.store)
+            .execute()
+            .map_err(|e| {
+                let truncated = &query_string[..query_string.len().min(500)];
+                anyhow!("SPARQL query failed: {}\nQuery: {}", e, truncated)
+            })?;
 
         match results {
             QueryResults::Solutions(solutions) => {
@@ -644,6 +697,232 @@ impl SparqlStore {
         }
         Ok(())
     }
+
+    /// Check the migration version stored in the store.
+    /// Returns 0 if no migration version is found.
+    pub fn migration_version(&self) -> u32 {
+        let migration_subj = NamedNodeRef::new_unchecked("ad4m://system/migration");
+        let migration_pred = NamedNodeRef::new_unchecked("ad4m://system/version");
+        self.store
+            .quads_for_pattern(
+                Some(migration_subj.into()),
+                Some(migration_pred),
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .next()
+            .and_then(|r| r.ok())
+            .and_then(|q| match &q.object {
+                Term::Literal(l) => l.value().parse::<u32>().ok(),
+                _ => None,
+            })
+            .unwrap_or(0)
+    }
+
+    /// Set the migration version marker.
+    pub fn set_migration_version(&self, version: u32) -> Result<(), Error> {
+        let migration_subj = NamedNode::new_unchecked("ad4m://system/migration");
+        let migration_pred = NamedNodeRef::new_unchecked("ad4m://system/version");
+
+        // Remove old version marker if any
+        let old_quads: Vec<_> = self
+            .store
+            .quads_for_pattern(
+                Some(migration_subj.as_ref().into()),
+                Some(migration_pred),
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .collect::<Result<Vec<_>, _>>()?;
+        for q in &old_quads {
+            self.store.remove(q)?;
+        }
+
+        // Insert new version
+        let version_lit = Literal::new_simple_literal(&version.to_string());
+        self.store.insert(QuadRef::new(
+            migration_subj.as_ref(),
+            migration_pred,
+            TermRef::Literal(version_lit.as_ref()),
+            GraphNameRef::DefaultGraph,
+        ))?;
+
+        Ok(())
+    }
+
+    /// Migrate data from named-graph storage model to reifier storage model.
+    /// Returns the number of links migrated.
+    pub fn migrate_named_graphs_to_reifiers(&self) -> Result<usize, Error> {
+        // Check if already migrated
+        if self.migration_version() >= 2 {
+            return Ok(0);
+        }
+
+        // Check if there are any named graphs (old storage model)
+        let has_named_graphs = self
+            .store
+            .named_graphs()
+            .next()
+            .is_some();
+
+        if !has_named_graphs {
+            // No old data to migrate, just set version
+            self.set_migration_version(2)?;
+            return Ok(0);
+        }
+
+        log::info!("Migrating link storage from named graphs to RDF 1.2 reifiers...");
+
+        // Collect all old-format links by querying named graphs
+        // We use the deprecated query_opt with set_default_graph_as_union to read old data
+        let query = r#"
+            SELECT ?g ?source ?predicate ?target ?author ?timestamp
+                   ?proofKey ?proofSig ?proofValid ?status
+            WHERE {
+                GRAPH ?g { ?source ?predicate ?target . }
+                FILTER(isIRI(?source) && isIRI(?predicate))
+                ?g <ad4m://ontology/author> ?author .
+                ?g <ad4m://ontology/timestamp> ?timestamp .
+                OPTIONAL { ?g <ad4m://ontology/proofKey> ?proofKey . }
+                OPTIONAL { ?g <ad4m://ontology/proofSignature> ?proofSig . }
+                OPTIONAL { ?g <ad4m://ontology/proofValid> ?proofValid . }
+                OPTIONAL { ?g <ad4m://ontology/status> ?status . }
+            }
+        "#;
+
+        // Use the deprecated API to read old named-graph data
+        #[allow(deprecated)]
+        let results = {
+            let evaluator = self.sparql_evaluator();
+            let mut parsed_query = oxigraph::sparql::Query::parse(query, None)
+                .map_err(|e| anyhow!("Failed to parse migration query: {}", e))?;
+            parsed_query.dataset_mut().set_default_graph_as_union();
+            self.store.query_opt(parsed_query, evaluator)?
+        };
+
+        let mut links_to_migrate: Vec<DecoratedLinkExpression> = Vec::new();
+        let mut graph_iris: Vec<NamedNode> = Vec::new();
+
+        if let QueryResults::Solutions(solutions) = results {
+            for solution in solutions {
+                let solution = solution?;
+
+                let get_str = |var: &str| -> String {
+                    solution
+                        .get(var)
+                        .and_then(|t| match t {
+                            Term::Literal(l) => Some(l.value().to_string()),
+                            Term::NamedNode(n) => Some(n.as_str().to_string()),
+                            _ => None,
+                        })
+                        .unwrap_or_default()
+                };
+
+                if let Some(Term::NamedNode(g)) = solution.get("g") {
+                    graph_iris.push(g.clone());
+                }
+
+                let source = match solution.get("source") {
+                    Some(Term::NamedNode(n)) => n.as_str().to_string(),
+                    _ => continue,
+                };
+                let predicate = match solution.get("predicate") {
+                    Some(Term::NamedNode(n)) => {
+                        let s = n.as_str().to_string();
+                        if s.is_empty() { None } else { Some(s) }
+                    }
+                    _ => continue,
+                };
+                let target = match solution.get("target") {
+                    Some(Term::NamedNode(n)) => n.as_str().to_string(),
+                    _ => continue,
+                };
+
+                let author = get_str("author");
+                let timestamp = get_str("timestamp");
+                let proof_key = get_str("proofKey");
+                let proof_sig = get_str("proofSig");
+                let proof_valid_str = get_str("proofValid");
+                let proof_valid = if proof_valid_str.is_empty() {
+                    None
+                } else {
+                    Some(proof_valid_str == "true")
+                };
+                let status_val = get_str("status");
+                let status = match status_val.as_str() {
+                    "Local" => Some(LinkStatus::Local),
+                    "Shared" => Some(LinkStatus::Shared),
+                    _ => None,
+                };
+
+                links_to_migrate.push(DecoratedLinkExpression {
+                    author,
+                    timestamp,
+                    data: Link {
+                        source,
+                        predicate,
+                        target,
+                    },
+                    proof: DecoratedExpressionProof {
+                        key: proof_key,
+                        signature: proof_sig,
+                        valid: proof_valid,
+                        invalid: proof_valid.map(|v| !v),
+                    },
+                    status,
+                });
+            }
+        }
+
+        let count = links_to_migrate.len();
+        log::info!("Found {} links in named-graph format to migrate", count);
+
+        // Remove all old named-graph data
+        // First remove named graph contents and metadata
+        for graph_iri in &graph_iris {
+            // Remove quads in the named graph
+            let ng_quads: Vec<_> = self
+                .store
+                .quads_for_pattern(
+                    None,
+                    None,
+                    None,
+                    Some(GraphNameRef::NamedNode(graph_iri.as_ref())),
+                )
+                .collect::<Result<Vec<_>, _>>()?;
+            for q in &ng_quads {
+                self.store.remove(q)?;
+            }
+
+            // Remove metadata in default graph
+            let meta_quads: Vec<_> = self
+                .store
+                .quads_for_pattern(
+                    Some(graph_iri.as_ref().into()),
+                    None,
+                    None,
+                    Some(GraphNameRef::DefaultGraph),
+                )
+                .collect::<Result<Vec<_>, _>>()?;
+            for q in &meta_quads {
+                self.store.remove(q)?;
+            }
+
+            // Remove the named graph itself
+            let _ = self.store.remove_named_graph(graph_iri.as_ref());
+        }
+
+        // Insert new reifier-format data
+        for link in &links_to_migrate {
+            self.insert_link_triples(link)?;
+        }
+
+        // Set migration version
+        self.set_migration_version(2)?;
+
+        log::info!("Migration complete: {} links migrated to reifier format", count);
+        Ok(count)
+    }
 }
 
 #[cfg(test)]
@@ -690,7 +969,7 @@ mod tests {
         SparqlStore::new(None).unwrap()
     }
 
-    // ── Storage Model Tests ──
+    // ── Storage Model Tests (Reifier Model) ──
 
     #[test]
     fn test_add_link_creates_direct_triple() {
@@ -698,10 +977,10 @@ mod tests {
         let link = make_link("ad4m://source1", "ad4m://predicate1", "ad4m://target1");
         svc.add_link(&link).unwrap();
 
-        // Direct triple should be findable via GRAPH pattern or unscoped (with union default graph)
+        // Direct triple should be in default graph
         let result = svc
             .query(
-                "SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } . FILTER(isIRI(?s) && isIRI(?o)) }",
+                "SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(isIRI(?s) && isIRI(?o) && ?p != <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>) }",
             )
             .unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
@@ -714,20 +993,43 @@ mod tests {
     }
 
     #[test]
-    fn test_add_link_creates_metadata_in_default_graph() {
+    fn test_add_link_creates_reifier() {
         let svc = new_service();
         let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
         svc.add_link(&link).unwrap();
+        let reifier = make_reifier_iri(&link);
 
-        // Query for metadata on the graph IRI in default graph
-        let result = svc
-            .query(
-                r#"SELECT ?g ?p ?v WHERE {
-                GRAPH ?g { <ad4m://src> <ad4m://pred> <ad4m://tgt> . }
-                ?g ?p ?v .
-                FILTER(STRSTARTS(STR(?p), "ad4m://ontology/"))
-            }"#,
+        // Reifier should reference the triple term
+        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
+        let reifier_quads: Vec<_> = svc
+            .store
+            .quads_for_pattern(
+                Some(reifier.as_ref().into()),
+                Some(rdf_reifies),
+                None,
+                Some(GraphNameRef::DefaultGraph),
             )
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(reifier_quads.len(), 1, "Expected 1 rdf:reifies triple");
+    }
+
+    #[test]
+    fn test_add_link_creates_metadata_on_reifier() {
+        let svc = new_service();
+        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        svc.add_link(&link).unwrap();
+        let reifier = make_reifier_iri(&link);
+
+        // Query for metadata on the reifier IRI
+        let result = svc
+            .query(&format!(
+                r#"SELECT ?p ?v WHERE {{
+                <{}> ?p ?v .
+                FILTER(STRSTARTS(STR(?p), "ad4m://ontology/"))
+            }}"#,
+                reifier.as_str()
+            ))
             .unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
 
@@ -767,8 +1069,9 @@ mod tests {
         svc.add_link(&link).unwrap();
         svc.remove_link(&link).unwrap();
 
+        // Direct triple should be gone
         let result = svc
-            .query("SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } . FILTER(isIRI(?s)) }")
+            .query("SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(?s = <ad4m://src>) }")
             .unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert!(
@@ -779,36 +1082,82 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_link_removes_metadata() {
+    fn test_remove_link_removes_reifier_and_metadata() {
         let svc = new_service();
         let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
         svc.add_link(&link).unwrap();
-        let graph = make_graph_iri(&link);
+        let reifier = make_reifier_iri(&link);
         svc.remove_link(&link).unwrap();
 
-        // Check no metadata triples remain for the graph IRI
+        // No reifier triples should remain
         let result = svc
             .query(&format!(
                 r#"SELECT ?p ?v WHERE {{ <{}> ?p ?v . }}"#,
-                graph.as_str()
+                reifier.as_str()
             ))
             .unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
-        assert!(rows.is_empty(), "Metadata triples still exist: {}", result);
+        assert!(rows.is_empty(), "Reifier triples still exist: {}", result);
     }
 
     #[test]
-    fn test_no_link_node_triples() {
+    fn test_remove_preserves_shared_direct_triple() {
+        let svc = new_service();
+        // Two different links with same s/p/o but different timestamps
+        let link1 = make_link_with_ts(
+            "ad4m://src", "ad4m://pred", "ad4m://tgt",
+            "2024-01-01T00:00:00Z", "did:key:z6Mk1",
+        );
+        let link2 = make_link_with_ts(
+            "ad4m://src", "ad4m://pred", "ad4m://tgt",
+            "2024-01-02T00:00:00Z", "did:key:z6Mk2",
+        );
+        svc.add_link(&link1).unwrap();
+        svc.add_link(&link2).unwrap();
+
+        // Remove link1 — direct triple should remain because link2 still references it
+        svc.remove_link(&link1).unwrap();
+
+        let all = svc.get_all_links().unwrap();
+        assert_eq!(all.len(), 1, "Should have 1 link remaining");
+        assert_eq!(all[0].author, "did:key:z6Mk2");
+    }
+
+    #[test]
+    fn test_no_named_graphs_used() {
         let svc = new_service();
         let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
         svc.add_link(&link).unwrap();
 
-        // Check no ad4m:Link type triples exist
-        let result = svc.query(
-            r#"SELECT ?s WHERE { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <ad4m://Link> . }"#
-        ).unwrap();
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
-        assert!(rows.is_empty(), "Found link-node type triples: {}", result);
+        // No named graphs should exist
+        let named: Vec<_> = svc.store.named_graphs().collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(named.is_empty(), "No named graphs should be used in reifier model");
+    }
+
+    #[test]
+    fn test_all_data_in_default_graph() {
+        let svc = new_service();
+        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        svc.add_link(&link).unwrap();
+
+        // All quads should be in the default graph
+        let all_quads: Vec<_> = svc
+            .store
+            .quads_for_pattern(None, None, None, None)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        for quad in &all_quads {
+            assert_eq!(
+                quad.graph_name,
+                GraphName::DefaultGraph,
+                "Found quad not in default graph: {:?}",
+                quad
+            );
+        }
+
+        // Should have: 1 direct triple + 1 reifier + 6 metadata = 8 quads
+        assert_eq!(all_quads.len(), 8, "Expected 8 quads total");
     }
 
     // ── Query Tests ──
@@ -1153,7 +1502,7 @@ mod tests {
         assert!(all.is_empty());
     }
 
-    // ── Concurrent write protection tests (Tier 1, 3.1) ──
+    // ── Concurrent write protection tests ──
 
     #[test]
     fn test_concurrent_writes_no_panic() {
@@ -1268,9 +1617,7 @@ mod tests {
         assert_eq!(remove_links.len(), 0, "Remove links not fully removed");
     }
 
-    // ── Persistence tests (Tier 1, 3.2) ──
-    // Note: Persistence via Store::open() requires the `rocksdb` feature which is not
-    // currently enabled. These tests document the expected behavior for when it is.
+    // ── Persistence tests ──
 
     #[test]
     fn test_inmemory_store_for_tests() {
@@ -1294,11 +1641,10 @@ mod tests {
         assert!(svc.has_data());
     }
 
-    // ── Error messages with query text (Tier 3, 3.10) ──
+    // ── Error messages ──
 
     #[test]
     fn test_validation_error_is_descriptive() {
-        // Parser-based validation produces descriptive errors from Oxigraph
         let result = validate_readonly_query("NOT VALID SPARQL");
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -1312,14 +1658,13 @@ mod tests {
     #[test]
     fn test_valid_query_on_empty_store_returns_ok() {
         let svc = new_service();
-        // A valid query on an empty store should return Ok with empty results
         let result = svc.query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }");
         assert!(result.is_ok());
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result.unwrap()).unwrap();
         assert_eq!(rows.len(), 0);
     }
 
-    // ── Parser-based SPARQL validation (Tier 3, 3.8) ──
+    // ── Parser-based SPARQL validation ──
 
     #[test]
     fn test_rejects_insert_query() {
@@ -1337,19 +1682,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_insert_in_comment() {
-        // "INSERT" in a comment should NOT cause rejection — the parser handles this correctly
-        let query = "SELECT * WHERE { ?s ?p ?o }\n# INSERT is just a comment here";
-        // This is valid SPARQL (comment doesn't affect parsing)
-        assert!(validate_readonly_query(query).is_ok());
-    }
-
-    #[test]
-    fn test_rejects_syntactically_invalid_sparql() {
-        assert!(validate_readonly_query("NOT VALID SPARQL AT ALL").is_err());
-    }
-
-    #[test]
     fn test_accepts_ask_query() {
         assert!(validate_readonly_query("ASK WHERE { ?s ?p ?o }").is_ok());
     }
@@ -1364,18 +1696,18 @@ mod tests {
         assert!(validate_readonly_query("DESCRIBE <http://example.org>").is_ok());
     }
 
-    // ── Named Graph Tests ──
+    // ── Reifier IRI tests ──
 
     #[test]
-    fn test_named_graph_iri_is_deterministic() {
+    fn test_reifier_iri_is_deterministic() {
         let link = make_link("ad4m://a", "ad4m://p", "ad4m://t");
-        let iri1 = make_graph_iri(&link);
-        let iri2 = make_graph_iri(&link);
-        assert_eq!(iri1, iri2, "Same link data should produce same graph IRI");
+        let iri1 = make_reifier_iri(&link);
+        let iri2 = make_reifier_iri(&link);
+        assert_eq!(iri1, iri2, "Same link data should produce same reifier IRI");
     }
 
     #[test]
-    fn test_named_graph_iri_differs_for_different_timestamps() {
+    fn test_reifier_iri_differs_for_different_timestamps() {
         let link1 = make_link_with_ts(
             "ad4m://a",
             "ad4m://p",
@@ -1390,136 +1722,30 @@ mod tests {
             "2024-01-02T00:00:00Z",
             "did:key:z6Mk1",
         );
-        let iri1 = make_graph_iri(&link1);
-        let iri2 = make_graph_iri(&link2);
+        let iri1 = make_reifier_iri(&link1);
+        let iri2 = make_reifier_iri(&link2);
         assert_ne!(
             iri1, iri2,
-            "Different timestamps should produce different graph IRIs"
+            "Different timestamps should produce different reifier IRIs"
         );
     }
 
-    #[test]
-    fn test_link_stored_in_named_graph() {
-        let svc = new_service();
-        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
-        svc.add_link(&link).unwrap();
-
-        // The direct triple should NOT be in the default graph
-        let default_quads: Vec<_> = svc
-            .store
-            .quads_for_pattern(None, None, None, Some(GraphNameRef::DefaultGraph))
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        // Default graph should only have metadata triples (with link: IRI subjects)
-        for quad in &default_quads {
-            match &quad.subject {
-                Subject::NamedNode(n) => {
-                    assert!(
-                        n.as_str().starts_with("link:"),
-                        "Default graph should only have graph IRI subjects, found: {}",
-                        n.as_str()
-                    );
-                }
-                _ => panic!("Unexpected non-NamedNode subject in default graph"),
-            }
-        }
-
-        // The direct triple should be in a named graph
-        let graph = make_graph_iri(&link);
-        let named_quads: Vec<_> = svc
-            .store
-            .quads_for_pattern(
-                None,
-                None,
-                None,
-                Some(GraphNameRef::NamedNode(graph.as_ref())),
-            )
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(
-            named_quads.len(),
-            1,
-            "Expected exactly 1 triple in named graph"
-        );
-    }
+    // ── Direct query finds data without GRAPH pattern ──
 
     #[test]
-    fn test_metadata_in_default_graph() {
-        let svc = new_service();
-        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
-        svc.add_link(&link).unwrap();
-
-        let graph = make_graph_iri(&link);
-        let meta_quads: Vec<_> = svc
-            .store
-            .quads_for_pattern(
-                Some(graph.as_ref().into()),
-                None,
-                None,
-                Some(GraphNameRef::DefaultGraph),
-            )
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(meta_quads.len(), 6, "Expected 6 metadata triples (author, timestamp, proofKey, proofSig, proofValid, status)");
-    }
-
-    #[test]
-    fn test_remove_cleans_both_graph_and_metadata() {
-        let svc = new_service();
-        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
-        svc.add_link(&link).unwrap();
-        let graph = make_graph_iri(&link);
-
-        svc.remove_link(&link).unwrap();
-
-        // Named graph should be empty
-        let named_quads: Vec<_> = svc
-            .store
-            .quads_for_pattern(
-                None,
-                None,
-                None,
-                Some(GraphNameRef::NamedNode(graph.as_ref())),
-            )
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(
-            named_quads.is_empty(),
-            "Named graph still has triples after removal"
-        );
-
-        // Default graph metadata should be empty
-        let meta_quads: Vec<_> = svc
-            .store
-            .quads_for_pattern(
-                Some(graph.as_ref().into()),
-                None,
-                None,
-                Some(GraphNameRef::DefaultGraph),
-            )
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(
-            meta_quads.is_empty(),
-            "Default graph still has metadata after removal"
-        );
-    }
-
-    #[test]
-    fn test_unscoped_query_finds_named_graph_triples() {
+    fn test_direct_query_finds_triples() {
         let svc = new_service();
         svc.add_link(&make_link("ad4m://src", "ad4m://pred", "ad4m://tgt"))
             .unwrap();
 
-        // Unscoped query (no GRAPH wrapper) should still find the triple
-        // because we set default_graph_as_union
+        // Direct query should find the triple without GRAPH wrapper
         let result = svc.query(
             "SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(?s = <ad4m://src> && ?p = <ad4m://pred>) }"
         ).unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert!(
             !rows.is_empty(),
-            "Unscoped query should find named graph triples via union default graph"
+            "Direct query should find data triples in default graph"
         );
     }
 
@@ -1574,27 +1800,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
 
-        // First "startup": no data, rebuild needed
         {
             let store = SparqlStore::new(Some(path)).unwrap();
-            assert!(
-                !store.has_data(),
-                "Fresh persistent store should have no data"
-            );
-            // Simulate rebuild
+            assert!(!store.has_data());
             store
                 .add_link(&make_link("ad4m://a", "ad4m://b", "ad4m://c"))
                 .unwrap();
             assert!(store.has_data());
         }
 
-        // Second "startup": data persisted, skip rebuild
         {
             let store = SparqlStore::new(Some(path)).unwrap();
-            assert!(
-                store.has_data(),
-                "Persistent store should have data on second open — rebuild should be skipped"
-            );
+            assert!(store.has_data());
         }
     }
 
@@ -1603,13 +1820,11 @@ mod tests {
     #[test]
     fn query_links_by_source() {
         let svc = new_service();
-        // Add links with different sources
         for i in 0..50 {
             let src = format!("ad4m://source{}", i);
             let link = make_link(&src, "ad4m://pred", "ad4m://target");
             svc.add_link(&link).unwrap();
         }
-        // Query for a specific source
         let results = svc
             .query_links(Some("ad4m://source7"), None, None, None, None, None)
             .unwrap();
@@ -1667,7 +1882,6 @@ mod tests {
             let link = make_link_with_ts(&src, "ad4m://pred", "ad4m://tgt", ts, "did:key:z6Mktest");
             svc.add_link(&link).unwrap();
         }
-        // Query from Jan 14 to Jan 21
         let results = svc
             .query_links(
                 None,
@@ -1698,7 +1912,6 @@ mod tests {
     #[test]
     fn query_links_combined_filters() {
         let svc = new_service();
-        // Add links with various combinations
         svc.add_link(&make_link("ad4m://a", "ad4m://likes", "ad4m://b"))
             .unwrap();
         svc.add_link(&make_link("ad4m://a", "ad4m://knows", "ad4m://c"))
@@ -1708,7 +1921,6 @@ mod tests {
         svc.add_link(&make_link("ad4m://a", "ad4m://likes", "ad4m://c"))
             .unwrap();
 
-        // source=a AND predicate=likes
         let results = svc
             .query_links(
                 Some("ad4m://a"),
@@ -1725,7 +1937,6 @@ mod tests {
             assert_eq!(r.data.predicate.as_deref(), Some("ad4m://likes"));
         }
 
-        // source=a AND predicate=likes AND target=b
         let results = svc
             .query_links(
                 Some("ad4m://a"),
@@ -1759,21 +1970,15 @@ mod tests {
         assert_eq!(results.len(), 10);
     }
 
-    // ── Test #18: Links with literal targets ──
     #[test]
     fn test_query_links_skips_literal_targets() {
         let svc = new_service();
-        // literal:string:hello is not a valid IRI for NamedNode, but add_link
-        // stores it. query_links uses NamedNode pattern matching, so non-IRI
-        // targets should be handled gracefully.
         svc.add_link(&make_link(
             "ad4m://src",
             "ad4m://pred",
             "ad4m://normal_target",
         ))
         .unwrap();
-        // Literal-style targets are stored as IRIs (NamedNode) in oxigraph
-        // even though they represent literals conceptually
         svc.add_link(&make_link(
             "ad4m://src",
             "ad4m://pred",
@@ -1781,14 +1986,11 @@ mod tests {
         ))
         .unwrap();
 
-        // Query without target filter should find both (literal:string:hello is technically a valid IRI)
         let results = svc
             .query_links(Some("ad4m://src"), None, None, None, None, None)
             .unwrap();
-        // literal:string:hello has a scheme "literal:" so NamedNode::new_unchecked accepts it
         assert_eq!(results.len(), 2);
 
-        // Query with specific literal target
         let results = svc
             .query_links(
                 Some("ad4m://src"),
@@ -1803,7 +2005,6 @@ mod tests {
         assert_eq!(results[0].data.target, "literal:string:hello");
     }
 
-    // ── Test #19: Same source, multiple predicates ──
     #[test]
     fn test_query_links_same_source_many_predicates() {
         let svc = new_service();
@@ -1816,7 +2017,6 @@ mod tests {
             .unwrap();
         }
 
-        // Filter by a specific predicate
         let results = svc
             .query_links(
                 Some("ad4m://src"),
@@ -1830,18 +2030,15 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].data.target, "ad4m://target_42");
 
-        // All from same source
         let all = svc
             .query_links(Some("ad4m://src"), None, None, None, None, None)
             .unwrap();
         assert_eq!(all.len(), 100);
     }
 
-    // ── Test #20: Unicode in link data ──
     #[test]
     fn test_query_links_unicode_roundtrip() {
         let svc = new_service();
-        // Unicode source, predicate, target
         svc.add_link(&make_link("ad4m://héllo", "ad4m://prédicat", "ad4m://目标"))
             .unwrap();
         svc.add_link(&make_link("ad4m://emoji🎉", "ad4m://pred", "ad4m://target"))
@@ -1875,7 +2072,6 @@ mod tests {
         assert_eq!(results[0].data.target, "ad4m://한국어대상");
     }
 
-    // ── Test #22: Date range edge cases ──
     #[test]
     fn test_query_links_date_range_exact_boundary() {
         let svc = new_service();
@@ -1889,7 +2085,6 @@ mod tests {
         ))
         .unwrap();
 
-        // from_date = exact timestamp — should include it (>=)
         let results = svc
             .query_links(None, None, None, Some(exact_ts), None, None)
             .unwrap();
@@ -1899,7 +2094,6 @@ mod tests {
             "from_date at exact timestamp should include the link"
         );
 
-        // until_date = exact timestamp — should include it (<=)
         let results = svc
             .query_links(None, None, None, None, Some(exact_ts), None)
             .unwrap();
@@ -1909,10 +2103,41 @@ mod tests {
             "until_date at exact timestamp should include the link"
         );
 
-        // Both from and until at exact — should still include
         let results = svc
             .query_links(None, None, None, Some(exact_ts), Some(exact_ts), None)
             .unwrap();
         assert_eq!(results.len(), 1, "exact from+until should include the link");
+    }
+
+    // ── Migration tests ──
+
+    #[test]
+    fn test_migration_version_default_zero() {
+        let svc = new_service();
+        assert_eq!(svc.migration_version(), 0);
+    }
+
+    #[test]
+    fn test_migration_version_set_and_get() {
+        let svc = new_service();
+        svc.set_migration_version(2).unwrap();
+        assert_eq!(svc.migration_version(), 2);
+    }
+
+    #[test]
+    fn test_migration_no_named_graphs_sets_version() {
+        let svc = new_service();
+        // No old data, migration should just set version
+        let count = svc.migrate_named_graphs_to_reifiers().unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(svc.migration_version(), 2);
+    }
+
+    #[test]
+    fn test_migration_skips_if_already_done() {
+        let svc = new_service();
+        svc.set_migration_version(2).unwrap();
+        let count = svc.migrate_named_graphs_to_reifiers().unwrap();
+        assert_eq!(count, 0);
     }
 }

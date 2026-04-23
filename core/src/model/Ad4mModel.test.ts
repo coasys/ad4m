@@ -1321,17 +1321,14 @@ describe("SPARQL direct triple pattern generation", () => {
     expect(query).toMatch(/\?source\s+<flux:\/\/name>\s+\?cfTarget_name/);
   });
 
-  it("uses GRAPH ?linkGraph pattern for author/timestamp", async () => {
+  it("uses RDF 1.2 reifier pattern for author/timestamp", async () => {
     const query = await (Channel as any).queryToSPARQL(mockPersp, {});
-    expect(query).toContain("GRAPH ?linkGraph { ?source ?predicate ?target . }");
-    expect(query).toContain("?linkGraph <ad4m://ontology/author> ?author");
-    expect(query).toContain("?linkGraph <ad4m://ontology/timestamp> ?timestamp");
-  });
-
-  it("does NOT contain RDF-star BIND(<< >> AS ?ann) pattern", async () => {
-    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
-    expect(query).not.toContain("BIND(<<");
-    expect(query).not.toContain("?ann ");
+    expect(query).toContain("PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>");
+    expect(query).toContain("?source ?predicate ?target .");
+    expect(query).toContain("?_reifier rdf:reifies <<( ?source ?predicate ?target )>>");
+    expect(query).toContain("?_reifier <ad4m://ontology/author> ?author");
+    expect(query).toContain("?_reifier <ad4m://ontology/timestamp> ?timestamp");
+    expect(query).not.toContain("GRAPH");
   });
 
   it("uses FILTER(isIRI(?source)) to exclude non-IRI subjects", async () => {

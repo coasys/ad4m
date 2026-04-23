@@ -1,4 +1,4 @@
-import { buildSPARQLOrderLimitOffset, buildSPARQLQuery, buildSPARQLCountQuery, buildPaginationSubquery, hasJsOnlyWhereFilters } from './query-sparql';
+import { buildSPARQLOrderLimitOffset, buildSPARQLQuery, buildSPARQLCountQuery, buildPaginationSubquery, hasJsOnlyWhereFilters, buildSPARQLGetDataQuery } from './query-sparql';
 
 // Minimal stubs for ModelMetadata — buildSPARQLOrderLimitOffset only uses the query arg
 const emptyMetadata: any = { properties: {}, relations: {} };
@@ -284,7 +284,6 @@ describe('SPARQL-level pagination', () => {
     const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
     expect(sparql).not.toContain('ORDER BY');
     expect(sparql).not.toContain('pg_minTs');
-    expect(sparql).not.toContain('GRAPH ?pg_g');
   });
 
   it('does NOT push pagination to SPARQL when JS-only where filters exist (author)', () => {
@@ -353,5 +352,34 @@ describe('buildSPARQLQuery — set-difference patterns', () => {
     // This ensures grandchildren (items at any depth) are matched
     expect(sparql).not.toContain('flux://has_child');
     expect(sparql).toContain('SELECT ?source ?predicate ?target');
+  });
+});
+
+describe('buildSPARQLQuery — RDF 1.2 reifier patterns', () => {
+  const modelClass: any = {};
+
+  it('uses rdf:reifies instead of GRAPH for link metadata', () => {
+    const query = { limit: 10 };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>');
+    expect(sparql).toContain('rdf:reifies <<(');
+    expect(sparql).toContain('?_reifier');
+    expect(sparql).not.toContain('GRAPH');
+    expect(sparql).not.toContain('?linkGraph');
+  });
+
+  it('binds author and timestamp on the reifier node', () => {
+    const query = {};
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('?_reifier <ad4m://ontology/author> ?author');
+    expect(sparql).toContain('?_reifier <ad4m://ontology/timestamp> ?timestamp');
+  });
+
+  it('uses reifier pattern in buildSPARQLGetDataQuery', () => {
+    const sparql = buildSPARQLGetDataQuery('flux://some-entity-123');
+    expect(sparql).toContain('PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>');
+    expect(sparql).toContain('rdf:reifies <<(');
+    expect(sparql).toContain('?_reifier');
+    expect(sparql).not.toContain('GRAPH');
   });
 });

@@ -1,9 +1,9 @@
 /**
  * Batch SPARQL query builder for Ad4mModel eager-loading (includes).
  *
- * Uses direct triple + named graph storage model.
- * Each AD4M link is stored as: <source> <predicate> <target> in a named graph
- * with metadata in the default graph keyed by graph IRI.
+ * Uses RDF 1.2 reifier storage model.
+ * Each AD4M link is stored as a direct triple in the default graph with
+ * a reifier node carrying metadata (author, timestamp).
  *
  * @module
  */
@@ -228,14 +228,15 @@ export function buildBatchSPARQLQuery(
 
   const unionBranches: string[] = [];
 
-  // Depth 0: root — direct triple pattern with named graph
+  // Depth 0: root — direct triple + reifier lookup
   unionBranches.push(`
       {
         ${rootJoinClause}
-        GRAPH ?linkGraph { ?source ?predicate ?target . }
+        ?source ?predicate ?target .
+        ?_reifier rdf:reifies <<( ?source ?predicate ?target )>> .
         FILTER(isIRI(?source) && isIRI(?predicate))
-        ?linkGraph <ad4m://ontology/author> ?author .
-        ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
+        ?_reifier <ad4m://ontology/author> ?author .
+        ?_reifier <ad4m://ontology/timestamp> ?timestamp .
         ${rootFilterClause}
         BIND("0" AS ?depth)
         BIND("" AS ?parentBase)
@@ -261,10 +262,11 @@ export function buildBatchSPARQLQuery(
         # Depth ${branch.depth}: ${branch.relationName} (forward)
         ?parentBase ${iri(branch.parentPredicate)} ?source .
         ${childJoinClause}
-        GRAPH ?linkGraph { ?source ?predicate ?target . }
+        ?source ?predicate ?target .
+        ?_reifier rdf:reifies <<( ?source ?predicate ?target )>> .
         FILTER(isIRI(?source) && isIRI(?predicate))
-        ?linkGraph <ad4m://ontology/author> ?author .
-        ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
+        ?_reifier <ad4m://ontology/author> ?author .
+        ?_reifier <ad4m://ontology/timestamp> ?timestamp .
         ${childFilterClause}
         ${parentJoinClause}
         ${parentFilterClause}
@@ -279,10 +281,11 @@ export function buildBatchSPARQLQuery(
         # Depth ${branch.depth}: ${branch.relationName} (reverse)
         ?source ${iri(branch.parentPredicate)} ?parentBase .
         ${childJoinClause}
-        GRAPH ?linkGraph { ?source ?predicate ?target . }
+        ?source ?predicate ?target .
+        ?_reifier rdf:reifies <<( ?source ?predicate ?target )>> .
         FILTER(isIRI(?source) && isIRI(?predicate))
-        ?linkGraph <ad4m://ontology/author> ?author .
-        ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
+        ?_reifier <ad4m://ontology/author> ?author .
+        ?_reifier <ad4m://ontology/timestamp> ?timestamp .
         ${childFilterClause}
         ${parentJoinClause}
         ${parentFilterClause}
@@ -294,6 +297,7 @@ export function buildBatchSPARQLQuery(
   }
 
   return `
+    PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
     SELECT ?depth ?parentBase ?relationName ?source ?predicate ?target ?author ?timestamp WHERE {
       ${unionBranches.join("\n      UNION\n")}
     }

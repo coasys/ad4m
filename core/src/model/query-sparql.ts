@@ -1,8 +1,10 @@
 /**
  * SPARQL query building utilities for Ad4mModel.
  *
- * Uses the direct triple + named graph storage model where each AD4M link
- * is stored in a named graph (keyed by link hash) with metadata in the default graph.
+ * Uses the RDF 1.2 reifier storage model where each AD4M link is stored as:
+ * 1. Direct triple: <source> <predicate> <target> . (default graph)
+ * 2. Reifier: <link:HASH> rdf:reifies <<( source predicate target )>> .
+ * 3. Metadata: <link:HASH> ad4m://ontology/* "value" . (default graph)
  *
  * All AD4M URIs (source, predicate, target) become RDF IRIs.
  *
@@ -249,7 +251,7 @@ export function buildSPARQLQuery(
   filterExpressions.push(...userFilters);
 
   // Main triple pattern — fetches all links for matched sources
-  // The direct triple in named graph: GRAPH ?linkGraph { ?source ?predicate ?target }
+  // Direct triple in default graph + RDF 1.2 reifier for link metadata
   // FILTER(isIRI(?source)) excludes non-IRI subjects
   const joinClause = joinPatterns.join("\n");
   const filterClause = filterExpressions.length > 0
@@ -272,23 +274,27 @@ export function buildSPARQLQuery(
     // Use the pagination subquery to constrain ?source, then fetch all links
     // for those sources only.
     return `
+    PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
     SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
       ${paginationSubquery}${joinClause}
-      GRAPH ?linkGraph { ?source ?predicate ?target . }
+      ?source ?predicate ?target .
+      ?_reifier rdf:reifies <<( ?source ?predicate ?target )>> .
       FILTER(isIRI(?source) && isIRI(?predicate))
-      ?linkGraph <ad4m://ontology/author> ?author .
-      ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
+      ?_reifier <ad4m://ontology/author> ?author .
+      ?_reifier <ad4m://ontology/timestamp> ?timestamp .
       ${filterClause}
     }
   `.trim();
   }
 
   return `
+    PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
     SELECT ?source ?predicate ?target ?author ?timestamp WHERE {${joinClause}
-      GRAPH ?linkGraph { ?source ?predicate ?target . }
+      ?source ?predicate ?target .
+      ?_reifier rdf:reifies <<( ?source ?predicate ?target )>> .
       FILTER(isIRI(?source) && isIRI(?predicate))
-      ?linkGraph <ad4m://ontology/author> ?author .
-      ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
+      ?_reifier <ad4m://ontology/author> ?author .
+      ?_reifier <ad4m://ontology/timestamp> ?timestamp .
       ${filterClause}
     }
     ${buildSPARQLOrderLimitOffset(metadata, query)}
@@ -453,12 +459,14 @@ export function buildSPARQLCountQuery(
  */
 export function buildSPARQLGetDataQuery(baseExpression: string): string {
   return `
+    PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
     SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
-      GRAPH ?linkGraph { ${iri(baseExpression)} ?predicate ?target . }
+      ${iri(baseExpression)} ?predicate ?target .
+      ?_reifier rdf:reifies <<( ${iri(baseExpression)} ?predicate ?target )>> .
       FILTER(isIRI(?predicate))
       BIND(${iri(baseExpression)} AS ?source)
-      ?linkGraph <ad4m://ontology/author> ?author .
-      ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
+      ?_reifier <ad4m://ontology/author> ?author .
+      ?_reifier <ad4m://ontology/timestamp> ?timestamp .
     }
   `.trim();
 }

@@ -668,7 +668,7 @@ export async function hydrateRelations<T>(
       const sourcesByTarget = new Map<string, string[]>();
       if (allIds.length > 0) {
         const sparqlQuery = `SELECT ?source ?target WHERE {
-  GRAPH ?g { ?source <${meta.predicate}> ?target }
+  ?source <${meta.predicate}> ?target .
   FILTER(?target IN (${allIds.map(id => `<${id}>`).join(', ')}))
 }`;
         try {
