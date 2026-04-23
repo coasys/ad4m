@@ -8,7 +8,6 @@ export * from "./expression/ExpressionRef";
 export * from "./language/Icon";
 export * from "./language/Language";
 export * from "./language/LanguageRef";
-export * from "./language/LanguageContext";
 export * from "./language/LanguageHandle";
 export * from "./language/LanguageMeta";
 export * from "./links/Links";

@@ -1,47 +1,74 @@
-import type { Address, Language, LanguageContext, HolochainLanguageDelegate, Interaction } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
-import ExpressionAdapter from "./adapter.ts";
-import Icon from "./build/Icon.js";
-import ConstructorIcon from "./build/ConstructorIcon.js";
-import { UI } from "./build/expressionUI.js";
+/**
+ * # Agent Expression Store
+ *
+ * Expression language that stores agent expressions via Holochain DNA.
+ */
+
+import {
+    defineLanguage,
+    agentDid,
+    agentCreateSignedExpression,
+    holochainRegisterDnas,
+    holochainCall,
+} from "@coasys/ad4m-ldk";
 import { BUNDLE, DNA_ROLE, ZOME_NAME } from "./build/happ.js";
 
+const language = defineLanguage({
+    name: "agent-expression-store",
+    version: "0.1.0",
 
-function iconFor(expression: Address): string {
-  return Icon as unknown as string;
-}
+    async init() {
+        const dnaBundle = Buffer.from(BUNDLE, "base64");
+        await holochainRegisterDnas([
+            {
+                file: dnaBundle,
+                nick: DNA_ROLE,
+                zomeCalls: [
+                    [ZOME_NAME, "create_agent_expression"],
+                    [ZOME_NAME, "get_agent_expression"],
+                ],
+            } as any,
+        ]);
+    },
 
-function constructorIcon(): string {
-  return ConstructorIcon as unknown as string;
-}
+    async teardown() {},
+    interactions() { return []; },
 
-function interactions(expression: Address): Interaction[] {
-  return [];
-}
+    expression: {
+        async create(content: any): Promise<string> {
+            if (!content["did"] || !content["perspective"] || !content["perspective"].links)
+                throw "Content must be an Agent object";
 
-//!@ad4m-template-variable
-export const name = "agent-expression-store";
+            const agentObj = content;
+            if (agentObj.did != agentDid())
+                throw "Can't set Agent Expression for foreign DID - only for self";
 
-export default async function create(context: LanguageContext): Promise<Language> {
-  const Holochain = context.Holochain as HolochainLanguageDelegate;
-  await Holochain.registerDNAs(
-    //@ts-ignore
-    [{ file: BUNDLE, nick: DNA_ROLE, zomeCalls:
-      [
-        [ZOME_NAME, "create_agent_expression"],
-        [ZOME_NAME, "get_agent_expression"]
-      ] 
-    }], 
-  );
+            if (!agentObj.directMessageLanguage) agentObj.directMessageLanguage = undefined;
 
-  const expressionAdapter = new ExpressionAdapter(context);
-  const expressionUI = new UI();
+            agentObj.perspective!.links.forEach((link: any) => {
+                delete link.proof.valid;
+                delete link.proof.invalid;
+                delete link.status;
+            });
 
-  return {
+            const expression = agentCreateSignedExpression(agentObj);
+            await holochainCall(DNA_ROLE, ZOME_NAME, "create_agent_expression", expression);
+            return agentObj.did;
+        },
+
+        async get(did: string): Promise<any> {
+            console.log("Getting expression with did", did);
+            return await holochainCall(DNA_ROLE, ZOME_NAME, "get_agent_expression", did);
+        },
+    },
+});
+
+export const {
     name,
-    expressionAdapter,
-    iconFor,
-    constructorIcon,
+    version,
+    init,
+    teardown,
     interactions,
-    expressionUI,
-  } as Language;
-}
+    expressionGet,
+    expressionCreate,
+} = language;

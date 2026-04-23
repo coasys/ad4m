@@ -17,9 +17,6 @@ const languages = {
   "perspective-diff-sync": {
     bundle: "../../bootstrap-languages/p-diff-sync/build/bundle.js",
   },
-  "direct-message-language": {
-    bundle: "../../bootstrap-languages/direct-message-language/build/bundle.js"
-  },
   "perspective-language": {
     bundle: "../../bootstrap-languages/perspective-language/build/bundle.js"
   }

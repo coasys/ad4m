@@ -12,8 +12,6 @@ pub struct SeedProto {
     pub link_languages: Vec<LanguageInstance>,
     #[serde(rename = "agentLanguage")]
     pub agent_language: LanguageInstance,
-    #[serde(rename = "directMessageLanguage")]
-    pub direct_message_language: LanguageInstance,
     #[serde(rename = "neighbourhoodLanguage")]
     pub neighbourhood_language: LanguageInstance,
     #[serde(rename = "perspectiveLanguage")]
@@ -80,7 +78,6 @@ pub async fn start_publishing(
 
     let languages = vec![
         seed_proto.agent_language,
-        seed_proto.direct_message_language,
         seed_proto.perspective_language,
         seed_proto.neighbourhood_language,
     ];
@@ -114,12 +111,9 @@ pub async fn start_publishing(
                 .agent_language
                 .clone_from(&publish_result.address),
             1 => bootstrap_seed
-                .direct_message_language
-                .clone_from(&publish_result.address),
-            2 => bootstrap_seed
                 .perspective_language
                 .clone_from(&publish_result.address),
-            3 => bootstrap_seed
+            2 => bootstrap_seed
                 .neighbourhood_language
                 .clone_from(&publish_result.address),
             _ => (),

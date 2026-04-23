@@ -135,7 +135,7 @@ async fn holochain_signal_receiver() {
                         let maybe_lang_address: Option<String> = {
                             let handlers = js_core::languages_extension::HOLOCHAIN_SIGNAL_HANDLERS
                                 .read()
-                                .await;
+                                .unwrap_or_else(|p| p.into_inner());
                             handlers.get(&cell_id_key).cloned()
                         };
                         if let Some(lang_address) = maybe_lang_address {

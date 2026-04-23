@@ -1,0 +1,31 @@
+{
+  "name": "@coasys/ad4m-ldk",
+  "version": "0.13.0-test-1",
+  "description": "AD4M Language Development Kit (JS) — typed wrappers around the runtime imports and a defineLanguage() helper for authoring flat-export Languages.",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./lib/index.js",
+      "types": "./lib/index.d.ts"
+    }
+  },
+  "files": [
+    "lib",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --experimental-vm-modules --import tsx --test tests/*.test.ts"
+  },
+  "license": "CAL-1.0",
+  "author": {
+    "name": "Coasys AG",
+    "email": "info@coasys.org"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5",
+    "tsx": "^4.16.0"
+  }
+}

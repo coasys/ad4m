@@ -14,8 +14,8 @@ import languageTests from "./language";
 import expressionTests from "./expression";
 import neighbourhoodTests from "./neighbourhood";
 import runtimeTests from "./runtime";
+import flatLanguageTests from "./flat-language.test";
 //import { Crypto } from "@peculiar/webcrypto"
-import directMessageTests from "./direct-messages";
 import agentLanguageTests from "./agent-language";
 import socialDNATests from "./social-dna-flow";
 import fetch from "node-fetch";
@@ -144,8 +144,9 @@ describe("Integration tests", function () {
     describe('Expression', expressionTests(testContext))
     describe('Perspective', perspectiveTests(testContext))
     describe('Social DNA', socialDNATests(testContext))
+        describe('Flat Language (new flat export pattern)', flatLanguageTests(testContext))
 
-    describe('with Alice and Bob', () => {
+        describe('with Alice and Bob', () => {
         let bobExecutorProcess: ChildProcess | null = null
         let bobGqlPort: number;
         let bobHcAdminPort: number;
@@ -194,6 +195,5 @@ describe("Integration tests", function () {
         describe('Agent Language', agentLanguageTests(testContext))
         describe('Language', languageTests(testContext))
         describe('Neighbourhood', neighbourhoodTests(testContext))
-        //describe('Direct Messages', directMessageTests(testContext))
     })
 })
