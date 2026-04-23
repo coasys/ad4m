@@ -233,7 +233,7 @@ export function buildBatchSPARQLQuery(
       {
         ${rootJoinClause}
         ?source ?predicate ?target .
-        ?_reifier rdf:reifies <<( ?source ?predicate ?target )>> .
+        ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
         FILTER(isIRI(?source) && isIRI(?predicate))
         ?_reifier <ad4m://ontology/author> ?author .
         ?_reifier <ad4m://ontology/timestamp> ?timestamp .
@@ -263,7 +263,7 @@ export function buildBatchSPARQLQuery(
         ?parentBase ${iri(branch.parentPredicate)} ?source .
         ${childJoinClause}
         ?source ?predicate ?target .
-        ?_reifier rdf:reifies <<( ?source ?predicate ?target )>> .
+        ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
         FILTER(isIRI(?source) && isIRI(?predicate))
         ?_reifier <ad4m://ontology/author> ?author .
         ?_reifier <ad4m://ontology/timestamp> ?timestamp .
@@ -282,7 +282,7 @@ export function buildBatchSPARQLQuery(
         ?source ${iri(branch.parentPredicate)} ?parentBase .
         ${childJoinClause}
         ?source ?predicate ?target .
-        ?_reifier rdf:reifies <<( ?source ?predicate ?target )>> .
+        ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
         FILTER(isIRI(?source) && isIRI(?predicate))
         ?_reifier <ad4m://ontology/author> ?author .
         ?_reifier <ad4m://ontology/timestamp> ?timestamp .
@@ -297,7 +297,7 @@ export function buildBatchSPARQLQuery(
   }
 
   return `
-    PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
     SELECT ?depth ?parentBase ?relationName ?source ?predicate ?target ?author ?timestamp WHERE {
       ${unionBranches.join("\n      UNION\n")}
     }

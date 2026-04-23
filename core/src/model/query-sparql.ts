@@ -3,7 +3,7 @@
  *
  * Uses the RDF 1.2 reifier storage model where each AD4M link is stored as:
  * 1. Direct triple: <source> <predicate> <target> . (default graph)
- * 2. Reifier: <link:HASH> rdf:reifies <<( source predicate target )>> .
+ * 2. Reifier: <link:HASH> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( source predicate target )>> .
  * 3. Metadata: <link:HASH> ad4m://ontology/* "value" . (default graph)
  *
  * All AD4M URIs (source, predicate, target) become RDF IRIs.
@@ -274,11 +274,11 @@ export function buildSPARQLQuery(
     // Use the pagination subquery to constrain ?source, then fetch all links
     // for those sources only.
     return `
-    PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
     SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
       ${paginationSubquery}${joinClause}
       ?source ?predicate ?target .
-      ?_reifier rdf:reifies <<( ?source ?predicate ?target )>> .
+      ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
       FILTER(isIRI(?source) && isIRI(?predicate))
       ?_reifier <ad4m://ontology/author> ?author .
       ?_reifier <ad4m://ontology/timestamp> ?timestamp .
@@ -288,10 +288,10 @@ export function buildSPARQLQuery(
   }
 
   return `
-    PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
     SELECT ?source ?predicate ?target ?author ?timestamp WHERE {${joinClause}
       ?source ?predicate ?target .
-      ?_reifier rdf:reifies <<( ?source ?predicate ?target )>> .
+      ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
       FILTER(isIRI(?source) && isIRI(?predicate))
       ?_reifier <ad4m://ontology/author> ?author .
       ?_reifier <ad4m://ontology/timestamp> ?timestamp .
@@ -459,10 +459,10 @@ export function buildSPARQLCountQuery(
  */
 export function buildSPARQLGetDataQuery(baseExpression: string): string {
   return `
-    PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
     SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
       ${iri(baseExpression)} ?predicate ?target .
-      ?_reifier rdf:reifies <<( ${iri(baseExpression)} ?predicate ?target )>> .
+      ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ${iri(baseExpression)} ?predicate ?target )>> .
       FILTER(isIRI(?predicate))
       BIND(${iri(baseExpression)} AS ?source)
       ?_reifier <ad4m://ontology/author> ?author .

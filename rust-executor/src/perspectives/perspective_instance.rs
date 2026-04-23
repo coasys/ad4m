@@ -69,14 +69,14 @@ fn notification_pool_name(uuid: &str) -> String {
 
 fn is_sparql_query(query: &str) -> bool {
     let trimmed = query.trim();
-    trimmed.starts_with("SELECT")
-        || trimmed.starts_with("select")
-        || trimmed.starts_with("ASK")
-        || trimmed.starts_with("ask")
-        || trimmed.starts_with("CONSTRUCT")
-        || trimmed.starts_with("construct")
-        || trimmed.starts_with("DESCRIBE")
-        || trimmed.starts_with("describe")
+    // Also match queries starting with PREFIX / BASE declarations
+    let upper = trimmed.to_ascii_uppercase();
+    upper.starts_with("SELECT")
+        || upper.starts_with("ASK")
+        || upper.starts_with("CONSTRUCT")
+        || upper.starts_with("DESCRIBE")
+        || upper.starts_with("PREFIX")
+        || upper.starts_with("BASE")
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]

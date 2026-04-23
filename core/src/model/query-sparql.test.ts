@@ -361,8 +361,8 @@ describe('buildSPARQLQuery — RDF 1.2 reifier patterns', () => {
   it('uses rdf:reifies instead of GRAPH for link metadata', () => {
     const query = { limit: 10 };
     const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
-    expect(sparql).toContain('PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>');
-    expect(sparql).toContain('rdf:reifies <<(');
+    expect(sparql).toContain('<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>');
+    expect(sparql).toContain('<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<(');
     expect(sparql).toContain('?_reifier');
     expect(sparql).not.toContain('GRAPH');
     expect(sparql).not.toContain('?linkGraph');
@@ -377,8 +377,8 @@ describe('buildSPARQLQuery — RDF 1.2 reifier patterns', () => {
 
   it('uses reifier pattern in buildSPARQLGetDataQuery', () => {
     const sparql = buildSPARQLGetDataQuery('flux://some-entity-123');
-    expect(sparql).toContain('PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>');
-    expect(sparql).toContain('rdf:reifies <<(');
+    expect(sparql).toContain('<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>');
+    expect(sparql).toContain('<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<(');
     expect(sparql).toContain('?_reifier');
     expect(sparql).not.toContain('GRAPH');
   });
