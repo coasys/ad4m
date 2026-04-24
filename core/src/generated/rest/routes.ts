@@ -55,6 +55,7 @@ import type {
   SetMultiUserRequest,
   SetOnlineStatusRequest,
   SetStatusRequest,
+  SetUserFreeAccessRequest,
   SignMessageRequest,
   SignalRequest,
   SubscribeQueryRequest,
@@ -247,11 +248,12 @@ export interface RouteMap {
   'GET /users': { request: never; response: unknown };
   'POST /users': { request: CreateUserRequest; response: unknown };
   'GET /users/:email/wallet': { request: never; response: string };
-  'POST /users/login': { request: LoginUserRequest; response: unknown };
+  'POST /users/free-access': { request: SetUserFreeAccessRequest; response: boolean };
+  'POST /users/login': { request: LoginUserRequest; response: string };
   'GET /users/multi-user-enabled': { request: never; response: boolean };
   'PUT /users/multi-user-enabled': { request: SetMultiUserRequest; response: boolean };
   'POST /users/request-verification': { request: RequestVerificationRequest; response: unknown };
-  'POST /users/verify-email': { request: VerifyEmailRequest; response: unknown };
+  'POST /users/verify-email': { request: VerifyEmailRequest; response: string };
   'GET /ws/audio': { request: never; response: void };
 }
 
