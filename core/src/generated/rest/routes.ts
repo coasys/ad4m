@@ -2,7 +2,6 @@
 // Regenerate: cd rust-executor && cargo test generate_route_map
 
 import type {
-  AIModelLoadingStatus,
   AddAgentInfosRequest,
   AddLinkExpressionRequest,
   AddLinkRequest,
@@ -11,7 +10,6 @@ import type {
   ApplyTemplateRequest,
   BroadcastRequest,
   CommitBatchRequest,
-  ComputeLogEntry,
   CreateExpressionRequest,
   CreatePerspectiveRequest,
   CreateSubjectRequest,
@@ -68,19 +66,20 @@ import type {
   UpdateLinkRequest,
   UpdatePerspectiveRequest,
   UpdateProfileRequest,
-  UserStatistics,
-  VerificationRequestResult,
   VerifyEmailRequest,
   VerifySignatureRequest,
 } from './index';
 
 import type {
+  AIModelLoadingStatus,
   Agent,
   AgentSignature,
   AgentStatus,
   Apps,
+  ComputeLogEntry,
   EntanglementProof,
   EntanglementProofInput,
+  ExpressionRendered,
   InteractionCall,
   InteractionMeta,
   LanguageHandle,
@@ -92,6 +91,8 @@ import type {
   Perspective,
   PerspectiveHandle,
   RuntimeInfo,
+  UserStatistics,
+  VerificationRequestResult,
 } from '../../index';
 
 import type { AITask } from '../../ai/Tasks';
