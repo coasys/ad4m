@@ -379,15 +379,40 @@ impl SparqlStore {
                 continue;
             }
 
-            // Apply date filters
+            // Apply date filters using proper DateTime comparison
+            // (string comparison fails when formats differ, e.g. "Z" vs "+00:00")
             if let Some(from) = from_date {
-                if timestamp.as_str() < from {
-                    continue;
+                match (
+                    chrono::DateTime::parse_from_rfc3339(&timestamp),
+                    chrono::DateTime::parse_from_rfc3339(from),
+                ) {
+                    (Ok(ts), Ok(fd)) => {
+                        if ts < fd {
+                            continue;
+                        }
+                    }
+                    _ => {
+                        if timestamp.as_str() < from {
+                            continue;
+                        }
+                    }
                 }
             }
             if let Some(until) = until_date {
-                if timestamp.as_str() > until {
-                    continue;
+                match (
+                    chrono::DateTime::parse_from_rfc3339(&timestamp),
+                    chrono::DateTime::parse_from_rfc3339(until),
+                ) {
+                    (Ok(ts), Ok(ud)) => {
+                        if ts > ud {
+                            continue;
+                        }
+                    }
+                    _ => {
+                        if timestamp.as_str() > until {
+                            continue;
+                        }
+                    }
                 }
             }
 
