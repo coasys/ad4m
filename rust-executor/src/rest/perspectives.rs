@@ -319,7 +319,7 @@ pub async fn add_link(
         .status
         .as_deref()
         .map(|s| match s {
-            "shared" => LinkStatus::Shared,
+            "shared" | "SHARED" => LinkStatus::Shared,
             _ => LinkStatus::Local,
         })
         .unwrap_or(LinkStatus::Shared);
@@ -361,7 +361,7 @@ pub async fn add_links_bulk(
         .status
         .as_deref()
         .map(|s| match s {
-            "shared" => LinkStatus::Shared,
+            "shared" | "SHARED" => LinkStatus::Shared,
             _ => LinkStatus::Local,
         })
         .unwrap_or(LinkStatus::Shared);
@@ -464,7 +464,7 @@ pub async fn link_mutations(
         .status
         .as_deref()
         .map(|s| match s {
-            "shared" => LinkStatus::Shared,
+            "shared" | "SHARED" => LinkStatus::Shared,
             _ => LinkStatus::Local,
         })
         .unwrap_or(LinkStatus::Shared);
@@ -514,7 +514,7 @@ pub async fn add_link_expression(
         .status
         .as_deref()
         .map(|s| match s {
-            "shared" => LinkStatus::Shared,
+            "shared" | "SHARED" => LinkStatus::Shared,
             _ => LinkStatus::Local,
         })
         .unwrap_or(LinkStatus::Shared);

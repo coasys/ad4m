@@ -223,6 +223,7 @@ pub struct DecoratedLinkExpression {
     pub timestamp: String,
     pub data: Link,
     pub proof: DecoratedExpressionProof,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<LinkStatus>,
 }
 
@@ -496,7 +497,7 @@ pub struct TriggeredNotification {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ModelApiType {
     OpenAi,
 }
@@ -520,7 +521,7 @@ impl FromStr for ModelApiType {
 impl ToString for ModelApiType {
     fn to_string(&self) -> String {
         match self {
-            ModelApiType::OpenAi => "openAi".to_string(),
+            ModelApiType::OpenAi => "OPEN_AI".to_string(),
         }
     }
 }

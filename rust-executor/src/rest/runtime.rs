@@ -399,13 +399,13 @@ pub async fn list_notifications(
     POST,
     "/runtime/notifications",
     request = "NotificationInput",
-    response = "boolean"
+    response = "string"
 )]
 pub async fn create_notification(
     State(_state): State<AppState>,
     auth: AuthContext,
     Json(body): Json<NotificationInput>,
-) -> Result<Json<bool>, ApiError> {
+) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
@@ -421,10 +421,11 @@ pub async fn create_notification(
         webhook_auth: body.webhook_auth,
     };
 
-    Ad4mDb::with_global_instance(|db| db.add_notification(domain_input, None))
+    let id = RuntimeService::request_install_notification(domain_input, None)
+        .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(true))
+    Ok(Json(id))
 }
 
 /// PATCH /notifications/:id — update (including grant)
@@ -722,9 +723,11 @@ pub async fn import_data(
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             let json_data: serde_json::Value =
                 serde_json::from_str(&data).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-            Ad4mDb::with_global_instance(|db| db.import_from_json(json_data))
+            let result = Ad4mDb::with_global_instance(|db| db.import_from_json(json_data))
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            Ok(Json(serde_json::json!({"success": true})))
+            Ok(Json(
+                serde_json::to_value(result).map_err(|e| ApiError::Internal(e.to_string()))?,
+            ))
         }
         "perspective" => {
             let data = std::fs::read_to_string(&body.file_path)

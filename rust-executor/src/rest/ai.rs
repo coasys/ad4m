@@ -129,7 +129,7 @@ pub async fn update_model(
     service
         .update_model(id, model)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| ApiError::Internal(format!("Failed to update model: {}", e)))?;
 
     Ok(Json(true))
 }

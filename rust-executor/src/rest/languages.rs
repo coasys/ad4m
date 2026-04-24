@@ -281,10 +281,12 @@ pub async fn apply_template_and_publish(
 
     let input_name = input.meta.name.clone();
 
-    // Save the templated bundle locally
-    if let Err(e) = controller.save_language_bundle(&input.bundle, None) {
-        log::warn!("Failed to save templated language bundle locally: {}", e);
-    }
+    // Save the templated bundle locally and capture the hash as the language address
+    let (hash, _bundle_path) = controller
+        .save_language_bundle(&input.bundle, None)
+        .map_err(|e| {
+            ApiError::Internal(format!("Failed to save templated language bundle: {}", e))
+        })?;
 
     let language_language_address = {
         let sys = controller.system_addresses.lock().await;
@@ -297,14 +299,14 @@ pub async fn apply_template_and_publish(
         .map_err(|e| ApiError::Internal(format!("Failed to serialize language input: {}", e)))?;
 
     let agent_context = crate::agent::AgentContext::main_agent();
-    let address = controller
+    controller
         .expression_create(&language_language_address, content, &agent_context)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to publish language: {}", e)))?;
 
     // Load the templated language into a per-language runtime
     let bundle_on_disk = crate::utils::languages_directory()
-        .join(&address)
+        .join(&hash)
         .join("bundle.js");
     if bundle_on_disk.exists() {
         if let Err(e) = controller.load_language(bundle_on_disk, false).await {
@@ -312,8 +314,10 @@ pub async fn apply_template_and_publish(
         }
     }
 
+    controller.set_language_name(&hash, &input_name).await;
+
     Ok(Json(LanguageRef {
-        address,
+        address: hash,
         name: input_name,
     }))
 }

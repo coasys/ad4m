@@ -903,10 +903,11 @@ pub async fn delete_entanglement(
             did_signing_key_id: agent_key_id.clone(),
         })
         .collect();
-    delete_entanglement_proof(domain_proofs.clone());
+    delete_entanglement_proof(domain_proofs);
 
+    let remaining = get_entanglement_proofs();
     Ok(Json(
-        domain_proofs
+        remaining
             .into_iter()
             .map(|p| serde_json::to_value(p).unwrap_or_default())
             .collect(),

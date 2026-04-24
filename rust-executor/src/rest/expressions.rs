@@ -3,12 +3,14 @@
 //! 5 harmonised endpoints.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
+use std::collections::HashMap;
 
 use crate::agent::capabilities::*;
 use crate::agent::AgentContext;
+use crate::helpers::build_expression_rendered;
 use crate::languages::LanguageController;
 use crate::types::*;
 
@@ -18,15 +20,22 @@ use super::types::*;
 use ad4m_rest_macros::rest_handler;
 
 /// GET /expressions/:url — get expression
-#[rest_handler(GET, "/expressions/:url", response = "unknown | null")]
+#[rest_handler(
+    GET,
+    "/expressions/:url",
+    response = "ExpressionRendered | string | null"
+)]
 pub async fn get_expression(
     State(_state): State<AppState>,
     auth: AuthContext,
     Path(url): Path<String>,
-) -> Result<Json<Option<serde_json::Value>>, ApiError> {
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
+
+    let raw = params.get("raw").map(|v| v == "true").unwrap_or(false);
 
     let decoded_url = urlencoding::decode(&url)
         .map(|s| s.into_owned())
@@ -45,9 +54,16 @@ pub async fn get_expression(
                 .await
             {
                 Ok(Some(expr_json)) => {
-                    return Ok(Json(Some(expr_json)));
+                    if raw {
+                        // Double-encode: client will JSON.parse the string value
+                        let json_string = serde_json::to_string(&expr_json).unwrap_or_default();
+                        return Ok(Json(serde_json::Value::String(json_string)));
+                    } else {
+                        let rendered = build_expression_rendered(&expr_json, &lang_address);
+                        return Ok(Json(serde_json::to_value(rendered).unwrap()));
+                    }
                 }
-                Ok(None) => return Ok(Json(None)),
+                Ok(None) => return Ok(Json(serde_json::Value::Null)),
                 Err(e) => {
                     return Err(ApiError::Internal(format!(
                         "Failed to get expression {}: {}",
@@ -58,7 +74,7 @@ pub async fn get_expression(
         }
     }
 
-    Ok(Json(None))
+    Ok(Json(serde_json::Value::Null))
 }
 
 /// GET /expressions/:url/interactions — get interactions
@@ -134,13 +150,13 @@ pub async fn create_expression(
     POST,
     "/expressions/many",
     request = "ExpressionManyRequest",
-    response = "Array<unknown | null>"
+    response = "Array<ExpressionRendered | null>"
 )]
 pub async fn get_many_expressions(
     State(_state): State<AppState>,
     auth: AuthContext,
     Json(body): Json<ExpressionManyRequest>,
-) -> Result<Json<Vec<Option<serde_json::Value>>>, ApiError> {
+) -> Result<Json<Vec<Option<ExpressionRendered>>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
@@ -158,7 +174,10 @@ pub async fn get_many_expressions(
                     .get_expression(&lang_address, &expression_address)
                     .await
                 {
-                    Ok(expr) => results.push(expr),
+                    Ok(Some(expr_json)) => {
+                        results.push(Some(build_expression_rendered(&expr_json, &lang_address)));
+                    }
+                    Ok(None) => results.push(None),
                     Err(_) => results.push(None),
                 }
             } else {

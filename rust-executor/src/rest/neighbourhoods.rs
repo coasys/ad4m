@@ -19,54 +19,6 @@ use super::errors::ApiError;
 use super::types::*;
 use ad4m_rest_macros::rest_handler;
 
-/// Convert REST PerspectiveInput to core Perspective (for neighbourhood meta)
-fn perspective_input_to_core(input: super::types::PerspectiveInput) -> Perspective {
-    let links: Vec<LinkExpression> = input
-        .links
-        .into_iter()
-        .map(|l| LinkExpression {
-            author: String::new(),
-            timestamp: String::new(),
-            data: Link {
-                source: l.source,
-                target: l.target,
-                predicate: l.predicate,
-            },
-            proof: ExpressionProof {
-                key: String::new(),
-                signature: String::new(),
-            },
-            status: None,
-        })
-        .collect();
-    Perspective { links }
-}
-
-/// Convert REST PerspectiveInput to domain Perspective
-fn perspective_input_to_domain(input: super::types::PerspectiveInput) -> DomainPerspective {
-    let links: Vec<DecoratedLinkExpression> = input
-        .links
-        .into_iter()
-        .map(|l| DecoratedLinkExpression {
-            author: String::new(),
-            timestamp: String::new(),
-            data: Link {
-                source: l.source,
-                target: l.target,
-                predicate: l.predicate,
-            },
-            proof: DecoratedExpressionProof {
-                key: String::new(),
-                signature: String::new(),
-                valid: None,
-                invalid: None,
-            },
-            status: None,
-        })
-        .collect();
-    DomainPerspective { links }
-}
-
 /// POST /neighbourhoods/join — join a neighbourhood by URL
 #[rest_handler(
     POST,
@@ -142,14 +94,20 @@ pub async fn send_broadcast(
         .ok_or_else(|| ApiError::NotFound(format!("No perspective found with uuid {}", uuid)))?;
 
     let signed_perspective = if body.signed.unwrap_or(true) {
-        // Pre-signed payload
-        let perspective = perspective_input_to_domain(body.payload);
+        // Pre-signed payload: deserialize as domain PerspectiveInput (links are LinkExpressionInput)
+        let perspective_input: crate::types::PerspectiveInput =
+            serde_json::from_value(body.payload.clone())
+                .map_err(|e| ApiError::BadRequest(format!("Invalid perspective input: {}", e)))?;
+        let perspective = DomainPerspective::from(perspective_input);
         create_signed_expression(perspective, &agent_context)
             .map_err(|e| ApiError::Internal(e.to_string()))?
     } else {
-        // Unsigned: sign each link individually
-        let links: Vec<DecoratedLinkExpression> = body
-            .payload
+        // Unsigned: deserialize as PerspectiveUnsignedInput (links are flat LinkInput)
+        let unsigned: PerspectiveUnsignedInput = serde_json::from_value(body.payload.clone())
+            .map_err(|e| {
+                ApiError::BadRequest(format!("Invalid unsigned perspective input: {}", e))
+            })?;
+        let links: Vec<DecoratedLinkExpression> = unsigned
             .links
             .into_iter()
             .map(|l| Link::from(l).normalize())
@@ -193,12 +151,18 @@ pub async fn send_signal(
         .ok_or_else(|| ApiError::NotFound(format!("No perspective found with uuid {}", uuid)))?;
 
     let signed_perspective = if body.signed.unwrap_or(true) {
-        let perspective = perspective_input_to_domain(body.payload);
+        let perspective_input: crate::types::PerspectiveInput =
+            serde_json::from_value(body.payload.clone())
+                .map_err(|e| ApiError::BadRequest(format!("Invalid perspective input: {}", e)))?;
+        let perspective = DomainPerspective::from(perspective_input);
         create_signed_expression(perspective, &agent_context)
             .map_err(|e| ApiError::Internal(e.to_string()))?
     } else {
-        let links: Vec<DecoratedLinkExpression> = body
-            .payload
+        let unsigned: PerspectiveUnsignedInput = serde_json::from_value(body.payload.clone())
+            .map_err(|e| {
+                ApiError::BadRequest(format!("Invalid unsigned perspective input: {}", e))
+            })?;
+        let links: Vec<DecoratedLinkExpression> = unsigned
             .links
             .into_iter()
             .map(|l| Link::from(l).normalize())
@@ -242,12 +206,18 @@ pub async fn set_online_status(
         .ok_or_else(|| ApiError::NotFound(format!("No perspective found with uuid {}", uuid)))?;
 
     let signed_perspective = if body.signed.unwrap_or(true) {
-        let perspective = perspective_input_to_domain(body.status);
+        let perspective_input: crate::types::PerspectiveInput =
+            serde_json::from_value(body.status.clone())
+                .map_err(|e| ApiError::BadRequest(format!("Invalid perspective input: {}", e)))?;
+        let perspective = DomainPerspective::from(perspective_input);
         create_signed_expression(perspective, &agent_context)
             .map_err(|e| ApiError::Internal(e.to_string()))?
     } else {
-        let links: Vec<DecoratedLinkExpression> = body
-            .status
+        let unsigned: PerspectiveUnsignedInput = serde_json::from_value(body.status.clone())
+            .map_err(|e| {
+                ApiError::BadRequest(format!("Invalid unsigned perspective input: {}", e))
+            })?;
+        let links: Vec<DecoratedLinkExpression> = unsigned
             .links
             .into_iter()
             .map(|l| Link::from(l).normalize())

@@ -279,8 +279,7 @@ pub async fn neighbourhood_signal_events(
     check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let current_did =
-        did_for_context(&AgentContext::from_auth_token(context.auth_token.clone())).ok();
+    let auth_token_for_signals = context.auth_token.clone();
 
     let pubsub = get_global_pubsub().await;
     let rx = pubsub.subscribe(&NEIGHBOURHOOD_SIGNAL_TOPIC).await;
@@ -289,8 +288,9 @@ pub async fn neighbourhood_signal_events(
         .filter_map(|r| async { handle_broadcast_result(r) })
         .filter_map(move |result| {
             let uuid = uuid.clone();
-            let current_did = current_did.clone();
+            let auth_token = auth_token_for_signals.clone();
             async move {
+                let current_did = did_for_context(&AgentContext::from_auth_token(auth_token)).ok();
                 match result {
                     Ok(msg)
                         if matches_perspective_uuid(&msg, &uuid)
@@ -434,8 +434,7 @@ pub async fn unified_events(
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let current_did =
-        did_for_context(&AgentContext::from_auth_token(context.auth_token.clone())).ok();
+    let auth_token_for_signals = context.auth_token.clone();
 
     let pubsub = get_global_pubsub().await;
 
@@ -495,11 +494,12 @@ pub async fn unified_events(
     let s_signal = BroadcastStream::new(signal_rx)
         .filter_map(|r| async { handle_broadcast_result(r) })
         .filter_map(move |result| {
-            let current_did = current_did.clone();
+            let auth_token = auth_token_for_signals.clone();
             async move {
+                let current_did = did_for_context(&AgentContext::from_auth_token(auth_token)).ok();
                 match result {
-                    Ok(msg) if matches_signal_recipient(&msg, current_did.as_deref()) => {
-                        Some(Ok(Event::default().data(wrap_event("signal", &msg))))
+                    Ok(ref msg) if matches_signal_recipient(msg, current_did.as_deref()) => {
+                        Some(Ok(Event::default().data(wrap_event("signal", msg))))
                     }
                     Err(n) => Some(Ok(Event::default().data(format!(
                         r#"{{"type":"lagged","missed":{},"stream":"signal"}}"#,

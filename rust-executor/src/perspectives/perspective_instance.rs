@@ -1623,11 +1623,11 @@ impl PerspectiveInstance {
     ) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
         let from_date = query.from_date.as_ref().map(|d| {
             let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
-            dt.to_rfc3339()
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         });
         let until_date = query.until_date.as_ref().map(|d| {
             let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
-            dt.to_rfc3339()
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         });
 
         let decorated_links = self.sparql_store.query_links(

@@ -263,12 +263,13 @@ pub struct Language {
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, Eq, Hash, TS)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[ts(export)]
 pub enum LinkStatus {
     #[default]
-    #[serde(rename = "shared")]
+    #[serde(alias = "shared")]
     Shared,
-    #[serde(rename = "local")]
+    #[serde(alias = "local")]
     Local,
 }
 
@@ -276,8 +277,8 @@ pub enum LinkStatus {
 impl std::fmt::Display for LinkStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match *self {
-            LinkStatus::Shared => write!(f, "shared"),
-            LinkStatus::Local => write!(f, "local"),
+            LinkStatus::Shared => write!(f, "SHARED"),
+            LinkStatus::Local => write!(f, "LOCAL"),
         }
     }
 }
@@ -480,13 +481,20 @@ impl PerspectiveExpression {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PerspectiveState {
     #[default]
+    #[serde(alias = "Private")]
     Private,
+    #[serde(alias = "NeighbourhoodCreationInitiated")]
     NeighbourhoodCreationInitiated,
+    #[serde(alias = "NeighbourhoodJoinInitiated")]
     NeighbourhoodJoinInitiated,
+    #[serde(alias = "LinkLanguageFailedToInstall")]
     LinkLanguageFailedToInstall,
+    #[serde(alias = "LinkLanguageInstalledButNotSynced")]
     LinkLanguageInstalledButNotSynced,
+    #[serde(alias = "Synced")]
     Synced,
 }
 
@@ -1278,6 +1286,7 @@ pub struct ImportStats {
 }
 
 #[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportResult {
     pub perspectives: ImportStats,
     pub links: ImportStats,

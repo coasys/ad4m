@@ -209,7 +209,8 @@ pub struct PublishNeighbourhoodRequest {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct BroadcastRequest {
-    pub payload: PerspectiveInput,
+    #[ts(type = "any")]
+    pub payload: serde_json::Value,
     pub signed: Option<bool>,
     pub loopback: Option<bool>,
 }
@@ -219,7 +220,8 @@ pub struct BroadcastRequest {
 #[ts(export)]
 pub struct SignalRequest {
     pub remote_agent_did: String,
-    pub payload: PerspectiveInput,
+    #[ts(type = "any")]
+    pub payload: serde_json::Value,
     pub signed: Option<bool>,
 }
 
@@ -227,7 +229,8 @@ pub struct SignalRequest {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct SetOnlineStatusRequest {
-    pub status: PerspectiveInput,
+    #[ts(type = "any")]
+    pub status: serde_json::Value,
     pub signed: Option<bool>,
 }
 
