@@ -29,10 +29,14 @@ pub async fn get_hosting_info(
             Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
                 .ok()
                 .flatten();
+        let free_access =
+            Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user_email))
+                .unwrap_or(false);
         Some(serde_json::json!({
             "email": user_email,
             "credits": credits,
             "hotWalletAddress": hot_wallet_address,
+            "freeAccess": free_access,
         }))
     } else {
         None

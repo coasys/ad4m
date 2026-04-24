@@ -287,7 +287,14 @@ export class AgentClient {
 
   // Hosting methods
   async hostingUserInfo(): Promise<HostingUserInfo> {
-    return this.#restClient.get<HostingUserInfo>('/api/v1/hosting');
+    const resp = await this.#restClient.get<any>('/api/v1/hosting');
+    const info = resp?.userInfo || resp;
+    return new HostingUserInfo(
+      info.email || '',
+      info.freeAccess ? 'unlimited' : String(info.credits ?? info.remainingCredits ?? '0'),
+      info.hotWalletAddress || undefined,
+      !!info.freeAccess,
+    );
   }
 
   async computeLog(since?: string, limit?: number, userEmail?: string): Promise<ComputeLogEntry[]> {

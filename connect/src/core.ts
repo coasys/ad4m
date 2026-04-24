@@ -227,10 +227,10 @@ export default class Ad4mConnect extends EventTarget {
         this.userInfo = userInfo;
         this.dispatchEvent(new CustomEvent('userinfochange', { detail: userInfo }));
 
-        if (userInfo.remainingCredits <= 0) {
+        if (!userInfo.freeAccess && userInfo.remainingCredits <= 0) {
           this.dispatchEvent(new CustomEvent('creditdepleted'));
         }
-        if (userInfo.remainingCredits <= this.lowCreditThreshold) {
+        if (!userInfo.freeAccess && userInfo.remainingCredits <= this.lowCreditThreshold) {
           this.dispatchEvent(new CustomEvent('creditlow'));
         }
       });
@@ -263,10 +263,10 @@ export default class Ad4mConnect extends EventTarget {
         this.userInfo = info;
         this.dispatchEvent(new CustomEvent('userinfochange', { detail: info }));
 
-        if (info.remainingCredits <= this.lowCreditThreshold) {
+        if (!info.freeAccess && info.remainingCredits <= this.lowCreditThreshold) {
           this.dispatchEvent(new CustomEvent('creditlow'));
         }
-        if (info.remainingCredits <= 0) {
+        if (!info.freeAccess && info.remainingCredits <= 0) {
           this.dispatchEvent(new CustomEvent('creditdepleted'));
         }
       } catch (error) {
