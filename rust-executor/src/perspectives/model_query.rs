@@ -137,8 +137,8 @@ struct ShapeProperty {
 struct ShapeRelation {
     name: String,
     predicate: String,
-    direction: String,         // "forward" or "reverse"
-    kind: String,              // "hasMany", "hasOne", "belongsToOne", "belongsToMany"
+    direction: String, // "forward" or "reverse"
+    kind: String,      // "hasMany", "hasOne", "belongsToOne", "belongsToMany"
     max_count: Option<usize>,
     target_class_name: String,
     target_shape_json: String, // Serialised ModelMetadata JSON for recursive queries
@@ -418,8 +418,7 @@ pub fn execute_model_query(
     // When the caller only needs a count (limit==0 or count==true) and all
     // where conditions can be pushed to SPARQL, we skip hydration entirely
     // and run a single SELECT COUNT(DISTINCT ?source) query.
-    let is_count_only =
-        query_input.count == Some(true) || query_input.limit == Some(0);
+    let is_count_only = query_input.count == Some(true) || query_input.limit == Some(0);
     if is_count_only && all_where_pushable(query_input, &shape) {
         let sparql = build_count_sparql(&shape, query_input);
         let result_json = store.query(&sparql)?;
@@ -519,10 +518,7 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
     let meta: Value =
         serde_json::from_str(json).map_err(|e| anyhow!("Failed to parse shape JSON: {}", e))?;
 
-    let target_class = meta["className"]
-        .as_str()
-        .unwrap_or(class_name)
-        .to_string();
+    let target_class = meta["className"].as_str().unwrap_or(class_name).to_string();
 
     let mut properties = Vec::new();
     let mut include_relations: Vec<ShapeRelation> = Vec::new();
@@ -581,10 +577,7 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
                     .or_else(|| target_shape["className"].as_str())
                     .unwrap_or("")
                     .to_string();
-                let kind = rel_meta["kind"]
-                    .as_str()
-                    .unwrap_or("hasMany")
-                    .to_string();
+                let kind = rel_meta["kind"].as_str().unwrap_or("hasMany").to_string();
                 let direction = rel_meta["direction"]
                     .as_str()
                     .unwrap_or("forward")
@@ -598,8 +591,7 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
                     kind,
                     max_count,
                     target_class_name,
-                    target_shape_json: serde_json::to_string(target_shape)
-                        .unwrap_or_default(),
+                    target_shape_json: serde_json::to_string(target_shape).unwrap_or_default(),
                 });
             }
         }
@@ -694,19 +686,16 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
     if let Some(ref parent) = query.parent {
         match parent {
             ParentScope::Raw { id, predicate } => {
-                conformance_patterns
-                    .push(format!("    <{}> <{}> ?source .", id, predicate));
+                conformance_patterns.push(format!("    <{}> <{}> ?source .", id, predicate));
             }
             ParentScope::Model { id, field, model } => {
                 // For model-based parent scope, we need to resolve the predicate
                 // The client should send the resolved predicate, but we handle both forms
                 if let Some(ref f) = field {
-                    conformance_patterns
-                        .push(format!("    <{}> <{}> ?source .", id, f));
+                    conformance_patterns.push(format!("    <{}> <{}> ?source .", id, f));
                 } else {
                     // Fallback: use model name as predicate hint
-                    conformance_patterns
-                        .push(format!("    <{}> ?_parentPred ?source .", id));
+                    conformance_patterns.push(format!("    <{}> ?_parentPred ?source .", id));
                     conformance_patterns.push(format!(
                         "    FILTER(STRENDS(STR(?_parentPred), \"{}\"))",
                         model
@@ -783,15 +772,16 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
             if prop_name == "base" || prop_name == "id" {
                 // Filter by base expression URI directly
                 if let WhereCondition::String(val) = condition {
-                    where_patterns.push(format!(
-                        "    FILTER(?source = <{}>)",
-                        val
-                    ));
+                    where_patterns.push(format!("    FILTER(?source = <{}>)", val));
                 }
                 continue;
             }
             // Skip author/timestamp — handled post-hydration
-            if prop_name == "author" || prop_name == "timestamp" || prop_name == "createdAt" || prop_name == "updatedAt" {
+            if prop_name == "author"
+                || prop_name == "timestamp"
+                || prop_name == "createdAt"
+                || prop_name == "updatedAt"
+            {
                 continue;
             }
 
@@ -801,17 +791,13 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                 match condition {
                     WhereCondition::String(val) => {
                         let iri_val = value_to_literal_iri_string(val);
-                        where_patterns.push(format!(
-                            "    ?source <{}> <{}> .",
-                            prop.predicate, iri_val
-                        ));
+                        where_patterns
+                            .push(format!("    ?source <{}> <{}> .", prop.predicate, iri_val));
                     }
                     WhereCondition::Bool(val) => {
                         let iri_val = format!("literal:boolean:{}", val);
-                        where_patterns.push(format!(
-                            "    ?source <{}> <{}> .",
-                            prop.predicate, iri_val
-                        ));
+                        where_patterns
+                            .push(format!("    ?source <{}> <{}> .", prop.predicate, iri_val));
                     }
                     _ => {
                         // Complex conditions (comparison ops, arrays, etc.) handled post-hydration
@@ -1096,12 +1082,10 @@ fn matches_ops(val: &Value, ops: &WhereOps) -> bool {
                 for item in arr {
                     if match (val, item) {
                         (Value::String(v), Value::String(s)) => v == s,
-                        (Value::Number(_), Value::Number(_)) => {
-                            to_f64(val)
-                                .zip(item.as_f64())
-                                .map(|(a, b)| (a - b).abs() < f64::EPSILON)
-                                .unwrap_or(false)
-                        }
+                        (Value::Number(_), Value::Number(_)) => to_f64(val)
+                            .zip(item.as_f64())
+                            .map(|(a, b)| (a - b).abs() < f64::EPSILON)
+                            .unwrap_or(false),
                         _ => false,
                     } {
                         return false;
@@ -1258,9 +1242,7 @@ fn compare_values(a: &Value, b: &Value) -> Ordering {
 
     // Try numeric comparison first
     if let (Some(an), Some(bn)) = (to_f64(a), to_f64(b)) {
-        return an
-            .partial_cmp(&bn)
-            .unwrap_or(Ordering::Equal);
+        return an.partial_cmp(&bn).unwrap_or(Ordering::Equal);
     }
 
     // String comparison
@@ -1381,8 +1363,10 @@ pub(crate) fn resolve_includes(
             let related_links =
                 store.query_links(Some(&id), Some(&prop.predicate), None, None, None, None)?;
 
-            let related_ids: Vec<String> =
-                related_links.iter().map(|l| l.data.target.clone()).collect();
+            let related_ids: Vec<String> = related_links
+                .iter()
+                .map(|l| l.data.target.clone())
+                .collect();
 
             // If there's a sub-query with its own class, we'd need to recursively query
             // For now, just set the IDs
@@ -1498,9 +1482,7 @@ fn resolve_forward_include(
         let resolved = if let Some(arr) = raw.as_array() {
             let items: Vec<Value> = arr
                 .iter()
-                .filter_map(|item| {
-                    item.as_str().and_then(|id| hydrated.get(id).cloned())
-                })
+                .filter_map(|item| item.as_str().and_then(|id| hydrated.get(id).cloned()))
                 .collect();
             // hasOne (maxCount==1): unwrap to single value
             if rel.max_count == Some(1) {
@@ -1605,10 +1587,7 @@ fn resolve_reverse_include(
     // Assign hydrated instances to each parent
     for inst in instances.iter_mut() {
         let inst_id = inst["id"].as_str().unwrap_or("").to_string();
-        let source_ids = sources_by_target
-            .get(&inst_id)
-            .cloned()
-            .unwrap_or_default();
+        let source_ids = sources_by_target.get(&inst_id).cloned().unwrap_or_default();
 
         let resolved = if rel.kind == "belongsToOne" || rel.max_count == Some(1) {
             source_ids
@@ -1803,10 +1782,7 @@ mod tests {
             json!({"name": "A", "age": 10}),
             json!({"name": "B", "age": 20}),
         ];
-        sort_instances(
-            &mut instances,
-            &[("age".to_string(), OrderDirection::ASC)],
-        );
+        sort_instances(&mut instances, &[("age".to_string(), OrderDirection::ASC)]);
         assert_eq!(instances[0]["age"], 10);
         assert_eq!(instances[1]["age"], 20);
         assert_eq!(instances[2]["age"], 30);
@@ -1821,10 +1797,7 @@ mod tests {
             "age": 25,
             "secret": "hidden"
         });
-        let filtered = filter_properties(
-            inst,
-            &["name".to_string(), "age".to_string()],
-        );
+        let filtered = filter_properties(inst, &["name".to_string(), "age".to_string()]);
         assert!(filtered.get("id").is_some());
         assert!(filtered.get("name").is_some());
         assert!(filtered.get("age").is_some());
@@ -1856,8 +1829,14 @@ mod tests {
         let shape = parse_shape_from_json(json, "Recipe").unwrap();
         assert_eq!(shape.target_class, "Recipe");
         assert_eq!(shape.properties.len(), 3);
-        assert!(shape.properties.iter().any(|p| p.name == "name" && p.is_required));
-        assert!(shape.properties.iter().any(|p| p.name == "ingredients" && p.is_collection));
+        assert!(shape
+            .properties
+            .iter()
+            .any(|p| p.name == "name" && p.is_required));
+        assert!(shape
+            .properties
+            .iter()
+            .any(|p| p.name == "ingredients" && p.is_collection));
     }
 }
 

@@ -2549,9 +2549,8 @@ impl PerspectiveInstance {
         query_json: &str,
         shape_json: Option<&str>,
     ) -> Result<String, deno_core::anyhow::Error> {
-        let query_input: super::model_query::ModelQueryInput =
-            serde_json::from_str(query_json)
-                .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
+        let query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
+            .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
 
         let result = super::model_query::execute_model_query(
             &self.sparql_store,
@@ -2560,8 +2559,9 @@ impl PerspectiveInstance {
             shape_json,
         )?;
 
-        serde_json::to_string(&result)
-            .map_err(|e| deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e))
+        serde_json::to_string(&result).map_err(|e| {
+            deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
+        })
     }
 
     pub(crate) async fn persist_link_diff(
