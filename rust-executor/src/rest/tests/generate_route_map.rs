@@ -21,9 +21,12 @@ fn generate_route_map() {
         "Agent",
         "AgentSignature",
         "AgentStatus",
+        "AIModelLoadingStatus",
         "Apps",
+        "ComputeLogEntry",
         "EntanglementProof",
         "EntanglementProofInput",
+        "ExpressionRendered",
         "InteractionCall",
         "InteractionMeta",
         "LanguageHandle",
@@ -35,6 +38,8 @@ fn generate_route_map() {
         "Perspective",
         "PerspectiveHandle",
         "RuntimeInfo",
+        "UserStatistics",
+        "VerificationRequestResult",
     ]
     .iter()
     .copied()
