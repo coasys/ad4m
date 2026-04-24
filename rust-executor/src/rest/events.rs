@@ -108,6 +108,25 @@ fn matches_signal_recipient(msg: &str, current_did: Option<&str>) -> bool {
     }
 }
 
+/// Check whether a perspective lifecycle event belongs to the authenticated user.
+///
+/// Perspective events include an `owner` field (DID string). For managed users,
+/// only emit events whose owner matches the user's DID. For main agent / admin
+/// (current_did is None), emit all events.
+fn matches_perspective_owner(msg: &str, current_did: Option<&str>) -> bool {
+    match current_did {
+        None => true,
+        Some(did) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::String(owner)) = map.get("owner") {
+                    return owner == did;
+                }
+            }
+            true
+        }
+    }
+}
+
 /// Wrap a raw pubsub JSON string with a `"type"` field.
 ///
 /// If the original message is a JSON object, the type is merged in:
@@ -434,7 +453,11 @@ pub async fn unified_events(
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let auth_token_for_signals = context.auth_token.clone();
+    let auth_token = context.auth_token.clone();
+    let auth_token_for_persp_added = auth_token.clone();
+    let auth_token_for_persp_removed = auth_token.clone();
+    let auth_token_for_persp_updated = auth_token.clone();
+    let auth_token_for_signals = auth_token;
 
     let pubsub = get_global_pubsub().await;
 
@@ -482,9 +505,48 @@ pub async fn unified_events(
         broadcast_to_sse_stream_nested(agent_updated_rx, "agent-updated", "agent");
     let s_hosting = typed_stream!(hosting_rx, "hosting-user-info-changed");
 
-    let s_persp_added = typed_stream!(persp_added_rx, "perspective-added");
-    let s_persp_removed = typed_stream!(persp_removed_rx, "perspective-removed");
-    let s_persp_updated = typed_stream!(persp_updated_rx, "perspective-updated");
+    // Perspective lifecycle events filtered by owner DID for multi-user isolation
+    macro_rules! owner_filtered_persp_stream {
+        ($rx:expr, $ty:expr, $token:expr) => {
+            BroadcastStream::new($rx)
+                .filter_map(|r| async { handle_broadcast_result(r) })
+                .filter_map(move |result| {
+                    let token = $token.clone();
+                    async move {
+                        let current_did =
+                            did_for_context(&AgentContext::from_auth_token(token)).ok();
+                        match result {
+                            Ok(ref msg)
+                                if matches_perspective_owner(msg, current_did.as_deref()) =>
+                            {
+                                Some(Ok(Event::default().data(wrap_event($ty, msg))))
+                            }
+                            Err(n) => Some(Ok(Event::default().data(format!(
+                                r#"{{"type":"lagged","missed":{},"stream":"{}"}}"#,
+                                n, $ty
+                            )))),
+                            _ => None,
+                        }
+                    }
+                })
+        };
+    }
+
+    let s_persp_added = owner_filtered_persp_stream!(
+        persp_added_rx,
+        "perspective-added",
+        auth_token_for_persp_added
+    );
+    let s_persp_removed = owner_filtered_persp_stream!(
+        persp_removed_rx,
+        "perspective-removed",
+        auth_token_for_persp_removed
+    );
+    let s_persp_updated = owner_filtered_persp_stream!(
+        persp_updated_rx,
+        "perspective-updated",
+        auth_token_for_persp_updated
+    );
     let s_sync = typed_stream!(sync_rx, "sync-state-change");
 
     let s_link_added = typed_stream!(link_added_rx, "link-added");

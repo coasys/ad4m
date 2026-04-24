@@ -390,8 +390,10 @@ pub async fn list_notifications(
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let notifications = Ad4mDb::with_global_instance(|db| db.get_notifications())
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let user_email = user_email_from_token(context.auth_token.clone());
+    let notifications =
+        Ad4mDb::with_global_instance(|db| db.get_notifications_for_user(user_email))
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(notifications))
 }
@@ -423,7 +425,8 @@ pub async fn create_notification(
         webhook_auth: body.webhook_auth,
     };
 
-    let id = RuntimeService::request_install_notification(domain_input, None)
+    let user_email = user_email_from_token(context.auth_token.clone());
+    let id = RuntimeService::request_install_notification(domain_input, user_email)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -483,6 +486,12 @@ pub async fn grant_notification(
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
+
+    if user_email_from_token(context.auth_token.clone()).is_some() {
+        return Err(ApiError::Forbidden(
+            "Permission denied: managed users cannot call grantNotification".into(),
+        ));
+    }
 
     // Fetch existing notification, update only the granted field
     let notifications = Ad4mDb::with_global_instance(|db| db.get_notifications())

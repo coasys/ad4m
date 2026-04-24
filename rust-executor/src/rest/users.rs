@@ -185,6 +185,27 @@ pub async fn create_user(
     let did =
         um::create_user(&email, &body.password).map_err(|e| ApiError::Internal(e.to_string()))?;
 
+    // Store minimal agent profile and publish to agent language
+    {
+        use crate::agent::{AgentContext, AgentService};
+        use crate::types::domain::{Agent, Perspective as DomainPerspective};
+
+        let agent = Agent {
+            did: did.clone(),
+            direct_message_language: None,
+            perspective: Some(DomainPerspective { links: vec![] }),
+        };
+        AgentService::with_global_instance(|svc| svc.store_user_agent_profile(&email, &agent))
+            .map_err(|e| {
+                ApiError::Internal(format!("Failed to store user agent profile: {}", e))
+            })?;
+
+        let ctx = AgentContext::for_user_email(email.clone());
+        if let Err(e) = AgentService::publish_agent_to_language(&ctx).await {
+            log::warn!("Failed to publish new user to agent language: {}", e);
+        }
+    }
+
     let code = um::create_verification_code(&email, "signup")
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     um::send_verification_email(&email, &code, "signup", None)

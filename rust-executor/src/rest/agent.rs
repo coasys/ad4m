@@ -688,9 +688,11 @@ pub async fn get_agent_status(
 
         return Ok(Json(AgentStatus {
             did: Some(agent_data.did),
-            did_document: Some(serde_json::to_value(&did_document).map_err(|e| {
-                ApiError::Internal(format!("Failed to serialize DID document: {}", e))
-            })?),
+            did_document: Some(serde_json::Value::String(
+                serde_json::to_string(&did_document).map_err(|e| {
+                    ApiError::Internal(format!("Failed to serialize DID document: {}", e))
+                })?,
+            )),
             error: None,
             is_initialized: true,
             is_unlocked: true,

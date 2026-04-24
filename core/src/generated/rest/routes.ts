@@ -25,6 +25,7 @@ import type {
   ExecuteCommandsRequest,
   ExportRequest,
   ExpressionManyRequest,
+  ExpressionRendered,
   FriendSendMessageRequest,
   FriendsListRequest,
   GenerateAgentRequest,
@@ -167,10 +168,10 @@ export interface RouteMap {
   'GET /events/runtime': { request: never; response: void };
   'GET /events/unified': { request: never; response: void };
   'POST /expressions': { request: CreateExpressionRequest; response: string };
-  'GET /expressions/:url': { request: never; response: unknown | null };
+  'GET /expressions/:url': { request: never; response: ExpressionRendered | string | null };
   'POST /expressions/:url/interact': { request: InteractionCall; response: string };
   'GET /expressions/:url/interactions': { request: never; response: InteractionMeta[] };
-  'POST /expressions/many': { request: ExpressionManyRequest; response: Array<unknown | null> };
+  'POST /expressions/many': { request: ExpressionManyRequest; response: Array<ExpressionRendered | null> };
   'GET /hosting': { request: never; response: HostingInfoResponse };
   'POST /hosting/request-payment': { request: RequestPaymentRequest; response: unknown };
   'GET /hosting/wallet': { request: never; response: HostingWalletResponse };
@@ -241,7 +242,7 @@ export interface RouteMap {
   'GET /runtime/messages/outbox': { request: never; response: unknown };
   'GET /runtime/network-metrics': { request: never; response: string };
   'GET /runtime/notifications': { request: never; response: Notification[] };
-  'POST /runtime/notifications': { request: NotificationInput; response: boolean };
+  'POST /runtime/notifications': { request: NotificationInput; response: string };
   'DELETE /runtime/notifications/:id': { request: never; response: boolean };
   'PATCH /runtime/notifications/:id': { request: NotificationInput; response: boolean };
   'PATCH /runtime/notifications/:id/grant': { request: NotificationGrantRequest; response: boolean };
