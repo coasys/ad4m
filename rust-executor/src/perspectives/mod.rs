@@ -1,4 +1,5 @@
 pub mod migration;
+pub mod model_query;
 pub mod perspective_instance;
 pub mod sdna;
 pub mod shacl_parser;

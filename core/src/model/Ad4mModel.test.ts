@@ -631,9 +631,10 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
     ingredients: string[] = [];
   }
 
-  // Mock perspective with both querySparql and infer methods
+  // Mock perspective with querySparql, modelQuery, and infer methods
   const mockPerspective = {
     querySparql: jest.fn(),
+    modelQuery: jest.fn(),
     infer: jest.fn(),
     uuid: 'test-perspective-uuid',
     stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue('Recipe')
@@ -770,18 +771,17 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
   });
 
   it("should use SPARQL when engine is 'sparql' in findAll()", async () => {
-    // Raw SPARQL rows (flat) — groupSPARQLResults will group them
-    const queryResults = [
-      { source: "literal:recipe1", predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-    ];
-
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+    // modelQuery returns already-hydrated instances from the Rust executor
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
+      ],
+      totalCount: 1
+    });
 
     const results = await Recipe.findAll(mockPerspective, {}, 'sparql');
 
-    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
     expect(results[0].name).toBe("Pasta");
@@ -805,38 +805,32 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
   });
 
   it("should use SPARQL when engine is 'sparql' in findAllAndCount()", async () => {
-    const queryResults = [
-      { source: "literal:recipe1", predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-    ];
-
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
+      ],
+      totalCount: 1
+    });
 
     const { results, totalCount } = await Recipe.findAllAndCount(mockPerspective, {}, 'sparql');
 
-    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
     expect(totalCount).toBe(1);
   });
 
   it("should use SPARQL when engine is 'sparql' in paginate()", async () => {
-    const queryResults = [
-      { source: "literal:recipe1", predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-    ];
-
-    // First call returns data, second call returns count (for SPARQL-paginated totalCount)
-    mockPerspective.querySparql
-      .mockResolvedValueOnce(queryResults)
-      .mockResolvedValueOnce([{ count: 1 }]);
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
+      ],
+      totalCount: 1
+    });
 
     const page = await Recipe.paginate(mockPerspective, 10, 1, {}, 'sparql');
 
-    // paginate now issues 2 SPARQL queries: data + count
-    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(2);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(page.results).toHaveLength(1);
     expect(page.pageSize).toBe(10);
@@ -845,12 +839,14 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
   });
 
   it("should use SPARQL when engine is 'sparql' in count()", async () => {
-    // count() now uses an efficient COUNT query that returns [{ count: N }]
-    mockPerspective.querySparql.mockResolvedValue([{ count: 5 }]);
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 5
+    });
 
     const count = await Recipe.count(mockPerspective, {}, 'sparql');
 
-    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(count).toBe(5);
   });
@@ -867,20 +863,19 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
   });
 
   it("should use SPARQL when engine is 'sparql' in ModelQueryBuilder.get()", async () => {
-    const queryResults = [
-      { source: "literal:recipe1", predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-    ];
-
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
+      ],
+      totalCount: 1
+    });
 
     const results = await Recipe.query(mockPerspective)
       .where({ name: "Pasta" })
       .engine('sparql')
       .get();
 
-    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
     expect(results[0].name).toBe("Pasta");
@@ -907,40 +902,35 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
   });
 
   it("should use SPARQL when engine is 'sparql' in ModelQueryBuilder.count()", async () => {
-    // count() counts the number of rows returned by the query (one row per source)
-    const queryResults = [
-      ...Array.from({ length: 3 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]).flat()
-    ];
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 3
+    });
 
     const count = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 4 } })
       .engine('sparql')
       .count();
 
-    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(count).toBe(3);
   });
 
   it("should use SPARQL when engine is 'sparql' in ModelQueryBuilder.paginate()", async () => {
-    const queryResults = [
-      { source: "literal:recipe1", predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-    ];
-
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
+      ],
+      totalCount: 1
+    });
 
     const page = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 3 } })
       .engine('sparql')
       .paginate(10, 1);
 
-    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(page.results).toHaveLength(1);
     expect(page.pageSize).toBe(10);
@@ -965,6 +955,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
   // Mock perspective
   const mockPerspective = {
     querySparql: jest.fn(),
+    modelQuery: jest.fn(),
     infer: jest.fn(),
     uuid: 'test-perspective-uuid',
     stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue('Recipe')
@@ -974,132 +965,80 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     jest.clearAllMocks();
   });
 
-  it("should apply JS-level filtering for gt operator on properties in SPARQL count()", async () => {
-    // Mock query results: 5 recipes with ratings 1, 2, 3, 4, 5
-    const queryResults = [
-      ...Array.from({ length: 5 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]).flat()
-    ];
-    
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+  it("should apply filtering for gt operator on properties in SPARQL count()", async () => {
+    // With the new modelQuery endpoint, filtering happens server-side in Rust
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 2
+    });
 
     // Count recipes with rating > 3 (should match 2 recipes: rating 4 and 5)
     const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 3 } } }, 'sparql');
     
-    // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { rating: { gt: 3 } } }, 'sparql');
-    
     expect(count).toBe(2);
-    expect(count).toBe(findAllResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering for between operator on properties in SPARQL count()", async () => {
-    // Mock query results: 5 recipes with ratings 1, 2, 3, 4, 5
-    const queryResults = [
-      ...Array.from({ length: 5 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]).flat()
-    ];
-    
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+  it("should apply filtering for between operator on properties in SPARQL count()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 3
+    });
 
     // Count recipes with rating between 2 and 4 (should match 3 recipes: rating 2, 3, 4)
     const count = await Recipe.count(mockPerspective, { where: { rating: { between: [2, 4] } } }, 'sparql');
     
-    // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { rating: { between: [2, 4] } } }, 'sparql');
-    
     expect(count).toBe(3);
-    expect(count).toBe(findAllResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering for timestamp gt operator in SPARQL count()", async () => {
-    // Mock query results: 5 recipes with different timestamps
-    const queryResults = [
-      ...Array.from({ length: 5 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
-      ]).flat()
-    ];
-    
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+  it("should apply filtering for timestamp gt operator in SPARQL count()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 2
+    });
 
-    // Count recipes with timestamp > 2023-01-03 (should match 2 recipes: 2023-01-04 and 2023-01-05)
     const targetTimestamp = new Date("2023-01-03T00:00:00Z").getTime();
     const count = await Recipe.count(mockPerspective, { where: { timestamp: { gt: targetTimestamp } } }, 'sparql');
     
-    // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { timestamp: { gt: targetTimestamp } } }, 'sparql');
-    
     expect(count).toBe(2);
-    expect(count).toBe(findAllResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering for timestamp between operator in SPARQL count()", async () => {
-    // Mock query results: 5 recipes with different timestamps
-    const queryResults = [
-      ...Array.from({ length: 5 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
-      ]).flat()
-    ];
-    
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+  it("should apply filtering for timestamp between operator in SPARQL count()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 3
+    });
 
-    // Count recipes with timestamp between 2023-01-02 and 2023-01-04
     const startTimestamp = new Date("2023-01-02T00:00:00Z").getTime();
     const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
     const count = await Recipe.count(mockPerspective, { 
       where: { timestamp: { between: [startTimestamp, endTimestamp] } } 
     }, 'sparql');
     
-    // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { 
-      where: { timestamp: { between: [startTimestamp, endTimestamp] } } 
-    }, 'sparql');
-    
     expect(count).toBe(3);
-    expect(count).toBe(findAllResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering for author filtering in SPARQL count()", async () => {
-    // Mock query results: 3 recipes by Alice and 2 by Bob
-    const queryResults = [
-      ...Array.from({ length: 3 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]).flat(),
-      ...Array.from({ length: 2 }, (_, i) => [
-        { source: `literal:recipe${i+4}`, predicate: "recipe://name", target: `Recipe ${i+4}`, author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
-        { source: `literal:recipe${i+4}`, predicate: "recipe://rating", target: "5", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" }
-      ]).flat()
-    ];
-    
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+  it("should apply filtering for author filtering in SPARQL count()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 3
+    });
 
     // Count recipes by Alice (should match 3 recipes)
     const count = await Recipe.count(mockPerspective, { where: { author: "did:key:alice" } }, 'sparql');
     
-    // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { author: "did:key:alice" } }, 'sparql');
-    
     expect(count).toBe(3);
-    expect(count).toBe(findAllResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering in ModelQueryBuilder.count() with gt operator", async () => {
-    // Mock query results: 5 recipes with ratings 1, 2, 3, 4, 5
-    const queryResults = [
-      ...Array.from({ length: 5 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]).flat()
-    ];
-    
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+  it("should apply filtering in ModelQueryBuilder.count() with gt operator", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 2
+    });
 
     // Count recipes with rating > 3 using ModelQueryBuilder
     const count = await Recipe.query(mockPerspective)
@@ -1107,26 +1046,15 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
       .engine('sparql')
       .count();
     
-    // Verify count matches the number of instances that would be returned by get()
-    const getResults = await Recipe.query(mockPerspective)
-      .where({ rating: { gt: 3 } })
-      .engine('sparql')
-      .get();
-    
     expect(count).toBe(2);
-    expect(count).toBe(getResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering in ModelQueryBuilder.count() with timestamp between", async () => {
-    // Mock query results: 5 recipes with different timestamps
-    const queryResults = [
-      ...Array.from({ length: 5 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
-      ]).flat()
-    ];
-    
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+  it("should apply filtering in ModelQueryBuilder.count() with timestamp between", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 3
+    });
 
     const startTimestamp = new Date("2023-01-02T00:00:00Z").getTime();
     const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
@@ -1137,14 +1065,8 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
       .engine('sparql')
       .count();
     
-    // Verify count matches the number of instances that would be returned by get()
-    const getResults = await Recipe.query(mockPerspective)
-      .where({ timestamp: { between: [startTimestamp, endTimestamp] } })
-      .engine('sparql')
-      .get();
-    
     expect(count).toBe(3);
-    expect(count).toBe(getResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
   it("should handle count() with Prolog for gt operator (legacy)", async () => {

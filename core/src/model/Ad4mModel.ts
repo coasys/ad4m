@@ -12,8 +12,6 @@ import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSON
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
 import { buildSPARQLQuery, buildSPARQLGetDataQuery, groupSPARQLResults, buildSPARQLCountQuery, hasJsOnlyWhereFilters, parseSparqlCount } from "./query-sparql";
-import { buildBatchSPARQLQuery } from "./query-sparql-batch";
-import { hydrateBatchResult } from "./hydration-batch";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import {
   normalizeValue, matchesCondition, hydrateFromLinks,
@@ -1066,6 +1064,85 @@ export class Ad4mModel {
   }
 
   /**
+   * Execute a model query via the executor-side endpoint.
+   * 
+   * This replaces the old SPARQL-build → hydrate → JS-filter → JS-sort → JS-paginate pipeline
+   * with a single RPC to the executor that handles everything in Rust.
+   * 
+   * @internal
+   */
+  private static async executeModelQuery<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    query: Query = {},
+  ): Promise<ResultsWithTotalCount<T>> {
+    const metadata = this.getModelMetadata();
+
+    // Build the query input that the Rust endpoint expects.
+    // Convert the TS Query type to the executor's ModelQueryInput format.
+    const queryInput: any = {};
+    if (query.parent) {
+      const parentPredicate = resolveParentPredicate(query.parent, this);
+      queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
+    }
+    if (query.properties) queryInput.properties = query.properties;
+    if (query.include) queryInput.include = query.include;
+    if (query.where) queryInput.where = query.where;
+    if (query.order) {
+      // Convert { propName: 'ASC' | 'DESC' } to [[propName, 'ASC'|'DESC'], ...]
+      queryInput.order = Object.entries(query.order).map(([k, v]) => [k, v]);
+    }
+    if (query.offset !== undefined) queryInput.offset = query.offset;
+    if (query.limit !== undefined) queryInput.limit = query.limit;
+    if (query.count !== undefined) queryInput.count = query.count;
+
+    // Send shape metadata to the executor so it knows the model structure.
+    // This is more reliable than reading SHACL from the store because
+    // the TS decorators are the definitive source of truth.
+    const shapeJson = JSON.stringify(metadata);
+    const queryJson = JSON.stringify(queryInput);
+
+    const result = await perspective.modelQuery(metadata.className, queryJson, shapeJson);
+
+    // Convert JSON instances to model class instances
+    const instances: T[] = result.instances.map((json: any) => {
+      const instance = new this(perspective, json.id || json.baseExpression) as any;
+      // Assign all hydrated values from the executor response
+      for (const [key, value] of Object.entries(json)) {
+        if (key === 'baseExpression' || key === 'id') continue; // already set via constructor
+        // Skip getter-only properties anywhere in the prototype chain
+        // (e.g. timestamp on Ad4mModel.prototype, id on Ad4mModel.prototype)
+        let isReadonly = false;
+        let proto = Object.getPrototypeOf(instance);
+        while (proto) {
+          const desc = Object.getOwnPropertyDescriptor(proto, key);
+          if (desc) { isReadonly = !!(desc.get && !desc.set); break; }
+          proto = Object.getPrototypeOf(proto);
+        }
+        if (isReadonly) continue;
+        instance[key] = value;
+      }
+      return instance;
+    });
+
+    // Eager-load relations if requested (uses TS-side relation resolution for now)
+    if (query.include && instances.length > 0) {
+      await hydrateRelations(this, instances, perspective, query.include);
+    }
+
+    // Take snapshots for dirty tracking
+    const snapshotRelations = query.include;
+    for (const inst of instances) {
+      (inst as Ad4mModel).takeSnapshot(snapshotRelations);
+    }
+
+    return {
+      results: instances,
+      totalCount: result.totalCount,
+    };
+  }
+
+  /**
    * Gets all instances of the model in the perspective that match the query params.
    * 
    * @param perspective - The perspective to search in
@@ -1108,14 +1185,7 @@ export class Ad4mModel {
       : engine;
 
     if (resolvedEngine === 'sparql') {
-      // Always use the regular SPARQL path + JS-level hydrateRelations for includes.
-      // The batch SPARQL approach had issues with sub-queries (where/order/limit on includes),
-      // non-conforming node filtering, and parse_literal compatibility.
-      // hydrateRelations handles all of these correctly via per-relation findAll calls.
-      const sparqlQuery = await this.queryToSPARQL(perspective, query);
-      const rawResult = await perspective.querySparql(sparqlQuery);
-      const grouped = groupSPARQLResults(rawResult);
-      const { results } = await this.instancesFromQueryResult(perspective, query, grouped);
+      const { results } = await this.executeModelQuery(perspective, query);
       return results;
     } else {
       const prologQuery = await this.queryToProlog(perspective, query);
@@ -1187,10 +1257,7 @@ export class Ad4mModel {
       : engine;
 
     if (resolvedEngine === 'sparql') {
-      const sparqlQuery = await this.queryToSPARQL(perspective, query);
-      const rawResult = await perspective.querySparql(sparqlQuery);
-      const grouped = groupSPARQLResults(rawResult);
-      return await this.instancesFromQueryResult(perspective, query, grouped, true);
+      return await this.executeModelQuery(perspective, query);
     } else {
       const prologQuery = await this.queryToProlog(perspective, query);
       const result = await perspective.infer(prologQuery);
@@ -1233,10 +1300,7 @@ export class Ad4mModel {
       : engine;
 
     if (resolvedEngine === 'sparql') {
-      const sparqlQuery = await this.queryToSPARQL(perspective, paginationQuery);
-      const rawResult = await perspective.querySparql(sparqlQuery);
-      const grouped = groupSPARQLResults(rawResult);
-      const { results, totalCount } = await this.instancesFromQueryResult(perspective, paginationQuery, grouped, true);
+      const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery);
       return { results, totalCount, pageSize, pageNumber };
     } else {
       const prologQuery = await this.queryToProlog(perspective, paginationQuery);
@@ -1307,21 +1371,8 @@ export class Ad4mModel {
       : engine;
 
     if (resolvedEngine === 'sparql') {
-      // When query has JS-only where filters (gt, between, author, timestamp, etc.),
-      // we must fall back to full hydration + JS filtering to get accurate count.
-      const metadata = this.getModelMetadata();
-      const allRelMeta = getRelationsMetadata(this as any);
-      if (hasJsOnlyWhereFilters(metadata, allRelMeta, query.where)) {
-        // Fall back to full query + JS filter path for accurate count
-        const sparqlQuery = await this.queryToSPARQL(perspective, query);
-        const rawResult = await perspective.querySparql(sparqlQuery);
-        const grouped = groupSPARQLResults(rawResult);
-        const { totalCount } = await this.instancesFromQueryResult(perspective, query, grouped, true);        return totalCount;
-      }
-      // No JS-only filters — use efficient COUNT query
-      const countSparql = await this.countQueryToSPARQL(perspective, query);
-      const countResult = await perspective.querySparql(countSparql);
-      return parseSparqlCount(countResult) ?? 0;
+      const { totalCount } = await this.executeModelQuery(perspective, { ...query, limit: 0 });
+      return totalCount;
     } else {
       const result = await perspective.infer(await this.countQueryToProlog(perspective, query));
       return result?.[0]?.TotalCount || 0;

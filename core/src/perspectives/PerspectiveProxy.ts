@@ -579,6 +579,18 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Execute a model query — the executor-side replacement for SPARQL query building + JS hydration.
+     * 
+     * @param className - The model class name (e.g. "Recipe")
+     * @param queryJson - Structured query as JSON string
+     * @param shapeJson - Optional shape metadata JSON from the model class
+     * @returns Object with `instances` array and `totalCount`
+     */
+    async modelQuery(className: string, queryJson: string, shapeJson?: string): Promise<{ instances: any[], totalCount: number }> {
+        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, shapeJson);
+    }
+
+    /**
      * Adds a new link to the perspective.
      * 
      * @param link - The link to add

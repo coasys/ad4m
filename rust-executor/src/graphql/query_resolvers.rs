@@ -671,6 +671,32 @@ impl Query {
         Ok(result)
     }
 
+    /// Model query — executor-side replacement for SPARQL query building + JS hydration.
+    /// Accepts a class name, structured query JSON, and optional shape metadata JSON.
+    /// Returns hydrated model instances as a JSON string.
+    async fn perspective_model_query(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        class_name: String,
+        query_json: String,
+        shape_json: Option<String>,
+    ) -> FieldResult<String> {
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        let result = get_perspective(&uuid)
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?
+            .model_query(&class_name, &query_json, shape_json.as_deref())?;
+
+        Ok(result)
+    }
+
     async fn perspective_snapshot(
         &self,
         context: &RequestContext,

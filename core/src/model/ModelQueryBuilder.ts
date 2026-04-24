@@ -327,18 +327,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
-   * Shared SPARQL query execution logic used by both get() and getSparql().
+   * Shared query execution logic — routes through the executor-side modelQuery endpoint.
    */
   private async executeSparqlQuery(): Promise<T[]> {
-    const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
-    const rawResult = await this.perspective.querySparql(sparqlQuery);
-    const { results } = await this.processSparqlResult(rawResult);
+    const { results } = await (this.ctor as any).executeModelQuery(this.perspective, this.queryParams);
     return results;
   }
 
   /**
    * Groups raw SPARQL results and hydrates them into model instances.
-   * Centralises the repeated groupSPARQLResults → instancesFromQueryResult pipeline.
+   * @deprecated — kept for subscription compatibility; new code uses executeModelQuery.
    */
   private async processSparqlResult(rawResult: any, queryOverride?: Query, computeTotalCount: boolean = false): Promise<{ results: T[], totalCount: number }> {
     const grouped = groupSPARQLResults(Array.isArray(rawResult) ? rawResult : []);
@@ -495,19 +493,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async count(): Promise<number> {
     if (this.engineFlag === 'sparql') {
-      // When query has JS-only where filters, fall back to full hydration
-      const metadata = this.ctor.getModelMetadata();
-      const allRelMeta = getRelationsMetadata(this.ctor as any);
-      if (hasJsOnlyWhereFilters(metadata, allRelMeta, this.queryParams.where)) {
-        const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
-        const rawResult = await this.perspective.querySparql(sparqlQuery);
-        const { totalCount } = await this.processSparqlResult(rawResult, undefined, true);
-        return totalCount;
-      }
-      // Use efficient COUNT query — no hydration
-      const countSparql = await this.ctor.countQueryToSPARQL(this.perspective, this.queryParams);
-      const countResult = await this.perspective.querySparql(countSparql);
-      return parseSparqlCount(countResult) ?? 0;
+      const { totalCount } = await (this.ctor as any).executeModelQuery(this.perspective, { ...this.queryParams, limit: 0 });
+      return totalCount;
     } else {
       const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
       const result = await this.perspective.infer(query);
@@ -631,9 +618,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     if (this.engineFlag === 'sparql') {
-      const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, paginationQuery);
-      const result = await this.perspective.querySparql(sparqlQuery);
-      const { results, totalCount } = await this.processSparqlResult(result, paginationQuery, true) as ResultsWithTotalCount<T>;
+      const { results, totalCount } = await (this.ctor as any).executeModelQuery(this.perspective, paginationQuery);
       return { results, totalCount, pageSize, pageNumber };
     } else {
       const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);

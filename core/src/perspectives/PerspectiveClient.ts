@@ -183,6 +183,17 @@ export class PerspectiveClient {
         return JSON.parse(perspectiveQuerySparql)
     }
 
+    async modelQuery(uuid: string, className: string, queryJson: string, shapeJson?: string): Promise<any> {
+        const { perspectiveModelQuery } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query perspectiveModelQuery($uuid: String!, $className: String!, $queryJson: String!, $shapeJson: String) {
+                perspectiveModelQuery(uuid: $uuid, className: $className, queryJson: $queryJson, shapeJson: $shapeJson)
+            }`,
+            variables: { uuid, className, queryJson, shapeJson: shapeJson || null }
+        }))
+
+        return JSON.parse(perspectiveModelQuery)
+    }
+
     async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
         const { perspectiveSubscribeQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveSubscribeQuery($uuid: String!, $query: String!) {

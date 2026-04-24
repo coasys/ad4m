@@ -2541,6 +2541,29 @@ impl PerspectiveInstance {
         self.sparql_store.query(&query)
     }
 
+    /// Execute a model query — the executor-side replacement for
+    /// SPARQL-build → hydrate → JS-filter → JS-sort → JS-paginate.
+    pub fn model_query(
+        &self,
+        class_name: &str,
+        query_json: &str,
+        shape_json: Option<&str>,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        let query_input: super::model_query::ModelQueryInput =
+            serde_json::from_str(query_json)
+                .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
+
+        let result = super::model_query::execute_model_query(
+            &self.sparql_store,
+            class_name,
+            &query_input,
+            shape_json,
+        )?;
+
+        serde_json::to_string(&result)
+            .map_err(|e| deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e))
+    }
+
     pub(crate) async fn persist_link_diff(
         &self,
         diff: &DecoratedPerspectiveDiff,
