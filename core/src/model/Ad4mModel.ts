@@ -48,8 +48,7 @@ function enrichShapeForIncludes(
     // Deep-copy so we don't mutate the cached metadata
     const targetMeta = JSON.parse(JSON.stringify(TargetClass.getModelMetadata()));
 
-    // Ensure the relation is in metadata.relations (hasOne/belongsToOne
-    // might not be there since getModelMetadata only puts hasMany/belongsToMany)
+    // Ensure the relation is in metadata.relations (fallback for edge cases)
     if (!metadata.relations[relName]) {
       metadata.relations[relName] = {
         name: relName,
@@ -88,8 +87,23 @@ function jsonToModelInstance<T extends Ad4mModel>(
   perspective: PerspectiveProxy,
   json: any,
   include?: IncludeMap,
+  properties?: string[],
 ): T {
   const instance = new ModelClass(perspective, json.id || json.baseExpression) as any;
+
+  // When a properties projection is active, remove own properties set by the
+  // constructor that are not in the projected JSON.  This ensures assertions
+  // like `expect(r).to.not.have.own.property("body")` pass.
+  if (properties) {
+    const jsonKeys = new Set(Object.keys(json));
+    for (const key of Object.getOwnPropertyNames(instance)) {
+      // Keep internal fields (backing store for getters), id, baseExpression, perspective
+      if (key === 'id' || key === 'baseExpression' || key === 'perspective' || key.startsWith('_')) continue;
+      if (!jsonKeys.has(key)) {
+        delete instance[key];
+      }
+    }
+  }
 
   for (const [key, value] of Object.entries(json)) {
     if (key === 'baseExpression' || key === 'id') continue;
@@ -119,18 +133,22 @@ function jsonToModelInstance<T extends Ad4mModel>(
         typeof includeVal === 'object' && includeVal !== null
           ? (includeVal as any).include
           : undefined;
+      const nestedProperties =
+        typeof includeVal === 'object' && includeVal !== null
+          ? (includeVal as any).properties
+          : undefined;
 
       const raw = instance[relName];
       if (Array.isArray(raw)) {
         instance[relName] = raw.map((item: any) => {
           if (typeof item === 'object' && item !== null && item.id) {
-            return jsonToModelInstance(TargetClass, perspective, item, nestedInclude);
+            return jsonToModelInstance(TargetClass, perspective, item, nestedInclude, nestedProperties);
           }
           return item;
         });
       } else if (typeof raw === 'object' && raw !== null && raw.id) {
         instance[relName] = jsonToModelInstance(
-          TargetClass, perspective, raw, nestedInclude,
+          TargetClass, perspective, raw, nestedInclude, nestedProperties,
         );
       }
     }
@@ -373,9 +391,7 @@ export class Ad4mModel {
     // Extract relations (relations) from WeakMap registry
     const relationsMetadata: Record<string, RelationMetadata> = {};
     const allRelationsMeta = getRelationsMetadata(this as any);
-    const prototypeRelations = Object.fromEntries(
-      Object.entries(allRelationsMeta).filter(([, r]) => r.kind === 'hasMany' || r.kind === 'belongsToMany')
-    );
+    const prototypeRelations = allRelationsMeta;
     
     for (const [relationName, opts] of Object.entries(prototypeRelations)) {
       const options = opts as RelationMetadataEntry;
@@ -385,6 +401,8 @@ export class Ad4mModel {
         ...(options.local !== undefined && { local: options.local }),
         ...(options.getter !== undefined && { getter: options.getter }),
         direction: (options.kind === 'belongsToMany' || options.kind === 'belongsToOne') ? 'reverse' : 'forward',
+        ...(options.kind !== undefined && { kind: options.kind }),
+        ...(options.maxCount !== undefined && { maxCount: options.maxCount }),
         ...(options.target !== undefined && { target: options.target }),
         ...(options.filter !== undefined && { filter: options.filter }),
         ...(options.where !== undefined && { where: options.where }),
@@ -1229,7 +1247,7 @@ export class Ad4mModel {
     // Convert JSON instances to model class instances, recursively constructing
     // class instances for any included relations resolved by Rust.
     const instances: T[] = result.instances.map((json: any) => {
-      return jsonToModelInstance(this, perspective, json, query.include);
+      return jsonToModelInstance(this, perspective, json, query.include, query.properties);
     });
 
     // Take snapshots for dirty tracking

@@ -11,7 +11,7 @@
 //! 6. Returns JSON instances + totalCount
 
 use deno_core::anyhow::{anyhow, Error};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
@@ -60,6 +60,58 @@ pub enum OrderDirection {
     DESC,
 }
 
+/// Deserialize `order` from either `[["key","ASC"]]` (tuple array) or
+/// `{"key":"ASC"}` (object map).  Sub-query includes send the object form
+/// while the top-level query converts to tuples in TS.
+fn deserialize_order_flex<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<(String, OrderDirection)>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let val: Option<Value> = Option::deserialize(deserializer)?;
+    let val = match val {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    match val {
+        // Array of [key, direction] tuples
+        Value::Array(arr) => {
+            let mut out = Vec::new();
+            for item in arr {
+                if let Value::Array(pair) = item {
+                    if pair.len() == 2 {
+                        let key = pair[0].as_str().unwrap_or("").to_string();
+                        let dir_str = pair[1].as_str().unwrap_or("ASC");
+                        let dir = if dir_str.eq_ignore_ascii_case("desc") {
+                            OrderDirection::DESC
+                        } else {
+                            OrderDirection::ASC
+                        };
+                        out.push((key, dir));
+                    }
+                }
+            }
+            Ok(Some(out))
+        }
+        // Object map { key: direction }
+        Value::Object(map) => {
+            let mut out = Vec::new();
+            for (key, dir_val) in map {
+                let dir_str = dir_val.as_str().unwrap_or("ASC");
+                let dir = if dir_str.eq_ignore_ascii_case("desc") {
+                    OrderDirection::DESC
+                } else {
+                    OrderDirection::ASC
+                };
+                out.push((key, dir));
+            }
+            Ok(Some(out))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Parent scope for scoped queries.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
@@ -95,7 +147,7 @@ pub struct ModelQueryInput {
     pub include: Option<HashMap<String, IncludeValue>>,
     #[serde(default, rename = "where")]
     pub where_clause: Option<HashMap<String, WhereCondition>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_order_flex")]
     pub order: Option<Vec<(String, OrderDirection)>>,
     #[serde(default)]
     pub offset: Option<usize>,
@@ -129,6 +181,8 @@ struct ShapeProperty {
     initial_value: Option<String>,
     resolve_language: Option<String>,
     datatype: Option<String>,
+    direction: Option<String>, // "forward" or "reverse" for relation properties
+    is_scalar_relation: bool,  // true for hasOne/belongsToOne (render as scalar, not array)
 }
 
 /// Enriched relation metadata for include (eager-loading) resolution.
@@ -343,6 +397,8 @@ fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelShape, Error
             initial_value,
             resolve_language,
             datatype,
+            direction: None,
+            is_scalar_relation: false,
         });
     }
 
@@ -452,9 +508,21 @@ pub fn execute_model_query(
     // Hydrate instances from grouped results
     let mut instances = hydrate_instances(&shape, &grouped);
 
+    // Resolve reverse relations (BelongsToOne / BelongsToMany) — these are
+    // links pointing TO our instances and aren't captured by the main SPARQL.
+    let reverse_rels: Vec<(String, String, bool)> = shape
+        .properties
+        .iter()
+        .filter(|p| p.direction.as_deref() == Some("reverse"))
+        .map(|p| (p.name.clone(), p.predicate.clone(), p.is_scalar_relation))
+        .collect();
+    if !reverse_rels.is_empty() && !instances.is_empty() {
+        resolve_reverse_relations(store, &mut instances, &reverse_rels)?;
+    }
+
     // Apply where-clause filters
     if let Some(ref where_clause) = query_input.where_clause {
-        instances.retain(|inst| matches_where(inst, where_clause));
+        instances.retain(|inst| matches_where(inst, where_clause, &shape));
     }
 
     // Calculate total count before pagination
@@ -546,6 +614,8 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
                 initial_value: initial,
                 resolve_language,
                 datatype,
+                direction: None,
+                is_scalar_relation: false,
             });
         }
     }
@@ -558,15 +628,22 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
                 continue;
             }
 
+            let direction = rel_meta["direction"].as_str().map(|s| s.to_string());
+
+            let kind = rel_meta["kind"].as_str().unwrap_or("hasMany").to_string();
+            let is_scalar_relation = kind == "hasOne" || kind == "belongsToOne";
+
             properties.push(ShapeProperty {
                 name: name.clone(),
                 predicate: predicate.clone(),
-                is_collection: true,
+                is_collection: true, // always accumulate as array during hydration
                 is_flag: false,
                 is_required: false,
                 initial_value: None,
                 resolve_language: None,
                 datatype: None,
+                direction: direction.clone(),
+                is_scalar_relation,
             });
 
             // Parse enriched relation metadata (target shapes for include resolution)
@@ -645,34 +722,38 @@ fn build_count_sparql(shape: &ModelShape, query: &ModelQueryInput) -> String {
 }
 
 /// Check whether a query's where clause contains only conditions that can be
-/// pushed to SPARQL (string equality, boolean equality, id/base filters).
-/// If true, a COUNT query can run entirely in SPARQL without hydration.
+/// pushed entirely to SPARQL.  If true, a COUNT query can skip hydration.
+///
+/// Only id/base filters and relation-based where (which match plain URIs, not
+/// signed envelopes) are SPARQL-pushable.  Property equality is NOT pushable
+/// because stored values are signed JSON envelopes.
 fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) -> bool {
     let Some(ref wc) = query.where_clause else {
         return true;
     };
     for (prop_name, condition) in wc {
         if prop_name == "base" || prop_name == "id" {
-            if matches!(condition, WhereCondition::String(_)) {
+            match condition {
+                WhereCondition::String(_) | WhereCondition::StringArray(_) => continue,
+                _ => return false,
+            }
+        }
+        // Relation-based where (forward or reverse) can be pushed
+        if shape
+            .properties
+            .iter()
+            .any(|p| p.name == *prop_name && p.is_collection)
+        {
+            if matches!(
+                condition,
+                WhereCondition::String(_) | WhereCondition::StringArray(_)
+            ) {
                 continue;
             }
             return false;
         }
-        if prop_name == "author"
-            || prop_name == "timestamp"
-            || prop_name == "createdAt"
-            || prop_name == "updatedAt"
-        {
-            return false;
-        }
-        if shape.properties.iter().any(|p| p.name == *prop_name) {
-            match condition {
-                WhereCondition::String(_) | WhereCondition::Bool(_) => continue,
-                _ => return false,
-            }
-        } else {
-            return false;
-        }
+        // All other conditions (property values, metadata, ops) need post-hydration
+        return false;
     }
     true
 }
@@ -765,45 +846,91 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
         }
     }
 
-    // WHERE clause filters that can be pushed to SPARQL (equality, IN)
+    // WHERE clause filters that can be pushed to SPARQL.
+    //
+    // Property equality CANNOT be pushed because stored values are signed JSON
+    // envelopes (`literal:json:{author,timestamp,data,proof}`), not plain
+    // `literal:string:X`.  Only id/base and relation-based where can be pushed.
     let mut where_patterns = Vec::new();
     if let Some(ref wc) = query.where_clause {
         for (prop_name, condition) in wc {
             if prop_name == "base" || prop_name == "id" {
-                // Filter by base expression URI directly
-                if let WhereCondition::String(val) = condition {
-                    where_patterns.push(format!("    FILTER(?source = <{}>)", val));
+                match condition {
+                    WhereCondition::String(val) => {
+                        // Use STR() comparison to avoid IRI parsing issues with
+                        // literal:json URIs that contain encoded special chars
+                        where_patterns.push(format!(
+                            "    FILTER(STR(?source) = \"{}\")",
+                            val.replace('\\', "\\\\").replace('"', "\\\"")
+                        ));
+                    }
+                    WhereCondition::StringArray(vals) => {
+                        let ids = vals
+                            .iter()
+                            .map(|v| {
+                                format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        where_patterns.push(format!("    FILTER(STR(?source) IN ({}))", ids));
+                    }
+                    _ => {} // complex id ops handled post-hydration
                 }
-                continue;
-            }
-            // Skip author/timestamp — handled post-hydration
-            if prop_name == "author"
-                || prop_name == "timestamp"
-                || prop_name == "createdAt"
-                || prop_name == "updatedAt"
-            {
                 continue;
             }
 
-            // Find the property metadata
-            if let Some(prop) = shape.properties.iter().find(|p| &p.name == prop_name) {
-                // Only push simple equality to SPARQL
+            // Relation-based where: link targets are plain URIs (not signed),
+            // so we CAN push these to SPARQL.  Use STR() comparison to avoid
+            // IRI parsing failures with literal:json URIs.
+            if let Some(prop) = shape
+                .properties
+                .iter()
+                .find(|p| &p.name == prop_name && p.is_collection)
+            {
+                let direction = prop.direction.as_deref().unwrap_or("forward");
+                let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
                 match condition {
                     WhereCondition::String(val) => {
-                        let iri_val = value_to_literal_iri_string(val);
-                        where_patterns
-                            .push(format!("    ?source <{}> <{}> .", prop.predicate, iri_val));
+                        let escaped = val.replace('\\', "\\\\").replace('"', "\\\"");
+                        if direction == "reverse" {
+                            where_patterns.push(format!(
+                                "    ?_rv_{} <{}> ?source . FILTER(STR(?_rv_{}) = \"{}\")",
+                                safe_name, prop.predicate, safe_name, escaped
+                            ));
+                        } else {
+                            where_patterns.push(format!(
+                                "    ?source <{}> ?_ft_{} . FILTER(STR(?_ft_{}) = \"{}\")",
+                                prop.predicate, safe_name, safe_name, escaped
+                            ));
+                        }
                     }
-                    WhereCondition::Bool(val) => {
-                        let iri_val = format!("literal:boolean:{}", val);
-                        where_patterns
-                            .push(format!("    ?source <{}> <{}> .", prop.predicate, iri_val));
+                    WhereCondition::StringArray(vals) => {
+                        let str_list = vals
+                            .iter()
+                            .map(|v| {
+                                format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        if direction == "reverse" {
+                            where_patterns.push(format!(
+                                "    ?_rv_{} <{}> ?source . FILTER(STR(?_rv_{}) IN ({}))",
+                                safe_name, prop.predicate, safe_name, str_list
+                            ));
+                        } else {
+                            where_patterns.push(format!(
+                                "    ?source <{}> ?_ft_{} . FILTER(STR(?_ft_{}) IN ({}))",
+                                prop.predicate, safe_name, safe_name, str_list
+                            ));
+                        }
                     }
-                    _ => {
-                        // Complex conditions (comparison ops, arrays, etc.) handled post-hydration
-                    }
+                    _ => {} // complex ops handled post-hydration
                 }
+                continue;
             }
+
+            // All other conditions (property values, metadata, ops) are
+            // handled post-hydration in matches_where().
         }
     }
 
@@ -964,19 +1091,39 @@ fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Value> {
     for (name, mut values) in collection_values {
         // Sort by timestamp (chronological)
         values.sort_by_key(|&(_, ts)| ts);
+        // Check if this is a relation property (has a direction) — if so, keep
+        // raw IRIs for later include resolution lookup rather than extracting
+        // the inner data value from signed envelopes.
+        let is_relation = shape
+            .properties
+            .iter()
+            .any(|p| p.name == name && p.direction.is_some());
         let arr: Vec<Value> = values
             .iter()
             .map(|&(target, _)| {
-                // For collections, the target is typically a URI (relation ID)
-                // not a literal: value
-                if target.starts_with("literal:") {
+                if is_relation {
+                    // Keep raw IRI so resolve_forward_include can match by id
+                    Value::String(target.to_string())
+                } else if target.starts_with("literal:") {
                     parse_literal_value(target)
                 } else {
                     Value::String(target.to_string())
                 }
             })
             .collect();
-        obj.insert(name.to_string(), Value::Array(arr));
+        // Check if this is a scalar relation (hasOne/belongsToOne) — if so,
+        // unwrap the first element as a scalar value instead of an array.
+        let is_scalar = shape
+            .properties
+            .iter()
+            .any(|p| p.name == name && p.is_scalar_relation);
+        if is_scalar {
+            if let Some(first) = arr.into_iter().next() {
+                obj.insert(name.to_string(), first);
+            }
+        } else {
+            obj.insert(name.to_string(), Value::Array(arr));
+        }
     }
 
     // Set metadata
@@ -1003,11 +1150,40 @@ fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Value> {
 // ---------------------------------------------------------------------------
 
 /// Check if an instance matches all where-clause conditions.
-fn matches_where(instance: &Value, where_clause: &HashMap<String, WhereCondition>) -> bool {
+fn matches_where(
+    instance: &Value,
+    where_clause: &HashMap<String, WhereCondition>,
+    shape: &ModelShape,
+) -> bool {
     for (prop_name, condition) in where_clause {
         if prop_name == "base" || prop_name == "id" {
-            // Already filtered in SPARQL
-            continue;
+            // String and StringArray id conditions are pushed to SPARQL.
+            // Complex ops (Ops, NumberArray, etc.) still need post-hydration.
+            match condition {
+                WhereCondition::String(_) | WhereCondition::StringArray(_) => continue,
+                _ => {
+                    let val = &instance[prop_name];
+                    if !matches_condition(val, condition) {
+                        return false;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // Relation-based where conditions (String/StringArray on collection props)
+        // are already pushed to SPARQL — skip them here.
+        if matches!(
+            condition,
+            WhereCondition::String(_) | WhereCondition::StringArray(_)
+        ) {
+            if shape
+                .properties
+                .iter()
+                .any(|p| p.name == *prop_name && p.is_collection)
+            {
+                continue;
+            }
         }
 
         let val = &instance[prop_name];
@@ -1458,8 +1634,20 @@ fn resolve_forward_include(
     // Build a query: where.id = [...allIds] merged with any sub-query filters
     let mut query = sub_query.clone();
     let mut wc = query.where_clause.take().unwrap_or_default();
+
+    // If the sub-query has its own id filter, intersect with parent IDs
+    if let Some(existing_id) = wc.get("id") {
+        let filter_ids: Vec<String> = match existing_id {
+            WhereCondition::String(s) => vec![s.clone()],
+            WhereCondition::StringArray(arr) => arr.clone(),
+            _ => vec![],
+        };
+        all_ids.retain(|id| filter_ids.contains(id));
+    }
     wc.insert("id".to_string(), WhereCondition::StringArray(all_ids));
     query.where_clause = Some(wc);
+
+    let has_sub_order = sub_query.order.is_some();
 
     let result = execute_model_query(
         store,
@@ -1468,8 +1656,13 @@ fn resolve_forward_include(
         Some(&rel.target_shape_json),
     )?;
 
-    // Build id → hydrated instance map
+    // Build id → hydrated instance map + ordered ID list
     let mut hydrated: HashMap<String, Value> = HashMap::new();
+    let ordered_ids: Vec<String> = result
+        .instances
+        .iter()
+        .filter_map(|inst| inst["id"].as_str().map(|s| s.to_string()))
+        .collect();
     for inst in result.instances {
         if let Some(id) = inst["id"].as_str() {
             hydrated.insert(id.to_string(), inst);
@@ -1479,21 +1672,36 @@ fn resolve_forward_include(
     // Replace string IDs with hydrated objects on each parent instance
     for inst in instances.iter_mut() {
         let raw = inst[&rel.name].clone();
-        let resolved = if let Some(arr) = raw.as_array() {
-            let items: Vec<Value> = arr
-                .iter()
-                .filter_map(|item| item.as_str().and_then(|id| hydrated.get(id).cloned()))
-                .collect();
-            // hasOne (maxCount==1): unwrap to single value
-            if rel.max_count == Some(1) {
-                items.last().cloned().unwrap_or(Value::Null)
-            } else {
-                Value::Array(items)
-            }
+        let parent_ids: Vec<String> = if let Some(arr) = raw.as_array() {
+            arr.iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect()
         } else if let Some(id) = raw.as_str() {
-            hydrated.get(id).cloned().unwrap_or(Value::Null)
+            vec![id.to_string()]
         } else {
             continue;
+        };
+
+        // When sub-query has an order, use result order (filtered to this parent's IDs)
+        let iter_ids: Vec<&str> = if has_sub_order {
+            ordered_ids
+                .iter()
+                .filter(|id| parent_ids.iter().any(|pid| pid == *id))
+                .map(|s| s.as_str())
+                .collect()
+        } else {
+            parent_ids.iter().map(|s| s.as_str()).collect()
+        };
+
+        let items: Vec<Value> = iter_ids
+            .iter()
+            .filter_map(|id| hydrated.get(*id).cloned())
+            .collect();
+
+        let resolved = if rel.max_count == Some(1) {
+            items.last().cloned().unwrap_or(Value::Null)
+        } else {
+            Value::Array(items)
         };
         inst.as_object_mut()
             .map(|obj| obj.insert(rel.name.clone(), resolved));
@@ -1557,15 +1765,33 @@ fn resolve_reverse_include(
     };
 
     // Hydrate source instances
-    let hydrated: HashMap<String, Value> = if all_source_ids.is_empty() {
-        HashMap::new()
+    let has_sub_order = sub_query.order.is_some();
+    let hydrated: HashMap<String, Value>;
+    let ordered_result_ids: Vec<String>;
+    if all_source_ids.is_empty() {
+        hydrated = HashMap::new();
+        ordered_result_ids = Vec::new();
     } else {
         let mut query = sub_query.clone();
         let mut wc = query.where_clause.take().unwrap_or_default();
-        wc.insert(
-            "id".to_string(),
-            WhereCondition::StringArray(all_source_ids),
-        );
+        // Intersect sub-query id filter with source IDs if present
+        if let Some(existing_id) = wc.get("id") {
+            let filter_ids: Vec<String> = match existing_id {
+                WhereCondition::String(s) => vec![s.clone()],
+                WhereCondition::StringArray(arr) => arr.clone(),
+                _ => vec![],
+            };
+            let filtered: Vec<String> = all_source_ids
+                .into_iter()
+                .filter(|id| filter_ids.contains(id))
+                .collect();
+            wc.insert("id".to_string(), WhereCondition::StringArray(filtered));
+        } else {
+            wc.insert(
+                "id".to_string(),
+                WhereCondition::StringArray(all_source_ids),
+            );
+        }
         query.where_clause = Some(wc);
 
         let result = execute_model_query(
@@ -1575,13 +1801,18 @@ fn resolve_reverse_include(
             Some(&rel.target_shape_json),
         )?;
 
+        ordered_result_ids = result
+            .instances
+            .iter()
+            .filter_map(|inst| inst["id"].as_str().map(|s| s.to_string()))
+            .collect();
         let mut map = HashMap::new();
         for inst in result.instances {
             if let Some(id) = inst["id"].as_str() {
                 map.insert(id.to_string(), inst);
             }
         }
-        map
+        hydrated = map;
     };
 
     // Assign hydrated instances to each parent
@@ -1595,9 +1826,19 @@ fn resolve_reverse_include(
                 .and_then(|id| hydrated.get(id).cloned())
                 .unwrap_or(Value::Null)
         } else {
-            let items: Vec<Value> = source_ids
+            // When sub-query has order, use result order filtered to this parent's source IDs
+            let iter_ids: Vec<&str> = if has_sub_order {
+                ordered_result_ids
+                    .iter()
+                    .filter(|id| source_ids.contains(id))
+                    .map(|s| s.as_str())
+                    .collect()
+            } else {
+                source_ids.iter().map(|s| s.as_str()).collect()
+            };
+            let items: Vec<Value> = iter_ids
                 .iter()
-                .filter_map(|id| hydrated.get(id).cloned())
+                .filter_map(|id| hydrated.get(*id).cloned())
                 .collect();
             Value::Array(items)
         };
