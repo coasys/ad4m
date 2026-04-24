@@ -408,7 +408,7 @@ export class PerspectiveClient {
         let existing = this.#linkUnsubscribers.get(uuid as string) || []
         existing.push(unsub)
         this.#linkUnsubscribers.set(uuid as string, existing)
-        await new Promise<void>(resolve => setTimeout(resolve, 500))
+        await this.#restClient.waitForSubscription(`/api/v1/events/perspectives/${encodeURIComponent(uuid as string)}/links`)
     }
 
     async addPerspectiveLinkRemovedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
@@ -427,7 +427,7 @@ export class PerspectiveClient {
         let existing = this.#linkUnsubscribers.get(uuid as string) || []
         existing.push(unsub)
         this.#linkUnsubscribers.set(uuid as string, existing)
-        await new Promise<void>(resolve => setTimeout(resolve, 500))
+        await this.#restClient.waitForSubscription(`/api/v1/events/perspectives/${encodeURIComponent(uuid as string)}/links`)
     }
 
     async addPerspectiveLinkUpdatedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
@@ -450,7 +450,7 @@ export class PerspectiveClient {
         let existing = this.#linkUnsubscribers.get(uuid as string) || []
         existing.push(unsub)
         this.#linkUnsubscribers.set(uuid as string, existing)
-        await new Promise<void>(resolve => setTimeout(resolve, 500))
+        await this.#restClient.waitForSubscription(`/api/v1/events/perspectives/${encodeURIComponent(uuid as string)}/links`)
     }
 
     getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {

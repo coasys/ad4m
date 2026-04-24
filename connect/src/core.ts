@@ -378,7 +378,12 @@ export default class Ad4mConnect extends EventTarget {
     
     // Request AD4M config from parent window
     console.log('[Ad4m Connect] Requesting AD4M config from parent window');
-    window.parent.postMessage({ type: 'REQUEST_AD4M_CONFIG' }, '*');
+    // Use document.referrer origin or configured allowedOrigins for the postMessage
+    // target, falling back to '*' only when no origin information is available.
+    const parentOrigin = (this.options.allowedOrigins && this.options.allowedOrigins.length > 0)
+      ? this.options.allowedOrigins[0]
+      : (document.referrer ? new URL(document.referrer).origin : '*');
+    window.parent.postMessage({ type: 'REQUEST_AD4M_CONFIG' }, parentOrigin);
   }
 
   // Local authentication

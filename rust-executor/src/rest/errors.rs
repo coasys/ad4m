@@ -11,6 +11,7 @@ pub enum ApiError {
     Unauthorized(String),
     Forbidden(String),
     NotFound(String),
+    NotImplemented(String),
     Internal(String),
 }
 
@@ -27,6 +28,7 @@ impl IntoResponse for ApiError {
             ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg),
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            ApiError::NotImplemented(msg) => (StatusCode::NOT_IMPLEMENTED, msg),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
         };
 

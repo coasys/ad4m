@@ -7,6 +7,7 @@
 // Only REST-specific request/response types are exported.
 
 export type { AddAgentInfosRequest } from "./AddAgentInfosRequest";
+export type { AIModelLoadingStatus } from "./AIModelLoadingStatus";
 export type { AddLinkExpressionRequest } from "./AddLinkExpressionRequest";
 export type { AddLinkRequest } from "./AddLinkRequest";
 export type { AddLinksBulkRequest } from "./AddLinksBulkRequest";
@@ -14,10 +15,12 @@ export type { AddSdnaRequest } from "./AddSdnaRequest";
 export type { ApplyTemplateRequest } from "./ApplyTemplateRequest";
 export type { BroadcastRequest } from "./BroadcastRequest";
 export type { CommitBatchRequest } from "./CommitBatchRequest";
+export type { ComputeLogEntry } from "./ComputeLogEntry";
 export type { CreateExpressionRequest } from "./CreateExpressionRequest";
 export type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
 export type { CreateSubjectRequest } from "./CreateSubjectRequest";
 export type { CreateUserRequest } from "./CreateUserRequest";
+export type { CreateUserResponse } from "./CreateUserResponse";
 export type { DecoratedExpressionProof } from "./DecoratedExpressionProof";
 export type { DecoratedLinkExpression } from "./DecoratedLinkExpression";
 export type { DisposeQueryRequest } from "./DisposeQueryRequest";
@@ -72,6 +75,8 @@ export type { UnlockAgentRequest } from "./UnlockAgentRequest";
 export type { UpdateLinkRequest } from "./UpdateLinkRequest";
 export type { UpdatePerspectiveRequest } from "./UpdatePerspectiveRequest";
 export type { UpdateProfileRequest } from "./UpdateProfileRequest";
+export type { UserStatistics } from "./UserStatistics";
+export type { VerificationRequestResult } from "./VerificationRequestResult";
 export type { VerifyEmailRequest } from "./VerifyEmailRequest";
 export type { VerifySignatureRequest } from "./VerifySignatureRequest";
 export type { NotificationGrantRequest } from "./NotificationGrantRequest";

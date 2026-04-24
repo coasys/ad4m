@@ -33,3 +33,4 @@ export { ModelApi, TokenizerSource, LocalModel, ModelType, ModelApiInput, Tokeni
 export * from './shacl/SHACLShape'
 export { SHACLFlow, FlowState, FlowTransition, LinkPattern, FlowableCondition } from './shacl/SHACLFlow'
 export * from "./generated/rest";
+export { RestError } from "./restClient";
