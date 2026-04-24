@@ -23,7 +23,6 @@ import type {
   ExecuteCommandsRequest,
   ExportRequest,
   ExpressionManyRequest,
-  ExpressionRendered,
   FriendSendMessageRequest,
   FriendsListRequest,
   GenerateAgentRequest,
