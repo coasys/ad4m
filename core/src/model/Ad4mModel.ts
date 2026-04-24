@@ -25,6 +25,120 @@ import type {
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata, ValueTuple,
 } from "./types";
 
+// ---------------------------------------------------------------------------
+// Helpers for Rust-side include resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Recursively enrich relation metadata in the shape with target class shapes
+ * so the Rust endpoint can resolve includes in-process (no extra GraphQL
+ * round-trips per relation).
+ */
+function enrichShapeForIncludes(
+  metadata: ModelMetadata,
+  include: IncludeMap,
+  allRelMeta: Record<string, RelationMetadataEntry>,
+): void {
+  for (const [relName, includeVal] of Object.entries(include)) {
+    if (!includeVal) continue;
+    const meta = allRelMeta[relName];
+    if (!meta?.target) continue;
+
+    const TargetClass = meta.target() as typeof Ad4mModel;
+    // Deep-copy so we don't mutate the cached metadata
+    const targetMeta = JSON.parse(JSON.stringify(TargetClass.getModelMetadata()));
+
+    // Ensure the relation is in metadata.relations (hasOne/belongsToOne
+    // might not be there since getModelMetadata only puts hasMany/belongsToMany)
+    if (!metadata.relations[relName]) {
+      metadata.relations[relName] = {
+        name: relName,
+        predicate: meta.predicate,
+        direction:
+          meta.kind === 'belongsToMany' || meta.kind === 'belongsToOne'
+            ? 'reverse'
+            : 'forward',
+      };
+    }
+    const rel = metadata.relations[relName] as any;
+    rel.kind = meta.kind;
+    rel.maxCount = meta.maxCount;
+    rel.targetShape = targetMeta;
+    rel.targetClassName = targetMeta.className;
+
+    // Recurse for nested includes
+    const nested =
+      typeof includeVal === 'object' && includeVal !== null
+        ? (includeVal as any).include
+        : undefined;
+    if (nested) {
+      const targetRelMeta = getRelationsMetadata(TargetClass as any);
+      enrichShapeForIncludes(targetMeta, nested, targetRelMeta);
+    }
+  }
+}
+
+/**
+ * Construct a model class instance from a plain JSON object returned by the
+ * Rust endpoint.  Recursively converts included relation values (which come
+ * back as plain JSON objects) into proper model class instances.
+ */
+function jsonToModelInstance<T extends Ad4mModel>(
+  ModelClass: typeof Ad4mModel & (new (...args: any[]) => T),
+  perspective: PerspectiveProxy,
+  json: any,
+  include?: IncludeMap,
+): T {
+  const instance = new ModelClass(perspective, json.id || json.baseExpression) as any;
+
+  for (const [key, value] of Object.entries(json)) {
+    if (key === 'baseExpression' || key === 'id') continue;
+
+    // Skip getter-only properties anywhere in the prototype chain
+    let isReadonly = false;
+    let proto = Object.getPrototypeOf(instance);
+    while (proto) {
+      const desc = Object.getOwnPropertyDescriptor(proto, key);
+      if (desc) { isReadonly = !!(desc.get && !desc.set); break; }
+      proto = Object.getPrototypeOf(proto);
+    }
+    if (isReadonly) continue;
+
+    instance[key] = value;
+  }
+
+  // Recursively convert included relation values to class instances
+  if (include) {
+    const relMeta = getRelationsMetadata(ModelClass as any);
+    for (const [relName, includeVal] of Object.entries(include)) {
+      if (!includeVal) continue;
+      const meta = relMeta[relName];
+      if (!meta?.target) continue;
+      const TargetClass = meta.target() as any;
+      const nestedInclude =
+        typeof includeVal === 'object' && includeVal !== null
+          ? (includeVal as any).include
+          : undefined;
+
+      const raw = instance[relName];
+      if (Array.isArray(raw)) {
+        instance[relName] = raw.map((item: any) => {
+          if (typeof item === 'object' && item !== null && item.id) {
+            return jsonToModelInstance(TargetClass, perspective, item, nestedInclude);
+          }
+          return item;
+        });
+      } else if (typeof raw === 'object' && raw !== null && raw.id) {
+        instance[relName] = jsonToModelInstance(
+          TargetClass, perspective, raw, nestedInclude,
+        );
+      }
+    }
+  }
+
+  return instance;
+}
+
 /**
  * Base class for defining data models in AD4M.
  * 
@@ -1096,6 +1210,14 @@ export class Ad4mModel {
     if (query.limit !== undefined) queryInput.limit = query.limit;
     if (query.count !== undefined) queryInput.count = query.count;
 
+    // Enrich relation metadata with target class shapes for Rust-side
+    // include resolution. This eliminates per-relation GraphQL round-trips
+    // by letting the Rust endpoint resolve includes in-process.
+    if (query.include) {
+      const allRelMeta = getRelationsMetadata(this as any);
+      enrichShapeForIncludes(metadata, query.include, allRelMeta);
+    }
+
     // Send shape metadata to the executor so it knows the model structure.
     // This is more reliable than reading SHACL from the store because
     // the TS decorators are the definitive source of truth.
@@ -1104,31 +1226,11 @@ export class Ad4mModel {
 
     const result = await perspective.modelQuery(metadata.className, queryJson, shapeJson);
 
-    // Convert JSON instances to model class instances
+    // Convert JSON instances to model class instances, recursively constructing
+    // class instances for any included relations resolved by Rust.
     const instances: T[] = result.instances.map((json: any) => {
-      const instance = new this(perspective, json.id || json.baseExpression) as any;
-      // Assign all hydrated values from the executor response
-      for (const [key, value] of Object.entries(json)) {
-        if (key === 'baseExpression' || key === 'id') continue; // already set via constructor
-        // Skip getter-only properties anywhere in the prototype chain
-        // (e.g. timestamp on Ad4mModel.prototype, id on Ad4mModel.prototype)
-        let isReadonly = false;
-        let proto = Object.getPrototypeOf(instance);
-        while (proto) {
-          const desc = Object.getOwnPropertyDescriptor(proto, key);
-          if (desc) { isReadonly = !!(desc.get && !desc.set); break; }
-          proto = Object.getPrototypeOf(proto);
-        }
-        if (isReadonly) continue;
-        instance[key] = value;
-      }
-      return instance;
+      return jsonToModelInstance(this, perspective, json, query.include);
     });
-
-    // Eager-load relations if requested (uses TS-side relation resolution for now)
-    if (query.include && instances.length > 0) {
-      await hydrateRelations(this, instances, perspective, query.include);
-    }
 
     // Take snapshots for dirty tracking
     const snapshotRelations = query.include;

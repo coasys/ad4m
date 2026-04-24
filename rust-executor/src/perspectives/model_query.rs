@@ -131,6 +131,19 @@ struct ShapeProperty {
     datatype: Option<String>,
 }
 
+/// Enriched relation metadata for include (eager-loading) resolution.
+/// Populated when the TS client sends target class shapes alongside the query.
+#[derive(Debug, Clone)]
+struct ShapeRelation {
+    name: String,
+    predicate: String,
+    direction: String,         // "forward" or "reverse"
+    kind: String,              // "hasMany", "hasOne", "belongsToOne", "belongsToMany"
+    max_count: Option<usize>,
+    target_class_name: String,
+    target_shape_json: String, // Serialised ModelMetadata JSON for recursive queries
+}
+
 /// A model shape reconstructed from SHACL links in the store.
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -139,6 +152,9 @@ pub(crate) struct ModelShape {
     #[allow(dead_code)]
     shape_uri: String,
     properties: Vec<ShapeProperty>,
+    /// Enriched relation metadata for include resolution (only populated
+    /// when the TS client sends target shapes for included relations).
+    include_relations: Vec<ShapeRelation>,
 }
 
 // ---------------------------------------------------------------------------
@@ -334,6 +350,7 @@ fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelShape, Error
         target_class,
         shape_uri,
         properties,
+        include_relations: Vec::new(),
     })
 }
 
@@ -397,6 +414,32 @@ pub fn execute_model_query(
         load_shape(store, class_name)?
     };
 
+    // ── Fast path: COUNT-only ────────────────────────────────────────────
+    // When the caller only needs a count (limit==0 or count==true) and all
+    // where conditions can be pushed to SPARQL, we skip hydration entirely
+    // and run a single SELECT COUNT(DISTINCT ?source) query.
+    let is_count_only =
+        query_input.count == Some(true) || query_input.limit == Some(0);
+    if is_count_only && all_where_pushable(query_input, &shape) {
+        let sparql = build_count_sparql(&shape, query_input);
+        let result_json = store.query(&sparql)?;
+        let results: Vec<Value> = serde_json::from_str(&result_json)?;
+        let count = results
+            .first()
+            .and_then(|r| {
+                r["cnt"]
+                    .as_str()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .or_else(|| r["cnt"].as_u64().map(|n| n as usize))
+            })
+            .unwrap_or(0);
+        return Ok(ModelQueryResult {
+            instances: vec![],
+            total_count: count,
+        });
+    }
+
+    // ── Full pipeline ────────────────────────────────────────────────────
     // Build SPARQL to find conforming instances and their property values
     let sparql = build_instance_sparql(&shape, query_input);
 
@@ -431,17 +474,33 @@ pub fn execute_model_query(
 
     // Apply pagination
     let offset = query_input.offset.unwrap_or(0);
-    let paginated: Vec<Value> = if let Some(limit) = query_input.limit {
+    let mut paginated: Vec<Value> = if let Some(limit) = query_input.limit {
         instances.into_iter().skip(offset).take(limit).collect()
     } else {
         instances.into_iter().skip(offset).collect()
     };
 
+    // ── Eager-load included relations ────────────────────────────────────
+    if let Some(ref include) = query_input.include {
+        if !paginated.is_empty() && !shape.include_relations.is_empty() {
+            resolve_includes_recursive(store, &mut paginated, include, &shape)?;
+        }
+    }
+
     // Strip unrequested properties if specified
     let final_instances = if let Some(ref requested) = query_input.properties {
+        // When includes are present, keep the included relation fields
+        let mut keep = requested.clone();
+        if let Some(ref inc) = query_input.include {
+            for rel_name in inc.keys() {
+                if !keep.contains(rel_name) {
+                    keep.push(rel_name.clone());
+                }
+            }
+        }
         paginated
             .into_iter()
-            .map(|inst| filter_properties(inst, requested))
+            .map(|inst| filter_properties(inst, &keep))
             .collect()
     } else {
         paginated
@@ -466,6 +525,7 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
         .to_string();
 
     let mut properties = Vec::new();
+    let mut include_relations: Vec<ShapeRelation> = Vec::new();
 
     // Parse properties from the metadata
     if let Some(props) = meta["properties"].as_object() {
@@ -504,7 +564,7 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
 
             properties.push(ShapeProperty {
                 name: name.clone(),
-                predicate,
+                predicate: predicate.clone(),
                 is_collection: true,
                 is_flag: false,
                 is_required: false,
@@ -512,6 +572,36 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
                 resolve_language: None,
                 datatype: None,
             });
+
+            // Parse enriched relation metadata (target shapes for include resolution)
+            if rel_meta.get("targetShape").is_some() {
+                let target_shape = &rel_meta["targetShape"];
+                let target_class_name = rel_meta["targetClassName"]
+                    .as_str()
+                    .or_else(|| target_shape["className"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let kind = rel_meta["kind"]
+                    .as_str()
+                    .unwrap_or("hasMany")
+                    .to_string();
+                let direction = rel_meta["direction"]
+                    .as_str()
+                    .unwrap_or("forward")
+                    .to_string();
+                let max_count = rel_meta["maxCount"].as_u64().map(|n| n as usize);
+
+                include_relations.push(ShapeRelation {
+                    name: name.clone(),
+                    predicate,
+                    direction,
+                    kind,
+                    max_count,
+                    target_class_name,
+                    target_shape_json: serde_json::to_string(target_shape)
+                        .unwrap_or_default(),
+                });
+            }
         }
     }
 
@@ -522,6 +612,7 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
         target_class,
         shape_uri,
         properties,
+        include_relations,
     })
 }
 
@@ -531,6 +622,72 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
 /// 1. Conformance: JOIN on required/flag properties to identify valid instances
 /// 2. Data retrieval: Fetch all links for conforming instances with reifier metadata
 fn build_instance_sparql(shape: &ModelShape, query: &ModelQueryInput) -> String {
+    let (conformance, where_extra) = build_query_patterns(shape, query);
+
+    format!(
+        r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+{conformance}
+{where_extra}
+    ?source ?predicate ?target .
+    ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+    FILTER(isIRI(?source) && isIRI(?predicate))
+    ?_reifier <ad4m://ontology/author> ?author .
+    ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+}}"#
+    )
+}
+
+/// Build a COUNT SPARQL query that returns the number of conforming instances.
+/// Used as a fast path for count-only queries when all where conditions are SPARQL-pushable.
+fn build_count_sparql(shape: &ModelShape, query: &ModelQueryInput) -> String {
+    let (conformance, where_extra) = build_query_patterns(shape, query);
+
+    format!(
+        r#"SELECT (COUNT(DISTINCT ?source) AS ?cnt) WHERE {{
+{conformance}
+{where_extra}
+    ?source ?_anyPred ?_anyTarget .
+    FILTER(isIRI(?source))
+}}"#
+    )
+}
+
+/// Check whether a query's where clause contains only conditions that can be
+/// pushed to SPARQL (string equality, boolean equality, id/base filters).
+/// If true, a COUNT query can run entirely in SPARQL without hydration.
+fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) -> bool {
+    let Some(ref wc) = query.where_clause else {
+        return true;
+    };
+    for (prop_name, condition) in wc {
+        if prop_name == "base" || prop_name == "id" {
+            if matches!(condition, WhereCondition::String(_)) {
+                continue;
+            }
+            return false;
+        }
+        if prop_name == "author"
+            || prop_name == "timestamp"
+            || prop_name == "createdAt"
+            || prop_name == "updatedAt"
+        {
+            return false;
+        }
+        if shape.properties.iter().any(|p| p.name == *prop_name) {
+            match condition {
+                WhereCondition::String(_) | WhereCondition::Bool(_) => continue,
+                _ => return false,
+            }
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// Build conformance + where patterns shared by both the instance query and
+/// the COUNT query.  Returns (conformance_patterns, where_patterns) as strings.
+fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String, String) {
     let mut conformance_patterns = Vec::new();
 
     // Parent filter
@@ -667,17 +824,7 @@ fn build_instance_sparql(shape: &ModelShape, query: &ModelQueryInput) -> String 
     let conformance = conformance_patterns.join("\n");
     let where_extra = where_patterns.join("\n");
 
-    format!(
-        r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
-{conformance}
-{where_extra}
-    ?source ?predicate ?target .
-    ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
-    FILTER(isIRI(?source) && isIRI(?predicate))
-    ?_reifier <ad4m://ontology/author> ?author .
-    ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-}}"#
-    )
+    (conformance, where_extra)
 }
 
 /// Convert a JS value to its literal: IRI form, matching how the Rust executor
@@ -1248,6 +1395,236 @@ pub(crate) fn resolve_includes(
         let _ = sub_query; // Will be used for nested querying in future
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Recursive include resolution (replaces TS-side hydrateRelations)
+// ---------------------------------------------------------------------------
+
+/// Resolve all included relations for a set of instances, recursively handling
+/// nested includes.  Uses enriched relation metadata (target shapes) from the
+/// TS client to call `execute_model_query` in-process, eliminating per-relation
+/// GraphQL round-trips.
+fn resolve_includes_recursive(
+    store: &SparqlStore,
+    instances: &mut [Value],
+    include: &HashMap<String, IncludeValue>,
+    shape: &ModelShape,
+) -> Result<(), Error> {
+    for (rel_name, include_val) in include {
+        match include_val {
+            IncludeValue::Bool(false) => continue,
+            _ => {}
+        }
+
+        // Find the enriched relation metadata
+        let rel = match shape.include_relations.iter().find(|r| r.name == *rel_name) {
+            Some(r) => r,
+            None => continue, // No target shape — can't resolve in Rust
+        };
+
+        let sub_query = match include_val {
+            IncludeValue::Bool(true) => ModelQueryInput::default(),
+            IncludeValue::SubQuery(sq) => *sq.clone(),
+            _ => continue,
+        };
+
+        if rel.direction == "reverse" {
+            resolve_reverse_include(store, instances, rel, &sub_query)?;
+        } else {
+            resolve_forward_include(store, instances, rel, &sub_query)?;
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a forward relation (hasMany / hasOne) for all instances.
+///
+/// The parent instances already have the target IDs as string arrays (from
+/// hydration).  We batch-query the target class for all those IDs at once,
+/// then replace the string IDs with fully hydrated JSON objects.
+fn resolve_forward_include(
+    store: &SparqlStore,
+    instances: &mut [Value],
+    rel: &ShapeRelation,
+    sub_query: &ModelQueryInput,
+) -> Result<(), Error> {
+    // Collect all target IDs across all instances
+    let mut all_ids: Vec<String> = Vec::new();
+    for inst in instances.iter() {
+        if let Some(arr) = inst[&rel.name].as_array() {
+            for item in arr {
+                if let Some(id) = item.as_str() {
+                    if !all_ids.contains(&id.to_string()) {
+                        all_ids.push(id.to_string());
+                    }
+                }
+            }
+        } else if let Some(id) = inst[&rel.name].as_str() {
+            if !all_ids.contains(&id.to_string()) {
+                all_ids.push(id.to_string());
+            }
+        }
+    }
+    if all_ids.is_empty() {
+        return Ok(());
+    }
+
+    // Build a query: where.id = [...allIds] merged with any sub-query filters
+    let mut query = sub_query.clone();
+    let mut wc = query.where_clause.take().unwrap_or_default();
+    wc.insert("id".to_string(), WhereCondition::StringArray(all_ids));
+    query.where_clause = Some(wc);
+
+    let result = execute_model_query(
+        store,
+        &rel.target_class_name,
+        &query,
+        Some(&rel.target_shape_json),
+    )?;
+
+    // Build id → hydrated instance map
+    let mut hydrated: HashMap<String, Value> = HashMap::new();
+    for inst in result.instances {
+        if let Some(id) = inst["id"].as_str() {
+            hydrated.insert(id.to_string(), inst);
+        }
+    }
+
+    // Replace string IDs with hydrated objects on each parent instance
+    for inst in instances.iter_mut() {
+        let raw = inst[&rel.name].clone();
+        let resolved = if let Some(arr) = raw.as_array() {
+            let items: Vec<Value> = arr
+                .iter()
+                .filter_map(|item| {
+                    item.as_str().and_then(|id| hydrated.get(id).cloned())
+                })
+                .collect();
+            // hasOne (maxCount==1): unwrap to single value
+            if rel.max_count == Some(1) {
+                items.last().cloned().unwrap_or(Value::Null)
+            } else {
+                Value::Array(items)
+            }
+        } else if let Some(id) = raw.as_str() {
+            hydrated.get(id).cloned().unwrap_or(Value::Null)
+        } else {
+            continue;
+        };
+        inst.as_object_mut()
+            .map(|obj| obj.insert(rel.name.clone(), resolved));
+    }
+    Ok(())
+}
+
+/// Resolve a reverse relation (belongsToOne / belongsToMany) for all instances.
+///
+/// Reverse relations are links pointing TO our instances (target = our ID).
+/// We batch-query for all such links, collect source IDs, then hydrate them.
+fn resolve_reverse_include(
+    store: &SparqlStore,
+    instances: &mut [Value],
+    rel: &ShapeRelation,
+    sub_query: &ModelQueryInput,
+) -> Result<(), Error> {
+    let all_ids: Vec<String> = instances
+        .iter()
+        .filter_map(|inst| inst["id"].as_str().map(|s| s.to_string()))
+        .collect();
+    if all_ids.is_empty() {
+        return Ok(());
+    }
+
+    // Batch SPARQL: find all (source, target) pairs for this predicate
+    let id_list = all_ids
+        .iter()
+        .map(|id| format!("<{}>", id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sparql = format!(
+        "SELECT ?source ?target WHERE {{ ?source <{}> ?target . FILTER(?target IN ({})) }}",
+        rel.predicate, id_list
+    );
+    let result_json = store.query(&sparql)?;
+    let rows: Vec<Value> = serde_json::from_str(&result_json)?;
+
+    // Group source IDs by target (our instance ID)
+    let mut sources_by_target: HashMap<String, Vec<String>> = HashMap::new();
+    for row in &rows {
+        let source = row["source"].as_str().unwrap_or("");
+        let target = row["target"].as_str().unwrap_or("");
+        if !source.is_empty() && !target.is_empty() {
+            sources_by_target
+                .entry(target.to_string())
+                .or_default()
+                .push(source.to_string());
+        }
+    }
+
+    // Collect all unique source IDs for batch hydration
+    let all_source_ids: Vec<String> = {
+        let mut set = std::collections::HashSet::new();
+        for ids in sources_by_target.values() {
+            for id in ids {
+                set.insert(id.clone());
+            }
+        }
+        set.into_iter().collect()
+    };
+
+    // Hydrate source instances
+    let hydrated: HashMap<String, Value> = if all_source_ids.is_empty() {
+        HashMap::new()
+    } else {
+        let mut query = sub_query.clone();
+        let mut wc = query.where_clause.take().unwrap_or_default();
+        wc.insert(
+            "id".to_string(),
+            WhereCondition::StringArray(all_source_ids),
+        );
+        query.where_clause = Some(wc);
+
+        let result = execute_model_query(
+            store,
+            &rel.target_class_name,
+            &query,
+            Some(&rel.target_shape_json),
+        )?;
+
+        let mut map = HashMap::new();
+        for inst in result.instances {
+            if let Some(id) = inst["id"].as_str() {
+                map.insert(id.to_string(), inst);
+            }
+        }
+        map
+    };
+
+    // Assign hydrated instances to each parent
+    for inst in instances.iter_mut() {
+        let inst_id = inst["id"].as_str().unwrap_or("").to_string();
+        let source_ids = sources_by_target
+            .get(&inst_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let resolved = if rel.kind == "belongsToOne" || rel.max_count == Some(1) {
+            source_ids
+                .last()
+                .and_then(|id| hydrated.get(id).cloned())
+                .unwrap_or(Value::Null)
+        } else {
+            let items: Vec<Value> = source_ids
+                .iter()
+                .filter_map(|id| hydrated.get(id).cloned())
+                .collect();
+            Value::Array(items)
+        };
+        inst.as_object_mut()
+            .map(|obj| obj.insert(rel.name.clone(), resolved));
+    }
     Ok(())
 }
 
