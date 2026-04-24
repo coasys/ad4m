@@ -2,6 +2,7 @@
 // Regenerate: cd rust-executor && cargo test generate_route_map
 
 import type {
+  AIModelLoadingStatus,
   AddAgentInfosRequest,
   AddLinkExpressionRequest,
   AddLinkRequest,
@@ -10,10 +11,12 @@ import type {
   ApplyTemplateRequest,
   BroadcastRequest,
   CommitBatchRequest,
+  ComputeLogEntry,
   CreateExpressionRequest,
   CreatePerspectiveRequest,
   CreateSubjectRequest,
   CreateUserRequest,
+  CreateUserResponse,
   DecoratedLinkExpression,
   DisposeQueryRequest,
   EmailTestRequest,
@@ -64,6 +67,8 @@ import type {
   UpdateLinkRequest,
   UpdatePerspectiveRequest,
   UpdateProfileRequest,
+  UserStatistics,
+  VerificationRequestResult,
   VerifyEmailRequest,
   VerifySignatureRequest,
 } from './index';
@@ -137,7 +142,7 @@ export interface RouteMap {
   'PUT /agent/trusted': { request: string[]; response: string[] };
   'POST /agent/unlock': { request: UnlockAgentRequest; response: AgentStatus };
   'POST /ai/embed': { request: EmbedRequest; response: string };
-  'GET /ai/model-loading-status': { request: never; response: unknown };
+  'GET /ai/model-loading-status': { request: never; response: AIModelLoadingStatus };
   'GET /ai/models': { request: never; response: Model[] };
   'POST /ai/models': { request: Record<string, unknown>; response: string };
   'DELETE /ai/models/:id': { request: never; response: boolean };
@@ -194,7 +199,7 @@ export interface RouteMap {
   'PUT /perspectives/:uuid': { request: UpdatePerspectiveRequest; response: PerspectiveHandle };
   'POST /perspectives/:uuid/batch': { request: never; response: string };
   'POST /perspectives/:uuid/batch/commit': { request: CommitBatchRequest; response: LinkMutationResponse };
-  'POST /perspectives/:uuid/commands': { request: ExecuteCommandsRequest; response: unknown };
+  'POST /perspectives/:uuid/commands': { request: ExecuteCommandsRequest; response: void };
   'POST /perspectives/:uuid/create-subject': { request: CreateSubjectRequest; response: boolean };
   'POST /perspectives/:uuid/dispose-query-subscription': { request: DisposeQueryRequest; response: boolean };
   'POST /perspectives/:uuid/dispose-surreal-query-subscription': { request: DisposeQueryRequest; response: boolean };
@@ -210,12 +215,12 @@ export interface RouteMap {
   'POST /perspectives/:uuid/links/mutations': { request: LinkMutationsRequest; response: LinkMutationResponse };
   'POST /perspectives/:uuid/links/remove-bulk': { request: RemoveLinksBulkRequest; response: DecoratedLinkExpression[] };
   'POST /perspectives/:uuid/publish-snapshot': { request: never; response: string };
-  'POST /perspectives/:uuid/query': { request: QueryRequest; response: unknown };
+  'POST /perspectives/:uuid/query': { request: QueryRequest; response: string };
   'POST /perspectives/:uuid/sdna': { request: AddSdnaRequest; response: boolean };
   'GET /perspectives/:uuid/snapshot': { request: never; response: Perspective };
   'POST /perspectives/:uuid/subscribe-query': { request: SubscribeQueryRequest; response: SubscribeQueryResponse };
   'POST /perspectives/:uuid/subscribe-surreal-query': { request: SubscribeQueryRequest; response: SubscribeQueryResponse };
-  'GET /runtime/compute-log': { request: never; response: unknown };
+  'GET /runtime/compute-log': { request: never; response: ComputeLogEntry[] };
   'POST /runtime/export': { request: ExportRequest; response: boolean };
   'GET /runtime/free-hosting-enabled': { request: never; response: boolean };
   'PUT /runtime/free-hosting-enabled': { request: Record<string, unknown>; response: boolean };
@@ -245,14 +250,14 @@ export interface RouteMap {
   'PUT /runtime/status': { request: SetStatusRequest; response: boolean };
   'GET /runtime/tls-domain': { request: never; response: string | null };
   'POST /runtime/verify-signature': { request: VerifySignatureRequest; response: boolean };
-  'GET /users': { request: never; response: unknown };
-  'POST /users': { request: CreateUserRequest; response: unknown };
+  'GET /users': { request: never; response: UserStatistics[] };
+  'POST /users': { request: CreateUserRequest; response: CreateUserResponse };
   'GET /users/:email/wallet': { request: never; response: string };
   'POST /users/free-access': { request: SetUserFreeAccessRequest; response: boolean };
   'POST /users/login': { request: LoginUserRequest; response: string };
   'GET /users/multi-user-enabled': { request: never; response: boolean };
   'PUT /users/multi-user-enabled': { request: SetMultiUserRequest; response: boolean };
-  'POST /users/request-verification': { request: RequestVerificationRequest; response: unknown };
+  'POST /users/request-verification': { request: RequestVerificationRequest; response: VerificationRequestResult };
   'POST /users/verify-email': { request: VerifyEmailRequest; response: string };
   'GET /ws/audio': { request: never; response: void };
 }

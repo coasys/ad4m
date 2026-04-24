@@ -170,7 +170,7 @@ pub async fn publish_snapshot(
 
     let _perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     // TODO: implement publish_snapshot in PerspectiveInstance
-    Err(ApiError::Internal(
+    Err(ApiError::NotImplemented(
         "publish_snapshot not yet implemented".into(),
     ))
 }
@@ -601,7 +601,7 @@ pub async fn remove_link(
     POST,
     "/perspectives/:uuid/query",
     request = "QueryRequest",
-    response = "unknown"
+    response = "string"
 )]
 pub async fn query_perspective(
     State(_state): State<AppState>,
@@ -625,13 +625,17 @@ pub async fn query_perspective(
                 .prolog_query_with_context(body.query, &agent_context)
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            serde_json::to_value(prolog_resolution_to_string(res)).unwrap_or_default()
+            serde_json::to_value(prolog_resolution_to_string(res)).map_err(|e| {
+                ApiError::Internal(format!("Failed to serialize prolog result: {}", e))
+            })?
         }
         "sparql" => {
             let res = perspective
                 .sparql_query(body.query)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            serde_json::to_value(res).unwrap_or_default()
+            serde_json::to_value(res).map_err(|e| {
+                ApiError::Internal(format!("Failed to serialize sparql result: {}", e))
+            })?
         }
         "surreal" => {
             // SurrealDB support removed — use prolog or sparql
@@ -695,7 +699,7 @@ pub async fn add_sdna(
     POST,
     "/perspectives/:uuid/commands",
     request = "ExecuteCommandsRequest",
-    response = "unknown"
+    response = "void"
 )]
 pub async fn execute_commands(
     State(_state): State<AppState>,
@@ -738,7 +742,9 @@ pub async fn execute_commands(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(serde_json::to_value(result).unwrap_or_default()))
+    Ok(Json(serde_json::to_value(result).map_err(|e| {
+        ApiError::Internal(format!("Failed to serialize command result: {}", e))
+    })?))
 }
 
 /// POST /perspectives/:uuid/batch — create batch
@@ -856,7 +862,7 @@ pub async fn subscribe_surreal_query(
     let _agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
     // TODO: implement surreal query subscription
-    Err(ApiError::Internal(
+    Err(ApiError::NotImplemented(
         "subscribe_surreal_query not yet implemented".into(),
     ))
 }

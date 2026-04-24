@@ -269,7 +269,9 @@ pub async fn get_friend_status(
 
     // friend_status not implemented in RuntimeService
     let _ = did;
-    Err(ApiError::Internal("Friend status not implemented".into()))
+    Err(ApiError::NotImplemented(
+        "Friend status not implemented".into(),
+    ))
 }
 
 /// PUT /friends — add friends
@@ -756,7 +758,7 @@ pub async fn get_tls_domain(
 }
 
 /// GET /runtime/compute-log
-#[rest_handler(GET, "/runtime/compute-log", response = "unknown")]
+#[rest_handler(GET, "/runtime/compute-log", response = "ComputeLogEntry[]")]
 pub async fn get_compute_log(
     State(_state): State<AppState>,
     auth: AuthContext,

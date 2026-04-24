@@ -57,7 +57,7 @@ pub async fn set_multi_user_enabled(
 }
 
 /// GET /users — list users
-#[rest_handler(GET, "/users", response = "unknown")]
+#[rest_handler(GET, "/users", response = "UserStatistics[]")]
 pub async fn list_users(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -133,7 +133,12 @@ pub async fn set_user_free_access(
 }
 
 /// POST /users — create user
-#[rest_handler(POST, "/users", request = "CreateUserRequest", response = "unknown")]
+#[rest_handler(
+    POST,
+    "/users",
+    request = "CreateUserRequest",
+    response = "CreateUserResponse"
+)]
 pub async fn create_user(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -317,7 +322,7 @@ pub async fn email_test(
     POST,
     "/users/request-verification",
     request = "RequestVerificationRequest",
-    response = "unknown"
+    response = "VerificationRequestResult"
 )]
 pub async fn request_verification(
     State(_state): State<AppState>,

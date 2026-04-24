@@ -218,7 +218,7 @@ pub async fn get_default_model(
 }
 
 /// GET /ai/model-loading-status?model=...
-#[rest_handler(GET, "/ai/model-loading-status", response = "unknown")]
+#[rest_handler(GET, "/ai/model-loading-status", response = "AIModelLoadingStatus")]
 pub async fn get_model_loading_status(
     State(_state): State<AppState>,
     auth: AuthContext,
