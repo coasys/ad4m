@@ -78,6 +78,19 @@ export class GraphQLClient {
     return data.perspectiveAddLink
   }
 
+  async addLinks(uuid: string, links: Array<{ source: string; predicate: string; target: string }>): Promise<void> {
+    const CHUNK = 500
+    for (let i = 0; i < links.length; i += CHUNK) {
+      const batch = links.slice(i, i + CHUNK)
+      await this.query(
+        `mutation($uuid: String!, $links: [LinkInput!]!) {
+          perspectiveAddLinks(uuid: $uuid, links: $links) { author }
+        }`,
+        { uuid, links: batch }
+      )
+    }
+  }
+
   async removeLink(uuid: string, link: LinkExpression): Promise<void> {
     await this.query(
       `mutation($uuid: String!, $link: LinkExpressionInput!) {

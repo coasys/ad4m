@@ -65,3 +65,19 @@ export function createRng(seed: number): () => number {
 export function generateId(rng: () => number, prefix: string): string {
   return `${prefix}://${Math.floor(rng() * 0xffffffff).toString(16).padStart(8, '0')}`
 }
+
+/**
+ * Run an async function `iterations` times, collecting timing samples.
+ */
+export async function measure(
+  fn: () => Promise<void>,
+  iterations: number,
+): Promise<{ samples: number[]; stats: Stats }> {
+  const samples: number[] = []
+  for (let i = 0; i < iterations; i++) {
+    const end = timeIt()
+    await fn()
+    samples.push(end())
+  }
+  return { samples, stats: computeStats(samples) }
+}

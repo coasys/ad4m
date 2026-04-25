@@ -18,5 +18,5 @@
     "verbatimModuleSyntax": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist", "results"]
+  "exclude": ["node_modules", "dist", "results", "src/orm-benchmarks", "src/models", "src/orm-setup.ts", "src/orm-reporter.ts", "src/seed.ts", "src/compare.ts"]
 }

@@ -49,6 +49,50 @@ npx tsx src/index.ts --sparql-binary /path/to/new/ad4m-executor --baseline-binar
 
 Results are written to `results/` as both JSON (raw data) and Markdown (formatted report).
 
+## ORM Benchmarks (Vitest)
+
+Tests real SDK query patterns via `Ad4mModel` against a live executor, seeded with ~100k Flux-shaped links.
+
+```bash
+# Run all ORM benchmarks
+pnpm bench:orm
+
+# Run only raw SPARQL benchmarks
+pnpm bench:orm:raw
+
+# Run only model/getter benchmarks
+pnpm bench:orm:model
+
+# Compare two result files
+pnpm bench:compare results/bench-A.json results/bench-B.json
+
+# Auto-compare latest two results
+pnpm bench:compare
+```
+
+### ORM Benchmark Specs
+
+| Spec | File | What it tests |
+|------|------|---------------|
+| **Raw SPARQL** | `01-raw-sparql.bench.ts` | SELECT, COUNT, multi-join, OPTIONAL, FILTER, thread traversal |
+| **Ad4mModel ORM** | `02-ad4m-model.bench.ts` | `.get()`, `.findAll()`, `.count()`, pagination, parallel loads |
+| **Custom Getters** | `03-custom-getters.bench.ts` | Instance methods, custom SPARQL getters, `.stats()` |
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BENCH_EXECUTOR_PATH` | `../../target/release/ad4m-executor` | Path to executor binary |
+| `BENCH_RUST_LOG` | `warn` | Rust log level for executor |
+| `BENCH_LABEL` | git branch | Label for result reports |
+
+### Seed Data
+
+The ORM benchmarks seed ~100k links in a Flux hierarchy:
+- 5 channels × 4000 messages each (with reactions, replies, threads)
+- 15 conversations per channel with 6 subgroups each
+- ~5 participants per conversation
+
 ## Interpreting Results
 
 - **Median** is the primary comparison metric (robust to outliers)

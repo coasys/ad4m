@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Benchmark tool comparing Oxigraph/SPARQL vs Baseline AD4M executors",
   "private": true,
+  "type": "module",
   "scripts": {
     "bench": "tsx src/index.ts",
     "bench:write": "tsx src/index.ts --suite write",
@@ -10,12 +11,21 @@
     "bench:sparql": "tsx src/index.ts --suite sparql",
     "bench:subject": "tsx src/index.ts --suite subject",
     "bench:scale": "tsx src/index.ts --suite scale",
+    "bench:orm": "vitest run",
+    "bench:orm:raw": "vitest run src/orm-benchmarks/01-raw-sparql.bench.ts",
+    "bench:orm:model": "vitest run src/orm-benchmarks/02-ad4m-model.bench.ts src/orm-benchmarks/03-custom-getters.bench.ts",
+    "bench:compare": "tsx src/compare.ts",
     "perf-test": "tsx src/performance-regression.ts",
     "integration-test": "tsx src/integration-test.ts"
   },
   "devDependencies": {
-    "typescript": "^5.4.0",
+    "@apollo/client": "3.7.10",
+    "@coasys/ad4m": "workspace:*",
+    "@types/node": "^18.0.0",
+    "cross-fetch": "^4.0.0",
+    "graphql": "15.7.2",
     "tsx": "^4.7.0",
-    "@types/node": "^20.0.0"
+    "typescript": "^5.4.0",
+    "vitest": "^3.1.0"
   }
 }
