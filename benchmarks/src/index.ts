@@ -3,7 +3,7 @@
 
 import { parseArgs } from 'node:util'
 import { resolve } from 'node:path'
-import { GraphQLClient } from './client'
+import { RestBenchClient } from './client'
 import { runBenchmarks, SUITE_NAMES, type SuiteName } from './runner'
 import { printTerminal, writeResults } from './reporter'
 import {
@@ -119,11 +119,11 @@ async function main(): Promise<void> {
   }
 
   const sparqlClient = noManage
-    ? new GraphQLClient({ label: 'sparql', url: `http://127.0.0.1:${sparqlPort}/graphql`, adminCredential })
+    ? new RestBenchClient({ label: 'sparql', url: `http://127.0.0.1:${sparqlPort}`, adminCredential })
     : getClient(sparqlConfig)
 
   const baselineClient = noManage
-    ? new GraphQLClient({ label: 'baseline', url: `http://127.0.0.1:${baselinePort}/graphql`, adminCredential })
+    ? new RestBenchClient({ label: 'baseline', url: `http://127.0.0.1:${baselinePort}`, adminCredential })
     : getClient(baselineConfig)
 
   // Verify connectivity

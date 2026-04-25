@@ -1,4 +1,4 @@
-// GraphQL client wrapper using native fetch
+// REST client wrapper using native fetch
 
 export interface LinkExpression {
   author: string
@@ -17,7 +17,7 @@ export interface ExecutorEndpoint {
   adminCredential: string
 }
 
-export class GraphQLClient {
+export class RestBenchClient {
   endpoint: ExecutorEndpoint
   timeoutMs: number
   constructor(endpoint: ExecutorEndpoint, timeoutMs = 30_000) {
@@ -28,119 +28,84 @@ export class GraphQLClient {
   private get headers(): Record<string, string> {
     return {
       'Content-Type': 'application/json',
-      'Authorization': this.endpoint.adminCredential,
+      'Authorization': `Bearer ${this.endpoint.adminCredential}`,
     }
   }
 
-  async query<T = unknown>(gql: string, variables?: Record<string, unknown>): Promise<T> {
-    const resp = await fetch(this.endpoint.url, {
-      method: 'POST',
+  private async request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+    const resp = await fetch(`${this.endpoint.url}${path}`, {
+      method,
       headers: this.headers,
-      body: JSON.stringify({ query: gql, variables }),
+      body: body != null ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(this.timeoutMs),
     })
     if (!resp.ok) {
-      throw new Error(`GraphQL request failed (${resp.status}): ${await resp.text()}`)
+      throw new Error(`REST request failed (${resp.status}): ${await resp.text()}`)
     }
-    const json = await resp.json() as { data?: T; errors?: Array<{ message: string }> }
-    if (json.errors?.length) {
-      throw new Error(`GraphQL errors: ${json.errors.map(e => e.message).join('; ')}`)
-    }
-    return json.data as T
+    return resp.json() as Promise<T>
   }
 
   async addPerspective(name: string): Promise<string> {
-    const data = await this.query<{ perspectiveAdd: { uuid: string } }>(
-      `mutation($name: String!) { perspectiveAdd(name: $name) { uuid } }`,
-      { name }
-    )
-    return data.perspectiveAdd.uuid
+    const data = await this.request<{ uuid: string }>('POST', '/api/v1/perspectives', { name })
+    return data.uuid
   }
 
   async removePerspective(uuid: string): Promise<void> {
-    await this.query(
-      `mutation($uuid: String!) { perspectiveRemove(uuid: $uuid) }`,
-      { uuid }
-    )
+    await this.request('DELETE', `/api/v1/perspectives/${encodeURIComponent(uuid)}`)
   }
 
   async addLink(uuid: string, source: string, predicate: string, target: string): Promise<LinkExpression> {
-    const data = await this.query<{ perspectiveAddLink: LinkExpression }>(
-      `mutation($uuid: String!, $link: LinkInput!) {
-        perspectiveAddLink(uuid: $uuid, link: $link) {
-          author timestamp
-          data { source predicate target }
-          proof { valid key signature }
-        }
-      }`,
-      { uuid, link: { source, predicate, target } }
+    return this.request<LinkExpression>(
+      'POST',
+      `/api/v1/perspectives/${encodeURIComponent(uuid)}/links`,
+      { source, predicate, target }
     )
-    return data.perspectiveAddLink
   }
 
   async removeLink(uuid: string, link: LinkExpression): Promise<void> {
-    await this.query(
-      `mutation($uuid: String!, $link: LinkExpressionInput!) {
-        perspectiveRemoveLink(uuid: $uuid, link: $link)
-      }`,
-      { uuid, link: { author: link.author, timestamp: link.timestamp, data: link.data, proof: link.proof } }
+    await this.request(
+      'POST',
+      `/api/v1/perspectives/${encodeURIComponent(uuid)}/links/remove`,
+      { author: link.author, timestamp: link.timestamp, data: link.data, proof: link.proof }
     )
   }
 
   async queryLinks(uuid: string, query: Record<string, string>): Promise<LinkExpression[]> {
-    const data = await this.query<{ perspectiveQueryLinks: LinkExpression[] }>(
-      `query($uuid: String!, $query: LinkQuery!) {
-        perspectiveQueryLinks(uuid: $uuid, query: $query) {
-          author timestamp
-          data { source predicate target }
-        }
-      }`,
-      { uuid, query }
+    return this.request<LinkExpression[]>(
+      'POST',
+      `/api/v1/perspectives/${encodeURIComponent(uuid)}/links/query`,
+      query
     )
-    return data.perspectiveQueryLinks
   }
 
   async querySparql(uuid: string, queryStr: string): Promise<string> {
-    const data = await this.query<{ perspectiveQuerySparql: string }>(
-      `query($uuid: String!, $query: String!) {
-        perspectiveQuerySparql(uuid: $uuid, query: $query)
-      }`,
-      { uuid, query: queryStr }
+    return this.request<string>(
+      'POST',
+      `/api/v1/perspectives/${encodeURIComponent(uuid)}/sparql`,
+      { query: queryStr }
     )
-    return data.perspectiveQuerySparql
   }
 
   async queryProlog(uuid: string, queryStr: string): Promise<string> {
-    const data = await this.query<{ perspectiveQueryProlog: string }>(
-      `query($uuid: String!, $query: String!) {
-        perspectiveQueryProlog(uuid: $uuid, query: $query)
-      }`,
-      { uuid, query: queryStr }
+    return this.request<string>(
+      'POST',
+      `/api/v1/perspectives/${encodeURIComponent(uuid)}/prolog-query`,
+      { query: queryStr }
     )
-    return data.perspectiveQueryProlog
   }
 
   async agentStatus(): Promise<{ isInitialized: boolean; isUnlocked: boolean; did: string }> {
-    const data = await this.query<{ agentStatus: { isInitialized: boolean; isUnlocked: boolean; did: string } }>(
-      `query { agentStatus { isInitialized isUnlocked did } }`
-    )
-    return data.agentStatus
+    return this.request('GET', '/api/v1/agent/status')
   }
 
   async agentGenerate(passphrase: string): Promise<string> {
-    const data = await this.query<{ agentGenerate: { did: string } }>(
-      `mutation($passphrase: String!) { agentGenerate(passphrase: $passphrase) { did } }`,
-      { passphrase }
-    )
-    return data.agentGenerate.did
+    const data = await this.request<{ did: string }>('POST', '/api/v1/agent/generate', { passphrase })
+    return data.did
   }
 
   async agentUnlock(passphrase: string): Promise<string> {
-    const data = await this.query<{ agentUnlock: { did: string } }>(
-      `mutation($passphrase: String!) { agentUnlock(passphrase: $passphrase) { did } }`,
-      { passphrase }
-    )
-    return data.agentUnlock.did
+    const data = await this.request<{ did: string }>('POST', '/api/v1/agent/unlock', { passphrase })
+    return data.did
   }
 
   async healthCheck(): Promise<boolean> {
@@ -152,3 +117,6 @@ export class GraphQLClient {
     }
   }
 }
+
+/** @deprecated Use RestBenchClient instead */
+export const GraphQLClient = RestBenchClient

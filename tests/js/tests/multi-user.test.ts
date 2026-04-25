@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor, quitExecutor } from "../utils/utils";
+import { sleep, baseUrl, startExecutor, quitExecutor } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
@@ -40,7 +40,7 @@ describe("Multi-User integration tests", () => {
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
             gqlPort, hcAdminPort, hcAppPort, false, "admin123");
 
-        adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "admin123"), false)
+        adminAd4mClient = new Ad4mClient(baseUrl(gqlPort), "admin123", false)
         
         // Generate initial admin agent
         await adminAd4mClient.agent.generate("passphrase")
@@ -167,8 +167,8 @@ describe("Multi-User integration tests", () => {
             const aliceJwt = await adminAd4mClient!.agent.generateJwtForUser("alice_persp", aliceRequestId, aliceRand);
             const bobJwt = await adminAd4mClient!.agent.generateJwtForUser("bob_persp", bobRequestId, bobRand);
 
-            aliceClient = new Ad4mClient(apolloClient(gqlPort, aliceJwt), false);
-            bobClient = new Ad4mClient(apolloClient(gqlPort, bobJwt), false);
+            aliceClient = new Ad4mClient(baseUrl(gqlPort), aliceJwt, false);
+            bobClient = new Ad4mClient(baseUrl(gqlPort), bobJwt, false);
         })
 
         it("should create perspectives scoped to specific users", async () => {
@@ -261,7 +261,7 @@ describe("Multi-User integration tests", () => {
             const rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"user-ops-app","appDesc":"test user operations","appUrl":"test-url","capabilities":[{"with":{"domain":"*","pointers":["*"]},"can":["*"]}]}}`);
             const jwt = await adminAd4mClient!.agent.generateJwtForUser("test_user_ops", requestId, rand);
 
-            userClient = new Ad4mClient(apolloClient(gqlPort, jwt), false);
+            userClient = new Ad4mClient(baseUrl(gqlPort), jwt, false);
         })
 
         it("should return correct agent status for user", async () => {

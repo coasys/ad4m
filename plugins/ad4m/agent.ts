@@ -8,14 +8,14 @@ export interface AgentResult {
 /**
  * Ensure the AD4M agent is initialized and unlocked.
  *
- * Creates a temporary GraphQL WS connection to the executor, checks agent
+ * Creates a REST Ad4mClient connection to the executor, checks agent
  * status, and generates (first run) or unlocks (subsequent runs) as needed.
  *
  * Returns { did, passphrase? } on success (passphrase only set when a new
  * agent was generated), or null if agent management failed.
  */
 export async function ensureAgentReady(
-  executorWsUrl: string,
+  executorUrl: string,
   adminCredential: string,
   logger: any,
   agentPassphrase?: string,
@@ -25,67 +25,27 @@ export async function ensureAgentReady(
   const MAX_CONNECT_ATTEMPTS = 10;
   const CONNECT_RETRY_DELAY_MS = 2000;
 
-  let wsClient: any = null;
   let client: any = null;
-
-  // Helper: create a fresh WS-backed Ad4mClient
-  function createWsClient() {
-    const { Ad4mClient } = require("@coasys/ad4m");
-    const { ApolloClient, InMemoryCache } = require("@apollo/client/core");
-    const { GraphQLWsLink } = require("@apollo/client/link/subscriptions");
-    const { createClient } = require("graphql-ws");
-    const WebSocket = require("ws");
-
-    // Dispose previous client if any
-    if (wsClient) {
-      try {
-        wsClient.dispose();
-      } catch {
-        // ignore
-      }
-    }
-
-    wsClient = createClient({
-      url: executorWsUrl,
-      webSocketImpl: WebSocket,
-      connectionParams: adminCredential
-        ? { headers: { authorization: adminCredential } }
-        : {},
-      retryAttempts: 0, // We handle retries ourselves in the outer loop
-    });
-
-    const wsLink = new GraphQLWsLink(wsClient);
-    const apolloClient = new ApolloClient({
-      link: wsLink,
-      cache: new InMemoryCache(),
-      defaultOptions: {
-        watchQuery: { fetchPolicy: "no-cache" },
-        query: { fetchPolicy: "no-cache" },
-        mutate: { fetchPolicy: "no-cache" },
-      },
-    });
-
-    client = new Ad4mClient(apolloClient);
-  }
 
   try {
     if (_testClient) {
       client = _testClient;
     } else {
       logger.info(
-        `[ad4m] Connecting to executor at ${executorWsUrl} for agent management...`,
+        `[ad4m] Connecting to executor at ${executorUrl} for agent management...`,
       );
     }
 
-    // Retry loop: the GraphQL WS server may not be ready immediately after
+    // Retry loop: the REST server may not be ready immediately after
     // the MCP endpoint comes up. We retry the initial status check.
-    // When _testClient is provided (tests), skip retries — no real WS to wait for.
+    // When _testClient is provided (tests), skip retries.
     const maxAttempts = _testClient ? 1 : MAX_CONNECT_ATTEMPTS;
     let agentStatus: any = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         if (!_testClient) {
-          createWsClient();
+          const { Ad4mClient } = require("@coasys/ad4m");
+          client = new Ad4mClient(executorUrl, adminCredential, false);
         }
         agentStatus = await client.agent.status();
         logger.info(
@@ -95,7 +55,7 @@ export async function ensureAgentReady(
       } catch (e: any) {
         if (attempt < maxAttempts) {
           logger.info(
-            `[ad4m] WS not ready yet (${e.message}), retrying in ${CONNECT_RETRY_DELAY_MS}ms... (${attempt}/${maxAttempts})`,
+            `[ad4m] Server not ready yet (${e.message}), retrying in ${CONNECT_RETRY_DELAY_MS}ms... (${attempt}/${maxAttempts})`,
           );
           await new Promise((r: any) =>
             setTimeout(r, CONNECT_RETRY_DELAY_MS),
@@ -165,14 +125,5 @@ export async function ensureAgentReady(
       `[ad4m] Make sure @coasys/ad4m and dependencies are installed (npm install in the plugin directory).`,
     );
     return null;
-  } finally {
-    // Clean up temporary WS connection
-    if (wsClient) {
-      try {
-        wsClient.dispose();
-      } catch {
-        /* ignore */
-      }
-    }
   }
 }

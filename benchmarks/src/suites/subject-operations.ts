@@ -1,6 +1,6 @@
 // Subject operations benchmark suite
 
-import type { GraphQLClient } from '../client'
+import type { RestBenchClient } from '../client'
 import { timeIt, createRng, generateId, computeStats, type Stats } from '../utils'
 
 export interface SubjectOperationsResult {
@@ -14,7 +14,7 @@ export interface SubjectOperationsResult {
 
 // Create SHACL-conforming link patterns for a "Message" subject
 async function createMessageInstance(
-  client: GraphQLClient,
+  client: RestBenchClient,
   uuid: string,
   instanceId: string,
   author: string,
@@ -28,7 +28,7 @@ async function createMessageInstance(
 }
 
 async function benchFindAll(
-  client: GraphQLClient,
+  client: RestBenchClient,
   uuid: string,
   iterations: number,
   warmup: number,
@@ -49,7 +49,7 @@ async function benchFindAll(
 }
 
 async function benchGetInstance(
-  client: GraphQLClient,
+  client: RestBenchClient,
   uuid: string,
   instanceId: string,
   iterations: number,
@@ -69,7 +69,7 @@ async function benchGetInstance(
 }
 
 async function benchPropertyUpdate(
-  client: GraphQLClient,
+  client: RestBenchClient,
   uuid: string,
   instanceId: string,
   iterations: number,
@@ -92,8 +92,8 @@ async function benchPropertyUpdate(
 }
 
 export async function run(
-  sparqlClient: GraphQLClient,
-  baselineClient: GraphQLClient,
+  sparqlClient: RestBenchClient,
+  baselineClient: RestBenchClient,
   iterations: number,
   warmup: number,
 ): Promise<SubjectOperationsResult> {

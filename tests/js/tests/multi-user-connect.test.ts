@@ -5,7 +5,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor, quitExecutor } from "../utils/utils";
+import { sleep, baseUrl, startExecutor, quitExecutor } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
@@ -41,7 +41,7 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
             gqlPort, hcAdminPort, hcAppPort, false);
 
-        adminAd4mClient = new Ad4mClient(apolloClient(gqlPort), false)
+        adminAd4mClient = new Ad4mClient(baseUrl(gqlPort), undefined, false)
         
         // Generate initial admin agent (needed for JWT signing)
         await adminAd4mClient.agent.generate("passphrase")

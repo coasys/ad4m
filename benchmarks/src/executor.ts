@@ -2,7 +2,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdir, rm } from 'node:fs/promises'
-import { GraphQLClient, type ExecutorEndpoint } from './client'
+import { RestBenchClient, type ExecutorEndpoint } from './client'
 
 export interface ExecutorConfig {
   binary: string
@@ -28,13 +28,13 @@ process.on('SIGTERM', () => { cleanupAll(); process.exit(143) })
 function makeEndpoint(config: ExecutorConfig): ExecutorEndpoint {
   return {
     label: config.label,
-    url: `http://127.0.0.1:${config.port}/graphql`,
+    url: `http://127.0.0.1:${config.port}`,
     adminCredential: config.adminCredential,
   }
 }
 
-export function getClient(config: ExecutorConfig): GraphQLClient {
-  return new GraphQLClient(makeEndpoint(config))
+export function getClient(config: ExecutorConfig): RestBenchClient {
+  return new RestBenchClient(makeEndpoint(config))
 }
 
 export async function startExecutor(config: ExecutorConfig): Promise<void> {

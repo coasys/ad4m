@@ -72,7 +72,7 @@ ad4m-executor run \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--app-data-path` | (required) | Data directory |
-| `--gql-port` | 12000 | GraphQL API port |
+| `--gql-port` | 12000 | HTTP API port |
 | `--admin-credential` | (none) | Admin auth token — without this, empty token has admin access |
 | `--enable-mcp` | false | Enable MCP server |
 | `--mcp-port` | 3001 | MCP server port |
@@ -94,16 +94,16 @@ First run only. Creates cryptographic keys and DID identity.
 **Via CLI:**
 
 ```bash
-ad4m --executor-url http://localhost:12000/graphql agent generate --passphrase <passphrase>
+ad4m --executor-url http://localhost:12000 agent generate --passphrase <passphrase>
 ```
 
-**Via GraphQL:**
+**Via REST API:**
 
 ```bash
-curl -s http://localhost:12000/graphql \
+curl -s http://localhost:12000/api/v1/agent/generate \
   -H "Content-Type: application/json" \
-  -H "Authorization: <admin-credential>" \
-  -d '{"query":"mutation { agentGenerate(passphrase: \"<passphrase>\") { did } }"}'
+  -H "Authorization: Bearer <admin-credential>" \
+  -d '{"passphrase": "<passphrase>"}'
 ```
 
 This triggers Holochain conductor startup and language installation. Takes 30-60 seconds.
@@ -113,10 +113,10 @@ This triggers Holochain conductor startup and language installation. Takes 30-60
 After restarting the executor, unlock the agent:
 
 ```bash
-curl -s http://localhost:12000/graphql \
+curl -s http://localhost:12000/api/v1/agent/unlock \
   -H "Content-Type: application/json" \
-  -H "Authorization: <admin-credential>" \
-  -d '{"query":"mutation { agentUnlock(passphrase: \"<passphrase>\", holochain: true) { isInitialized isUnlocked did } }"}'
+  -H "Authorization: Bearer <admin-credential>" \
+  -d '{"passphrase": "<passphrase>"}'
 ```
 
 The `holochain: true` parameter starts the Holochain conductor during unlock.
@@ -125,12 +125,10 @@ The `holochain: true` parameter starts the Holochain conductor during unlock.
 
 ```bash
 # Check agent status
-curl -s http://localhost:12000/graphql \
-  -H "Content-Type: application/json" \
-  -H "Authorization: <admin-credential>" \
-  -d '{"query":"{ agentStatus { isInitialized isUnlocked did } }"}'
+curl -s http://localhost:12000/api/v1/agent/status \
+  -H "Authorization: Bearer <admin-credential>"
 
-# Expected: {"data":{"agentStatus":{"isInitialized":true,"isUnlocked":true,"did":"did:key:z6Mk..."}}}
+# Expected: {"isInitialized":true,"isUnlocked":true,"did":"did:key:z6Mk..."}
 ```
 
 ## Deployment Scenarios & Networking

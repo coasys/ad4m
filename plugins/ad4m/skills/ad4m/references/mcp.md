@@ -12,7 +12,7 @@ ad4m-executor run --enable-mcp true --mcp-port 3001 ...
 
 Streamable HTTP (bidirectional HTTP with SSE-like streaming). Connect at `http://localhost:3001/mcp`.
 
-**Not stdio** — the MCP server runs alongside the GraphQL server in the same process. Uses JSON-RPC 2.0 over HTTP POST with session management via `Mcp-Session-Id` header.
+**Not stdio** — the MCP server runs alongside the REST server in the same process. Uses JSON-RPC 2.0 over HTTP POST with session management via `Mcp-Session-Id` header.
 
 **Do NOT use `curl` to call MCP tools.** The server always responds with `Content-Type: text/event-stream` (Server-Sent Events), not plain JSON. Raw curl will get garbled SSE event data. You must use a proper MCP client (your tool interface, an MCP SDK, etc.).
 

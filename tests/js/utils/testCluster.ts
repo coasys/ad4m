@@ -14,7 +14,7 @@
 
 import { ChildProcess } from "node:child_process";
 import { Ad4mClient } from "@coasys/ad4m";
-import { apolloClient, startExecutor, gracefulShutdown, sleep } from "./utils";
+import { baseUrl, startExecutor, gracefulShutdown, sleep } from "./utils";
 
 export interface NodeConfig {
     gqlPort: number;
@@ -82,7 +82,7 @@ export class TestCluster {
 
         while (Date.now() - start < timeoutMs) {
             try {
-                const client = new Ad4mClient(apolloClient(port, adminCredential));
+                const client = new Ad4mClient(baseUrl(port), adminCredential, false);
                 // Try a simple query to verify connectivity
                 await client.runtime.info();
                 return client;

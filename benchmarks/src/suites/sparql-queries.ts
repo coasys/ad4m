@@ -1,6 +1,6 @@
 // Complex query benchmark suite (SPARQL vs SPARQL/Prolog)
 
-import type { GraphQLClient } from '../client'
+import type { RestBenchClient } from '../client'
 import { timeIt, createRng, generateId, computeStats, type Stats } from '../utils'
 
 export interface SparqlQueryResult {
@@ -12,7 +12,7 @@ export interface SparqlQueryResult {
   }>
 }
 
-async function populateStructured(client: GraphQLClient, uuid: string, rng: () => number): Promise<void> {
+async function populateStructured(client: RestBenchClient, uuid: string, rng: () => number): Promise<void> {
   // Create community → channels → messages structure
   const communities = 3
   const channelsPerCommunity = 5
@@ -35,7 +35,7 @@ async function populateStructured(client: GraphQLClient, uuid: string, rng: () =
 }
 
 async function benchSparqlQuery(
-  client: GraphQLClient,
+  client: RestBenchClient,
   uuid: string,
   queryStr: string,
   iterations: number,
@@ -54,8 +54,8 @@ async function benchSparqlQuery(
 }
 
 export async function run(
-  sparqlClient: GraphQLClient,
-  baselineClient: GraphQLClient,
+  sparqlClient: RestBenchClient,
+  baselineClient: RestBenchClient,
   iterations: number,
   warmup: number,
 ): Promise<SparqlQueryResult> {

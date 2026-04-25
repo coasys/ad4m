@@ -1,6 +1,6 @@
 // Scale benchmark suite — test performance at different perspective sizes
 
-import type { GraphQLClient } from '../client'
+import type { RestBenchClient } from '../client'
 import { timeIt, createRng, generateId, computeStats, type Stats } from '../utils'
 
 export interface ScaleResult {
@@ -13,7 +13,7 @@ export interface ScaleResult {
 }
 
 async function populateAndBench(
-  client: GraphQLClient,
+  client: RestBenchClient,
   targetCount: number,
   queryIterations: number,
   warmup: number,
@@ -67,8 +67,8 @@ async function populateAndBench(
 }
 
 export async function run(
-  sparqlClient: GraphQLClient,
-  baselineClient: GraphQLClient,
+  sparqlClient: RestBenchClient,
+  baselineClient: RestBenchClient,
   iterations: number,
   warmup: number,
   maxScale: number,

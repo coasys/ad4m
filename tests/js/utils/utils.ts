@@ -2,10 +2,6 @@ import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_p
 import { mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
-import { GraphQLWsLink } from "@apollo/client/link/subscriptions/index.js";
-import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
-import Websocket from "ws";
-import { createClient } from "graphql-ws";
 import path from "path";
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -275,46 +271,6 @@ export async function startExecutor(dataPath: string,
 
 export function baseUrl(port: number): string {
     return `http://127.0.0.1:${port}`;
-}
-
-export function apolloClient(port: number, token?: string): ApolloClient<any> {
-    //@ts-ignore
-    const wsLink = new GraphQLWsLink(createClient({
-        url: `ws://127.0.0.1:${port}/graphql`,
-        webSocketImpl: Websocket,
-        connectionParams: () => {
-            return {
-                headers: {
-                    authorization: token || ""
-                }
-            }
-        },
-    }));
-    wsLink.client.on('message' as any, (data: any) => {
-        if (data.payload) {
-            if (data.payload.errors) {
-                console.dir(data.payload.errors, { depth: null });
-            }
-        }
-    });
-
-    let client = new ApolloClient({
-        link: wsLink,
-        cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
-        defaultOptions: {
-            watchQuery: {
-                fetchPolicy: "no-cache",
-            },
-            query: {
-                fetchPolicy: "no-cache",
-            },
-            mutate: {
-                fetchPolicy: "no-cache"
-            }
-        },
-    });
-
-    return client;
 }
 
 export function sleep(ms: number) {

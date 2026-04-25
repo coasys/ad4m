@@ -1,6 +1,6 @@
 // Point query benchmark suite
 
-import type { GraphQLClient } from '../client'
+import type { RestBenchClient } from '../client'
 import { timeIt, createRng, generateId, computeStats, type Stats } from '../utils'
 
 export interface PointQueryResult {
@@ -14,7 +14,7 @@ export interface PointQueryResult {
 
 const PREDICATES = ['ad4m://has-child', 'ad4m://has-member', 'ad4m://has-message', 'ad4m://has-tag', 'ad4m://has-author']
 
-async function populate(client: GraphQLClient, uuid: string, count: number, rng: () => number): Promise<{ sources: string[]; predicates: string[] }> {
+async function populate(client: RestBenchClient, uuid: string, count: number, rng: () => number): Promise<{ sources: string[]; predicates: string[] }> {
   const sources: string[] = []
   const usedPredicates: string[] = []
 
@@ -30,7 +30,7 @@ async function populate(client: GraphQLClient, uuid: string, count: number, rng:
 }
 
 async function benchQuery(
-  client: GraphQLClient,
+  client: RestBenchClient,
   uuid: string,
   query: Record<string, string>,
   iterations: number,
@@ -49,8 +49,8 @@ async function benchQuery(
 }
 
 export async function run(
-  sparqlClient: GraphQLClient,
-  baselineClient: GraphQLClient,
+  sparqlClient: RestBenchClient,
+  baselineClient: RestBenchClient,
   iterations: number,
   warmup: number,
 ): Promise<PointQueryResult> {

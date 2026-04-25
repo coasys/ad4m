@@ -16,7 +16,7 @@ pub async fn login_proxy(
 ) -> Result<(), String> {
     log::info!("Login proxy server with did: {}", subdomain);
 
-    let graphql_port = app_state.graphql_port;
+    let port = app_state.port;
     let req_credential = &app_state.req_credential;
     let subdomain = format_subdomain(&subdomain);
 
@@ -34,7 +34,7 @@ pub async fn login_proxy(
         })?;
 
     let ad4m_client = Ad4mClient::new(
-        format!("{}:{}/graphql", AD4M_SERVER, graphql_port),
+        format!("{}:{}", AD4M_SERVER, port),
         req_credential.to_string(),
     );
     let signed_message = ad4m_client.agent.sign_message(rand).await.map_err(|err| {
@@ -81,7 +81,7 @@ pub async fn setup_proxy(
 ) -> Result<String, String> {
     log::info!("Setup proxy: {}", subdomain);
 
-    let graphql_port = app_state.graphql_port;
+    let port = app_state.port;
     let (notify_shutdown, _) = broadcast::channel(1);
     let subdomain = format_subdomain(&subdomain);
 
@@ -91,7 +91,7 @@ pub async fn setup_proxy(
         Some(PROXY_SERVER),
         Some(&subdomain),
         None,
-        graphql_port,
+        port,
         notify_shutdown.clone(),
         5,
         credential.clone(),
