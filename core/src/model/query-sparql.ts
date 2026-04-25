@@ -37,7 +37,12 @@ export function hasJsOnlyWhereFilters(
   for (const [propertyName, condition] of Object.entries(where)) {
     if (propertyName === "base" || propertyName === "id") continue;
 
-    // author/timestamp filters are handled in JS
+    // author/timestamp: return true so that count() falls back to the full hydration
+    // path (which uses buildSPARQLQuery — which DOES bind ?author/?timestamp via the
+    // named graph block).  buildSPARQLCountQuery intentionally omits the named graph,
+    // so emitting an ?author FILTER there would produce unbound-variable SPARQL.
+    // buildSPARQLWhereFilters still pushes these into FILTER when called from
+    // buildSPARQLQuery / buildSPARQLGroupedCountQuery, which both include the named graph.
     if (propertyName === "author" || propertyName === "timestamp") return true;
 
     const propMeta = metadata.properties[propertyName];
@@ -541,7 +546,46 @@ function buildSPARQLWhereFilters(
       continue;
     }
 
-    if (propertyName === "author" || propertyName === "timestamp") {
+    if (propertyName === "author") {
+      // ?author is bound by the named graph block in buildSPARQLQuery /
+      // buildSPARQLGroupedCountQuery — push equality/IN filters into SPARQL.
+      if (Array.isArray(condition)) {
+        const formatted = (condition as any[]).map(v => formatSPARQLValue(String(v))).join(', ');
+        filters.push(`STR(?author) IN (${formatted})`);
+      } else if (typeof condition === 'object' && condition !== null) {
+        const ops = condition as any;
+        if (ops.not !== undefined) {
+          if (Array.isArray(ops.not)) {
+            const formatted = (ops.not as any[]).map((v: any) => formatSPARQLValue(String(v))).join(', ');
+            filters.push(`!(STR(?author) IN (${formatted}))`);
+          } else {
+            filters.push(`STR(?author) != ${formatSPARQLValue(String(ops.not))}`);
+          }
+        }
+        // Other operators (gt/lt/etc.) fall through to JS post-filter
+      } else {
+        filters.push(`STR(?author) = ${formatSPARQLValue(String(condition))}`);
+      }
+      continue;
+    }
+
+    if (propertyName === "timestamp") {
+      // ?timestamp is bound by the named graph block — push numeric comparisons.
+      if (typeof condition === 'object' && condition !== null && !Array.isArray(condition)) {
+        const ops = condition as any;
+        if (ops.gt !== undefined) filters.push(`?timestamp > ${Number(ops.gt)}`);
+        if (ops.gte !== undefined) filters.push(`?timestamp >= ${Number(ops.gte)}`);
+        if (ops.lt !== undefined) filters.push(`?timestamp < ${Number(ops.lt)}`);
+        if (ops.lte !== undefined) filters.push(`?timestamp <= ${Number(ops.lte)}`);
+        if (ops.between !== undefined && Array.isArray(ops.between)) {
+          filters.push(`?timestamp >= ${Number(ops.between[0])} && ?timestamp <= ${Number(ops.between[1])}`);
+        }
+        if (ops.not !== undefined) {
+          filters.push(`?timestamp != ${Number(ops.not)}`);
+        }
+      } else if (typeof condition === 'number' || (typeof condition === 'string' && !isNaN(Number(condition)))) {
+        filters.push(`?timestamp = ${Number(condition)}`);
+      }
       continue;
     }
 
@@ -656,4 +700,121 @@ export function parseSparqlCount(result: any[]): number | null {
   if (val === undefined || val === null) return null;
   const parsed = typeof val === 'number' ? val : parseInt(String(val), 10);
   return isNaN(parsed) ? null : parsed;
+}
+
+/**
+ * Build a SPARQL query that counts child instances grouped by parent IRI.
+ *
+ * Used by the projection Path A (`count: true`) in `hydrateRelations` to get
+ * per-parent counts in a single round-trip with zero instance hydration.
+ *
+ * Includes the full named graph block so that `?author` and `?timestamp` are
+ * bound and available for SPARQL FILTER expressions (unlike the intentionally
+ * minimal `buildSPARQLCountQuery` which omits them for speed).
+ *
+ * @param metadata              - Model metadata for the **child** (target) class
+ * @param allRelationsMetadata  - Relations metadata for the child class
+ * @param relationPredicate     - The predicate linking `?parent` → `?source` (child)
+ * @param parentIds             - IRI strings of all parent instances to count for
+ * @param where                 - Optional filter applied to child instances
+ */
+export function buildSPARQLGroupedCountQuery(
+  metadata: ModelMetadata,
+  allRelationsMetadata: Record<string, RelationMetadataEntry>,
+  relationPredicate: string,
+  parentIds: string[],
+  where?: import('./types').Where,
+): string {
+  const joinPatterns: string[] = [];
+  const filterExpressions: string[] = [];
+
+  // Parent → child join and IN filter
+  joinPatterns.push(`\n      ?parent ${iri(relationPredicate)} ?source .`);
+  const parentIris = parentIds.map(id => iri(id)).join(', ');
+  filterExpressions.push(`?parent IN (${parentIris})`);
+
+  // Conformance patterns (mirrors buildSPARQLCountQuery logic)
+  let hasConformance = false;
+  for (const [, propMeta] of Object.entries(metadata.properties)) {
+    if (propMeta.required) {
+      if (propMeta.getter) continue;
+      hasConformance = true;
+      if (propMeta.flag && propMeta.initial) {
+        joinPatterns.push(`\n      ?source ${iri(propMeta.predicate)} ${iri(propMeta.initial)} .`);
+      } else {
+        joinPatterns.push(`\n      ?source ${iri(propMeta.predicate)} ?cfTarget_${propMeta.name} .`);
+      }
+    }
+  }
+
+  if (!hasConformance) {
+    for (const [, propMeta] of Object.entries(metadata.properties)) {
+      if (propMeta.initial) {
+        hasConformance = true;
+        if (propMeta.flag) {
+          joinPatterns.push(`\n      ?source ${iri(propMeta.predicate)} ${iri(propMeta.initial)} .`);
+        } else {
+          joinPatterns.push(`\n      ?source ${iri(propMeta.predicate)} ?cfInitTarget_${propMeta.name} .`);
+        }
+        break;
+      }
+    }
+  }
+
+  if (!hasConformance && joinPatterns.length <= 1) {
+    // Only the parent join so far — add open-world structural matching
+    const knownPredicates: string[] = [];
+    for (const [, propMeta] of Object.entries(metadata.properties)) {
+      if (propMeta.predicate) knownPredicates.push(iri(propMeta.predicate));
+    }
+    if (metadata.relations) {
+      for (const [, relMeta] of Object.entries(metadata.relations)) {
+        if (relMeta.predicate) knownPredicates.push(iri(relMeta.predicate));
+      }
+    }
+    if (knownPredicates.length > 0) {
+      joinPatterns.push(`\n      { SELECT DISTINCT ?source WHERE { ?source ?cf_structPred ?cf_structTarget . FILTER(?cf_structPred IN (${knownPredicates.join(', ')})) } }`);
+    }
+  }
+
+  // User where-clause filters (including author/timestamp after the SPARQL push)
+  const { joins: userJoins, filters: userFilters } = buildSPARQLWhereFilters(metadata, allRelationsMetadata, where);
+  joinPatterns.push(...userJoins);
+  filterExpressions.push(...userFilters);
+
+  const joinClause = joinPatterns.join('\n');
+  const filterClause = filterExpressions.length > 0
+    ? `FILTER(\n      ${filterExpressions.join(' &&\n      ')}\n    )`
+    : '';
+
+  return `
+    SELECT ?parent (COUNT(DISTINCT ?source) AS ?count) WHERE {${joinClause}
+      GRAPH ?linkGraph { ?source ?predicate ?target . }
+      FILTER(isIRI(?source) && isIRI(?predicate))
+      ?linkGraph <ad4m://ontology/author> ?author .
+      ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
+      ${filterClause}
+    }
+    GROUP BY ?parent
+  `.trim();
+}
+
+/**
+ * Parse the result of `buildSPARQLGroupedCountQuery` into a map from parent IRI
+ * to count.  Missing parents (zero matches) are absent from the map — callers
+ * should use `map.get(id) ?? 0`.
+ *
+ * @returns Map from parentId string → count number
+ */
+export function parseSparqlGroupedCount(result: any[]): Map<string, number> {
+  const out = new Map<string, number>();
+  if (!Array.isArray(result)) return out;
+  for (const row of result) {
+    const parentVal = row.parent?.value ?? row.parent;
+    const countVal = row.count?.value ?? row.count;
+    if (!parentVal || countVal === undefined || countVal === null) continue;
+    const parsed = typeof countVal === 'number' ? countVal : parseInt(String(countVal), 10);
+    if (!isNaN(parsed)) out.set(String(parentVal), parsed);
+  }
+  return out;
 }

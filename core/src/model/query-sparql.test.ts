@@ -1,4 +1,4 @@
-import { buildSPARQLOrderLimitOffset, buildSPARQLQuery, buildSPARQLCountQuery, buildPaginationSubquery, hasJsOnlyWhereFilters } from './query-sparql';
+import { buildSPARQLOrderLimitOffset, buildSPARQLQuery, buildSPARQLCountQuery, buildPaginationSubquery, hasJsOnlyWhereFilters, buildSPARQLGroupedCountQuery, parseSparqlGroupedCount } from './query-sparql';
 
 // Minimal stubs for ModelMetadata — buildSPARQLOrderLimitOffset only uses the query arg
 const emptyMetadata: any = { properties: {}, relations: {} };
@@ -49,11 +49,11 @@ describe('hasJsOnlyWhereFilters', () => {
     expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, { category: 'some://uri' })).toBe(false);
   });
 
-  it('returns true when where has author filter', () => {
+  it('returns true when where has author filter (count() fast path is unsafe — buildSPARQLCountQuery has no named graph)', () => {
     expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, { author: 'did:key:abc' })).toBe(true);
   });
 
-  it('returns true when where has timestamp filter', () => {
+  it('returns true when where has timestamp filter (same reason — guards the COUNT fast path)', () => {
     expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, { timestamp: { gt: 100 } })).toBe(true);
   });
 
@@ -88,10 +88,11 @@ describe('buildSPARQLQuery — SPARQL-level pagination via subquery', () => {
     expect(sparql).not.toContain('SELECT DISTINCT');
   });
 
-  it('does NOT include LIMIT/OFFSET when JS-only where filters exist', () => {
-    // author is a JS-only filter
-    const query = { limit: 10, offset: 0, where: { author: 'did:key:abc' } };
-    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+  it('does NOT include LIMIT/OFFSET when JS-only where filters exist (literal gt operator)', () => {
+    // gt on a literal-stored property is JS-only, so pagination must not be pushed to SPARQL
+    const meta: any = { properties: { rating: { name: 'rating', predicate: 'flux://rating', required: true, resolveLanguage: 'literal' } }, relations: {} };
+    const query = { limit: 10, offset: 0, where: { rating: { gt: 3 } } };
+    const sparql = buildSPARQLQuery(meta, emptyRelations, query, modelClass);
     expect(sparql).not.toContain('LIMIT');
     expect(sparql).not.toContain('OFFSET');
   });
@@ -328,9 +329,11 @@ describe('SPARQL-level pagination', () => {
     expect(sparql).not.toContain('GRAPH ?pg_g');
   });
 
-  it('does NOT push pagination to SPARQL when JS-only where filters exist (author)', () => {
-    const query = { limit: 10, where: { author: 'did:key:abc' } };
-    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+  it('does NOT push pagination to SPARQL when JS-only where filters exist (literal gt operator)', () => {
+    // author equality is now SPARQL-pushable; use a literal gt which remains JS-only
+    const meta: any = { properties: { rating: { name: 'rating', predicate: 'flux://rating', required: true, resolveLanguage: 'literal' } }, relations: {} };
+    const query = { limit: 10, where: { rating: { gt: 5 } } };
+    const sparql = buildSPARQLQuery(meta, emptyRelations, query, modelClass);
     expect(sparql).not.toContain('LIMIT');
     expect(sparql).not.toContain('OFFSET');
   });
@@ -404,5 +407,162 @@ describe('buildSPARQLQuery — set-difference patterns', () => {
     // This ensures grandchildren (items at any depth) are matched
     expect(sparql).not.toContain('flux://has_child');
     expect(sparql).toContain('SELECT ?source ?predicate ?target');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// buildSPARQLWhereFilters — author / timestamp SPARQL push
+// ─────────────────────────────────────────────────────────────
+describe('buildSPARQLQuery — author/timestamp SPARQL filter push', () => {
+  const modelClass: any = {};
+
+  it('pushes author equality into SPARQL FILTER using STR(?author)', () => {
+    const query = { where: { author: 'did:key:zABC' } };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('STR(?author) = "did:key:zABC"');
+    expect(sparql).toContain('?author');
+  });
+
+  it('pushes author IN array into SPARQL FILTER', () => {
+    const query = { where: { author: ['did:key:zABC', 'did:key:zDEF'] } };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('STR(?author) IN');
+    expect(sparql).toContain('"did:key:zABC"');
+    expect(sparql).toContain('"did:key:zDEF"');
+  });
+
+  it('pushes author NOT into SPARQL FILTER', () => {
+    const query = { where: { author: { not: 'did:key:zABC' } } };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('STR(?author) != "did:key:zABC"');
+  });
+
+  it('pushes timestamp gt/lt into SPARQL FILTER', () => {
+    const query = { where: { timestamp: { gt: 1000, lt: 9000 } } };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('?timestamp > 1000');
+    expect(sparql).toContain('?timestamp < 9000');
+  });
+
+  it('pushes timestamp between into SPARQL FILTER', () => {
+    const query = { where: { timestamp: { between: [100, 200] as [number, number] } } };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('?timestamp >= 100');
+    expect(sparql).toContain('?timestamp <= 200');
+  });
+
+  it('pushes timestamp equality into SPARQL FILTER', () => {
+    const query = { where: { timestamp: 1714000000000 } };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('?timestamp = 1714000000000');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// buildSPARQLGroupedCountQuery
+// ─────────────────────────────────────────────────────────────
+describe('buildSPARQLGroupedCountQuery', () => {
+  const signalMetadata: any = {
+    properties: {
+      signalTypeId: {
+        name: 'signalTypeId',
+        predicate: 'flux://signalTypeId',
+        required: true,
+        resolveLanguage: 'literal',
+      },
+    },
+    relations: {},
+  };
+
+  it('selects ?parent and COUNT(DISTINCT ?source)', () => {
+    const sparql = buildSPARQLGroupedCountQuery(signalMetadata, emptyRelations, 'flux://has-signal', ['flux://post/1'], undefined);
+    expect(sparql).toContain('SELECT ?parent (COUNT(DISTINCT ?source) AS ?count)');
+  });
+
+  it('groups by ?parent', () => {
+    const sparql = buildSPARQLGroupedCountQuery(signalMetadata, emptyRelations, 'flux://has-signal', ['flux://post/1'], undefined);
+    expect(sparql).toContain('GROUP BY ?parent');
+  });
+
+  it('includes parent → child join with the supplied predicate', () => {
+    const sparql = buildSPARQLGroupedCountQuery(signalMetadata, emptyRelations, 'flux://has-signal', ['flux://post/1', 'flux://post/2'], undefined);
+    expect(sparql).toContain('?parent <flux://has-signal> ?source');
+  });
+
+  it('includes FILTER(?parent IN (...)) for the supplied parent IDs', () => {
+    const sparql = buildSPARQLGroupedCountQuery(signalMetadata, emptyRelations, 'flux://has-signal', ['flux://post/1', 'flux://post/2'], undefined);
+    expect(sparql).toContain('?parent IN (<flux://post/1>, <flux://post/2>)');
+  });
+
+  it('includes the full named graph block (GRAPH ?linkGraph + author + timestamp)', () => {
+    const sparql = buildSPARQLGroupedCountQuery(signalMetadata, emptyRelations, 'flux://has-signal', ['flux://post/1'], undefined);
+    expect(sparql).toContain('GRAPH ?linkGraph');
+    expect(sparql).toContain('?linkGraph <ad4m://ontology/author> ?author');
+    expect(sparql).toContain('?linkGraph <ad4m://ontology/timestamp> ?timestamp');
+  });
+
+  it('includes conformance join for required properties', () => {
+    const sparql = buildSPARQLGroupedCountQuery(signalMetadata, emptyRelations, 'flux://has-signal', ['flux://post/1'], undefined);
+    expect(sparql).toContain('<flux://signalTypeId>');
+  });
+
+  it('applies a where clause filter (author equality) via SPARQL FILTER', () => {
+    const sparql = buildSPARQLGroupedCountQuery(signalMetadata, emptyRelations, 'flux://has-signal', ['flux://post/1'], { author: 'did:key:zABC' });
+    expect(sparql).toContain('STR(?author) = "did:key:zABC"');
+  });
+
+  it('applies a where clause filter (required property equality) via parse_literal', () => {
+    const sparql = buildSPARQLGroupedCountQuery(signalMetadata, emptyRelations, 'flux://has-signal', ['flux://post/1'], { signalTypeId: 'like' });
+    expect(sparql).toContain('parse_literal');
+    expect(sparql).toContain('"like"');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// parseSparqlGroupedCount
+// ─────────────────────────────────────────────────────────────
+describe('parseSparqlGroupedCount', () => {
+  it('returns an empty map for empty input', () => {
+    expect(parseSparqlGroupedCount([]).size).toBe(0);
+  });
+
+  it('returns an empty map for non-array input', () => {
+    expect(parseSparqlGroupedCount(null as any).size).toBe(0);
+  });
+
+  it('parses RDF binding objects ({ parent: { value: ... }, count: { value: ... } })', () => {
+    const rows = [
+      { parent: { value: 'flux://post/1' }, count: { value: '3' } },
+      { parent: { value: 'flux://post/2' }, count: { value: '0' } },
+    ];
+    const map = parseSparqlGroupedCount(rows);
+    expect(map.get('flux://post/1')).toBe(3);
+    expect(map.get('flux://post/2')).toBe(0);
+  });
+
+  it('parses plain string/number values (non-RDF binding format)', () => {
+    const rows = [
+      { parent: 'flux://post/1', count: 5 },
+      { parent: 'flux://post/2', count: '2' },
+    ];
+    const map = parseSparqlGroupedCount(rows);
+    expect(map.get('flux://post/1')).toBe(5);
+    expect(map.get('flux://post/2')).toBe(2);
+  });
+
+  it('skips rows with missing parent or count', () => {
+    const rows = [
+      { parent: { value: 'flux://post/1' } },             // no count
+      { count: { value: '3' } },                           // no parent
+      { parent: { value: 'flux://post/3' }, count: { value: '1' } },
+    ];
+    const map = parseSparqlGroupedCount(rows);
+    expect(map.size).toBe(1);
+    expect(map.get('flux://post/3')).toBe(1);
+  });
+
+  it('skips rows with NaN count', () => {
+    const rows = [{ parent: { value: 'flux://post/1' }, count: { value: 'not-a-number' } }];
+    expect(parseSparqlGroupedCount(rows).size).toBe(0);
   });
 });

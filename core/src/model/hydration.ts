@@ -16,8 +16,9 @@ import { compileWhereClause } from "./query-utils";
 import { escapeQueryString } from "../utils";
 import type {
   PropertyMetadata, RelationMetadata, ModelMetadata,
-  ValueTuple, WhereCondition, IncludeMap, RelationSubQuery,
+  ValueTuple, WhereCondition, IncludeMap, RelationSubQuery, IncludeProjection,
 } from "./types";
+import { buildSPARQLGroupedCountQuery, parseSparqlGroupedCount } from "./query-sparql";
 
 // ──────────────────────────────────────────────────────────
 //  Pure helpers
@@ -638,7 +639,160 @@ export async function hydrateRelations<T>(
 
   const relMeta = getRelationsMetadata(modelClass);
 
+  // ── Projections ($-prefixed keys) ────────────────────────────────────────
+  // Collect all projection entries up-front so we can batch the count queries
+  // together per-projection before processing.  Each projection key starts
+  // with '$' and has a descriptor with a `from` field.
+  const projectionEntries: Array<[string, IncludeProjection]> = [];
+  for (const [key, val] of Object.entries(includeMap)) {
+    if (key.startsWith('$') && val !== null && typeof val === 'object' && 'from' in val) {
+      projectionEntries.push([key, val as IncludeProjection]);
+    }
+  }
+
+  for (const [projKey, proj] of projectionEntries) {
+    const sourceMeta: RelationMetadataEntry | undefined = relMeta[proj.from];
+    if (!sourceMeta) {
+      console.warn(`include projection "${projKey}": relation "${proj.from}" not found in metadata, skipping`);
+      for (const inst of instances) (inst as any)[projKey] = proj.count ? 0 : [];
+      continue;
+    }
+
+    const TargetClass = sourceMeta.target() as any;
+    const allParentIds = instances.map(inst => (inst as any).id).filter(Boolean) as string[];
+
+    if (proj.count) {
+      // ── Path A: grouped SPARQL COUNT ─────────────────────────────────────
+      // One round-trip, zero instance hydration.  Returns one row per parent.
+      const targetMetadata = TargetClass.getModelMetadata?.() ?? null;
+      const targetRelMeta = TargetClass.getAllRelationsMetadata?.() ?? {};
+      let countMap = new Map<string, number>();
+
+      if (targetMetadata && allParentIds.length > 0) {
+        try {
+          const sparql = buildSPARQLGroupedCountQuery(
+            targetMetadata,
+            targetRelMeta,
+            sourceMeta.predicate,
+            allParentIds,
+            proj.where,
+          );
+          const raw = await perspective.querySparql(sparql);
+          const rows = Array.isArray(raw) ? raw
+            : raw?.results?.bindings ?? raw?.bindings ?? [];
+          countMap = parseSparqlGroupedCount(rows);
+        } catch (e) {
+          console.warn(`include projection "${projKey}" count query failed, falling back to 0:`, e);
+        }
+      }
+
+      for (const inst of instances) {
+        (inst as any)[projKey] = countMap.get((inst as any).id) ?? 0;
+      }
+    } else {
+      // ── Path B: findAll + Map distribution ───────────────────────────────
+      // For reverse relations we don't have the child IDs on the instance,
+      // so fall back to a parent-scoped findAll per instance (uncommon path).
+      const isReverse = sourceMeta.kind === 'belongsToOne' || sourceMeta.kind === 'belongsToMany';
+
+      if (isReverse) {
+        // Reverse: the link goes child→parent, reuse the batched SPARQL pattern
+        // from the existing belongsTo path to collect source IDs per parent.
+        if (allParentIds.length > 0) {
+          const sparqlQuery = `SELECT ?source ?target WHERE {
+  GRAPH ?g { ?source <${sourceMeta.predicate}> ?target }
+  FILTER(?target IN (${allParentIds.map(id => `<${id}>`).join(', ')}))
+}`;
+          const sourcesByTarget = new Map<string, string[]>();
+          try {
+            const raw = await perspective.querySparql(sparqlQuery);
+            const bindings = Array.isArray(raw) ? raw : raw?.results?.bindings ?? raw?.bindings ?? [];
+            for (const row of bindings) {
+              const source = row.source?.value ?? row.source;
+              const target = row.target?.value ?? row.target;
+              if (!source || !target) continue;
+              if (!sourcesByTarget.has(target)) sourcesByTarget.set(target, []);
+              sourcesByTarget.get(target)!.push(source);
+            }
+          } catch (e) {
+            console.warn(`include projection "${projKey}" reverse SPARQL failed:`, e);
+          }
+
+          const allSourceIds = new Set<string>();
+          for (const ids of sourcesByTarget.values()) for (const id of ids) allSourceIds.add(id);
+
+          const hydratedMap = new Map<string, any>();
+          if (allSourceIds.size > 0) {
+            const results = await TargetClass.findAll(perspective, {
+              where: { id: Array.from(allSourceIds), ...(proj.where ?? {}) },
+            });
+            for (const r of results) hydratedMap.set(r.id, r);
+          }
+
+          for (const inst of instances) {
+            const sourceIds = sourcesByTarget.get((inst as any).id) ?? [];
+            let resolved = sourceIds.map(id => hydratedMap.get(id)).filter((v: any): v is any => v != null);
+            if (proj.limit != null) {
+              if (proj.limit === 1) {
+                (inst as any)[projKey] = resolved[0] ?? null;
+              } else {
+                (inst as any)[projKey] = resolved.slice(0, proj.limit);
+              }
+            } else {
+              (inst as any)[projKey] = resolved;
+            }
+          }
+        } else {
+          for (const inst of instances) (inst as any)[projKey] = proj.limit === 1 ? null : [];
+        }
+      } else {
+        // Forward: instance[from] holds raw child URIs — collect across all parents
+        const uriSet = new Set<string>();
+        const rawCache = new Map<any, string[]>();
+        for (const inst of instances) {
+          const raw = (inst as any)[proj.from];
+          const uris: string[] = [];
+          if (Array.isArray(raw)) {
+            for (const v of raw) {
+              const id = typeof v === 'string' ? v : v?.id;
+              if (id) { uriSet.add(id); uris.push(id); }
+            }
+          } else if (typeof raw === 'string') {
+            uriSet.add(raw); uris.push(raw);
+          } else if (raw?.id) {
+            uriSet.add(raw.id); uris.push(raw.id);
+          }
+          rawCache.set(inst, uris);
+        }
+
+        const hydratedMap = new Map<string, any>();
+        if (uriSet.size > 0) {
+          const results = await TargetClass.findAll(perspective, {
+            where: { id: Array.from(uriSet), ...(proj.where ?? {}) },
+          });
+          for (const r of results) hydratedMap.set(r.id, r);
+        }
+
+        for (const inst of instances) {
+          const uris = rawCache.get(inst) ?? [];
+          const resolved = uris.map(id => hydratedMap.get(id)).filter((v: any): v is any => v != null);
+          if (proj.limit === 1) {
+            (inst as any)[projKey] = resolved[0] ?? null;
+          } else if (proj.limit != null) {
+            (inst as any)[projKey] = resolved.slice(0, proj.limit);
+          } else {
+            (inst as any)[projKey] = resolved;
+          }
+        }
+      }
+    }
+  }
+
+  // ── Standard relations (non-projected) ───────────────────────────────────
   for (const [relName, includeValue] of Object.entries(includeMap)) {
+    // Skip projection keys — already handled above
+    if (relName.startsWith('$') && typeof includeValue === 'object' && includeValue !== null && 'from' in includeValue) continue;
+
     const meta: RelationMetadataEntry | undefined = relMeta[relName];
     if (!meta) {
       console.warn(`include: relation "${relName}" not found in metadata, skipping`);

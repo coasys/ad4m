@@ -42,11 +42,47 @@ export type ParentScope =
   | { id: string; predicate: string };
 
 /**
+ * Descriptor for a user-named projection — a derived field computed from a
+ * relation that is attached to the parent instance under a custom `$`-prefixed
+ * key in the `IncludeMap`.
+ *
+ * The `from` field must name a declared relation on the model.
+ *
+ * @example
+ * ```typescript
+ * include: {
+ *   $signalCount: { from: 'signals', count: true },
+ *   $mySignal:    { from: 'signals', where: { author: myDid }, limit: 1 },
+ *   $likeSignals: { from: 'signals', where: { signalTypeId: 'like' } },
+ * }
+ * ```
+ */
+export interface IncludeProjection {
+  /** Declared relation name on the model to derive the projection from. */
+  from: string;
+  /**
+   * When true, the projection result is the count of matching instances
+   * as a `number`. All other options (`where`, `limit`) are still applied
+   * before counting. `count: true` → result type is `number`.
+   */
+  count?: true;
+  /** Filter applied to the related instances before the projection result is produced. */
+  where?: Where;
+  /**
+   * Maximum number of results to include.
+   * When `limit` is `1`, the result type is `T | null` (unwrapped single instance)
+   * rather than `T[]`.
+   */
+  limit?: number;
+}
+
+/**
  * Describes which relations to eager-load when querying.
  *
  * Each value is either:
  * - `true` — hydrate the relation one level deep
  * - A `RelationSubQuery` — scoped sub-query (filter / sort / paginate / nested include)
+ * - An `IncludeProjection` — user-named derived field (count, filtered subset, single item)
  *
  * @example
  * ```typescript
@@ -58,10 +94,13 @@ export type ParentScope =
  *
  * // Nested eager-load
  * { comments: { include: { author: true } } }
+ *
+ * // Projection: count + filtered single item
+ * { $signalCount: { from: 'signals', count: true }, $mySignal: { from: 'signals', where: { author: myDid }, limit: 1 } }
  * ```
  */
 export interface IncludeMap {
-  [relation: string]: boolean | RelationSubQuery;
+  [relation: string]: boolean | RelationSubQuery | IncludeProjection;
 }
 
 export type Query = {
