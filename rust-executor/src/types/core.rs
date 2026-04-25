@@ -116,7 +116,7 @@ impl Link {
     /// Examples: `did:key:alice`, `expression://Qm...`, `smart_literal://content`
     /// Validates that link fields are not empty.
     ///
-    /// Note: URI scheme validation was removed to match the original GraphQL
+    /// Note: URI scheme validation was removed to match the original
     /// behavior which accepted bare strings like `"root"` for source/target.
     /// Existing apps (including Flux) rely on this permissive behavior.
     pub fn validate(&self) -> Result<(), AnyError> {

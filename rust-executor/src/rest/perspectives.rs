@@ -989,7 +989,7 @@ pub async fn create_subject(
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
     // The JS client may send subjectClass as a JSON string like
-    // '{"className":"Community","initialValues":{...}}' (legacy from GraphQL era).
+    // '{\'className\':\'Community\',\'initialValues\':{...}}' (legacy from earlier API).
     // Parse it to extract the actual class name.
     let (resolved_class_name, parsed_initial_values) =
         match serde_json::from_str::<serde_json::Value>(&body.subject_class) {

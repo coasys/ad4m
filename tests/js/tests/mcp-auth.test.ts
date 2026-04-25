@@ -79,10 +79,10 @@ describe("MCP Authentication HTTP Tests", function() {
 
         await sleep(3000);
 
-        // Generate agent via GraphQL (no MCP equivalent)
+        // Generate agent via REST (no MCP equivalent)
         const adminClient = new Ad4mClient(`http://127.0.0.1:${gqlPort}`, adminCredential, false);
         await adminClient.agent.generate("test-passphrase");
-        console.log("Agent generated via GraphQL");
+        console.log("Agent generated via REST");
     });
 
     after(async () => {
@@ -230,7 +230,7 @@ describe("MCP Authentication HTTP Tests", function() {
         let adminClient: Ad4mClient;
 
         before(async function() {
-            // Enable multi-user mode via GraphQL so email tools work
+            // Enable multi-user mode via REST so email tools work
             adminClient = new Ad4mClient(`http://127.0.0.1:${gqlPort}`, adminCredential, false);
             await adminClient.runtime.setMultiUserEnabled(true);
             console.log("Multi-user mode enabled");

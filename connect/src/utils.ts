@@ -28,7 +28,8 @@ export function removeLocal(key: string): void {
   if (localStorageSupported()) localStorage.removeItem(`${version}/${key}`);
 }
 
-/** Convert a WebSocket URL to an HTTP base URL. */
+/** Convert a WebSocket URL to an HTTP base URL.
+ *  Also strips any legacy `/graphql` suffix for backward compatibility. */
 export function wsUrlToHttpBase(wsUrl: string): string {
   let url = wsUrl.replace(/^ws(s?):\/\//, (_, s) => `http${s}://`);
     url = url.replace(/\/graphql\/?$/, '').replace(/^ws(s?):\/\//, 'http$1://');

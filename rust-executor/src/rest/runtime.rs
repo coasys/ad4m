@@ -150,7 +150,7 @@ pub async fn export_data(
             let json_data = Ad4mDb::with_global_instance(|db| db.export_all_to_json())
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             // SECURITY TODO: constrain file paths to ad4m data directory.
-            // This is pre-existing behaviour from the GraphQL mutation.
+            // This is pre-existing behaviour from the original mutation.
             let json_string = serde_json::to_string_pretty(&json_data)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             std::fs::write(&body.file_path, json_string)

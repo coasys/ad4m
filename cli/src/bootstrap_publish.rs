@@ -61,7 +61,7 @@ pub async fn start_publishing(
     seed_proto: SeedProto,
     language_language_bundle: String,
 ) {
-    let ad4m_client = Ad4mClient::new("http://localhost:12000/graphql".to_string(), "".to_string());
+    let ad4m_client = Ad4mClient::new("http://localhost:12000".to_string(), "".to_string());
 
     let agent = ad4m_client
         .agent

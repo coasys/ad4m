@@ -2,7 +2,7 @@
  * REST Integration Tests
  * 
  * Tests the core AD4M operations through the REST API transport.
- * Uses Ad4mClient directly with a REST base URL (no GraphQL/Apollo).
+ * Uses Ad4mClient directly with a REST base URL.
  */
 import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';

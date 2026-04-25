@@ -230,7 +230,7 @@ export async function startExecutor(dataPath: string,
 
     executorProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let executorReady = new Promise<void>((resolve, reject) => {
-        // REST branch no longer emits the old GraphQL-era `listening on http://127.0.0.1:<port>`
+        // REST branch no longer emits the old `listening on http://127.0.0.1:<port>`
         // marker consistently. Accept either the legacy marker or the REST startup log so tests
         // can run against both pre-REST and REST executors.
         const legacyApiMarker = `listening on http://127.0.0.1:${gqlPort}`;

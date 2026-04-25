@@ -108,7 +108,7 @@ fn ad4m_signal_emitted(#[serde] signal: JsonValue, #[string] language_address: S
     // `emitSignal` from a flat Language quietly disappeared, with no
     // error surface for the author to notice.
     //
-    // Until a dedicated `AD4M_SIGNAL_TOPIC` + GraphQL subscription is
+    // Until a dedicated `AD4M_SIGNAL_TOPIC` + SSE subscription is
     // wired (tracked as a post-refactor follow-up — see Phase F of
     // docs-src/language-interface-migration-plan.md), route through the
     // telepresence path when the payload happens to be a

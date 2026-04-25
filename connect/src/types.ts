@@ -42,7 +42,7 @@ export type RemoteHost = {
   description?: string;      // host description
   profilePicUrl: string;
   location: string;          // e.g. "Frankfurt, DE"
-  url: string;               // WebSocket/GraphQL endpoint
+  url: string;               // REST API endpoint
   rates: PricingItem[];      // flexible pricing array
   aiModels: string[];        // e.g. ["gpt-4o", "claude-3.5-sonnet"]
   computeSpecs?: string | null; // e.g. "8 vCPU, 32GB RAM"

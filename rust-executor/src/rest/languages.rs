@@ -181,7 +181,7 @@ pub async fn publish_language(
     let controller = LanguageController::global_instance();
 
     // SECURITY TODO: validate language_path is within allowed directories (AD4M data dir or known language dirs).
-    // This is pre-existing behaviour from the GraphQL mutation.
+    // This is pre-existing behaviour from the original mutation.
     let bundle = std::fs::read_to_string(&body.language_path)
         .map_err(|e| ApiError::Internal(format!("Failed to read language bundle: {}", e)))?;
 

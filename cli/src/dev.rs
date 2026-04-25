@@ -70,7 +70,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
             let test_res = tokio::task::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
                 let client = ad4m_client::Ad4mClient::new(
-                    String::from("http://127.0.0.1:4000/graphql"),
+                    String::from("http://127.0.0.1:4000"),
                     String::from("*"),
                 );
                 let me = client.agent.me().await;

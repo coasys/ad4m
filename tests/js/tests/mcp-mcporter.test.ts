@@ -76,10 +76,10 @@ describe("MCP mcporter Integration Tests", function() {
 
         await sleep(3000);
 
-        // Generate agent via GraphQL
+        // Generate agent via REST
         const adminClient = new Ad4mClient(`http://127.0.0.1:${gqlPort}`, adminCredential, false);
         await adminClient.agent.generate("test-passphrase");
-        console.log("Agent generated via GraphQL");
+        console.log("Agent generated via REST");
 
         // Create mcporter config
         const mcporterDir = path.join(appDataPath, "mcporter-config");
