@@ -69,14 +69,18 @@ fn notification_pool_name(uuid: &str) -> String {
 
 fn is_sparql_query(query: &str) -> bool {
     let trimmed = query.trim();
-    // Also match queries starting with PREFIX / BASE declarations
+    // Match SPARQL keywords followed by whitespace or '{' / '<' to avoid
+    // false-positives on Prolog atoms like `base(X).`
     let upper = trimmed.to_ascii_uppercase();
-    upper.starts_with("SELECT")
-        || upper.starts_with("ASK")
-        || upper.starts_with("CONSTRUCT")
-        || upper.starts_with("DESCRIBE")
-        || upper.starts_with("PREFIX")
-        || upper.starts_with("BASE")
+    for keyword in &["SELECT", "ASK", "CONSTRUCT", "DESCRIBE", "PREFIX", "BASE"] {
+        if upper.starts_with(keyword) {
+            let rest = &trimmed[keyword.len()..];
+            if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || c == '{' || c == '<') {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]

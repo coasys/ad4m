@@ -175,12 +175,16 @@ impl SparqlStore {
         })
     }
 
-    /// Returns true if the store contains any quads (non-empty).
+    /// Returns true if the store contains any quads beyond the migration marker.
     pub fn has_data(&self) -> bool {
+        let migration_subj = NamedNodeRef::new_unchecked("ad4m://system/migration");
         self.store
             .quads_for_pattern(None, None, None, None)
-            .next()
-            .is_some()
+            .any(|q| {
+                q.as_ref()
+                    .map(|quad| quad.subject != migration_subj.into())
+                    .unwrap_or(false)
+            })
     }
 
     fn insert_link_triples(&self, link: &DecoratedLinkExpression) -> Result<(), Error> {
@@ -874,8 +878,13 @@ impl SparqlStore {
         let count = links_to_migrate.len();
         log::info!("Found {} links in named-graph format to migrate", count);
 
-        // Remove all old named-graph data
-        // First remove named graph contents and metadata
+        // Safety: write new reifier-format data BEFORE deleting old named-graph
+        // data so a crash mid-migration doesn't lose the only readable copy.
+        for link in &links_to_migrate {
+            self.insert_link_triples(link)?;
+        }
+
+        // Now remove old named-graph data
         for graph_iri in &graph_iris {
             // Remove quads in the named graph
             let ng_quads: Vec<_> = self
@@ -909,12 +918,7 @@ impl SparqlStore {
             let _ = self.store.remove_named_graph(graph_iri.as_ref());
         }
 
-        // Insert new reifier-format data
-        for link in &links_to_migrate {
-            self.insert_link_triples(link)?;
-        }
-
-        // Set migration version
+        // Set migration version only after both insert and cleanup succeeded
         self.set_migration_version(2)?;
 
         log::info!(

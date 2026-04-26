@@ -1213,8 +1213,10 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query: Query = {},
+    classNameOverride?: string | null,
   ): Promise<ResultsWithTotalCount<T>> {
     const metadata = this.getModelMetadata();
+    const className = classNameOverride || metadata.className;
 
     // Build the query input that the Rust endpoint expects.
     // Convert the TS Query type to the executor's ModelQueryInput format.
@@ -1248,7 +1250,7 @@ export class Ad4mModel {
     const shapeJson = JSON.stringify(metadata);
     const queryJson = JSON.stringify(queryInput);
 
-    const result = await perspective.modelQuery(metadata.className, queryJson, shapeJson);
+    const result = await perspective.modelQuery(className, queryJson, shapeJson);
 
     // Convert JSON instances to model class instances, recursively constructing
     // class instances for any included relations resolved by Rust.

@@ -19,6 +19,27 @@ use std::collections::{BTreeMap, HashMap};
 use super::sparql_store::SparqlStore;
 
 // ---------------------------------------------------------------------------
+// SPARQL injection prevention helpers
+// ---------------------------------------------------------------------------
+
+/// Escape a string value for use inside a SPARQL string literal (double-quoted).
+fn escape_sparql_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Validate a value for use inside an IRI `<…>`.  Rejects characters that
+/// would break or inject into a SPARQL IRI token.
+fn validate_iri(s: &str) -> Result<&str, Error> {
+    if s.contains('>') || s.contains('<') || s.contains('{') || s.contains('}') || s.contains('"') || s.contains(' ') {
+        return Err(anyhow!("Invalid IRI component: '{}'", s));
+    }
+    Ok(s)
+}
+
+/// Maximum recursion depth for include resolution to prevent stack overflow.
+const MAX_INCLUDE_DEPTH: u8 = 8;
+
+// ---------------------------------------------------------------------------
 // Query DSL types (mirrors TS types.ts)
 // ---------------------------------------------------------------------------
 
@@ -80,16 +101,25 @@ where
             let mut out = Vec::new();
             for item in arr {
                 if let Value::Array(pair) = item {
-                    if pair.len() == 2 {
-                        let key = pair[0].as_str().unwrap_or("").to_string();
-                        let dir_str = pair[1].as_str().unwrap_or("ASC");
-                        let dir = if dir_str.eq_ignore_ascii_case("desc") {
-                            OrderDirection::DESC
-                        } else {
-                            OrderDirection::ASC
-                        };
-                        out.push((key, dir));
+                    if pair.len() != 2 {
+                        return Err(serde::de::Error::custom("order entry must be a [key, direction] pair"));
                     }
+                    let key = pair[0]
+                        .as_str()
+                        .ok_or_else(|| serde::de::Error::custom("order key must be a string"))?
+                        .to_string();
+                    if key.is_empty() {
+                        return Err(serde::de::Error::custom("order key must not be empty"));
+                    }
+                    let dir_str = pair[1].as_str().unwrap_or("ASC");
+                    let dir = if dir_str.eq_ignore_ascii_case("desc") {
+                        OrderDirection::DESC
+                    } else {
+                        OrderDirection::ASC
+                    };
+                    out.push((key, dir));
+                } else {
+                    return Err(serde::de::Error::custom("order entry must be an array"));
                 }
             }
             Ok(Some(out))
@@ -98,7 +128,12 @@ where
         Value::Object(map) => {
             let mut out = Vec::new();
             for (key, dir_val) in map {
-                let dir_str = dir_val.as_str().unwrap_or("ASC");
+                if key.is_empty() {
+                    return Err(serde::de::Error::custom("order key must not be empty"));
+                }
+                let dir_str = dir_val
+                    .as_str()
+                    .ok_or_else(|| serde::de::Error::custom("order direction must be a string"))?;
                 let dir = if dir_str.eq_ignore_ascii_case("desc") {
                     OrderDirection::DESC
                 } else {
@@ -293,13 +328,17 @@ fn to_f64(val: &Value) -> Option<f64> {
 /// - `<namespace://ClassName.propName> sh://minCount literal:1^^xsd:integer`
 /// - etc.
 fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelShape, Error> {
+    let safe_name = escape_sparql_string(class_name);
     // Step 1: Find the shape URI and target class via SPARQL
+    // Use exact suffix matching (/{name} or #{name}) to avoid "Recipe" matching "MyRecipe"
+    // Build hash suffix separately to avoid `#` confusing `format!`
+    let hash_suffix = format!("#{}", safe_name);
     let query = format!(
         r#"
         SELECT ?shapeUri ?targetClass WHERE {{
             ?targetClass <rdf://type> <ad4m://SubjectClass> .
             ?targetClass <ad4m://shape> ?shapeUri .
-            FILTER(STRENDS(STR(?targetClass), "{class_name}"))
+            FILTER(STRENDS(STR(?targetClass), "/{safe_name}") || STRENDS(STR(?targetClass), "{hash_suffix}") || STR(?targetClass) = "{safe_name}")
         }}
         LIMIT 1
         "#
@@ -430,14 +469,15 @@ fn get_initial_value(
 
     // Quick check: is there a link from targetClass with this predicate to a fixed value?
     // Look for the "required" flag property pattern
+    let safe_tc = validate_iri(target_class).unwrap_or(target_class);
+    let safe_pred = validate_iri(predicate).unwrap_or(predicate);
     let query = format!(
         r#"
         SELECT ?target WHERE {{
-            <{}> <{}> ?target .
+            <{safe_tc}> <{safe_pred}> ?target .
         }}
         LIMIT 1
-        "#,
-        target_class, predicate
+        "#
     );
 
     let result_json = store.query(&query).unwrap_or_else(|_| "[]".to_string());
@@ -463,6 +503,28 @@ pub fn execute_model_query(
     query_input: &ModelQueryInput,
     shape_json: Option<&str>,
 ) -> Result<ModelQueryResult, Error> {
+    execute_model_query_inner(store, class_name, query_input, shape_json, 0)
+}
+
+/// Inner implementation with depth tracking for cycle detection.
+fn execute_model_query_inner(
+    store: &SparqlStore,
+    class_name: &str,
+    query_input: &ModelQueryInput,
+    shape_json: Option<&str>,
+    depth: u8,
+) -> Result<ModelQueryResult, Error> {
+    if depth > MAX_INCLUDE_DEPTH {
+        log::warn!(
+            "Include resolution depth {} exceeded for class '{}'; returning empty",
+            MAX_INCLUDE_DEPTH,
+            class_name
+        );
+        return Ok(ModelQueryResult {
+            instances: vec![],
+            total_count: 0,
+        });
+    }
     // Load shape from store or parse from provided JSON
     let shape = if let Some(json) = shape_json {
         parse_shape_from_json(json, class_name)?
@@ -476,22 +538,24 @@ pub fn execute_model_query(
     // and run a single SELECT COUNT(DISTINCT ?source) query.
     let is_count_only = query_input.count == Some(true) || query_input.limit == Some(0);
     if is_count_only && all_where_pushable(query_input, &shape) {
-        let sparql = build_count_sparql(&shape, query_input);
-        let result_json = store.query(&sparql)?;
-        let results: Vec<Value> = serde_json::from_str(&result_json)?;
-        let count = results
-            .first()
-            .and_then(|r| {
-                r["cnt"]
-                    .as_str()
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .or_else(|| r["cnt"].as_u64().map(|n| n as usize))
-            })
-            .unwrap_or(0);
-        return Ok(ModelQueryResult {
-            instances: vec![],
-            total_count: count,
-        });
+        if let Some(sparql) = build_count_sparql(&shape, query_input) {
+            let result_json = store.query(&sparql)?;
+            let results: Vec<Value> = serde_json::from_str(&result_json)?;
+            let count = results
+                .first()
+                .and_then(|r| {
+                    r["cnt"]
+                        .as_str()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .or_else(|| r["cnt"].as_u64().map(|n| n as usize))
+                })
+                .unwrap_or(0);
+            return Ok(ModelQueryResult {
+                instances: vec![],
+                total_count: count,
+            });
+        }
+        // Fall through to full pipeline when conformance is empty
     }
 
     // ── Full pipeline ────────────────────────────────────────────────────
@@ -550,7 +614,7 @@ pub fn execute_model_query(
     // ── Eager-load included relations ────────────────────────────────────
     if let Some(ref include) = query_input.include {
         if !paginated.is_empty() && !shape.include_relations.is_empty() {
-            resolve_includes_recursive(store, &mut paginated, include, &shape)?;
+            resolve_includes_recursive(store, &mut paginated, include, &shape, depth)?;
         }
     }
 
@@ -708,17 +772,23 @@ fn build_instance_sparql(shape: &ModelShape, query: &ModelQueryInput) -> String 
 
 /// Build a COUNT SPARQL query that returns the number of conforming instances.
 /// Used as a fast path for count-only queries when all where conditions are SPARQL-pushable.
-fn build_count_sparql(shape: &ModelShape, query: &ModelQueryInput) -> String {
+fn build_count_sparql(shape: &ModelShape, query: &ModelQueryInput) -> Option<String> {
     let (conformance, where_extra) = build_query_patterns(shape, query);
 
-    format!(
+    // If no conformance patterns were produced, the COUNT would match every
+    // IRI subject in the store — refuse the fast path.
+    if conformance.trim().is_empty() && where_extra.trim().is_empty() {
+        return None;
+    }
+
+    Some(format!(
         r#"SELECT (COUNT(DISTINCT ?source) AS ?cnt) WHERE {{
 {conformance}
 {where_extra}
     ?source ?_anyPred ?_anyTarget .
     FILTER(isIRI(?source))
 }}"#
-    )
+    ))
 }
 
 /// Check whether a query's where clause contains only conditions that can be
@@ -767,19 +837,24 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
     if let Some(ref parent) = query.parent {
         match parent {
             ParentScope::Raw { id, predicate } => {
-                conformance_patterns.push(format!("    <{}> <{}> ?source .", id, predicate));
+                let safe_id = validate_iri(id).unwrap_or(id);
+                let safe_pred = validate_iri(predicate).unwrap_or(predicate);
+                conformance_patterns.push(format!("    <{safe_id}> <{safe_pred}> ?source ."));
             }
             ParentScope::Model { id, field, model } => {
+                let safe_id = validate_iri(id).unwrap_or(id);
                 // For model-based parent scope, we need to resolve the predicate
                 // The client should send the resolved predicate, but we handle both forms
                 if let Some(ref f) = field {
-                    conformance_patterns.push(format!("    <{}> <{}> ?source .", id, f));
+                    let safe_f = validate_iri(f).unwrap_or(f);
+                    conformance_patterns.push(format!("    <{safe_id}> <{safe_f}> ?source ."));
                 } else {
                     // Fallback: use model name as predicate hint
-                    conformance_patterns.push(format!("    <{}> ?_parentPred ?source .", id));
+                    let safe_model = escape_sparql_string(model);
+                    let hash_model = format!("#{}", safe_model);
+                    conformance_patterns.push(format!("    <{safe_id}> ?_parentPred ?source ."));
                     conformance_patterns.push(format!(
-                        "    FILTER(STRENDS(STR(?_parentPred), \"{}\"))",
-                        model
+                        "    FILTER(STRENDS(STR(?_parentPred), \"/{safe_model}\") || STRENDS(STR(?_parentPred), \"{hash_model}\"))",
                     ));
                 }
             }
@@ -1159,10 +1234,12 @@ fn matches_where(
         if prop_name == "base" || prop_name == "id" {
             // String and StringArray id conditions are pushed to SPARQL.
             // Complex ops (Ops, NumberArray, etc.) still need post-hydration.
+            // Hydrated instances use "id" (not "base"), so map "base" → "id".
+            let lookup_key = if prop_name == "base" { "id" } else { prop_name.as_str() };
             match condition {
                 WhereCondition::String(_) | WhereCondition::StringArray(_) => continue,
                 _ => {
-                    let val = &instance[prop_name];
+                    let val = &instance[lookup_key];
                     if !matches_condition(val, condition) {
                         return false;
                     }
@@ -1300,43 +1377,38 @@ fn matches_ops(val: &Value, ops: &WhereOps) -> bool {
             }
         }
     } else {
-        // For string comparisons, use lexicographic comparison
+        // For string values, try numeric parse; if it fails AND a numeric op is
+        // present, the condition does not match (instead of silently passing).
+        let has_numeric_op = ops.lt.is_some()
+            || ops.lte.is_some()
+            || ops.gt.is_some()
+            || ops.gte.is_some()
+            || ops.between.is_some();
+
         if let Value::String(s) = val {
-            // Try parsing as timestamp for comparison
-            if let Some(lt) = ops.lt {
-                if let Ok(sv) = s.parse::<f64>() {
-                    if sv >= lt {
-                        return false;
+            match s.parse::<f64>() {
+                Ok(sv) => {
+                    if let Some(lt) = ops.lt {
+                        if sv >= lt { return false; }
+                    }
+                    if let Some(lte) = ops.lte {
+                        if sv > lte { return false; }
+                    }
+                    if let Some(gt) = ops.gt {
+                        if sv <= gt { return false; }
+                    }
+                    if let Some(gte) = ops.gte {
+                        if sv < gte { return false; }
+                    }
+                    if let Some((lo, hi)) = ops.between {
+                        if sv < lo || sv > hi { return false; }
                     }
                 }
-            }
-            if let Some(lte) = ops.lte {
-                if let Ok(sv) = s.parse::<f64>() {
-                    if sv > lte {
-                        return false;
-                    }
+                Err(_) if has_numeric_op => {
+                    // Non-numeric string with a numeric comparator → no match
+                    return false;
                 }
-            }
-            if let Some(gt) = ops.gt {
-                if let Ok(sv) = s.parse::<f64>() {
-                    if sv <= gt {
-                        return false;
-                    }
-                }
-            }
-            if let Some(gte) = ops.gte {
-                if let Ok(sv) = s.parse::<f64>() {
-                    if sv < gte {
-                        return false;
-                    }
-                }
-            }
-            if let Some((lo, hi)) = ops.between {
-                if let Ok(sv) = s.parse::<f64>() {
-                    if sv < lo || sv > hi {
-                        return false;
-                    }
-                }
+                _ => {}
             }
         }
         // If value is null and we have numeric conditions, don't match
@@ -1472,19 +1544,29 @@ pub fn resolve_reverse_relations(
     }
 
     for (rel_name, predicate, is_single) in relations {
-        // Batch query: find all links with this predicate pointing to any of our instances
+        // Single batched query per relation: find all links with this predicate
+        // targeting ANY of our instances, then group by target in Rust.
+        let all_links = store.query_links(None, Some(predicate), None, None, None, None)?;
+
+        // Build target_id → [source_id, ...] map
+        let mut target_to_sources: HashMap<String, Vec<String>> = HashMap::new();
+        for link in &all_links {
+            target_to_sources
+                .entry(link.data.target.clone())
+                .or_default()
+                .push(link.data.source.clone());
+        }
+
         for inst in instances.iter_mut() {
             let id = match inst["id"].as_str() {
-                Some(id) => id.to_string(),
+                Some(id) => id,
                 None => continue,
             };
 
-            let links = store.query_links(None, Some(predicate), Some(&id), None, None, None)?;
-
-            let source_ids: Vec<Value> = links
-                .iter()
-                .map(|l| Value::String(l.data.source.clone()))
-                .collect();
+            let source_ids: Vec<Value> = target_to_sources
+                .get(id)
+                .map(|sources| sources.iter().map(|s| Value::String(s.clone())).collect())
+                .unwrap_or_default();
 
             if *is_single {
                 let val = source_ids.last().cloned().unwrap_or(Value::Null);
@@ -1495,64 +1577,6 @@ pub fn resolve_reverse_relations(
                     .map(|obj| obj.insert(rel_name.clone(), Value::Array(source_ids)));
             }
         }
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Include (eager-loading) support (Phase 2)
-// ---------------------------------------------------------------------------
-
-/// Eager-load included relations for all instances.
-pub(crate) fn resolve_includes(
-    store: &SparqlStore,
-    instances: &mut [Value],
-    include: &HashMap<String, IncludeValue>,
-    shape: &ModelShape,
-) -> Result<(), Error> {
-    for (rel_name, include_val) in include {
-        // Find the relation property in the shape
-        let prop = match shape.properties.iter().find(|p| &p.name == rel_name) {
-            Some(p) => p,
-            None => continue,
-        };
-
-        if !prop.is_collection {
-            continue; // Only collections can be eagerly loaded
-        }
-
-        let sub_query = match include_val {
-            IncludeValue::Bool(false) => continue,
-            IncludeValue::Bool(true) => ModelQueryInput::default(),
-            IncludeValue::SubQuery(sq) => *sq.clone(),
-        };
-
-        // For each instance, find related entities
-        for inst in instances.iter_mut() {
-            let id = match inst["id"].as_str() {
-                Some(id) => id.to_string(),
-                None => continue,
-            };
-
-            // Forward relation: source=instance, predicate=rel.predicate, target=?
-            let related_links =
-                store.query_links(Some(&id), Some(&prop.predicate), None, None, None, None)?;
-
-            let related_ids: Vec<String> = related_links
-                .iter()
-                .map(|l| l.data.target.clone())
-                .collect();
-
-            // If there's a sub-query with its own class, we'd need to recursively query
-            // For now, just set the IDs
-            let arr: Vec<Value> = related_ids.into_iter().map(Value::String).collect();
-
-            inst.as_object_mut()
-                .map(|obj| obj.insert(rel_name.clone(), Value::Array(arr)));
-        }
-
-        let _ = sub_query; // Will be used for nested querying in future
     }
 
     Ok(())
@@ -1571,6 +1595,7 @@ fn resolve_includes_recursive(
     instances: &mut [Value],
     include: &HashMap<String, IncludeValue>,
     shape: &ModelShape,
+    depth: u8,
 ) -> Result<(), Error> {
     for (rel_name, include_val) in include {
         match include_val {
@@ -1591,9 +1616,9 @@ fn resolve_includes_recursive(
         };
 
         if rel.direction == "reverse" {
-            resolve_reverse_include(store, instances, rel, &sub_query)?;
+            resolve_reverse_include(store, instances, rel, &sub_query, depth)?;
         } else {
-            resolve_forward_include(store, instances, rel, &sub_query)?;
+            resolve_forward_include(store, instances, rel, &sub_query, depth)?;
         }
     }
     Ok(())
@@ -1609,6 +1634,7 @@ fn resolve_forward_include(
     instances: &mut [Value],
     rel: &ShapeRelation,
     sub_query: &ModelQueryInput,
+    depth: u8,
 ) -> Result<(), Error> {
     // Collect all target IDs across all instances
     let mut all_ids: Vec<String> = Vec::new();
@@ -1649,11 +1675,12 @@ fn resolve_forward_include(
 
     let has_sub_order = sub_query.order.is_some();
 
-    let result = execute_model_query(
+    let result = execute_model_query_inner(
         store,
         &rel.target_class_name,
         &query,
         Some(&rel.target_shape_json),
+        depth + 1,
     )?;
 
     // Build id → hydrated instance map + ordered ID list
@@ -1718,6 +1745,7 @@ fn resolve_reverse_include(
     instances: &mut [Value],
     rel: &ShapeRelation,
     sub_query: &ModelQueryInput,
+    depth: u8,
 ) -> Result<(), Error> {
     let all_ids: Vec<String> = instances
         .iter()
@@ -1733,9 +1761,9 @@ fn resolve_reverse_include(
         .map(|id| format!("<{}>", id))
         .collect::<Vec<_>>()
         .join(", ");
+    let safe_pred = validate_iri(&rel.predicate).unwrap_or(&rel.predicate);
     let sparql = format!(
-        "SELECT ?source ?target WHERE {{ ?source <{}> ?target . FILTER(?target IN ({})) }}",
-        rel.predicate, id_list
+        "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . FILTER(?target IN ({id_list})) }}"
     );
     let result_json = store.query(&sparql)?;
     let rows: Vec<Value> = serde_json::from_str(&result_json)?;
@@ -1794,11 +1822,12 @@ fn resolve_reverse_include(
         }
         query.where_clause = Some(wc);
 
-        let result = execute_model_query(
+        let result = execute_model_query_inner(
             store,
             &rel.target_class_name,
             &query,
             Some(&rel.target_shape_json),
+            depth + 1,
         )?;
 
         ordered_result_ids = result

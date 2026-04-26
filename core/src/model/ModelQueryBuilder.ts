@@ -330,7 +330,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * Shared query execution logic — routes through the executor-side modelQuery endpoint.
    */
   private async executeSparqlQuery(): Promise<T[]> {
-    const { results } = await (this.ctor as any).executeModelQuery(this.perspective, this.queryParams);
+    const { results } = await (this.ctor as any).executeModelQuery(this.perspective, this.queryParams, this.modelClassName);
     return results;
   }
 
@@ -493,7 +493,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async count(): Promise<number> {
     if (this.engineFlag === 'sparql') {
-      const { totalCount } = await (this.ctor as any).executeModelQuery(this.perspective, { ...this.queryParams, limit: 0 });
+      const { totalCount } = await (this.ctor as any).executeModelQuery(this.perspective, { ...this.queryParams, limit: 0 }, this.modelClassName);
       return totalCount;
     } else {
       const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
@@ -618,7 +618,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     if (this.engineFlag === 'sparql') {
-      const { results, totalCount } = await (this.ctor as any).executeModelQuery(this.perspective, paginationQuery);
+      const { results, totalCount } = await (this.ctor as any).executeModelQuery(this.perspective, paginationQuery, this.modelClassName);
       return { results, totalCount, pageSize, pageNumber };
     } else {
       const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
