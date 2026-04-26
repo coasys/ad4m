@@ -41,6 +41,9 @@ commands:
     steps:
       - checkout
       - run:
+          name: Remove stale test data (self-hosted runner — Oxigraph DB format may change between branches)
+          command: rm -rf tests/js/tst-tmp
+      - run:
           name: Restore binaries from local stash (no CircleCI network storage needed — same host)
           command: |
             mkdir -p target/release
