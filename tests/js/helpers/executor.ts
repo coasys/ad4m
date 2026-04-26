@@ -1,4 +1,5 @@
 import { ChildProcess } from "node:child_process";
+import fs from "node:fs";
 import { Ad4mClient } from "@coasys/ad4m";
 import { startExecutor, apolloClient } from "../utils/utils.js";
 import { getFreePorts, registerPorts, deregisterPorts } from "./ports.js";
@@ -76,6 +77,11 @@ export async function startAgent(
   registerPorts([gqlPort, hcAdminPort, hcAppPort]);
 
   const appDataPath = path.join(TEST_DIR, "agents", agentName);
+
+  // Remove stale agent data — Oxigraph DB format may change between branches
+  // and the self-hosted CI runner retains tst-tmp/ across jobs.
+  fs.rmSync(appDataPath, { recursive: true, force: true });
+
   const bootstrapSeedPath = opts.bootstrapSeedPath ?? BOOTSTRAP_SEED;
 
   const executorProcess = await startExecutor(
