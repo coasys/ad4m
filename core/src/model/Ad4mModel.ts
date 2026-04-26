@@ -118,6 +118,12 @@ function jsonToModelInstance<T extends Ad4mModel>(
     }
     if (isReadonly) continue;
 
+    // Parse ISO timestamps to epoch milliseconds (matches hydrateFromLinks behaviour)
+    if ((key === 'createdAt' || key === 'updatedAt') && typeof value === 'string' && value.includes('T')) {
+      instance[key] = new Date(value).getTime();
+      continue;
+    }
+
     instance[key] = value;
   }
 
