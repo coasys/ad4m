@@ -30,7 +30,13 @@ fn escape_sparql_string(s: &str) -> String {
 /// Validate a value for use inside an IRI `<…>`.  Rejects characters that
 /// would break or inject into a SPARQL IRI token.
 fn validate_iri(s: &str) -> Result<&str, Error> {
-    if s.contains('>') || s.contains('<') || s.contains('{') || s.contains('}') || s.contains('"') || s.contains(' ') {
+    if s.contains('>')
+        || s.contains('<')
+        || s.contains('{')
+        || s.contains('}')
+        || s.contains('"')
+        || s.contains(' ')
+    {
         return Err(anyhow!("Invalid IRI component: '{}'", s));
     }
     Ok(s)
@@ -102,7 +108,9 @@ where
             for item in arr {
                 if let Value::Array(pair) = item {
                     if pair.len() != 2 {
-                        return Err(serde::de::Error::custom("order entry must be a [key, direction] pair"));
+                        return Err(serde::de::Error::custom(
+                            "order entry must be a [key, direction] pair",
+                        ));
                     }
                     let key = pair[0]
                         .as_str()
@@ -1235,7 +1243,11 @@ fn matches_where(
             // String and StringArray id conditions are pushed to SPARQL.
             // Complex ops (Ops, NumberArray, etc.) still need post-hydration.
             // Hydrated instances use "id" (not "base"), so map "base" → "id".
-            let lookup_key = if prop_name == "base" { "id" } else { prop_name.as_str() };
+            let lookup_key = if prop_name == "base" {
+                "id"
+            } else {
+                prop_name.as_str()
+            };
             match condition {
                 WhereCondition::String(_) | WhereCondition::StringArray(_) => continue,
                 _ => {
@@ -1389,19 +1401,29 @@ fn matches_ops(val: &Value, ops: &WhereOps) -> bool {
             match s.parse::<f64>() {
                 Ok(sv) => {
                     if let Some(lt) = ops.lt {
-                        if sv >= lt { return false; }
+                        if sv >= lt {
+                            return false;
+                        }
                     }
                     if let Some(lte) = ops.lte {
-                        if sv > lte { return false; }
+                        if sv > lte {
+                            return false;
+                        }
                     }
                     if let Some(gt) = ops.gt {
-                        if sv <= gt { return false; }
+                        if sv <= gt {
+                            return false;
+                        }
                     }
                     if let Some(gte) = ops.gte {
-                        if sv < gte { return false; }
+                        if sv < gte {
+                            return false;
+                        }
                     }
                     if let Some((lo, hi)) = ops.between {
-                        if sv < lo || sv > hi { return false; }
+                        if sv < lo || sv > hi {
+                            return false;
+                        }
                     }
                 }
                 Err(_) if has_numeric_op => {

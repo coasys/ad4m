@@ -75,7 +75,9 @@ fn is_sparql_query(query: &str) -> bool {
     for keyword in &["SELECT", "ASK", "CONSTRUCT", "DESCRIBE", "PREFIX", "BASE"] {
         if upper.starts_with(keyword) {
             let rest = &trimmed[keyword.len()..];
-            if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || c == '{' || c == '<') {
+            if rest.is_empty()
+                || rest.starts_with(|c: char| c.is_whitespace() || c == '{' || c == '<')
+            {
                 return true;
             }
         }
