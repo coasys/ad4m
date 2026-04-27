@@ -461,8 +461,12 @@ pub async fn handle_perspective_diff_from_link_language_impl(
     diff: PerspectiveDiff,
     language_address: String,
 ) {
-    log::info!("🔄 DIFF FROM LINK LANG [{}]: {} additions, {} removals",
-        language_address, diff.additions.len(), diff.removals.len());
+    log::info!(
+        "🔄 DIFF FROM LINK LANG [{}]: {} additions, {} removals",
+        language_address,
+        diff.additions.len(),
+        diff.removals.len()
+    );
     if let Some(perspective) = perspective_by_link_language(language_address.clone()).await {
         if let Err(e) = perspective.diff_from_link_language(diff).await {
             log::error!(
@@ -472,7 +476,10 @@ pub async fn handle_perspective_diff_from_link_language_impl(
             );
         }
     } else {
-        log::warn!("🔄 DIFF FROM LINK LANG [{}]: No perspective found for this link language!", language_address);
+        log::warn!(
+            "🔄 DIFF FROM LINK LANG [{}]: No perspective found for this link language!",
+            language_address
+        );
     }
 }
 

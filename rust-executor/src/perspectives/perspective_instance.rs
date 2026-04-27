@@ -762,8 +762,12 @@ impl PerspectiveInstance {
             log::info!("🔗 COMMIT [{}]: skipped — no neighbourhood", handle.uuid);
             return Ok(());
         }
-        log::info!("🔗 COMMIT [{}]: attempting {} additions, {} removals",
-            handle.uuid, diff.additions.len(), diff.removals.len());
+        log::info!(
+            "🔗 COMMIT [{}]: attempting {} additions, {} removals",
+            handle.uuid,
+            diff.additions.len(),
+            diff.removals.len()
+        );
 
         // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
         let (_, pending_ids) =
@@ -811,7 +815,10 @@ impl PerspectiveInstance {
         let ok = match commit_result {
             Ok(Some(rev)) => {
                 if rev.trim().is_empty() {
-                    log::warn!("🔗 COMMIT [{}]: returned empty revision string; treating as success", handle.uuid);
+                    log::warn!(
+                        "🔗 COMMIT [{}]: returned empty revision string; treating as success",
+                        handle.uuid
+                    );
                     true
                 } else {
                     log::info!("🔗 COMMIT [{}]: success — revision: {}", handle.uuid, rev);
@@ -819,13 +826,17 @@ impl PerspectiveInstance {
                 }
             }
             Ok(None) => {
-                log::info!("🔗 COMMIT [{}]: returned None (flat commit success)", handle.uuid);
+                log::info!(
+                    "🔗 COMMIT [{}]: returned None (flat commit success)",
+                    handle.uuid
+                );
                 true
             }
             Err(e) => {
                 log::warn!(
                     "🔗 COMMIT [{}]: FAILED — {:?} — storing in pending diffs",
-                    handle.uuid, e
+                    handle.uuid,
+                    e
                 );
                 false
             }
@@ -864,11 +875,20 @@ impl PerspectiveInstance {
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) -> Result<(), AnyError> {
         let uuid = self.persisted.lock().await.uuid.clone();
-        log::info!("🔄 SYNC RECV [{}]: {} additions, {} removals from link language",
-            uuid, diff.additions.len(), diff.removals.len());
+        log::info!(
+            "🔄 SYNC RECV [{}]: {} additions, {} removals from link language",
+            uuid,
+            diff.additions.len(),
+            diff.removals.len()
+        );
         for link in &diff.additions {
-            log::info!("🔄 SYNC RECV [{}]:   + {} -> {} (by {})",
-                uuid, link.data.source, link.data.target, link.author);
+            log::info!(
+                "🔄 SYNC RECV [{}]:   + {} -> {} (by {})",
+                uuid,
+                link.data.source,
+                link.data.target,
+                link.author
+            );
         }
         // Deduplicate by (author, timestamp, source, predicate, target)
         // Use structured keys to avoid delimiter collision issues
@@ -2592,18 +2612,33 @@ impl PerspectiveInstance {
         // Removals first
         for removal in &diff.removals {
             if let Err(e) = self.sparql_store.remove_link(removal) {
-                log::warn!("💾 PERSIST [{}]: FAILED to remove link {} -> {}: {:?}",
-                    uuid, removal.data.source, removal.data.target, e);
+                log::warn!(
+                    "💾 PERSIST [{}]: FAILED to remove link {} -> {}: {:?}",
+                    uuid,
+                    removal.data.source,
+                    removal.data.target,
+                    e
+                );
             }
         }
         // Additions after
         for addition in &diff.additions {
             if let Err(e) = self.sparql_store.add_link(addition) {
-                log::warn!("💾 PERSIST [{}]: FAILED to add link {} -> {}: {:?}",
-                    uuid, addition.data.source, addition.data.target, e);
+                log::warn!(
+                    "💾 PERSIST [{}]: FAILED to add link {} -> {}: {:?}",
+                    uuid,
+                    addition.data.source,
+                    addition.data.target,
+                    e
+                );
             } else {
-                log::info!("💾 PERSIST [{}]: added link {} -> {} (by {})",
-                    uuid, addition.data.source, addition.data.target, addition.author);
+                log::info!(
+                    "💾 PERSIST [{}]: added link {} -> {} (by {})",
+                    uuid,
+                    addition.data.source,
+                    addition.data.target,
+                    addition.author
+                );
             }
         }
 
