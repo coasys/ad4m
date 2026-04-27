@@ -317,9 +317,19 @@ fn parse_literal_value(uri: &str) -> Value {
 fn to_f64(val: &Value) -> Option<f64> {
     match val {
         Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.parse::<f64>().ok(),
+        Value::String(s) => s
+            .parse::<f64>()
+            .ok()
+            .or_else(|| iso_to_epoch_ms(s)),
         _ => None,
     }
+}
+
+/// Convert an ISO 8601 timestamp string to epoch milliseconds.
+fn iso_to_epoch_ms(s: &str) -> Option<f64> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp_millis() as f64)
 }
 
 // ---------------------------------------------------------------------------
@@ -541,10 +551,12 @@ fn execute_model_query_inner(
     };
 
     // ── Fast path: COUNT-only ────────────────────────────────────────────
-    // When the caller only needs a count (limit==0 or count==true) and all
-    // where conditions can be pushed to SPARQL, we skip hydration entirely
-    // and run a single SELECT COUNT(DISTINCT ?source) query.
-    let is_count_only = query_input.count == Some(true) || query_input.limit == Some(0);
+    // When the caller only needs a count (limit==0) and all where conditions
+    // can be pushed to SPARQL, we skip hydration entirely and run a single
+    // SELECT COUNT(DISTINCT ?source) query.
+    // Note: count==true with limit>0 means "return instances AND total count",
+    // so we must NOT take the fast path in that case.
+    let is_count_only = query_input.limit == Some(0);
     if is_count_only && all_where_pushable(query_input, &shape) {
         if let Some(sparql) = build_count_sparql(&shape, query_input) {
             let result_json = store.query(&sparql)?;
@@ -1025,6 +1037,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
 
 /// Convert a JS value to its literal: IRI form, matching how the Rust executor
 /// stores property values.
+#[allow(dead_code)]
 fn value_to_literal_iri_string(s: &str) -> String {
     // If it already looks like a URI, use as-is
     if s.contains("://") || s.starts_with("literal:") {
@@ -1351,6 +1364,13 @@ fn matches_ops(val: &Value, ops: &WhereOps) -> bool {
                             .zip(item.as_f64())
                             .map(|(a, b)| (a - b).abs() < f64::EPSILON)
                             .unwrap_or(false),
+                        // Cross-type: ISO string vs epoch number (timestamps)
+                        (Value::String(_), Value::Number(_)) | (Value::Number(_), Value::String(_)) => {
+                            to_f64(val)
+                                .zip(to_f64(item))
+                                .map(|(a, b)| (a - b).abs() < f64::EPSILON)
+                                .unwrap_or(false)
+                        }
                         _ => false,
                     } {
                         return false;
@@ -2143,5 +2163,101 @@ impl Default for WhereOps {
             gte: None,
             contains: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::perspectives::sparql_store::SparqlStore;
+    use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
+    use serde_json::json;
+
+    fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> DecoratedLinkExpression {
+        DecoratedLinkExpression {
+            author: "did:key:test123".to_string(),
+            timestamp: ts.to_string(),
+            data: Link {
+                source: source.to_string(),
+                predicate: Some(predicate.to_string()),
+                target: target.to_string(),
+            },
+            proof: DecoratedExpressionProof {
+                key: "key".to_string(),
+                signature: "sig".to_string(),
+                valid: Some(true),
+                invalid: Some(false),
+            },
+            status: None,
+        }
+    }
+
+    #[test]
+    fn test_full_model_query_with_where_filter() {
+        // Create an in-memory store
+        let store = SparqlStore::new(None).unwrap();
+
+        // Simulate a Recipe with:
+        //   - Flag: <ad4m://type> → <ad4m://recipe>
+        //   - Name: <recipe://name> → literal:json:{signed expression with data="Recipe 1"}
+
+        let base1 = "literal:string:recipe1base";
+
+        // Signed expression for name "Recipe 1"
+        let signed_name = serde_json::json!({
+            "author": "did:key:test123",
+            "timestamp": "1700000000000",
+            "data": "Recipe 1",
+            "proof": {"key": "k", "signature": "s"}
+        });
+        let signed_name_str = serde_json::to_string(&signed_name).unwrap();
+        let name_encoded = urlencoding::encode(&signed_name_str);
+        let name_target = format!("literal:json:{}", name_encoded);
+
+        // Add the type flag link
+        let flag_link = make_link(base1, "ad4m://type", "ad4m://recipe", "1700000000000");
+        store.add_link(&flag_link).unwrap();
+
+        // Add the name link
+        let name_link = make_link(base1, "recipe://name", &name_target, "1700000000001");
+        store.add_link(&name_link).unwrap();
+
+        // Shape JSON (like what TS sends)
+        let shape_json = r#"{
+            "className": "Recipe",
+            "properties": {
+                "type": {
+                    "predicate": "ad4m://type",
+                    "required": true,
+                    "flag": true,
+                    "initial": "ad4m://recipe"
+                },
+                "name": {
+                    "predicate": "recipe://name",
+                    "required": false,
+                    "resolveLanguage": "literal"
+                }
+            },
+            "relations": {}
+        }"#;
+
+        // Query without WHERE - should find 1 instance
+        let query_no_where = ModelQueryInput::default();
+        let result = execute_model_query(&store, "Recipe", &query_no_where, Some(shape_json)).unwrap();
+        assert_eq!(result.instances.len(), 1, "Should find 1 recipe without WHERE");
+
+        // Check that name is hydrated
+        let name_val = &result.instances[0]["name"];
+        assert_eq!(name_val, &json!("Recipe 1"), "Name should be 'Recipe 1'");
+
+        // Query WITH WHERE - should also find 1 instance
+        let mut where_clause = HashMap::new();
+        where_clause.insert("name".to_string(), WhereCondition::String("Recipe 1".to_string()));
+        let query_with_where = ModelQueryInput {
+            where_clause: Some(where_clause),
+            ..Default::default()
+        };
+        let result2 = execute_model_query(&store, "Recipe", &query_with_where, Some(shape_json)).unwrap();
+        assert_eq!(result2.instances.len(), 1, "WHERE name='Recipe 1' should match 1 recipe");
     }
 }

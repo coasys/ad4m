@@ -127,6 +127,20 @@ function jsonToModelInstance<T extends Ad4mModel>(
     instance[key] = value;
   }
 
+  // Apply property transform functions from decorators (only for literal-resolved
+  // or no-resolveLanguage properties; non-literal properties are resolved + transformed
+  // asynchronously in executeModelQuery).
+  try {
+    const propsMeta = getPropertiesMetadata(ModelClass as any);
+    for (const [propName, opts] of Object.entries(propsMeta)) {
+      const o = opts as any;
+      if (typeof o.transform !== 'function' || !(propName in json)) continue;
+      // Skip non-literal resolveLanguage props — they need async expression resolution first
+      if (o.resolveLanguage != null && o.resolveLanguage !== 'literal') continue;
+      instance[propName] = o.transform(instance[propName]);
+    }
+  } catch (_) { /* no metadata available */ }
+
   // Recursively convert included relation values to class instances
   if (include) {
     const relMeta = getRelationsMetadata(ModelClass as any);
@@ -1257,6 +1271,44 @@ export class Ad4mModel {
     const instances: T[] = result.instances.map((json: any) => {
       return jsonToModelInstance(this, perspective, json, query.include, query.properties);
     });
+
+    // Resolve non-literal expressions (e.g. file languages where the stored
+    // value is a content-addressed hash that must be fetched from the language
+    // runtime). The Rust endpoint returns raw target URIs; we resolve them here.
+    const propsMeta = getPropertiesMetadata(this as any);
+    const resolveProps = Object.entries(propsMeta).filter(
+      ([, opts]: [string, any]) =>
+        opts.resolveLanguage != null &&
+        opts.resolveLanguage !== 'literal',
+    );
+    if (resolveProps.length > 0) {
+      await Promise.all(
+        instances.map(async (inst: any) => {
+          for (const [propName, opts] of resolveProps) {
+            const val = inst[propName];
+            if (typeof val !== 'string' || !val || val.startsWith('literal:')) continue;
+            try {
+              const expression = await perspective.getExpression(val);
+              if (expression) {
+                let resolved: any;
+                try { resolved = JSON.parse(expression.data); } catch { resolved = expression.data; }
+                const transform = (opts as any).transform;
+                inst[propName] = typeof transform === 'function' ? transform(resolved) : resolved;
+              }
+            } catch (_) { /* resolution failed — keep raw value */ }
+          }
+        }),
+      );
+    }
+
+    // Run relation type-conformance filtering (ensures @HasMany/@HasOne
+    // targets actually conform to the target class's shape).
+    for (const inst of instances) {
+      await evaluateCustomGettersForInstance(inst, perspective, metadata, {
+        skipPropertyGetters: true,
+        ...(query.include && { include: query.include }),
+      });
+    }
 
     // Take snapshots for dirty tracking
     const snapshotRelations = query.include;

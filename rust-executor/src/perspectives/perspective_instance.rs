@@ -211,6 +211,17 @@ fn extract_predicates_from_sparql(query: &str) -> HashSet<String> {
         return HashSet::new();
     }
 
+    // Detect variable predicate in regular triple patterns (e.g. ?source ?predicate ?target)
+    // When a query uses a variable predicate, it can match any predicate,
+    // so we must always re-check.
+    let var_pred = regex::Regex::new(
+        r"(?:\?\w+|<[^>]+>)\s+\?\w+\s+(?:\?\w+|<[^>]+>)\s*\.",
+    )
+    .unwrap();
+    if var_pred.is_match(query) {
+        return HashSet::new();
+    }
+
     let mut predicates = HashSet::new();
     // Match triple patterns: (var|uri) <uri> (var|uri)
     // The middle <uri> is the predicate
@@ -5265,6 +5276,29 @@ mod tests {
         assert!(
             predicates.is_empty(),
             "Query with variable ?predicate should return empty set, got: {:?}",
+            predicates
+        );
+    }
+
+    #[test]
+    fn test_extract_predicates_reifier_pattern_variable_predicate() {
+        // RDF 1.2 reifier-based queries use `?source ?predicate ?target .`
+        // outside of GRAPH patterns. The variable predicate must still be
+        // detected so subscriptions always re-check.
+        let query = r#"
+            SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
+                ?source <test://post_type> <test://post> .
+                ?source ?predicate ?target .
+                ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+                FILTER(isIRI(?source) && isIRI(?predicate))
+                ?_reifier <ad4m://ontology/author> ?author .
+                ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+            }
+        "#;
+        let predicates = extract_predicates_from_sparql(query);
+        assert!(
+            predicates.is_empty(),
+            "Reifier query with variable ?predicate should return empty set, got: {:?}",
             predicates
         );
     }
