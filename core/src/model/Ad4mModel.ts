@@ -1303,14 +1303,14 @@ export class Ad4mModel {
 
     // Run relation type-conformance filtering (ensures @HasMany/@HasOne
     // targets actually conform to the target class's shape).
-    // Skip relations that were already hydrated by Rust include resolution —
-    // those are nested objects, and re-evaluating their conformance getter
-    // would overwrite them with raw string URIs.
-    const includedRelNames = query.include ? new Set(Object.keys(query.include)) : new Set<string>();
+    // Save ALL relation values before conformance evaluation — the getters
+    // overwrite raw string IDs and hydrated include objects alike.  We only
+    // want the side-effect of validating the instance itself; the relation
+    // values produced by Rust are authoritative.
+    const allRelNames = Object.keys(metadata.relations);
     for (const inst of instances) {
-      // Save hydrated relation values that came from Rust include resolution
       const savedRelations: Record<string, any> = {};
-      for (const relName of includedRelNames) {
+      for (const relName of allRelNames) {
         if ((inst as any)[relName] !== undefined) {
           savedRelations[relName] = (inst as any)[relName];
         }
@@ -1320,7 +1320,7 @@ export class Ad4mModel {
         skipPropertyGetters: true,
       });
 
-      // Restore hydrated relations that were overwritten by conformance getters
+      // Restore all relation values that were overwritten by conformance getters
       for (const [relName, value] of Object.entries(savedRelations)) {
         (inst as any)[relName] = value;
       }
