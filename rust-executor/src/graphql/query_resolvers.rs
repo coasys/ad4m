@@ -617,13 +617,19 @@ impl Query {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        Ok(get_perspective(&uuid)
+        let result = get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
                 uuid
             )))?
             .get_links(&query)
-            .await?)
+            .await?;
+        eprintln!(
+            "[AD4M-SYNC] QUERY-LINKS [{}]: returned {} links",
+            uuid,
+            result.len()
+        );
+        Ok(result)
     }
 
     async fn perspective_query_prolog(
