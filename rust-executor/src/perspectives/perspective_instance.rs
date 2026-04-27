@@ -808,27 +808,19 @@ impl PerspectiveInstance {
         let ok = match commit_result {
             Ok(Some(rev)) => {
                 if rev.trim().is_empty() {
-                    log::warn!(
-                        "🔗 COMMIT [{}]: returned empty revision string; treating as success",
-                        handle.uuid
-                    );
+                    log::warn!("LinkLanguage.commit returned an empty revision string; treating as success");
                     true
                 } else {
-                    log::info!("🔗 COMMIT [{}]: success — revision: {}", handle.uuid, rev);
+                    log::info!("Committed to revision: {}", rev);
                     true
                 }
             }
             Ok(None) => {
-                log::info!(
-                    "🔗 COMMIT [{}]: returned None (flat commit success)",
-                    handle.uuid
-                );
                 true
             }
             Err(e) => {
                 log::warn!(
-                    "🔗 COMMIT [{}]: FAILED — {:?} — storing in pending diffs",
-                    handle.uuid,
+                    "Error trying to commit diff: {:?}\nStoring in pending diffs for later",
                     e
                 );
                 false
@@ -2589,23 +2581,13 @@ impl PerspectiveInstance {
         // Removals first
         for removal in &diff.removals {
             if let Err(e) = self.sparql_store.remove_link(removal) {
-                log::error!(
-                    "PERSIST: FAILED to remove link {} -> {}: {:?}",
-                    removal.data.source,
-                    removal.data.target,
-                    e
-                );
+                log::warn!("Failed to remove link from SPARQL store: {:?}", e);
             }
         }
         // Additions after
         for addition in &diff.additions {
             if let Err(e) = self.sparql_store.add_link(addition) {
-                log::error!(
-                    "PERSIST: FAILED to add link {} -> {}: {:?}",
-                    addition.data.source,
-                    addition.data.target,
-                    e
-                );
+                log::warn!("Failed to add link to SPARQL store: {:?}", e);
             }
         }
 
