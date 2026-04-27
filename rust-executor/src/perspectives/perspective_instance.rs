@@ -56,6 +56,21 @@ enum ChangedPredicates {
 use uuid;
 use uuid::Uuid;
 
+/// Write a debug sync line to both the log framework and a dedicated file.
+/// The file ensures visibility even when CircleCI truncates step output.
+pub fn sync_debug(msg: &str) {
+    log::warn!("{}", msg);
+    // Also append to a well-known file for CI artifact collection
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/ad4m-sync-debug.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "[{}] {}", chrono::Utc::now().format("%H:%M:%S%.3f"), msg);
+    }
+}
+
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;
@@ -759,18 +774,12 @@ impl PerspectiveInstance {
     pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
         let handle = self.persisted.lock().await.clone();
         if handle.neighbourhood.is_none() {
-            log::warn!(
-                "[AD4M-SYNC] COMMIT [{}]: skipped — no neighbourhood",
-                handle.uuid
-            );
+            sync_debug(&format!("[AD4M-SYNC] COMMIT [{}]: skipped — no neighbourhood",                 handle.uuid));
             return Ok(());
         }
-        log::warn!(
-            "[AD4M-SYNC] COMMIT [{}]: attempting {} additions, {} removals",
-            handle.uuid,
+        sync_debug(&format!("[AD4M-SYNC] COMMIT [{}]: attempting {} additions, {} removals",             handle.uuid,
             diff.additions.len(),
-            diff.removals.len()
-        );
+            diff.removals.len()));
 
         // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
         let (_, pending_ids) =
@@ -878,20 +887,14 @@ impl PerspectiveInstance {
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) -> Result<(), AnyError> {
         let uuid = self.persisted.lock().await.uuid.clone();
-        log::warn!(
-            "[AD4M-SYNC] SYNC-RECV [{}]: {} additions, {} removals from link language",
-            uuid,
+        sync_debug(&format!("[AD4M-SYNC] SYNC-RECV [{}]: {} additions, {} removals from link language",             uuid,
             diff.additions.len(),
-            diff.removals.len()
-        );
+            diff.removals.len()));
         for link in &diff.additions {
-            log::warn!(
-                "[AD4M-SYNC] SYNC-RECV [{}]:   + {} -> {} (by {})",
-                uuid,
+            sync_debug(&format!("[AD4M-SYNC] SYNC-RECV [{}]:   + {} -> {} (by {})",                 uuid,
                 link.data.source,
                 link.data.target,
-                link.author
-            );
+                link.author));
         }
         // Deduplicate by (author, timestamp, source, predicate, target)
         // Use structured keys to avoid delimiter collision issues
@@ -2615,33 +2618,24 @@ impl PerspectiveInstance {
         // Removals first
         for removal in &diff.removals {
             if let Err(e) = self.sparql_store.remove_link(removal) {
-                log::warn!(
-                    "[AD4M-SYNC] PERSIST [{}]: FAILED to remove link {} -> {}: {:?}",
-                    uuid,
+                sync_debug(&format!("[AD4M-SYNC] PERSIST [{}]: FAILED to remove link {} -> {}: {:?}",                     uuid,
                     removal.data.source,
                     removal.data.target,
-                    e
-                );
+                    e));
             }
         }
         // Additions after
         for addition in &diff.additions {
             if let Err(e) = self.sparql_store.add_link(addition) {
-                log::warn!(
-                    "[AD4M-SYNC] PERSIST [{}]: FAILED to add link {} -> {}: {:?}",
-                    uuid,
+                sync_debug(&format!("[AD4M-SYNC] PERSIST [{}]: FAILED to add link {} -> {}: {:?}",                     uuid,
                     addition.data.source,
                     addition.data.target,
-                    e
-                );
+                    e));
             } else {
-                log::warn!(
-                    "[AD4M-SYNC] PERSIST [{}]: added link {} -> {} (by {})",
-                    uuid,
+                sync_debug(&format!("[AD4M-SYNC] PERSIST [{}]: added link {} -> {} (by {})",                     uuid,
                     addition.data.source,
                     addition.data.target,
-                    addition.author
-                );
+                    addition.author));
             }
         }
 
