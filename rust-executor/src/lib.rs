@@ -264,6 +264,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     // Initialize logging for CLI (stdout)
     // Respects RUST_LOG environment variable if set
     crate::logging::init_cli_logging(None);
+    log::info!("[AD4M-SYNC] executor binary version marker — debug build active");
     config.prepare();
 
     // Write PID file if requested via config.

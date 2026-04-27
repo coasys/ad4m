@@ -363,7 +363,7 @@ impl PerspectiveInstance {
                         };
 
                         log::info!(
-                            "🔍 Setting local agents for link language: {:?}",
+                            "[AD4M-SYNC] Setting local agents for link language: {:?}",
                             agents_to_register
                         );
                         if let Err(e) = language.set_local_agents(agents_to_register).await {
