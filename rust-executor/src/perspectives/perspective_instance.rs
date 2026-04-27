@@ -759,8 +759,11 @@ impl PerspectiveInstance {
     pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
         let handle = self.persisted.lock().await.clone();
         if handle.neighbourhood.is_none() {
+            log::info!("🔗 COMMIT [{}]: skipped — no neighbourhood", handle.uuid);
             return Ok(());
         }
+        log::info!("🔗 COMMIT [{}]: attempting {} additions, {} removals",
+            handle.uuid, diff.additions.len(), diff.removals.len());
 
         // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
         let (_, pending_ids) =
@@ -808,30 +811,21 @@ impl PerspectiveInstance {
         let ok = match commit_result {
             Ok(Some(rev)) => {
                 if rev.trim().is_empty() {
-                    // Revision came back but was an empty string — a legacy
-                    // language bug; treat as success but flag it so the
-                    // operator sees the oddity. Previously we fell through
-                    // to pending-diffs here, which left flat-commit-only
-                    // languages permanently queued.
-                    log::warn!("LinkLanguage.commit returned an empty revision string; treating as success");
+                    log::warn!("🔗 COMMIT [{}]: returned empty revision string; treating as success", handle.uuid);
                     true
                 } else {
-                    log::info!("Committed to revision: {}", rev);
+                    log::info!("🔗 COMMIT [{}]: success — revision: {}", handle.uuid, rev);
                     true
                 }
             }
             Ok(None) => {
-                // Spec v1.0 — `perspective-commit` returns nothing. A flat
-                // language that implements only perspective-commit (no
-                // perspective-sync) has no revision to hand back, and the
-                // commit-layer wrapper in language_bootstrap.js emits
-                // `null`. This is the normal success path, NOT a failure.
+                log::info!("🔗 COMMIT [{}]: returned None (flat commit success)", handle.uuid);
                 true
             }
             Err(e) => {
                 log::warn!(
-                    "Error trying to commit diff: {:?}\nStoring in pending diffs for later",
-                    e
+                    "🔗 COMMIT [{}]: FAILED — {:?} — storing in pending diffs",
+                    handle.uuid, e
                 );
                 false
             }
@@ -869,6 +863,13 @@ impl PerspectiveInstance {
     }
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) -> Result<(), AnyError> {
+        let uuid = self.persisted.lock().await.uuid.clone();
+        log::info!("🔄 SYNC RECV [{}]: {} additions, {} removals from link language",
+            uuid, diff.additions.len(), diff.removals.len());
+        for link in &diff.additions {
+            log::info!("🔄 SYNC RECV [{}]:   + {} -> {} (by {})",
+                uuid, link.data.source, link.data.target, link.author);
+        }
         // Deduplicate by (author, timestamp, source, predicate, target)
         // Use structured keys to avoid delimiter collision issues
         let mut seen_add: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2587,16 +2588,22 @@ impl PerspectiveInstance {
         // The remove_link function matches by source/predicate/target (not unique ID).
         // If we add first and remove second, we'd delete the newly added links too.
 
+        let uuid = self.persisted.lock().await.uuid.clone();
         // Removals first
         for removal in &diff.removals {
             if let Err(e) = self.sparql_store.remove_link(removal) {
-                log::warn!("Failed to remove link from SPARQL store: {:?}", e);
+                log::warn!("💾 PERSIST [{}]: FAILED to remove link {} -> {}: {:?}",
+                    uuid, removal.data.source, removal.data.target, e);
             }
         }
         // Additions after
         for addition in &diff.additions {
             if let Err(e) = self.sparql_store.add_link(addition) {
-                log::warn!("Failed to add link to SPARQL store: {:?}", e);
+                log::warn!("💾 PERSIST [{}]: FAILED to add link {} -> {}: {:?}",
+                    uuid, addition.data.source, addition.data.target, e);
+            } else {
+                log::info!("💾 PERSIST [{}]: added link {} -> {} (by {})",
+                    uuid, addition.data.source, addition.data.target, addition.author);
             }
         }
 
