@@ -774,12 +774,18 @@ impl PerspectiveInstance {
     pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
         let handle = self.persisted.lock().await.clone();
         if handle.neighbourhood.is_none() {
-            sync_debug(&format!("[AD4M-SYNC] COMMIT [{}]: skipped — no neighbourhood",                 handle.uuid));
+            sync_debug(&format!(
+                "[AD4M-SYNC] COMMIT [{}]: skipped — no neighbourhood",
+                handle.uuid
+            ));
             return Ok(());
         }
-        sync_debug(&format!("[AD4M-SYNC] COMMIT [{}]: attempting {} additions, {} removals",             handle.uuid,
+        sync_debug(&format!(
+            "[AD4M-SYNC] COMMIT [{}]: attempting {} additions, {} removals",
+            handle.uuid,
             diff.additions.len(),
-            diff.removals.len()));
+            diff.removals.len()
+        ));
 
         // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
         let (_, pending_ids) =
@@ -887,14 +893,17 @@ impl PerspectiveInstance {
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) -> Result<(), AnyError> {
         let uuid = self.persisted.lock().await.uuid.clone();
-        sync_debug(&format!("[AD4M-SYNC] SYNC-RECV [{}]: {} additions, {} removals from link language",             uuid,
+        sync_debug(&format!(
+            "[AD4M-SYNC] SYNC-RECV [{}]: {} additions, {} removals from link language",
+            uuid,
             diff.additions.len(),
-            diff.removals.len()));
+            diff.removals.len()
+        ));
         for link in &diff.additions {
-            sync_debug(&format!("[AD4M-SYNC] SYNC-RECV [{}]:   + {} -> {} (by {})",                 uuid,
-                link.data.source,
-                link.data.target,
-                link.author));
+            sync_debug(&format!(
+                "[AD4M-SYNC] SYNC-RECV [{}]:   + {} -> {} (by {})",
+                uuid, link.data.source, link.data.target, link.author
+            ));
         }
         // Deduplicate by (author, timestamp, source, predicate, target)
         // Use structured keys to avoid delimiter collision issues
@@ -2618,24 +2627,24 @@ impl PerspectiveInstance {
         // Removals first
         for removal in &diff.removals {
             if let Err(e) = self.sparql_store.remove_link(removal) {
-                sync_debug(&format!("[AD4M-SYNC] PERSIST [{}]: FAILED to remove link {} -> {}: {:?}",                     uuid,
-                    removal.data.source,
-                    removal.data.target,
-                    e));
+                sync_debug(&format!(
+                    "[AD4M-SYNC] PERSIST [{}]: FAILED to remove link {} -> {}: {:?}",
+                    uuid, removal.data.source, removal.data.target, e
+                ));
             }
         }
         // Additions after
         for addition in &diff.additions {
             if let Err(e) = self.sparql_store.add_link(addition) {
-                sync_debug(&format!("[AD4M-SYNC] PERSIST [{}]: FAILED to add link {} -> {}: {:?}",                     uuid,
-                    addition.data.source,
-                    addition.data.target,
-                    e));
+                sync_debug(&format!(
+                    "[AD4M-SYNC] PERSIST [{}]: FAILED to add link {} -> {}: {:?}",
+                    uuid, addition.data.source, addition.data.target, e
+                ));
             } else {
-                sync_debug(&format!("[AD4M-SYNC] PERSIST [{}]: added link {} -> {} (by {})",                     uuid,
-                    addition.data.source,
-                    addition.data.target,
-                    addition.author));
+                sync_debug(&format!(
+                    "[AD4M-SYNC] PERSIST [{}]: added link {} -> {} (by {})",
+                    uuid, addition.data.source, addition.data.target, addition.author
+                ));
             }
         }
 

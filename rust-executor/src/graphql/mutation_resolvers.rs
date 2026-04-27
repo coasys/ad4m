@@ -2014,9 +2014,7 @@ impl Mutation {
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         crate::perspectives::perspective_instance::sync_debug(&format!(
             "[AD4M-SYNC] ADD-LINK [{}]: {} -> {}",
-            uuid,
-            link.source,
-            link.target
+            uuid, link.source, link.target
         ));
         let result = perspective
             .add_link(
