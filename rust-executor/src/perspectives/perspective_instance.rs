@@ -214,10 +214,8 @@ fn extract_predicates_from_sparql(query: &str) -> HashSet<String> {
     // Detect variable predicate in regular triple patterns (e.g. ?source ?predicate ?target)
     // When a query uses a variable predicate, it can match any predicate,
     // so we must always re-check.
-    let var_pred = regex::Regex::new(
-        r"(?:\?\w+|<[^>]+>)\s+\?\w+\s+(?:\?\w+|<[^>]+>)\s*\.",
-    )
-    .unwrap();
+    let var_pred =
+        regex::Regex::new(r"(?:\?\w+|<[^>]+>)\s+\?\w+\s+(?:\?\w+|<[^>]+>)\s*\.").unwrap();
     if var_pred.is_match(query) {
         return HashSet::new();
     }

@@ -317,10 +317,7 @@ fn parse_literal_value(uri: &str) -> Value {
 fn to_f64(val: &Value) -> Option<f64> {
     match val {
         Value::Number(n) => n.as_f64(),
-        Value::String(s) => s
-            .parse::<f64>()
-            .ok()
-            .or_else(|| iso_to_epoch_ms(s)),
+        Value::String(s) => s.parse::<f64>().ok().or_else(|| iso_to_epoch_ms(s)),
         _ => None,
     }
 }
@@ -1365,12 +1362,11 @@ fn matches_ops(val: &Value, ops: &WhereOps) -> bool {
                             .map(|(a, b)| (a - b).abs() < f64::EPSILON)
                             .unwrap_or(false),
                         // Cross-type: ISO string vs epoch number (timestamps)
-                        (Value::String(_), Value::Number(_)) | (Value::Number(_), Value::String(_)) => {
-                            to_f64(val)
-                                .zip(to_f64(item))
-                                .map(|(a, b)| (a - b).abs() < f64::EPSILON)
-                                .unwrap_or(false)
-                        }
+                        (Value::String(_), Value::Number(_))
+                        | (Value::Number(_), Value::String(_)) => to_f64(val)
+                            .zip(to_f64(item))
+                            .map(|(a, b)| (a - b).abs() < f64::EPSILON)
+                            .unwrap_or(false),
                         _ => false,
                     } {
                         return false;
@@ -2243,8 +2239,13 @@ mod integration_tests {
 
         // Query without WHERE - should find 1 instance
         let query_no_where = ModelQueryInput::default();
-        let result = execute_model_query(&store, "Recipe", &query_no_where, Some(shape_json)).unwrap();
-        assert_eq!(result.instances.len(), 1, "Should find 1 recipe without WHERE");
+        let result =
+            execute_model_query(&store, "Recipe", &query_no_where, Some(shape_json)).unwrap();
+        assert_eq!(
+            result.instances.len(),
+            1,
+            "Should find 1 recipe without WHERE"
+        );
 
         // Check that name is hydrated
         let name_val = &result.instances[0]["name"];
@@ -2252,12 +2253,20 @@ mod integration_tests {
 
         // Query WITH WHERE - should also find 1 instance
         let mut where_clause = HashMap::new();
-        where_clause.insert("name".to_string(), WhereCondition::String("Recipe 1".to_string()));
+        where_clause.insert(
+            "name".to_string(),
+            WhereCondition::String("Recipe 1".to_string()),
+        );
         let query_with_where = ModelQueryInput {
             where_clause: Some(where_clause),
             ..Default::default()
         };
-        let result2 = execute_model_query(&store, "Recipe", &query_with_where, Some(shape_json)).unwrap();
-        assert_eq!(result2.instances.len(), 1, "WHERE name='Recipe 1' should match 1 recipe");
+        let result2 =
+            execute_model_query(&store, "Recipe", &query_with_where, Some(shape_json)).unwrap();
+        assert_eq!(
+            result2.instances.len(),
+            1,
+            "WHERE name='Recipe 1' should match 1 recipe"
+        );
     }
 }
