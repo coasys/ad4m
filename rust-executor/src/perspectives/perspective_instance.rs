@@ -759,13 +759,13 @@ impl PerspectiveInstance {
     pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
         let handle = self.persisted.lock().await.clone();
         if handle.neighbourhood.is_none() {
-            eprintln!(
+            log::warn!(
                 "[AD4M-SYNC] COMMIT [{}]: skipped — no neighbourhood",
                 handle.uuid
             );
             return Ok(());
         }
-        eprintln!(
+        log::warn!(
             "[AD4M-SYNC] COMMIT [{}]: attempting {} additions, {} removals",
             handle.uuid,
             diff.additions.len(),
@@ -878,16 +878,19 @@ impl PerspectiveInstance {
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) -> Result<(), AnyError> {
         let uuid = self.persisted.lock().await.uuid.clone();
-        eprintln!(
+        log::warn!(
             "[AD4M-SYNC] SYNC-RECV [{}]: {} additions, {} removals from link language",
             uuid,
             diff.additions.len(),
             diff.removals.len()
         );
         for link in &diff.additions {
-            eprintln!(
+            log::warn!(
                 "[AD4M-SYNC] SYNC-RECV [{}]:   + {} -> {} (by {})",
-                uuid, link.data.source, link.data.target, link.author
+                uuid,
+                link.data.source,
+                link.data.target,
+                link.author
             );
         }
         // Deduplicate by (author, timestamp, source, predicate, target)
@@ -2612,23 +2615,32 @@ impl PerspectiveInstance {
         // Removals first
         for removal in &diff.removals {
             if let Err(e) = self.sparql_store.remove_link(removal) {
-                eprintln!(
+                log::warn!(
                     "[AD4M-SYNC] PERSIST [{}]: FAILED to remove link {} -> {}: {:?}",
-                    uuid, removal.data.source, removal.data.target, e
+                    uuid,
+                    removal.data.source,
+                    removal.data.target,
+                    e
                 );
             }
         }
         // Additions after
         for addition in &diff.additions {
             if let Err(e) = self.sparql_store.add_link(addition) {
-                eprintln!(
+                log::warn!(
                     "[AD4M-SYNC] PERSIST [{}]: FAILED to add link {} -> {}: {:?}",
-                    uuid, addition.data.source, addition.data.target, e
+                    uuid,
+                    addition.data.source,
+                    addition.data.target,
+                    e
                 );
             } else {
-                eprintln!(
+                log::warn!(
                     "[AD4M-SYNC] PERSIST [{}]: added link {} -> {} (by {})",
-                    uuid, addition.data.source, addition.data.target, addition.author
+                    uuid,
+                    addition.data.source,
+                    addition.data.target,
+                    addition.author
                 );
             }
         }

@@ -2012,9 +2012,11 @@ impl Mutation {
         )?;
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-        eprintln!(
+        log::warn!(
             "[AD4M-SYNC] ADD-LINK [{}]: {} -> {}",
-            uuid, link.source, link.target
+            uuid,
+            link.source,
+            link.target
         );
         let result = perspective
             .add_link(

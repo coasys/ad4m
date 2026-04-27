@@ -461,7 +461,7 @@ pub async fn handle_perspective_diff_from_link_language_impl(
     diff: PerspectiveDiff,
     language_address: String,
 ) {
-    eprintln!(
+    log::warn!(
         "[AD4M-SYNC] DIFF-FROM-LINK-LANG [{}]: {} additions, {} removals",
         language_address,
         diff.additions.len(),
@@ -476,7 +476,7 @@ pub async fn handle_perspective_diff_from_link_language_impl(
             );
         }
     } else {
-        eprintln!(
+        log::warn!(
             "[AD4M-SYNC] DIFF-FROM-LINK-LANG [{}]: No perspective found for this link language!",
             language_address
         );

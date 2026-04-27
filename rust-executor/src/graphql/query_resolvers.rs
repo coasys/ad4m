@@ -624,7 +624,7 @@ impl Query {
             )))?
             .get_links(&query)
             .await?;
-        eprintln!(
+        log::warn!(
             "[AD4M-SYNC] QUERY-LINKS [{}]: returned {} links",
             uuid,
             result.len()
