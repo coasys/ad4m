@@ -815,9 +815,7 @@ impl PerspectiveInstance {
                     true
                 }
             }
-            Ok(None) => {
-                true
-            }
+            Ok(None) => true,
             Err(e) => {
                 log::warn!(
                     "Error trying to commit diff: {:?}\nStoring in pending diffs for later",
