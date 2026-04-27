@@ -624,11 +624,6 @@ impl Query {
             )))?
             .get_links(&query)
             .await?;
-        crate::perspectives::perspective_instance::sync_debug(&format!(
-            "[AD4M-SYNC] QUERY-LINKS [{}]: returned {} links",
-            uuid,
-            result.len()
-        ));
         Ok(result)
     }
 

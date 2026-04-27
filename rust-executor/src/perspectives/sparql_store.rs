@@ -109,6 +109,7 @@ pub fn validate_readonly_query(query: &str) -> Result<(), Error> {
 /// Generate a deterministic reifier IRI from link data + timestamp.
 fn make_reifier_iri(link: &DecoratedLinkExpression) -> NamedNode {
     let mut hasher = Sha256::new();
+    hasher.update(link.author.as_bytes());
     hasher.update(link.data.source.as_bytes());
     hasher.update(link.data.predicate.as_deref().unwrap_or("").as_bytes());
     hasher.update(link.data.target.as_bytes());
@@ -2156,5 +2157,159 @@ mod tests {
         svc.set_migration_version(2).unwrap();
         let count = svc.migrate_named_graphs_to_reifiers().unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// Simulates the exact multi-user sync scenario from the integration test:
+    /// 4 different users on 2 nodes add links with unique (source, pred, target),
+    /// then a wildcard query_links(None,None,None,...) must return all 5 links.
+    #[test]
+    fn test_multi_user_sync_wildcard_query() {
+        let svc = new_service();
+
+        // Setup link (created by node 1 user 1 during neighbourhood creation)
+        let setup = make_link_with_ts(
+            "test://setup",
+            "test://init",
+            "test://neighbourhood",
+            "2024-01-15T10:00:00.000Z",
+            "did:key:z6Mknode1user1",
+        );
+
+        // 4 user links (simulating the integration test)
+        let n1u1 = make_link_with_ts(
+            "test://node1user1",
+            "test://created",
+            "test://link1",
+            "2024-01-15T10:00:01.000Z",
+            "did:key:z6Mknode1user1",
+        );
+        let n1u2 = make_link_with_ts(
+            "test://node1user2",
+            "test://created",
+            "test://link2",
+            "2024-01-15T10:00:02.000Z",
+            "did:key:z6Mknode1user2",
+        );
+        let n2u1 = make_link_with_ts(
+            "test://node2user1",
+            "test://created",
+            "test://link3",
+            "2024-01-15T10:00:03.000Z",
+            "did:key:z6Mknode2user1",
+        );
+        let n2u2 = make_link_with_ts(
+            "test://node2user2",
+            "test://created",
+            "test://link4",
+            "2024-01-15T10:00:04.000Z",
+            "did:key:z6Mknode2user2",
+        );
+
+        // Node 1 adds its local links
+        svc.add_link(&setup).unwrap();
+        svc.add_link(&n1u1).unwrap();
+        svc.add_link(&n1u2).unwrap();
+
+        // Simulate sync: Node 2's links arrive via diff_from_link_language
+        svc.add_link(&n2u1).unwrap();
+        svc.add_link(&n2u2).unwrap();
+
+        // Wildcard query (same as the integration test: LinkQuery({}))
+        let all = svc.query_links(None, None, None, None, None, None).unwrap();
+
+        assert_eq!(
+            all.len(),
+            5,
+            "Expected 5 links (1 setup + 4 user), got {}. Links: {:?}",
+            all.len(),
+            all.iter()
+                .map(|l| format!("{} -> {} (by {})", l.data.source, l.data.target, l.author))
+                .collect::<Vec<_>>()
+        );
+
+        // Verify each link is present
+        let sources: Vec<&str> = all.iter().map(|l| l.data.source.as_str()).collect();
+        assert!(sources.contains(&"test://setup"), "Missing setup link");
+        assert!(
+            sources.contains(&"test://node1user1"),
+            "Missing node1user1 link"
+        );
+        assert!(
+            sources.contains(&"test://node1user2"),
+            "Missing node1user2 link"
+        );
+        assert!(
+            sources.contains(&"test://node2user1"),
+            "Missing node2user1 link"
+        );
+        assert!(
+            sources.contains(&"test://node2user2"),
+            "Missing node2user2 link"
+        );
+    }
+
+    /// Same scenario but also test get_all_links() (SPARQL-based query path)
+    #[test]
+    fn test_multi_user_sync_get_all_links() {
+        let svc = new_service();
+
+        let links: Vec<DecoratedLinkExpression> = (0..5)
+            .map(|i| {
+                make_link_with_ts(
+                    &format!("test://source{}", i),
+                    "test://pred",
+                    &format!("test://target{}", i),
+                    &format!("2024-01-15T10:00:0{}.000Z", i),
+                    &format!("did:key:z6Mkuser{}", i),
+                )
+            })
+            .collect();
+
+        for link in &links {
+            svc.add_link(link).unwrap();
+        }
+
+        let all = svc.get_all_links().unwrap();
+        assert_eq!(
+            all.len(),
+            5,
+            "get_all_links returned {} links, expected 5",
+            all.len()
+        );
+
+        // Also check query_links returns the same count
+        let queried = svc.query_links(None, None, None, None, None, None).unwrap();
+        assert_eq!(
+            queried.len(),
+            5,
+            "query_links returned {} links, expected 5",
+            queried.len()
+        );
+    }
+
+    /// Test that re-adding the same link (idempotent insert from sync) doesn't
+    /// cause duplicates or data corruption.
+    #[test]
+    fn test_idempotent_sync_insert() {
+        let svc = new_service();
+        let link = make_link_with_ts(
+            "test://src",
+            "test://pred",
+            "test://tgt",
+            "2024-01-15T10:00:00.000Z",
+            "did:key:z6Mkauthor",
+        );
+
+        // Add twice (simulates: local add + sync receives same link back)
+        svc.add_link(&link).unwrap();
+        svc.add_link(&link).unwrap();
+
+        let all = svc.query_links(None, None, None, None, None, None).unwrap();
+        assert_eq!(
+            all.len(),
+            1,
+            "Idempotent insert should produce exactly 1 link, got {}",
+            all.len()
+        );
     }
 }

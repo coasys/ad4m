@@ -154,10 +154,6 @@ jobs:
           name: Run multi-user-simple integration tests
           command: cd ./tests/js && ./test-multi-user-with-setup.sh
           no_output_timeout: 30m
-      - store_artifacts:
-          when: always
-          path: /tmp/ad4m-sync-debug.log
-          destination: ad4m-sync-debug.log
 
   integration-tests-email-verification:
     machine: true
