@@ -1303,16 +1303,19 @@ export class Ad4mModel {
 
     // Run relation type-conformance filtering (ensures @HasMany/@HasOne
     // targets actually conform to the target class's shape).
-    // Save ALL relation values before conformance evaluation — the getters
-    // overwrite raw string IDs and hydrated include objects alike.  We only
-    // want the side-effect of validating the instance itself; the relation
-    // values produced by Rust are authoritative.
-    const allRelNames = Object.keys(metadata.relations);
+    // - Included relations are saved/restored because Rust already hydrated
+    //   them as full nested objects.
+    // - Non-included @HasMany relations keep the conformance result (filtered
+    //   arrays with non-conforming targets removed).
+    // - Non-included @HasOne/@BelongsToOne relations keep the conformance
+    //   result but are unwrapped from array → scalar to preserve cardinality.
+    const includedRelNames = query.include ? new Set(Object.keys(query.include)) : new Set<string>();
     for (const inst of instances) {
-      const savedRelations: Record<string, any> = {};
-      for (const relName of allRelNames) {
+      // Save included relation values that came from Rust hydration
+      const savedIncluded: Record<string, any> = {};
+      for (const relName of includedRelNames) {
         if ((inst as any)[relName] !== undefined) {
-          savedRelations[relName] = (inst as any)[relName];
+          savedIncluded[relName] = (inst as any)[relName];
         }
       }
 
@@ -1320,9 +1323,20 @@ export class Ad4mModel {
         skipPropertyGetters: true,
       });
 
-      // Restore all relation values that were overwritten by conformance getters
-      for (const [relName, value] of Object.entries(savedRelations)) {
+      // Restore hydrated include objects that were overwritten by conformance getters
+      for (const [relName, value] of Object.entries(savedIncluded)) {
         (inst as any)[relName] = value;
+      }
+
+      // Fix cardinality for non-included HasOne/BelongsToOne relations:
+      // The conformance getter always produces arrays; unwrap to scalar.
+      for (const [relName, relMeta] of Object.entries(metadata.relations)) {
+        if (includedRelNames.has(relName)) continue;
+        const kind = (relMeta as any).kind;
+        if ((kind === 'hasOne' || kind === 'belongsToOne') && Array.isArray((inst as any)[relName])) {
+          const arr = (inst as any)[relName] as any[];
+          (inst as any)[relName] = arr.length > 0 ? arr[0] : null;
+        }
       }
     }
 
