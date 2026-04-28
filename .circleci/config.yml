@@ -6,6 +6,17 @@ references:
 # Resource class: coasys/marvin
 
 commands:
+  fix_workdir:
+    description: "Recover from corrupted .git directory (e.g. after disk-full)"
+    steps:
+      - run:
+          name: Fix corrupted working directory
+          command: |
+            if [ -d .git ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
+              echo "Corrupted .git directory detected, removing for fresh clone..."
+              rm -rf .git
+            fi
+
   setup_env:
     description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
     parameters:
@@ -39,6 +50,7 @@ commands:
   setup_integration_test_environment:
     description: "Setup common integration test environment"
     steps:
+      - fix_workdir
       - checkout
       - run:
           name: Restore binaries from local stash (no CircleCI network storage needed — same host)
@@ -65,6 +77,7 @@ jobs:
     machine: true
     resource_class: coasys/marvin
     steps:
+      - fix_workdir
       - checkout
       - setup_env
       - run:
@@ -189,6 +202,7 @@ jobs:
     machine: true
     resource_class: coasys/marvin
     steps:
+      - fix_workdir
       - checkout
       - run:
           name: Restore binaries from local stash
@@ -211,6 +225,7 @@ jobs:
     machine: true
     resource_class: coasys/marvin
     steps:
+      - fix_workdir
       - checkout
       - run:
           name: Install dependencies
