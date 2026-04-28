@@ -99,13 +99,16 @@ export class AIClient {
             timeBeforeSpeech?: number;
         }
     ): Promise<string> {
+        console.log('[AIClient] openTranscriptionStream:', modelId, params);
         const streamId = await this.#restClient.post<string>('/api/v1/ai/transcription/open', { modelId, params });
+        console.log('[AIClient] transcription stream opened, streamId:', streamId);
 
-        // Subscribe to AI events and filter for this stream's transcription text
         const unsub = this.#restClient.subscribe(
             `/api/v1/events/ai`,
             (data) => {
+                console.log('[AIClient] SSE event received:', data);
                 if (data.type === 'transcription-text' && data.streamId === streamId && data.text) {
+                    console.log('[AIClient] transcription text for stream', streamId, ':', data.text);
                     streamCallback(data.text as string);
                 }
             }
@@ -113,7 +116,6 @@ export class AIClient {
 
         this.#transcriptionUnsubscribers.set(streamId, unsub);
 
-        // Connect binary WebSocket for efficient audio transport
         this.connectAudioWs([streamId]);
 
         return streamId;
@@ -130,16 +132,24 @@ export class AIClient {
         }
     }
 
+    private _feedCount = 0;
+
     async feedTranscriptionStream(streamIds: string | string[], audio: Float32Array): Promise<void> {
         const ids = Array.isArray(streamIds) ? streamIds : [streamIds];
 
-        // Use WebSocket if connected (binary, efficient — no JSON serialisation)
         if (this.#audioWs && this.#audioWs.readyState === WebSocket.OPEN) {
+            this._feedCount++;
+            if (this._feedCount % 50 === 1) {
+                console.log(`[AIClient] feedTranscriptionStream via WebSocket (frame #${this._feedCount}, ${audio.length} samples)`);
+            }
             this.#audioWs.send(audio.buffer);
             return;
         }
 
-        // Fallback to REST POST (JSON, less efficient)
+        this._feedCount++;
+        if (this._feedCount % 50 === 1) {
+            console.log(`[AIClient] feedTranscriptionStream via REST fallback (frame #${this._feedCount}, ${audio.length} samples, ws state: ${this.#audioWs?.readyState})`);
+        }
         return this.#restClient.post<void>('/api/v1/ai/transcription/feed', {
             streamIds: ids,
             audio: Array.from(audio)
@@ -149,21 +159,31 @@ export class AIClient {
     private connectAudioWs(streamIds: string[]): void {
         const baseUrl = this.#restClient.getBaseUrl().replace(/^http/, 'ws');
         const token = this.#restClient.getToken();
-        if (!token) return;
+        if (!token) {
+            console.warn('[AIClient] connectAudioWs: no token, skipping WebSocket');
+            return;
+        }
 
         const idsParam = encodeURIComponent(streamIds.join(','));
         const tokenParam = encodeURIComponent(token);
 
-        this.#audioWs = new WebSocket(
-            `${baseUrl}/api/v1/ws/audio?token=${tokenParam}&stream_ids=${idsParam}`
-        );
+        const wsUrl = `${baseUrl}/api/v1/ws/audio?token=${tokenParam}&stream_ids=${idsParam}`;
+        console.log('[AIClient] connecting audio WebSocket:', wsUrl.replace(/token=[^&]+/, 'token=***'));
+
+        this.#audioWs = new WebSocket(wsUrl);
         this.#audioWs.binaryType = 'arraybuffer';
 
-        this.#audioWs.onerror = () => {
+        this.#audioWs.onopen = () => {
+            console.log('[AIClient] audio WebSocket connected');
+        };
+
+        this.#audioWs.onerror = (e) => {
+            console.error('[AIClient] audio WebSocket error:', e);
             this.#audioWs = null;
         };
 
-        this.#audioWs.onclose = () => {
+        this.#audioWs.onclose = (e) => {
+            console.log('[AIClient] audio WebSocket closed:', e.code, e.reason);
             this.#audioWs = null;
         };
     }
