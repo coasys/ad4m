@@ -892,6 +892,7 @@ pub struct PromptOutput {
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TranscriptionTextFilter {
     pub stream_id: String,
     pub text: String,
@@ -1352,6 +1353,7 @@ pub struct QuerySubscription {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct PerspectiveQuerySubscriptionFilter {
     pub uuid: String,
     pub subscription_id: String,
