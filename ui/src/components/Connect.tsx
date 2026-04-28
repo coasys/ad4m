@@ -80,7 +80,7 @@ export function Connect() {
         <>
           <j-input
             label="Ad4m URL"
-            placeholder="ws://www.example.com/graphql"
+            placeholder="http://www.example.com"
             radius="md"
             size="md"
             onInput={onUrlChange}
