@@ -7,11 +7,10 @@ import { getPropertiesMetadata, getRelationsMetadata } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { formatQueryValue } from "./query-utils";
 import { resolveParentPredicate } from "./query-common";
-import { buildParentQuery, buildAuthorAndTimestampQuery, buildPropertiesQuery, buildWhereQuery, buildCountQuery, buildOrderQuery, buildOffsetQuery, buildLimitQuery } from "./query-prolog";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
-import { buildSPARQLQuery, buildSPARQLGetDataQuery, groupSPARQLResults, buildSPARQLCountQuery, hasJsOnlyWhereFilters, parseSparqlCount } from "./query-sparql";
+import { buildSPARQLQuery, groupSPARQLResults, buildSPARQLCountQuery, hasJsOnlyWhereFilters, parseSparqlCount } from "./query-sparql";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import {
   normalizeValue, matchesCondition, hydrateFromLinks,
@@ -753,87 +752,45 @@ export class Ad4mModel {
   }
 
   private async getData(opts?: GetOptions) {
-    // Builds an object with the author, timestamp, all properties, & all relations on the Ad4mModel and saves it to the instance
-    // Use SPARQL for data queries
+    // Route through the Rust model query endpoint — same pipeline as executeModelQuery
+    // but for a single instance by ID.
     try {
       const ctor = this.constructor as typeof Ad4mModel;
-      const metadata = ctor.getModelMetadata();
+      const query: Query = {
+        where: { id: this._baseExpression },
+        limit: 1,
+      };
+      if (opts?.properties) query.properties = opts.properties;
+      if (opts?.include) query.include = opts.include;
 
-      // Query for all links from this specific node (base expression)
-      const linksQuery = buildSPARQLGetDataQuery(this._baseExpression);
-      const links = await this._perspective.querySparql(linksQuery);
+      const { results } = await (ctor as any).executeModelQuery(
+        this._perspective, query, null
+      );
 
-      if (links && links.length > 0) {
-        // Core hydration: properties (latest-wins), relations, timestamps/author
-        const requestedProperties = opts?.properties && opts.properties.length > 0 ? opts.properties : undefined;
-        await hydrateFromLinks(this, links, metadata, this._perspective, requestedProperties);
-      }
-
-      // Populate reverse relation fields (belongsToOne / belongsToMany) as string IDs.
-      const allRelsMeta = getRelationsMetadata(ctor as any);
-      const requestedProps = opts?.properties && opts.properties.length > 0 ? new Set(opts.properties) : null;
-      for (const [relName, relMeta] of Object.entries(allRelsMeta)) {
-        if (relMeta.kind !== 'belongsToOne' && relMeta.kind !== 'belongsToMany') continue;
-        if (requestedProps && !requestedProps.has(relName)) continue;
-        const reverseLinks = await this._perspective.get(
-          new LinkQuery({ predicate: relMeta.predicate, target: this._baseExpression })
-        );
-        const sourceIds = reverseLinks
-          .filter((l) => l.data.target === this._baseExpression)
-          .map((l) => l.data.source);
-        if (relMeta.kind === 'belongsToOne') {
-          (this as any)[relName] = sourceIds.length > 0 ? sourceIds[sourceIds.length - 1] : null;
-        } else {
-          (this as any)[relName] = sourceIds;
+      if (results.length > 0) {
+        const hydrated = results[0];
+        // Copy all hydrated values from the Rust-side result onto this instance
+        for (const [key, value] of Object.entries(hydrated as any)) {
+          if (key === '_baseExpression' || key === '_perspective' || key === '_snapshot') continue;
+          if (key.startsWith('_')) continue;
+          // Check for readonly getters
+          let isReadonly = false;
+          let proto = Object.getPrototypeOf(this);
+          while (proto) {
+            const desc = Object.getOwnPropertyDescriptor(proto, key);
+            if (desc) { isReadonly = !!(desc.get && !desc.set); break; }
+            proto = Object.getPrototypeOf(proto);
+          }
+          if (isReadonly) continue;
+          (this as any)[key] = value;
         }
       }
-
-      // Evaluate SPARQL getters
-      const getterOpts = opts?.properties || opts?.include
-        ? { requestedProperties: opts?.properties, include: opts?.include }
-        : undefined;
-      await evaluateCustomGettersForInstance(this, this._perspective, metadata, getterOpts);
-
-      // Eager-load relations if requested
-      if (opts?.include) {
-        await hydrateRelations(ctor, [this], this._perspective, opts.include);
-      }
     } catch (e) {
-      console.error(`SPARQL getData also failed for ${this._baseExpression}:`, e);
+      console.error(`getData via Rust model query failed for ${this._baseExpression}:`, e);
     }
 
-    this.takeSnapshot();
+    this.takeSnapshot(opts?.include);
     return this;
-  }
-
-  public static async queryToProlog(perspective: PerspectiveProxy, query: Query, modelClassName?: string | null) {
-    const { properties, where, order, offset, limit, count } = query;
-    const className = modelClassName || (await this.getClassName(perspective));
-
-    // Resolve parent predicate from model metadata if needed
-    const resolvedParentPredicate = query.parent
-      ? resolveParentPredicate(query.parent, this)
-      : undefined;
-
-    const instanceQueries = [
-      buildAuthorAndTimestampQuery(),
-      buildParentQuery(query.parent, resolvedParentPredicate),
-      buildPropertiesQuery(properties),
-      buildWhereQuery(where),
-    ];
-
-    const resultSetQueries = [buildCountQuery(count), buildOrderQuery(order), buildOffsetQuery(offset), buildLimitQuery(limit)];
-
-    const fullQuery = `
-      findall([Base, Properties, Collections, Timestamp, Author], (
-        subject_class("${className}", SubjectClass),
-        instance(SubjectClass, Base),
-        ${instanceQueries.filter((q) => q).join(", ")}
-      ), UnsortedInstances),
-      ${resultSetQueries.filter((q) => q).join(", ")}
-    `;
-
-    return fullQuery;
   }
 
   /**
@@ -876,57 +833,6 @@ export class Ad4mModel {
     const metadata = this.getModelMetadata();
     const allRelMeta = getRelationsMetadata(this as any);
     return buildSPARQLQuery(metadata, allRelMeta, query, this);
-  }
-
-  public static async instancesFromPrologResult<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy,
-    query: Query,
-    result: AllInstancesResult
-  ): Promise<ResultsWithTotalCount<T>> {
-    if (!result?.[0]?.AllInstances) return { results: [], totalCount: 0 };
-    // Map results to instances
-    const requestedProperties = query?.properties || [];
-    const allInstances = await Promise.all(
-      result[0].AllInstances.map(async ([Base, Properties, Collections, Timestamp, Author]) => {
-        try {
-          const instance = new this(perspective, Base) as any;
-          // Remove unrequested attributes from instance
-          if (requestedProperties.length) {
-            Object.keys(instance).forEach((key) => {
-              if (!requestedProperties.includes(key) && key !== 'createdAt' && key !== 'updatedAt' && key !== 'author' && key !== 'id' && key !== 'baseExpression') delete instance[key];
-            });
-          }
-          // Collect values to assign to instance
-          const values = [...Properties, ...Collections, ["createdAt", Timestamp], ["author", Author]];
-          await Ad4mModel.assignValuesToInstance(perspective, instance, values);
-
-          return instance;
-        } catch (error) {
-          console.error(`Failed to process instance ${Base}:`, error);
-          // Return null for failed instances - we'll filter these out below
-          return null;
-        }
-      })
-    );
-    const instances = allInstances.filter((instance) => instance !== null) as T[];
-
-    // Eager-load relations if requested (BEFORE snapshot so dirty tracking is accurate)
-    if (query.include && instances.length > 0) {
-      await hydrateRelations(this, instances, perspective, query.include);
-    }
-
-    // Take snapshots for dirty tracking after ALL hydration is complete
-    // (including eager-loaded relations).
-    // When `include` is specified, only snapshot those relations.
-    // Otherwise snapshot ALL fields (properties + relations) since
-    // hydrateFromLinks populates relations with stable raw IDs.
-    const snapshotRelations = query.include;
-    for (const inst of instances) {
-      (inst as Ad4mModel).takeSnapshot(snapshotRelations);
-    }
-
-    return { results: instances, totalCount: result[0].TotalCount };
   }
 
   /**
@@ -1383,26 +1289,14 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy, 
     query: Query = {},
-    engine: 'sparql' | 'prolog' | boolean = 'sparql'
+    _engine?: 'sparql' | 'prolog' | boolean
   ): Promise<T[]> {
     if (query.properties && query.properties.length === 0) {
       throw new Error("properties[] must not be empty — omit the field to return all properties, or specify at least one field name");
     }
 
-    // Backward compatibility: boolean maps to sparql (true) or prolog (false)
-    const resolvedEngine = typeof engine === 'boolean'
-      ? (engine ? 'sparql' : 'prolog')
-      : engine;
-
-    if (resolvedEngine === 'sparql') {
-      const { results } = await this.executeModelQuery(perspective, query);
-      return results;
-    } else {
-      const prologQuery = await this.queryToProlog(perspective, query);
-      const result = await perspective.infer(prologQuery);
-      const { results } = await this.instancesFromPrologResult(perspective, query, result);
-      return results;
-    }
+    const { results } = await this.executeModelQuery(perspective, query);
+    return results;
   }
 
   /**
@@ -1429,10 +1323,10 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query: Query = {},
-    engine: 'sparql' | 'prolog' | boolean = 'sparql',
+    _engine?: 'sparql' | 'prolog' | boolean,
   ): Promise<T | null> {
     const limitedQuery = { ...query, limit: 1 };
-    const results = await this.findAll(perspective, limitedQuery, engine);
+    const results = await this.findAll(perspective, limitedQuery);
     return results[0] ?? null;
   }
 
@@ -1460,19 +1354,9 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy, 
     query: Query = {},
-    engine: 'sparql' | 'prolog' | boolean = 'sparql'
+    _engine?: 'sparql' | 'prolog' | boolean
   ): Promise<ResultsWithTotalCount<T>> {
-    const resolvedEngine = typeof engine === 'boolean'
-      ? (engine ? 'sparql' : 'prolog')
-      : engine;
-
-    if (resolvedEngine === 'sparql') {
-      return await this.executeModelQuery(perspective, query);
-    } else {
-      const prologQuery = await this.queryToProlog(perspective, query);
-      const result = await perspective.infer(prologQuery);
-      return await this.instancesFromPrologResult(perspective, query, result);
-    }
+    return await this.executeModelQuery(perspective, query);
   }
 
   /**
@@ -1482,7 +1366,6 @@ export class Ad4mModel {
    * @param pageSize - Number of items per page
    * @param pageNumber - Which page to retrieve (1-based)
    * @param query - Optional additional query parameters
-   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
    * @returns Paginated results with metadata
    * 
    * @example
@@ -1491,9 +1374,6 @@ export class Ad4mModel {
    *   where: { category: "Main Course" }
    * });
    * console.log(`Page ${page.pageNumber} of recipes, ${page.results.length} items`);
-   * 
-   * // Use Prolog explicitly (legacy)
-   * const pageProlog = await Recipe.paginate(perspective, 10, 1, {}, false);
    * ```
    */
   static async paginate<T extends Ad4mModel>(
@@ -1502,43 +1382,11 @@ export class Ad4mModel {
     pageSize: number, 
     pageNumber: number, 
     query?: Query,
-    engine: 'sparql' | 'prolog' | boolean = 'sparql'
+    _engine?: 'sparql' | 'prolog' | boolean
   ): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(query || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const resolvedEngine = typeof engine === 'boolean'
-      ? (engine ? 'sparql' : 'prolog')
-      : engine;
-
-    if (resolvedEngine === 'sparql') {
-      const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery);
-      return { results, totalCount, pageSize, pageNumber };
-    } else {
-      const prologQuery = await this.queryToProlog(perspective, paginationQuery);
-      const result = await perspective.infer(prologQuery);
-      const { results, totalCount } = await this.instancesFromPrologResult(perspective, paginationQuery, result);
-      return { results, totalCount, pageSize, pageNumber };
-    }
-  }
-
-  static async countQueryToProlog(perspective: PerspectiveProxy, query: Query = {}, modelClassName?: string | null) {
-    const { where } = query;
-    const className = modelClassName || (await this.getClassName(perspective));
-    const resolvedParentPredicate = query.parent
-      ? resolveParentPredicate(query.parent, this)
-      : undefined;
-    const instanceQueries = [buildAuthorAndTimestampQuery(), buildParentQuery(query.parent, resolvedParentPredicate), buildWhereQuery(where)];
-    const resultSetQueries = [buildCountQuery(true), buildOrderQuery(), buildOffsetQuery(), buildLimitQuery()];
-
-    const fullQuery = `
-      findall([Base, Properties, Collections, Timestamp, Author], (
-        subject_class("${className}", SubjectClass),
-        instance(SubjectClass, Base),
-        ${instanceQueries.filter((q) => q).join(", ")}
-      ), UnsortedInstances),
-      ${resultSetQueries.filter((q) => q).join(", ")}
-    `;
-
-    return fullQuery;
+    const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery);
+    return { results, totalCount, pageSize, pageNumber };
   }
 
   /**
@@ -1561,7 +1409,6 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
    * @returns Total count of matching entities
    * 
    * @example
@@ -1570,23 +1417,11 @@ export class Ad4mModel {
    * const activeRecipes = await Recipe.count(perspective, {
    *   where: { status: "active" }
    * });
-   * 
-   * // Use Prolog explicitly (legacy)
-   * const countProlog = await Recipe.count(perspective, {}, false);
    * ```
    */
-  static async count(perspective: PerspectiveProxy, query: Query = {}, engine: 'sparql' | 'prolog' | boolean = 'sparql') {
-    const resolvedEngine = typeof engine === 'boolean'
-      ? (engine ? 'sparql' : 'prolog')
-      : engine;
-
-    if (resolvedEngine === 'sparql') {
-      const { totalCount } = await this.executeModelQuery(perspective, { ...query, limit: 0 });
-      return totalCount;
-    } else {
-      const result = await perspective.infer(await this.countQueryToProlog(perspective, query));
-      return result?.[0]?.TotalCount || 0;
-    }
+  static async count(perspective: PerspectiveProxy, query: Query = {}): Promise<number> {
+    const { totalCount } = await this.executeModelQuery(perspective, { ...query, limit: 0 });
+    return totalCount;
   }
 
   private async setProperty(key: string, value: any, batchId?: string) {
