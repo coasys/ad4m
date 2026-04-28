@@ -492,6 +492,11 @@ pub async fn unified_events(
     let trans_rx = pubsub.subscribe(&AI_TRANSCRIPTION_TEXT_TOPIC).await;
     let loading_rx = pubsub.subscribe(&AI_MODEL_LOADING_STATUS).await;
 
+    // Query subscription events (forwarded unfiltered; client filters by subscriptionId)
+    let query_sub_rx = pubsub
+        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
+        .await;
+
     // Convert each receiver into a typed stream
     macro_rules! typed_stream {
         ($rx:expr, $ty:expr) => {
@@ -579,6 +584,7 @@ pub async fn unified_events(
 
     let s_trans = typed_stream!(trans_rx, "transcription-text");
     let s_loading = typed_stream!(loading_rx, "model-loading-status");
+    let s_query_sub = typed_stream!(query_sub_rx, "query-subscription-update");
 
     // Merge all streams using a balanced binary tree of stream::select
     let agent = stream::select(
@@ -591,7 +597,7 @@ pub async fn unified_events(
     );
     let links = stream::select(s_link_added, stream::select(s_link_removed, s_link_updated));
     let runtime = stream::select(s_msg, stream::select(s_notif, s_exc));
-    let ai = stream::select(s_trans, s_loading);
+    let ai = stream::select(s_trans, stream::select(s_loading, s_query_sub));
 
     let top = stream::select(
         stream::select(agent, persp),

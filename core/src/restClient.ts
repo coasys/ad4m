@@ -129,12 +129,9 @@ export class RestClient {
     }>()
 
     subscribe<T = SseEvent>(path: string, callback: (data: T) => void): () => void {
-        // Route broad event feeds through the unified /events endpoint to avoid
-        // exhausting the browser's per-origin SSE connection limit, but keep
-        // dedicated subscription-specific streams on their own path because
-        // they are not mirrored into the unified feed.
-        const useDirectPath = path.startsWith('/api/v1/events/query-subscription/')
-        const targetPath = useDirectPath ? path : '/api/v1/events/unified'
+        // Route all event feeds through the unified /events endpoint to avoid
+        // exhausting the browser's per-origin SSE connection limit (6 in Chrome).
+        const targetPath = '/api/v1/events/unified'
         const url = `${this.baseUrl}${targetPath}`
         const tokenParam = this.token ? `token=${encodeURIComponent(this.token)}` : ''
         const separator = url.includes('?') ? '&' : '?'
@@ -194,8 +191,7 @@ export class RestClient {
 
     /** Wait until the SSE connection for the given path is established. */
     async waitForSubscription(path: string): Promise<void> {
-        const useDirectPath = path.startsWith('/api/v1/events/query-subscription/')
-        const targetPath = useDirectPath ? path : '/api/v1/events/unified'
+        const targetPath = '/api/v1/events/unified'
         const url = `${this.baseUrl}${targetPath}`
         const tokenParam = this.token ? `token=${encodeURIComponent(this.token)}` : ''
         const separator = url.includes('?') ? '&' : '?'
