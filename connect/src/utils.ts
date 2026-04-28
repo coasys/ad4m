@@ -43,6 +43,8 @@ export async function checkConnection(baseUrl: string, timeout = 10000): Promise
   try {
     const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
     if (!res.ok) throw new Error(`Health check returned ${res.status}`);
+    const body = await res.json();
+    if (body?.status !== 'ok') throw new Error('Not an AD4M executor');
   } catch (e: any) {
     if (e.name === 'AbortError') throw new Error('Connection timed out');
     throw e;

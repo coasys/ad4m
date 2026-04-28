@@ -287,13 +287,12 @@ export class Ad4mConnectElement extends LitElement {
     // First, try same-origin (works when Vite dev server proxies /health to executor)
     try {
       const probeRes = await fetch(window.location.origin + '/health', { signal: AbortSignal.timeout(2000) });
-      if (probeRes.ok) {
-        this.core.url = window.location.origin;
-        setLocal("ad4m-url", this.core.url);
-        console.log('[Ad4m Connect UI] Using same-origin proxy:', this.core.url);
-      } else {
-        throw new Error('probe failed');
-      }
+      if (!probeRes.ok) throw new Error('probe failed');
+      const body = await probeRes.json();
+      if (body?.status !== 'ok') throw new Error('not an ad4m executor');
+      this.core.url = window.location.origin;
+      setLocal("ad4m-url", this.core.url);
+      console.log('[Ad4m Connect UI] Using same-origin proxy:', this.core.url);
     } catch {
       // Fall back to direct connection
       const host = window.location.hostname === '127.0.0.1' ? '127.0.0.1' : 'localhost';

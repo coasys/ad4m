@@ -19,7 +19,7 @@ export default class Ad4mConnect extends EventTarget {
   connectionState: ConnectionStates = "not-connected";
   authState: AuthStates = "unauthenticated";
   ad4mClient?: Ad4mClient;
-  /** HTTP base URL derived from the WebSocket URL */
+  /** HTTP base URL (normalizes legacy ws:// URLs from localStorage) */
   get baseUrl(): string {
     return wsUrlToHttpBase(this.url);
   }
