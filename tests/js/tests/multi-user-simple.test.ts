@@ -2125,7 +2125,7 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should sync links correctly between all users across nodes", async function() {
-            this.timeout(180000); // Increased for Holochain 0.7.0 - link sync takes longer
+            this.timeout(300000); // 5 min — K2 gossip on CI can take >2.5 min
 
             console.log("\n=== Testing cross-node link synchronization ===");
 
@@ -2180,21 +2180,22 @@ describe("Multi-User Simple integration tests", () => {
             // Re-exchange agent infos before sync polling — K2 spaces created
             // during link-language install may need fresh peer info
             console.log("Re-exchanging agent infos before link sync polling...");
-            for (let attempt = 1; attempt <= 3; attempt++) {
+            for (let attempt = 1; attempt <= 5; attempt++) {
                 try {
                     const n1Infos = await adminAd4mClient!.runtime.hcAgentInfos();
                     const n2Infos = await node2AdminClient!.runtime.hcAgentInfos();
                     await adminAd4mClient!.runtime.hcAddAgentInfos(n2Infos);
                     await node2AdminClient!.runtime.hcAddAgentInfos(n1Infos);
+                    console.log(`  Agent info exchange attempt ${attempt}/5 successful`);
                 } catch (e) {
-                    console.log(`  Agent info exchange attempt ${attempt} failed:`, e);
+                    console.log(`  Agent info exchange attempt ${attempt}/5 failed:`, e);
                 }
-                if (attempt < 3) await sleep(2000);
+                if (attempt < 5) await sleep(3000);
             }
 
             // Wait for cross-node Holochain gossip synchronization with retry
             console.log("\nWaiting for cross-node sync (polling until all users see >= 5 links)...");
-            const syncTimeout = 150000; // 2.5 minutes max
+            const syncTimeout = 240000; // 4 minutes max — CI K2 gossip can be very slow
             const syncStart = Date.now();
             let synced = false;
             let pollCount = 0;
@@ -2208,8 +2209,8 @@ describe("Multi-User Simple integration tests", () => {
                 await sleep(5000);
                 pollCount++;
 
-                // Re-exchange agent infos every 30s to help K2 peer discovery
-                if (pollCount % 6 === 0) {
+                // Re-exchange agent infos every 15s to help K2 peer discovery
+                if (pollCount % 3 === 0) {
                     try {
                         const n1Infos = await adminAd4mClient!.runtime.hcAgentInfos();
                         const n2Infos = await node2AdminClient!.runtime.hcAgentInfos();
