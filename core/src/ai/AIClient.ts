@@ -116,13 +116,14 @@ export class AIClient {
 
         this.#transcriptionUnsubscribers.set(streamId, unsub);
 
-        this.connectAudioWs([streamId]);
-
         return streamId;
     }
 
     async closeTranscriptionStream(streamId: string): Promise<void> {
-        this.disconnectAudioWs();
+        this.#pendingStreamIds.delete(streamId);
+        if (this.#pendingStreamIds.size === 0) {
+            this.disconnectAudioWs();
+        }
         await this.#restClient.post<void>('/api/v1/ai/transcription/close', { streamId });
 
         const unsub = this.#transcriptionUnsubscribers.get(streamId);
@@ -133,26 +134,45 @@ export class AIClient {
     }
 
     private _feedCount = 0;
+    #pendingStreamIds: Set<string> = new Set();
 
-    async feedTranscriptionStream(streamIds: string | string[], audio: Float32Array): Promise<void> {
+    async feedTranscriptionStream(streamIds: string | string[], audio: Float32Array | number[]): Promise<void> {
         const ids = Array.isArray(streamIds) ? streamIds : [streamIds];
+
+        // Ensure we have a typed array for binary WebSocket transport
+        const typedAudio = audio instanceof Float32Array
+            ? audio
+            : new Float32Array(audio);
+
+        // Lazily connect/reconnect WebSocket with all known stream IDs
+        let idsChanged = false;
+        for (const id of ids) {
+            if (!this.#pendingStreamIds.has(id)) {
+                this.#pendingStreamIds.add(id);
+                idsChanged = true;
+            }
+        }
+        if (idsChanged && this.#pendingStreamIds.size > 0) {
+            this.disconnectAudioWs();
+            this.connectAudioWs([...this.#pendingStreamIds]);
+        }
 
         if (this.#audioWs && this.#audioWs.readyState === WebSocket.OPEN) {
             this._feedCount++;
             if (this._feedCount % 50 === 1) {
-                console.log(`[AIClient] feedTranscriptionStream via WebSocket (frame #${this._feedCount}, ${audio.length} samples)`);
+                console.log(`[AIClient] feedTranscriptionStream via WebSocket (frame #${this._feedCount}, ${typedAudio.length} samples)`);
             }
-            this.#audioWs.send(audio.buffer);
+            this.#audioWs.send(typedAudio.buffer);
             return;
         }
 
         this._feedCount++;
         if (this._feedCount % 50 === 1) {
-            console.log(`[AIClient] feedTranscriptionStream via REST fallback (frame #${this._feedCount}, ${audio.length} samples, ws state: ${this.#audioWs?.readyState})`);
+            console.log(`[AIClient] feedTranscriptionStream via REST fallback (frame #${this._feedCount}, ${typedAudio.length} samples, ws state: ${this.#audioWs?.readyState})`);
         }
         return this.#restClient.post<void>('/api/v1/ai/transcription/feed', {
             streamIds: ids,
-            audio: Array.from(audio)
+            audio: Array.from(typedAudio)
         });
     }
 
