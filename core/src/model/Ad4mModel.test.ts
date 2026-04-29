@@ -787,20 +787,18 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
     expect(results[0].name).toBe("Pasta");
   });
 
-  it("should use Prolog when engine is prolog in findAll()", async () => {
-    const prologResults = [{
-      AllInstances: [
-        ["literal:recipe1", [["name", "Pasta"]], [["ingredients", ["pasta"]]], "2023-01-01T00:00:00Z", "did:key:alice"]
+  it("should route through modelQuery when engine is 'prolog' in findAll() (prolog is now no-op)", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
       ],
-      TotalCount: 1
-    }];
-
-    mockPerspective.infer.mockResolvedValue(prologResults);
+      totalCount: 1
+    });
 
     const results = await Recipe.findAll(mockPerspective, {}, false);
     
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySparql).not.toHaveBeenCalled();
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
   });
 
@@ -812,7 +810,7 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
       totalCount: 1
     });
 
-    const { results, totalCount } = await Recipe.findAllAndCount(mockPerspective, {}, 'sparql');
+    const { results, totalCount } = await Recipe.findAllAndCount(mockPerspective, {});
 
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
@@ -828,7 +826,7 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
       totalCount: 1
     });
 
-    const page = await Recipe.paginate(mockPerspective, 10, 1, {}, 'sparql');
+    const page = await Recipe.paginate(mockPerspective, 10, 1, {});
 
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
@@ -838,26 +836,28 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
     expect(page.totalCount).toBe(1);
   });
 
-  it("should use SPARQL when engine is 'sparql' in count()", async () => {
+  it("should use SPARQL in count()", async () => {
     mockPerspective.modelQuery.mockResolvedValue({
       instances: [],
       totalCount: 5
     });
 
-    const count = await Recipe.count(mockPerspective, {}, 'sparql');
+    const count = await Recipe.count(mockPerspective, {});
 
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(count).toBe(5);
   });
 
-  it("should use Prolog when engine is prolog in count()", async () => {
-    const prologResults = [{ TotalCount: 10 }];
-    mockPerspective.infer.mockResolvedValue(prologResults);
+  it("should return count from modelQuery", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 10
+    });
 
-    const count = await Recipe.count(mockPerspective, {}, false);
+    const count = await Recipe.count(mockPerspective, {});
     
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.querySparql).not.toHaveBeenCalled();
     expect(count).toBe(10);
   });
@@ -881,23 +881,22 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
     expect(results[0].name).toBe("Pasta");
   });
 
-  it("should use Prolog when.engine('prolog') in ModelQueryBuilder.get()", async () => {
-    const prologResults = [{
-      AllInstances: [
-        ["literal:recipe1", [["name", "Pasta"]], [["ingredients", ["pasta"]]], "2023-01-01T00:00:00Z", "did:key:alice"]
+  it("should use modelQuery when .engine('prolog') is called (engine is now a no-op)", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
       ],
-      TotalCount: 1
-    }];
-
-    mockPerspective.infer.mockResolvedValue(prologResults);
+      totalCount: 1
+    });
 
     const results = await Recipe.query(mockPerspective)
       .where({ name: "Pasta" })
       .engine('prolog')
       .get();
     
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySparql).not.toHaveBeenCalled();
+    // engine('prolog') is now a no-op — everything goes through modelQuery
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
   });
 
@@ -973,7 +972,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     });
 
     // Count recipes with rating > 3 (should match 2 recipes: rating 4 and 5)
-    const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 3 } } }, 'sparql');
+    const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 3 } } });
     
     expect(count).toBe(2);
     expect(mockPerspective.modelQuery).toHaveBeenCalled();
@@ -986,7 +985,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     });
 
     // Count recipes with rating between 2 and 4 (should match 3 recipes: rating 2, 3, 4)
-    const count = await Recipe.count(mockPerspective, { where: { rating: { between: [2, 4] } } }, 'sparql');
+    const count = await Recipe.count(mockPerspective, { where: { rating: { between: [2, 4] } } });
     
     expect(count).toBe(3);
     expect(mockPerspective.modelQuery).toHaveBeenCalled();
@@ -999,7 +998,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     });
 
     const targetTimestamp = new Date("2023-01-03T00:00:00Z").getTime();
-    const count = await Recipe.count(mockPerspective, { where: { timestamp: { gt: targetTimestamp } } }, 'sparql');
+    const count = await Recipe.count(mockPerspective, { where: { timestamp: { gt: targetTimestamp } } });
     
     expect(count).toBe(2);
     expect(mockPerspective.modelQuery).toHaveBeenCalled();
@@ -1015,7 +1014,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
     const count = await Recipe.count(mockPerspective, { 
       where: { timestamp: { between: [startTimestamp, endTimestamp] } } 
-    }, 'sparql');
+    });
     
     expect(count).toBe(3);
     expect(mockPerspective.modelQuery).toHaveBeenCalled();
@@ -1028,7 +1027,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     });
 
     // Count recipes by Alice (should match 3 recipes)
-    const count = await Recipe.count(mockPerspective, { where: { author: "did:key:alice" } }, 'sparql');
+    const count = await Recipe.count(mockPerspective, { where: { author: "did:key:alice" } });
     
     expect(count).toBe(3);
     expect(mockPerspective.modelQuery).toHaveBeenCalled();
@@ -1069,34 +1068,6 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should handle count() with Prolog for gt operator (legacy)", async () => {
-    const prologResults = [{ TotalCount: 2 }];
-    mockPerspective.infer.mockResolvedValue(prologResults);
-
-    const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 3 } } }, false);
-    
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySparql).not.toHaveBeenCalled();
-    expect(count).toBe(2);
-  });
-
-  it("should handle count() with Prolog for timestamp between (legacy)", async () => {
-    const prologResults = [{ TotalCount: 3 }];
-    mockPerspective.infer.mockResolvedValue(prologResults);
-
-    const startTimestamp = new Date("2023-01-02T00:00:00Z").getTime();
-    const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
-    
-    const count = await Recipe.count(
-      mockPerspective, 
-      { where: { timestamp: { between: [startTimestamp, endTimestamp] } } }, 
-      false
-    );
-    
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySparql).not.toHaveBeenCalled();
-    expect(count).toBe(3);
-  });
 });
 
 
@@ -2143,6 +2114,7 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
     
     const mockPerspective = {
       getLinks: jest.fn().mockResolvedValue([]),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
       subscribeQuery: jest.fn().mockResolvedValue({
         result: '[]',
         onResult: jest.fn(),
@@ -2402,6 +2374,18 @@ describe("deepQuery opt-in — getter evaluation", () => {
   let sparqlCalls: string[];
   const mockPerspective: any = {
     uuid: "test-uuid",
+    modelQuery: jest.fn(async (className: string, queryJson: string, shapeJson: string) => {
+      // Return a basic result for the single-instance getData() path
+      const query = JSON.parse(queryJson);
+      const id = query?.where?.id;
+      if (id) {
+        return {
+          instances: [{ id, body: "Hello" }],
+          totalCount: 1,
+        };
+      }
+      return { instances: [], totalCount: 0 };
+    }),
     querySparql: jest.fn(async (q: string) => {
       sparqlCalls.push(q);
       return [];

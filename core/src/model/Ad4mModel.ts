@@ -785,6 +785,14 @@ export class Ad4mModel {
           (this as any)[key] = value;
         }
       }
+
+      // Evaluate custom property getters (e.g. @Property({ getter: '...' }))
+      // The Rust endpoint doesn't handle these yet (Phase 8), so evaluate JS-side.
+      const metadata = ctor.getModelMetadata();
+      await evaluateCustomGettersForInstance(this, this._perspective, metadata, {
+        requestedProperties: opts?.properties,
+        include: opts?.include,
+      });
     } catch (e) {
       console.error(`getData via Rust model query failed for ${this._baseExpression}:`, e);
     }
