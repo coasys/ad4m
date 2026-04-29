@@ -396,8 +396,6 @@ pub fn rest_router(state: AppState) -> Router {
             .route("/ws/audio", get(audio_ws::audio_websocket))
             // ── SSE Events (single endpoint) ──
             .route("/events", get(events::events))
-            // Legacy aliases — redirect to the single /events endpoint
-            .route("/events/unified", get(events::events))
             // ── Stub routes: SDK endpoints not yet implemented on server (501) ──
             .route("/runtime/unyt/agent-key", get(runtime::unyt_agent_key))
             .route(

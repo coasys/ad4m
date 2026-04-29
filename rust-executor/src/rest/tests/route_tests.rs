@@ -1107,12 +1107,6 @@ async fn route_events() {
     assert!(is_route_registered(s), "GET /events returned {}", s);
 }
 
-#[tokio::test]
-async fn route_events_unified_alias() {
-    let s = route_status(Method::GET, "/api/v1/events/unified").await;
-    assert!(is_route_registered(s), "GET /events/unified returned {}", s);
-}
-
 // ── Negative: wrong method should return 405 ──
 
 #[tokio::test]
