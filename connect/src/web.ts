@@ -666,9 +666,10 @@ export class Ad4mConnectElement extends LitElement {
     } else if (this.core.authState === "authenticated") {
       // Show settings button when authenticated and modal is closed
       const credits = this.userInfo?.remainingCredits;
+      const showCredits = credits != null && isFinite(credits);
       return html`
         <div class="settings-bar">
-          ${credits != null ? html`
+          ${showCredits ? html`
             <span class="credit-badge ${this.lowCredit ? 'low-credit' : ''}">
               ${CreditIcon()} ${credits.toFixed(2)} wHOT
             </span>

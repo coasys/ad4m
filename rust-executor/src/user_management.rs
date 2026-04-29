@@ -139,6 +139,10 @@ pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
     if !password_valid {
         return Err("Invalid credentials".to_string());
     }
+    // Wallet keys are in-memory only and don't survive executor restarts.
+    // Re-create the key if it's missing so login works after restart.
+    AgentService::ensure_user_key_exists(email)
+        .map_err(|e| format!("Failed to ensure user key: {}", e))?;
     if !AgentService::user_exists(email) {
         return Err("User key not found on executor".to_string());
     }

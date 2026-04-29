@@ -98,20 +98,33 @@ export class AIClient {
             timeBeforeSpeech?: number;
         }
     ): Promise<string> {
-        console.log('[AIClient] openTranscriptionStream:', modelId, params);
-        const streamId = await this.#restClient.post<string>('/api/v1/ai/transcription/open', { modelId, params });
-        console.log('[AIClient] transcription stream opened, streamId:', streamId);
+        console.log('[AIClient] openTranscriptionStream called with modelId:', modelId, 'params:', params);
+        console.log('[AIClient] restClient baseUrl:', this.#restClient.getBaseUrl(), 'hasToken:', !!this.#restClient.getToken());
+        let streamId: string;
+        try {
+            streamId = await this.#restClient.post<string>('/api/v1/ai/transcription/open', { modelId, params });
+            console.log('[AIClient] transcription stream opened OK, streamId:', streamId);
+        } catch (e) {
+            console.error('[AIClient] openTranscriptionStream POST failed:', e);
+            throw e;
+        }
 
+        console.log('[AIClient] subscribing to SSE for stream', streamId, '...');
+        let sseEventCount = 0;
         const unsub = this.#restClient.subscribe(
             `/api/v1/events/ai`,
             (data) => {
-                console.log('[AIClient] SSE event received:', data);
+                sseEventCount++;
+                if (sseEventCount <= 5 || sseEventCount % 20 === 0) {
+                    console.log(`[AIClient] SSE event #${sseEventCount} received:`, JSON.stringify(data).slice(0, 200));
+                }
                 if (data.type === 'transcription-text' && data.streamId === streamId && data.text) {
                     console.log('[AIClient] transcription text for stream', streamId, ':', data.text);
                     streamCallback(data.text as string);
                 }
             }
         );
+        console.log('[AIClient] SSE subscription registered for stream', streamId);
 
         this.#transcriptionUnsubscribers.set(streamId, unsub);
 
@@ -119,13 +132,20 @@ export class AIClient {
     }
 
     async closeTranscriptionStream(streamId: string): Promise<void> {
+        console.log('[AIClient] closeTranscriptionStream called for:', streamId);
         this.#pendingStreamIds.delete(streamId);
-        await this.#restClient.post<void>('/api/v1/ai/transcription/close', { streamId });
+        try {
+            await this.#restClient.post<void>('/api/v1/ai/transcription/close', { streamId });
+            console.log('[AIClient] transcription stream closed OK:', streamId);
+        } catch (e) {
+            console.error('[AIClient] closeTranscriptionStream failed:', e);
+        }
 
         const unsub = this.#transcriptionUnsubscribers.get(streamId);
         if (unsub) {
             unsub();
             this.#transcriptionUnsubscribers.delete(streamId);
+            console.log('[AIClient] SSE unsubscribed for stream:', streamId);
         }
     }
 
@@ -147,24 +167,52 @@ export class AIClient {
             : new Float32Array(audio);
 
         this._feedCount++;
-        if (this._feedCount % 50 === 1) {
-            console.log(`[AIClient] feedTranscriptionStream binary (frame #${this._feedCount}, ${typedAudio.length} samples)`);
+        if (this._feedCount <= 3 || this._feedCount % 50 === 1) {
+            console.log(`[AIClient] feedTranscriptionStream binary (frame #${this._feedCount}, ${typedAudio.length} samples, ${typedAudio.byteLength} bytes, streams: [${ids.join(',')}])`);
+        }
+
+        if (ids.length === 0) {
+            console.warn('[AIClient] feedTranscriptionStream called with no stream IDs');
+            return;
+        }
+        if (typedAudio.length === 0) {
+            console.warn('[AIClient] feedTranscriptionStream called with empty audio');
+            return;
         }
 
         const baseUrl = this.#restClient.getBaseUrl();
         const token = this.#restClient.getToken();
-        const response = await fetch(`${baseUrl}/api/v1/ai/transcription/feed`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/octet-stream',
-                'X-Stream-Ids': ids.join(','),
-                ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-            },
-            body: typedAudio.buffer as ArrayBuffer,
-        });
 
-        if (!response.ok) {
-            console.error(`[AIClient] feed failed: ${response.status} ${response.statusText}`);
+        // Use slice to get only the relevant portion of the underlying ArrayBuffer
+        // (Float32Array may be a view over a larger buffer)
+        const bodyBuffer = typedAudio.buffer.slice(
+            typedAudio.byteOffset,
+            typedAudio.byteOffset + typedAudio.byteLength
+        );
+
+        if (this._feedCount <= 3) {
+            console.log(`[AIClient] feed POST to ${baseUrl}/api/v1/ai/transcription/feed, hasToken: ${!!token}, viewBytes: ${typedAudio.byteLength}, bufferBytes: ${bodyBuffer.byteLength}, offset: ${typedAudio.byteOffset}`);
+        }
+
+        try {
+            const response = await fetch(`${baseUrl}/api/v1/ai/transcription/feed`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/octet-stream',
+                    'X-Stream-Ids': ids.join(','),
+                    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+                },
+                body: bodyBuffer,
+            });
+
+            if (!response.ok) {
+                const text = await response.text().catch(() => '');
+                console.error(`[AIClient] feed failed: ${response.status} ${response.statusText}`, text);
+            } else if (this._feedCount <= 3) {
+                console.log(`[AIClient] feed #${this._feedCount} OK (${response.status})`);
+            }
+        } catch (e) {
+            console.error('[AIClient] feed fetch error:', e);
         }
     }
 

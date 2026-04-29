@@ -1237,14 +1237,17 @@ impl AIService {
                 // Client-side VAD sends pre-segmented utterances (speech only,
                 // silence stripped). Server-side VAD acts as a lightweight
                 // pass-through: very low onset threshold so all audio is treated
-                // as speech, and a long end window so Kalosm doesn't prematurely
-                // cut within an utterance.
+                // as speech.  The end_window is short (500ms) because the feed
+                // handler appends silence after each utterance to trigger segment
+                // finalization — without it, Kalosm's VAD never sees silence
+                // (the stream returns Pending between feeds, not zero samples)
+                // and Whisper never gets a complete segment to transcribe.
                 let voice_stream = audio_stream
                     .voice_activity_stream()
                     .rechunk_voice_activity()
                     .with_start_threshold(0.001)
                     .with_end_threshold(0.001)
-                    .with_end_window(Duration::from_secs(30));
+                    .with_end_window(Duration::from_millis(500));
 
                 let mut word_stream = voice_stream.transcribe(whisper);
 
@@ -1254,6 +1257,7 @@ impl AIService {
                         while let Some(segment) = word_stream.next().await {
                             let text = segment.text().to_string();
                             let stream_id_clone = stream_id_clone.clone();
+                            log::info!("Transcription text for stream {}: {:?}", stream_id_clone, text);
 
                             // Bill for transcribed words
                             let word_count = text.split_whitespace().count();
@@ -1364,6 +1368,20 @@ impl AIService {
             stream.samples_tx.send(audio_samples).await.map_err(|e| {
                 AIServiceError::CrazyError(format!("Failed to feed stream {}: {}", stream_id, e))
             })?;
+            // Append silence so the server-side VAD detects the speech→silence
+            // transition and finalizes the segment for Whisper to transcribe.
+            // 16000 samples = 1 second at 16 kHz, comfortably exceeding the
+            // 500 ms end_window configured on the voice_activity_stream.
+            stream
+                .samples_tx
+                .send(vec![0.0f32; 16000])
+                .await
+                .map_err(|e| {
+                    AIServiceError::CrazyError(format!(
+                        "Failed to send silence to stream {}: {}",
+                        stream_id, e
+                    ))
+                })?;
             Ok(())
         } else {
             Err(AIServiceError::StreamNotFound.into())
@@ -1387,6 +1405,17 @@ impl AIService {
             stream.samples_tx.send(audio_samples).await.map_err(|e| {
                 AIServiceError::CrazyError(format!("Failed to feed stream {}: {}", stream_id, e))
             })?;
+            // Append silence (same as feed_transcription_stream)
+            stream
+                .samples_tx
+                .send(vec![0.0f32; 16000])
+                .await
+                .map_err(|e| {
+                    AIServiceError::CrazyError(format!(
+                        "Failed to send silence to stream {}: {}",
+                        stream_id, e
+                    ))
+                })?;
             Ok(rx)
         } else {
             Err(AIServiceError::StreamNotFound.into())
