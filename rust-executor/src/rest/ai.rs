@@ -458,12 +458,7 @@ pub async fn open_transcription_stream(
 /// Stream IDs are passed via `X-Stream-Ids` header (comma-separated).
 /// Transcription text results are delivered via the existing SSE channel
 /// at `/events/ai` (type: "transcription-text").
-#[rest_handler(
-    POST,
-    "/ai/transcription/feed",
-    request = "bytes",
-    response = "string"
-)]
+#[rest_handler(POST, "/ai/transcription/feed", request = "bytes", response = "string")]
 pub async fn feed_transcription_stream(
     State(_state): State<AppState>,
     auth: AuthContext,
