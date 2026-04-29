@@ -4073,27 +4073,26 @@ impl PerspectiveInstance {
         user_email: Option<String>,
     ) -> Result<(String, String), AnyError> {
         // 1. Run the initial model query
-        let initial_result = self.model_query(
-            &class_name,
-            &query_json,
-            shape_json.as_deref(),
-        )?;
+        let initial_result = self.model_query(&class_name, &query_json, shape_json.as_deref())?;
 
         // 2. Build trigger SPARQL from shape predicates.
         //    Parse the shape to extract required predicates for change detection.
-        let trigger_predicates = self.build_model_trigger_predicates(
-            &class_name, shape_json.as_deref(),
-        );
+        let trigger_predicates =
+            self.build_model_trigger_predicates(&class_name, shape_json.as_deref());
 
         let trigger_sparql = if trigger_predicates.is_empty() {
             // Fallback: match any triple (always re-check)
             "SELECT ?s ?p ?o WHERE { ?s ?p ?o . } LIMIT 1".to_string()
         } else {
-            let patterns: Vec<String> = trigger_predicates.iter()
+            let patterns: Vec<String> = trigger_predicates
+                .iter()
                 .enumerate()
                 .map(|(i, p)| format!("{{ ?s <{}> ?o{} . }}", p, i))
                 .collect();
-            format!("SELECT ?s ?p ?o WHERE {{ {} }} LIMIT 1", patterns.join(" UNION "))
+            format!(
+                "SELECT ?s ?p ?o WHERE {{ {} }} LIMIT 1",
+                patterns.join(" UNION ")
+            )
         };
 
         let predicate_set: HashSet<String> = trigger_predicates.into_iter().collect();
@@ -4130,7 +4129,8 @@ impl PerspectiveInstance {
                     existing_id.clone(),
                     init_string.clone(),
                     Some(Duration::from_millis(delay)),
-                ).await;
+                )
+                .await;
             }
             return Ok((existing_id, initial_result));
         }
@@ -4162,7 +4162,8 @@ impl PerspectiveInstance {
                 subscription_id.clone(),
                 init_string.clone(),
                 Some(Duration::from_millis(delay)),
-            ).await;
+            )
+            .await;
         }
 
         Ok((subscription_id, initial_result))
@@ -4208,7 +4209,9 @@ impl PerspectiveInstance {
 
         // Fallback: try to read shape from the store
         if predicates.is_empty() {
-            if let Ok(shape) = super::model_query::load_shape_from_store(&self.sparql_store, class_name) {
+            if let Ok(shape) =
+                super::model_query::load_shape_from_store(&self.sparql_store, class_name)
+            {
                 predicates = shape.predicates();
             }
         }
@@ -4277,7 +4280,8 @@ impl PerspectiveInstance {
         };
 
         // Create futures for each query check
-        for (id, query_string, user_email, last_keepalive, sub_predicates, model_params) in queries {
+        for (id, query_string, user_email, last_keepalive, sub_predicates, model_params) in queries
+        {
             // Check for timeout
             if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
                 queries_to_remove.push(id);

@@ -1,7 +1,6 @@
 import {
   PerspectiveProxy,
   Link,
-  Subject,
   Literal,
   LinkQuery,
   getPropertiesMetadata,

@@ -261,7 +261,10 @@ pub(crate) struct ModelShape {
 impl ModelShape {
     /// Returns all predicate IRIs declared in this shape (properties + relations + flags).
     pub fn predicates(&self) -> Vec<String> {
-        self.properties.iter().map(|p| p.predicate.clone()).collect()
+        self.properties
+            .iter()
+            .map(|p| p.predicate.clone())
+            .collect()
     }
 }
 
@@ -624,12 +627,7 @@ fn execute_model_query_inner(
     // conformance getters for relations with targets) in-process — eliminating
     // the N × querySparql round-trips per instance that evaluateCustomGettersForInstance() made.
     if !instances.is_empty() {
-        evaluate_getters(
-            store,
-            &mut instances,
-            &shape,
-            query_input.include.as_ref(),
-        )?;
+        evaluate_getters(store, &mut instances, &shape, query_input.include.as_ref())?;
     }
 
     // Apply where-clause filters
@@ -1696,16 +1694,10 @@ fn evaluate_getters(
                             if let Some(obj) = instance.as_object_mut() {
                                 if prop.is_scalar_relation {
                                     // HasOne/BelongsToOne → scalar
-                                    let val = values
-                                        .into_iter()
-                                        .next()
-                                        .unwrap_or(Value::Null);
+                                    let val = values.into_iter().next().unwrap_or(Value::Null);
                                     obj.insert(prop.name.clone(), val);
                                 } else {
-                                    obj.insert(
-                                        prop.name.clone(),
-                                        Value::Array(values),
-                                    );
+                                    obj.insert(prop.name.clone(), Value::Array(values));
                                 }
                             }
                         } else {
