@@ -101,7 +101,7 @@ export class AIClient {
         const streamId = await this.#restClient.post<string>('/api/v1/ai/transcription/open', { modelId, params });
 
         const unsub = this.#restClient.subscribe(
-            `/api/v1/events/ai`,
+            '/api/v1/events',
             (data) => {
                 if (data.type === 'transcription-text' && data.streamId === streamId && data.text) {
                     streamCallback(data.text as string);
@@ -131,7 +131,7 @@ export class AIClient {
      * Feed an audio utterance to one or more transcription streams.
      * Sends raw binary Float32Array as application/octet-stream.
      * Transcription results are delivered via the SSE channel registered
-     * in openTranscriptionStream (/events/ai).
+     * in openTranscriptionStream (/events).
      */
     async feedTranscriptionStream(streamIds: string | string[], audio: Float32Array | number[]): Promise<void> {
         const ids = Array.isArray(streamIds) ? streamIds : [streamIds];

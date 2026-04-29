@@ -687,28 +687,28 @@ describe('PerspectiveClient', () => {
         expect(result).toEqual([{X: 'test'}]);
     });
 
-    test('subscribeToQueryUpdates() routes through the unified SSE endpoint', async () => {
+    test('subscribeToQueryUpdates() routes through the SSE endpoint', async () => {
         const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
         const callback = jest.fn();
         const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
         const eventSource = lastOf(MockEventSource.instances);
 
-        expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/unified?token=test-token`);
+        expect(eventSource.url).toBe(`${baseUrl}/api/v1/events?token=test-token`);
 
         unsubscribe();
         expect(eventSource.closed).toBe(true);
     });
 
-    test('perspective lifecycle subscriptions still use the unified SSE endpoint', async () => {
+    test('perspective lifecycle subscriptions use the SSE endpoint', async () => {
         const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
         freshClient.perspective.addPerspectiveAddedListener(jest.fn());
         freshClient.perspective.subscribePerspectiveAdded();
 
         const eventSource = lastOf(MockEventSource.instances);
-        expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/unified?token=test-token`);
+        expect(eventSource.url).toBe(`${baseUrl}/api/v1/events?token=test-token`);
     });
 
-    test('perspective-scoped link subscriptions ignore unified SSE events for other perspectives', async () => {
+    test('perspective-scoped link subscriptions ignore SSE events for other perspectives', async () => {
         const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
         const linkAddedCallback = jest.fn();
         const linkRemovedCallback = jest.fn();
@@ -719,7 +719,7 @@ describe('PerspectiveClient', () => {
         await freshClient.perspective.addPerspectiveLinkUpdatedListener('uuid-1', [linkUpdatedCallback]);
 
         const eventSource = lastOf(MockEventSource.instances);
-        expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/unified?token=test-token`);
+        expect(eventSource.url).toBe(`${baseUrl}/api/v1/events?token=test-token`);
 
         eventSource.emit({
             type: 'link-added',
@@ -820,7 +820,7 @@ describe('PerspectiveClient', () => {
             freshClient.runtime.subscribeExceptionOccurred();
 
             const eventSource = lastOf(MockEventSource.instances);
-            expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/unified?token=test-token`);
+            expect(eventSource.url).toBe(`${baseUrl}/api/v1/events?token=test-token`);
             expect(eventSource.init?.fetch).toBeDefined();
             expect(eventSource.init?.fetch).not.toBe(fakeFetch);
         } finally {

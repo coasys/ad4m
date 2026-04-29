@@ -129,9 +129,8 @@ export class RestClient {
     }>()
 
     subscribe<T = SseEvent>(path: string, callback: (data: T) => void): () => void {
-        // Route all event feeds through the unified /events endpoint to avoid
-        // exhausting the browser's per-origin SSE connection limit (6 in Chrome).
-        const targetPath = '/api/v1/events/unified'
+        // Single /events endpoint — all event types multiplexed, server filters per-user.
+        const targetPath = '/api/v1/events'
         const url = `${this.baseUrl}${targetPath}`
         const tokenParam = this.token ? `token=${encodeURIComponent(this.token)}` : ''
         const separator = url.includes('?') ? '&' : '?'
@@ -191,7 +190,7 @@ export class RestClient {
 
     /** Wait until the SSE connection for the given path is established. */
     async waitForSubscription(path: string): Promise<void> {
-        const targetPath = '/api/v1/events/unified'
+        const targetPath = '/api/v1/events'
         const url = `${this.baseUrl}${targetPath}`
         const tokenParam = this.token ? `token=${encodeURIComponent(this.token)}` : ''
         const separator = url.includes('?') ? '&' : '?'

@@ -1217,6 +1217,11 @@ impl AIService {
         let billing_email = user_email.clone();
         let billing_model_id = model_id.clone();
 
+        // Resolve user DID for SSE event filtering (multi-user isolation)
+        let user_did =
+            crate::agent::did_for_context(&crate::agent::AgentContext::from_auth_token(auth_token))
+                .ok();
+
         // Clone the streams map so the thread can remove itself on exit
         let streams_map = self.transcription_streams.clone();
         let stream_id_for_cleanup = stream_id.clone();
@@ -1308,6 +1313,7 @@ impl AIService {
                                         let text_for_broadcast = text.clone();
                                         let broadcast_tx = text_broadcast_tx_clone.clone();
                                         let stream_id_for_pubsub = stream_id_clone.clone();
+                                        let user_did_for_pubsub = user_did.clone();
                                         rt.spawn(async move {
                                             let _ = get_global_pubsub()
                                                 .await
@@ -1317,6 +1323,7 @@ impl AIService {
                                                         &TranscriptionTextFilter {
                                                             stream_id: stream_id_for_pubsub,
                                                             text: text_for_pubsub,
+                                                            user_did: user_did_for_pubsub,
                                                         },
                                                     )
                                                     .expect(

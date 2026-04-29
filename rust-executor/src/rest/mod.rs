@@ -394,28 +394,10 @@ pub fn rest_router(state: AppState) -> Router {
             )
             // ── WebSocket (1 endpoint) ──
             .route("/ws/audio", get(audio_ws::audio_websocket))
-            // ── SSE Events (7 endpoints) ──
-            .route("/events/agent", get(events::agent_events))
-            .route(
-                "/events/perspectives",
-                get(events::perspective_lifecycle_events),
-            )
-            .route(
-                "/events/perspectives/{uuid}/links",
-                get(events::perspective_link_events),
-            )
-            .route(
-                "/events/neighbourhoods/{uuid}/signals",
-                get(events::neighbourhood_signal_events),
-            )
-            .route("/events/runtime", get(events::runtime_events))
-            .route("/events/ai", get(events::ai_events))
-            .route(
-                "/events/query-subscription/{subscription_id}",
-                get(events::query_subscription_events),
-            )
-            // ── Unified SSE (single connection for all events) ──
-            .route("/events/unified", get(events::unified_events))
+            // ── SSE Events (single endpoint) ──
+            .route("/events", get(events::events))
+            // Legacy aliases — redirect to the single /events endpoint
+            .route("/events/unified", get(events::events))
             // ── Stub routes: SDK endpoints not yet implemented on server (501) ──
             .route("/runtime/unyt/agent-key", get(runtime::unyt_agent_key))
             .route(

@@ -1,63 +1,19 @@
-//! SSE event endpoints: /api/v1/events/*
+//! SSE event endpoint: GET /api/v1/events
 //!
-//! 6 SSE endpoints tapping into the existing PubSub system.
-//!
-//! Events are sent as unnamed SSE events (no `.event()` call) so that the
-//! browser/client `EventSource.onmessage` handler receives them.  Each message
-//! is a JSON object `{ "type": "<event-type>", ...payload }` where `payload` is
-//! the original pubsub message merged into the wrapper.
+//! Single SSE endpoint serving ALL event types.  Every event is a JSON object
+//! `{ "type": "<event-type>", ...payload }`.  Events are filtered per-user in
+//! multi-user mode so that each authenticated user only receives events that
+//! belong to them.
 
 use std::convert::Infallible;
 
 use axum::{
-    extract::{Path, State},
+    extract::State,
     response::sse::{Event, KeepAlive, Sse},
 };
 use futures::stream::{self, Stream, StreamExt};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
-
-/// Convert a BroadcastStream result into an Option<String>, emitting a lagged event on overflow.
-fn handle_broadcast_result(
-    r: Result<String, BroadcastStreamRecvError>,
-) -> Option<Result<String, u64>> {
-    match r {
-        Ok(msg) => Some(Ok(msg)),
-        Err(BroadcastStreamRecvError::Lagged(n)) => Some(Err(n)),
-    }
-}
-
-/// Create an SSE stream from a broadcast receiver, with lagged event reporting.
-fn broadcast_to_sse_stream(
-    rx: tokio::sync::broadcast::Receiver<String>,
-    event_type: &'static str,
-) -> impl Stream<Item = Result<Event, Infallible>> {
-    BroadcastStream::new(rx)
-        .filter_map(|r| async { handle_broadcast_result(r) })
-        .map(move |result| match result {
-            Ok(msg) => Ok(Event::default().data(wrap_event(event_type, &msg))),
-            Err(n) => Ok(Event::default().data(format!(
-                r#"{{"type":"lagged","missed":{},"stream":"{}"}}"#,
-                n, event_type
-            ))),
-        })
-}
-
-fn broadcast_to_sse_stream_nested(
-    rx: tokio::sync::broadcast::Receiver<String>,
-    event_type: &'static str,
-    payload_key: &'static str,
-) -> impl Stream<Item = Result<Event, Infallible>> {
-    BroadcastStream::new(rx)
-        .filter_map(|r| async { handle_broadcast_result(r) })
-        .map(move |result| match result {
-            Ok(msg) => Ok(Event::default().data(wrap_event_nested(event_type, payload_key, &msg))),
-            Err(n) => Ok(Event::default().data(format!(
-                r#"{{"type":"lagged","missed":{},"stream":"{}"}}"#,
-                n, event_type
-            ))),
-        })
-}
 
 use crate::agent::capabilities::*;
 use crate::agent::{did_for_context, AgentContext};
@@ -75,63 +31,23 @@ use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 use ad4m_rest_macros::rest_handler;
 
-/// Check if a pubsub JSON message belongs to the given perspective UUID.
-/// Parses JSON and checks the `perspectiveUuid` field instead of string containment.
-fn matches_perspective_uuid(msg: &str, uuid: &str) -> bool {
-    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-        if let Some(serde_json::Value::String(ref id)) = map.get("perspectiveUuid") {
-            return id == uuid;
-        }
-    }
-    // Fallback: string containment for backwards compatibility
-    msg.contains(uuid)
-}
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Check whether a pubsub neighbourhood signal should be visible to the
-/// currently authenticated agent.
-///
-/// If the message has no explicit `recipient`, treat it as a broadcast / legacy
-/// event and allow it through. If it does declare a recipient, only emit it to
-/// the matching authenticated DID.
-fn matches_signal_recipient(msg: &str, current_did: Option<&str>) -> bool {
-    match serde_json::from_str::<serde_json::Value>(msg) {
-        Ok(serde_json::Value::Object(map)) => match map.get("recipient") {
-            Some(serde_json::Value::String(recipient)) => {
-                current_did.is_some_and(|did| did == recipient)
-            }
-            Some(serde_json::Value::Null) | None => true,
-            _ => false,
-        },
-        // Backwards compatibility for older raw payloads.
-        Err(_) => true,
-        _ => false,
-    }
-}
-
-/// Check whether a perspective lifecycle event belongs to the authenticated user.
-///
-/// Perspective events include an `owner` field (DID string). For managed users,
-/// only emit events whose owner matches the user's DID. For main agent / admin
-/// (current_did is None), emit all events.
-fn matches_perspective_owner(msg: &str, current_did: Option<&str>) -> bool {
-    match current_did {
-        None => true,
-        Some(did) => {
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-                if let Some(serde_json::Value::String(owner)) = map.get("owner") {
-                    return owner == did;
-                }
-            }
-            true
-        }
+/// Convert a BroadcastStream result, emitting a lagged marker on overflow.
+fn handle_broadcast_result(
+    r: Result<String, BroadcastStreamRecvError>,
+) -> Option<Result<String, u64>> {
+    match r {
+        Ok(msg) => Some(Ok(msg)),
+        Err(BroadcastStreamRecvError::Lagged(n)) => Some(Err(n)),
     }
 }
 
 /// Wrap a raw pubsub JSON string with a `"type"` field.
 ///
-/// If the original message is a JSON object, the type is merged in:
+/// If the original message is a JSON object the type is merged in:
 ///   `{"type": "foo", ...original}`
-/// Otherwise (scalar / array / invalid JSON) it becomes:
+/// Otherwise it becomes:
 ///   `{"type": "foo", "data": <original>}`
 fn wrap_event(event_type: &str, raw_json: &str) -> String {
     if let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str(raw_json) {
@@ -153,299 +69,176 @@ fn wrap_event_nested(event_type: &str, payload_key: &str, raw_json: &str) -> Str
     )
 }
 
-/// GET /events/agent — SSE: agent-status-changed, apps-changed, agent-updated, hosting-user-info-changed, compute-log-updated
-#[rest_handler(GET, "/events/agent", response = "void")]
-pub async fn agent_events(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+// ─── Per-user filtering predicates ───────────────────────────────────────────
 
-    let pubsub = get_global_pubsub().await;
-
-    let status_rx = pubsub.subscribe(&AGENT_STATUS_CHANGED_TOPIC).await;
-    let apps_rx = pubsub.subscribe(&APPS_CHANGED).await;
-    let updated_rx = pubsub.subscribe(&AGENT_UPDATED_TOPIC).await;
-    let hosting_rx = pubsub.subscribe(&HOSTING_USER_INFO_CHANGED_TOPIC).await;
-
-    let status_stream = broadcast_to_sse_stream_nested(status_rx, "agent-status-changed", "agent");
-    let apps_stream = broadcast_to_sse_stream(apps_rx, "apps-changed");
-    let updated_stream = broadcast_to_sse_stream_nested(updated_rx, "agent-updated", "agent");
-    let hosting_stream = broadcast_to_sse_stream(hosting_rx, "hosting-user-info-changed");
-
-    let merged = stream::select(
-        stream::select(status_stream, apps_stream),
-        stream::select(updated_stream, hosting_stream),
-    );
-
-    Ok(Sse::new(merged).keep_alive(KeepAlive::default()))
-}
-
-/// GET /events/perspectives — SSE: perspective-added, perspective-removed, perspective-updated, sync-state-change
-#[rest_handler(GET, "/events/perspectives", response = "void")]
-pub async fn perspective_lifecycle_events(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    let pubsub = get_global_pubsub().await;
-
-    let added_rx = pubsub.subscribe(&PERSPECTIVE_ADDED_TOPIC).await;
-    let removed_rx = pubsub.subscribe(&PERSPECTIVE_REMOVED_TOPIC).await;
-    let updated_rx = pubsub.subscribe(&PERSPECTIVE_UPDATED_TOPIC).await;
-    let sync_rx = pubsub.subscribe(&PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC).await;
-
-    let s1 = broadcast_to_sse_stream(added_rx, "perspective-added");
-    let s2 = broadcast_to_sse_stream(removed_rx, "perspective-removed");
-    let s3 = broadcast_to_sse_stream(updated_rx, "perspective-updated");
-    let s4 = broadcast_to_sse_stream(sync_rx, "sync-state-change");
-
-    let merged = stream::select(stream::select(s1, s2), stream::select(s3, s4));
-    Ok(Sse::new(merged).keep_alive(KeepAlive::default()))
-}
-
-/// GET /events/perspectives/:uuid/links — SSE: link-added, link-removed, link-updated
-#[rest_handler(GET, "/events/perspectives/:uuid/links", response = "void")]
-pub async fn perspective_link_events(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Path(uuid): Path<String>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    let pubsub = get_global_pubsub().await;
-
-    let added_rx = pubsub.subscribe(&PERSPECTIVE_LINK_ADDED_TOPIC).await;
-    let removed_rx = pubsub.subscribe(&PERSPECTIVE_LINK_REMOVED_TOPIC).await;
-    let updated_rx = pubsub.subscribe(&PERSPECTIVE_LINK_UPDATED_TOPIC).await;
-
-    let uuid_clone = uuid.clone();
-    let s1 = BroadcastStream::new(added_rx)
-        .filter_map(|r| async { handle_broadcast_result(r) })
-        .filter_map(move |result| {
-            let uuid = uuid_clone.clone();
-            async move {
-                match result {
-                    Ok(msg) if matches_perspective_uuid(&msg, &uuid) => {
-                        Some(Ok(Event::default().data(wrap_event("link-added", &msg))))
-                    }
-                    Err(n) => Some(Ok(Event::default().data(format!(
-                        r#"{{"type":"lagged","missed":{},"stream":"link-added"}}"#,
-                        n
-                    )))),
-                    _ => None,
+/// Perspective lifecycle events and link events include an `owner` DID.
+/// For managed users, only emit events whose owner matches.  For main agent /
+/// admin (current_did is None), emit all events.
+fn matches_owner(msg: &str, current_did: Option<&str>) -> bool {
+    match current_did {
+        None => true,
+        Some(did) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::String(owner)) = map.get("owner") {
+                    return owner == did;
                 }
             }
-        });
+            // No owner field → treat as broadcast (backwards compat)
+            true
+        }
+    }
+}
 
-    let uuid_clone = uuid.clone();
-    let s2 = BroadcastStream::new(removed_rx)
-        .filter_map(|r| async { handle_broadcast_result(r) })
-        .filter_map(move |result| {
-            let uuid = uuid_clone.clone();
-            async move {
-                match result {
-                    Ok(msg) if matches_perspective_uuid(&msg, &uuid) => {
-                        Some(Ok(Event::default().data(wrap_event("link-removed", &msg))))
-                    }
-                    Err(n) => Some(Ok(Event::default().data(format!(
-                        r#"{{"type":"lagged","missed":{},"stream":"link-removed"}}"#,
-                        n
-                    )))),
-                    _ => None,
+/// Neighbourhood signals: `recipient` field must match or be absent (broadcast).
+fn matches_signal_recipient(msg: &str, current_did: Option<&str>) -> bool {
+    match serde_json::from_str::<serde_json::Value>(msg) {
+        Ok(serde_json::Value::Object(map)) => match map.get("recipient") {
+            Some(serde_json::Value::String(recipient)) => {
+                current_did.is_some_and(|did| did == recipient)
+            }
+            Some(serde_json::Value::Null) | None => true,
+            _ => false,
+        },
+        Err(_) => true,
+        _ => false,
+    }
+}
+
+/// Agent events: the payload contains a `did` field.  For managed users, only
+/// emit when it matches.  Main agent / admin sees all.
+fn matches_agent_did(msg: &str, current_did: Option<&str>) -> bool {
+    match current_did {
+        None => true,
+        Some(did) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::String(agent_did)) = map.get("did") {
+                    return agent_did == did;
                 }
             }
-        });
+            true
+        }
+    }
+}
 
-    let uuid_clone = uuid;
-    let s3 = BroadcastStream::new(updated_rx)
-        .filter_map(|r| async { handle_broadcast_result(r) })
-        .filter_map(move |result| {
-            let uuid = uuid_clone.clone();
-            async move {
-                match result {
-                    Ok(msg) if matches_perspective_uuid(&msg, &uuid) => {
-                        Some(Ok(Event::default().data(wrap_event("link-updated", &msg))))
+/// Apps-changed events: the auth payload contains `user_did`.
+fn matches_apps_user(msg: &str, current_did: Option<&str>) -> bool {
+    match current_did {
+        None => true,
+        Some(did) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::Object(auth)) = map.get("auth") {
+                    if let Some(serde_json::Value::String(user_did)) = auth.get("user_did") {
+                        return user_did == did;
                     }
-                    Err(n) => Some(Ok(Event::default().data(format!(
-                        r#"{{"type":"lagged","missed":{},"stream":"link-updated"}}"#,
-                        n
-                    )))),
-                    _ => None,
                 }
             }
-        });
-
-    let merged = stream::select(s1, stream::select(s2, s3));
-    Ok(Sse::new(merged).keep_alive(KeepAlive::default()))
+            true
+        }
+    }
 }
 
-/// GET /events/neighbourhoods/:uuid/signals — SSE: signal
-#[rest_handler(GET, "/events/neighbourhoods/:uuid/signals", response = "void")]
-pub async fn neighbourhood_signal_events(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Path(uuid): Path<String>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    let auth_token_for_signals = context.auth_token.clone();
-
-    let pubsub = get_global_pubsub().await;
-    let rx = pubsub.subscribe(&NEIGHBOURHOOD_SIGNAL_TOPIC).await;
-
-    let stream = BroadcastStream::new(rx)
-        .filter_map(|r| async { handle_broadcast_result(r) })
-        .filter_map(move |result| {
-            let uuid = uuid.clone();
-            let auth_token = auth_token_for_signals.clone();
-            async move {
-                let current_did = did_for_context(&AgentContext::from_auth_token(auth_token)).ok();
-                match result {
-                    Ok(msg)
-                        if matches_perspective_uuid(&msg, &uuid)
-                            && matches_signal_recipient(&msg, current_did.as_deref()) =>
-                    {
-                        Some(Ok(Event::default().data(wrap_event("signal", &msg))))
-                    }
-                    Err(n) => Some(Ok(Event::default().data(format!(
-                        r#"{{"type":"lagged","missed":{},"stream":"signal"}}"#,
-                        n
-                    )))),
-                    _ => None,
+/// Hosting-user-info events: payload has `email`.  Match against the requesting
+/// user's email (derived from the auth token).
+fn matches_hosting_user(msg: &str, user_email: Option<&str>) -> bool {
+    match user_email {
+        None => true,
+        Some(email) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::String(msg_email)) = map.get("email") {
+                    return msg_email == email;
                 }
             }
-        });
-
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+            true
+        }
+    }
 }
 
-/// GET /events/runtime — SSE: message-received, notification-triggered, exception-occurred
-#[rest_handler(GET, "/events/runtime", response = "void")]
-pub async fn runtime_events(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(
-        &context.capabilities,
-        &RUNTIME_MESSAGES_SUBSCRIBE_CAPABILITY,
-    )
-    .map_err(|e| ApiError::Forbidden(e))?;
-
-    let pubsub = get_global_pubsub().await;
-
-    let msg_rx = pubsub.subscribe(&RUNTIME_MESSAGED_RECEIVED_TOPIC).await;
-    let notif_rx = pubsub
-        .subscribe(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC)
-        .await;
-    let exc_rx = pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await;
-
-    let s1 = broadcast_to_sse_stream_nested(msg_rx, "message-received", "message");
-    let s2 = broadcast_to_sse_stream_nested(notif_rx, "notification-triggered", "notification");
-    let s3 = broadcast_to_sse_stream_nested(exc_rx, "exception-occurred", "exception");
-
-    let merged = stream::select(s1, stream::select(s2, s3));
-    Ok(Sse::new(merged).keep_alive(KeepAlive::default()))
+/// Transcription events: payload has `userDid`.  Match against the requesting
+/// user's DID.  Main agent / admin sees all.
+fn matches_transcription_user(msg: &str, current_did: Option<&str>) -> bool {
+    match current_did {
+        None => true,
+        Some(did) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::String(user_did)) = map.get("userDid") {
+                    return user_did == did;
+                }
+            }
+            // No userDid field → legacy message, pass through
+            true
+        }
+    }
 }
 
-/// GET /events/ai — SSE: transcription-text, model-loading-status
-#[rest_handler(GET, "/events/ai", response = "void")]
-pub async fn ai_events(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(
-        &context.capabilities,
-        &RUNTIME_MESSAGES_SUBSCRIBE_CAPABILITY,
-    )
-    .map_err(|e| ApiError::Forbidden(e))?;
-
-    let pubsub = get_global_pubsub().await;
-
-    let trans_rx = pubsub.subscribe(&AI_TRANSCRIPTION_TEXT_TOPIC).await;
-    let loading_rx = pubsub.subscribe(&AI_MODEL_LOADING_STATUS).await;
-
-    let s1 = broadcast_to_sse_stream(trans_rx, "transcription-text");
-    let s2 = broadcast_to_sse_stream(loading_rx, "model-loading-status");
-
-    let merged = stream::select(s1, s2);
-    Ok(Sse::new(merged).keep_alive(KeepAlive::default()))
+/// Notification events: payload has a `perspective_id` (or `perspectiveId`).
+/// Look up the perspective's owners and check if the current user is among them.
+fn matches_notification_owner(msg: &str, current_did: Option<&str>) -> bool {
+    match current_did {
+        None => true,
+        Some(did) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::String(uuid)) = map
+                    .get("perspectiveId")
+                    .or_else(|| map.get("perspective_id"))
+                {
+                    return perspective_is_owned_by(uuid, did);
+                }
+            }
+            true
+        }
+    }
 }
 
-/// GET /events/query-subscription/:subscription_id — SSE: query subscription updates
+/// Query-subscription events: payload has `uuid` (perspective UUID).
+/// Look up the perspective's owners to check if the current user owns it.
+fn matches_query_subscription_owner(msg: &str, current_did: Option<&str>) -> bool {
+    match current_did {
+        None => true,
+        Some(did) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::String(uuid)) = map.get("uuid") {
+                    return perspective_is_owned_by(uuid, did);
+                }
+            }
+            true
+        }
+    }
+}
+
+/// Check if a perspective is owned by (or visible to) the given DID.
+/// Falls back to `true` if the perspective doesn't exist or has no owners
+/// (unowned perspectives are visible to everyone).
+fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
+    use crate::perspectives::get_perspective;
+    match get_perspective(uuid) {
+        Some(instance) => {
+            // PerspectiveInstance.persisted is a tokio::sync::Mutex — use try_lock
+            // to avoid blocking in the stream filter.
+            match instance.persisted.try_lock() {
+                Ok(handle) => {
+                    if handle.is_unowned() {
+                        true
+                    } else {
+                        handle.is_owned_by(did)
+                    }
+                }
+                // Lock contended → allow through
+                Err(_) => true,
+            }
+        }
+        // Perspective not found → allow (might be stale event)
+        None => true,
+    }
+}
+
+// ─── The single SSE endpoint ─────────────────────────────────────────────────
+
+/// GET /events — Single SSE endpoint for ALL event types.
 ///
-/// Filters the global `PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC` to only emit
-/// events matching the given `subscription_id`.  The pubsub message is a JSON
-/// object `{ uuid, subscription_id, result }` — we forward the full object
-/// wrapped with `"type": "query-subscription-update"`.
-#[rest_handler(GET, "/events/query-subscription/:subscription_id", response = "void")]
-pub async fn query_subscription_events(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Path(subscription_id): Path<String>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    let pubsub = get_global_pubsub().await;
-    let rx = pubsub
-        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-        .await;
-
-    let stream = BroadcastStream::new(rx)
-        .filter_map(|r| async { handle_broadcast_result(r) })
-        .filter_map(move |result| {
-            let sub_id = subscription_id.clone();
-            async move {
-                match result {
-                    Ok(msg) => {
-                        // Parse and check subscription_id field
-                        if let Ok(serde_json::Value::Object(ref map)) =
-                            serde_json::from_str::<serde_json::Value>(&msg)
-                        {
-                            if let Some(serde_json::Value::String(ref id)) = map
-                                .get("subscription_id")
-                                .or_else(|| map.get("subscriptionId"))
-                            {
-                                if id == &sub_id {
-                                    return Some(Ok(Event::default()
-                                        .data(wrap_event("query-subscription-update", &msg))));
-                                }
-                            }
-                        }
-                        None
-                    }
-                    Err(n) => Some(Ok(Event::default().data(format!(
-                        r#"{{"type":"lagged","missed":{},"stream":"query-subscription"}}"#,
-                        n
-                    )))),
-                }
-            }
-        });
-
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
-}
-
-/// GET /events — Unified SSE endpoint that merges ALL event topics into a
-/// single HTTP connection.  This avoids exhausting the browser's per-origin
-/// connection limit (6 in Chrome) when multiple SSE streams are needed.
-///
-/// Each event is a JSON object with a `"type"` field identifying the topic.
-/// Perspective-specific events include `"perspectiveUuid"` for client-side filtering.
-#[rest_handler(GET, "/events/unified", response = "void")]
-pub async fn unified_events(
+/// Each event is a JSON object with a `"type"` field.
+/// In multi-user mode, events are filtered per-user.
+#[rest_handler(GET, "/events", response = "void")]
+pub async fn events(
     State(_state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
@@ -454,64 +247,31 @@ pub async fn unified_events(
         .map_err(|e| ApiError::Forbidden(e))?;
 
     let auth_token = context.auth_token.clone();
-    let auth_token_for_persp_added = auth_token.clone();
-    let auth_token_for_persp_removed = auth_token.clone();
-    let auth_token_for_persp_updated = auth_token.clone();
-    let auth_token_for_signals = auth_token;
+
+    // Pre-resolve user email for hosting-info filtering
+    let user_email = user_email_from_token(auth_token.clone());
+
+    // Clone auth tokens for each filter closure
+    let t_persp_added = auth_token.clone();
+    let t_persp_removed = auth_token.clone();
+    let t_persp_updated = auth_token.clone();
+    let t_link_added = auth_token.clone();
+    let t_link_removed = auth_token.clone();
+    let t_link_updated = auth_token.clone();
+    let t_signal = auth_token.clone();
+    let t_agent_status = auth_token.clone();
+    let t_agent_updated = auth_token.clone();
+    let t_apps = auth_token.clone();
+    let t_trans = auth_token.clone();
+    let t_notif = auth_token.clone();
+    let t_query_sub = auth_token;
 
     let pubsub = get_global_pubsub().await;
 
-    // Agent events
-    let status_rx = pubsub.subscribe(&AGENT_STATUS_CHANGED_TOPIC).await;
-    let apps_rx = pubsub.subscribe(&APPS_CHANGED).await;
-    let agent_updated_rx = pubsub.subscribe(&AGENT_UPDATED_TOPIC).await;
-    let hosting_rx = pubsub.subscribe(&HOSTING_USER_INFO_CHANGED_TOPIC).await;
+    // ── Helper macros (local to this function) ──
 
-    // Perspective lifecycle events
-    let persp_added_rx = pubsub.subscribe(&PERSPECTIVE_ADDED_TOPIC).await;
-    let persp_removed_rx = pubsub.subscribe(&PERSPECTIVE_REMOVED_TOPIC).await;
-    let persp_updated_rx = pubsub.subscribe(&PERSPECTIVE_UPDATED_TOPIC).await;
-    let sync_rx = pubsub.subscribe(&PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC).await;
-
-    // Perspective link events (all perspectives, no filtering)
-    let link_added_rx = pubsub.subscribe(&PERSPECTIVE_LINK_ADDED_TOPIC).await;
-    let link_removed_rx = pubsub.subscribe(&PERSPECTIVE_LINK_REMOVED_TOPIC).await;
-    let link_updated_rx = pubsub.subscribe(&PERSPECTIVE_LINK_UPDATED_TOPIC).await;
-
-    // Neighbourhood signals (all neighbourhoods)
-    let signal_rx = pubsub.subscribe(&NEIGHBOURHOOD_SIGNAL_TOPIC).await;
-
-    // Runtime events
-    let msg_rx = pubsub.subscribe(&RUNTIME_MESSAGED_RECEIVED_TOPIC).await;
-    let notif_rx = pubsub
-        .subscribe(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC)
-        .await;
-    let exc_rx = pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await;
-
-    // AI events
-    let trans_rx = pubsub.subscribe(&AI_TRANSCRIPTION_TEXT_TOPIC).await;
-    let loading_rx = pubsub.subscribe(&AI_MODEL_LOADING_STATUS).await;
-
-    // Query subscription events (forwarded unfiltered; client filters by subscriptionId)
-    let query_sub_rx = pubsub
-        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-        .await;
-
-    // Convert each receiver into a typed stream
-    macro_rules! typed_stream {
-        ($rx:expr, $ty:expr) => {
-            broadcast_to_sse_stream($rx, $ty)
-        };
-    }
-
-    let s_status = broadcast_to_sse_stream_nested(status_rx, "agent-status-changed", "agent");
-    let s_apps = typed_stream!(apps_rx, "apps-changed");
-    let s_agent_updated =
-        broadcast_to_sse_stream_nested(agent_updated_rx, "agent-updated", "agent");
-    let s_hosting = typed_stream!(hosting_rx, "hosting-user-info-changed");
-
-    // Perspective lifecycle events filtered by owner DID for multi-user isolation
-    macro_rules! owner_filtered_persp_stream {
+    /// Owner-filtered stream (perspective lifecycle + link events)
+    macro_rules! owner_stream {
         ($rx:expr, $ty:expr, $token:expr) => {
             BroadcastStream::new($rx)
                 .filter_map(|r| async { handle_broadcast_result(r) })
@@ -521,9 +281,7 @@ pub async fn unified_events(
                         let current_did =
                             did_for_context(&AgentContext::from_auth_token(token)).ok();
                         match result {
-                            Ok(ref msg)
-                                if matches_perspective_owner(msg, current_did.as_deref()) =>
-                            {
+                            Ok(ref msg) if matches_owner(msg, current_did.as_deref()) => {
                                 Some(Ok(Event::default().data(wrap_event($ty, msg))))
                             }
                             Err(n) => Some(Ok(Event::default().data(format!(
@@ -537,56 +295,222 @@ pub async fn unified_events(
         };
     }
 
-    let s_persp_added = owner_filtered_persp_stream!(
-        persp_added_rx,
-        "perspective-added",
-        auth_token_for_persp_added
-    );
-    let s_persp_removed = owner_filtered_persp_stream!(
-        persp_removed_rx,
-        "perspective-removed",
-        auth_token_for_persp_removed
-    );
-    let s_persp_updated = owner_filtered_persp_stream!(
-        persp_updated_rx,
-        "perspective-updated",
-        auth_token_for_persp_updated
-    );
-    let s_sync = typed_stream!(sync_rx, "sync-state-change");
-
-    let s_link_added = typed_stream!(link_added_rx, "link-added");
-    let s_link_removed = typed_stream!(link_removed_rx, "link-removed");
-    let s_link_updated = typed_stream!(link_updated_rx, "link-updated");
-
-    let s_signal = BroadcastStream::new(signal_rx)
-        .filter_map(|r| async { handle_broadcast_result(r) })
-        .filter_map(move |result| {
-            let auth_token = auth_token_for_signals.clone();
-            async move {
-                let current_did = did_for_context(&AgentContext::from_auth_token(auth_token)).ok();
-                match result {
-                    Ok(ref msg) if matches_signal_recipient(msg, current_did.as_deref()) => {
-                        Some(Ok(Event::default().data(wrap_event("signal", msg))))
+    /// User-DID-filtered stream with custom predicate
+    macro_rules! did_stream {
+        ($rx:expr, $ty:expr, $token:expr, $filter_fn:expr) => {
+            BroadcastStream::new($rx)
+                .filter_map(|r| async { handle_broadcast_result(r) })
+                .filter_map(move |result| {
+                    let token = $token.clone();
+                    async move {
+                        let current_did =
+                            did_for_context(&AgentContext::from_auth_token(token)).ok();
+                        match result {
+                            Ok(ref msg) if $filter_fn(msg, current_did.as_deref()) => {
+                                Some(Ok(Event::default().data(wrap_event($ty, msg))))
+                            }
+                            Err(n) => Some(Ok(Event::default().data(format!(
+                                r#"{{"type":"lagged","missed":{},"stream":"{}"}}"#,
+                                n, $ty
+                            )))),
+                            _ => None,
+                        }
                     }
-                    Err(n) => Some(Ok(Event::default().data(format!(
-                        r#"{{"type":"lagged","missed":{},"stream":"signal"}}"#,
-                        n
-                    )))),
-                    _ => None,
+                })
+        };
+    }
+
+    /// Nested-payload variant
+    macro_rules! did_stream_nested {
+        ($rx:expr, $ty:expr, $key:expr, $token:expr, $filter_fn:expr) => {
+            BroadcastStream::new($rx)
+                .filter_map(|r| async { handle_broadcast_result(r) })
+                .filter_map(move |result| {
+                    let token = $token.clone();
+                    async move {
+                        let current_did =
+                            did_for_context(&AgentContext::from_auth_token(token)).ok();
+                        match result {
+                            Ok(ref msg) if $filter_fn(msg, current_did.as_deref()) => {
+                                Some(Ok(Event::default().data(wrap_event_nested($ty, $key, msg))))
+                            }
+                            Err(n) => Some(Ok(Event::default().data(format!(
+                                r#"{{"type":"lagged","missed":{},"stream":"{}"}}"#,
+                                n, $ty
+                            )))),
+                            _ => None,
+                        }
+                    }
+                })
+        };
+    }
+
+    /// Unfiltered broadcast stream (system-level events)
+    macro_rules! broadcast_stream {
+        ($rx:expr, $ty:expr) => {
+            BroadcastStream::new($rx)
+                .filter_map(|r| async { handle_broadcast_result(r) })
+                .map(move |result| match result {
+                    Ok(msg) => Ok(Event::default().data(wrap_event($ty, &msg))),
+                    Err(n) => Ok(Event::default().data(format!(
+                        r#"{{"type":"lagged","missed":{},"stream":"{}"}}"#,
+                        n, $ty
+                    ))),
+                })
+        };
+    }
+
+    macro_rules! broadcast_stream_nested {
+        ($rx:expr, $ty:expr, $key:expr) => {
+            BroadcastStream::new($rx)
+                .filter_map(|r| async { handle_broadcast_result(r) })
+                .map(move |result| match result {
+                    Ok(msg) => Ok(Event::default().data(wrap_event_nested($ty, $key, &msg))),
+                    Err(n) => Ok(Event::default().data(format!(
+                        r#"{{"type":"lagged","missed":{},"stream":"{}"}}"#,
+                        n, $ty
+                    ))),
+                })
+        };
+    }
+
+    // ── Agent events (filtered by DID) ──
+    let s_status = did_stream_nested!(
+        pubsub.subscribe(&AGENT_STATUS_CHANGED_TOPIC).await,
+        "agent-status-changed",
+        "agent",
+        t_agent_status,
+        matches_agent_did
+    );
+    let s_agent_updated = did_stream_nested!(
+        pubsub.subscribe(&AGENT_UPDATED_TOPIC).await,
+        "agent-updated",
+        "agent",
+        t_agent_updated,
+        matches_agent_did
+    );
+    let s_apps = did_stream!(
+        pubsub.subscribe(&APPS_CHANGED).await,
+        "apps-changed",
+        t_apps,
+        matches_apps_user
+    );
+
+    // Hosting-user-info: filter by email (not DID)
+    let s_hosting = {
+        let hosting_rx = pubsub.subscribe(&HOSTING_USER_INFO_CHANGED_TOPIC).await;
+        BroadcastStream::new(hosting_rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let email = user_email.clone();
+                async move {
+                    match result {
+                        Ok(ref msg) if matches_hosting_user(msg, email.as_deref()) => {
+                            Some(Ok(
+                                Event::default()
+                                    .data(wrap_event("hosting-user-info-changed", msg)),
+                            ))
+                        }
+                        Err(n) => Some(Ok(Event::default().data(format!(
+                            r#"{{"type":"lagged","missed":{},"stream":"hosting-user-info-changed"}}"#,
+                            n
+                        )))),
+                        _ => None,
+                    }
                 }
-            }
-        });
+            })
+    };
 
-    let s_msg = broadcast_to_sse_stream_nested(msg_rx, "message-received", "message");
-    let s_notif =
-        broadcast_to_sse_stream_nested(notif_rx, "notification-triggered", "notification");
-    let s_exc = broadcast_to_sse_stream_nested(exc_rx, "exception-occurred", "exception");
+    // ── Perspective lifecycle (filtered by owner DID) ──
+    let s_persp_added = owner_stream!(
+        pubsub.subscribe(&PERSPECTIVE_ADDED_TOPIC).await,
+        "perspective-added",
+        t_persp_added
+    );
+    let s_persp_removed = owner_stream!(
+        pubsub.subscribe(&PERSPECTIVE_REMOVED_TOPIC).await,
+        "perspective-removed",
+        t_persp_removed
+    );
+    let s_persp_updated = owner_stream!(
+        pubsub.subscribe(&PERSPECTIVE_UPDATED_TOPIC).await,
+        "perspective-updated",
+        t_persp_updated
+    );
+    let s_sync = broadcast_stream!(
+        pubsub.subscribe(&PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC).await,
+        "sync-state-change"
+    );
 
-    let s_trans = typed_stream!(trans_rx, "transcription-text");
-    let s_loading = typed_stream!(loading_rx, "model-loading-status");
-    let s_query_sub = typed_stream!(query_sub_rx, "query-subscription-update");
+    // ── Link events (filtered by owner DID) ──
+    let s_link_added = owner_stream!(
+        pubsub.subscribe(&PERSPECTIVE_LINK_ADDED_TOPIC).await,
+        "link-added",
+        t_link_added
+    );
+    let s_link_removed = owner_stream!(
+        pubsub.subscribe(&PERSPECTIVE_LINK_REMOVED_TOPIC).await,
+        "link-removed",
+        t_link_removed
+    );
+    let s_link_updated = owner_stream!(
+        pubsub.subscribe(&PERSPECTIVE_LINK_UPDATED_TOPIC).await,
+        "link-updated",
+        t_link_updated
+    );
 
-    // Merge all streams using a balanced binary tree of stream::select
+    // ── Neighbourhood signals (filtered by recipient DID) ──
+    let s_signal = did_stream!(
+        pubsub.subscribe(&NEIGHBOURHOOD_SIGNAL_TOPIC).await,
+        "signal",
+        t_signal,
+        matches_signal_recipient
+    );
+
+    // ── Runtime events ──
+    let s_msg = broadcast_stream_nested!(
+        pubsub.subscribe(&RUNTIME_MESSAGED_RECEIVED_TOPIC).await,
+        "message-received",
+        "message"
+    );
+    let s_notif = did_stream_nested!(
+        pubsub
+            .subscribe(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC)
+            .await,
+        "notification-triggered",
+        "notification",
+        t_notif,
+        matches_notification_owner
+    );
+    let s_exc = broadcast_stream_nested!(
+        pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await,
+        "exception-occurred",
+        "exception"
+    );
+
+    // ── AI events ──
+    let s_trans = did_stream!(
+        pubsub.subscribe(&AI_TRANSCRIPTION_TEXT_TOPIC).await,
+        "transcription-text",
+        t_trans,
+        matches_transcription_user
+    );
+    let s_loading = broadcast_stream!(
+        pubsub.subscribe(&AI_MODEL_LOADING_STATUS).await,
+        "model-loading-status"
+    );
+
+    // ── Query subscriptions (filtered by perspective owner) ──
+    let s_query_sub = did_stream!(
+        pubsub
+            .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
+            .await,
+        "query-subscription-update",
+        t_query_sub,
+        matches_query_subscription_owner
+    );
+
+    // ── Merge all streams (balanced binary tree for fairness) ──
     let agent = stream::select(
         stream::select(s_status, s_apps),
         stream::select(s_agent_updated, s_hosting),
@@ -607,12 +531,14 @@ pub async fn unified_events(
     Ok(Sse::new(top).keep_alive(KeepAlive::default()))
 }
 
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
-    use super::{matches_signal_recipient, wrap_event, wrap_event_nested};
+    use super::*;
 
     #[test]
-    fn wrap_event_preserves_flat_payloads_for_regular_events() {
+    fn wrap_event_preserves_flat_payloads() {
         let wrapped = wrap_event("agent-status-changed", r#"{"isUnlocked":true}"#);
         assert_eq!(
             wrapped,
@@ -621,31 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn matches_signal_recipient_allows_broadcasts_without_recipient() {
-        assert!(matches_signal_recipient(
-            r#"{"perspective":{"uuid":"p-1"},"signal":{"data":{"links":[]}}}"#,
-            Some("did:key:z6Mktest"),
-        ));
-    }
-
-    #[test]
-    fn matches_signal_recipient_accepts_matching_recipient() {
-        assert!(matches_signal_recipient(
-            r#"{"perspective":{"uuid":"p-1"},"signal":{"data":{"links":[]}},"recipient":"did:key:z6Mkmatch"}"#,
-            Some("did:key:z6Mkmatch"),
-        ));
-    }
-
-    #[test]
-    fn matches_signal_recipient_rejects_other_recipient() {
-        assert!(!matches_signal_recipient(
-            r#"{"perspective":{"uuid":"p-1"},"signal":{"data":{"links":[]}},"recipient":"did:key:z6Mkother"}"#,
-            Some("did:key:z6Mkself"),
-        ));
-    }
-
-    #[test]
-    fn wrap_event_nested_preserves_inner_exception_type() {
+    fn wrap_event_nested_preserves_inner_type() {
         let wrapped = wrap_event_nested(
             "exception-occurred",
             "exception",
@@ -655,5 +557,109 @@ mod tests {
             wrapped,
             r#"{"type":"exception-occurred","exception":{"title":"Request","message":"Waiting","type":"CAPABILITY_REQUESTED","addon":"{}"}}"#
         );
+    }
+
+    #[test]
+    fn matches_signal_recipient_allows_broadcasts() {
+        assert!(matches_signal_recipient(
+            r#"{"perspective":{"uuid":"p-1"},"signal":{"data":{"links":[]}}}"#,
+            Some("did:key:z6Mktest"),
+        ));
+    }
+
+    #[test]
+    fn matches_signal_recipient_accepts_matching() {
+        assert!(matches_signal_recipient(
+            r#"{"perspective":{"uuid":"p-1"},"signal":{"data":{}},"recipient":"did:key:z6Mkmatch"}"#,
+            Some("did:key:z6Mkmatch"),
+        ));
+    }
+
+    #[test]
+    fn matches_signal_recipient_rejects_other() {
+        assert!(!matches_signal_recipient(
+            r#"{"perspective":{"uuid":"p-1"},"signal":{"data":{}},"recipient":"did:key:z6Mkother"}"#,
+            Some("did:key:z6Mkself"),
+        ));
+    }
+
+    #[test]
+    fn matches_owner_admin_sees_all() {
+        assert!(matches_owner(
+            r#"{"owner":"did:key:z6Mkuser","perspectiveUuid":"p-1"}"#,
+            None,
+        ));
+    }
+
+    #[test]
+    fn matches_owner_user_sees_own() {
+        assert!(matches_owner(
+            r#"{"owner":"did:key:z6Mkuser","perspectiveUuid":"p-1"}"#,
+            Some("did:key:z6Mkuser"),
+        ));
+    }
+
+    #[test]
+    fn matches_owner_user_blocked_from_other() {
+        assert!(!matches_owner(
+            r#"{"owner":"did:key:z6MkotherUser","perspectiveUuid":"p-1"}"#,
+            Some("did:key:z6Mkuser"),
+        ));
+    }
+
+    #[test]
+    fn matches_agent_did_admin_sees_all() {
+        assert!(matches_agent_did(
+            r#"{"did":"did:key:z6Mkagent","isUnlocked":true}"#,
+            None,
+        ));
+    }
+
+    #[test]
+    fn matches_agent_did_user_sees_own() {
+        assert!(matches_agent_did(
+            r#"{"did":"did:key:z6Mkuser","isUnlocked":true}"#,
+            Some("did:key:z6Mkuser"),
+        ));
+    }
+
+    #[test]
+    fn matches_transcription_user_admin_sees_all() {
+        assert!(matches_transcription_user(
+            r#"{"streamId":"abc","text":"hello","userDid":"did:key:z6Mkuser"}"#,
+            None,
+        ));
+    }
+
+    #[test]
+    fn matches_transcription_user_filters_correctly() {
+        assert!(matches_transcription_user(
+            r#"{"streamId":"abc","text":"hello","userDid":"did:key:z6Mkuser"}"#,
+            Some("did:key:z6Mkuser"),
+        ));
+        assert!(!matches_transcription_user(
+            r#"{"streamId":"abc","text":"hello","userDid":"did:key:z6Mkother"}"#,
+            Some("did:key:z6Mkuser"),
+        ));
+    }
+
+    #[test]
+    fn matches_apps_user_admin_sees_all() {
+        assert!(matches_apps_user(
+            r#"{"auth":{"user_did":"did:key:z6Mkuser"},"request_id":"r1"}"#,
+            None,
+        ));
+    }
+
+    #[test]
+    fn matches_apps_user_filters_correctly() {
+        assert!(matches_apps_user(
+            r#"{"auth":{"user_did":"did:key:z6Mkuser"},"request_id":"r1"}"#,
+            Some("did:key:z6Mkuser"),
+        ));
+        assert!(!matches_apps_user(
+            r#"{"auth":{"user_did":"did:key:z6Mkother"},"request_id":"r1"}"#,
+            Some("did:key:z6Mkuser"),
+        ));
     }
 }

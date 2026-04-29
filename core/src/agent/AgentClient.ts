@@ -177,7 +177,7 @@ export class AgentClient {
   }
 
   subscribeAgentUpdated() {
-    const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
+    const unsub = this.#restClient.subscribe('/api/v1/events', (data) => {
       if (data.type === 'agent-updated') {
         this.#updatedCallbacks.forEach((cb) => cb((data.agent || data) as Agent));
       }
@@ -186,7 +186,7 @@ export class AgentClient {
   }
 
   subscribeAppsChanged() {
-    const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
+    const unsub = this.#restClient.subscribe('/api/v1/events', (data) => {
       if (data.type === 'apps-changed') {
         this.#appsChangedCallback.forEach((cb) => cb());
       }
@@ -199,7 +199,7 @@ export class AgentClient {
   }
 
   subscribeAgentStatusChanged() {
-    const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
+    const unsub = this.#restClient.subscribe('/api/v1/events', (data) => {
       if (data.type === 'agent-status-changed') {
         this.#agentStatusChangedCallbacks.forEach((cb) => cb((data.agent || data) as Agent));
       }
@@ -212,7 +212,7 @@ export class AgentClient {
   }
 
   subscribeHostingUserInfoChanged() {
-    const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
+    const unsub = this.#restClient.subscribe('/api/v1/events', (data) => {
       if (data.type === 'hosting-user-info-changed') {
         this.#hostingUserInfoChangedCallbacks.forEach((cb) => cb((data.info || data) as HostingUserInfo));
       }
@@ -225,7 +225,7 @@ export class AgentClient {
   }
 
   subscribeComputeLogUpdated() {
-    const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
+    const unsub = this.#restClient.subscribe('/api/v1/events', (data) => {
       if (data.type === 'compute-log-updated') {
         this.#computeLogUpdatedCallbacks.forEach((cb) => cb((data.entry || data) as ComputeLogEntry));
       }

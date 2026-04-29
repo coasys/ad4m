@@ -159,14 +159,7 @@ export interface RouteMap {
   'POST /ai/transcription/feed': { request: FeedTranscriptionRequest; response: string };
   'POST /ai/transcription/open': { request: OpenTranscriptionRequest; response: string };
   'POST /dev/email-test': { request: EmailTestRequest; response: unknown };
-  'GET /events/agent': { request: never; response: void };
-  'GET /events/ai': { request: never; response: void };
-  'GET /events/neighbourhoods/:uuid/signals': { request: never; response: void };
-  'GET /events/perspectives': { request: never; response: void };
-  'GET /events/perspectives/:uuid/links': { request: never; response: void };
-  'GET /events/query-subscription/:subscription_id': { request: never; response: void };
-  'GET /events/runtime': { request: never; response: void };
-  'GET /events/unified': { request: never; response: void };
+  'GET /events': { request: never; response: void };
   'POST /expressions': { request: CreateExpressionRequest; response: string };
   'GET /expressions/:url': { request: never; response: ExpressionRendered | string | null };
   'POST /expressions/:url/interact': { request: InteractionCall; response: string };

@@ -896,6 +896,8 @@ pub struct PromptOutput {
 pub struct TranscriptionTextFilter {
     pub stream_id: String,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_did: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
