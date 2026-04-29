@@ -78,4 +78,4 @@ The SDK sends certain payloads wrapped in a named object for clarity and self-do
 
 ### Query Subscription SSE
 
-Query subscription updates are delivered via `GET /events/query-subscription/:subscription_id`. The endpoint filters the global `PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC` pubsub by `subscription_id`.
+Query subscription updates are delivered via the unified `GET /events` SSE endpoint. Events of type `query-subscription-updated` include the `subscription_id` field and are filtered per-user based on perspective ownership.

@@ -1102,59 +1102,13 @@ async fn route_ws_audio() {
 // ── Event (SSE) routes ──
 
 #[tokio::test]
-async fn route_agent_events() {
-    let s = route_status(Method::GET, "/api/v1/events/agent").await;
-    assert!(is_route_registered(s), "GET /events/agent returned {}", s);
+async fn route_events() {
+    let s = route_status(Method::GET, "/api/v1/events").await;
+    assert!(is_route_registered(s), "GET /events returned {}", s);
 }
 
 #[tokio::test]
-async fn route_perspective_lifecycle_events() {
-    let s = route_status(Method::GET, "/api/v1/events/perspectives").await;
-    assert!(
-        is_route_registered(s),
-        "GET /events/perspectives returned {}",
-        s
-    );
-}
-
-#[tokio::test]
-async fn route_perspective_link_events() {
-    let s = route_status(Method::GET, "/api/v1/events/perspectives/test-uuid/links").await;
-    assert!(
-        is_route_registered(s),
-        "GET /events/perspectives/:uuid/links returned {}",
-        s
-    );
-}
-
-#[tokio::test]
-async fn route_neighbourhood_signal_events() {
-    let s = route_status(
-        Method::GET,
-        "/api/v1/events/neighbourhoods/test-uuid/signals",
-    )
-    .await;
-    assert!(
-        is_route_registered(s),
-        "GET /events/neighbourhoods/:uuid/signals returned {}",
-        s
-    );
-}
-
-#[tokio::test]
-async fn route_runtime_events() {
-    let s = route_status(Method::GET, "/api/v1/events/runtime").await;
-    assert!(is_route_registered(s), "GET /events/runtime returned {}", s);
-}
-
-#[tokio::test]
-async fn route_ai_events() {
-    let s = route_status(Method::GET, "/api/v1/events/ai").await;
-    assert!(is_route_registered(s), "GET /events/ai returned {}", s);
-}
-
-#[tokio::test]
-async fn route_unified_events() {
+async fn route_events_unified_alias() {
     let s = route_status(Method::GET, "/api/v1/events/unified").await;
     assert!(is_route_registered(s), "GET /events/unified returned {}", s);
 }
