@@ -19,6 +19,11 @@ use super::types::*;
 use ad4m_rest_macros::rest_handler;
 
 fn check_compute_credits(auth_token: &str) -> Result<(), ApiError> {
+    let global_free =
+        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+    if global_free {
+        return Ok(());
+    }
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| ApiError::Internal(e.to_string()))?;

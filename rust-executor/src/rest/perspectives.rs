@@ -48,6 +48,11 @@ pub async fn get_perspective_with_access_control(
 }
 
 fn check_compute_credits(auth_token: &str) -> Result<(), ApiError> {
+    let global_free =
+        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+    if global_free {
+        return Ok(());
+    }
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -63,6 +68,11 @@ fn check_compute_credits(auth_token: &str) -> Result<(), ApiError> {
 }
 
 fn reserve_compute_credits(auth_token: &str, amount: f64) -> Result<(), ApiError> {
+    let global_free =
+        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+    if global_free {
+        return Ok(());
+    }
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| ApiError::Internal(e.to_string()))?;
