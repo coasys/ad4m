@@ -1,4 +1,4 @@
-use self::{audio_stream::AudioStream, error::AIServiceError};
+use self::error::AIServiceError;
 use crate::pubsub::AI_MODEL_LOADING_STATUS;
 #[allow(unused_imports)]
 use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
@@ -70,6 +70,9 @@ struct TranscriptionSession {
     samples_tx: futures_channel::mpsc::UnboundedSender<Vec<f32>>,
     drop_tx: oneshot::Sender<()>,
     last_activity: Arc<Mutex<std::time::Instant>>,
+    /// Broadcast channel for streaming partial/final transcription text back
+    /// to the REST feed handler (SSE response).
+    text_broadcast_tx: tokio::sync::broadcast::Sender<String>,
     // Billing context (used by the async whisper task via cloned values;
     // stored here for potential close-stream reconciliation)
     #[allow(dead_code)]
@@ -1157,7 +1160,7 @@ impl AIService {
     pub async fn open_transcription_stream(
         &self,
         model_id: String,
-        params: Option<VoiceActivityParams>,
+        _params: Option<VoiceActivityParams>,
         auth_token: String,
     ) -> Result<String> {
         let model_size = Self::get_whisper_model_size(model_id.clone())?;
@@ -1207,6 +1210,8 @@ impl AIService {
         let (samples_tx, samples_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
         let (drop_tx, drop_rx) = oneshot::channel();
         let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
+        let (text_broadcast_tx, _) = tokio::sync::broadcast::channel::<String>(64);
+        let text_broadcast_tx_clone = text_broadcast_tx.clone();
 
         // Clone billing context for the async task
         let billing_email = user_email.clone();
@@ -1224,109 +1229,115 @@ impl AIService {
                 // The model weights stay shared in memory!
                 let whisper = (*whisper_model).clone();
 
-                let audio_stream = AudioStream {
-                    read_data: Vec::new(),
-                    receiver: Box::pin(samples_rx.map(futures_util::stream::iter).flatten()),
-                };
-
-                let mut voice_stream = audio_stream
-                    .voice_activity_stream()
-                    .rechunk_voice_activity();
-
-                // Apply voice activity parameters if provided
-                if let Some(params) = params {
-                    if let Some(start_threshold) = params.start_threshold {
-                        voice_stream = voice_stream.with_start_threshold(start_threshold);
-                    }
-                    if let Some(start_window) = params.start_window {
-                        voice_stream =
-                            voice_stream.with_start_window(Duration::from_millis(start_window));
-                    }
-                    if let Some(end_threshold) = params.end_threshold {
-                        voice_stream = voice_stream.with_end_threshold(end_threshold);
-                    }
-                    if let Some(end_window) = params.end_window {
-                        voice_stream =
-                            voice_stream.with_end_window(Duration::from_millis(end_window));
-                    }
-                    if let Some(time_before_speech) = params.time_before_speech {
-                        voice_stream = voice_stream
-                            .with_time_before_speech(Duration::from_millis(time_before_speech));
-                    }
-                } else {
-                    // Set default end window if no params provided
-                    voice_stream = voice_stream.with_end_window(Duration::from_millis(500));
-                }
-
-                let mut word_stream = voice_stream.transcribe(whisper);
+                // Client-side VAD already sends pre-segmented utterances, so
+                // server-side VAD is unnecessary.  Each feed is a complete
+                // speech segment — just pass it directly to Whisper.
+                //
+                // The old approach (voice_activity_stream → rechunk → transcribe)
+                // hung because the rechunker's end_window timer relies on
+                // continuously polled silence samples.  When the AudioStream
+                // returns Pending between feeds, the rechunker never detects
+                // end-of-speech and Whisper never receives a segment.
+                let mut samples_rx = samples_rx;
 
                 tokio::select! {
                     _ = drop_rx => {},
                     _ = async {
-                        while let Some(segment) = word_stream.next().await {
-                            let text = segment.text().to_string();
-                            let stream_id_clone = stream_id_clone.clone();
+                        while let Some(audio_chunk) = samples_rx.next().await {
+                            if audio_chunk.is_empty() {
+                                continue;
+                            }
+                            let buffer = rodio::buffer::SamplesBuffer::new(1, 16000, audio_chunk);
+                            match whisper.transcribe(buffer) {
+                                Ok(mut segments) => {
+                                    while let Some(segment) = segments.next().await {
+                                        let text = segment.text().to_string();
+                                        log::info!(
+                                            "Transcription text for stream {}: {:?}",
+                                            stream_id_clone,
+                                            text
+                                        );
 
-                            // Bill for transcribed words
-                            let word_count = text.split_whitespace().count();
-                            if word_count > 0 {
-                                if let Some(ref email) = billing_email {
-                                    // Resolve model name from ID for rate lookup
-                                    // (host_rates are stored by display name, not UUID)
-                                    let rate_key = crate::db::Ad4mDb::with_global_instance(|db| {
-                                        db.get_model(billing_model_id.clone())
-                                    })
-                                    .ok()
-                                    .flatten()
-                                    .map(|m| m.name)
-                                    .unwrap_or_else(|| billing_model_id.clone());
+                                        // Bill for transcribed words
+                                        let word_count = text.split_whitespace().count();
+                                        if word_count > 0 {
+                                            if let Some(ref email) = billing_email {
+                                                let rate_key =
+                                                    crate::db::Ad4mDb::with_global_instance(|db| {
+                                                        db.get_model(billing_model_id.clone())
+                                                    })
+                                                    .ok()
+                                                    .flatten()
+                                                    .map(|m| m.name)
+                                                    .unwrap_or_else(|| billing_model_id.clone());
 
-                                    // Rate must exist — validated when the stream was opened.
-                                    // If lookup fails here, log and skip billing (don't suppress text).
-                                    let rate = crate::db::Ad4mDb::with_global_instance(|db| {
-                                        db.get_host_rate(&rate_key)
-                                    })
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or(0.0);
-                                    let cost = word_count as f64 * rate;
-                                    match crate::billing::bill_compute(
-                                        email,
-                                        cost,
-                                        "ai_transcription",
-                                        Some(&format!(
-                                            "{} words (model: {})",
-                                            word_count,
-                                            billing_model_id,
-                                        )),
-                                    ) {
-                                        Err(crate::billing::BillingError::InsufficientCredits) => {
-                                            log::warn!("Transcription: insufficient credits for user {} — delivering already-computed text, future feeds will be rejected", email);
+                                                let rate =
+                                                    crate::db::Ad4mDb::with_global_instance(|db| {
+                                                        db.get_host_rate(&rate_key)
+                                                    })
+                                                    .ok()
+                                                    .flatten()
+                                                    .unwrap_or(0.0);
+                                                let cost = word_count as f64 * rate;
+                                                match crate::billing::bill_compute(
+                                                    email,
+                                                    cost,
+                                                    "ai_transcription",
+                                                    Some(&format!(
+                                                        "{} words (model: {})",
+                                                        word_count, billing_model_id,
+                                                    )),
+                                                ) {
+                                                    Err(
+                                                        crate::billing::BillingError::InsufficientCredits,
+                                                    ) => {
+                                                        log::warn!("Transcription: insufficient credits for user {} — delivering already-computed text, future feeds will be rejected", email);
+                                                    }
+                                                    Err(e) => {
+                                                        log::warn!(
+                                                            "Transcription billing failed: {:?}",
+                                                            e
+                                                        );
+                                                    }
+                                                    Ok(()) => {}
+                                                }
+                                            }
                                         }
-                                        Err(e) => {
-                                            log::warn!("Transcription billing failed: {:?}", e);
-                                        }
-                                        Ok(()) => {}
+
+                                        let text_for_pubsub = text.clone();
+                                        let text_for_broadcast = text.clone();
+                                        let broadcast_tx = text_broadcast_tx_clone.clone();
+                                        let stream_id_for_pubsub = stream_id_clone.clone();
+                                        rt.spawn(async move {
+                                            let _ = get_global_pubsub()
+                                                .await
+                                                .publish(
+                                                    &AI_TRANSCRIPTION_TEXT_TOPIC,
+                                                    &serde_json::to_string(
+                                                        &TranscriptionTextFilter {
+                                                            stream_id: stream_id_for_pubsub,
+                                                            text: text_for_pubsub,
+                                                        },
+                                                    )
+                                                    .expect(
+                                                        "TranscriptionTextFilter must be serializable",
+                                                    ),
+                                                )
+                                                .await;
+                                        });
+
+                                        // Also broadcast via per-stream channel for SSE feed responses
+                                        let _ = broadcast_tx.send(text_for_broadcast);
                                     }
                                 }
+                                Err(e) => {
+                                    log::error!(
+                                        "Transcription error for stream {}: {:?}",
+                                        stream_id_clone,
+                                        e
+                                    );
+                                }
                             }
-
-                            let text_for_pubsub = text.clone();
-                            rt.spawn(async move {
-                                let _ = get_global_pubsub()
-                                    .await
-                                    .publish(
-                                        &AI_TRANSCRIPTION_TEXT_TOPIC,
-                                        &serde_json::to_string(&TranscriptionTextFilter {
-                                            stream_id: stream_id_clone.clone(),
-                                            text: text_for_pubsub,
-                                        })
-                                        .expect("TranscriptionTextFilter must be serializable"),
-                                    )
-                                    .await;
-                            });
-
-                            sleep(Duration::from_millis(50)).await;
                         }
                     } => {}
                 }
@@ -1346,6 +1357,7 @@ impl AIService {
                 samples_tx,
                 drop_tx,
                 last_activity,
+                text_broadcast_tx,
                 model_id: model_id.clone(),
                 user_email,
             },
@@ -1371,6 +1383,29 @@ impl AIService {
                 AIServiceError::CrazyError(format!("Failed to feed stream {}: {}", stream_id, e))
             })?;
             Ok(())
+        } else {
+            Err(AIServiceError::StreamNotFound.into())
+        }
+    }
+
+    /// Feed audio samples to a stream and return a broadcast receiver for
+    /// partial/final transcription text events (used by SSE feed response).
+    pub async fn feed_transcription_stream_with_broadcast(
+        &self,
+        stream_id: &String,
+        audio_samples: Vec<f32>,
+        auth_token: &str,
+    ) -> Result<tokio::sync::broadcast::Receiver<String>> {
+        let mut map_lock = self.transcription_streams.lock().await;
+
+        if let Some(stream) = map_lock.get_mut(stream_id) {
+            Self::verify_stream_ownership(stream, auth_token)?;
+            *stream.last_activity.lock().await = std::time::Instant::now();
+            let rx = stream.text_broadcast_tx.subscribe();
+            stream.samples_tx.send(audio_samples).await.map_err(|e| {
+                AIServiceError::CrazyError(format!("Failed to feed stream {}: {}", stream_id, e))
+            })?;
+            Ok(rx)
         } else {
             Err(AIServiceError::StreamNotFound.into())
         }

@@ -8,7 +8,6 @@ import type { PromptRequest, EmbedRequest, SetDefaultModelRequest } from "../gen
 export class AIClient {
     #restClient: RestClient;
     #transcriptionUnsubscribers: Map<string, () => void> = new Map();
-    #audioWs: WebSocket | null = null;
 
     constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedRestClient?: RestClient) {
         this.#restClient = sharedRestClient || new RestClient(baseUrl, token);
@@ -99,16 +98,12 @@ export class AIClient {
             timeBeforeSpeech?: number;
         }
     ): Promise<string> {
-        console.log('[AIClient] openTranscriptionStream:', modelId, params);
         const streamId = await this.#restClient.post<string>('/api/v1/ai/transcription/open', { modelId, params });
-        console.log('[AIClient] transcription stream opened, streamId:', streamId);
 
         const unsub = this.#restClient.subscribe(
             `/api/v1/events/ai`,
             (data) => {
-                console.log('[AIClient] SSE event received:', data);
                 if (data.type === 'transcription-text' && data.streamId === streamId && data.text) {
-                    console.log('[AIClient] transcription text for stream', streamId, ':', data.text);
                     streamCallback(data.text as string);
                 }
             }
@@ -121,9 +116,6 @@ export class AIClient {
 
     async closeTranscriptionStream(streamId: string): Promise<void> {
         this.#pendingStreamIds.delete(streamId);
-        if (this.#pendingStreamIds.size === 0) {
-            this.disconnectAudioWs();
-        }
         await this.#restClient.post<void>('/api/v1/ai/transcription/close', { streamId });
 
         const unsub = this.#transcriptionUnsubscribers.get(streamId);
@@ -133,85 +125,50 @@ export class AIClient {
         }
     }
 
-    private _feedCount = 0;
     #pendingStreamIds: Set<string> = new Set();
 
+    /**
+     * Feed an audio utterance to one or more transcription streams.
+     * Sends raw binary Float32Array as application/octet-stream.
+     * Transcription results are delivered via the SSE channel registered
+     * in openTranscriptionStream (/events/ai).
+     */
     async feedTranscriptionStream(streamIds: string | string[], audio: Float32Array | number[]): Promise<void> {
         const ids = Array.isArray(streamIds) ? streamIds : [streamIds];
 
-        // Ensure we have a typed array for binary WebSocket transport
+        // Ensure we have a typed array for binary transport
         const typedAudio = audio instanceof Float32Array
             ? audio
             : new Float32Array(audio);
 
-        // Lazily connect/reconnect WebSocket with all known stream IDs
-        let idsChanged = false;
-        for (const id of ids) {
-            if (!this.#pendingStreamIds.has(id)) {
-                this.#pendingStreamIds.add(id);
-                idsChanged = true;
-            }
-        }
-        if (idsChanged && this.#pendingStreamIds.size > 0) {
-            this.disconnectAudioWs();
-            this.connectAudioWs([...this.#pendingStreamIds]);
-        }
-
-        if (this.#audioWs && this.#audioWs.readyState === WebSocket.OPEN) {
-            this._feedCount++;
-            if (this._feedCount % 50 === 1) {
-                console.log(`[AIClient] feedTranscriptionStream via WebSocket (frame #${this._feedCount}, ${typedAudio.length} samples)`);
-            }
-            this.#audioWs.send(typedAudio.buffer);
+        if (ids.length === 0 || typedAudio.length === 0) {
             return;
         }
 
-        this._feedCount++;
-        if (this._feedCount % 50 === 1) {
-            console.log(`[AIClient] feedTranscriptionStream via REST fallback (frame #${this._feedCount}, ${typedAudio.length} samples, ws state: ${this.#audioWs?.readyState})`);
-        }
-        return this.#restClient.post<void>('/api/v1/ai/transcription/feed', {
-            streamIds: ids,
-            audio: Array.from(typedAudio)
-        });
-    }
-
-    private connectAudioWs(streamIds: string[]): void {
-        const baseUrl = this.#restClient.getBaseUrl().replace(/^http/, 'ws');
+        const baseUrl = this.#restClient.getBaseUrl();
         const token = this.#restClient.getToken();
-        if (!token) {
-            console.warn('[AIClient] connectAudioWs: no token, skipping WebSocket');
-            return;
-        }
 
-        const idsParam = encodeURIComponent(streamIds.join(','));
-        const tokenParam = encodeURIComponent(token);
+        // Use slice to get only the relevant portion of the underlying ArrayBuffer
+        // (Float32Array may be a view over a larger buffer)
+        const bodyBuffer = typedAudio.buffer.slice(
+            typedAudio.byteOffset,
+            typedAudio.byteOffset + typedAudio.byteLength
+        );
 
-        const wsUrl = `${baseUrl}/api/v1/ws/audio?token=${tokenParam}&stream_ids=${idsParam}`;
-        console.log('[AIClient] connecting audio WebSocket:', wsUrl.replace(/token=[^&]+/, 'token=***'));
+        const response = await fetch(`${baseUrl}/api/v1/ai/transcription/feed`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/octet-stream',
+                'X-Stream-Ids': ids.join(','),
+                ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+            },
+            body: bodyBuffer,
+        });
 
-        this.#audioWs = new WebSocket(wsUrl);
-        this.#audioWs.binaryType = 'arraybuffer';
-
-        this.#audioWs.onopen = () => {
-            console.log('[AIClient] audio WebSocket connected');
-        };
-
-        this.#audioWs.onerror = (e) => {
-            console.error('[AIClient] audio WebSocket error:', e);
-            this.#audioWs = null;
-        };
-
-        this.#audioWs.onclose = (e) => {
-            console.log('[AIClient] audio WebSocket closed:', e.code, e.reason);
-            this.#audioWs = null;
-        };
-    }
-
-    private disconnectAudioWs(): void {
-        if (this.#audioWs) {
-            this.#audioWs.close();
-            this.#audioWs = null;
+        if (!response.ok) {
+            const text = await response.text().catch(() => '');
+            console.error(`[AIClient] feed failed: ${response.status} ${response.statusText}`, text);
         }
     }
+
 }

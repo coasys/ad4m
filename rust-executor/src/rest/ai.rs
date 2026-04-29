@@ -453,28 +453,56 @@ pub async fn open_transcription_stream(
 }
 
 /// POST /ai/transcription/feed
-#[rest_handler(
-    POST,
-    "/ai/transcription/feed",
-    request = "FeedTranscriptionRequest",
-    response = "string"
-)]
+///
+/// Accepts raw PCM Float32 little-endian bytes (application/octet-stream).
+/// Stream IDs are passed via `X-Stream-Ids` header (comma-separated).
+/// Transcription text results are delivered via the existing SSE channel
+/// at `/events/ai` (type: "transcription-text").
+#[rest_handler(POST, "/ai/transcription/feed", request = "bytes", response = "string")]
 pub async fn feed_transcription_stream(
     State(_state): State<AppState>,
     auth: AuthContext,
-    Json(body): Json<FeedTranscriptionRequest>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
     check_compute_credits(&context.auth_token)?;
 
-    let audio_f32: Vec<f32> = body.audio.into_iter().map(|x| x as f32).collect();
+    // Parse stream IDs from header
+    let stream_ids_header = headers
+        .get("x-stream-ids")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let stream_ids: Vec<String> = stream_ids_header
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if stream_ids.is_empty() {
+        return Err(ApiError::BadRequest(
+            "X-Stream-Ids header is required".into(),
+        ));
+    }
+
+    // Interpret raw bytes as f32 little-endian samples (zero-copy)
+    if body.len() % 4 != 0 {
+        return Err(ApiError::BadRequest(
+            "Body length must be a multiple of 4 (Float32 samples)".into(),
+        ));
+    }
+    let audio_f32: Vec<f32> = body
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect();
+
     let service = AIService::global_instance()
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    for stream_id in &body.stream_ids {
+    for stream_id in &stream_ids {
         if let Err(e) = service
             .feed_transcription_stream(stream_id, audio_f32.clone(), &context.auth_token)
             .await
