@@ -224,6 +224,10 @@ export class Ad4mConnectElement extends LitElement {
         // Token expired or invalid - show connection options
         this.currentView = "connection-options";
         this.modalOpen = true;
+      } else if (e.detail === 'authenticated') {
+        // Successfully authenticated - switch to dashboard and close modal
+        this.currentView = "logged-in-dashboard";
+        this.modalOpen = false;
       }
       // Trigger re-render to update UI based on new auth state
       this.requestUpdate();
