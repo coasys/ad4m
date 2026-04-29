@@ -1174,7 +1174,7 @@ describe("SPARQL comparison filters", () => {
 // SPARQL Direct Triple Pattern & IRI Tests
 // ──────────────────────────────────────────────────────────
 
-import { buildSPARQLQuery, groupSPARQLResults, formatSPARQLValue, buildSPARQLGetDataQuery } from "./query-sparql";
+import { buildSPARQLQuery, groupSPARQLResults, formatSPARQLValue } from "./query-sparql";
 
 describe("SPARQL direct triple pattern generation", () => {
   @Model({ name: "Channel" })
@@ -1230,27 +1230,7 @@ describe("SPARQL direct triple pattern generation", () => {
   });
 });
 
-describe("SPARQL IRI formatting", () => {
-  it("wraps AD4M URIs in angle brackets", () => {
-    const query = buildSPARQLGetDataQuery("ad4m://test123");
-    expect(query).toContain("<ad4m://test123>");
-  });
 
-  it("wraps literal: URIs in angle brackets", () => {
-    const query = buildSPARQLGetDataQuery("literal:string:foo");
-    expect(query).toContain("<literal:string:foo>");
-  });
-
-  it("wraps flux:// URIs in angle brackets", () => {
-    const query = buildSPARQLGetDataQuery("flux://has_channel");
-    expect(query).toContain("<flux://has_channel>");
-  });
-
-  it("wraps did:key URIs in angle brackets", () => {
-    const query = buildSPARQLGetDataQuery("did:key:z6MkhaXg");
-    expect(query).toContain("<did:key:z6MkhaXg>");
-  });
-});
 
 describe("groupSPARQLResults", () => {
   it("groups flat rows by source URI", () => {

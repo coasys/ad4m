@@ -1,4 +1,4 @@
-import { buildSPARQLOrderLimitOffset, buildSPARQLQuery, buildSPARQLCountQuery, buildPaginationSubquery, hasJsOnlyWhereFilters, buildSPARQLGetDataQuery } from './query-sparql';
+import { buildSPARQLOrderLimitOffset, buildSPARQLQuery, buildSPARQLCountQuery, buildPaginationSubquery, hasJsOnlyWhereFilters } from './query-sparql';
 
 // Minimal stubs for ModelMetadata — buildSPARQLOrderLimitOffset only uses the query arg
 const emptyMetadata: any = { properties: {}, relations: {} };
@@ -375,11 +375,4 @@ describe('buildSPARQLQuery — RDF 1.2 reifier patterns', () => {
     expect(sparql).toContain('?_reifier <ad4m://ontology/timestamp> ?timestamp');
   });
 
-  it('uses reifier pattern in buildSPARQLGetDataQuery', () => {
-    const sparql = buildSPARQLGetDataQuery('flux://some-entity-123');
-    expect(sparql).toContain('<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>');
-    expect(sparql).toContain('<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<(');
-    expect(sparql).toContain('?_reifier');
-    expect(sparql).not.toContain('GRAPH');
-  });
 });

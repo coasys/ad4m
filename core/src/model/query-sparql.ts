@@ -454,22 +454,6 @@ export function buildSPARQLCountQuery(
   `.trim();
 }
 
-/**
- * Build a SPARQL query to fetch all links for a single instance.
- */
-export function buildSPARQLGetDataQuery(baseExpression: string): string {
-  return `
-
-    SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
-      ${iri(baseExpression)} ?predicate ?target .
-      ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ${iri(baseExpression)} ?predicate ?target )>> .
-      FILTER(isIRI(?predicate))
-      BIND(${iri(baseExpression)} AS ?source)
-      ?_reifier <ad4m://ontology/author> ?author .
-      ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-    }
-  `.trim();
-}
 
 /**
  * Group flat SPARQL link rows into the same shape that SPARQL returned:
