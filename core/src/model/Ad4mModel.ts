@@ -857,11 +857,30 @@ export class Ad4mModel {
           const TargetClass = meta.target();
           const filter = buildConformanceFilter(meta.predicate, TargetClass);
 
+          // Only compile where clauses to SPARQL when the target properties
+          // are stored as plain IRIs (not signed expressions). Properties
+          // without resolveLanguage or with resolveLanguage='literal' store
+          // values as signed JSON envelopes, so SPARQL exact-match fails.
           let whereConditions: string[] = [];
           if (rel.where) {
             try {
               const targetMetadata = (TargetClass as any).getModelMetadata?.() ?? null;
-              whereConditions = compileWhereClause(rel.where, targetMetadata);
+              let allSparqlFilterable = true;
+              if (targetMetadata) {
+                for (const propName of Object.keys(rel.where)) {
+                  if (['id', 'author', 'timestamp'].includes(propName)) continue;
+                  const propMeta = targetMetadata.properties[propName];
+                  if (propMeta && (!propMeta.resolveLanguage || propMeta.resolveLanguage === 'literal')) {
+                    allSparqlFilterable = false;
+                    break;
+                  }
+                }
+              } else {
+                allSparqlFilterable = false;
+              }
+              if (allSparqlFilterable) {
+                whereConditions = compileWhereClause(rel.where, targetMetadata);
+              }
             } catch (_) {}
           }
 
@@ -970,12 +989,30 @@ export class Ad4mModel {
           const TargetClass = meta.target();
           const filter = buildConformanceFilter(meta.predicate, TargetClass);
 
-          // Compile relation-level where clause to SPARQL conditions
+          // Only compile where clauses to SPARQL when the target properties
+          // are stored as plain IRIs (not signed expressions). Properties
+          // without resolveLanguage or with resolveLanguage='literal' store
+          // values as signed JSON envelopes, so SPARQL exact-match fails.
           let whereConditions: string[] = [];
           if (rel.where) {
             try {
               const targetMetadata = (TargetClass as any).getModelMetadata?.() ?? null;
-              whereConditions = compileWhereClause(rel.where, targetMetadata);
+              let allSparqlFilterable = true;
+              if (targetMetadata) {
+                for (const propName of Object.keys(rel.where)) {
+                  if (['id', 'author', 'timestamp'].includes(propName)) continue;
+                  const propMeta = targetMetadata.properties[propName];
+                  if (propMeta && (!propMeta.resolveLanguage || propMeta.resolveLanguage === 'literal')) {
+                    allSparqlFilterable = false;
+                    break;
+                  }
+                }
+              } else {
+                allSparqlFilterable = false;
+              }
+              if (allSparqlFilterable) {
+                whereConditions = compileWhereClause(rel.where, targetMetadata);
+              }
             } catch (_) { /* target metadata unavailable */ }
           }
 
@@ -1040,9 +1077,42 @@ export class Ad4mModel {
       );
     }
 
-    // Relation conformance getters and property getters are now evaluated
-    // Rust-side via evaluate_getters() in model_query.rs. No TS-side
-    // evaluateCustomGettersForInstance() call needed.
+    // Relation conformance getters are evaluated Rust-side via evaluate_getters()
+    // in model_query.rs. However, for relations with non-SPARQL-filterable where
+    // clauses (e.g. properties stored as signed expressions), we still need
+    // TS-side evaluation as a fallback. Running evaluateCustomGettersForInstance
+    // with skipPropertyGetters ensures conformance + JS post-filtering for
+    // where clauses that couldn't be compiled to SPARQL.
+    const includedRelNames = query.include ? new Set(Object.keys(query.include)) : new Set<string>();
+    for (const inst of instances) {
+      // Save included relation values that came from Rust hydration
+      const savedIncluded: Record<string, any> = {};
+      for (const relName of includedRelNames) {
+        if ((inst as any)[relName] !== undefined) {
+          savedIncluded[relName] = (inst as any)[relName];
+        }
+      }
+
+      await evaluateCustomGettersForInstance(inst, perspective, metadata, {
+        skipPropertyGetters: true,
+      });
+
+      // Restore hydrated include objects that were overwritten by conformance getters
+      for (const [relName, value] of Object.entries(savedIncluded)) {
+        (inst as any)[relName] = value;
+      }
+
+      // Fix cardinality for non-included HasOne/BelongsToOne relations:
+      // The conformance getter always produces arrays; unwrap to scalar.
+      for (const [relName, relMeta] of Object.entries(metadata.relations)) {
+        if (includedRelNames.has(relName)) continue;
+        const kind = (relMeta as any).kind;
+        if ((kind === 'hasOne' || kind === 'belongsToOne') && Array.isArray((inst as any)[relName])) {
+          const arr = (inst as any)[relName] as any[];
+          (inst as any)[relName] = arr.length > 0 ? arr[0] : null;
+        }
+      }
+    }
 
     // Take snapshots for dirty tracking
     const snapshotRelations = query.include;

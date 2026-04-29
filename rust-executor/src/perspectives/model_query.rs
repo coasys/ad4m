@@ -1151,8 +1151,12 @@ fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Value> {
     // Build a predicate -> properties map for fast lookup.
     // Multiple relations can share the same predicate (e.g. ad4m://has_child),
     // so we map each predicate to ALL matching properties.
+    // Exclude properties that have SPARQL getters — those will be evaluated
+    // separately by evaluate_getters(). This prevents predicate collisions
+    // when two properties share the same predicate (e.g. an unfiltered
+    // @HasMany and a conformance-filtered @HasMany with a getter).
     let mut pred_to_props: HashMap<&str, Vec<&ShapeProperty>> = HashMap::new();
-    for p in &shape.properties {
+    for p in shape.properties.iter().filter(|p| p.getter.is_none()) {
         pred_to_props
             .entry(p.predicate.as_str())
             .or_default()
@@ -1622,6 +1626,12 @@ fn evaluate_getters(
         return Ok(());
     }
 
+    log::debug!(
+        "evaluate_getters: {} getter props for {} instances",
+        getter_props.len(),
+        instances.len()
+    );
+
     for instance in instances.iter_mut() {
         let instance_id = match instance.get("id").and_then(|v| v.as_str()) {
             Some(id) => id.to_string(),
@@ -1645,6 +1655,13 @@ fn evaluate_getters(
                 .replace("?source", &format!("<{}>", instance_id))
                 .replace("<Base>", &format!("<{}>", instance_id))
                 .replace("Base", &format!("<{}>", instance_id));
+
+            log::debug!(
+                "evaluate_getters: prop='{}' collection={} sparql={}",
+                prop.name,
+                prop.is_collection,
+                &sparql[..sparql.len().min(200)]
+            );
 
             let trimmed = sparql.trim().to_uppercase();
 
@@ -1694,6 +1711,13 @@ fn evaluate_getters(
                                         .unwrap_or(false)
                                 })
                                 .collect();
+
+                            log::debug!(
+                                "evaluate_getters: prop='{}' raw_rows={} filtered_values={}",
+                                prop.name,
+                                results.len(),
+                                values.len()
+                            );
 
                             if let Some(obj) = instance.as_object_mut() {
                                 if prop.is_scalar_relation {
