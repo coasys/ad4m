@@ -1613,7 +1613,7 @@ fn evaluate_getters(
     store: &SparqlStore,
     instances: &mut [Value],
     shape: &ModelShape,
-    include: Option<&HashMap<String, IncludeValue>>,
+    _include: Option<&HashMap<String, IncludeValue>>,
 ) -> Result<(), Error> {
     // Collect properties/relations that have getters.
     let getter_props: Vec<&ShapeProperty> = shape
@@ -1641,14 +1641,9 @@ fn evaluate_getters(
         for prop in &getter_props {
             let getter = prop.getter.as_ref().unwrap(); // safe: filtered above
 
-            // Skip included relations — include resolution already handled them.
-            if prop.is_collection {
-                if let Some(inc) = include {
-                    if inc.contains_key(&prop.name) {
-                        continue;
-                    }
-                }
-            }
+            // Note: we intentionally do NOT skip included collection relations here.
+            // The getter must run first to populate target IDs, which
+            // resolve_forward_include later replaces with hydrated objects.
 
             // Substitute Base / ?source with the instance IRI
             let sparql = getter
