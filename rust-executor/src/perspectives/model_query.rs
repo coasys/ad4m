@@ -736,7 +736,12 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
     if let Some(rels) = meta["relations"].as_object() {
         for (name, rel_meta) in rels {
             let predicate = rel_meta["predicate"].as_str().unwrap_or("").to_string();
-            if predicate.is_empty() {
+            let getter = rel_meta["getter"].as_str().map(|s| s.to_string());
+
+            // Skip relations with no predicate AND no getter — nothing to query.
+            // Relations with a getter but no predicate are read-only custom-SPARQL
+            // relations (e.g. `@HasMany({ getter: "SELECT ..." })`).
+            if predicate.is_empty() && getter.is_none() {
                 continue;
             }
 
@@ -747,7 +752,6 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
 
             let kind = rel_meta["kind"].as_str().unwrap_or("hasMany").to_string();
             let is_scalar_relation = kind == "hasOne" || kind == "belongsToOne";
-            let getter = rel_meta["getter"].as_str().map(|s| s.to_string());
 
             properties.push(ShapeProperty {
                 name: name.clone(),
@@ -1712,9 +1716,12 @@ fn evaluate_getters(
                                         if let Some(s) = val {
                                             if !s.is_empty() && s != "None" {
                                                 if let Some(obj) = instance.as_object_mut() {
+                                                    // Property getters return raw values
+                                                    // (e.g. literal URLs). Don't decode them
+                                                    // — the TS side handles resolution if needed.
                                                     obj.insert(
                                                         prop.name.clone(),
-                                                        parse_literal_value(s),
+                                                        Value::String(s.to_string()),
                                                     );
                                                 }
                                             }
