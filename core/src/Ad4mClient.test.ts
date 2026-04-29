@@ -415,8 +415,8 @@ beforeAll(async () => {
     app.get('/api/v1/hosting', (_req, res) => res.json({ email: 'test@test.com' }));
 
     // ===================== SSE EVENTS (stub - not testing SSE) =====================
-    // SSE endpoints return 404 to avoid hanging; subscribe=false prevents client from connecting
-    app.get('/api/v1/events/*', (_req, res) => res.status(404).end());
+    // subscribe=false prevents client from connecting; stub avoids hanging if accidentally hit
+    app.get('/api/v1/events', (_req, res) => res.status(404).end());
 
     httpServer = app.listen(0);
     const addr = httpServer.address() as { port: number };
