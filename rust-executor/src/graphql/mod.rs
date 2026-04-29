@@ -157,9 +157,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         .and(warp::path("playground"))
         .and(playground_filter("/graphql", Some("/subscriptions"))))
     .or(homepage)
-    .or(warp::options().map(|| {
-        warp::reply::with_status("", warp::http::StatusCode::NO_CONTENT)
-    }))
+    .or(warp::options().map(|| warp::reply::with_status("", warp::http::StatusCode::NO_CONTENT)))
     .with(log);
 
     let routes_with_cors = warp::any()
@@ -185,8 +183,16 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
                 };
 
             let response = with_header(reply, ACCESS_CONTROL_ALLOW_ORIGIN, allow_origin);
-            let response = with_header(response, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-            let response = with_header(response, "Access-Control-Allow-Headers", "Content-Type, Authorization, authorization");
+            let response = with_header(
+                response,
+                "Access-Control-Allow-Methods",
+                "GET, POST, OPTIONS",
+            );
+            let response = with_header(
+                response,
+                "Access-Control-Allow-Headers",
+                "Content-Type, Authorization, authorization",
+            );
             let response = with_header(response, "Cross-Origin-Embedder-Policy", embedder_policy);
             let response = with_header(response, "Cross-Origin-Resource-Policy", resource_policy);
             with_header(response, "Cross-Origin-Opener-Policy", opener_policy)
@@ -314,9 +320,8 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
             .and(warp::path("playground"))
             .and(playground_filter("/graphql", Some("/subscriptions"))))
         .or(homepage)
-        .or(warp::options().map(|| {
-            warp::reply::with_status("", warp::http::StatusCode::NO_CONTENT)
-        }))
+        .or(warp::options()
+            .map(|| warp::reply::with_status("", warp::http::StatusCode::NO_CONTENT)))
         .with(log);
 
         let routes2_with_cors = warp::any()
@@ -342,8 +347,16 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
                     };
 
                 let response = with_header(reply, ACCESS_CONTROL_ALLOW_ORIGIN, allow_origin);
-                let response = with_header(response, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-                let response = with_header(response, "Access-Control-Allow-Headers", "Content-Type, Authorization, authorization");
+                let response = with_header(
+                    response,
+                    "Access-Control-Allow-Methods",
+                    "GET, POST, OPTIONS",
+                );
+                let response = with_header(
+                    response,
+                    "Access-Control-Allow-Headers",
+                    "Content-Type, Authorization, authorization",
+                );
                 let response =
                     with_header(response, "Cross-Origin-Embedder-Policy", embedder_policy);
                 let response =
