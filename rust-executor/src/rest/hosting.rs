@@ -34,8 +34,7 @@ pub async fn get_hosting_info(
         let free_access = if global_free {
             true
         } else {
-            Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user_email))
-                .unwrap_or(false)
+            Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user_email)).unwrap_or(false)
         };
         Some(serde_json::json!({
             "email": user_email,
