@@ -132,7 +132,8 @@ export default class Ad4mConnect extends EventTarget {
       this.ad4mClient.close();
     }
 
-    this.ad4mClient = new Ad4mClient(this.baseUrl, this.token);
+    // Defer SSE subscriptions until auth is verified to avoid 403 spam
+    this.ad4mClient = new Ad4mClient(this.baseUrl, this.token, false);
     this.notifyConnectionChange("connected");
 
     return this.ad4mClient;
@@ -169,10 +170,10 @@ export default class Ad4mConnect extends EventTarget {
         this.notifyAuthChange("locked");
       } else {
         await this.ad4mClient.agent.status();
+        this.ad4mClient.startSubscriptions();
         this.notifyAuthChange("authenticated");
       }
 
-      // Return true as we are authenticated
       return true;
     } catch (error) {
       console.error('[Ad4m Connect] Authentication check failed:', error);
