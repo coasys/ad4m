@@ -1528,7 +1528,7 @@ export class PerspectiveProxy {
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
 
         // Get metadata from SHACL links
-        const metadata = await this.getSubjectClassMetadataFromSDNA(className);
+        const metadata = await this.getSubjectClassMetadata(className);
         if (!metadata) {
             console.warn(`isSubjectInstance: No SHACL metadata found for class ${className}`);
             return false;
@@ -1559,38 +1559,11 @@ export class PerspectiveProxy {
     }
 
 
-    /** For an existing subject instance (existing in the perspective's links)
-     * this function returns a proxy object that can be used to access the subject's
-     * properties and methods.
-     *
-     * @param base URI of the subject's root expression
-     * @param subjectClass Either a string with the name of the subject class, or an object
-     * with the properties of the subject class. In the latter case, the first subject class
-     * that matches the given properties will be used.
-     */
-    /** @deprecated Use Ad4mModel or getSubjectData() instead */
-    async getSubjectProxy<T>(base: string, subjectClass: T): Promise<T> {
-        let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
-        // Return plain data instead of a Subject proxy
-        const data = await this.getSubjectData(className, base) as any;
-        return { id: base, ...data } as unknown as T;
-    }
-
     /**
      * Gets subject class metadata from SHACL links using SHACLShape.fromLinks().
      * Retrieves the SHACL shape and extracts metadata for instance queries.
      */
     async getSubjectClassMetadata(className: string): Promise<{
-        requiredPredicates: string[],
-        requiredTriples: Array<{predicate: string, target?: string}>,
-        properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-        relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
-    } | null> {
-        return this.getSubjectClassMetadataFromSDNA(className);
-    }
-
-    /** @deprecated Use getSubjectClassMetadata() */
-    async getSubjectClassMetadataFromSDNA(className: string): Promise<{
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
         properties: Map<string, { predicate: string, resolveLanguage?: string }>,
@@ -1650,6 +1623,7 @@ export class PerspectiveProxy {
             return null;
         }
     }
+
     /**
      * Generates a SPARQL query to find instances based on class metadata.
      */
@@ -1701,210 +1675,6 @@ export class PerspectiveProxy {
         return candidates.map(c => ({ base: c }));
     }
 
-    /**
-     * Gets a property value using SPARQL when Prolog fails.
-     * This is used as a fallback in SdnaOnly mode where link data isn't in Prolog.
-     */
-    async getPropertyValueViaSparql(baseExpression: string, className: string, propertyName: string): Promise<any> {
-        const metadata = await this.getSubjectClassMetadataFromSDNA(className);
-        if (!metadata) {
-            return undefined;
-        }
-
-        const propMeta = metadata.properties.get(propertyName);
-        if (!propMeta) {
-            return undefined;
-        }
-
-        const links = await this.get(new LinkQuery({ source: baseExpression, predicate: propMeta.predicate }));
-
-        if (!links || links.length === 0) {
-            return undefined;
-        }
-
-        const value = links[0].data.target;
-
-        // Handle expression resolution if needed
-        if (propMeta.resolveLanguage && value) {
-            try {
-                const expression = await this.getExpression(value);
-                try {
-                    return JSON.parse(expression.data);
-                } catch (e) {
-                    return expression.data;
-                }
-            } catch (err) {
-                return value;
-            }
-        }
-
-        return value;
-    }
-
-    /**
-     * Gets relation values using SPARQL when Prolog fails.
-     * This is used as a fallback in SdnaOnly mode where link data isn't in Prolog.
-     * Note: This is used by Subject.ts (legacy pattern). Ad4mModel.ts uses getModelMetadata() instead.
-     */
-    async getRelationValuesViaSparql(baseExpression: string, className: string, relationName: string): Promise<any[]> {
-        const metadata = await this.getSubjectClassMetadataFromSDNA(className);
-        if (!metadata) {
-            return [];
-        }
-
-        const relMeta = metadata.relations.get(relationName);
-        if (!relMeta) {
-            return [];
-        }
-
-        const links = await this.get(new LinkQuery({ source: baseExpression, predicate: relMeta.predicate }));
-
-        if (!links || links.length === 0) {
-            return [];
-        }
-
-        // Sort by timestamp ascending
-        links.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-
-        let values = links.map(l => l.data.target).filter(v => v !== "" && v !== '');
-        
-        // Apply condition filtering if present
-        if (relMeta.condition && values.length > 0) {
-            try {
-                const filteredValues: string[] = [];
-                
-                for (const value of values) {
-                    let condition = relMeta.condition
-                        .replace(/\$perspective/g, `'${this.uuid}'`)
-                        .replace(/\$base/g, `'${baseExpression}'`)
-                        .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
-                    
-                    // Parse condition to extract link query parameters
-                    // Conditions typically look like: WHERE in.uri = 'X' AND predicate = 'Y' AND out.uri = 'Z'
-                    // or: array::len(SELECT * FROM link WHERE ...) > 0
-                    // Convert to queryLinks calls
-                    const sourceMatch = condition.match(/in\.uri\s*=\s*'([^']+)'/);
-                    const predicateMatch = condition.match(/predicate\s*=\s*'([^']+)'/);
-                    const targetMatch = condition.match(/out\.uri\s*=\s*'([^']+)'/);
-                    
-                    if (sourceMatch || predicateMatch || targetMatch) {
-                        const linkQuery: any = {};
-                        if (sourceMatch) linkQuery.source = sourceMatch[1];
-                        if (predicateMatch) linkQuery.predicate = predicateMatch[1];
-                        if (targetMatch) linkQuery.target = targetMatch[1];
-                        
-                        const matchingLinks = await this.get(new LinkQuery(linkQuery));
-                        if (matchingLinks.length > 0) {
-                            filteredValues.push(value);
-                        }
-                    } else {
-                        // Can't parse condition, include by default
-                        filteredValues.push(value);
-                    }
-                }
-                
-                values = filteredValues;
-            } catch (error) {
-                console.warn(`Failed to apply condition filter for ${relationName}:`, error);
-            }
-        }
-
-        // Apply instance filter if present - batch-check all values at once
-        if (relMeta.instanceFilter) {
-            try {
-                const filterMetadata = await this.getSubjectClassMetadataFromSDNA(relMeta.instanceFilter);
-                if (!filterMetadata) {
-                    // Fallback to sequential checks if metadata isn't available
-                    return this.filterInstancesSequential(values, relMeta.instanceFilter);
-                }
-
-                return await this.batchCheckSubjectInstances(values, filterMetadata);
-            } catch (err) {
-                // Fallback to sequential checks on error
-                return this.filterInstancesSequential(values, relMeta.instanceFilter);
-            }
-        }
-
-        return values;
-    }
-
-    /**
-     * Batch-checks multiple expressions against subject class metadata using a single or limited SPARQL queries.
-     * This avoids N+1 query problems by checking all values at once.
-     */
-    async batchCheckSubjectInstances(
-        expressions: string[],
-        metadata: {
-            requiredPredicates: string[],
-            requiredTriples: Array<{predicate: string, target?: string}>,
-            properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-            relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
-        }
-    ): Promise<string[]> {
-        if (expressions.length === 0) {
-            return [];
-        }
-
-        // If no required triples, check which expressions have any links
-        if (metadata.requiredTriples.length === 0) {
-            const results: string[] = [];
-            for (const expr of expressions) {
-                const links = await this.get(new LinkQuery({ source: expr }));
-                if (links.length > 0) results.push(expr);
-            }
-            return results;
-        }
-
-        // For each required triple, find which expressions match
-        const validExpressionSets: Set<string>[] = [];
-        
-        for (const triple of metadata.requiredTriples) {
-            const matchingExprs = new Set<string>();
-            for (const expr of expressions) {
-                let query: LinkQuery;
-                if (triple.target) {
-                    query = new LinkQuery({ source: expr, predicate: triple.predicate, target: triple.target });
-                } else {
-                    query = new LinkQuery({ source: expr, predicate: triple.predicate });
-                }
-                const links = await this.get(query);
-                if (links.length > 0) matchingExprs.add(expr);
-            }
-            validExpressionSets.push(matchingExprs);
-        }
-
-        // Find intersection: expressions that passed ALL required triple checks
-        if (validExpressionSets.length === 0) {
-            return expressions;
-        }
-
-        const firstSet = validExpressionSets[0];
-        const validExpressions = expressions.filter(expr => {
-            return validExpressionSets.every(set => set.has(expr));
-        });
-
-        return validExpressions;
-    }
-
-    /**
-     * Fallback sequential instance checking when batch checking isn't available.
-     */
-    private async filterInstancesSequential(values: string[], instanceFilter: string): Promise<string[]> {
-        const filteredValues = [];
-        for (const value of values) {
-            try {
-                const isInstance = await this.isSubjectInstance(value, instanceFilter);
-                if (isInstance) {
-                    filteredValues.push(value);
-                }
-            } catch (err) {
-                // Skip values that fail instance check
-                continue;
-            }
-        }
-        return filteredValues;
-    }
-
     /** Returns all subject instances of the given subject class as proxy objects.
      *  @param subjectClass Either a string with the name of the subject class, or an object
      * with the properties of the subject class. In the latter case, all subject classes
@@ -1927,7 +1697,7 @@ export class PerspectiveProxy {
         for(let className of classes) {
             //console.log(`getAllSubjectInstances: Processing class ${className}`);
             // Query SDNA for metadata, then query SPARQL for instances
-            const metadata = await this.getSubjectClassMetadataFromSDNA(className);
+            const metadata = await this.getSubjectClassMetadata(className);
             //console.log(`getAllSubjectInstances: Got metadata for ${className}:`, metadata);
             if (metadata) {
                 const results = await this.findInstancesByMetadata(metadata);
@@ -1960,38 +1730,6 @@ export class PerspectiveProxy {
             }
         }
         //console.log(`getAllSubjectInstances: Returning ${instances.length} instances`);
-        return instances
-    }
-
-    /** Returns all subject proxies of the given subject class as proxy objects.
-     *  @param subjectClass Either a string with the name of the subject class, or an object
-     * with the properties of the subject class. In the latter case, all subject classes
-     * that match the given properties will be used.
-     */
-    /** @deprecated Use Ad4mModel.query() or listRegisteredClasses() + getSubjectData() instead */
-    async getAllSubjectProxies<T>(subjectClass: T): Promise<T[]> {
-        let classes = []
-        if(typeof subjectClass === "string") {
-            classes = [subjectClass]
-        } else {
-            classes = await this.subjectClassesByTemplate(subjectClass as object)
-        }
-
-        let instances = []
-        for(let className of classes) {
-            const metadata = await this.getSubjectClassMetadataFromSDNA(className);
-            if (metadata) {
-                const results = await this.findInstancesByMetadata(metadata);
-                for (const result of results || []) {
-                    try {
-                        const data = await this.getSubjectData(className, result.base);
-                        instances.push({ id: result.base, ...data } as unknown as T);
-                    } catch (e) {
-                        // Skip instances that fail to load
-                    }
-                }
-            }
-        }
         return instances
     }
 
