@@ -147,7 +147,22 @@ export default class Ad4mConnect extends EventTarget {
   async checkAuth(): Promise<boolean> {
     try {
       console.log('[Ad4m Connect] Checking authentication status...');
-      const isLocked = await this.ad4mClient.agent.isLocked();
+
+      // isLocked may not exist on REST-only executors (404). Treat errors
+      // as "not locked" and fall through to the status check.
+      let isLocked = false;
+      try {
+        isLocked = await this.ad4mClient.agent.isLocked();
+      } catch (lockErr) {
+        const msg = lockErr?.message || '';
+        if (msg === "Cannot extractByTags from a ciphered wallet. You must unlock first.") {
+          console.log('[Ad4m Connect] Agent wallet is locked (error path)');
+          this.notifyAuthChange("locked");
+          return true;
+        }
+        // 404 / network error → assume not locked
+        console.warn('[Ad4m Connect] isLocked check unavailable, assuming unlocked:', msg);
+      }
 
       if (isLocked) {
         console.log('[Ad4m Connect] Agent wallet is locked');
@@ -161,13 +176,6 @@ export default class Ad4mConnect extends EventTarget {
       return true;
     } catch (error) {
       console.error('[Ad4m Connect] Authentication check failed:', error);
-      const lockedMessage = "Cannot extractByTags from a ciphered wallet. You must unlock first.";
-      
-      if (error.message === lockedMessage) {
-        // TODO: isLocked throws an error, should just return a boolean. Temp fix
-        this.notifyAuthChange("locked");
-        return true;
-      }
       
       // Clear token if it's invalid (signed by different agent)
       if (error.message === "InvalidSignature") {
