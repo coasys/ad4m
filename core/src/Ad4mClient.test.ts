@@ -687,12 +687,13 @@ describe('PerspectiveClient', () => {
         expect(result).toEqual([{X: 'test'}]);
     });
 
-    test('subscribeToQueryUpdates() uses the dedicated query-subscription SSE endpoint', async () => {
+    test('subscribeToQueryUpdates() routes through the unified SSE endpoint', async () => {
+        const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
         const callback = jest.fn();
-        const unsubscribe = ad4m.perspective.subscribeToQueryUpdates('sub-1', callback);
+        const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
         const eventSource = lastOf(MockEventSource.instances);
 
-        expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/query-subscription/sub-1?token=test-token`);
+        expect(eventSource.url).toBe(`${baseUrl}/api/v1/events/unified?token=test-token`);
 
         unsubscribe();
         expect(eventSource.closed).toBe(true);
@@ -853,8 +854,9 @@ describe('PerspectiveClient', () => {
     });
 
     test('subscribeToQueryUpdates() ignores unrelated SSE events and accepts object results', async () => {
+        const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
         const callback = jest.fn();
-        const unsubscribe = ad4m.perspective.subscribeToQueryUpdates('sub-1', callback);
+        const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
         const eventSource = lastOf(MockEventSource.instances);
 
         eventSource.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-ignored' } });
