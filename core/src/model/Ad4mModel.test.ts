@@ -981,7 +981,7 @@ describe("SPARQL comparison filters", () => {
 // SPARQL Direct Triple Pattern & IRI Tests
 // ──────────────────────────────────────────────────────────
 
-import { buildSPARQLQuery, groupSPARQLResults, formatSPARQLValue } from "./query-sparql";
+import { buildSPARQLQuery, formatSPARQLValue } from "./query-sparql";
 
 describe("SPARQL direct triple pattern generation", () => {
   @Model({ name: "Channel" })
@@ -1038,39 +1038,6 @@ describe("SPARQL direct triple pattern generation", () => {
 });
 
 
-
-describe("groupSPARQLResults", () => {
-  it("groups flat rows by source URI", () => {
-    const rows = [
-      { source: "ad4m://a", predicate: "p1", target: "t1", author: "auth1", timestamp: "ts1" },
-      { source: "ad4m://a", predicate: "p2", target: "t2", author: "auth1", timestamp: "ts1" },
-      { source: "ad4m://b", predicate: "p1", target: "t3", author: "auth2", timestamp: "ts2" },
-    ];
-    const grouped = groupSPARQLResults(rows);
-    expect(grouped).toHaveLength(2);
-
-    const aGroup = grouped.find(g => g.source_uri === "ad4m://a");
-    expect(aGroup).toBeDefined();
-    expect(aGroup!.links).toHaveLength(2);
-
-    const bGroup = grouped.find(g => g.source_uri === "ad4m://b");
-    expect(bGroup).toBeDefined();
-    expect(bGroup!.links).toHaveLength(1);
-  });
-
-  it("returns empty array for empty input", () => {
-    expect(groupSPARQLResults([])).toEqual([]);
-  });
-
-  it("preserves metadata in grouped links", () => {
-    const rows = [
-      { source: "x", predicate: "p", target: "t", author: "did:key:z6Mk", timestamp: "2024-01-01T00:00:00Z" },
-    ];
-    const grouped = groupSPARQLResults(rows);
-    expect(grouped[0].links[0].author).toBe("did:key:z6Mk");
-    expect(grouped[0].links[0].timestamp).toBe("2024-01-01T00:00:00Z");
-  });
-});
 
 describe("formatSPARQLValue", () => {
   it("wraps strings in double quotes", () => {
@@ -1193,39 +1160,6 @@ describe("matchesCondition()", () => {
   });
   it("returns true for undefined with not operator", () => {
     expect(matchesCondition(undefined, { not: "hello" })).toBe(true);
-  });
-});
-
-describe("groupSPARQLResults()", () => {
-  it("groups rows by source", () => {
-    const rows = [
-      { source: "a", predicate: "p1", target: "t1", author: "auth", timestamp: "ts1" },
-      { source: "a", predicate: "p2", target: "t2", author: "auth", timestamp: "ts2" },
-      { source: "b", predicate: "p1", target: "t3", author: "auth", timestamp: "ts3" },
-    ];
-    const grouped = groupSPARQLResults(rows);
-    expect(grouped.length).toBe(2);
-    const groupA = grouped.find(g => g.source_uri === "a")!;
-    const groupB = grouped.find(g => g.source_uri === "b")!;
-    expect(groupA.links.length).toBe(2);
-    expect(groupB.links.length).toBe(1);
-  });
-
-  it("handles empty input", () => {
-    expect(groupSPARQLResults([])).toEqual([]);
-  });
-
-  it("preserves link metadata", () => {
-    const rows = [
-      { source: "x", predicate: "pred", target: "tgt", author: "did:auth", timestamp: "2024-01-01" },
-    ];
-    const grouped = groupSPARQLResults(rows);
-    expect(grouped[0].links[0]).toEqual({
-      predicate: "pred",
-      target: "tgt",
-      author: "did:auth",
-      timestamp: "2024-01-01",
-    });
   });
 });
 

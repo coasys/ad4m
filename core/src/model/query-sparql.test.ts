@@ -1,4 +1,4 @@
-import { buildSPARQLOrderLimitOffset, buildSPARQLQuery, buildSPARQLCountQuery, buildPaginationSubquery, hasJsOnlyWhereFilters } from './query-sparql';
+import { buildSPARQLOrderLimitOffset, buildSPARQLQuery, buildPaginationSubquery, hasJsOnlyWhereFilters } from './query-sparql';
 
 // Minimal stubs for ModelMetadata — buildSPARQLOrderLimitOffset only uses the query arg
 const emptyMetadata: any = { properties: {}, relations: {} };
@@ -312,24 +312,6 @@ describe('SPARQL-level pagination', () => {
     expect(sparql).toContain('SELECT DISTINCT ?source');
     expect(sparql).toContain('LIMIT 5');
     expect(sparql).toContain('OFFSET 10');
-  });
-
-  describe('buildSPARQLCountQuery', () => {
-    it('returns a COUNT(DISTINCT ?source) query', () => {
-      const query = { parent: { id: 'flux://ch-1', predicate: 'flux://has_child' } };
-      const countSparql = buildSPARQLCountQuery(emptyMetadata, emptyRelations, query, modelClass);
-      expect(countSparql).toContain('COUNT(DISTINCT ?source)');
-      expect(countSparql).toContain('?count');
-      expect(countSparql).toContain('<flux://ch-1>');
-    });
-
-    it('does NOT include LIMIT/OFFSET (counts full result set)', () => {
-      const query = { limit: 10, offset: 20, parent: { id: 'flux://ch-1', predicate: 'flux://has_child' } };
-      const countSparql = buildSPARQLCountQuery(emptyMetadata, emptyRelations, query, modelClass);
-      expect(countSparql).not.toContain('LIMIT');
-      expect(countSparql).not.toContain('OFFSET');
-      expect(countSparql).toContain('COUNT(DISTINCT ?source)');
-    });
   });
 });
 
