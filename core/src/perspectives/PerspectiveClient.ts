@@ -194,6 +194,29 @@ export class PerspectiveClient {
         return JSON.parse(perspectiveModelQuery)
     }
 
+    async modelSubscribe(uuid: string, className: string, queryJson: string, shapeJson?: string): Promise<{ subscriptionId: string, result: any }> {
+        const { perspectiveModelSubscribe } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveModelSubscribe($uuid: String!, $className: String!, $queryJson: String!, $shapeJson: String) {
+                perspectiveModelSubscribe(uuid: $uuid, className: $className, queryJson: $queryJson, shapeJson: $shapeJson) {
+                    subscriptionId
+                    result
+                }
+            }`,
+            variables: { uuid, className, queryJson, shapeJson: shapeJson || null }
+        }))
+        const { subscriptionId, result } = perspectiveModelSubscribe
+        let finalResult = result;
+        if (finalResult.startsWith("#init#")) {
+            finalResult = finalResult.substring(6)
+        }
+        try {
+            finalResult = JSON.parse(finalResult)
+        } catch (e) {
+            console.error('Error parsing perspectiveModelSubscribe result:', e)
+        }
+        return { subscriptionId, result: finalResult }
+    }
+
     async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
         const { perspectiveSubscribeQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveSubscribeQuery($uuid: String!, $query: String!) {

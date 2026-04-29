@@ -385,6 +385,10 @@ export class PerspectiveProxy {
 
     #handle: PerspectiveHandle
     #client: PerspectiveClient
+
+    /** @internal Exposed for ModelQueryBuilder subscription management */
+    get client(): PerspectiveClient { return this.#client; }
+
     #perspectiveLinkAddedCallbacks: LinkCallback[]
     #perspectiveLinkRemovedCallbacks: LinkCallback[]
     #perspectiveLinkUpdatedCallbacks: LinkCallback[]
@@ -597,6 +601,23 @@ export class PerspectiveProxy {
      */
     async modelQuery(className: string, queryJson: string, shapeJson?: string): Promise<{ instances: any[], totalCount: number }> {
         return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, shapeJson);
+    }
+
+    /**
+     * Subscribe to model query changes. Builds trigger SPARQL from the model shape
+     * internally in Rust, registers a subscription, runs the initial query, and
+     * pushes updated results when relevant links change.
+     *
+     * The subscription reuses the same GraphQL subscription channel as subscribeQuery().
+     * Use keepAliveQuery() / disposeQuerySubscription() with the returned subscriptionId.
+     *
+     * @param className - The model class name
+     * @param queryJson - JSON-serialized query parameters (same as modelQuery)
+     * @param shapeJson - Optional shape metadata JSON from the model class
+     * @returns Object with `subscriptionId` and initial `result`
+     */
+    async modelSubscribe(className: string, queryJson: string, shapeJson?: string): Promise<{ subscriptionId: string, result: any }> {
+        return await this.#client.modelSubscribe(this.#handle.uuid, className, queryJson, shapeJson);
     }
 
     /**
@@ -1540,22 +1561,14 @@ export class PerspectiveProxy {
             return links.length > 0;
         }
 
-        // Check if the expression has all required triples (predicate + optional exact target)
-        for (const triple of metadata.requiredTriples) {
-            let query: LinkQuery;
-            if (triple.target) {
-                query = new LinkQuery({ source: expression, predicate: triple.predicate, target: triple.target });
-            } else {
-                query = new LinkQuery({ source: expression, predicate: triple.predicate });
-            }
-            const links = await this.get(query);
+        // Build a single SPARQL ASK query with all required triple patterns
+        const patterns = metadata.requiredTriples.map((t, i) => {
+            const target = t.target ? `<${t.target}>` : `?t${i}`;
+            return `<${expression}> <${t.predicate}> ${target} .`;
+        }).join('\n    ');
 
-            if (!links || links.length === 0) {
-                return false;
-            }
-        }
-
-        return true;
+        const result = await this.querySparql(`ASK WHERE {\n    ${patterns}\n}`);
+        return result === true;
     }
 
 
@@ -1644,35 +1657,17 @@ export class PerspectiveProxy {
             return Array.from(sources).map(s => ({ base: s }));
         }
 
-        // Use first required triple to get candidate set, then filter by rest
-        const first = metadata.requiredTriples[0];
-        let query: LinkQuery;
-        if (first.target) {
-            query = new LinkQuery({ predicate: first.predicate, target: first.target });
-        } else {
-            query = new LinkQuery({ predicate: first.predicate });
-        }
-        const candidateLinks = await this.get(query);
-        let candidates = [...new Set(candidateLinks.map(l => l.data.source))];
+        // Build a single SPARQL SELECT with all required triple patterns joined
+        const patterns = metadata.requiredTriples.map((t, i) => {
+            const target = t.target ? `<${t.target}>` : `?t${i}`;
+            return `?base <${t.predicate}> ${target} .`;
+        }).join('\n    ');
 
-        // Filter by remaining required triples
-        for (let i = 1; i < metadata.requiredTriples.length; i++) {
-            const triple = metadata.requiredTriples[i];
-            const remaining: string[] = [];
-            for (const expr of candidates) {
-                let q: LinkQuery;
-                if (triple.target) {
-                    q = new LinkQuery({ source: expr, predicate: triple.predicate, target: triple.target });
-                } else {
-                    q = new LinkQuery({ source: expr, predicate: triple.predicate });
-                }
-                const links = await this.get(q);
-                if (links.length > 0) remaining.push(expr);
-            }
-            candidates = remaining;
-        }
-
-        return candidates.map(c => ({ base: c }));
+        const results = await this.querySparql(
+            `SELECT DISTINCT ?base WHERE {\n    ${patterns}\n}`
+        );
+        if (!Array.isArray(results)) return [];
+        return results.map((row: any) => ({ base: row.base }));
     }
 
     /** Returns all subject instances of the given subject class as proxy objects.
@@ -1768,16 +1763,17 @@ export class PerspectiveProxy {
             return null;
         }
 
-        // Query links for class shapes using queryLinks
-        const typeLinks = await this.get(new LinkQuery({ predicate: 'rdf://type', target: 'ad4m://SubjectClass' }));
-        const propLinks = await this.get(new LinkQuery({ predicate: 'sh://property' }));
-        const collLinks = await this.get(new LinkQuery({ predicate: 'sh://collection' }));
-        const results = [
-            ...typeLinks.map(l => ({ shape_source: l.data.source, predicate: l.data.predicate, target: l.data.target })),
-            ...propLinks.map(l => ({ shape_source: l.data.source, predicate: l.data.predicate, target: l.data.target })),
-            ...collLinks.map(l => ({ shape_source: l.data.source, predicate: l.data.predicate, target: l.data.target })),
-        ];
-        if (results.length === 0) return null;
+        // Single SPARQL query to get all class shapes with their properties and collections
+        const results = await this.querySparql(`
+            SELECT ?shape ?predicate ?target WHERE {
+                { ?shape <rdf://type> <ad4m://SubjectClass> . BIND(<rdf://type> AS ?predicate) BIND(<ad4m://SubjectClass> AS ?target) }
+                UNION
+                { ?shape <sh://property> ?target . BIND(<sh://property> AS ?predicate) }
+                UNION
+                { ?shape <sh://collection> ?target . BIND(<sh://collection> AS ?predicate) }
+            }
+        `);
+        if (!Array.isArray(results) || results.length === 0) return null;
 
         // Build a map of className -> { properties, relations }
         const classShapes: Map<string, { shapeUri: string, properties: string[], relations: string[] }> = new Map();
@@ -1785,7 +1781,7 @@ export class PerspectiveProxy {
         // First pass: find all subject classes
         for (const r of results) {
             if (r.predicate === 'rdf://type' && r.target === 'ad4m://SubjectClass') {
-                const source = r.shape_source;
+                const source = r.shape;
                 const sepIdx = source.indexOf('://');
                 if (sepIdx < 0) continue;
                 const className = source.substring(sepIdx + 3).split('/').pop();
@@ -1799,7 +1795,7 @@ export class PerspectiveProxy {
             if (r.predicate === 'sh://property' || r.predicate === 'sh://collection') {
                 // Match shape source to class (e.g., "recipe://RecipeShape" -> "Recipe")
                 for (const [className, shape] of classShapes) {
-                    if (r.shape_source.endsWith(`${className}Shape`)) {
+                    if (r.shape.endsWith(`${className}Shape`)) {
                         const dotIdx = r.target.lastIndexOf('.');
                         if (dotIdx < 0) continue;
                         const name = r.target.substring(dotIdx + 1);

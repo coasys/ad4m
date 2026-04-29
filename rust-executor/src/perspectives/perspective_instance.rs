@@ -190,6 +190,18 @@ struct SubscribedQuery {
     /// Predicate IRIs extracted from the SPARQL/Prolog query at registration time.
     /// If empty, the subscription is always re-checked (safe fallback for variable predicates).
     predicates: HashSet<String>,
+    /// When set, this subscription was registered via `model_subscribe_and_query`.
+    /// On trigger, `execute_model_query` is called instead of re-running raw SPARQL.
+    model_query_params: Option<ModelSubscriptionParams>,
+}
+
+/// Parameters for a model query subscription. Stored alongside the trigger SPARQL
+/// so that `check_subscribed_queries` can re-execute the model query in Rust.
+#[derive(Clone)]
+struct ModelSubscriptionParams {
+    class_name: String,
+    query_json: String,
+    shape_json: Option<String>,
 }
 
 /// Extract predicate IRIs from a SPARQL query by finding triple patterns.
@@ -4026,6 +4038,7 @@ impl PerspectiveInstance {
             last_keepalive: Instant::now(),
             user_email,
             predicates,
+            model_query_params: None,
         };
 
         // Now insert the subscription
@@ -4046,6 +4059,161 @@ impl PerspectiveInstance {
         }
 
         Ok((subscription_id, result_string))
+    }
+
+    /// Subscribe to model query changes. Builds trigger SPARQL from the model shape,
+    /// registers a subscription, and runs the initial model query — all in one call.
+    /// When link changes match the trigger predicates, `execute_model_query` is
+    /// re-run in Rust and the updated results are pushed to the client.
+    pub async fn model_subscribe_and_query(
+        &self,
+        class_name: String,
+        query_json: String,
+        shape_json: Option<String>,
+        user_email: Option<String>,
+    ) -> Result<(String, String), AnyError> {
+        // 1. Run the initial model query
+        let initial_result = self.model_query(
+            &class_name,
+            &query_json,
+            shape_json.as_deref(),
+        )?;
+
+        // 2. Build trigger SPARQL from shape predicates.
+        //    Parse the shape to extract required predicates for change detection.
+        let trigger_predicates = self.build_model_trigger_predicates(
+            &class_name, shape_json.as_deref(),
+        );
+
+        let trigger_sparql = if trigger_predicates.is_empty() {
+            // Fallback: match any triple (always re-check)
+            "SELECT ?s ?p ?o WHERE { ?s ?p ?o . } LIMIT 1".to_string()
+        } else {
+            let patterns: Vec<String> = trigger_predicates.iter()
+                .enumerate()
+                .map(|(i, p)| format!("{{ ?s <{}> ?o{} . }}", p, i))
+                .collect();
+            format!("SELECT ?s ?p ?o WHERE {{ {} }} LIMIT 1", patterns.join(" UNION "))
+        };
+
+        let predicate_set: HashSet<String> = trigger_predicates.into_iter().collect();
+
+        // 3. Check for existing subscription with same params
+        let existing_subscription = {
+            let queries = self.subscribed_queries.lock().await;
+            queries
+                .iter()
+                .find(|(_, q)| {
+                    if let Some(ref params) = q.model_query_params {
+                        params.class_name == class_name
+                            && params.query_json == query_json
+                            && params.shape_json == shape_json
+                            && q.user_email == user_email
+                    } else {
+                        false
+                    }
+                })
+                .map(|(id, _)| id.clone())
+        };
+
+        if let Some(existing_id) = existing_subscription {
+            // Update last_result with fresh data and re-send
+            {
+                let mut queries = self.subscribed_queries.lock().await;
+                if let Some(q) = queries.get_mut(&existing_id) {
+                    q.last_result = initial_result.clone();
+                }
+            }
+            let init_string = format!("#init#{}", initial_result);
+            for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
+                self.send_subscription_update(
+                    existing_id.clone(),
+                    init_string.clone(),
+                    Some(Duration::from_millis(delay)),
+                ).await;
+            }
+            return Ok((existing_id, initial_result));
+        }
+
+        // 4. Register new subscription
+        let subscription_id = uuid::Uuid::new_v4().to_string();
+        let subscribed_query = SubscribedQuery {
+            query: trigger_sparql,
+            last_result: initial_result.clone(),
+            last_keepalive: Instant::now(),
+            user_email,
+            predicates: predicate_set,
+            model_query_params: Some(ModelSubscriptionParams {
+                class_name,
+                query_json,
+                shape_json,
+            }),
+        };
+
+        self.subscribed_queries
+            .lock()
+            .await
+            .insert(subscription_id.clone(), subscribed_query);
+
+        // 5. Send initial result
+        let init_string = format!("#init#{}", initial_result);
+        for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
+            self.send_subscription_update(
+                subscription_id.clone(),
+                init_string.clone(),
+                Some(Duration::from_millis(delay)),
+            ).await;
+        }
+
+        Ok((subscription_id, initial_result))
+    }
+
+    /// Extract predicates from a model shape for subscription trigger matching.
+    fn build_model_trigger_predicates(
+        &self,
+        class_name: &str,
+        shape_json: Option<&str>,
+    ) -> Vec<String> {
+        let mut predicates = Vec::new();
+
+        // Try to extract predicates from the shape JSON provided by the client
+        if let Some(json_str) = shape_json {
+            if let Ok(shape) = serde_json::from_str::<serde_json::Value>(json_str) {
+                // Extract property predicates
+                if let Some(props) = shape.get("properties").and_then(|p| p.as_object()) {
+                    for (_name, meta) in props {
+                        if let Some(pred) = meta.get("predicate").and_then(|p| p.as_str()) {
+                            predicates.push(pred.to_string());
+                        }
+                    }
+                }
+                // Extract relation predicates
+                if let Some(rels) = shape.get("relations").and_then(|r| r.as_object()) {
+                    for (_name, meta) in rels {
+                        if let Some(pred) = meta.get("predicate").and_then(|p| p.as_str()) {
+                            predicates.push(pred.to_string());
+                        }
+                    }
+                }
+                // Extract flag predicates
+                if let Some(flags) = shape.get("flags").and_then(|f| f.as_object()) {
+                    for (_name, meta) in flags {
+                        if let Some(pred) = meta.get("predicate").and_then(|p| p.as_str()) {
+                            predicates.push(pred.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: try to read shape from the store
+        if predicates.is_empty() {
+            if let Ok(shape) = super::model_query::load_shape_from_store(&self.sparql_store, class_name) {
+                predicates = shape.predicates();
+            }
+        }
+
+        predicates
     }
 
     pub async fn keepalive_query(&self, subscription_id: String) -> Result<(), AnyError> {
@@ -4088,7 +4256,8 @@ impl PerspectiveInstance {
         let mut query_futures = Vec::new();
         let now = Instant::now();
 
-        // Collect only the minimal data needed: ID, query string, user_email, keepalive time, and predicates
+        // Collect only the minimal data needed: ID, query string, user_email, keepalive time, predicates,
+        // and model_query_params (if this is a model subscription).
         // DON'T clone the potentially huge last_result string
         let queries = {
             let queries = self.subscribed_queries.lock().await;
@@ -4101,13 +4270,14 @@ impl PerspectiveInstance {
                         query.user_email.clone(),
                         query.last_keepalive,
                         query.predicates.clone(),
+                        query.model_query_params.clone(),
                     )
                 })
                 .collect::<Vec<_>>()
         };
 
         // Create futures for each query check
-        for (id, query_string, user_email, last_keepalive, sub_predicates) in queries {
+        for (id, query_string, user_email, last_keepalive, sub_predicates, model_params) in queries {
             // Check for timeout
             if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
                 queries_to_remove.push(id);
@@ -4134,12 +4304,26 @@ impl PerspectiveInstance {
             let self_clone = self.clone();
             let query_future = async move {
                 //let this_now = Instant::now();
-                let agent_context = if let Some(email) = user_email {
+                let _agent_context = if let Some(email) = user_email {
                     crate::agent::AgentContext::for_user_email(email)
                 } else {
                     crate::agent::AgentContext::main_agent()
                 };
-                let result_string = if is_sparql_query(&query_string) {
+
+                // Model subscriptions: re-run execute_model_query instead of raw SPARQL
+                let result_string = if let Some(ref params) = model_params {
+                    match self_clone.model_query(
+                        &params.class_name,
+                        &params.query_json,
+                        params.shape_json.as_deref(),
+                    ) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            log::error!("Model subscription query failed: {}", e);
+                            return;
+                        }
+                    }
+                } else if is_sparql_query(&query_string) {
                     match self_clone.sparql_query(query_string) {
                         Ok(r) => r,
                         Err(e) => {
@@ -4149,7 +4333,7 @@ impl PerspectiveInstance {
                     }
                 } else {
                     match self_clone
-                        .prolog_query_subscription_with_context(query_string, &agent_context)
+                        .prolog_query_subscription_with_context(query_string, &_agent_context)
                         .await
                     {
                         Ok(result) => prolog_resolution_to_string(result),

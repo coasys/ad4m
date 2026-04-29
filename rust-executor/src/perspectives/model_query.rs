@@ -258,6 +258,19 @@ pub(crate) struct ModelShape {
     include_relations: Vec<ShapeRelation>,
 }
 
+impl ModelShape {
+    /// Returns all predicate IRIs declared in this shape (properties + relations + flags).
+    pub fn predicates(&self) -> Vec<String> {
+        self.properties.iter().map(|p| p.predicate.clone()).collect()
+    }
+}
+
+/// Load a shape from the store by class name.
+/// Public wrapper for use by subscription infrastructure.
+pub fn load_shape_from_store(store: &SparqlStore, class_name: &str) -> Result<ModelShape, Error> {
+    load_shape(store, class_name)
+}
+
 // ---------------------------------------------------------------------------
 // literal: URI parsing (typed)
 // ---------------------------------------------------------------------------

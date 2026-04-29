@@ -813,6 +813,79 @@ export class Ad4mModel {
     return buildSPARQLQuery(metadata, allRelMeta, query, this);
   }
 
+  /**
+   * Build the JSON parameters needed for a model query/subscription endpoint.
+   * Returns the className, queryJson, and shapeJson that the Rust executor expects.
+   * @internal
+   */
+  static prepareModelQueryParams(
+    query: Query = {},
+    classNameOverride?: string | null,
+  ): { className: string; queryJson: string; shapeJson: string } {
+    const metadata = this.getModelMetadata();
+    const className = classNameOverride || metadata.className;
+
+    const queryInput: any = {};
+    if (query.parent) {
+      const parentPredicate = resolveParentPredicate(query.parent, this);
+      queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
+    }
+    if (query.properties) queryInput.properties = query.properties;
+    if (query.include) queryInput.include = query.include;
+    if (query.where) queryInput.where = query.where;
+    if (query.order) {
+      queryInput.order = Object.entries(query.order).map(([k, v]) => [k, v]);
+    }
+    if (query.offset !== undefined) queryInput.offset = query.offset;
+    if (query.limit !== undefined) queryInput.limit = query.limit;
+    if (query.count !== undefined) queryInput.count = query.count;
+
+    if (query.include) {
+      const allRelMeta = getRelationsMetadata(this as any);
+      enrichShapeForIncludes(metadata, query.include, allRelMeta);
+    }
+
+    // Pre-compute conformance getters
+    {
+      const allRelMeta = getRelationsMetadata(this as any);
+      for (const [relName, relMeta] of Object.entries(metadata.relations)) {
+        const rel = relMeta as any;
+        if (rel.getter || rel.direction === 'reverse' || rel.filter === false) continue;
+        const meta = allRelMeta[relName];
+        if (!meta?.target) continue;
+        try {
+          const TargetClass = meta.target();
+          const filter = buildConformanceFilter(meta.predicate, TargetClass);
+          if (filter) rel.getter = filter.getter;
+        } catch (_) {}
+      }
+    }
+
+    return {
+      className,
+      queryJson: JSON.stringify(queryInput),
+      shapeJson: JSON.stringify(metadata),
+    };
+  }
+
+  /**
+   * Parse raw model query/subscription result JSON into typed model instances.
+   * Used by ModelQueryBuilder to convert subscription updates without circular imports.
+   * @internal
+   */
+  static parseModelResult<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    raw: any,
+    include?: IncludeMap,
+    properties?: string[],
+  ): T[] {
+    const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const arr = data.instances || data;
+    if (!Array.isArray(arr)) return [];
+    return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
+  }
+
   // instancesFromQueryResult — removed (superseded by Rust executeModelQuery pipeline)
 
   /**

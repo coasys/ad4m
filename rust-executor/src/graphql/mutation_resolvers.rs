@@ -2356,6 +2356,33 @@ impl Mutation {
         })
     }
 
+    async fn perspective_model_subscribe(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        class_name: String,
+        query_json: String,
+        shape_json: Option<String>,
+    ) -> FieldResult<QuerySubscription> {
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
+        let user_email = agent_context.user_email;
+
+        let perspective = get_perspective_with_access_control(&uuid, context).await?;
+        let (subscription_id, result_string) = perspective
+            .model_subscribe_and_query(class_name, query_json, shape_json, user_email)
+            .await?;
+
+        Ok(QuerySubscription {
+            subscription_id,
+            result: result_string,
+        })
+    }
+
     async fn perspective_keep_alive_query(
         &self,
         context: &RequestContext,

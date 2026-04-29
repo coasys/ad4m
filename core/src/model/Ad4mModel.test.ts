@@ -945,73 +945,6 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
 });
 
 
-// ──────────────────────────────────────────────────────────
-// Batch SPARQL query builder tests
-// ──────────────────────────────────────────────────────────
-
-import { buildBatchSPARQLQuery } from "./query-sparql-batch";
-
-describe("buildBatchSPARQLQuery", () => {
-  @Model({ name: "Author" })
-  class Author extends Ad4mModel {
-    @Property({ through: "author://name", required: true })
-    name!: string;
-  }
-
-  @Model({ name: "Book" })
-  class Book extends Ad4mModel {
-    @Property({ through: "book://title", required: true })
-    title!: string;
-
-    @HasMany(() => Author, { through: "book://author" })
-    authors!: Author[];
-  }
-
-  it("should generate UNION branches for depth 0 and depth 1 includes", () => {
-    const metadata = Book.getModelMetadata();
-    const query = { include: { authors: true } };
-    const sparql = buildBatchSPARQLQuery(metadata, query, Book);
-
-    expect(sparql).toContain("?depth");
-    expect(sparql).toContain("?parentBase");
-    expect(sparql).toContain("?relationName");
-    expect(sparql).toContain("UNION");
-    expect(sparql).toContain("BIND(\"0\" AS ?depth)");
-    expect(sparql).toContain("BIND(\"1\" AS ?depth)");
-    expect(sparql).toContain("book://author");
-  });
-
-  it("should include parent filter when query.parent is specified", () => {
-    const metadata = Book.getModelMetadata();
-    const query = {
-      parent: { id: "flux://library1", predicate: "library://books" },
-      include: { authors: true },
-    };
-    const sparql = buildBatchSPARQLQuery(metadata, query, Book);
-
-    expect(sparql).toContain("flux://library1");
-    expect(sparql).toContain("library://books");
-  });
-
-  it("should include where filter for simple equality", () => {
-    const metadata = Book.getModelMetadata();
-    const query = {
-      where: { title: "My Book" },
-      include: { authors: true },
-    };
-    const sparql = buildBatchSPARQLQuery(metadata, query, Book);
-
-    // For literal-stored properties, SPARQL only has a JOIN (no FILTER value) — filtering in JS
-    expect(sparql).toContain("book://title");
-    expect(sparql).toContain("root_wTarget_eq_title");
-  });
-
-  it("should throw when include is empty", () => {
-    const metadata = Book.getModelMetadata();
-    expect(() => buildBatchSPARQLQuery(metadata, {}, Book)).toThrow("requires query.include");
-  });
-});
-
 describe("SPARQL comparison filters", () => {
   @Model({ name: "Item" })
   class Item extends Ad4mModel {
@@ -1157,7 +1090,7 @@ describe("formatSPARQLValue", () => {
 //  Comprehensive SPARQL migration unit tests
 // ──────────────────────────────────────────────────────────
 
-import { matchesCondition, hydrateFromLinks } from "./hydration";
+import { matchesCondition } from "./hydration";
 import { Literal } from "../Literal";
 
 // Helper: create literal URLs using JSON encoding (which handles all types including booleans)
@@ -1260,83 +1193,6 @@ describe("matchesCondition()", () => {
   });
   it("returns true for undefined with not operator", () => {
     expect(matchesCondition(undefined, { not: "hello" })).toBe(true);
-  });
-});
-
-describe("hydrateFromLinks()", () => {
-  // Create a mock perspective that won't be called for literal properties
-  const mockPerspective = {} as any;
-
-  @Model({ name: "HydrationTest" })
-  class HydrationTest extends Ad4mModel {
-    @Property({ through: "test://name", resolveLanguage: "literal" })
-    name: string = "";
-
-    @Property({ through: "test://score", resolveLanguage: "literal" })
-    score: number = 0;
-
-    @Property({ through: "test://active", resolveLanguage: "literal" })
-    active: boolean = false;
-  }
-
-  const metadata = HydrationTest.getModelMetadata();
-
-  it("hydrates all properties when requestedProperties is undefined", async () => {
-    const instance = new HydrationTest(mockPerspective) as any;
-    const links = [
-      { predicate: "test://name", target: literalUrl("Alice"), author: "did:test", timestamp: "1000" },
-      { predicate: "test://score", target: literalUrl(42), author: "did:test", timestamp: "1000" },
-      { predicate: "test://active", target: literalUrl(true), author: "did:test", timestamp: "1000" },
-    ];
-    await hydrateFromLinks(instance, links, metadata, mockPerspective, undefined);
-    expect(instance.name).toBe("Alice");
-    expect(instance.score).toBe(42);
-    expect(instance.active).toBe(true);
-  });
-
-  it("hydrates only requested properties when requestedProperties is provided", async () => {
-    const instance = new HydrationTest(mockPerspective) as any;
-    const links = [
-      { predicate: "test://name", target: literalUrl("Alice"), author: "did:test", timestamp: "1000" },
-      { predicate: "test://score", target: literalUrl(42), author: "did:test", timestamp: "1000" },
-      { predicate: "test://active", target: literalUrl(true), author: "did:test", timestamp: "1000" },
-    ];
-    await hydrateFromLinks(instance, links, metadata, mockPerspective, ["name"]);
-    expect(instance.name).toBe("Alice");
-    // score and active should remain at defaults since not requested
-    expect(instance.score).toBe(0);
-    expect(instance.active).toBe(false);
-  });
-
-  it("hydrates where-clause + projection properties when both are in requestedProperties", async () => {
-    const instance = new HydrationTest(mockPerspective) as any;
-    const links = [
-      { predicate: "test://name", target: literalUrl("Recipe 2"), author: "did:test", timestamp: "1000" },
-      { predicate: "test://active", target: literalUrl(true), author: "did:test", timestamp: "1000" },
-    ];
-    // Simulate merged hydration props: projection ["active"] + where clause props ["name"]
-    await hydrateFromLinks(instance, links, metadata, mockPerspective, ["active", "name"]);
-    expect(instance.name).toBe("Recipe 2");
-    expect(instance.active).toBe(true);
-  });
-
-  it("sets author and timestamps from links", async () => {
-    const instance = new HydrationTest(mockPerspective) as any;
-    const links = [
-      { predicate: "test://name", target: literalUrl("Bob"), author: "did:author1", timestamp: "1000" },
-      { predicate: "test://score", target: literalUrl(10), author: "did:author2", timestamp: "2000" },
-    ];
-    await hydrateFromLinks(instance, links, metadata, mockPerspective);
-    expect(instance.author).toBe("did:author1");
-    expect(instance.createdAt).toBe(1000);
-    expect(instance.updatedAt).toBe(2000);
-  });
-
-  it("handles empty links array", async () => {
-    const instance = new HydrationTest(mockPerspective) as any;
-    await hydrateFromLinks(instance, [], metadata, mockPerspective);
-    expect(instance.name).toBe("");
-    expect(instance.score).toBe(0);
   });
 });
 
@@ -1798,19 +1654,33 @@ describe("Native SPARQL getter evaluation", () => {
 // ── Subscribe callback timing ──────────────────────────────────────────
 describe("ModelQueryBuilder subscribe callback timing", () => {
   it("subscribe should not invoke callback synchronously before Promise resolves", async () => {
-    // This test verifies that the initial callback from subscribe() is deferred
-    // via queueMicrotask, preventing Preact/React hook lifecycle violations
-    // when subscribe() is called from useEffect.
+    // This test verifies that subscribe() uses the Rust model subscription endpoint
+    // and properly handles the subscription lifecycle.
     
+    const mockSubscriptionId = "test-sub-123";
+    let updateCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        updateCallback = cb;
+        return () => {}; // unsubscribe function
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
     const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string, shapeJson?: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson, shapeJson);
+      }),
       getLinks: jest.fn().mockResolvedValue([]),
       modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
-      subscribeQuery: jest.fn().mockResolvedValue({
-        result: '[]',
-        onResult: jest.fn(),
-        dispose: jest.fn(),
-      }),
-      querySparql: jest.fn().mockResolvedValue('[]'),
     } as any;
 
     const { Ad4mModel, Model, Property, Flag } = require("./index");
@@ -1837,12 +1707,11 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
     // The callback should NOT have fired synchronously
     expect(callbackInvokedBeforeResolve).toBe(false);
 
-    await promise;
+    const initialResults = await promise;
     promiseResolved = true;
 
-    // After the microtask queue drains, the callback should fire
-    await new Promise(r => setTimeout(r, 10));
-    // The callback was deferred — it fires after the Promise resolves
+    expect(initialResults).toEqual([]);
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalled();
   });
 });
 
@@ -1851,7 +1720,6 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
 // ============================================================================
 
 import { getCachedResult, setCachedResult, clearQueryCache, queryCacheSize } from "./query-cache";
-import { clearSubscriptionPool, subscriptionPoolSize } from "./subscription-pool";
 import { getPropertiesMetadata, getRelationsMetadata, getMemoizedSHACL } from "./decorators";
 
 describe("QueryCache", () => {

@@ -11,7 +11,6 @@ import type {
   Where, Order, IncludeMap, Query,
   ResultsWithTotalCount, PaginationResult,
 } from "./types";
-import { pooledSubscribe } from "./subscription-pool";
 
 /** Query builder for Ad4mModel queries.
  * Allows building queries with a fluent interface and either running them once
@@ -375,65 +374,81 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     this.dispose();
 
     const ctor = this.ctor;
-    const sparqlQuery = await ctor.queryToSPARQL(this.perspective, this.queryParams);
+
+    // Build the model query params (className, queryJson, shapeJson)
+    const { className, queryJson, shapeJson } = (ctor as any).prepareModelQueryParams(
+      this.queryParams, this.modelClassName
+    );
+
+    // Register model subscription via Rust — this builds trigger SPARQL internally,
+    // registers the subscription, and runs the initial query in one call.
+    const { subscriptionId, result: initialModelResult } = await this.perspective.modelSubscribe(
+      className, queryJson, shapeJson
+    );
+
+    // Convert JSON instances to model class instances
+    const parseResults = (raw: any): T[] => {
+      return (ctor as any).parseModelResult(this.perspective, raw, this.queryParams.include, this.queryParams.properties);
+    };
+
+    // Parse initial results
+    const initialResults = parseResults(initialModelResult);
 
     // Track last emitted result fingerprint to suppress duplicate callbacks
     let lastResultFingerprint: string | null = null;
-
     const buildFingerprint = (results: any[]) => {
-        if (results.length === 0) return '0:';
-        return JSON.stringify(results, (_, v) =>
-            typeof v === 'function' ? undefined : v
-        );
+      if (results.length === 0) return '0:';
+      return JSON.stringify(results, (_, v) =>
+        typeof v === 'function' ? undefined : v
+      );
     };
+    lastResultFingerprint = buildFingerprint(initialResults);
 
-    // On each subscription update, re-execute via Rust endpoint instead of
-    // JS-side hydration. The SPARQL subscription is only a change-detection
-    // signal — all actual query work (hydration, filtering, sorting, pagination)
-    // is done Rust-side.
-    const hydrate = async (_rawResult: any) => {
-        const { results } = await (ctor as any).executeModelQuery(this.perspective, this.queryParams, this.modelClassName);
-        return results;
-    };
-
-    const pooled = await pooledSubscribe(
-        this.perspective,
-        sparqlQuery,
-        hydrate,
-        (hydratedResults: T[]) => {
-            const fp = buildFingerprint(hydratedResults);
-            if (fp === lastResultFingerprint) return;
-            lastResultFingerprint = fp;
-            callback(hydratedResults);
-        },
+    // Listen for subscription updates via the same GraphQL subscription channel.
+    // When Rust re-runs the model query and finds changed results, it pushes them.
+    const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
+      subscriptionId,
+      (rawResult: any) => {
+        try {
+          const results = parseResults(rawResult);
+          const fp = buildFingerprint(results);
+          if (fp === lastResultFingerprint) return;
+          lastResultFingerprint = fp;
+          callback(results);
+        } catch (e) {
+          console.error('Model subscription update parse error:', e);
+        }
+      },
     );
 
-    // Store dispose function as subscription
-    this.currentSubscription = { dispose: pooled.dispose };
+    // Set up keepalive
+    const keepaliveTimer = setInterval(() => {
+      this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId).catch(() => {});
+    }, 30000);
 
-    const initialResults = pooled.initialResult as T[];
-    lastResultFingerprint = buildFingerprint(initialResults);
+    // Store dispose function
+    this.currentSubscription = {
+      dispose: () => {
+        clearInterval(keepaliveTimer);
+        unsubscribe();
+        this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).catch(() => {});
+      },
+    };
+
+    // Take snapshots for dirty tracking
+    for (const inst of initialResults) {
+      (inst as any).takeSnapshot?.(this.queryParams.include);
+    }
+
     return initialResults;
   }
 
   /**
    * Subscribes to the query and receives updates using SPARQL.
+   * @deprecated Use subscribe() instead — now routes through Rust model subscription.
    */
   async subscribeSparql(callback: (results: T[]) => void): Promise<T[]> {
-    this.dispose();
-
-    const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
-    this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
-
-    const processResults = async (_result: any) => {
-      const { results } = await (this.ctor as any).executeModelQuery(this.perspective, this.queryParams, this.modelClassName);
-      callback(results as T[]);
-    };
-
-    this.currentSubscription.onResult(processResults);
-
-    const { results } = await (this.ctor as any).executeModelQuery(this.perspective, this.queryParams, this.modelClassName);
-    return results as T[];
+    return this.subscribe(callback);
   }
 
   /**
@@ -493,44 +508,54 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     // Clean up any existing subscription
     this.dispose();
 
-    const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
-    this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
+    const countParams = { ...this.queryParams, limit: 0 };
+    const { className, queryJson, shapeJson } = (this.ctor as any).prepareModelQueryParams(
+      countParams, this.modelClassName
+    );
 
-    const processResults = async (_result: any) => {
-      const { totalCount } = await (this.ctor as any).executeModelQuery(
-        this.perspective, { ...this.queryParams, limit: 0 }, this.modelClassName
-      );
-      callback(totalCount);
+    const { subscriptionId, result: initialModelResult } = await this.perspective.modelSubscribe(
+      className, queryJson, shapeJson
+    );
+
+    const parseCount = (raw: any): number => {
+      const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      return data.totalCount ?? 0;
     };
 
-    this.currentSubscription.onResult(processResults);
-    const { totalCount } = await (this.ctor as any).executeModelQuery(
-      this.perspective, { ...this.queryParams, limit: 0 }, this.modelClassName
+    const initialCount = parseCount(initialModelResult);
+
+    const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
+      subscriptionId,
+      (rawResult: any) => {
+        try {
+          callback(parseCount(rawResult));
+        } catch (e) {
+          console.error('Count subscription update parse error:', e);
+        }
+      },
     );
-    return totalCount;
+
+    const keepaliveTimer = setInterval(() => {
+      this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId).catch(() => {});
+    }, 30000);
+
+    this.currentSubscription = {
+      dispose: () => {
+        clearInterval(keepaliveTimer);
+        unsubscribe();
+        this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).catch(() => {});
+      },
+    };
+
+    return initialCount;
   }
 
   /**
    * Subscribes to count updates using SPARQL.
+   * @deprecated Use countSubscribe() instead — now routes through Rust model subscription.
    */
   async countSubscribeSparql(callback: (count: number) => void): Promise<number> {
-    this.dispose();
-
-    const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
-    this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
-
-    const processResults = async (_result: any) => {
-      const { totalCount } = await (this.ctor as any).executeModelQuery(
-        this.perspective, { ...this.queryParams, limit: 0 }, this.modelClassName
-      );
-      callback(totalCount);
-    };
-
-    this.currentSubscription.onResult(processResults);
-    const { totalCount } = await (this.ctor as any).executeModelQuery(
-      this.perspective, { ...this.queryParams, limit: 0 }, this.modelClassName
-    );
-    return totalCount;
+    return this.countSubscribe(callback);
   }
 
   /**
@@ -600,13 +625,21 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     // Clean up any existing subscription
     this.dispose();
 
-    // Subscribe to the FULL result set (no LIMIT/OFFSET) so the subscription
-    // detects changes anywhere in the dataset (e.g. new items beyond current page).
+    const ctor = this.ctor;
+
+    // Subscribe to the full result set (no limit/offset) so the subscription
+    // detects changes anywhere in the dataset. Rust builds trigger SPARQL
+    // from the shape predicates.
     const subscriptionParams = { ...(this.queryParams || {}) };
     delete subscriptionParams.limit;
     delete subscriptionParams.offset;
-    const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, subscriptionParams);
-    this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
+    const { className, queryJson, shapeJson } = (ctor as any).prepareModelQueryParams(
+      subscriptionParams, this.modelClassName
+    );
+
+    const { subscriptionId } = await this.perspective.modelSubscribe(
+      className, queryJson, shapeJson
+    );
 
     // Build the paginated query for Rust endpoint
     const paginatedQuery = {
@@ -615,19 +648,34 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       offset: pageSize * (pageNumber - 1),
     };
 
-    const processResults = async (_result: any) => {
-      // Get count via separate call with limit:0
+    const processResults = async () => {
       const countQuery = { ...(this.queryParams || {}), limit: 0 };
-      const { totalCount } = await (this.ctor as any).executeModelQuery(this.perspective, countQuery, this.modelClassName);
-      const { results } = await (this.ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
+      const { totalCount } = await (ctor as any).executeModelQuery(this.perspective, countQuery, this.modelClassName);
+      const { results } = await (ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
       callback({ results, totalCount, pageSize, pageNumber });
     };
 
-    this.currentSubscription.onResult(processResults);
+    const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
+      subscriptionId,
+      () => { processResults().catch(e => console.error('Paginate subscription error:', e)); },
+    );
 
+    const keepaliveTimer = setInterval(() => {
+      this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId).catch(() => {});
+    }, 30000);
+
+    this.currentSubscription = {
+      dispose: () => {
+        clearInterval(keepaliveTimer);
+        unsubscribe();
+        this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).catch(() => {});
+      },
+    };
+
+    // Initial fetch
     const countQuery = { ...(this.queryParams || {}), limit: 0 };
-    const { totalCount } = await (this.ctor as any).executeModelQuery(this.perspective, countQuery, this.modelClassName);
-    const { results } = await (this.ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
+    const { totalCount } = await (ctor as any).executeModelQuery(this.perspective, countQuery, this.modelClassName);
+    const { results } = await (ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
     return { results, totalCount, pageSize, pageNumber };
   }
 
