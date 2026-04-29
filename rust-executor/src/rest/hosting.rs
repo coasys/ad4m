@@ -23,14 +23,20 @@ pub async fn get_hosting_info(
         .map_err(|e| ApiError::Forbidden(e))?;
 
     // User info for the current user
+    let global_free =
+        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
     let user_info = if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
         let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(&user_email)).ok();
         let hot_wallet_address =
             Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
                 .ok()
                 .flatten();
-        let free_access = Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user_email))
-            .unwrap_or(false);
+        let free_access = if global_free {
+            true
+        } else {
+            Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user_email))
+                .unwrap_or(false)
+        };
         Some(serde_json::json!({
             "email": user_email,
             "credits": credits,
