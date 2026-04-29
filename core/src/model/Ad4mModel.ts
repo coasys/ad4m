@@ -278,6 +278,14 @@ export class Ad4mModel {
   createdAt: any;
   updatedAt: any;
 
+  /**
+   * Backwards compatibility alias for createdAt.
+   * @deprecated Use createdAt instead. This will be removed in a future version.
+   */
+  get timestamp(): any {
+    return (this as any).createdAt;
+  }
+
   private static classNamesByClass = new WeakMap<typeof Ad4mModel, { [perspectiveId: string]: string }>();
 
   /**
