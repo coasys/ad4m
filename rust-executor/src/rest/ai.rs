@@ -486,8 +486,6 @@ pub async fn feed_transcription_stream(
         .filter(|s| !s.is_empty())
         .collect();
 
-    log::info!("Feed request: {} bytes, streams: {:?}", body.len(), stream_ids);
-
     if stream_ids.is_empty() {
         return Err(ApiError::BadRequest(
             "X-Stream-Ids header is required".into(),
@@ -496,13 +494,10 @@ pub async fn feed_transcription_stream(
 
     // Interpret raw bytes as f32 little-endian samples (zero-copy)
     if body.len() % 4 != 0 {
-        log::warn!("Feed body length {} is not a multiple of 4", body.len());
         return Err(ApiError::BadRequest(
             "Body length must be a multiple of 4 (Float32 samples)".into(),
         ));
     }
-    let num_samples = body.len() / 4;
-    log::info!("Feed: {} f32 samples to {} streams", num_samples, stream_ids.len());
     let audio_f32: Vec<f32> = body
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
@@ -510,10 +505,7 @@ pub async fn feed_transcription_stream(
 
     let service = AIService::global_instance()
         .await
-        .map_err(|e| {
-            log::error!("AIService::global_instance() failed in feed: {}", e);
-            ApiError::Internal(e.to_string())
-        })?;
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     for stream_id in &stream_ids {
         if let Err(e) = service

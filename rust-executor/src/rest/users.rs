@@ -166,11 +166,6 @@ pub async fn create_user(
     let user_exists = Ad4mDb::with_global_instance(|db| db.get_user(&email).is_ok());
 
     if user_exists {
-        // Ensure wallet key exists — keys are in-memory and don't survive
-        // executor restarts. Re-creating them here makes login work after restart.
-        crate::agent::AgentService::ensure_user_key_exists(&email)
-            .map_err(|e| ApiError::Internal(format!("Failed to ensure user key: {}", e)))?;
-
         match um::verify_credentials(&email, &body.password) {
             Ok(()) => {
                 let did = crate::agent::AgentService::get_user_did_by_email(&email)
