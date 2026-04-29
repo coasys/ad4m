@@ -354,17 +354,7 @@ describe("Prolog + Literals", () => {
                         target: "ad4m://message"
                     }))
 
-                    // Debug: check links exist, then query
-                    const flagLinks = await perspective!.get(new LinkQuery({source: "test://message", predicate: "ad4m://type", target: "ad4m://message"}))
-                    console.log("[CI-DEBUG] flag links found:", flagLinks.length, "metadata:", JSON.stringify(Message.getModelMetadata().properties.type))
                     const second = await Message.all(perspective!)
-                    console.log("[CI-DEBUG] Message.all() returned:", second.length, "instances")
-                    if (second.length === 0) {
-                        // Raw SPARQL check
-                        const sparql = `SELECT ?s ?p ?o WHERE { ?s <ad4m://type> <ad4m://message> . ?s ?p ?o . } LIMIT 10`
-                        const raw = await perspective!.querySparql(sparql)
-                        console.log("[CI-DEBUG] raw SPARQL result:", JSON.stringify(raw).slice(0, 500))
-                    }
                     expect(second.length).to.be.equal(1)
                 })
 

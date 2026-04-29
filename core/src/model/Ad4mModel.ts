@@ -5,7 +5,7 @@ import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomId } from "./util";
 import { getPropertiesMetadata, getRelationsMetadata, buildConformanceFilter } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
-import { formatQueryValue } from "./query-utils";
+import { formatQueryValue, compileWhereClause } from "./query-utils";
 import { resolveParentPredicate } from "./query-common";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
@@ -845,7 +845,7 @@ export class Ad4mModel {
       enrichShapeForIncludes(metadata, query.include, allRelMeta);
     }
 
-    // Pre-compute conformance getters
+    // Pre-compute conformance getters (with where-clause support)
     {
       const allRelMeta = getRelationsMetadata(this as any);
       for (const [relName, relMeta] of Object.entries(metadata.relations)) {
@@ -856,7 +856,25 @@ export class Ad4mModel {
         try {
           const TargetClass = meta.target();
           const filter = buildConformanceFilter(meta.predicate, TargetClass);
-          if (filter) rel.getter = filter.getter;
+
+          let whereConditions: string[] = [];
+          if (rel.where) {
+            try {
+              const targetMetadata = (TargetClass as any).getModelMetadata?.() ?? null;
+              whereConditions = compileWhereClause(rel.where, targetMetadata);
+            } catch (_) {}
+          }
+
+          if (filter) {
+            let getter = filter.getter;
+            if (whereConditions.length > 0) {
+              getter = getter.replace(/ \}$/, ` ${whereConditions.join(' ')} }`);
+            }
+            rel.getter = getter;
+          } else if (whereConditions.length > 0) {
+            const escapedPred = meta.predicate.replace(/[<>"{}|\\^`\u0000-\u0020]/g, '');
+            rel.getter = `SELECT ?target WHERE { <Base> <${escapedPred}> ?target . ${whereConditions.join(' ')} }`;
+          }
         } catch (_) {}
       }
     }
@@ -935,6 +953,8 @@ export class Ad4mModel {
     // For each relation with a target class and filter !== false, compute
     // the conformance getter SPARQL so Rust can evaluate it in-process
     // (eliminating N × querySparql round-trips per instance).
+    // When a relation has a `where` clause, compile the where conditions
+    // into the getter SPARQL so Rust applies them during evaluation.
     {
       const allRelMeta = getRelationsMetadata(this as any);
       for (const [relName, relMeta] of Object.entries(metadata.relations)) {
@@ -949,8 +969,27 @@ export class Ad4mModel {
         try {
           const TargetClass = meta.target();
           const filter = buildConformanceFilter(meta.predicate, TargetClass);
+
+          // Compile relation-level where clause to SPARQL conditions
+          let whereConditions: string[] = [];
+          if (rel.where) {
+            try {
+              const targetMetadata = (TargetClass as any).getModelMetadata?.() ?? null;
+              whereConditions = compileWhereClause(rel.where, targetMetadata);
+            } catch (_) { /* target metadata unavailable */ }
+          }
+
           if (filter) {
-            rel.getter = filter.getter;
+            let getter = filter.getter;
+            if (whereConditions.length > 0) {
+              // Append where conditions before the closing }
+              getter = getter.replace(/ \}$/, ` ${whereConditions.join(' ')} }`);
+            }
+            rel.getter = getter;
+          } else if (whereConditions.length > 0) {
+            // No conformance filter but where clause exists — build getter from where alone
+            const escapedPred = meta.predicate.replace(/[<>"{}|\\^`\u0000-\u0020]/g, '');
+            rel.getter = `SELECT ?target WHERE { <Base> <${escapedPred}> ?target . ${whereConditions.join(' ')} }`;
           }
         } catch (e) {
           // Target class may not be available; skip silently
