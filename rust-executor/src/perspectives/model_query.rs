@@ -226,6 +226,10 @@ struct ShapeProperty {
     datatype: Option<String>,
     direction: Option<String>, // "forward" or "reverse" for relation properties
     is_scalar_relation: bool,  // true for hasOne/belongsToOne (render as scalar, not array)
+    /// SPARQL getter expression (e.g. `SELECT ?value WHERE { ... }` or `ASK WHERE { ... }`).
+    /// For properties: returns a scalar value.
+    /// For relations: returns target IDs (conformance-filtered).
+    getter: Option<String>,
 }
 
 /// Enriched relation metadata for include (eager-loading) resolution.
@@ -453,6 +457,7 @@ fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelShape, Error
             datatype,
             direction: None,
             is_scalar_relation: false,
+            getter: None, // SHACL shapes don't carry getter metadata; JSON path does
         });
     }
 
@@ -601,6 +606,19 @@ fn execute_model_query_inner(
         resolve_reverse_relations(store, &mut instances, &reverse_rels)?;
     }
 
+    // ── Evaluate property/relation getters ────────────────────────────────
+    // Runs SPARQL getters (both explicit @Property({ getter }) and auto-generated
+    // conformance getters for relations with targets) in-process — eliminating
+    // the N × querySparql round-trips per instance that evaluateCustomGettersForInstance() made.
+    if !instances.is_empty() {
+        evaluate_getters(
+            store,
+            &mut instances,
+            &shape,
+            query_input.include.as_ref(),
+        )?;
+    }
+
     // Apply where-clause filters
     if let Some(ref where_clause) = query_input.where_clause {
         instances.retain(|inst| matches_where(inst, where_clause, &shape));
@@ -685,6 +703,7 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
             let initial = prop_meta["initial"].as_str().map(|s| s.to_string());
             let resolve_language = prop_meta["resolveLanguage"].as_str().map(|s| s.to_string());
             let datatype = prop_meta["datatype"].as_str().map(|s| s.to_string());
+            let getter = prop_meta["getter"].as_str().map(|s| s.to_string());
 
             properties.push(ShapeProperty {
                 name: name.clone(),
@@ -697,6 +716,7 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
                 datatype,
                 direction: None,
                 is_scalar_relation: false,
+                getter,
             });
         }
     }
@@ -716,6 +736,7 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
 
             let kind = rel_meta["kind"].as_str().unwrap_or("hasMany").to_string();
             let is_scalar_relation = kind == "hasOne" || kind == "belongsToOne";
+            let getter = rel_meta["getter"].as_str().map(|s| s.to_string());
 
             properties.push(ShapeProperty {
                 name: name.clone(),
@@ -728,6 +749,7 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
                 datatype: None,
                 direction: direction.clone(),
                 is_scalar_relation,
+                getter,
             });
 
             // Parse enriched relation metadata (target shapes for include resolution)
@@ -1554,6 +1576,164 @@ fn compare_values(a: &Value, b: &Value) -> Ordering {
     };
 
     as_str.cmp(&bs_str)
+}
+
+// ---------------------------------------------------------------------------
+// Getter evaluation (property getters + relation conformance getters)
+// ---------------------------------------------------------------------------
+
+/// Evaluate SPARQL getters on all instances.
+///
+/// For **property** getters: replaces the property value with the result of
+/// executing the getter SPARQL (SELECT → scalar, ASK → bool).
+///
+/// For **relation** getters (conformance or explicit): replaces the relation
+/// array with the filtered set of IDs returned by the getter SPARQL.
+/// Included relations (already resolved by include processing) are skipped.
+fn evaluate_getters(
+    store: &SparqlStore,
+    instances: &mut [Value],
+    shape: &ModelShape,
+    include: Option<&HashMap<String, IncludeValue>>,
+) -> Result<(), Error> {
+    // Collect properties/relations that have getters.
+    let getter_props: Vec<&ShapeProperty> = shape
+        .properties
+        .iter()
+        .filter(|p| p.getter.is_some())
+        .collect();
+
+    if getter_props.is_empty() {
+        return Ok(());
+    }
+
+    for instance in instances.iter_mut() {
+        let instance_id = match instance.get("id").and_then(|v| v.as_str()) {
+            Some(id) => id.to_string(),
+            None => continue,
+        };
+
+        for prop in &getter_props {
+            let getter = prop.getter.as_ref().unwrap(); // safe: filtered above
+
+            // Skip included relations — include resolution already handled them.
+            if prop.is_collection {
+                if let Some(inc) = include {
+                    if inc.contains_key(&prop.name) {
+                        continue;
+                    }
+                }
+            }
+
+            // Substitute Base / ?source with the instance IRI
+            let sparql = getter
+                .replace("?source", &format!("<{}>", instance_id))
+                .replace("<Base>", &format!("<{}>", instance_id))
+                .replace("Base", &format!("<{}>", instance_id));
+
+            let trimmed = sparql.trim().to_uppercase();
+
+            if trimmed.starts_with("ASK") {
+                // ASK query → boolean result
+                match store.query(&sparql) {
+                    Ok(result_json) => {
+                        let val = result_json.trim();
+                        let bool_val = val == "true" || val == "\"true\"";
+                        if let Some(obj) = instance.as_object_mut() {
+                            obj.insert(prop.name.clone(), Value::Bool(bool_val));
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Getter evaluation failed for property '{}' on {}: {}",
+                            prop.name,
+                            instance_id,
+                            e
+                        );
+                    }
+                }
+            } else if trimmed.starts_with("SELECT") {
+                match store.query(&sparql) {
+                    Ok(result_json) => {
+                        let results: Vec<Value> =
+                            serde_json::from_str(&result_json).unwrap_or_default();
+
+                        if prop.is_collection {
+                            // Relation getter → array of target IDs
+                            let values: Vec<Value> = results
+                                .iter()
+                                .filter_map(|row| {
+                                    // Get first binding's value
+                                    row.as_object().and_then(|obj| {
+                                        obj.values().next().and_then(|v| {
+                                            v.get("value")
+                                                .and_then(|s| s.as_str())
+                                                .or_else(|| v.as_str())
+                                                .map(|s| Value::String(s.to_string()))
+                                        })
+                                    })
+                                })
+                                .filter(|v| {
+                                    v.as_str()
+                                        .map(|s| !s.is_empty() && s != "None")
+                                        .unwrap_or(false)
+                                })
+                                .collect();
+
+                            if let Some(obj) = instance.as_object_mut() {
+                                if prop.is_scalar_relation {
+                                    // HasOne/BelongsToOne → scalar
+                                    let val = values
+                                        .into_iter()
+                                        .next()
+                                        .unwrap_or(Value::Null);
+                                    obj.insert(prop.name.clone(), val);
+                                } else {
+                                    obj.insert(
+                                        prop.name.clone(),
+                                        Value::Array(values),
+                                    );
+                                }
+                            }
+                        } else {
+                            // Property getter → scalar value (first binding's first value)
+                            if let Some(first_row) = results.first() {
+                                if let Some(obj_row) = first_row.as_object() {
+                                    if let Some(first_val) = obj_row.values().next() {
+                                        let val = first_val
+                                            .get("value")
+                                            .and_then(|s| s.as_str())
+                                            .or_else(|| first_val.as_str());
+                                        if let Some(s) = val {
+                                            if !s.is_empty() && s != "None" {
+                                                if let Some(obj) = instance.as_object_mut() {
+                                                    obj.insert(
+                                                        prop.name.clone(),
+                                                        parse_literal_value(s),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Getter evaluation failed for '{}' on {}: {}",
+                            prop.name,
+                            instance_id,
+                            e
+                        );
+                    }
+                }
+            }
+            // Unknown getter format → skip silently
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

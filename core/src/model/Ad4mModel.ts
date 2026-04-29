@@ -3,25 +3,23 @@ import { Link } from "../links/Links";
 import { LinkQuery } from "../perspectives/LinkQuery";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomId } from "./util";
-import { getPropertiesMetadata, getRelationsMetadata } from "./decorators";
+import { getPropertiesMetadata, getRelationsMetadata, buildConformanceFilter } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { formatQueryValue } from "./query-utils";
 import { resolveParentPredicate } from "./query-common";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
-import { buildSPARQLQuery, groupSPARQLResults, buildSPARQLCountQuery, hasJsOnlyWhereFilters, parseSparqlCount } from "./query-sparql";
+import { buildSPARQLQuery } from "./query-sparql";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import {
-  normalizeValue, matchesCondition, hydrateFromLinks,
-  assignValuesToInstance as _assignValuesToInstance,
+  normalizeValue,
   evaluateCustomGettersForInstance,
-  hydrateRelations,
 } from "./hydration";
 import type {
   ParentScope, IncludeMap, Query,
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
-  PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata, ValueTuple,
+  PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -327,14 +325,6 @@ export class Ad4mModel {
   }
 
   /**
-   * Backwards compatibility alias for createdAt.
-   * @deprecated Use createdAt instead. This will be removed in a future version.
-   */
-  get timestamp(): any {
-    return (this as any).createdAt;
-  }
-
-  /**
    * Extracts metadata from decorators for query building.
    * 
    * @description
@@ -509,13 +499,6 @@ export class Ad4mModel {
   }
 
   /**
-   * @deprecated Use `.id` instead. Will be removed in a future version.
-   */
-  get baseExpression(): string {
-    return this._baseExpression;
-  }
-
-  /**
    * Protected getter for the perspective.
    * Allows subclasses to access the perspective while keeping it private from external code.
    */
@@ -609,14 +592,6 @@ export class Ad4mModel {
       target: "value",
       ...(metadata.local && { local: true })
     }];
-  }
-
-  /**
-   * Assigns decoded Prolog property values to an instance.
-   * Delegates to the standalone function in hydration.ts.
-   */
-  public static async assignValuesToInstance(perspective: PerspectiveProxy, instance: Ad4mModel, values: ValueTuple[]) {
-    return _assignValuesToInstance(perspective, instance, values);
   }
 
   // ──────────────────────────────────────────────────────────
@@ -786,13 +761,8 @@ export class Ad4mModel {
         }
       }
 
-      // Evaluate custom property getters (e.g. @Property({ getter: '...' }))
-      // The Rust endpoint doesn't handle these yet (Phase 8), so evaluate JS-side.
-      const metadata = ctor.getModelMetadata();
-      await evaluateCustomGettersForInstance(this, this._perspective, metadata, {
-        requestedProperties: opts?.properties,
-        include: opts?.include,
-      });
+      // Property getters and relation conformance getters are now evaluated
+      // Rust-side via evaluate_getters() in model_query.rs.
     } catch (e) {
       console.error(`getData via Rust model query failed for ${this._baseExpression}:`, e);
     }
@@ -843,291 +813,7 @@ export class Ad4mModel {
     return buildSPARQLQuery(metadata, allRelMeta, query, this);
   }
 
-  /**
-   * Converts SPARQL query results to Ad4mModel instances.
-   * 
-   * @param perspective - The perspective context
-   * @param query - The query parameters used
-   * @param result - Array of result objects from SPARQL
-   * @returns Promise resolving to results with total count
-   * 
-   * @internal
-   */
-  public static async instancesFromQueryResult<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy,
-    query: Query,
-    result: any[],
-    computeTotalCount: boolean = false
-  ): Promise<ResultsWithTotalCount<T>> {
-    if (!result || result.length === 0) return { results: [], totalCount: 0 };
-    
-    const metadata = this.getModelMetadata();
-    const requestedProperties = query?.properties || [];
-    
-    // The query used GROUP BY with graph traversal, so each row has:
-    // - source: the node ID (e.g., "node:abc123")
-    // - source_uri: the actual URI (the base expression)
-    // - links: array of link objects with {predicate, target, author, timestamp}
-
-    const instances: T[] = [];
-    for (const row of result) {
-      let base;
-      try {
-        // Use source_uri as the base (the actual URI), not the node ID
-        base = row.source_uri;
-
-        // Skip rows without a source_uri field
-        if (!base) {
-          continue;
-        }
-        
-        const links = row.links || [];
-        
-        const instance = new this(perspective, base) as any;
-
-        // Core hydration via unified helper (pass requestedProperties for sparse fieldset).
-        // Also hydrate any properties referenced in `where` so the JS post-filter can match them,
-        // even if they're not in the user's `properties` projection.
-        let hydrationProps = requestedProperties.length > 0 ? [...requestedProperties] : undefined;
-        if (hydrationProps && query.where) {
-          for (const key of Object.keys(query.where)) {
-            if (!hydrationProps.includes(key)) {
-              hydrationProps.push(key);
-            }
-          }
-        }
-        await hydrateFromLinks(instance, links, metadata, perspective, hydrationProps);
-        
-        // NOTE: Property deletion for sparse fieldsets is deferred until AFTER
-        // where-filtering so that where conditions can reference any property,
-        // even ones not in the `properties` projection.
-
-        instances.push(instance);
-      } catch (error) {
-        console.error(`Failed to process SPARQL instance ${base}:`, error);
-      }
-    }
-
-    // Populate reverse relation fields (belongsToOne / belongsToMany) as string IDs.
-    // These relations point FROM other nodes TO this instance, so they cannot be resolved
-    // from the node's own outgoing links fetched above. We do a reverse-link lookup here
-    // so that these fields are populated as IDs even without an explicit include.
-    const allRelsMeta = getRelationsMetadata(this as any);
-    const reverseRelEntries = Object.entries(allRelsMeta).filter(
-      ([relName, meta]) =>
-        (meta.kind === 'belongsToOne' || meta.kind === 'belongsToMany') &&
-        (requestedProperties.length === 0 || requestedProperties.includes(relName))
-    );
-    if (reverseRelEntries.length > 0 && instances.length > 0) {
-      await Promise.all(
-        instances.map(async (inst) => {
-          for (const [relName, relMeta] of reverseRelEntries) {
-            const reverseLinks = await perspective.get(
-              new LinkQuery({ predicate: relMeta.predicate, target: inst.id })
-            );
-            const sourceIds = reverseLinks
-              .filter((l) => l.data.target === inst.id)
-              .map((l) => l.data.source);
-            if (relMeta.kind === 'belongsToOne') {
-              (inst as any)[relName] = sourceIds.length > 0 ? sourceIds[sourceIds.length - 1] : null;
-            } else {
-              (inst as any)[relName] = sourceIds;
-            }
-          }
-        })
-      );
-    }
-
-    // Evaluate custom getters for all instances.
-    // Relation getters (type-conformance filtering) always run — they ensure
-    // correctness of @HasMany/@HasOne targets. Property getters only run when
-    // deepQuery is true or when where conditions reference getter-backed properties.
-    const whereGetterProperties = query.where
-      ? Object.keys(query.where).filter((propName) => (metadata.properties[propName] as any)?.getter)
-      : [];
-    const shouldEvaluatePropertyGetters = query.deepQuery === true || whereGetterProperties.length > 0;
-    {
-      const skipPropertyGetters = !shouldEvaluatePropertyGetters;
-      const getterRequestedProperties = shouldEvaluatePropertyGetters
-        ? (requestedProperties.length > 0
-          ? Array.from(new Set([...requestedProperties, ...whereGetterProperties]))
-          : query.deepQuery === true
-            ? []  // deepQuery: evaluate all getters
-            : whereGetterProperties)  // only evaluate where-referenced getters
-        : [];
-      const getterOpts = {
-        ...(getterRequestedProperties.length > 0 && { requestedProperties: getterRequestedProperties }),
-        ...(query.include && { include: query.include }),
-        skipPropertyGetters,
-      };
-      for (const instance of instances) {
-        await evaluateCustomGettersForInstance(instance, perspective, metadata, getterOpts);
-      }
-    }
-    
-    // Filter by where conditions that couldn't be filtered in SPARQL
-    // This includes:
-    // - author/timestamp (computed from grouped links)
-    // - Properties with comparison operators (gt, gte, lt, lte, between, contains)
-    //   because <ad4m://fn/parse_literal>() returns strings, making numeric/date
-    //   comparisons unreliable. Equality, IN, and NOT are pushed to SPARQL.
-    // - Relation-based where clauses (e.g., { post: postId } for @BelongsToOne)
-    //   which require reverse-link resolution before filtering
-    let filteredInstances = instances;
-    if (query.where) {
-      filteredInstances = instances.filter(instance => {
-        for (const [propertyName, condition] of Object.entries(query.where!)) {
-          // Skip 'base'/'id' as it's filtered in SPARQL
-          if (propertyName === 'base' || propertyName === 'id') continue;
-
-          // For author and timestamp, always filter in JS
-          if (propertyName === 'author' || propertyName === 'timestamp') {
-            if (!matchesCondition(instance[propertyName], condition)) {
-              return false;
-            }
-            continue;
-          }
-
-          // Check if this is a relation field (not in properties metadata)
-          const isPropField = propertyName in metadata.properties;
-
-          if (!isPropField) {
-            // Relation-based where — filter in JS against the populated field
-            if (!matchesCondition(instance[propertyName], condition)) {
-              return false;
-            }
-            continue;
-          }
-
-          // Filter ALL property conditions in JS (safety net).
-          // Equality/IN/NOT are also filtered in SPARQL via <ad4m://fn/parse_literal>()
-          // but JS re-validates after hydration resolves values.
-          if (!matchesCondition(instance[propertyName], condition)) {
-            return false;
-          }
-        }
-        return true;
-      });
-    }
-
-    // Apply ordering in JavaScript
-    // If limit/offset is used but no explicit order, default to ordering by timestamp (ASC)
-    // This ensures consistent pagination behavior
-    const effectiveOrder = query.order ||
-      (query.limit !== undefined || query.offset !== undefined ? { createdAt: 'ASC' as 'ASC' } : null);
-
-    if (effectiveOrder) {
-      const orderEntries = Object.entries(effectiveOrder);
-
-      filteredInstances.sort((a: any, b: any) => {
-        for (const [orderPropName, orderDirection] of orderEntries) {
-          let aVal = a[orderPropName];
-          let bVal = b[orderPropName];
-
-          // Handle undefined values - push them to the end
-          if (aVal === undefined && bVal === undefined) continue;
-          if (aVal === undefined) return orderDirection === 'ASC' ? 1 : -1;
-          if (bVal === undefined) return orderDirection === 'ASC' ? -1 : 1;
-
-          // Compare values
-          let comparison = 0;
-          if (typeof aVal === 'number' && typeof bVal === 'number') {
-            comparison = aVal - bVal;
-          } else if (typeof aVal === 'string' && typeof bVal === 'string') {
-            comparison = aVal.localeCompare(bVal);
-          } else {
-            comparison = String(aVal).localeCompare(String(bVal));
-          }
-
-          if (comparison !== 0) {
-            return orderDirection === 'DESC' ? -comparison : comparison;
-          }
-          // comparison === 0: continue to next sort field
-        }
-        return 0;
-      });
-    }
-
-    // Determine if SPARQL already applied LIMIT/OFFSET (i.e., the pagination
-    // subquery was used).  When it was, skip JS-level slicing — instances are
-    // already the correct page.
-    const allRelsMeta2 = getRelationsMetadata(this as any);
-    const sparqlPaginated = !hasJsOnlyWhereFilters(metadata, allRelsMeta2, query.where)
-      && (query.limit !== undefined || query.offset !== undefined);
-
-    // Calculate totalCount BEFORE applying limit/offset.
-    // When SPARQL already paginated, filteredInstances.length is the page size,
-    // not the total — use a separate COUNT query for the real total.
-    // Only run the COUNT query when the caller actually needs it (computeTotalCount=true).
-    let totalCount: number;
-    if (sparqlPaginated && computeTotalCount) {
-      try {
-        const countSparql = buildSPARQLCountQuery(metadata, allRelsMeta2, query, this);
-        const countResult = await perspective.querySparql(countSparql);
-        totalCount = parseSparqlCount(countResult) ?? filteredInstances.length;
-      } catch {
-        // Fallback: if count query fails, use what we have
-        totalCount = filteredInstances.length;
-      }
-    } else {
-      totalCount = filteredInstances.length;
-    }
-
-    // Apply offset and limit in JavaScript only when SPARQL didn't already paginate.
-    // Subscription queries use unpaginated SPARQL, so JS must apply pagination.
-    // Direct queries use SPARQL-level pagination, so JS slicing would double-apply.
-    let paginatedInstances = filteredInstances;
-    if (!sparqlPaginated && (query.offset !== undefined || query.limit !== undefined)) {
-      const start = query.offset || 0;
-      const end = query.limit ? start + query.limit : undefined;
-      paginatedInstances = filteredInstances.slice(start, end);
-    }
-
-    // Now that where-filtering is done, strip unrequested properties for sparse fieldsets.
-    // This must happen AFTER where-filtering so conditions can reference any property.
-    if (requestedProperties.length > 0) {
-      const requested = new Set(requestedProperties);
-      for (const inst of paginatedInstances) {
-        for (const propName of Object.keys(metadata.properties)) {
-          if (!requested.has(propName)) {
-            delete (inst as any)[propName];
-          }
-        }
-        for (const relName of Object.keys(metadata.relations)) {
-          if (!requested.has(relName) && !(query.include && relName in query.include)) {
-            delete (inst as any)[relName];
-          }
-        }
-        for (const metaField of ['author', 'createdAt', 'updatedAt'] as const) {
-          if (!requested.has(metaField)) {
-            delete (inst as any)[metaField];
-          }
-        }
-      }
-    }
-
-    // Eager-load relations if requested (BEFORE snapshot so dirty tracking is accurate)
-    if (query.include && paginatedInstances.length > 0) {
-      await hydrateRelations(this, paginatedInstances, perspective, query.include);
-    }
-
-    // Take snapshots for dirty tracking after ALL hydration is complete
-    // (including eager-loaded relations).
-    // When `include` is specified, only snapshot those relations.
-    // Otherwise snapshot ALL fields (properties + relations) since
-    // hydrateFromLinks populates relations with stable raw IDs —
-    // this ensures push-to-array + save() correctly detects dirty relations.
-    const snapshotRelations = query.include;
-    for (const inst of paginatedInstances) {
-      (inst as Ad4mModel).takeSnapshot(snapshotRelations);
-    }
-
-    return {
-      results: paginatedInstances,
-      totalCount
-    };
-  }
+  // instancesFromQueryResult — removed (superseded by Rust executeModelQuery pipeline)
 
   /**
    * Execute a model query via the executor-side endpoint.
@@ -1170,6 +856,33 @@ export class Ad4mModel {
     if (query.include) {
       const allRelMeta = getRelationsMetadata(this as any);
       enrichShapeForIncludes(metadata, query.include, allRelMeta);
+    }
+
+    // ── Pre-compute conformance getters for Rust-side evaluation ──────
+    // For each relation with a target class and filter !== false, compute
+    // the conformance getter SPARQL so Rust can evaluate it in-process
+    // (eliminating N × querySparql round-trips per instance).
+    {
+      const allRelMeta = getRelationsMetadata(this as any);
+      for (const [relName, relMeta] of Object.entries(metadata.relations)) {
+        const rel = relMeta as any;
+        if (rel.getter) continue; // explicit getter already set
+        if (rel.direction === 'reverse') continue; // reverse relations use reverse link lookup
+        if (rel.filter === false) continue; // opt-out of conformance filtering
+
+        const meta = allRelMeta[relName];
+        if (!meta?.target) continue;
+
+        try {
+          const TargetClass = meta.target();
+          const filter = buildConformanceFilter(meta.predicate, TargetClass);
+          if (filter) {
+            rel.getter = filter.getter;
+          }
+        } catch (e) {
+          // Target class may not be available; skip silently
+        }
+      }
     }
 
     // Send shape metadata to the executor so it knows the model structure.
@@ -1215,44 +928,9 @@ export class Ad4mModel {
       );
     }
 
-    // Run relation type-conformance filtering (ensures @HasMany/@HasOne
-    // targets actually conform to the target class's shape).
-    // - Included relations are saved/restored because Rust already hydrated
-    //   them as full nested objects.
-    // - Non-included @HasMany relations keep the conformance result (filtered
-    //   arrays with non-conforming targets removed).
-    // - Non-included @HasOne/@BelongsToOne relations keep the conformance
-    //   result but are unwrapped from array → scalar to preserve cardinality.
-    const includedRelNames = query.include ? new Set(Object.keys(query.include)) : new Set<string>();
-    for (const inst of instances) {
-      // Save included relation values that came from Rust hydration
-      const savedIncluded: Record<string, any> = {};
-      for (const relName of includedRelNames) {
-        if ((inst as any)[relName] !== undefined) {
-          savedIncluded[relName] = (inst as any)[relName];
-        }
-      }
-
-      await evaluateCustomGettersForInstance(inst, perspective, metadata, {
-        skipPropertyGetters: true,
-      });
-
-      // Restore hydrated include objects that were overwritten by conformance getters
-      for (const [relName, value] of Object.entries(savedIncluded)) {
-        (inst as any)[relName] = value;
-      }
-
-      // Fix cardinality for non-included HasOne/BelongsToOne relations:
-      // The conformance getter always produces arrays; unwrap to scalar.
-      for (const [relName, relMeta] of Object.entries(metadata.relations)) {
-        if (includedRelNames.has(relName)) continue;
-        const kind = (relMeta as any).kind;
-        if ((kind === 'hasOne' || kind === 'belongsToOne') && Array.isArray((inst as any)[relName])) {
-          const arr = (inst as any)[relName] as any[];
-          (inst as any)[relName] = arr.length > 0 ? arr[0] : null;
-        }
-      }
-    }
+    // Relation conformance getters and property getters are now evaluated
+    // Rust-side via evaluate_getters() in model_query.rs. No TS-side
+    // evaluateCustomGettersForInstance() call needed.
 
     // Take snapshots for dirty tracking
     const snapshotRelations = query.include;
@@ -1406,11 +1084,7 @@ export class Ad4mModel {
    * 
    * @private
    */
-  public static async countQueryToSPARQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
-    const metadata = this.getModelMetadata();
-    const allRelMeta = getRelationsMetadata(this as any);
-    return buildSPARQLCountQuery(metadata, allRelMeta, query, this);
-  }
+  // countQueryToSPARQL — removed (zero callers; Rust COUNT fast-path supersedes)
 
   /**
    * Gets a count of all matching instances.

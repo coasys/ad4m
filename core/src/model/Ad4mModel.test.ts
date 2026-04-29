@@ -617,7 +617,7 @@ describe("Ad4mModel.queryToSPARQL()", () => {
     expect(norm).toContain("SELECT DISTINCT ?source");
   });
 });
-describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
+describe("Ad4mModel query methods (modelQuery integration)", () => {
   // Test Recipe model
   @Model({ name: "Recipe" })
   class Recipe extends Ad4mModel {
@@ -642,132 +642,6 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-  });
-
-  it("should convert empty query results correctly", async () => {
-    const result = await Recipe.instancesFromQueryResult(mockPerspective, {}, []);
-    
-    expect(result.results).toEqual([]);
-    expect(result.totalCount).toBe(0);
-  });
-
-  it("should convert query results to model instances", async () => {
-    const queryResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal:recipe1",
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "tomato", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "cheese", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      },
-      {
-        source: "node:def456",
-        source_uri: "literal:recipe2",
-        links: [
-          { predicate: "recipe://name", target: "Pizza", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
-          { predicate: "recipe://rating", target: "4", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "dough", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "cheese", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "tomato", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" }
-        ]
-      }
-    ];
-
-    const result = await Recipe.instancesFromQueryResult(mockPerspective, {}, queryResults);
-
-    expect(result.results).toHaveLength(2);
-    expect(result.totalCount).toBe(2);
-
-    const recipe1 = result.results[0];
-    expect(recipe1).toBeInstanceOf(Recipe);
-    expect(recipe1.name).toBe("Pasta");
-    expect(recipe1.rating).toBe(5);
-    expect(recipe1.ingredients).toEqual(["pasta", "tomato", "cheese"]);
-
-    const recipe2 = result.results[1];
-    expect(recipe2).toBeInstanceOf(Recipe);
-    expect(recipe2.name).toBe("Pizza");
-    expect(recipe2.rating).toBe(4);
-  });
-
-  it("should filter properties when query specifies properties", async () => {
-    const queryResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal:recipe1",
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "tomato", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      }
-    ];
-
-    const result = await Recipe.instancesFromQueryResult(
-      mockPerspective,
-      { properties: ["name"] },
-      queryResults
-    );
-
-    expect(result.results).toHaveLength(1);
-    const recipe = result.results[0];
-    expect(recipe.name).toBe("Pasta");
-    // rating and ingredients should be removed since only "name" was requested
-    expect(recipe.rating).toBeUndefined();
-    expect(recipe.ingredients).toBeUndefined();
-    // author, createdAt, updatedAt are also stripped unless explicitly requested
-    expect(recipe.author).toBeUndefined();
-    expect(recipe.timestamp).toBeUndefined();
-  });
-
-  it("should filter properties when query specifies properties", async () => {
-    const queryResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal:recipe1",
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "tomato", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      }
-    ];
-
-    const result = await Recipe.instancesFromQueryResult(
-      mockPerspective,
-      { properties: ["name"] },
-      queryResults
-    );
-
-    expect(result.results).toHaveLength(1);
-    const recipe = result.results[0];
-    expect(recipe.name).toBe("Pasta");
-    // rating and ingredients should be removed since only "name" was requested
-    expect(recipe.rating).toBeUndefined();
-  });
-
-  it("should handle results missing base field", async () => {
-    const queryResults = [
-      {
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-        // Missing source field
-      } as any
-    ];
-
-    const result = await Recipe.instancesFromQueryResult(mockPerspective, {}, queryResults);
-
-    // Should filter out the invalid result (or handle gracefully)
-    expect(result.results).toHaveLength(0);
-    expect(result.totalCount).toBe(0);
   });
 
   it("should use SPARQL when engine is 'sparql' in findAll()", async () => {
@@ -1466,95 +1340,6 @@ describe("hydrateFromLinks()", () => {
   });
 });
 
-describe("instancesFromQueryResult — where + properties interaction", () => {
-  const mockPerspective = {
-    get: jest.fn().mockResolvedValue([]),
-    querySparql: jest.fn().mockResolvedValue([]),
-    getExpression: jest.fn().mockResolvedValue(null),
-  } as any;
-
-  @Model({ name: "Recipe" })
-  class Recipe extends Ad4mModel {
-    @Property({ through: "recipe://name", resolveLanguage: "literal", required: true })
-    name: string = "";
-
-    @Property({ through: "recipe://booleanTest", resolveLanguage: "literal" })
-    booleanTest: boolean = false;
-
-    @Property({ through: "recipe://score", resolveLanguage: "literal" })
-    score: number = 0;
-  }
-
-  it("should filter by where clause property even when not in properties projection", async () => {
-    // Simulate SPARQL result with two recipes
-    const grouped = [
-      {
-        source_uri: "expr:recipe1",
-        links: [
-          { predicate: "recipe://name", target: literalUrl("Recipe 1"), author: "did:test", timestamp: "1000" },
-          { predicate: "recipe://booleanTest", target: literalUrl(true), author: "did:test", timestamp: "1000" },
-        ],
-      },
-      {
-        source_uri: "expr:recipe2",
-        links: [
-          { predicate: "recipe://name", target: literalUrl("Recipe 2"), author: "did:test", timestamp: "1000" },
-          { predicate: "recipe://booleanTest", target: literalUrl(false), author: "did:test", timestamp: "1000" },
-        ],
-      },
-    ];
-
-    const query = { where: { name: "Recipe 2" }, properties: ["booleanTest"] };
-    const { results } = await Recipe.instancesFromQueryResult(mockPerspective, query, grouped);
-
-    expect(results.length).toBe(1);
-    expect((results[0] as any).booleanTest).toBe(false);
-    // name should be deleted after filtering since it wasn't in properties projection
-    expect((results[0] as any).name).toBeUndefined();
-  });
-
-  it("should delete unrequested properties AFTER where-filtering", async () => {
-    const grouped = [
-      {
-        source_uri: "expr:recipe1",
-        links: [
-          { predicate: "recipe://name", target: literalUrl("Recipe 1"), author: "did:test", timestamp: "1000" },
-          { predicate: "recipe://score", target: literalUrl(99), author: "did:test", timestamp: "1000" },
-        ],
-      },
-    ];
-
-    const query = { where: { name: "Recipe 1" }, properties: ["score"] };
-    const { results } = await Recipe.instancesFromQueryResult(mockPerspective, query, grouped);
-
-    expect(results.length).toBe(1);
-    expect((results[0] as any).score).toBe(99);
-    // name was used for filtering but should be deleted from final result
-    expect((results[0] as any).name).toBeUndefined();
-  });
-
-  it("should return all properties when no projection is specified", async () => {
-    const grouped = [
-      {
-        source_uri: "expr:recipe1",
-        links: [
-          { predicate: "recipe://name", target: literalUrl("Test"), author: "did:test", timestamp: "1000" },
-          { predicate: "recipe://booleanTest", target: literalUrl(true), author: "did:test", timestamp: "1000" },
-          { predicate: "recipe://score", target: literalUrl(50), author: "did:test", timestamp: "1000" },
-        ],
-      },
-    ];
-
-    const query = { where: { name: "Test" } };
-    const { results } = await Recipe.instancesFromQueryResult(mockPerspective, query, grouped);
-
-    expect(results.length).toBe(1);
-    expect((results[0] as any).name).toBe("Test");
-    expect((results[0] as any).booleanTest).toBe(true);
-    expect((results[0] as any).score).toBe(50);
-  });
-});
-
 describe("groupSPARQLResults()", () => {
   it("groups rows by source", () => {
     const rows = [
@@ -1638,81 +1423,6 @@ describe("buildSPARQLQuery edge cases", () => {
     const sparql = buildSPARQLQuery(metadata, allRelsMeta, { where: { id: "expr:123" } as any }, FlagModel);
     // Should filter by source
     expect(sparql).toContain("expr:123");
-  });
-});
-
-describe("sparse fieldset property deletion timing", () => {
-  const mockPerspective = {
-    get: jest.fn().mockResolvedValue([]),
-    querySparql: jest.fn().mockResolvedValue([]),
-    getExpression: jest.fn().mockResolvedValue(null),
-  } as any;
-
-  @Model({ name: "TimingTest" })
-  class TimingTest extends Ad4mModel {
-    @Property({ through: "timing://a", resolveLanguage: "literal" })
-    a: string = "";
-
-    @Property({ through: "timing://b", resolveLanguage: "literal" })
-    b: string = "";
-
-    @Property({ through: "timing://c", resolveLanguage: "literal" })
-    c: string = "";
-  }
-
-  it("where-clause properties are available during filtering but deleted after", async () => {
-    const grouped = [
-      {
-        source_uri: "expr:1",
-        links: [
-          { predicate: "timing://a", target: literalUrl("match"), author: "did:test", timestamp: "1000" },
-          { predicate: "timing://b", target: literalUrl("keep"), author: "did:test", timestamp: "1000" },
-          { predicate: "timing://c", target: literalUrl("ignore"), author: "did:test", timestamp: "1000" },
-        ],
-      },
-      {
-        source_uri: "expr:2",
-        links: [
-          { predicate: "timing://a", target: literalUrl("no-match"), author: "did:test", timestamp: "1000" },
-          { predicate: "timing://b", target: literalUrl("skip"), author: "did:test", timestamp: "1000" },
-          { predicate: "timing://c", target: literalUrl("skip"), author: "did:test", timestamp: "1000" },
-        ],
-      },
-    ];
-
-    // properties projection asks for "b" only, where clause filters on "a"
-    const query = { where: { a: "match" }, properties: ["b"] };
-    const { results } = await TimingTest.instancesFromQueryResult(mockPerspective, query, grouped);
-
-    // Only the matching instance should survive
-    expect(results.length).toBe(1);
-    // "b" was requested — should be present
-    expect((results[0] as any).b).toBe("keep");
-    // "a" was used for filtering but not in projection — should be deleted
-    expect((results[0] as any).a).toBeUndefined();
-    // "c" was not requested — should be deleted
-    expect((results[0] as any).c).toBeUndefined();
-  });
-
-  it("properties not in projection are undefined after instancesFromQueryResult", async () => {
-    const grouped = [
-      {
-        source_uri: "expr:1",
-        links: [
-          { predicate: "timing://a", target: literalUrl("val-a"), author: "did:test", timestamp: "1000" },
-          { predicate: "timing://b", target: literalUrl("val-b"), author: "did:test", timestamp: "1000" },
-          { predicate: "timing://c", target: literalUrl("val-c"), author: "did:test", timestamp: "1000" },
-        ],
-      },
-    ];
-
-    const query = { properties: ["a"] };
-    const { results } = await TimingTest.instancesFromQueryResult(mockPerspective, query, grouped);
-
-    expect(results.length).toBe(1);
-    expect((results[0] as any).a).toBe("val-a");
-    expect((results[0] as any).b).toBeUndefined();
-    expect((results[0] as any).c).toBeUndefined();
   });
 });
 
@@ -2269,60 +1979,6 @@ describe("Lazy Conformance Filters", () => {
 });
 
 // ──────────────────────────────────────────────────────────
-// instancesFromQueryResult — SPARQL vs JS pagination behaviour
-// ──────────────────────────────────────────────────────────
-
-describe("instancesFromQueryResult — SPARQL vs JS pagination", () => {
-  @Model({ name: "PaginationTestChannel" })
-  class PaginationTestChannel extends Ad4mModel {
-    @Flag({ through: "flux://entry_type", value: "flux://channel" })
-    type: string = "";
-
-    @Property({ through: "flux://name", resolveLanguage: "literal" })
-    name: string = "";
-  }
-
-  const mockPerspective: any = {
-    uuid: "test-uuid",
-    querySparql: jest.fn().mockResolvedValue([]),
-    get: jest.fn().mockResolvedValue([]),
-    getExpression: jest.fn().mockResolvedValue(null),
-  };
-
-  it("does NOT slice results when SPARQL pagination was applied", async () => {
-    const grouped = Array.from({ length: 5 }, (_, i) => ({
-      source_uri: `flux://ch-${i}`,
-      links: [
-        { predicate: "flux://entry_type", target: "flux://channel", author: "did:key:a", timestamp: String(1000 + i) },
-        { predicate: "flux://name", target: `literal:string:Channel${i}`, author: "did:key:a", timestamp: String(1000 + i) },
-      ],
-    }));
-
-    const query = { limit: 5, offset: 10 };
-    const result = await (PaginationTestChannel as any).instancesFromQueryResult(mockPerspective, query, grouped);
-
-    // sparqlPaginated = true (limit+offset present, no JS-only where filters),
-    // so JS should NOT re-slice — all 5 items come through as-is.
-    expect(result.results.length).toBe(5);
-    expect(result.totalCount).toBe(5);
-  });
-
-  it("applies JS-level slicing as fallback when JS-only filters exist", async () => {
-    const grouped = Array.from({ length: 10 }, (_, i) => ({
-      source_uri: `flux://ch-${i}`,
-      links: [
-        { predicate: "flux://entry_type", target: "flux://channel", author: "did:key:a", timestamp: String(1000 + i) },
-        { predicate: "flux://name", target: `literal:string:Ch${i}`, author: "did:key:a", timestamp: String(1000 + i) },
-      ],
-    }));
-
-    const query = { limit: 3, offset: 0, where: { author: "did:key:a" } };
-    const result = await (PaginationTestChannel as any).instancesFromQueryResult(mockPerspective, query, grouped);
-    expect(result.results.length).toBe(3);
-  });
-});
-
-// ──────────────────────────────────────────────────────────
 // deepQuery opt-in — getter evaluation on collection queries
 // ──────────────────────────────────────────────────────────
 
@@ -2381,39 +2037,13 @@ describe("deepQuery opt-in — getter evaluation", () => {
     mockPerspective.get.mockClear();
   });
 
-  function makeMessageRows(count: number) {
-    return Array.from({ length: count }, (_, i) => ({
-      source_uri: `flux://msg-${i}`,
-      links: [
-        { predicate: "flux://entry_type", target: "flux://message", author: "did:key:a", timestamp: String(2000 + i) },
-        { predicate: "flux://body", target: `literal:string:Hello${i}`, author: "did:key:a", timestamp: String(2000 + i) },
-      ],
-    }));
+  function makeInstances(count: number): InstanceType<typeof DeepQueryTestMessage>[] {
+    return Array.from({ length: count }, (_, i) =>
+      new DeepQueryTestMessage(mockPerspective, `flux://msg-${i}`)
+    );
   }
 
-  it("skips getter evaluation on collection queries by default", async () => {
-    const grouped = makeMessageRows(5);
-    const result = await (DeepQueryTestMessage as any).instancesFromQueryResult(mockPerspective, {}, grouped);
-    expect(result.results.length).toBe(5);
-
-    const getterCalls = sparqlCalls.filter(
-      (q) => q.includes("flux://has_reply") || q.includes("flux://is_popular")
-    );
-    expect(getterCalls.length).toBe(0);
-  });
-
-  it("evaluates getter properties when deepQuery is true", async () => {
-    const grouped = makeMessageRows(3);
-    const result = await (DeepQueryTestMessage as any).instancesFromQueryResult(mockPerspective, { deepQuery: true }, grouped);
-    expect(result.results.length).toBe(3);
-
-    const getterCalls = sparqlCalls.filter(
-      (q) => q.includes("flux://has_reply") || q.includes("flux://is_popular")
-    );
-    expect(getterCalls.length).toBe(6); // 3 instances × 2 getters
-  });
-
-  it("single-instance get() still evaluates getters by default", async () => {
+  it("single-instance get() delegates getter evaluation to Rust (no JS-side SPARQL)", async () => {
     const instance = new DeepQueryTestMessage(mockPerspective, "flux://msg-single");
     mockPerspective.querySparql.mockImplementation(async (q: string) => {
       sparqlCalls.push(q);
@@ -2427,19 +2057,19 @@ describe("deepQuery opt-in — getter evaluation", () => {
     });
 
     await instance.get();
+    // Getter evaluation now happens Rust-side via evaluate_getters() — no JS SPARQL calls
     const getterCalls = sparqlCalls.filter(
       (q) => q.includes("flux://has_reply") || q.includes("flux://is_popular")
     );
-    expect(getterCalls.length).toBe(2);
+    expect(getterCalls.length).toBe(0);
   });
 
   describe("Ad4mModel.evaluateGetters()", () => {
     it("resolves getters for a batch of instances", async () => {
-      const grouped = makeMessageRows(4);
-      const result = await (DeepQueryTestMessage as any).instancesFromQueryResult(mockPerspective, {}, grouped);
+      const instances = makeInstances(4);
       sparqlCalls = [];
 
-      await DeepQueryTestMessage.evaluateGetters(result.results.slice(0, 2), mockPerspective, ["replyingTo"]);
+      await DeepQueryTestMessage.evaluateGetters(instances.slice(0, 2), mockPerspective, ["replyingTo"]);
 
       const replyCalls = sparqlCalls.filter((q) => q.includes("flux://has_reply"));
       expect(replyCalls.length).toBe(2);
@@ -2448,11 +2078,10 @@ describe("deepQuery opt-in — getter evaluation", () => {
     });
 
     it("evaluates all getters when propertyNames is omitted", async () => {
-      const grouped = makeMessageRows(2);
-      const result = await (DeepQueryTestMessage as any).instancesFromQueryResult(mockPerspective, {}, grouped);
+      const instances = makeInstances(2);
       sparqlCalls = [];
 
-      await DeepQueryTestMessage.evaluateGetters(result.results, mockPerspective);
+      await DeepQueryTestMessage.evaluateGetters(instances, mockPerspective);
 
       const replyCalls = sparqlCalls.filter((q) => q.includes("flux://has_reply"));
       const popularCalls = sparqlCalls.filter((q) => q.includes("flux://is_popular"));

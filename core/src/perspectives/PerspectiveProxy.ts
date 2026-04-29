@@ -4,7 +4,6 @@ import { LinkQuery } from "./LinkQuery";
 import { PerspectiveHandle, PerspectiveState } from './PerspectiveHandle'
 import { Perspective } from "./Perspective";
 import { Literal } from "../Literal";
-import { Subject } from "../model/Subject";
 import { ExpressionRendered } from "../expression/Expression";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
@@ -20,6 +19,16 @@ import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
+/** Extract namespace prefix from a URI (everything up to and including the last / or #) */
+function extractNamespaceFromUri(uri: string): string {
+    const hashIdx = uri.lastIndexOf('#');
+    if (hashIdx >= 0) return uri.substring(0, hashIdx + 1);
+    const slashIdx = uri.lastIndexOf('/');
+    if (slashIdx >= 0) return uri.substring(0, slashIdx + 1);
+    const colonIdx = uri.lastIndexOf(':');
+    if (colonIdx >= 0) return uri.substring(0, colonIdx + 1);
+    return uri;
+}
 
 
 // Generic subscription interface that matches Apollo's Subscription
@@ -1435,7 +1444,9 @@ export class PerspectiveProxy {
             return exprAddr as B extends undefined ? T : string;
         }
 
-        return this.getSubjectProxy(exprAddr, subjectClass) as Promise<B extends undefined ? T : string>;
+        // Return the expression address directly — callers should use Ad4mModel or
+        // getSubjectData() to interact with the created instance.
+        return exprAddr as unknown as B extends undefined ? T : string;
     }
 
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
@@ -1557,14 +1568,12 @@ export class PerspectiveProxy {
      * with the properties of the subject class. In the latter case, the first subject class
      * that matches the given properties will be used.
      */
+    /** @deprecated Use Ad4mModel or getSubjectData() instead */
     async getSubjectProxy<T>(base: string, subjectClass: T): Promise<T> {
-        if(!await this.isSubjectInstance(base, subjectClass)) {
-            throw `Expression ${base} is not a subject instance of given class: ${JSON.stringify(subjectClass)}`
-        }
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
-        let subject = new Subject(this, base, className)
-        await subject.init()
-        return subject as unknown as T
+        // Return plain data instead of a Subject proxy
+        const data = await this.getSubjectData(className, base) as any;
+        return { id: base, ...data } as unknown as T;
     }
 
     /**
@@ -1936,9 +1945,9 @@ export class PerspectiveProxy {
                             // Load the instance data from links
                             await instance.get();
                         } else {
-                            // Legacy: Create a Subject proxy
-                            instance = new Subject(this, result.base, className);
-                            await instance.init();
+                            // Return plain data for string-based lookups
+                            const data = await this.getSubjectData(className, result.base);
+                            instance = { id: result.base, ...data };
                         }
                         instances.push(instance as unknown as T);
                         //console.log(`getAllSubjectInstances: Successfully created subject for ${result.base}`);
@@ -1959,6 +1968,7 @@ export class PerspectiveProxy {
      * with the properties of the subject class. In the latter case, all subject classes
      * that match the given properties will be used.
      */
+    /** @deprecated Use Ad4mModel.query() or listRegisteredClasses() + getSubjectData() instead */
     async getAllSubjectProxies<T>(subjectClass: T): Promise<T[]> {
         let classes = []
         if(typeof subjectClass === "string") {
@@ -1969,19 +1979,15 @@ export class PerspectiveProxy {
 
         let instances = []
         for(let className of classes) {
-            // Query SDNA for metadata, then query SPARQL for instances
             const metadata = await this.getSubjectClassMetadataFromSDNA(className);
             if (metadata) {
                 const results = await this.findInstancesByMetadata(metadata);
-                
-
                 for (const result of results || []) {
                     try {
-                        let subject = new Subject(this, result.base, className);
-                        await subject.init();
-                        instances.push(subject as unknown as T);
+                        const data = await this.getSubjectData(className, result.base);
+                        instances.push({ id: result.base, ...data } as unknown as T);
                     } catch (e) {
-                        // Skip subjects that fail to initialize
+                        // Skip instances that fail to load
                     }
                 }
             }
@@ -2170,6 +2176,202 @@ export class PerspectiveProxy {
      * subsequent register() calls re-add SHACL definitions. */
     clearEnsuredSubjectClasses(): void {
         this.#ensuredSubjectClasses.clear();
+    }
+
+    /**
+     * Returns a list of all class names that have been registered as SHACL
+     * subject classes in this perspective (via `ensureSDNASubjectClass` or `addSdna`).
+     *
+     * @returns Array of class name strings (e.g. `["Channel", "Message", "Task"]`)
+     */
+    async listRegisteredClasses(): Promise<string[]> {
+        const results = await this.querySparql(
+            `SELECT DISTINCT ?class WHERE { ?class <rdf://type> <ad4m://SubjectClass> . }`
+        );
+        if (!Array.isArray(results)) return [];
+        return results.map((row: any) => {
+            const uri: string = row.class || '';
+            // Extract class name from URI like "recipe://Recipe" or "flux://Channel"
+            const hashIdx = uri.lastIndexOf('#');
+            if (hashIdx >= 0) return uri.substring(hashIdx + 1);
+            const slashIdx = uri.lastIndexOf('/');
+            if (slashIdx >= 0) return uri.substring(slashIdx + 1);
+            return uri;
+        }).filter(Boolean);
+    }
+
+    /**
+     * Returns the SHACL shape metadata for a registered class, including
+     * property names, predicates, datatypes, and cardinality constraints.
+     *
+     * @param className - The name of the registered class
+     * @returns Shape metadata or `null` if the class is not registered
+     */
+    async getClassShape(className: string): Promise<{
+        className: string;
+        shapeUri: string;
+        properties: Array<{
+            name: string;
+            predicate: string;
+            datatype?: string;
+            required: boolean;
+            collection: boolean;
+            writable: boolean;
+            options?: Array<{ value: string; label?: string }>;
+        }>;
+    } | null> {
+        // Find the shape URI for this class
+        const safeName = className.replace(/['"\\]/g, '');
+        const shapeResults = await this.querySparql(
+            `SELECT ?shapeUri ?targetClass WHERE {
+                ?targetClass <rdf://type> <ad4m://SubjectClass> .
+                ?targetClass <ad4m://shape> ?shapeUri .
+                FILTER(STRENDS(STR(?targetClass), "/${safeName}") || STRENDS(STR(?targetClass), "#${safeName}"))
+            } LIMIT 1`
+        );
+        if (!Array.isArray(shapeResults) || shapeResults.length === 0) return null;
+
+        const shapeUri = shapeResults[0].shapeUri;
+        const classUri = shapeResults[0].targetClass;
+
+        // Query all properties for this shape, including sh:in
+        const propResults = await this.querySparql(
+            `SELECT ?propShape ?path ?datatype ?minCount ?maxCount ?writable ?propType ?shIn WHERE {
+                <${shapeUri}> <sh://property> ?propShape .
+                ?propShape <sh://path> ?path .
+                ?propShape <rdf://type> ?propType .
+                OPTIONAL { ?propShape <sh://datatype> ?datatype }
+                OPTIONAL { ?propShape <sh://minCount> ?minCount }
+                OPTIONAL { ?propShape <sh://maxCount> ?maxCount }
+                OPTIONAL { ?propShape <ad4m://writable> ?writable }
+                OPTIONAL { ?propShape <sh://in> ?shIn }
+            }`
+        );
+
+        const properties = (Array.isArray(propResults) ? propResults : []).map((row: any) => {
+            // Extract property name from shape URI like "recipe://Recipe.name"
+            const propUri: string = row.propShape || '';
+            const dotIdx = propUri.lastIndexOf('.');
+            const name = dotIdx >= 0 ? propUri.substring(dotIdx + 1) : propUri;
+
+            const minCount = parseInt(row.minCount || '0', 10);
+            const isCollection = row.propType === 'ad4m://CollectionShape';
+            const writable = row.writable === 'true' || row.writable === 'literal:true';
+
+            // Parse sh:in values if present
+            let options: Array<{ value: string; label?: string }> | undefined;
+            if (row.shIn) {
+                try {
+                    let raw = row.shIn;
+                    // Strip literal: prefix if present
+                    if (raw.startsWith('literal:string:')) raw = raw.substring('literal:string:'.length);
+                    options = JSON.parse(raw);
+                } catch { /* ignore parse errors */ }
+            }
+
+            return {
+                name,
+                predicate: row.path || '',
+                datatype: row.datatype || undefined,
+                required: minCount > 0,
+                collection: isCollection,
+                writable,
+                ...(options && options.length > 0 ? { options } : {}),
+            };
+        });
+
+        return { className: safeName, shapeUri, properties };
+    }
+
+    /**
+     * Detects which registered subject classes a given instance conforms to,
+     * based on its stored triples matching the class shapes' required properties.
+     *
+     * @param baseExpression - The instance's base expression / subject URI
+     * @returns Array of class names the instance matches
+     */
+    async getInstanceClasses(baseExpression: string): Promise<string[]> {
+        const safeId = baseExpression.replace(/['"\\]/g, '');
+        // Get all registered classes and their required conformance properties
+        const results = await this.querySparql(
+            `SELECT DISTINCT ?class WHERE {
+                ?class <rdf://type> <ad4m://SubjectClass> .
+                ?class <ad4m://shape> ?shape .
+                ?shape <sh://property> ?propShape .
+                ?propShape <sh://minCount> ?mc .
+                FILTER(?mc >= 1)
+                ?propShape <sh://path> ?path .
+                <${safeId}> ?path ?_val .
+            }`
+        );
+        if (!Array.isArray(results)) return [];
+        return results.map((row: any) => {
+            const uri: string = row.class || '';
+            const hashIdx = uri.lastIndexOf('#');
+            if (hashIdx >= 0) return uri.substring(hashIdx + 1);
+            const slashIdx = uri.lastIndexOf('/');
+            if (slashIdx >= 0) return uri.substring(slashIdx + 1);
+            return uri;
+        }).filter(Boolean);
+    }
+
+    /**
+     * Returns all named options (sh:in values) for a registered class, grouped by property.
+     *
+     * @param className - The name of the registered class
+     * @returns Record mapping property name → array of { value, label } options
+     */
+    async getNamedOptions(className: string): Promise<Record<string, Array<{ value: string; label?: string }>>> {
+        const shape = await this.getClassShape(className);
+        if (!shape) return {};
+        const result: Record<string, Array<{ value: string; label?: string }>> = {};
+        for (const prop of shape.properties) {
+            if (prop.options && prop.options.length > 0) {
+                result[prop.name] = prop.options;
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Adds a named option (sh:in value) to a property of a registered class.
+     * This appends to the existing sh:in list stored on the property shape.
+     *
+     * @param className - The registered class name
+     * @param propertyName - The property to add the option to
+     * @param value - The RDF value for the option
+     * @param label - Optional human-readable label
+     */
+    async addNamedOption(className: string, propertyName: string, value: string, label?: string): Promise<void> {
+        const shape = await this.getClassShape(className);
+        if (!shape) throw new Error(`Class "${className}" not found`);
+
+        const prop = shape.properties.find(p => p.name === propertyName);
+        if (!prop) throw new Error(`Property "${propertyName}" not found on class "${className}"`);
+
+        // Build the property shape URI
+        const ns = extractNamespaceFromUri(shape.shapeUri);
+        const propShapeId = `${ns}${className}.${propertyName}`;
+
+        // Get existing options
+        const existing = prop.options || [];
+        // Don't add duplicates
+        if (existing.some(o => o.value === value)) return;
+
+        const updated = [...existing, { value, ...(label ? { label } : {}) }];
+
+        // Remove old sh:in link if exists by querying for it
+        const oldLinks = await this.get(new LinkQuery({ source: propShapeId, predicate: "sh://in" }));
+        for (const oldLink of oldLinks) {
+            await this.remove(oldLink);
+        }
+
+        // Add new sh:in link
+        await this.add(new Link({
+            source: propShapeId,
+            predicate: "sh://in",
+            target: `literal:string:${JSON.stringify(updated)}`
+        }));
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {
