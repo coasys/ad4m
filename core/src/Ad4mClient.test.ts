@@ -3,31 +3,66 @@ import { Ad4mClient } from './Ad4mClient';
 import { Perspective } from './perspectives/Perspective';
 import { LinkQuery } from './perspectives/LinkQuery';
 
-// Save original EventSource so we can restore it after the suite
-const originalEventSource = (global as any).EventSource;
+// Save original WebSocket so we can restore it after the suite
+const originalWebSocket = (global as any).WebSocket;
 
-class MockEventSource {
-    static instances: MockEventSource[] = [];
-    onmessage: any = null;
-    onerror: any = null;
+class MockWebSocket {
+    static instances: MockWebSocket[] = [];
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSING = 2;
+    static CLOSED = 3;
+
+    onopen: ((event: any) => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onerror: ((event: any) => void) | null = null;
+    onclose: ((event: any) => void) | null = null;
+    readyState: number = MockWebSocket.CONNECTING;
     closed = false;
     url: string;
-    init: any;
 
     close() {
         this.closed = true;
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.({});
     }
 
+    send(data: string) {
+        // Handle ping/pong
+        try {
+            const parsed = JSON.parse(data);
+            if (parsed.type === 'ping') {
+                // Respond with pong asynchronously
+                setTimeout(() => {
+                    this.onmessage?.({ data: JSON.stringify({ type: 'pong' }) });
+                }, 0);
+            }
+        } catch {}
+    }
+
+    /** Simulate server sending an event to the client */
     emit(payload: unknown) {
         this.onmessage?.({ data: JSON.stringify(payload) });
     }
 
-    constructor(url: string, init?: any) {
+    constructor(url: string) {
         this.url = url;
-        this.init = init;
-        MockEventSource.instances.push(this);
+        MockWebSocket.instances.push(this);
+        // Simulate async connection open
+        setTimeout(() => {
+            if (this.readyState === MockWebSocket.CONNECTING) {
+                this.readyState = MockWebSocket.OPEN;
+                this.onopen?.({});
+            }
+        }, 0);
     }
 }
+
+// Copy static constants to prototype (matches real WebSocket)
+Object.defineProperty(MockWebSocket.prototype, 'CONNECTING', { value: 0 });
+Object.defineProperty(MockWebSocket.prototype, 'OPEN', { value: 1 });
+Object.defineProperty(MockWebSocket.prototype, 'CLOSING', { value: 2 });
+Object.defineProperty(MockWebSocket.prototype, 'CLOSED', { value: 3 });
 
 /** Return the last element of an array (avoids Array.prototype.at which needs ES2022 lib). */
 function lastOf<T>(arr: T[]): T {
@@ -53,7 +88,7 @@ function trackRequest(req: express.Request) {
 }
 
 beforeAll(async () => {
-    (global as any).EventSource = MockEventSource as any;
+    (global as any).WebSocket = MockWebSocket as any;
 
     app = express();
     app.use(express.json());
@@ -414,7 +449,7 @@ beforeAll(async () => {
     app.put('/api/v1/ai/models/:modelId/default', (_req, res) => res.json(true));
     app.get('/api/v1/hosting', (_req, res) => res.json({ email: 'test@test.com' }));
 
-    // ===================== SSE EVENTS (stub - not testing SSE) =====================
+    // ===================== WebSocket EVENTS (stub - not testing WS server) =====================
     // subscribe=false prevents client from connecting; stub avoids hanging if accidentally hit
     app.get('/api/v1/events', (_req, res) => res.status(404).end());
 
@@ -426,12 +461,12 @@ beforeAll(async () => {
 
 afterAll(() => {
     httpServer?.close();
-    (global as any).EventSource = originalEventSource;
+    (global as any).WebSocket = originalWebSocket;
 });
 
 beforeEach(() => {
     lastRequest = null;
-    MockEventSource.instances = [];
+    MockWebSocket.instances = [];
 });
 
 // ===================== AGENT TESTS =====================
@@ -537,16 +572,16 @@ describe('AgentClient', () => {
         expect(result).toEqual([]);
     });
 
-    test('agent-updated SSE event unwraps nested agent payload', async () => {
+    test('agent-updated event unwraps nested agent payload', async () => {
         const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
         const callback = jest.fn();
         freshClient.agent.addUpdatedListener(callback);
         freshClient.agent.subscribeAgentUpdated();
 
-        const eventSource = lastOf(MockEventSource.instances);
+        const ws = lastOf(MockWebSocket.instances);
 
         // Server now sends { type: "agent-updated", agent: { did, ... } }
-        eventSource.emit({
+        ws.emit({
             type: 'agent-updated',
             agent: { did: 'did:test:updated', directMessageLanguage: 'lang://dm2', perspective: null, isInitialized: true, isUnlocked: true },
         });
@@ -555,19 +590,19 @@ describe('AgentClient', () => {
         const received = callback.mock.calls[0][0];
         expect(received.did).toBe('did:test:updated');
         expect(received.directMessageLanguage).toBe('lang://dm2');
-        // The type field from the SSE envelope must NOT leak into the agent object
+        // The type field from the event envelope must NOT leak into the agent object
         expect(received).not.toHaveProperty('type');
     });
 
-    test('agent-status-changed SSE event unwraps nested agent payload', async () => {
+    test('agent-status-changed event unwraps nested agent payload', async () => {
         const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
         const callback = jest.fn();
         freshClient.agent.addAgentStatusChangedListener(callback);
         freshClient.agent.subscribeAgentStatusChanged();
 
-        const eventSource = lastOf(MockEventSource.instances);
+        const ws = lastOf(MockWebSocket.instances);
 
-        eventSource.emit({
+        ws.emit({
             type: 'agent-status-changed',
             agent: { did: 'did:test:status', isInitialized: true, isUnlocked: false },
         });
@@ -687,28 +722,28 @@ describe('PerspectiveClient', () => {
         expect(result).toEqual([{X: 'test'}]);
     });
 
-    test('subscribeToQueryUpdates() routes through the SSE endpoint', async () => {
+    test('subscribeToQueryUpdates() routes through the WebSocket endpoint', async () => {
         const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
         const callback = jest.fn();
         const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
-        const eventSource = lastOf(MockEventSource.instances);
+        const ws = lastOf(MockWebSocket.instances);
 
-        expect(eventSource.url).toBe(`${baseUrl}/api/v1/events?token=test-token`);
+        expect(ws.url).toBe(`ws://127.0.0.1:${(httpServer.address() as any).port}/api/v1/ws/events?token=test-token`);
 
         unsubscribe();
-        expect(eventSource.closed).toBe(true);
+        expect(ws.closed).toBe(true);
     });
 
-    test('perspective lifecycle subscriptions use the SSE endpoint', async () => {
+    test('perspective lifecycle subscriptions use the WebSocket endpoint', async () => {
         const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
         freshClient.perspective.addPerspectiveAddedListener(jest.fn());
         freshClient.perspective.subscribePerspectiveAdded();
 
-        const eventSource = lastOf(MockEventSource.instances);
-        expect(eventSource.url).toBe(`${baseUrl}/api/v1/events?token=test-token`);
+        const ws = lastOf(MockWebSocket.instances);
+        expect(ws.url).toBe(`ws://127.0.0.1:${(httpServer.address() as any).port}/api/v1/ws/events?token=test-token`);
     });
 
-    test('perspective-scoped link subscriptions ignore SSE events for other perspectives', async () => {
+    test('perspective-scoped link subscriptions ignore events for other perspectives', async () => {
         const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
         const linkAddedCallback = jest.fn();
         const linkRemovedCallback = jest.fn();
@@ -718,10 +753,10 @@ describe('PerspectiveClient', () => {
         await freshClient.perspective.addPerspectiveLinkRemovedListener('uuid-1', [linkRemovedCallback]);
         await freshClient.perspective.addPerspectiveLinkUpdatedListener('uuid-1', [linkUpdatedCallback]);
 
-        const eventSource = lastOf(MockEventSource.instances);
-        expect(eventSource.url).toBe(`${baseUrl}/api/v1/events?token=test-token`);
+        const ws = lastOf(MockWebSocket.instances);
+        expect(ws.url).toBe(`ws://127.0.0.1:${(httpServer.address() as any).port}/api/v1/ws/events?token=test-token`);
 
-        eventSource.emit({
+        ws.emit({
             type: 'link-added',
             perspectiveUuid: 'uuid-2',
             link: {
@@ -731,7 +766,7 @@ describe('PerspectiveClient', () => {
                 proof: { valid: true }
             }
         });
-        eventSource.emit({
+        ws.emit({
             type: 'link-removed',
             perspectiveUuid: 'uuid-2',
             link: {
@@ -741,7 +776,7 @@ describe('PerspectiveClient', () => {
                 proof: { valid: true }
             }
         });
-        eventSource.emit({
+        ws.emit({
             type: 'link-updated',
             perspectiveUuid: 'uuid-2',
             oldLink: {
@@ -775,17 +810,17 @@ describe('PerspectiveClient', () => {
             proof: { valid: true }
         };
 
-        eventSource.emit({
+        ws.emit({
             type: 'link-added',
             perspectiveUuid: 'uuid-1',
             link: addedLink
         });
-        eventSource.emit({
+        ws.emit({
             type: 'link-removed',
             perspectiveUuid: 'uuid-1',
             link: removedLink
         });
-        eventSource.emit({
+        ws.emit({
             type: 'link-updated',
             perspectiveUuid: 'uuid-1',
             oldLink: {
@@ -807,35 +842,14 @@ describe('PerspectiveClient', () => {
         expect(linkUpdatedCallback).toHaveBeenCalledTimes(1);
     });
 
-    test('subscriptions keep using the module-native fetch even if global.fetch changes later', async () => {
-        const originalFetch = global.fetch;
-        const fakeFetch = jest.fn(async () => {
-            throw new Error('should not be used by EventSource');
-        }) as any;
-
-        global.fetch = fakeFetch;
-        try {
-            const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
-            freshClient.runtime.addExceptionCallback(jest.fn(() => null));
-            freshClient.runtime.subscribeExceptionOccurred();
-
-            const eventSource = lastOf(MockEventSource.instances);
-            expect(eventSource.url).toBe(`${baseUrl}/api/v1/events?token=test-token`);
-            expect(eventSource.init?.fetch).toBeDefined();
-            expect(eventSource.init?.fetch).not.toBe(fakeFetch);
-        } finally {
-            global.fetch = originalFetch;
-        }
-    });
-
     test('runtime exception subscriptions normalize PascalCase exception types from REST', async () => {
         const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
         const callback = jest.fn(() => null);
         freshClient.runtime.addExceptionCallback(callback);
         freshClient.runtime.subscribeExceptionOccurred();
 
-        const eventSource = lastOf(MockEventSource.instances);
-        eventSource.emit({
+        const ws = lastOf(MockWebSocket.instances);
+        ws.emit({
             type: 'exception-occurred',
             exception: {
                 title: 'Request to authenticate application',
@@ -853,17 +867,17 @@ describe('PerspectiveClient', () => {
         });
     });
 
-    test('subscribeToQueryUpdates() ignores unrelated SSE events and accepts object results', async () => {
+    test('subscribeToQueryUpdates() ignores unrelated events and accepts object results', async () => {
         const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
         const callback = jest.fn();
         const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
-        const eventSource = lastOf(MockEventSource.instances);
+        const ws = lastOf(MockWebSocket.instances);
 
-        eventSource.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-ignored' } });
-        eventSource.emit({ type: 'query-subscription-update', subscriptionId: 'sub-2', result: { ignored: true } });
+        ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-ignored' } });
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-2', result: { ignored: true } });
         expect(callback).not.toHaveBeenCalled();
 
-        eventSource.emit({
+        ws.emit({
             type: 'query-subscription-update',
             subscriptionId: 'sub-1',
             result: [{ id: 'community://1', name: 'REST Smoke Community' }],
@@ -871,7 +885,7 @@ describe('PerspectiveClient', () => {
         expect(callback).toHaveBeenCalledWith([{ id: 'community://1', name: 'REST Smoke Community' }]);
 
         unsubscribe();
-        eventSource.emit({
+        ws.emit({
             type: 'query-subscription-update',
             subscriptionId: 'sub-1',
             result: [{ id: 'community://2', name: 'Should not arrive' }],
@@ -1187,6 +1201,7 @@ describe('AIClient', () => {
     });
 
     test('removeModel() removes a model', async () => {
+
         const result = await ad4m.ai.removeModel('model-1');
         expect(result).toBe(true);
     });
