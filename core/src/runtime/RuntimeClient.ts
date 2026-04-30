@@ -55,231 +55,225 @@ export class RuntimeClient {
     }
 
     async info(): Promise<RuntimeInfo> {
-        return this.#restClient.get<RuntimeInfo>('/api/v1/runtime/info')
+        return this.#restClient.call<RuntimeInfo>('runtime.info')
     }
 
     async tlsDomain(): Promise<string | null> {
-        return this.#restClient.get<string | null>('/api/v1/runtime/tls-domain')
+        return this.#restClient.call<string | null>('runtime.tlsDomain')
     }
 
     async quit(): Promise<Boolean> {
-        return this.#restClient.post<Boolean>('/api/v1/runtime/quit')
+        return this.#restClient.call<Boolean>('runtime.quit')
     }
 
     async openLink(url: string): Promise<Boolean> {
-        return this.#restClient.post<Boolean>('/api/v1/runtime/open-link', { url })
+        return this.#restClient.call<Boolean>('runtime.openLink', { url })
     }
 
     async addTrustedAgents(agents: string[]): Promise<string[]> {
-        return this.#restClient.put<string[]>('/api/v1/agent/trusted', { agents })
+        return this.#restClient.call<string[]>('agent.addTrustedAgents', { agents })
     }
 
     async deleteTrustedAgents(agents: string[]): Promise<string[]> {
-        return this.#restClient.delete<string[]>('/api/v1/agent/trusted', { agents })
+        return this.#restClient.call<string[]>('agent.deleteTrustedAgents', { agents })
     }
 
     async getTrustedAgents(): Promise<string[]> {
-        return this.#restClient.get<string[]>('/api/v1/agent/trusted')
+        return this.#restClient.call<string[]>('agent.getTrustedAgents')
     }
 
     async addKnownLinkLanguageTemplates(addresses: string[]): Promise<string[]> {
-        return this.#restClient.put<string[]>('/api/v1/runtime/link-language-templates', { addresses })
+        return this.#restClient.call<string[]>('runtime.addLinkLanguageTemplates', { addresses })
     }
 
     async removeKnownLinkLanguageTemplates(addresses: string[]): Promise<string[]> {
-        return this.#restClient.delete<string[]>('/api/v1/runtime/link-language-templates', { addresses })
+        return this.#restClient.call<string[]>('runtime.removeLinkLanguageTemplates', { addresses })
     }
 
     async knownLinkLanguageTemplates(): Promise<string[]> {
-        return this.#restClient.get<string[]>('/api/v1/runtime/link-language-templates')
+        return this.#restClient.call<string[]>('runtime.linkLanguageTemplates')
     }
 
     async addFriends(dids: string[]): Promise<string[]> {
-        return this.#restClient.put<string[]>('/api/v1/runtime/friends', { dids })
+        return this.#restClient.call<string[]>('runtime.addFriends', { dids })
     }
 
     async removeFriends(dids: string[]): Promise<string[]> {
-        return this.#restClient.delete<string[]>('/api/v1/runtime/friends', { dids })
+        return this.#restClient.call<string[]>('runtime.removeFriends', { dids })
     }
 
     async friends(): Promise<string[]> {
-        return this.#restClient.get<string[]>('/api/v1/runtime/friends')
+        return this.#restClient.call<string[]>('runtime.friends')
     }
 
     async hcAgentInfos(): Promise<string[]> {
-        return this.#restClient.get<string[]>('/api/v1/runtime/hc/agent-infos')
+        return this.#restClient.call<string[]>('runtime.hcAgentInfos')
     }
 
     async getNetworkMetrics(): Promise<string> {
-        return this.#restClient.get<string>('/api/v1/runtime/network-metrics')
+        return this.#restClient.call<string>('runtime.networkMetrics')
     }
 
     async restartHolochain(): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/holochain/restart')
+        return this.#restClient.call<boolean>('runtime.restartHolochain')
     }
 
     async hcAddAgentInfos(agentInfos: string[]): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/hc/agent-infos', { agentInfos })
+        return this.#restClient.call<boolean>('runtime.addHcAgentInfos', { agentInfos })
     }
 
     async verifyStringSignedByDid(did: string, didSigningKeyId: string, data: string, signedData: string): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/verify-signature', { did, didSigningKeyId, data, signedData })
+        return this.#restClient.call<boolean>('runtime.verifySignature', { did, didSigningKeyId, data, signedData })
     }
 
     async setStatus(perspective: Perspective): Promise<boolean> {
-        return this.#restClient.put<boolean>('/api/v1/runtime/status', { status: perspective })
+        return this.#restClient.call<boolean>('runtime.setStatus', { status: perspective })
     }
 
     async friendStatus(did: string): Promise<PerspectiveExpression> {
-        return this.#restClient.get<PerspectiveExpression>(`/api/v1/runtime/friends/${encodeURIComponent(did)}`)
+        return this.#restClient.call<PerspectiveExpression>('runtime.friendStatus', { did })
     }
 
     async friendSendMessage(did: string, message: Perspective): Promise<boolean> {
-        return this.#restClient.post<boolean>(`/api/v1/runtime/friends/${encodeURIComponent(did)}/message`, { message })
+        return this.#restClient.call<boolean>('runtime.sendFriendMessage', { did, message })
     }
 
     async messageInbox(filter?: string): Promise<PerspectiveExpression[]> {
-        const params = filter ? `?filter=${encodeURIComponent(filter)}` : ''
-        return this.#restClient.get<PerspectiveExpression[]>(`/api/v1/runtime/messages/inbox${params}`)
+        return this.#restClient.call<PerspectiveExpression[]>('runtime.inbox', { filter })
     }
 
     async messageOutbox(filter?: string): Promise<SentMessage[]> {
-        const params = filter ? `?filter=${encodeURIComponent(filter)}` : ''
-        return this.#restClient.get<SentMessage[]>(`/api/v1/runtime/messages/outbox${params}`)
+        return this.#restClient.call<SentMessage[]>('runtime.outbox', { filter })
     }
 
     async requestInstallNotification(notification: NotificationInput) {
-        return this.#restClient.post('/api/v1/runtime/notifications', notification)
+        return this.#restClient.call('runtime.createNotification', { ...notification })
     }
 
     async grantNotification(id: string): Promise<boolean> {
-        return this.#restClient.patch<boolean>(`/api/v1/runtime/notifications/${encodeURIComponent(id)}/grant`, { granted: true })
+        return this.#restClient.call<boolean>('runtime.grantNotification', { id, granted: true })
     }
 
     async exportDb(filePath: string): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/export', { type: "db", filePath })
+        return this.#restClient.call<boolean>('runtime.exportData', { type: "db", filePath })
     }
 
     async importDb(filePath: string): Promise<ImportResult> {
-        return this.#restClient.post<ImportResult>('/api/v1/runtime/import', { type: "db", filePath })
+        return this.#restClient.call<ImportResult>('runtime.importData', { type: "db", filePath })
     }
 
     async notifications(): Promise<Notification[]> {
-        return this.#restClient.get<Notification[]>('/api/v1/runtime/notifications')
+        return this.#restClient.call<Notification[]>('runtime.notifications')
     }
 
     async updateNotification(id: string, notification: NotificationInput): Promise<boolean> {
-        return this.#restClient.patch<boolean>(`/api/v1/runtime/notifications/${encodeURIComponent(id)}`, notification)
+        return this.#restClient.call<boolean>('runtime.updateNotification', { id, ...notification })
     }
 
     async removeNotification(id: string): Promise<boolean> {
-        return this.#restClient.delete<boolean>(`/api/v1/runtime/notifications/${encodeURIComponent(id)}`)
+        return this.#restClient.call<boolean>('runtime.deleteNotification', { id })
     }
 
     async exportPerspective(uuid: string, filePath: string): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/export', { type: "perspective", perspectiveUuid: uuid, filePath })
+        return this.#restClient.call<boolean>('runtime.exportData', { type: "perspective", perspectiveUuid: uuid, filePath })
     }
 
     async importPerspective(filePath: string): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/import', { type: "perspective", filePath })
+        return this.#restClient.call<boolean>('runtime.importData', { type: "perspective", filePath })
     }
 
     async multiUserEnabled(): Promise<boolean> {
-        return this.#restClient.get<boolean>('/api/v1/users/multi-user-enabled')
+        return this.#restClient.call<boolean>('user.multiUserEnabled')
     }
 
     async setMultiUserEnabled(enabled: boolean): Promise<boolean> {
-        return this.#restClient.put<boolean>('/api/v1/users/multi-user-enabled', { enabled })
+        return this.#restClient.call<boolean>('user.setMultiUserEnabled', { enabled })
     }
 
     async freeHostingEnabled(): Promise<boolean> {
-        return this.#restClient.get<boolean>('/api/v1/runtime/free-hosting-enabled')
+        return this.#restClient.call<boolean>('runtime.freeHostingEnabled')
     }
 
     async setFreeHostingEnabled(enabled: boolean): Promise<boolean> {
-        return this.#restClient.put<boolean>('/api/v1/runtime/free-hosting-enabled', { enabled })
+        return this.#restClient.call<boolean>('runtime.setFreeHostingEnabled', { enabled })
     }
 
     async listUsers(): Promise<UserStatistics[]> {
-        return this.#restClient.get<UserStatistics[]>('/api/v1/users')
+        return this.#restClient.call<UserStatistics[]>('user.list')
     }
 
     async userWalletAddress(email: string): Promise<string | null> {
-        return this.#restClient.get<string | null>(`/api/v1/users/${encodeURIComponent(email)}/wallet`)
+        return this.#restClient.call<string | null>('user.wallet', { email })
     }
 
     async emailTestModeEnable(): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/dev/email-test', { action: 'enable' })
+        return this.#restClient.call<boolean>('user.emailTest', { action: 'enable' })
     }
 
     async emailTestModeDisable(): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/dev/email-test', { action: 'disable' })
+        return this.#restClient.call<boolean>('user.emailTest', { action: 'disable' })
     }
 
     async emailTestGetCode(email: string): Promise<string | null> {
-        return this.#restClient.post<string | null>('/api/v1/dev/email-test', { action: 'get-code', email })
+        return this.#restClient.call<string | null>('user.emailTest', { action: 'get-code', email })
     }
 
     async emailTestClearCodes(): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/dev/email-test', { action: 'clear-codes' })
+        return this.#restClient.call<boolean>('user.emailTest', { action: 'clear-codes' })
     }
 
     async emailTestSetExpiry(email: string, verificationType: string, expiresAt: number): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/dev/email-test', { action: 'set-expiry', email, verificationType, expiresAt })
+        return this.#restClient.call<boolean>('user.emailTest', { action: 'set-expiry', email, verificationType, expiresAt })
     }
 
     // ---- Unyt / mHOT methods ----
 
     async unytAgentKey(): Promise<string> {
-        return this.#restClient.get<string>('/api/v1/runtime/unyt/agent-key')
+        return this.#restClient.call<string>('runtime.unytAgentKey')
     }
 
     async unytHotAgentPubkey(): Promise<string> {
-        return this.#restClient.get<string>('/api/v1/runtime/unyt/hot-agent-pubkey')
+        return this.#restClient.call<string>('runtime.unytHotAgentPubkey')
     }
 
     async unytWalletBalance(): Promise<string> {
-        return this.#restClient.get<string>('/api/v1/runtime/unyt/wallet-balance')
+        return this.#restClient.call<string>('runtime.unytWalletBalance')
     }
 
     async unytWalletHistory(page?: number, perPage?: number): Promise<string> {
-        const params = new URLSearchParams()
-        if (page !== undefined) params.set('page', String(page))
-        if (perPage !== undefined) params.set('perPage', String(perPage))
-        const qs = params.toString()
-        return this.#restClient.get<string>(`/api/v1/runtime/unyt/wallet-history${qs ? '?' + qs : ''}`)
+        return this.#restClient.call<string>('runtime.unytWalletHistory', { page, perPage })
     }
 
     async unytVersionInfo(): Promise<string> {
-        return this.#restClient.get<string>('/api/v1/runtime/unyt/version-info')
+        return this.#restClient.call<string>('runtime.unytVersionInfo')
     }
 
     async unytSetMembraneProof(proof: string): Promise<{ success: boolean; message: string }> {
-        return this.#restClient.post<{ success: boolean; message: string }>('/api/v1/runtime/unyt/membrane-proof', { proof })
+        return this.#restClient.call<{ success: boolean; message: string }>('runtime.unytSetMembraneProof', { proof })
     }
 
     async unytReinstallDna(): Promise<{ success: boolean; message: string }> {
-        return this.#restClient.post<{ success: boolean; message: string }>('/api/v1/runtime/unyt/reinstall-dna')
+        return this.#restClient.call<{ success: boolean; message: string }>('runtime.unytReinstallDna')
     }
 
     async unytSendHot(recipient: string, amount: string): Promise<{ success: boolean; message: string }> {
-        return this.#restClient.post<{ success: boolean; message: string }>('/api/v1/runtime/unyt/send-hot', { recipient, amount })
+        return this.#restClient.call<{ success: boolean; message: string }>('runtime.unytSendHot', { recipient, amount })
     }
 
     async setUserCredits(email: string, amount: number): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/users/credits', { email, amount })
+        return this.#restClient.call<boolean>('user.credits', { email, amount })
     }
 
     async setUserFreeAccess(email: string, enabled: boolean): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/users/free-access', { email, enabled })
+        return this.#restClient.call<boolean>('user.freeAccess', { email, enabled })
     }
 
     async setHostRates(ratesJson: string): Promise<boolean> {
-        return this.#restClient.put<boolean>('/api/v1/runtime/host-rates', { ratesJson })
+        return this.#restClient.call<boolean>('runtime.setHostRates', { ratesJson })
     }
 
     async getHostRates(): Promise<{ description: string; priceInHOT: number }[]> {
-        const result = await this.#restClient.get<string>('/api/v1/runtime/host-rates')
+        const result = await this.#restClient.call<string>('runtime.getHostRates')
         try {
             return JSON.parse(result)
         } catch {

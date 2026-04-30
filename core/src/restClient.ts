@@ -4,32 +4,23 @@ export interface SseEvent {
     [key: string]: unknown
 }
 
-/** Error thrown by RestClient when an HTTP request fails. */
+/** Error thrown by RestClient when an RPC call fails. */
 export class RestError extends Error {
-    /** HTTP status code (e.g. 401, 500). */
+    /** Error code (maps to HTTP status semantics: 400, 401, 403, 404, 500). */
     readonly status: number
-    /** Raw response body text. */
+    /** Raw error message from server. */
     readonly body: string
 
     constructor(status: number, body: string) {
-        super(`HTTP ${status}: ${body}`)
+        super(`RPC error ${status}: ${body}`)
         this.name = 'RestError'
         this.status = status
         this.body = body
     }
 }
 
-/** Default request timeout in milliseconds (30 seconds). */
+/** Default RPC call timeout in milliseconds (30 seconds). */
 const DEFAULT_TIMEOUT_MS = 30_000
-
-/** HTTP status codes that are safe to retry (transient server errors). */
-const RETRYABLE_STATUS = new Set([502, 503, 504])
-
-/** Maximum number of automatic retries for transient failures. */
-const MAX_RETRIES = 2
-
-/** Base delay in ms between retries (doubles each attempt). */
-const RETRY_BASE_DELAY_MS = 500
 
 /** Maximum reconnect delay in ms. */
 const MAX_RECONNECT_DELAY_MS = 30_000
@@ -37,95 +28,52 @@ const MAX_RECONNECT_DELAY_MS = 30_000
 /** Initial reconnect delay in ms. */
 const INITIAL_RECONNECT_DELAY_MS = 500
 
-export class RestClient {
-    constructor(private baseUrl: string, private token?: string) {}
+/** Counter for generating unique request IDs. */
+let _idCounter = 0
+function nextId(): string {
+    return String(++_idCounter)
+}
 
-    getBaseUrl(): string { return this.baseUrl; }
-    getToken(): string | undefined { return this.token; }
+interface PendingCall {
+    resolve: (value: unknown) => void
+    reject: (reason: unknown) => void
+    timer: ReturnType<typeof setTimeout>
+}
+
+export class RestClient {
+    private baseUrl: string
+    private token?: string
+
+    constructor(baseUrl: string, token?: string) {
+        this.baseUrl = baseUrl
+        this.token = token
+    }
+
+    getBaseUrl(): string { return this.baseUrl }
+    getToken(): string | undefined { return this.token }
 
     setToken(token: string) {
         this.token = token
     }
 
-    private headers(): Record<string, string> {
-        const h: Record<string, string> = { 'Content-Type': 'application/json' }
-        if (this.token) h['Authorization'] = `Bearer ${this.token}`
-        return h
-    }
-
-    private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
-        let lastError: unknown
-        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-            const controller = new AbortController()
-            const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
-            try {
-                const res = await fetch(url, { ...init, signal: controller.signal })
-                clearTimeout(timeoutId)
-                if (res.ok || !RETRYABLE_STATUS.has(res.status) || attempt === MAX_RETRIES) {
-                    return res
-                }
-                lastError = new RestError(res.status, await res.text())
-            } catch (err: unknown) {
-                clearTimeout(timeoutId)
-                // Don't retry non-transient fetch errors (e.g. AbortError from timeout)
-                if (attempt === MAX_RETRIES) throw err
-                lastError = err
-            }
-            await new Promise(r => setTimeout(r, RETRY_BASE_DELAY_MS * Math.pow(2, attempt)))
-        }
-        throw lastError
-    }
-
-    private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-        const res = await this.fetchWithRetry(`${this.baseUrl}${path}`, {
-            method,
-            headers: this.headers(),
-            body: body !== undefined ? JSON.stringify(body) : undefined,
-        })
-        if (!res.ok) throw new RestError(res.status, await res.text())
-        const text = await res.text()
-        if (!text) return undefined as T
-        return JSON.parse(text) as T
-    }
-
-    async get<T>(path: string): Promise<T> {
-        return this.request<T>('GET', path)
-    }
-
-    async post<T>(path: string, body?: unknown): Promise<T> {
-        return this.request<T>('POST', path, body)
-    }
-
-    async put<T>(path: string, body?: unknown): Promise<T> {
-        return this.request<T>('PUT', path, body)
-    }
-
-    async patch<T>(path: string, body?: unknown): Promise<T> {
-        return this.request<T>('PATCH', path, body)
-    }
-
-    async delete<T>(path: string, body?: unknown): Promise<T> {
-        return this.request<T>('DELETE', path, body)
-    }
-
-    // ── WebSocket-based event subscription ──────────────────────────────────
+    // ── WebSocket RPC core ──────────────────────────────────────────────────
 
     private _ws: WebSocket | null = null
     private _wsCallbacks = new Set<(data: unknown) => void>()
+    private _pendingCalls = new Map<string, PendingCall>()
     private _wsReady: Promise<void> | null = null
     private _wsReadyResolve: (() => void) | null = null
     private _wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
     private _wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
-    private _wsClosed = false   // true when closeAll() is called explicitly
+    private _wsClosed = false
     private _wsPingTimer: ReturnType<typeof setInterval> | null = null
 
     private _getWsUrl(): string {
-        // Convert http(s):// to ws(s)://
         const wsBase = this.baseUrl
             .replace(/^http:\/\//, 'ws://')
             .replace(/^https:\/\//, 'wss://')
         const tokenParam = this.token ? `token=${encodeURIComponent(this.token)}` : ''
-        const path = '/api/v1/ws/events'
+        const path = '/api/v1/ws'
         return tokenParam ? `${wsBase}${path}?${tokenParam}` : `${wsBase}${path}`
     }
 
@@ -136,7 +84,6 @@ export class RestClient {
 
         this._wsClosed = false
 
-        // Create readiness promise
         this._wsReady = new Promise<void>((resolve) => {
             this._wsReadyResolve = resolve
         })
@@ -151,7 +98,6 @@ export class RestClient {
                 this._wsReadyResolve()
                 this._wsReadyResolve = null
             }
-            // Start application-level ping to detect stale connections
             this._startPing()
         }
 
@@ -161,8 +107,27 @@ export class RestClient {
                 console.error('Error parsing WebSocket data:', e)
                 return
             }
-            // Ignore pong messages from the server
+
+            // Ignore pong messages
             if (parsed.type === 'pong') return
+
+            // Check if this is a response to a pending RPC call (has an id field)
+            const id = parsed.id as string | undefined
+            if (id && this._pendingCalls.has(id)) {
+                const pending = this._pendingCalls.get(id)!
+                this._pendingCalls.delete(id)
+                clearTimeout(pending.timer)
+
+                if (parsed.error) {
+                    const err = parsed.error as { code?: number; message?: string }
+                    pending.reject(new RestError(err.code ?? 500, err.message ?? 'Unknown error'))
+                } else {
+                    pending.resolve(parsed.result)
+                }
+                return
+            }
+
+            // Server-push event (no id, or id not in pending) → route to subscribers
             for (const cb of this._wsCallbacks) cb(parsed)
         }
 
@@ -173,8 +138,17 @@ export class RestClient {
         ws.onclose = () => {
             this._stopPing()
             this._ws = null
-            if (!this._wsClosed && this._wsCallbacks.size > 0) {
-                // Auto-reconnect with exponential backoff
+            // Reset the readiness promise so future calls reconnect
+            this._wsReady = null
+
+            // Reject all pending calls
+            for (const [id, pending] of this._pendingCalls) {
+                clearTimeout(pending.timer)
+                pending.reject(new RestError(503, 'WebSocket connection closed'))
+            }
+            this._pendingCalls.clear()
+
+            if (!this._wsClosed && (this._wsCallbacks.size > 0 || this._pendingCalls.size > 0)) {
                 this._scheduleReconnect()
             }
         }
@@ -182,7 +156,6 @@ export class RestClient {
 
     private _startPing(): void {
         this._stopPing()
-        // Send application-level ping every 30s to detect dead connections
         this._wsPingTimer = setInterval(() => {
             if (this._ws && this._ws.readyState === WebSocket.OPEN) {
                 this._ws.send(JSON.stringify({ type: 'ping' }))
@@ -203,11 +176,55 @@ export class RestClient {
         this._wsReconnectDelay = Math.min(this._wsReconnectDelay * 2, MAX_RECONNECT_DELAY_MS)
         this._wsReconnectTimer = setTimeout(() => {
             this._wsReconnectTimer = null
-            if (!this._wsClosed && this._wsCallbacks.size > 0) {
+            if (!this._wsClosed) {
                 this._ensureWs()
             }
         }, delay)
     }
+
+    /** Ensure WS is connected and ready. Lazy — connects on first use. */
+    private async _ready(): Promise<void> {
+        this._ensureWs()
+        if (this._wsReady) await this._wsReady
+    }
+
+    // ── RPC call method ─────────────────────────────────────────────────────
+
+    /**
+     * Send an RPC call over the WebSocket connection.
+     * @param type - The operation type (e.g. 'agent.get', 'perspective.all')
+     * @param params - Optional parameters to include in the message
+     * @returns Promise that resolves with the result from the server
+     */
+    async call<T>(type: string, params?: Record<string, unknown>): Promise<T> {
+        await this._ready()
+
+        const id = nextId()
+        const message: Record<string, unknown> = { id, type, ...params }
+
+        return new Promise<T>((resolve, reject) => {
+            const timer = setTimeout(() => {
+                this._pendingCalls.delete(id)
+                reject(new RestError(408, `RPC call '${type}' timed out after ${DEFAULT_TIMEOUT_MS}ms`))
+            }, DEFAULT_TIMEOUT_MS)
+
+            this._pendingCalls.set(id, {
+                resolve: resolve as (value: unknown) => void,
+                reject,
+                timer,
+            })
+
+            if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+                this._ws.send(JSON.stringify(message))
+            } else {
+                this._pendingCalls.delete(id)
+                clearTimeout(timer)
+                reject(new RestError(503, 'WebSocket not connected'))
+            }
+        })
+    }
+
+    // ── Event subscriptions (same interface as before) ──────────────────────
 
     subscribe<T = SseEvent>(path: string, callback: (data: T) => void): () => void {
         this._wsCallbacks.add(callback as (data: unknown) => void)
@@ -215,7 +232,7 @@ export class RestClient {
 
         return () => {
             this._wsCallbacks.delete(callback as (data: unknown) => void)
-            if (this._wsCallbacks.size === 0) {
+            if (this._wsCallbacks.size === 0 && this._pendingCalls.size === 0) {
                 this._closeWs()
             }
         }
@@ -223,7 +240,14 @@ export class RestClient {
 
     /** Wait until the WebSocket connection is established. */
     async waitForSubscription(path: string): Promise<void> {
-        if (this._wsReady) await this._wsReady
+        await this._ready()
+    }
+
+    // ── Explicit connection ─────────────────────────────────────────────────
+
+    /** Explicitly connect the WebSocket (optional — connection is lazy). */
+    connect(): void {
+        this._ensureWs()
     }
 
     private _closeWs(): void {
@@ -239,8 +263,14 @@ export class RestClient {
         }
     }
 
-    /** Close all open WebSocket connections */
+    /** Close all open WebSocket connections and reject pending calls. */
     closeAll(): void {
+        // Reject pending calls
+        for (const [id, pending] of this._pendingCalls) {
+            clearTimeout(pending.timer)
+            pending.reject(new RestError(503, 'Client closed'))
+        }
+        this._pendingCalls.clear()
         this._closeWs()
         this._wsCallbacks.clear()
     }

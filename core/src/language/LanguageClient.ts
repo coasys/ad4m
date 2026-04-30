@@ -12,38 +12,38 @@ export class LanguageClient {
     }
 
     async byAddress(address: string): Promise<LanguageHandle> {
-        return this.#restClient.get<LanguageHandle>(`/api/v1/languages/${encodeURIComponent(address)}`)
+        return this.#restClient.call<LanguageHandle>('language.get', { address })
     }
 
     async byFilter(filter: string): Promise<LanguageHandle[]> {
-        return this.#restClient.get<LanguageHandle[]>(`/api/v1/languages?filter=${encodeURIComponent(filter)}`)
+        return this.#restClient.call<LanguageHandle[]>('language.all', { filter })
     }
 
     async all(): Promise<LanguageHandle[]> {
-        return this.#restClient.get<LanguageHandle[]>('/api/v1/languages')
+        return this.#restClient.call<LanguageHandle[]>('language.all')
     }
 
     async writeSettings(languageAddress: string, settings: string): Promise<Boolean> {
-        return this.#restClient.put<Boolean>(`/api/v1/languages/${encodeURIComponent(languageAddress)}/settings`, { settings })
+        return this.#restClient.call<Boolean>('language.writeSettings', { address: languageAddress, settings })
     }
 
     async applyTemplateAndPublish(sourceLanguageHash: string, templateData: string): Promise<LanguageRef> {
-        return this.#restClient.post<LanguageRef>('/api/v1/languages/apply-template', { sourceLanguageHash, templateData })
+        return this.#restClient.call<LanguageRef>('language.applyTemplate', { sourceLanguageHash, templateData })
     }
 
     async publish(languagePath: string, languageMeta: LanguageMetaInput): Promise<LanguageMeta> {
-        return this.#restClient.post<LanguageMeta>('/api/v1/languages/publish', { languagePath, languageMeta })
+        return this.#restClient.call<LanguageMeta>('language.publish', { languagePath, languageMeta })
     }
 
     async meta(address: string): Promise<LanguageMeta> {
-        return this.#restClient.get<LanguageMeta>(`/api/v1/languages/${encodeURIComponent(address)}/meta`)
+        return this.#restClient.call<LanguageMeta>('language.meta', { address })
     }
 
     async source(address: string): Promise<string> {
-        return this.#restClient.get<string>(`/api/v1/languages/${encodeURIComponent(address)}/source`)
+        return this.#restClient.call<string>('language.source', { address })
     }
 
     async remove(address: string): Promise<Boolean> {
-        return this.#restClient.delete<Boolean>(`/api/v1/languages/${encodeURIComponent(address)}`)
+        return this.#restClient.call<Boolean>('language.remove', { address })
     }
 }

@@ -67,42 +67,39 @@ export class AgentClient {
   }
 
   async me(): Promise<Agent> {
-    const agent = await this.#restClient.get<Agent>('/api/v1/agent');
+    const agent = await this.#restClient.call<Agent>('agent.get');
     let agentObject = new Agent(agent.did, agent.perspective);
     agentObject.directMessageLanguage = agent.directMessageLanguage;
     return agentObject;
   }
 
   async status(): Promise<AgentStatus> {
-    const agentStatus = await this.#restClient.get<AgentStatus>('/api/v1/agent/status');
+    const agentStatus = await this.#restClient.call<AgentStatus>('agent.status');
     return new AgentStatus(agentStatus);
   }
 
   async generate(passphrase: string): Promise<AgentStatus> {
-    const body: GenerateAgentRequest = { passphrase };
-    const result = await this.#restClient.post<AgentStatus>('/api/v1/agent/generate', body);
+    const result = await this.#restClient.call<AgentStatus>('agent.generate', { passphrase });
     return new AgentStatus(result);
   }
 
   async import(args: InitializeArgs): Promise<AgentStatus> {
-    const result = await this.#restClient.post<AgentStatus>('/api/v1/agent/import', args);
+    const result = await this.#restClient.call<AgentStatus>('agent.import', { ...args });
     return new AgentStatus(result);
   }
 
   async lock(passphrase: string): Promise<AgentStatus> {
-    const body: LockAgentRequest = { passphrase };
-    const result = await this.#restClient.post<AgentStatus>('/api/v1/agent/lock', body);
+    const result = await this.#restClient.call<AgentStatus>('agent.lock', { passphrase });
     return new AgentStatus(result);
   }
 
   async unlock(passphrase: string, holochain = true): Promise<AgentStatus> {
-    const body: UnlockAgentRequest = { passphrase, holochain };
-    const result = await this.#restClient.post<AgentStatus>('/api/v1/agent/unlock', body);
+    const result = await this.#restClient.call<AgentStatus>('agent.unlock', { passphrase, holochain });
     return new AgentStatus(result);
   }
 
   async byDID(did: string): Promise<Agent> {
-    return this.#restClient.get<Agent>(`/api/v1/agent/by-did/${encodeURIComponent(did)}`);
+    return this.#restClient.call<Agent>('agent.byDid', { did });
   }
 
   async updatePublicPerspective(perspective: PerspectiveInput): Promise<Agent> {
@@ -115,7 +112,7 @@ export class AgentClient {
       delete link.status;
     });
 
-    const a = await this.#restClient.patch<Agent>('/api/v1/agent/profile', { publicPerspective: cleanedPerspective });
+    const a = await this.#restClient.call<Agent>('agent.updateProfile', { publicPerspective: cleanedPerspective });
     const agent = new Agent(a.did, a.perspective);
     agent.directMessageLanguage = a.directMessageLanguage;
     return agent;
@@ -145,26 +142,26 @@ export class AgentClient {
   }
 
   async updateDirectMessageLanguage(directMessageLanguage: string): Promise<Agent> {
-    const a = await this.#restClient.patch<Agent>('/api/v1/agent/profile', { dmLanguage: directMessageLanguage });
+    const a = await this.#restClient.call<Agent>('agent.updateProfile', { dmLanguage: directMessageLanguage });
     const agent = new Agent(a.did, a.perspective);
     agent.directMessageLanguage = a.directMessageLanguage;
     return agent;
   }
 
   async addEntanglementProofs(proofs: EntanglementProofInput[]): Promise<EntanglementProof[]> {
-    return this.#restClient.post<EntanglementProof[]>('/api/v1/agent/entanglement-proofs', { proofs });
+    return this.#restClient.call<EntanglementProof[]>('agent.addEntanglementProofs', { proofs });
   }
 
   async deleteEntanglementProofs(proofs: EntanglementProofInput[]): Promise<EntanglementProof[]> {
-    return this.#restClient.delete<EntanglementProof[]>('/api/v1/agent/entanglement-proofs', { proofs });
+    return this.#restClient.call<EntanglementProof[]>('agent.deleteEntanglementProofs', { proofs });
   }
 
   async getEntanglementProofs(): Promise<string[]> {
-    return this.#restClient.get<string[]>('/api/v1/agent/entanglement-proofs');
+    return this.#restClient.call<string[]>('agent.getEntanglementProofs');
   }
 
   async entanglementProofPreFlight(deviceKey: string, deviceKeyType: string): Promise<EntanglementProof> {
-    return this.#restClient.post<EntanglementProof>('/api/v1/agent/entanglement-proof-preflight', { deviceKey, deviceKeyType });
+    return this.#restClient.call<EntanglementProof>('agent.entanglementProofPreflight', { deviceKey, deviceKeyType });
   }
 
   addUpdatedListener(listener: AgentUpdatedCallback) {
@@ -233,60 +230,57 @@ export class AgentClient {
   }
 
   async requestCapability(authInfo: AuthInfoInput): Promise<string> {
-    return this.#restClient.post<string>('/api/v1/agent/auth/request', { authInfo });
+    return this.#restClient.call<string>('agent.requestCapability', { authInfo });
   }
 
   async permitCapability(auth: string): Promise<string> {
-    const body: PermitCapabilityRequest = { auth };
-    return this.#restClient.post<string>('/api/v1/agent/auth/permit', body);
+    return this.#restClient.call<string>('agent.permitCapability', { auth });
   }
 
   async generateJwt(requestId: string, rand: string): Promise<string> {
-    const body: GenerateJwtRequest = { requestId, rand };
-    return this.#restClient.post<string>('/api/v1/agent/auth/jwt', body);
+    return this.#restClient.call<string>('agent.generateJwt', { requestId, rand });
   }
 
   async getApps(): Promise<Apps[]> {
-    return this.#restClient.get<Apps[]>('/api/v1/agent/apps');
+    return this.#restClient.call<Apps[]>('agent.getApps');
   }
 
   async removeApp(requestId: string): Promise<Apps[]> {
-    return this.#restClient.delete<Apps[]>(`/api/v1/agent/apps/${encodeURIComponent(requestId)}`);
+    return this.#restClient.call<Apps[]>('agent.removeApp', { id: requestId });
   }
 
   async revokeToken(requestId: string): Promise<Apps[]> {
-    return this.#restClient.delete<Apps[]>(`/api/v1/agent/auth/token/${encodeURIComponent(requestId)}`);
+    return this.#restClient.call<Apps[]>('agent.revokeToken', { token: requestId });
   }
 
   async isLocked(): Promise<boolean> {
-    return this.#restClient.get<boolean>('/api/v1/agent/is-locked');
+    return this.#restClient.call<boolean>('agent.isLocked');
   }
 
   async signMessage(message: string): Promise<string> {
-    const body: SignMessageRequest = { message };
-    return this.#restClient.post<string>('/api/v1/agent/sign', body);
+    return this.#restClient.call<string>('agent.sign', { message });
   }
 
   // Multi-user methods
   async createUser(email: string, password: string, appInfo?: AuthInfoInput): Promise<UserCreationResult> {
-    return this.#restClient.post<UserCreationResult>('/api/v1/users', { email, password, appInfo });
+    return this.#restClient.call<UserCreationResult>('user.create', { email, password, appInfo });
   }
 
   async loginUser(email: string, password: string): Promise<string> {
-    return this.#restClient.post<string>('/api/v1/users/login', { email, password });
+    return this.#restClient.call<string>('user.login', { email, password });
   }
 
   async requestLoginVerification(email: string, appInfo?: AuthInfoInput): Promise<VerificationRequestResult> {
-    return this.#restClient.post<VerificationRequestResult>('/api/v1/users/request-verification', { email, appInfo });
+    return this.#restClient.call<VerificationRequestResult>('user.requestVerification', { email, appInfo });
   }
 
   async verifyEmailCode(email: string, code: string, verificationType: string): Promise<string> {
-    return this.#restClient.post<string>('/api/v1/users/verify-email', { email, code, verificationType });
+    return this.#restClient.call<string>('user.verifyEmail', { email, code, verificationType });
   }
 
   // Hosting methods
   async hostingUserInfo(): Promise<HostingUserInfo> {
-    const resp = await this.#restClient.get<any>('/api/v1/hosting');
+    const resp = await this.#restClient.call<any>('hosting.info');
     const info = resp?.userInfo || resp;
     return new HostingUserInfo(
       info.email || '',
@@ -297,19 +291,14 @@ export class AgentClient {
   }
 
   async computeLog(since?: string, limit?: number, userEmail?: string): Promise<ComputeLogEntry[]> {
-    const params = new URLSearchParams();
-    if (since) params.set('since', since);
-    if (limit !== undefined) params.set('limit', String(limit));
-    if (userEmail) params.set('userEmail', userEmail);
-    const query = params.toString();
-    return this.#restClient.get<ComputeLogEntry[]>(`/api/v1/runtime/compute-log${query ? '?' + query : ''}`);
+    return this.#restClient.call<ComputeLogEntry[]>('runtime.computeLog', { since, limit, userEmail });
   }
 
   async setHotWalletAddress(address: string): Promise<boolean> {
-    return this.#restClient.put<boolean>('/api/v1/hosting/wallet/hot-wallet-address', { address });
+    return this.#restClient.call<boolean>('hosting.setHotWallet', { address });
   }
 
   async requestPayment(amountHOT: string): Promise<PaymentRequestResult> {
-    return this.#restClient.post<PaymentRequestResult>('/api/v1/hosting/request-payment', { amountHOT });
+    return this.#restClient.call<PaymentRequestResult>('hosting.requestPayment', { amountHOT });
   }
 }

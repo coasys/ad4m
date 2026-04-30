@@ -23,44 +23,45 @@ export class AIClient {
     }
 
     async getModels(): Promise<Model[]> {
-        return this.#restClient.get<Model[]>('/api/v1/ai/models');
+        return this.#restClient.call<Model[]>('ai.models');
     }
 
     async addModel(model: ModelInput): Promise<string> {
-        return this.#restClient.post<string>('/api/v1/ai/models', { model: this.serializeModelInput(model) });
+        return this.#restClient.call<string>('ai.addModel', { model: this.serializeModelInput(model) });
     }
 
     async updateModel(modelId: string, model: ModelInput): Promise<boolean> {
-        return this.#restClient.put<boolean>(`/api/v1/ai/models/${encodeURIComponent(modelId)}`, { model: this.serializeModelInput(model) });
+        return this.#restClient.call<boolean>('ai.updateModel', { id: modelId, model: this.serializeModelInput(model) });
     }
 
     async removeModel(modelId: string): Promise<boolean> {
-        return this.#restClient.delete<boolean>(`/api/v1/ai/models/${encodeURIComponent(modelId)}`);
+        return this.#restClient.call<boolean>('ai.removeModel', { id: modelId });
     }
 
     async setDefaultModel(modelType: ModelType, modelId: string): Promise<boolean> {
-        return this.#restClient.put<boolean>(`/api/v1/ai/models/${encodeURIComponent(modelId)}/default`, { modelType });
+        return this.#restClient.call<boolean>('ai.setDefaultModel', { id: modelId, modelType });
     }
 
     async getDefaultModel(modelType: ModelType): Promise<Model> {
-        return this.#restClient.get<Model>(`/api/v1/ai/models/default?modelType=${encodeURIComponent(modelType)}`);
+        return this.#restClient.call<Model>('ai.getDefaultModel', { modelType });
     }
 
     async tasks(): Promise<AITask[]> {
-        return this.#restClient.get<AITask[]>('/api/v1/ai/tasks');
+        return this.#restClient.call<AITask[]>('ai.tasks');
     }
 
     async addTask(name: string, modelId: string, systemPrompt: string, promptExamples: { input: string, output: string }[], metaData?: string): Promise<AITask> {
         const task = new AITaskInput(name, modelId, systemPrompt, promptExamples, metaData);
-        return this.#restClient.post<AITask>('/api/v1/ai/tasks', { task });
+        return this.#restClient.call<AITask>('ai.addTask', { task });
     }
 
     async removeTask(taskId: string): Promise<AITask> {
-        return this.#restClient.delete<AITask>(`/api/v1/ai/tasks/${encodeURIComponent(taskId)}`);
+        return this.#restClient.call<AITask>('ai.removeTask', { id: taskId });
     }
 
     async updateTask(taskId: string, task: AITask): Promise<AITask> {
-        return this.#restClient.put<AITask>(`/api/v1/ai/tasks/${encodeURIComponent(taskId)}`, {
+        return this.#restClient.call<AITask>('ai.updateTask', {
+            id: taskId,
             task: {
                 name: task.name,
                 modelId: task.modelId,
@@ -71,15 +72,15 @@ export class AIClient {
     }
 
     async modelLoadingStatus(model: string): Promise<AIModelLoadingStatus> {
-        return this.#restClient.get<AIModelLoadingStatus>(`/api/v1/ai/model-loading-status?model=${encodeURIComponent(model)}`);
+        return this.#restClient.call<AIModelLoadingStatus>('ai.modelLoadingStatus', { model });
     }
 
     async prompt(taskId: string, prompt: string): Promise<string> {
-        return this.#restClient.post<string>('/api/v1/ai/prompt', { taskId, prompt });
+        return this.#restClient.call<string>('ai.prompt', { taskId, prompt });
     }
 
     async embed(modelId: string, text: string): Promise<Array<number>> {
-        const aiEmbed = await this.#restClient.post<string>('/api/v1/ai/embed', { modelId, text });
+        const aiEmbed = await this.#restClient.call<string>('ai.embed', { modelId, text });
 
         const compressed = base64js.toByteArray(aiEmbed);
         const decompressed = JSON.parse(pako.inflate(compressed, { to: 'string' }));
@@ -98,7 +99,7 @@ export class AIClient {
             timeBeforeSpeech?: number;
         }
     ): Promise<string> {
-        const streamId = await this.#restClient.post<string>('/api/v1/ai/transcription/open', { modelId, params });
+        const streamId = await this.#restClient.call<string>('ai.transcriptionOpen', { modelId, params });
 
         const unsub = this.#restClient.subscribe(
             '/api/v1/events',
@@ -116,7 +117,7 @@ export class AIClient {
 
     async closeTranscriptionStream(streamId: string): Promise<void> {
         this.#pendingStreamIds.delete(streamId);
-        await this.#restClient.post<void>('/api/v1/ai/transcription/close', { streamId });
+        await this.#restClient.call<void>('ai.transcriptionClose', { streamId });
 
         const unsub = this.#transcriptionUnsubscribers.get(streamId);
         if (unsub) {
@@ -130,8 +131,9 @@ export class AIClient {
     /**
      * Feed an audio utterance to one or more transcription streams.
      * Sends raw binary Float32Array as application/octet-stream.
-     * Transcription results are delivered via the SSE channel registered
-     * in openTranscriptionStream (/events).
+     * NOTE: This method still uses HTTP fetch because binary audio data
+     * cannot be efficiently sent over the JSON-based WebSocket RPC protocol.
+     * Transcription results are delivered via the WS event channel.
      */
     async feedTranscriptionStream(streamIds: string | string[], audio: Float32Array | number[]): Promise<void> {
         const ids = Array.isArray(streamIds) ? streamIds : [streamIds];

@@ -103,13 +103,13 @@ export class PerspectiveClient {
     }
 
     async all(): Promise<PerspectiveProxy[]> {
-        const perspectives = await this.#restClient.get<PerspectiveHandle[]>('/api/v1/perspectives')
+        const perspectives = await this.#restClient.call<PerspectiveHandle[]>('perspective.all')
         return perspectives.map(handle => new PerspectiveProxy(handle, this))
     }
 
     async byUUID(uuid: string): Promise<PerspectiveProxy|null> {
         try {
-            const perspective = await this.#restClient.get<PerspectiveHandle>(`/api/v1/perspectives/${encodeURIComponent(uuid)}`)
+            const perspective = await this.#restClient.call<PerspectiveHandle>('perspective.get', { uuid })
             if(!perspective) return null
             return new PerspectiveProxy(perspective, this)
         } catch(e) {
@@ -118,42 +118,42 @@ export class PerspectiveClient {
     }
 
     async snapshotByUUID(uuid: string): Promise<Perspective|null> {
-        return this.#restClient.get<Perspective|null>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/snapshot`)
+        return this.#restClient.call<Perspective|null>('perspective.snapshot', { uuid })
     }
 
     async publishSnapshotByUUID(uuid: string): Promise<string|null> {
-        return this.#restClient.post<string|null>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/publish-snapshot`)
+        return this.#restClient.call<string|null>('perspective.publishSnapshot', { uuid })
     }
 
     async queryLinks(uuid: string, query: LinkQuery): Promise<LinkExpression[]> {
-        const params = new URLSearchParams()
-        if (query.source) params.set('source', query.source)
-        if (query.predicate) params.set('predicate', query.predicate)
-        if (query.target) params.set('target', query.target)
-        if (query.fromDate) params.set('fromDate', query.fromDate instanceof Date ? query.fromDate.toISOString() : String(query.fromDate))
-        if (query.untilDate) params.set('untilDate', query.untilDate instanceof Date ? query.untilDate.toISOString() : String(query.untilDate))
-        if (query.limit !== undefined) params.set('limit', String(query.limit))
-        return this.#restClient.get<LinkExpression[]>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/links?${params.toString()}`)
+        const params: Record<string, unknown> = { uuid }
+        if (query.source) params.source = query.source
+        if (query.predicate) params.predicate = query.predicate
+        if (query.target) params.target = query.target
+        if (query.fromDate) params.fromDate = query.fromDate instanceof Date ? query.fromDate.toISOString() : String(query.fromDate)
+        if (query.untilDate) params.untilDate = query.untilDate instanceof Date ? query.untilDate.toISOString() : String(query.untilDate)
+        if (query.limit !== undefined) params.limit = query.limit
+        return this.#restClient.call<LinkExpression[]>('perspective.queryLinks', params)
     }
 
     async queryProlog(uuid: string, query: string): Promise<unknown> {
-        const result = await this.#restClient.post<string>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/query`, { engine: 'prolog', query })
+        const result = await this.#restClient.call<string>('perspective.queryProlog', { uuid, query })
         return JSON.parse(result)
     }
 
     async querySparql(uuid: string, query: string): Promise<unknown> {
-        const result = await this.#restClient.post<string>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/query`, { engine: 'sparql', query })
+        const result = await this.#restClient.call<string>('perspective.querySparql', { uuid, engine: 'sparql', query })
         return JSON.parse(result)
     }
 
     async querySurrealDB(uuid: string, query: string): Promise<unknown> {
-        const result = await this.#restClient.post<string>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/query`, { engine: 'surreal', query })
+        const result = await this.#restClient.call<string>('perspective.querySparql', { uuid, engine: 'surreal', query })
         return JSON.parse(result)
     }
 
     async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
-        const response = await this.#restClient.post<{ subscriptionId: string, result: unknown }>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/subscribe-query`, { query }
+        const response = await this.#restClient.call<{ subscriptionId: string, result: unknown }>(
+            'perspective.subscribeQuery', { uuid, query }
         )
         const { subscriptionId, result } = response
         const normalized = normalizeQueryResult(result, 'Error parsing subscribeQuery result:')
@@ -161,8 +161,8 @@ export class PerspectiveClient {
     }
 
     async perspectiveSubscribeSurrealQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
-        const response = await this.#restClient.post<{ subscriptionId: string, result: string }>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/subscribe-surreal-query`, { query }
+        const response = await this.#restClient.call<{ subscriptionId: string, result: string }>(
+            'perspective.subscribeQuery', { uuid, query, engine: 'surreal' }
         )
         const { subscriptionId, result } = response
         let finalResult: unknown = result
@@ -180,16 +180,14 @@ export class PerspectiveClient {
     }
 
     async perspectiveKeepAliveSurrealQuery(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#restClient.post<boolean>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/keep-alive-surreal-query`,
-            { subscriptionId }
+        return this.#restClient.call<boolean>(
+            'perspective.keepAliveQuery', { uuid, subscriptionId }
         )
     }
 
     async perspectiveDisposeSurrealQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#restClient.post<boolean>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/dispose-surreal-query-subscription`,
-            { subscriptionId }
+        return this.#restClient.call<boolean>(
+            'perspective.disposeQuery', { uuid, subscriptionId }
         )
     }
 
@@ -212,9 +210,8 @@ export class PerspectiveClient {
     }
 
     async keepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#restClient.post<boolean>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/keep-alive-query`,
-            { subscriptionId }
+        return this.#restClient.call<boolean>(
+            'perspective.keepAliveQuery', { uuid, subscriptionId }
         )
     }
 
@@ -224,70 +221,59 @@ export class PerspectiveClient {
             unsub()
             this.#querySubscriptionUnsubscribers.delete(subscriptionId)
         }
-        return this.#restClient.post<boolean>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/dispose-query-subscription`,
-            { subscriptionId }
+        return this.#restClient.call<boolean>(
+            'perspective.disposeQuery', { uuid, subscriptionId }
         )
     }
 
     async add(name: string): Promise<PerspectiveProxy> {
-        const body: CreatePerspectiveRequest = { name }
-        const handle = await this.#restClient.post<PerspectiveHandle>('/api/v1/perspectives', body)
+        const handle = await this.#restClient.call<PerspectiveHandle>('perspective.create', { name })
         return new PerspectiveProxy(handle, this)
     }
 
     async update(uuid: string, name: string): Promise<PerspectiveProxy> {
-        const body: UpdatePerspectiveRequest = { name }
-        const handle = await this.#restClient.put<PerspectiveHandle>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}`, body
-        )
+        const handle = await this.#restClient.call<PerspectiveHandle>('perspective.update', { uuid, name })
         return new PerspectiveProxy(handle, this)
     }
 
     async remove(uuid: string): Promise<{perspectiveRemove: boolean}> {
-        const result = await this.#restClient.delete<boolean>(`/api/v1/perspectives/${encodeURIComponent(uuid)}`)
+        const result = await this.#restClient.call<boolean>('perspective.remove', { uuid })
         return { perspectiveRemove: result }
     }
 
     async addLink(uuid: string, link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
-        return this.#restClient.post<LinkExpression>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/links`,
-            { link, status, batchId }
+        return this.#restClient.call<LinkExpression>(
+            'perspective.addLink', { uuid, link, status, batchId }
         )
     }
 
     async addLinks(uuid: string, links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
-        return this.#restClient.post<LinkExpression[]>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/links/bulk`,
-            { links, status, batchId }
+        return this.#restClient.call<LinkExpression[]>(
+            'perspective.addLinks', { uuid, links, status, batchId }
         )
     }
 
     async removeLinks(uuid: string, links: LinkExpressionInput[], batchId?: string): Promise<LinkExpression[]> {
-        return this.#restClient.post<LinkExpression[]>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/links/remove-bulk`,
-            { links, batchId }
+        return this.#restClient.call<LinkExpression[]>(
+            'perspective.removeLinks', { uuid, links, batchId }
         )
     }
 
     async linkMutations(uuid: string, mutations: LinkMutations, status?: LinkStatus): Promise<LinkExpressionMutations> {
-        return this.#restClient.post<LinkExpressionMutations>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/links/mutations`,
-            { mutations, status }
+        return this.#restClient.call<LinkExpressionMutations>(
+            'perspective.linkMutations', { uuid, mutations, status }
         )
     }
 
     async addLinkExpression(uuid: string, link: LinkExpression, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
-        return this.#restClient.post<LinkExpression>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/links/expression`,
-            { link, status, batchId }
+        return this.#restClient.call<LinkExpression>(
+            'perspective.addLinkExpression', { uuid, link, status, batchId }
         )
     }
 
     async updateLink(uuid: string, oldLink: LinkExpressionInput, newLink: Link, batchId?: string): Promise<LinkExpression> {
-        return this.#restClient.put<LinkExpression>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/links`,
-            { oldLink, newLink, batchId }
+        return this.#restClient.call<LinkExpression>(
+            'perspective.updateLink', { uuid, oldLink, newLink, batchId }
         )
     }
 
@@ -296,37 +282,32 @@ export class PerspectiveClient {
         delete link.data.__typename
         delete link.proof.__typename
         delete link.status
-        return this.#restClient.delete<boolean>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/links`,
-            { link, batchId }
+        return this.#restClient.call<boolean>(
+            'perspective.removeLink', { uuid, link, batchId }
         )
     }
 
     async addSdna(uuid: string, name: string, sdnaCode: string | undefined, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string): Promise<boolean> {
-        return this.#restClient.post<boolean>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/sdna`,
-            { name, sdnaCode: sdnaCode || "", sdnaType, shaclJson }
+        return this.#restClient.call<boolean>(
+            'perspective.addSdna', { uuid, name, sdnaCode: sdnaCode || "", sdnaType, shaclJson }
         )
     }
 
     async executeCommands(uuid: string, commands: string, expression: string, parameters: string, batchId?: string): Promise<boolean> {
-        return this.#restClient.post<boolean>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/commands`,
-            { commands, expression, parameters, batchId }
+        return this.#restClient.call<boolean>(
+            'perspective.executeCommands', { uuid, commands, expression, parameters, batchId }
         )
     }
 
     async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string, batchId?: string): Promise<boolean> {
-        return this.#restClient.post<boolean>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/create-subject`,
-            { subjectClass, expressionAddress, initialValues, batchId }
+        return this.#restClient.call<boolean>(
+            'perspective.createSubject', { uuid, subjectClass, expressionAddress, initialValues, batchId }
         )
     }
 
     async getSubjectData(uuid: string, subjectClass: string, expressionAddress: string): Promise<string> {
-        return this.#restClient.post<string>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/get-subject-data`,
-            { subjectClass, expressionAddress }
+        return this.#restClient.call<string>(
+            'perspective.getSubjectData', { uuid, subjectClass, expressionAddress }
         )
     }
 
@@ -458,13 +439,12 @@ export class PerspectiveClient {
     }
 
     async createBatch(uuid: string): Promise<string> {
-        return this.#restClient.post<string>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/batch`)
+        return this.#restClient.call<string>('perspective.createBatch', { uuid })
     }
 
     async commitBatch(uuid: string, batchId: string): Promise<LinkExpressionMutations> {
-        return this.#restClient.post<LinkExpressionMutations>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/batch/commit`,
-            { batchId }
+        return this.#restClient.call<LinkExpressionMutations>(
+            'perspective.commitBatch', { uuid, batchId }
         )
     }
 }

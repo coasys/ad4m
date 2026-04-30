@@ -21,56 +21,56 @@ export class NeighbourhoodClient {
         linkLanguage: Address,
         meta: Perspective
     ): Promise<string> {
-        return this.#restClient.post<string>('/api/v1/neighbourhoods/publish', {
+        return this.#restClient.call<string>('neighbourhood.publish', {
             perspectiveUUID, linkLanguage, meta
         })
     }
 
     async joinFromUrl(url: string): Promise<PerspectiveHandle> {
-        return this.#restClient.post<PerspectiveHandle>('/api/v1/neighbourhoods/join', { url })
+        return this.#restClient.call<PerspectiveHandle>('neighbourhood.join', { url })
     }
 
     async otherAgents(perspectiveUUID: string): Promise<DID[]> {
-        return this.#restClient.get<DID[]>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/other-agents`)
+        return this.#restClient.call<DID[]>('neighbourhood.otherAgents', { uuid: perspectiveUUID })
     }
 
     async hasTelepresenceAdapter(perspectiveUUID: string): Promise<boolean> {
-        return this.#restClient.get<boolean>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/has-telepresence`)
+        return this.#restClient.call<boolean>('neighbourhood.hasTelepresence', { uuid: perspectiveUUID })
     }
 
     async onlineAgents(perspectiveUUID: string): Promise<OnlineAgent[]> {
-        return this.#restClient.get<OnlineAgent[]>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/online-agents`)
+        return this.#restClient.call<OnlineAgent[]>('neighbourhood.onlineAgents', { uuid: perspectiveUUID })
     }
 
     async setOnlineStatus(perspectiveUUID: string, status: Perspective): Promise<boolean> {
-        return this.#restClient.put<boolean>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/online-status`, { status })
+        return this.#restClient.call<boolean>('neighbourhood.setOnlineStatus', { uuid: perspectiveUUID, status })
     }
 
     async setOnlineStatusU(perspectiveUUID: string, status: PerspectiveUnsignedInput): Promise<boolean> {
-        return this.#restClient.put<boolean>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/online-status`, { status, signed: false })
+        return this.#restClient.call<boolean>('neighbourhood.setOnlineStatus', { uuid: perspectiveUUID, status, signed: false })
     }
 
     async sendSignal(perspectiveUUID: string, remoteAgentDid: string, payload: Perspective): Promise<boolean> {
-        return this.#restClient.post<boolean>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/signal`, {
-            remoteAgentDid, payload
+        return this.#restClient.call<boolean>('neighbourhood.sendSignal', {
+            uuid: perspectiveUUID, remoteAgentDid, payload
         })
     }
 
     async sendSignalU(perspectiveUUID: string, remoteAgentDid: string, payload: PerspectiveUnsignedInput): Promise<boolean> {
-        return this.#restClient.post<boolean>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/signal`, {
-            remoteAgentDid, payload, signed: false
+        return this.#restClient.call<boolean>('neighbourhood.sendSignal', {
+            uuid: perspectiveUUID, remoteAgentDid, payload, signed: false
         })
     }
 
     async sendBroadcast(perspectiveUUID: string, payload: Perspective, loopback: boolean = false): Promise<boolean> {
-        return this.#restClient.post<boolean>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/broadcast`, {
-            payload, loopback
+        return this.#restClient.call<boolean>('neighbourhood.sendBroadcast', {
+            uuid: perspectiveUUID, payload, loopback
         })
     }
 
     async sendBroadcastU(perspectiveUUID: string, payload: PerspectiveUnsignedInput, loopback: boolean = false): Promise<boolean> {
-        return this.#restClient.post<boolean>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/broadcast`, {
-            payload, loopback, signed: false
+        return this.#restClient.call<boolean>('neighbourhood.sendBroadcast', {
+            uuid: perspectiveUUID, payload, loopback, signed: false
         })
     }
 
