@@ -22,3 +22,4 @@ export * from "./sdna";
 export * from "./shacl-gen";
 export * from "./query-cache";
 export * from "./subscription-pool";
+export * from "./model-manifest";

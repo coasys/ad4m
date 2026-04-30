@@ -5,6 +5,8 @@ import { PerspectiveHandle, PerspectiveState } from './PerspectiveHandle'
 import { Perspective } from "./Perspective";
 import { Literal } from "../Literal";
 import { Subject } from "../model/Subject";
+import type { Ad4mModel } from "../model/Ad4mModel";
+import type { ModelManifestEntry, ModelManifestProperty } from "../model/model-manifest";
 import { ExpressionRendered } from "../expression/Expression";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
@@ -19,6 +21,45 @@ import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
 
 type QueryCallback = (result: AllInstancesResult) => void;
+
+// ─── Model manifest helpers ───────────────────────────────────────────────────
+
+/**
+ * Normalise a SHACL datatype/nodeKind pair to one of the four scalar types
+ * used by `ModelManifestProperty.type`.
+ * @internal
+ */
+function _normaliseShaclType(
+    datatype?: string,
+    nodeKind?: 'IRI' | 'Literal' | 'BlankNode'
+): 'string' | 'number' | 'boolean' | 'uri' {
+    if (nodeKind === 'IRI') return 'uri';
+    if (!datatype) return 'string';
+    const dt = datatype.replace(/^(xsd:|sh:|rdfs:)/, '');
+    switch (dt) {
+        case 'integer':
+        case 'decimal':
+        case 'float':
+        case 'double':
+        case 'long':
+        case 'int':
+            return 'number';
+        case 'boolean':
+            return 'boolean';
+        default:
+            return 'string';
+    }
+}
+
+/**
+ * Strip a SHACL class URI to its local name.
+ * `"flux://Message"` → `"Message"`, `"https://schema.org/Person"` → `"Person"`
+ * @internal
+ */
+function _shaclClassToLocalName(classUri: string): string {
+    const sep = Math.max(classUri.lastIndexOf('/'), classUri.lastIndexOf('#'));
+    return sep >= 0 ? classUri.slice(sep + 1) : classUri;
+}
 
 
 
@@ -1217,6 +1258,59 @@ export class PerspectiveProxy {
         }
         
         return shapes;
+    }
+
+    /**
+     * Synthesise a ready-to-use `Ad4mModel` subclass for every SHACL shape
+     * stored in this perspective.
+     *
+     * Internally calls `getAllShacl()` then `Ad4mModel.fromSHACL()` for each
+     * entry.  The returned classes can be passed directly to
+     * `registerDynamicModels()` on the WE side.
+     *
+     * @returns Record keyed by class name (e.g. `{ Channel: <class>, Message: <class> }`)
+     */
+    async getModelClasses(): Promise<Record<string, typeof Ad4mModel>> {
+        // Lazy import to avoid a hard circular dependency at module-init time
+        // (Ad4mModel imports PerspectiveProxy; PerspectiveProxy already has such
+        // a pattern with Subject/PerspectiveProxy).
+        const { Ad4mModel: _Ad4mModel } = await import("../model/Ad4mModel");
+        const shapes = await this.getAllShacl();
+        const result: Record<string, typeof Ad4mModel> = {};
+        for (const { name, shape } of shapes) {
+            result[name] = _Ad4mModel.fromSHACL(shape, name);
+        }
+        return result;
+    }
+
+    /**
+     * Returns a normalised, AI-friendly manifest of every model class in this
+     * perspective.  Suitable for injection into an AI system prompt.
+     *
+     * Each entry describes the class name, target-class URI, and all data
+     * properties with their predicates and types.  Flag properties
+     * (`hasValue`) and unnamed properties are excluded.
+     *
+     * @returns Array of `ModelManifestEntry` objects (one per SHACL shape)
+     */
+    async getModelManifest(): Promise<ModelManifestEntry[]> {
+        const shapes = await this.getAllShacl();
+        return shapes.map(({ name, shape }) => ({
+            name,
+            targetClass: shape.targetClass ?? '',
+            properties: shape.properties
+                .filter(p => p.hasValue === undefined && p.name !== undefined)
+                .map((p): ModelManifestProperty => ({
+                    name: p.name!,
+                    predicate: p.path,
+                    type: _normaliseShaclType(p.datatype, p.nodeKind),
+                    isCollection: p.maxCount === undefined || p.maxCount > 1,
+                    required: (p.minCount ?? 0) >= 1,
+                    writable: p.writable ?? true,
+                    ...(p.resolveLanguage !== undefined && { resolveLanguage: p.resolveLanguage }),
+                    ...(p.class !== undefined && { relatedModel: _shaclClassToLocalName(p.class) }),
+                })),
+        }));
     }
 
     /**

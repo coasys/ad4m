@@ -1,5 +1,7 @@
 import { Ad4mModel } from "./Ad4mModel";
 import { Model, Property, Optional, ReadOnly, HasMany, Flag } from "./decorators";
+import { SHACLShape } from "../shacl/SHACLShape";
+import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 
 describe("Ad4mModel.getModelMetadata()", () => {
   it("should extract basic model metadata with className", () => {
@@ -2592,5 +2594,343 @@ describe("deepQuery opt-in — getter evaluation", () => {
       (builder as any).deepQuery();
       expect((builder as any).queryParams.deepQuery).toBe(true);
     });
+  });
+});
+
+// ─── Ad4mModel.fromSHACL() ────────────────────────────────────────────────────
+
+describe("Ad4mModel.fromSHACL()", () => {
+  function makeShape(targetClass: string, props: Array<import("../shacl/SHACLShape").SHACLPropertyShape>) {
+    const shape = new SHACLShape(targetClass);
+    for (const p of props) shape.addProperty(p);
+    return shape;
+  }
+
+  it("assigns the given name as className", () => {
+    const shape = makeShape("flux://Channel", []);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    expect((Cls as any).className).toBe("Channel");
+    expect((new (Cls as any)({}, "flux://1")).className).toBe("Channel");
+  });
+
+  it("registers scalar property (maxCount=1) via setPropertyRegistryEntry", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "title", path: "flux://has_title", maxCount: 1, writable: true },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["title"]).toBeDefined();
+    expect(meta.properties["title"].predicate).toBe("flux://has_title");
+    expect(meta.properties["title"].readOnly).toBe(false);
+  });
+
+  it("registers collection property (no maxCount) as hasMany relation", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "messages", path: "flux://has_message" },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.relations["messages"]).toBeDefined();
+    expect(meta.relations["messages"].predicate).toBe("flux://has_message");
+    expect(meta.relations["messages"].direction).toBe("forward");
+  });
+
+  it("registers collection property (maxCount=5) as hasMany relation", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "participants", path: "flux://participant", maxCount: 5 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.relations["participants"]).toBeDefined();
+    expect(meta.relations["participants"].direction).toBe("forward");
+  });
+
+  it("propagates resolveLanguage onto scalar properties", () => {
+    const shape = makeShape("flux://Post", [
+      { name: "body", path: "flux://body", maxCount: 1, resolveLanguage: "literal" },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Post");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["body"].resolveLanguage).toBe("literal");
+  });
+
+  it("defaults writable to true when not specified", () => {
+    const shape = makeShape("flux://Post", [
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Post");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["body"].readOnly).toBe(false);
+  });
+
+  it("respects writable:false", () => {
+    const shape = makeShape("flux://Post", [
+      { name: "id", path: "flux://id", maxCount: 1, writable: false },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Post");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["id"].readOnly).toBe(true);
+  });
+
+  it("skips properties that have hasValue (flag/type-discrimination markers)", () => {
+    const shape = makeShape("flux://Message", [
+      { name: "type", path: "flux://entry_type", hasValue: "flux://message" },
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Message");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["type"]).toBeUndefined();
+    expect(meta.relations["type"]).toBeUndefined();
+    expect(meta.properties["body"]).toBeDefined();
+  });
+
+  it("skips properties without a name field", () => {
+    const shape = makeShape("flux://Message", [
+      { path: "flux://anonymous" } as any,
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Message");
+    const meta = Cls.getModelMetadata();
+    expect(Object.keys(meta.properties)).toEqual(["body"]);
+  });
+
+  it("propagates local flag onto relations", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "drafts", path: "flux://draft", local: true },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.relations["drafts"].local).toBe(true);
+  });
+
+  it("applies Model decorator so generateSHACL is available", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "title", path: "flux://has_title", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    expect(typeof (Cls as any).generateSDNA).toBe("function");
+    expect(typeof (Cls as any).generateSHACL).toBe("function");
+  });
+
+  it("handles shapes with no properties", () => {
+    const shape = makeShape("flux://Empty", []);
+    const Cls = Ad4mModel.fromSHACL(shape, "Empty");
+    const meta = Cls.getModelMetadata();
+    expect(Object.keys(meta.properties)).toHaveLength(0);
+    expect(Object.keys(meta.relations)).toHaveLength(0);
+  });
+});
+
+// ─── PerspectiveProxy.getModelManifest() ─────────────────────────────────────
+
+describe("PerspectiveProxy.getModelManifest()", () => {
+  function buildProxy(shapes: Array<{ name: string; shape: SHACLShape }>): PerspectiveProxy {
+    const proxy = Object.create(PerspectiveProxy.prototype);
+    proxy.getAllShacl = jest.fn().mockResolvedValue(shapes);
+    return proxy as PerspectiveProxy;
+  }
+
+  function makeShape(
+    targetClass: string,
+    props: Array<import("../shacl/SHACLShape").SHACLPropertyShape>
+  ) {
+    const shape = new SHACLShape(targetClass);
+    for (const p of props) shape.addProperty(p);
+    return shape;
+  }
+
+  it("returns one entry per shape", async () => {
+    const proxy = buildProxy([
+      { name: "Channel", shape: makeShape("flux://Channel", []) },
+      { name: "Message", shape: makeShape("flux://Message", []) },
+    ]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest).toHaveLength(2);
+    expect(manifest[0].name).toBe("Channel");
+    expect(manifest[1].name).toBe("Message");
+  });
+
+  it("sets targetClass from shape.targetClass", async () => {
+    const proxy = buildProxy([
+      { name: "Channel", shape: makeShape("flux://Channel", []) },
+    ]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest[0].targetClass).toBe("flux://Channel");
+  });
+
+  it("normalises xsd:string datatype to 'string'", async () => {
+    const shape = makeShape("flux://Post", [
+      { name: "body", path: "flux://body", maxCount: 1, datatype: "xsd:string" },
+    ]);
+    const proxy = buildProxy([{ name: "Post", shape }]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest[0].properties[0].type).toBe("string");
+  });
+
+  it("normalises xsd:integer to 'number'", async () => {
+    const shape = makeShape("flux://Post", [
+      { name: "count", path: "flux://count", maxCount: 1, datatype: "xsd:integer" },
+    ]);
+    const proxy = buildProxy([{ name: "Post", shape }]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest[0].properties[0].type).toBe("number");
+  });
+
+  it("normalises xsd:boolean to 'boolean'", async () => {
+    const shape = makeShape("flux://Post", [
+      { name: "published", path: "flux://published", maxCount: 1, datatype: "xsd:boolean" },
+    ]);
+    const proxy = buildProxy([{ name: "Post", shape }]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest[0].properties[0].type).toBe("boolean");
+  });
+
+  it("normalises nodeKind IRI to 'uri'", async () => {
+    const shape = makeShape("flux://Post", [
+      { name: "author", path: "flux://author", maxCount: 1, nodeKind: "IRI" },
+    ]);
+    const proxy = buildProxy([{ name: "Post", shape }]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest[0].properties[0].type).toBe("uri");
+  });
+
+  it("strips class URI to local name for relatedModel", async () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "messages", path: "flux://has_message", class: "flux://Message" },
+    ]);
+    const proxy = buildProxy([{ name: "Channel", shape }]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest[0].properties[0].relatedModel).toBe("Message");
+  });
+
+  it("strips https class URI to local name", async () => {
+    const shape = makeShape("schema://Person", [
+      { name: "knows", path: "schema://knows", class: "https://schema.org/Person" },
+    ]);
+    const proxy = buildProxy([{ name: "Person", shape }]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest[0].properties[0].relatedModel).toBe("Person");
+  });
+
+  it("excludes hasValue (flag) properties", async () => {
+    const shape = makeShape("flux://Message", [
+      { name: "type", path: "flux://entry_type", hasValue: "flux://message" },
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const proxy = buildProxy([{ name: "Message", shape }]);
+    const manifest = await proxy.getModelManifest();
+    const propNames = manifest[0].properties.map(p => p.name);
+    expect(propNames).not.toContain("type");
+    expect(propNames).toContain("body");
+  });
+
+  it("sets isCollection=true when maxCount absent", async () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "messages", path: "flux://has_message" },
+    ]);
+    const proxy = buildProxy([{ name: "Channel", shape }]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest[0].properties[0].isCollection).toBe(true);
+  });
+
+  it("sets isCollection=false when maxCount=1", async () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "title", path: "flux://has_title", maxCount: 1 },
+    ]);
+    const proxy = buildProxy([{ name: "Channel", shape }]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest[0].properties[0].isCollection).toBe(false);
+  });
+
+  it("sets required=true when minCount>=1", async () => {
+    const shape = makeShape("flux://Post", [
+      { name: "body", path: "flux://body", maxCount: 1, minCount: 1 },
+    ]);
+    const proxy = buildProxy([{ name: "Post", shape }]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest[0].properties[0].required).toBe(true);
+  });
+
+  it("sets required=false when minCount absent", async () => {
+    const shape = makeShape("flux://Post", [
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const proxy = buildProxy([{ name: "Post", shape }]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest[0].properties[0].required).toBe(false);
+  });
+
+  it("includes resolveLanguage when present", async () => {
+    const shape = makeShape("flux://Post", [
+      { name: "body", path: "flux://body", maxCount: 1, resolveLanguage: "literal" },
+    ]);
+    const proxy = buildProxy([{ name: "Post", shape }]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest[0].properties[0].resolveLanguage).toBe("literal");
+  });
+
+  it("omits resolveLanguage when absent", async () => {
+    const shape = makeShape("flux://Post", [
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const proxy = buildProxy([{ name: "Post", shape }]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest[0].properties[0].resolveLanguage).toBeUndefined();
+  });
+
+  it("defaults writable to true when not specified", async () => {
+    const shape = makeShape("flux://Post", [
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const proxy = buildProxy([{ name: "Post", shape }]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest[0].properties[0].writable).toBe(true);
+  });
+
+  it("returns empty properties array for shape with no properties", async () => {
+    const proxy = buildProxy([
+      { name: "Empty", shape: makeShape("flux://Empty", []) },
+    ]);
+    const manifest = await proxy.getModelManifest();
+    expect(manifest[0].properties).toHaveLength(0);
+  });
+});
+
+// ─── PerspectiveProxy.getModelClasses() ──────────────────────────────────────
+
+describe("PerspectiveProxy.getModelClasses()", () => {
+  function buildProxy(shapes: Array<{ name: string; shape: SHACLShape }>): PerspectiveProxy {
+    const proxy = Object.create(PerspectiveProxy.prototype);
+    proxy.getAllShacl = jest.fn().mockResolvedValue(shapes);
+    return proxy as PerspectiveProxy;
+  }
+
+  it("returns a Record keyed by class name", async () => {
+    const shapeA = new SHACLShape("flux://Channel");
+    shapeA.addProperty({ name: "title", path: "flux://has_title", maxCount: 1 });
+    const shapeB = new SHACLShape("flux://Message");
+    shapeB.addProperty({ name: "body", path: "flux://body", maxCount: 1 });
+
+    const proxy = buildProxy([
+      { name: "Channel", shape: shapeA },
+      { name: "Message", shape: shapeB },
+    ]);
+    const classes = await proxy.getModelClasses();
+    expect(Object.keys(classes).sort()).toEqual(["Channel", "Message"]);
+  });
+
+  it("each returned class is an Ad4mModel subclass with correct className", async () => {
+    const shape = new SHACLShape("flux://Channel");
+    const proxy = buildProxy([{ name: "Channel", shape }]);
+    const classes = await proxy.getModelClasses();
+    const Cls = classes["Channel"];
+    expect((Cls as any).className).toBe("Channel");
+    expect(Cls.prototype instanceof Ad4mModel).toBe(true);
+  });
+
+  it("returns empty record for a perspective with no shapes", async () => {
+    const proxy = buildProxy([]);
+    const classes = await proxy.getModelClasses();
+    expect(Object.keys(classes)).toHaveLength(0);
   });
 });

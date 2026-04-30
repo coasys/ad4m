@@ -3,8 +3,9 @@ import { Link } from "../links/Links";
 import { LinkQuery } from "../perspectives/LinkQuery";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomId } from "./util";
-import { getPropertiesMetadata, getRelationsMetadata } from "./decorators";
+import { getPropertiesMetadata, getRelationsMetadata, Model, setPropertyRegistryEntry, setRelationRegistryEntry } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
+import type { SHACLShape } from "../shacl/SHACLShape";
 import { formatQueryValue } from "./query-utils";
 import { resolveParentPredicate } from "./query-common";
 import { buildParentQuery, buildAuthorAndTimestampQuery, buildPropertiesQuery, buildWhereQuery, buildCountQuery, buildOrderQuery, buildOffsetQuery, buildLimitQuery } from "./query-prolog";
@@ -2131,6 +2132,59 @@ export class Ad4mModel {
     options: JSONSchemaToModelOptions
   ): typeof Ad4mModel {
     return buildModelFromJSONSchema(this, schema, options);
+  }
+
+  /**
+   * Creates a fully functional Ad4mModel subclass from a SHACL shape.
+   *
+   * Unlike `fromJSONSchema()`, no predicate inference is required —
+   * `SHACLShape` already contains the exact predicate URI in `path` for
+   * every property. The method reads each property's `path`, `maxCount`,
+   * `writable`, and `resolveLanguage` directly and writes them to the
+   * WeakMap metadata registries.
+   *
+   * Properties with `hasValue` (flag / type-discrimination markers) are
+   * excluded, as are properties without a `name` field.
+   *
+   * @param shape - SHACL node shape (as returned by `PerspectiveProxy.getAllShacl()`)
+   * @param name  - Class name to assign (e.g. "Channel")
+   * @returns Generated Ad4mModel subclass, ready for querying
+   */
+  static fromSHACL(shape: SHACLShape, name: string): typeof Ad4mModel {
+    const DynamicModelClass = class extends (this as any) {} as unknown as typeof Ad4mModel;
+    (DynamicModelClass as any).className = name;
+    (DynamicModelClass.prototype as any).className = name;
+
+    for (const prop of shape.properties) {
+      // Skip flag properties — type-discrimination markers, not data properties
+      if (prop.hasValue !== undefined) continue;
+      // Skip properties without a declared name
+      if (!prop.name) continue;
+
+      const isCollection = prop.maxCount === undefined || prop.maxCount > 1;
+
+      if (isCollection) {
+        setRelationRegistryEntry(DynamicModelClass, prop.name, {
+          predicate: prop.path,
+          kind: 'hasMany',
+          ...(prop.local !== undefined && { local: prop.local }),
+          ...(prop.getter !== undefined && { getter: prop.getter }),
+        });
+      } else {
+        // maxCount === 1 → scalar property
+        setPropertyRegistryEntry(DynamicModelClass, prop.name, {
+          through: prop.path,
+          writable: prop.writable ?? true,
+          ...(prop.resolveLanguage !== undefined && { resolveLanguage: prop.resolveLanguage }),
+          ...(prop.local !== undefined && { local: prop.local }),
+        });
+      }
+    }
+
+    const ModelDecorator = Model({ name });
+    ModelDecorator(DynamicModelClass);
+
+    return DynamicModelClass as typeof Ad4mModel;
   }
 }
 
