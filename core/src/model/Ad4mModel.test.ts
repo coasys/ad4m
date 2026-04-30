@@ -1649,6 +1649,184 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
   });
 });
 
+describe("ModelQueryBuilder paginateSubscribe", () => {
+  it("paginateSubscribe should use a single query with count: true", async () => {
+    const mockSubscriptionId = "paginate-sub-123";
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, _cb: any) => {
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string, shapeJson?: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson, shapeJson);
+      }),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [{ id: "item1", type: "test://paginate" }], totalCount: 42 }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "PaginateTest" })
+    class PaginateTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://paginate" })
+      type: string = "test://paginate";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const builder = PaginateTest.query(mockPerspective);
+    const result = await builder.paginateSubscribe(10, 1, () => {});
+
+    // Should return paginated result structure
+    expect(result).toHaveProperty("results");
+    expect(result).toHaveProperty("totalCount");
+    expect(result).toHaveProperty("pageSize", 10);
+    expect(result).toHaveProperty("pageNumber", 1);
+
+    // modelQuery should be called exactly once (not twice — no separate count query)
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+
+    // The query should have count: true
+    const callArgs = mockPerspective.modelQuery.mock.calls[0];
+    const queryJson = JSON.parse(callArgs[1]);
+    expect(queryJson.count).toBe(true);
+    expect(queryJson.limit).toBe(10);
+    expect(queryJson.offset).toBe(0);
+  });
+
+  it("paginateSubscribe should skip isInit messages from subscription", async () => {
+    const mockSubscriptionId = "paginate-init-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    let modelQueryCallCount = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string, shapeJson?: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson, shapeJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(async () => {
+        modelQueryCallCount++;
+        return { instances: [], totalCount: 0 };
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "InitGuardTest" })
+    class InitGuardTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://init" })
+      type: string = "test://init";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = InitGuardTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    // Reset the count after initial fetch
+    const initialCallCount = modelQueryCallCount;
+
+    // Simulate an isInit message from subscription
+    expect(capturedCallback).not.toBeNull();
+    capturedCallback!({ isInit: true });
+
+    // Wait for any async processing
+    await new Promise(r => setTimeout(r, 50));
+
+    // modelQuery should NOT have been called again (isInit was filtered)
+    expect(modelQueryCallCount).toBe(initialCallCount);
+    // User callback should NOT have been invoked by isInit
+    expect(userCallback).not.toHaveBeenCalled();
+  });
+
+  it("paginateSubscribe should re-fetch on real subscription updates", async () => {
+    const mockSubscriptionId = "paginate-update-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    let modelQueryCallCount = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string, shapeJson?: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson, shapeJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(async () => {
+        modelQueryCallCount++;
+        return { instances: [{ id: "new-item", type: "test://update" }], totalCount: 1 };
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "UpdateTest" })
+    class UpdateTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://update" })
+      type: string = "test://update";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = UpdateTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    const initialCallCount = modelQueryCallCount;
+
+    // Simulate a real subscription update (not isInit)
+    capturedCallback!({ instances: [{ id: "new-item" }], totalCount: 1 });
+
+    // Wait for async processing
+    await new Promise(r => setTimeout(r, 100));
+
+    // modelQuery should have been called again for the re-fetch
+    expect(modelQueryCallCount).toBeGreaterThan(initialCallCount);
+    // User callback should have been invoked with paginated results
+    expect(userCallback).toHaveBeenCalled();
+    const callArg = userCallback.mock.calls[0][0];
+    expect(callArg).toHaveProperty("totalCount");
+    expect(callArg).toHaveProperty("pageSize", 10);
+    expect(callArg).toHaveProperty("pageNumber", 1);
+  });
+});
+
 // ============================================================================
 // Performance Optimisation Tests
 // ============================================================================
