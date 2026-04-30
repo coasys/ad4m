@@ -128,6 +128,7 @@ rustls-pemfile = "2"
 x509-parser = "0.16"
 
 kalosm = { version = "0.3.2", git = "https://github.com/coasys/floneum.git", branch = "coasys-2-without-pdf", features = ["language", "sound"] }
+voice_activity_detector = "0.1.1"
 candle-core = "0.8.2"
 deflate = "1.0.0"
 futures-core = "0.3.30"

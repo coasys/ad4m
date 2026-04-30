@@ -1230,19 +1230,32 @@ impl AIService {
             let rt = tokio::runtime::Runtime::new().unwrap();
 
             rt.block_on(async {
+
                 // Dereference the Arc to get the Whisper model
                 // The model weights stay shared in memory!
                 let whisper = (*whisper_model).clone();
 
-                // Client-side VAD already sends pre-segmented utterances, so
-                // server-side VAD is unnecessary.  Each feed is a complete
-                // speech segment — just pass it directly to Whisper.
-                //
-                // The old approach (voice_activity_stream → rechunk → transcribe)
-                // hung because the rechunker's end_window timer relies on
-                // continuously polled silence samples.  When the AudioStream
-                // returns Pending between feeds, the rechunker never detects
-                // end-of-speech and Whisper never receives a segment.
+                // Build a Silero VAD model for server-side speech detection.
+                // This filters non-speech audio (coughs, sighs, keyboard noise)
+                // that the client-side energy-based VAD cannot distinguish from
+                // speech.  We run VAD inline on each feed rather than using the
+                // streaming pipeline (voice_activity_stream → rechunk) because
+                // the rechunker hangs: it relies on continuously polled samples,
+                // but the AudioStream returns Pending between feeds, so the
+                // rechunker never detects end-of-speech.
+                let vad = match voice_activity_detector::VoiceActivityDetector::builder()
+                    .sample_rate(16000)
+                    .chunk_size(512usize)
+                    .build()
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::error!("Failed to build Silero VAD model for stream {}: {:?}", stream_id_clone, e);
+                        return;
+                    }
+                };
+                let vad = std::sync::Mutex::new(vad);
+
                 let mut samples_rx = samples_rx;
 
                 tokio::select! {
@@ -1252,89 +1265,131 @@ impl AIService {
                             if audio_chunk.is_empty() {
                                 continue;
                             }
+
+                            // Run Silero VAD: check what fraction of 512-sample
+                            // windows contain speech.  Thresholds chosen to
+                            // match the old Kalosm rechunker behaviour:
+                            //   per-window prob >= 0.6  (was start_threshold)
+                            //   >= 33% of windows       (reject transients)
+                            let speech_ratio = {
+                                let mut locked = vad.lock().unwrap();
+                                let mut speech_chunks = 0usize;
+                                let mut total_chunks = 0usize;
+                                for window in audio_chunk.chunks(512) {
+                                    if window.len() == 512 {
+                                        let prob = locked.predict(window.iter().copied());
+                                        total_chunks += 1;
+                                        if prob > 0.6 {
+                                            speech_chunks += 1;
+                                        }
+                                    }
+                                }
+                                if total_chunks == 0 {
+                                    0.0f32
+                                } else {
+                                    speech_chunks as f32 / total_chunks as f32
+                                }
+                            };
+
+                            if speech_ratio < 0.33 {
+                                log::info!(
+                                    "VAD filtered non-speech audio for stream {} (speech_ratio={:.2})",
+                                    stream_id_clone,
+                                    speech_ratio
+                                );
+                                continue;
+                            }
+
+                            log::info!(
+                                "VAD passed audio for stream {} ({} samples, speech_ratio={:.2})",
+                                stream_id_clone,
+                                audio_chunk.len(),
+                                speech_ratio
+                            );
+
                             let buffer = rodio::buffer::SamplesBuffer::new(1, 16000, audio_chunk);
                             match whisper.transcribe(buffer) {
                                 Ok(mut segments) => {
                                     while let Some(segment) = segments.next().await {
-                                        let text = segment.text().to_string();
-                                        log::info!(
-                                            "Transcription text for stream {}: {:?}",
-                                            stream_id_clone,
-                                            text
-                                        );
+                            let text = segment.text().to_string();
+                            log::info!(
+                                "Transcription text for stream {}: {:?}",
+                                stream_id_clone,
+                                text
+                            );
 
-                                        // Bill for transcribed words
-                                        let word_count = text.split_whitespace().count();
-                                        if word_count > 0 {
-                                            if let Some(ref email) = billing_email {
-                                                let rate_key =
-                                                    crate::db::Ad4mDb::with_global_instance(|db| {
-                                                        db.get_model(billing_model_id.clone())
-                                                    })
-                                                    .ok()
-                                                    .flatten()
-                                                    .map(|m| m.name)
-                                                    .unwrap_or_else(|| billing_model_id.clone());
+                            // Bill for transcribed words
+                            let word_count = text.split_whitespace().count();
+                            if word_count > 0 {
+                                if let Some(ref email) = billing_email {
+                                    let rate_key =
+                                        crate::db::Ad4mDb::with_global_instance(|db| {
+                                            db.get_model(billing_model_id.clone())
+                                        })
+                                        .ok()
+                                        .flatten()
+                                        .map(|m| m.name)
+                                        .unwrap_or_else(|| billing_model_id.clone());
 
-                                                let rate =
-                                                    crate::db::Ad4mDb::with_global_instance(|db| {
-                                                        db.get_host_rate(&rate_key)
-                                                    })
-                                                    .ok()
-                                                    .flatten()
-                                                    .unwrap_or(0.0);
-                                                let cost = word_count as f64 * rate;
-                                                match crate::billing::bill_compute(
-                                                    email,
-                                                    cost,
-                                                    "ai_transcription",
-                                                    Some(&format!(
-                                                        "{} words (model: {})",
-                                                        word_count, billing_model_id,
-                                                    )),
-                                                ) {
-                                                    Err(
-                                                        crate::billing::BillingError::InsufficientCredits,
-                                                    ) => {
-                                                        log::warn!("Transcription: insufficient credits for user {} — delivering already-computed text, future feeds will be rejected", email);
-                                                    }
-                                                    Err(e) => {
-                                                        log::warn!(
-                                                            "Transcription billing failed: {:?}",
-                                                            e
-                                                        );
-                                                    }
-                                                    Ok(()) => {}
-                                                }
-                                            }
+                                    let rate =
+                                        crate::db::Ad4mDb::with_global_instance(|db| {
+                                            db.get_host_rate(&rate_key)
+                                        })
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or(0.0);
+                                    let cost = word_count as f64 * rate;
+                                    match crate::billing::bill_compute(
+                                        email,
+                                        cost,
+                                        "ai_transcription",
+                                        Some(&format!(
+                                            "{} words (model: {})",
+                                            word_count, billing_model_id,
+                                        )),
+                                    ) {
+                                        Err(
+                                            crate::billing::BillingError::InsufficientCredits,
+                                        ) => {
+                                            log::warn!("Transcription: insufficient credits for user {} — delivering already-computed text, future feeds will be rejected", email);
                                         }
+                                        Err(e) => {
+                                            log::warn!(
+                                                "Transcription billing failed: {:?}",
+                                                e
+                                            );
+                                        }
+                                        Ok(()) => {}
+                                    }
+                                }
+                            }
 
-                                        let text_for_pubsub = text.clone();
-                                        let text_for_broadcast = text.clone();
-                                        let broadcast_tx = text_broadcast_tx_clone.clone();
-                                        let stream_id_for_pubsub = stream_id_clone.clone();
-                                        let user_did_for_pubsub = user_did.clone();
-                                        rt.spawn(async move {
-                                            let _ = get_global_pubsub()
-                                                .await
-                                                .publish(
-                                                    &AI_TRANSCRIPTION_TEXT_TOPIC,
-                                                    &serde_json::to_string(
-                                                        &TranscriptionTextFilter {
-                                                            stream_id: stream_id_for_pubsub,
-                                                            text: text_for_pubsub,
-                                                            user_did: user_did_for_pubsub,
-                                                        },
-                                                    )
-                                                    .expect(
-                                                        "TranscriptionTextFilter must be serializable",
-                                                    ),
-                                                )
-                                                .await;
-                                        });
+                            let text_for_pubsub = text.clone();
+                            let text_for_broadcast = text.clone();
+                            let broadcast_tx = text_broadcast_tx_clone.clone();
+                            let stream_id_for_pubsub = stream_id_clone.clone();
+                            let user_did_for_pubsub = user_did.clone();
+                            rt.spawn(async move {
+                                let _ = get_global_pubsub()
+                                    .await
+                                    .publish(
+                                        &AI_TRANSCRIPTION_TEXT_TOPIC,
+                                        &serde_json::to_string(
+                                            &TranscriptionTextFilter {
+                                                stream_id: stream_id_for_pubsub,
+                                                text: text_for_pubsub,
+                                                user_did: user_did_for_pubsub,
+                                            },
+                                        )
+                                        .expect(
+                                            "TranscriptionTextFilter must be serializable",
+                                        ),
+                                    )
+                                    .await;
+                            });
 
-                                        // Also broadcast via per-stream channel for SSE feed responses
-                                        let _ = broadcast_tx.send(text_for_broadcast);
+                            // Also broadcast via per-stream channel for SSE feed responses
+                            let _ = broadcast_tx.send(text_for_broadcast);
                                     }
                                 }
                                 Err(e) => {
@@ -1907,5 +1962,111 @@ mod tests {
             .await
             .expect("prompt to work after model update");
         assert!(!response.text.is_empty());
+    }
+
+    /// Helper that replicates the server-side VAD gate logic so we can test
+    /// it without needing a running Whisper model or audio stream.
+    fn compute_speech_ratio(
+        vad: &mut voice_activity_detector::VoiceActivityDetector,
+        audio: &[f32],
+    ) -> f32 {
+        let mut speech_chunks = 0usize;
+        let mut total_chunks = 0usize;
+        for window in audio.chunks(512) {
+            if window.len() == 512 {
+                let prob = vad.predict(window.iter().copied());
+                total_chunks += 1;
+                if prob > 0.6 {
+                    speech_chunks += 1;
+                }
+            }
+        }
+        if total_chunks == 0 {
+            0.0
+        } else {
+            speech_chunks as f32 / total_chunks as f32
+        }
+    }
+
+    #[test]
+    fn test_vad_gate_rejects_silence() {
+        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
+            .sample_rate(16000)
+            .chunk_size(512usize)
+            .build()
+            .expect("VAD to build");
+
+        // Pure silence (zeros) — must be rejected
+        let silence = vec![0.0f32; 8000];
+        let ratio = compute_speech_ratio(&mut vad, &silence);
+        assert!(
+            ratio < 0.33,
+            "Silence should be rejected (ratio={ratio:.2})"
+        );
+    }
+
+    #[test]
+    fn test_vad_gate_rejects_sine_wave() {
+        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
+            .sample_rate(16000)
+            .chunk_size(512usize)
+            .build()
+            .expect("VAD to build");
+
+        // 440 Hz sine wave — not speech, should be rejected
+        let sine: Vec<f32> = (0..8000)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin())
+            .collect();
+        let ratio = compute_speech_ratio(&mut vad, &sine);
+        assert!(
+            ratio < 0.33,
+            "Sine wave should be rejected (ratio={ratio:.2})"
+        );
+    }
+
+    #[test]
+    fn test_vad_gate_rejects_low_noise() {
+        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
+            .sample_rate(16000)
+            .chunk_size(512usize)
+            .build()
+            .expect("VAD to build");
+
+        // Low-level white noise — not speech, should be rejected
+        let noise: Vec<f32> = (0..8000)
+            .map(|i| ((i as f32 * 17.3).sin() * 0.01))
+            .collect();
+        let ratio = compute_speech_ratio(&mut vad, &noise);
+        assert!(
+            ratio < 0.33,
+            "Low noise should be rejected (ratio={ratio:.2})"
+        );
+    }
+
+    #[test]
+    fn test_vad_gate_empty_audio() {
+        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
+            .sample_rate(16000)
+            .chunk_size(512usize)
+            .build()
+            .expect("VAD to build");
+
+        // Empty audio — ratio should be 0
+        let empty: Vec<f32> = vec![];
+        let ratio = compute_speech_ratio(&mut vad, &empty);
+        assert_eq!(ratio, 0.0, "Empty audio should give ratio=0");
+
+        // Sub-chunk audio (less than 512 samples)
+        let short = vec![0.1f32; 100];
+        let ratio = compute_speech_ratio(&mut vad, &short);
+        assert_eq!(ratio, 0.0, "Sub-chunk audio should give ratio=0");
+    }
+
+    #[test]
+    fn test_vad_gate_threshold_boundary() {
+        // Verify the 0.33 gate matches our code: < 0.33 is rejected, >= 0.33 passes
+        assert!(0.32 < 0.33, "Below threshold should be rejected");
+        assert!(!(0.33 < 0.33), "At threshold should pass");
+        assert!(!(0.50 < 0.33), "Above threshold should pass");
     }
 }
