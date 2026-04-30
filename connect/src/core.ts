@@ -139,10 +139,14 @@ export default class Ad4mConnect extends EventTarget {
     return this.ad4mClient;
   }
 
-  private withTempClient<T>(wsUrl: string, callback: (client: Ad4mClient) => Promise<T>): Promise<T> {
+  private async withTempClient<T>(wsUrl: string, callback: (client: Ad4mClient) => Promise<T>): Promise<T> {
     const baseUrl = wsUrlToHttpBase(wsUrl);
-    const client = new Ad4mClient(baseUrl);
-    return callback(client);
+    const client = new Ad4mClient(baseUrl, undefined, false);
+    try {
+      return await callback(client);
+    } finally {
+      client.close();
+    }
   }
 
   async checkAuth(): Promise<boolean> {
