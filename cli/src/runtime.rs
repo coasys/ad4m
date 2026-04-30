@@ -139,8 +139,9 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
                 let readline = rl.readline("Please enter the encoded agent infos JSON array: ");
                 match readline {
                     Ok(line) => {
-                        let parsed: Vec<String> = serde_json::from_str(&line)
-                            .map_err(|e| anyhow::anyhow!("Failed to parse agent infos JSON array: {e}"))?;
+                        let parsed: Vec<String> = serde_json::from_str(&line).map_err(|e| {
+                            anyhow::anyhow!("Failed to parse agent infos JSON array: {e}")
+                        })?;
                         ad4m_client.runtime.hc_add_agent_infos(parsed).await?;
                         println!("Holochain agent infos added!");
                     }
