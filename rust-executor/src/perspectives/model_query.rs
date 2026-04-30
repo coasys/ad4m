@@ -1109,12 +1109,16 @@ fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Value> {
         Value::String(inst.source.clone()),
     );
 
-    // Build a predicate -> property map for fast lookup
-    let pred_to_prop: HashMap<&str, &ShapeProperty> = shape
-        .properties
-        .iter()
-        .map(|p| (p.predicate.as_str(), p))
-        .collect();
+    // Build a predicate -> properties map for fast lookup.
+    // Multiple relations can share the same predicate (e.g. ad4m://has_child),
+    // so we map each predicate to ALL matching properties.
+    let mut pred_to_props: HashMap<&str, Vec<&ShapeProperty>> = HashMap::new();
+    for p in &shape.properties {
+        pred_to_props
+            .entry(p.predicate.as_str())
+            .or_default()
+            .push(p);
+    }
 
     // Track latest timestamp per property for latest-wins
     let mut prop_timestamps: HashMap<&str, &str> = HashMap::new();
@@ -1150,31 +1154,36 @@ fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Value> {
             _ => {}
         }
 
-        if let Some(prop) = pred_to_prop.get(predicate.as_str()) {
-            if prop.is_collection {
-                // Collections: accumulate all values with timestamps
-                collection_values
-                    .entry(prop.name.as_str())
-                    .or_default()
-                    .push((target.as_str(), ts));
-            } else if prop.is_flag {
-                // Flags: just note presence (value is the target URI)
-                // Skip setting — flags are conformance-only
-                // But if it's also a regular property, set it
-                let current_ts = prop_timestamps.get(prop.name.as_str()).copied();
-                if current_ts.is_none() || current_ts.map(|t| ts > t).unwrap_or(true) {
-                    prop_timestamps.insert(prop.name.as_str(), ts);
-                    // Parse the target value
-                    let val = parse_literal_value(target);
-                    obj.insert(prop.name.clone(), val);
-                }
-            } else {
-                // Single-valued: latest-wins
-                let current_ts = prop_timestamps.get(prop.name.as_str()).copied();
-                if current_ts.is_none() || current_ts.map(|t| ts > t).unwrap_or(true) {
-                    prop_timestamps.insert(prop.name.as_str(), ts);
-                    let val = parse_literal_value(target);
-                    obj.insert(prop.name.clone(), val);
+        if let Some(props) = pred_to_props.get(predicate.as_str()) {
+            for prop in props {
+                if prop.is_collection {
+                    // Collections: accumulate all values with timestamps
+                    // When multiple relations share the same predicate, each gets
+                    // the full set of targets; include resolution later filters
+                    // by target type.
+                    collection_values
+                        .entry(prop.name.as_str())
+                        .or_default()
+                        .push((target.as_str(), ts));
+                } else if prop.is_flag {
+                    // Flags: just note presence (value is the target URI)
+                    // Skip setting — flags are conformance-only
+                    // But if it's also a regular property, set it
+                    let current_ts = prop_timestamps.get(prop.name.as_str()).copied();
+                    if current_ts.is_none() || current_ts.map(|t| ts > t).unwrap_or(true) {
+                        prop_timestamps.insert(prop.name.as_str(), ts);
+                        // Parse the target value
+                        let val = parse_literal_value(target);
+                        obj.insert(prop.name.clone(), val);
+                    }
+                } else {
+                    // Single-valued: latest-wins
+                    let current_ts = prop_timestamps.get(prop.name.as_str()).copied();
+                    if current_ts.is_none() || current_ts.map(|t| ts > t).unwrap_or(true) {
+                        prop_timestamps.insert(prop.name.as_str(), ts);
+                        let val = parse_literal_value(target);
+                        obj.insert(prop.name.clone(), val);
+                    }
                 }
             }
         }
@@ -2147,6 +2156,325 @@ mod tests {
             .iter()
             .any(|p| p.name == "ingredients" && p.is_collection));
     }
+
+    // -----------------------------------------------------------------------
+    // hydrate_one: shared-predicate regression tests
+    //
+    // When multiple @HasMany relations share the same predicate (e.g.
+    // ad4m://has_child), every relation must receive ALL targets for that
+    // predicate.  A prior bug used HashMap<predicate, ShapeProperty> which
+    // silently dropped all but the last relation, causing include resolution
+    // to find zero IDs for earlier relations.
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a minimal ShapeProperty for a scalar (non-collection) field.
+    fn prop(name: &str, predicate: &str) -> ShapeProperty {
+        ShapeProperty {
+            name: name.to_string(),
+            predicate: predicate.to_string(),
+            is_collection: false,
+            is_flag: false,
+            is_required: false,
+            initial_value: None,
+            resolve_language: None,
+            datatype: None,
+            direction: None,
+            is_scalar_relation: false,
+        }
+    }
+
+    /// Helper: build a ShapeProperty for a collection relation.
+    fn relation(name: &str, predicate: &str) -> ShapeProperty {
+        ShapeProperty {
+            name: name.to_string(),
+            predicate: predicate.to_string(),
+            is_collection: true,
+            is_flag: false,
+            is_required: false,
+            initial_value: None,
+            resolve_language: None,
+            datatype: None,
+            direction: Some("forward".to_string()),
+            is_scalar_relation: false,
+        }
+    }
+
+    /// Helper: build a ShapeProperty for a flag field.
+    fn flag(name: &str, predicate: &str, initial: &str) -> ShapeProperty {
+        ShapeProperty {
+            name: name.to_string(),
+            predicate: predicate.to_string(),
+            is_collection: false,
+            is_flag: true,
+            is_required: true,
+            initial_value: Some(initial.to_string()),
+            resolve_language: None,
+            datatype: None,
+            direction: None,
+            is_scalar_relation: false,
+        }
+    }
+
+    /// Helper: build a ModelShape from a list of properties.
+    fn shape(class: &str, properties: Vec<ShapeProperty>) -> ModelShape {
+        ModelShape {
+            target_class: class.to_string(),
+            shape_uri: format!("{}Shape", class),
+            properties,
+            include_relations: Vec::new(),
+        }
+    }
+
+    /// Helper: build an InstanceLinks entry.
+    fn inst_links(source: &str, links: Vec<(&str, &str)>) -> InstanceLinks {
+        InstanceLinks {
+            source: source.to_string(),
+            links: links
+                .into_iter()
+                .enumerate()
+                .map(|(i, (pred, tgt))| {
+                    (
+                        pred.to_string(),
+                        tgt.to_string(),
+                        "did:key:testauthor".to_string(),
+                        format!("2026-01-01T00:00:{:02}.000Z", i),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_hydrate_shared_predicate_all_relations_populated() {
+        // Regression: multiple relations sharing "ad4m://has_child" must all
+        // receive the targets, not just the last one in iteration order.
+        let s = shape(
+            "Channel",
+            vec![
+                flag("type", "flux://entry_type", "flux://has_channel"),
+                prop("name", "flux://has_channel_name"),
+                relation("views", "ad4m://has_child"),
+                relation("messages", "ad4m://has_child"),
+                relation("conversations", "ad4m://has_child"),
+            ],
+        );
+
+        let inst = inst_links(
+            "literal:string:ch1",
+            vec![
+                ("flux://entry_type", "flux://has_channel"),
+                ("flux://has_channel_name", "literal:string:General"),
+                ("ad4m://has_child", "literal:string:app1"),
+                ("ad4m://has_child", "literal:string:conv1"),
+            ],
+        );
+
+        let result = hydrate_one(&s, &inst).unwrap();
+
+        // All three relations must contain both children
+        let views = result["views"].as_array().expect("views should be an array");
+        let messages = result["messages"]
+            .as_array()
+            .expect("messages should be an array");
+        let conversations = result["conversations"]
+            .as_array()
+            .expect("conversations should be an array");
+
+        assert_eq!(views.len(), 2, "views must have 2 items");
+        assert_eq!(messages.len(), 2, "messages must have 2 items");
+        assert_eq!(conversations.len(), 2, "conversations must have 2 items");
+
+        // All must contain the same IDs (raw IRIs for relations)
+        let expected_ids: Vec<&str> =
+            vec!["literal:string:app1", "literal:string:conv1"];
+        for rel_name in &["views", "messages", "conversations"] {
+            let ids: Vec<String> = result[rel_name]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(
+                ids, expected_ids,
+                "{} must contain both child IDs",
+                rel_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_hydrate_shared_predicate_single_relation_still_works() {
+        // Sanity: a single relation with a unique predicate still works.
+        let s = shape(
+            "Simple",
+            vec![
+                flag("type", "test://type", "test://simple"),
+                relation("items", "test://has_item"),
+            ],
+        );
+
+        let inst = inst_links(
+            "literal:string:s1",
+            vec![
+                ("test://type", "test://simple"),
+                ("test://has_item", "literal:string:item1"),
+                ("test://has_item", "literal:string:item2"),
+            ],
+        );
+
+        let result = hydrate_one(&s, &inst).unwrap();
+        let items = result["items"].as_array().expect("items should be an array");
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn test_hydrate_shared_predicate_with_distinct_predicates() {
+        // When relations use different predicates, they should still be
+        // independent (no cross-contamination).
+        let s = shape(
+            "Model",
+            vec![
+                flag("type", "test://type", "test://model"),
+                relation("alpha", "test://pred_a"),
+                relation("beta", "test://pred_b"),
+            ],
+        );
+
+        let inst = inst_links(
+            "literal:string:m1",
+            vec![
+                ("test://type", "test://model"),
+                ("test://pred_a", "literal:string:a1"),
+                ("test://pred_b", "literal:string:b1"),
+                ("test://pred_b", "literal:string:b2"),
+            ],
+        );
+
+        let result = hydrate_one(&s, &inst).unwrap();
+
+        let alpha = result["alpha"].as_array().unwrap();
+        let beta = result["beta"].as_array().unwrap();
+
+        assert_eq!(alpha.len(), 1, "alpha has 1 item");
+        assert_eq!(beta.len(), 2, "beta has 2 items");
+        assert_eq!(alpha[0].as_str().unwrap(), "literal:string:a1");
+    }
+
+    #[test]
+    fn test_hydrate_shared_predicate_no_targets() {
+        // No links for the shared predicate — all relations should be absent
+        // (not present in the output JSON, matching prior behavior).
+        let s = shape(
+            "Channel",
+            vec![
+                flag("type", "flux://entry_type", "flux://has_channel"),
+                relation("views", "ad4m://has_child"),
+                relation("messages", "ad4m://has_child"),
+            ],
+        );
+
+        let inst = inst_links(
+            "literal:string:ch_empty",
+            vec![("flux://entry_type", "flux://has_channel")],
+        );
+
+        let result = hydrate_one(&s, &inst).unwrap();
+
+        // Neither relation should appear (no links for has_child)
+        assert!(
+            result.get("views").is_none(),
+            "views should be absent when no has_child links"
+        );
+        assert!(
+            result.get("messages").is_none(),
+            "messages should be absent when no has_child links"
+        );
+    }
+
+    #[test]
+    fn test_hydrate_shared_predicate_preserves_scalar_properties() {
+        // Scalar properties alongside shared-predicate relations must still
+        // hydrate correctly.
+        let s = shape(
+            "Channel",
+            vec![
+                flag("type", "flux://entry_type", "flux://has_channel"),
+                prop("name", "flux://has_channel_name"),
+                prop("description", "flux://has_channel_description"),
+                relation("views", "ad4m://has_child"),
+                relation("posts", "ad4m://has_child"),
+            ],
+        );
+
+        let inst = inst_links(
+            "literal:string:ch2",
+            vec![
+                ("flux://entry_type", "flux://has_channel"),
+                ("flux://has_channel_name", "literal:string:General"),
+                (
+                    "flux://has_channel_description",
+                    "literal:string:Main%20channel",
+                ),
+                ("ad4m://has_child", "literal:string:child1"),
+            ],
+        );
+
+        let result = hydrate_one(&s, &inst).unwrap();
+
+        assert_eq!(result["name"], json!("General"));
+        assert_eq!(result["description"], json!("Main channel"));
+        assert_eq!(result["type"], json!("flux://has_channel"));
+
+        // Both relations should have the child
+        assert_eq!(result["views"].as_array().unwrap().len(), 1);
+        assert_eq!(result["posts"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_hydrate_many_relations_same_predicate() {
+        // Stress test: 8 relations sharing the same predicate (mirrors the
+        // real Channel model).  Every relation must see all targets.
+        let rel_names = vec![
+            "views",
+            "messages",
+            "conversations",
+            "childChannels",
+            "boards",
+            "taskColumns",
+            "tasks",
+            "posts",
+        ];
+        let mut props = vec![flag("type", "flux://entry_type", "flux://has_channel")];
+        for name in &rel_names {
+            props.push(relation(name, "ad4m://has_child"));
+        }
+        let s = shape("Channel", props);
+
+        let inst = inst_links(
+            "literal:string:ch_stress",
+            vec![
+                ("flux://entry_type", "flux://has_channel"),
+                ("ad4m://has_child", "literal:string:c1"),
+                ("ad4m://has_child", "literal:string:c2"),
+                ("ad4m://has_child", "literal:string:c3"),
+            ],
+        );
+
+        let result = hydrate_one(&s, &inst).unwrap();
+
+        for name in &rel_names {
+            let arr = result[name]
+                .as_array()
+                .unwrap_or_else(|| panic!("{} should be an array", name));
+            assert_eq!(
+                arr.len(),
+                3,
+                "{} must have all 3 children, got {}",
+                name,
+                arr.len()
+            );
+        }
+    }
 }
 
 impl Default for WhereOps {
@@ -2269,5 +2597,304 @@ mod integration_tests {
             1,
             "WHERE name='Recipe 1' should match 1 recipe"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration test: shared predicate across multiple @HasMany relations
+    //
+    // This simulates the real Channel model from Flux where 8+ relations
+    // all use "ad4m://has_child".  Without the fix, only the last relation
+    // in HashMap iteration order receives targets; the others (like "views")
+    // are empty, causing include resolution to return zero results.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_shared_predicate_relations_all_populated_via_store() {
+        // Simulate a Channel with views, messages, and conversations all using
+        // the same predicate "ad4m://has_child".  Each child has a different
+        // flag type so include resolution (if applied later) can discriminate.
+        let store = SparqlStore::new(None).unwrap();
+
+        let channel_base = "literal:string:channel1";
+
+        // Channel flag
+        store
+            .add_link(&make_link(
+                channel_base,
+                "flux://entry_type",
+                "flux://has_channel",
+                "1700000000000",
+            ))
+            .unwrap();
+
+        // Channel name
+        let signed_name = json!({
+            "author": "did:key:test123",
+            "timestamp": "1700000000000",
+            "data": "General",
+            "proof": {"key": "k", "signature": "s"}
+        });
+        let name_target = format!(
+            "literal:json:{}",
+            urlencoding::encode(&serde_json::to_string(&signed_name).unwrap())
+        );
+        store
+            .add_link(&make_link(
+                channel_base,
+                "flux://has_channel_name",
+                &name_target,
+                "1700000000001",
+            ))
+            .unwrap();
+
+        // Child 1: an "App" (flag flux://has_app)
+        let app_base = "literal:string:app1";
+        store
+            .add_link(&make_link(
+                channel_base,
+                "ad4m://has_child",
+                app_base,
+                "1700000000002",
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                app_base,
+                "flux://entry_type",
+                "flux://has_app",
+                "1700000000003",
+            ))
+            .unwrap();
+        let app_name = json!({
+            "author": "did:key:test123",
+            "timestamp": "1700000000003",
+            "data": "Chat",
+            "proof": {"key": "k", "signature": "s"}
+        });
+        let app_name_target = format!(
+            "literal:json:{}",
+            urlencoding::encode(&serde_json::to_string(&app_name).unwrap())
+        );
+        store
+            .add_link(&make_link(
+                app_base,
+                "flux://has_name",
+                &app_name_target,
+                "1700000000004",
+            ))
+            .unwrap();
+
+        // Child 2: a "Conversation" (flag flux://has_conversation)
+        let conv_base = "literal:string:conv1";
+        store
+            .add_link(&make_link(
+                channel_base,
+                "ad4m://has_child",
+                conv_base,
+                "1700000000005",
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                conv_base,
+                "flux://entry_type",
+                "flux://has_conversation",
+                "1700000000006",
+            ))
+            .unwrap();
+
+        // Child 3: a "Message" (flag flux://has_message)
+        let msg_base = "literal:string:msg1";
+        store
+            .add_link(&make_link(
+                channel_base,
+                "ad4m://has_child",
+                msg_base,
+                "1700000000007",
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                msg_base,
+                "flux://entry_type",
+                "flux://has_message",
+                "1700000000008",
+            ))
+            .unwrap();
+
+        // Shape JSON with 3 relations sharing ad4m://has_child and no includes
+        let shape_json = r#"{
+            "className": "Channel",
+            "properties": {
+                "type": {
+                    "predicate": "flux://entry_type",
+                    "required": true,
+                    "flag": true,
+                    "initial": "flux://has_channel"
+                },
+                "name": {
+                    "predicate": "flux://has_channel_name",
+                    "required": false,
+                    "resolveLanguage": "literal"
+                }
+            },
+            "relations": {
+                "views": {
+                    "predicate": "ad4m://has_child",
+                    "target": "App"
+                },
+                "messages": {
+                    "predicate": "ad4m://has_child",
+                    "target": "Message"
+                },
+                "conversations": {
+                    "predicate": "ad4m://has_child",
+                    "target": "Conversation"
+                }
+            }
+        }"#;
+
+        let query = ModelQueryInput::default();
+        let result =
+            execute_model_query(&store, "Channel", &query, Some(shape_json)).unwrap();
+
+        assert_eq!(result.instances.len(), 1, "Should find 1 channel");
+
+        let channel = &result.instances[0];
+        assert_eq!(channel["name"], json!("General"));
+
+        // All 3 relations must have all 3 children (raw IRI strings, no include)
+        let views = channel["views"]
+            .as_array()
+            .expect("views must be an array");
+        let messages = channel["messages"]
+            .as_array()
+            .expect("messages must be an array");
+        let conversations = channel["conversations"]
+            .as_array()
+            .expect("conversations must be an array");
+
+        // Without include resolution, all 3 children appear in each relation
+        // (the store can't discriminate by target type without include)
+        assert_eq!(
+            views.len(),
+            3,
+            "views must have 3 raw child IDs (no include filter)"
+        );
+        assert_eq!(
+            messages.len(),
+            3,
+            "messages must have 3 raw child IDs (no include filter)"
+        );
+        assert_eq!(
+            conversations.len(),
+            3,
+            "conversations must have 3 raw child IDs (no include filter)"
+        );
+
+        // Verify the actual IDs are present
+        let expected_ids = vec!["literal:string:app1", "literal:string:conv1", "literal:string:msg1"];
+        for rel_name in &["views", "messages", "conversations"] {
+            let ids: Vec<String> = channel[*rel_name]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            for eid in &expected_ids {
+                assert!(
+                    ids.contains(&eid.to_string()),
+                    "{} should contain {} but got {:?}",
+                    rel_name,
+                    eid,
+                    ids
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
+        // Ensure relations with distinct predicates don't bleed into each other
+        // even when one predicate is shared.
+        let store = SparqlStore::new(None).unwrap();
+
+        let parent = "literal:string:parent1";
+
+        // Parent flag
+        store
+            .add_link(&make_link(
+                parent,
+                "test://type",
+                "test://parent_type",
+                "1700000000000",
+            ))
+            .unwrap();
+
+        // Child via shared predicate
+        store
+            .add_link(&make_link(
+                parent,
+                "test://has_child",
+                "literal:string:shared_child",
+                "1700000000001",
+            ))
+            .unwrap();
+
+        // Child via unique predicate
+        store
+            .add_link(&make_link(
+                parent,
+                "test://has_special",
+                "literal:string:special_child",
+                "1700000000002",
+            ))
+            .unwrap();
+
+        let shape_json = r#"{
+            "className": "Parent",
+            "properties": {
+                "type": {
+                    "predicate": "test://type",
+                    "required": true,
+                    "flag": true,
+                    "initial": "test://parent_type"
+                }
+            },
+            "relations": {
+                "alpha": {
+                    "predicate": "test://has_child",
+                    "target": "Alpha"
+                },
+                "beta": {
+                    "predicate": "test://has_child",
+                    "target": "Beta"
+                },
+                "special": {
+                    "predicate": "test://has_special",
+                    "target": "Special"
+                }
+            }
+        }"#;
+
+        let query = ModelQueryInput::default();
+        let result =
+            execute_model_query(&store, "Parent", &query, Some(shape_json)).unwrap();
+
+        assert_eq!(result.instances.len(), 1);
+        let inst = &result.instances[0];
+
+        // alpha and beta both share test://has_child → both get shared_child
+        let alpha = inst["alpha"].as_array().expect("alpha must be array");
+        let beta = inst["beta"].as_array().expect("beta must be array");
+        let special = inst["special"].as_array().expect("special must be array");
+
+        assert_eq!(alpha.len(), 1, "alpha should have 1 child");
+        assert_eq!(beta.len(), 1, "beta should have 1 child");
+        assert_eq!(special.len(), 1, "special should have 1 child");
+
+        assert_eq!(alpha[0].as_str().unwrap(), "literal:string:shared_child");
+        assert_eq!(beta[0].as_str().unwrap(), "literal:string:shared_child");
+        assert_eq!(special[0].as_str().unwrap(), "literal:string:special_child");
     }
 }
