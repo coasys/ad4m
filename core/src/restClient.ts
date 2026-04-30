@@ -97,7 +97,9 @@ export class RestClient {
             body: body !== undefined ? JSON.stringify(body) : undefined,
         })
         if (!res.ok) throw new RestError(res.status, await res.text())
-        return res.json() as Promise<T>
+        const text = await res.text()
+        if (!text) return undefined as T
+        return JSON.parse(text) as T
     }
 
     async get<T>(path: string): Promise<T> {

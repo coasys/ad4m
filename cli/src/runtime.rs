@@ -126,9 +126,12 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
             }
         }
         RuntimeFunctions::HcAddAgentInfos { infos_file } => {
+            // NOTE: K2 spaces must already exist (via join) before adding agent infos,
+            // otherwise the call will fail with K2SpaceNotFound.
             if let Some(infos_file) = infos_file {
                 let infos = std::fs::read_to_string(infos_file)?;
-                let parsed: Vec<String> = serde_json::from_str(&infos)?;
+                let parsed: Vec<String> = serde_json::from_str(&infos)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse agent infos JSON array: {e}"))?;
                 ad4m_client.runtime.hc_add_agent_infos(parsed).await?;
                 println!("Holochain agent infos added!");
             } else {
@@ -136,7 +139,8 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
                 let readline = rl.readline("Please enter the encoded agent infos JSON array: ");
                 match readline {
                     Ok(line) => {
-                        let parsed: Vec<String> = serde_json::from_str(&line)?;
+                        let parsed: Vec<String> = serde_json::from_str(&line)
+                            .map_err(|e| anyhow::anyhow!("Failed to parse agent infos JSON array: {e}"))?;
                         ad4m_client.runtime.hc_add_agent_infos(parsed).await?;
                         println!("Holochain agent infos added!");
                     }

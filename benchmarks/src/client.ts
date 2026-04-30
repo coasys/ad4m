@@ -42,7 +42,9 @@ export class RestBenchClient {
     if (!resp.ok) {
       throw new Error(`REST request failed (${resp.status}): ${await resp.text()}`)
     }
-    return resp.json() as Promise<T>
+    const text = await resp.text()
+    if (!text) return undefined as T
+    return JSON.parse(text) as T
   }
 
   async addPerspective(name: string): Promise<string> {

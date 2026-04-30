@@ -20,7 +20,7 @@ export class LanguageClient {
     }
 
     async all(): Promise<LanguageHandle[]> {
-        return this.byFilter('')
+        return this.#restClient.get<LanguageHandle[]>('/api/v1/languages')
     }
 
     async writeSettings(languageAddress: string, settings: string): Promise<Boolean> {

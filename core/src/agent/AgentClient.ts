@@ -123,10 +123,9 @@ export class AgentClient {
 
   async mutatePublicPerspective(mutations: LinkMutations): Promise<Agent> {
     const perspectiveClient = new PerspectiveClient(this.#baseUrl, this.#token);
-    const agentClient = new AgentClient(this.#baseUrl, this.#token);
 
     const proxyPerspective = await perspectiveClient.add("Agent Perspective Proxy");
-    const agentMe = await agentClient.me();
+    const agentMe = await this.me();
 
     if (agentMe.perspective) {
       await proxyPerspective.loadSnapshot(agentMe.perspective);

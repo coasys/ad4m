@@ -25,7 +25,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: ExpressionFunctions) -> Resul
         } => {
             let content_str = serde_json::from_str::<Value>(&content)
                 .map(|v| v.to_string())
-                .unwrap_or_else(|_| format!("\"{}\"", content));
+                .unwrap_or_else(|_| serde_json::to_string(&content).unwrap());
             let expression_url = ad4m_client
                 .expressions
                 .expression_create(content_str, language_address)

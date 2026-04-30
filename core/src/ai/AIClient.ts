@@ -167,7 +167,7 @@ export class AIClient {
 
         if (!response.ok) {
             const text = await response.text().catch(() => '');
-            console.error(`[AIClient] feed failed: ${response.status} ${response.statusText}`, text);
+            throw new Error(`[AIClient] feed failed: ${response.status} ${response.statusText} ${text}`);
         }
     }
 
