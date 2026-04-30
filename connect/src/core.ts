@@ -127,12 +127,12 @@ export default class Ad4mConnect extends EventTarget {
   private buildClient(): Ad4mClient {
     this.notifyConnectionChange("connecting");
 
-    // Close old client's SSE connections to avoid connection pool exhaustion
+    // Close old client's WebSocket connections to avoid connection pool exhaustion
     if (this.ad4mClient && typeof this.ad4mClient.close === 'function') {
       this.ad4mClient.close();
     }
 
-    // Defer SSE subscriptions until auth is verified to avoid 403 spam
+    // Defer subscriptions until auth is verified to avoid 403 spam
     this.ad4mClient = new Ad4mClient(this.baseUrl, this.token, false);
     this.notifyConnectionChange("connected");
 

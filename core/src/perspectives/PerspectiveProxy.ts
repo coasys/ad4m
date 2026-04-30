@@ -31,7 +31,7 @@ interface Unsubscribable {
  * This class handles:
  * - Keeping the subscription alive by sending periodic keepalive signals
  * - Managing callbacks for result updates
- * - Subscribing to query updates via SSE subscriptions
+ * - Subscribing to query updates via WebSocket subscriptions
  * - Maintaining the latest query result
  * - Ensuring subscription is fully initialized before allowing access
  * - Cleaning up resources when disposed
@@ -121,7 +121,7 @@ export class QuerySubscriptionProxy {
             // Process the initial result immediately for fast UX.
             // The REST subscribeQuery() endpoint already returns the initial result,
             // so treat that as successful initialization instead of waiting for a
-            // follow-up SSE update that may never arrive until the query changes.
+            // follow-up WebSocket update that may never arrive until the query changes.
             if (initialResult.result !== undefined) {
                 this.#latestResult = initialResult.result;
                 this.#notifyCallbacks(initialResult.result);

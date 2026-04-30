@@ -1,24 +1,4 @@
-type EventSourceInitCompat = {
-    withCredentials?: boolean
-    fetch?: typeof globalThis.fetch
-}
-
-// EventSource may come from DOM lib or a polyfill.
-// The `eventsource` polyfill supports a custom `fetch` implementation,
-// which we use to preserve Node's native web-stream-based fetch even if
-// callers later overwrite `global.fetch` with `node-fetch`.
-declare var EventSource: {
-    new(url: string, init?: EventSourceInitCompat): {
-        onmessage: ((event: { data: string }) => void) | null
-        onerror: ((event: Event) => void) | null
-        close(): void
-    }
-}
-
-const nativeFetch =
-    typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : undefined
-
-/** Shape of SSE event data parsed from JSON. Callers can narrow via generics. */
+/** Shape of event data parsed from JSON. Callers can narrow via generics. */
 export interface SseEvent {
     type: string
     [key: string]: unknown
@@ -50,6 +30,12 @@ const MAX_RETRIES = 2
 
 /** Base delay in ms between retries (doubles each attempt). */
 const RETRY_BASE_DELAY_MS = 500
+
+/** Maximum reconnect delay in ms. */
+const MAX_RECONNECT_DELAY_MS = 30_000
+
+/** Initial reconnect delay in ms. */
+const INITIAL_RECONNECT_DELAY_MS = 500
 
 export class RestClient {
     constructor(private baseUrl: string, private token?: string) {}
@@ -122,91 +108,140 @@ export class RestClient {
         return this.request<T>('DELETE', path, body)
     }
 
-    // Shared EventSource instances keyed by full URL to avoid exhausting
-    // the browser's per-origin HTTP/1.1 connection limit (6 in Chrome).
-    private _eventSources = new Map<string, {
-        es: InstanceType<typeof EventSource>,
-        callbacks: Set<(data: unknown) => void>,
-        ready: Promise<void>
-    }>()
+    // ── WebSocket-based event subscription ──────────────────────────────────
+
+    private _ws: WebSocket | null = null
+    private _wsCallbacks = new Set<(data: unknown) => void>()
+    private _wsReady: Promise<void> | null = null
+    private _wsReadyResolve: (() => void) | null = null
+    private _wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
+    private _wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
+    private _wsClosed = false   // true when closeAll() is called explicitly
+    private _wsPingTimer: ReturnType<typeof setInterval> | null = null
+
+    private _getWsUrl(): string {
+        // Convert http(s):// to ws(s)://
+        const wsBase = this.baseUrl
+            .replace(/^http:\/\//, 'ws://')
+            .replace(/^https:\/\//, 'wss://')
+        const tokenParam = this.token ? `token=${encodeURIComponent(this.token)}` : ''
+        const path = '/api/v1/ws/events'
+        return tokenParam ? `${wsBase}${path}?${tokenParam}` : `${wsBase}${path}`
+    }
+
+    private _ensureWs(): void {
+        if (this._ws && (this._ws.readyState === WebSocket.OPEN || this._ws.readyState === WebSocket.CONNECTING)) {
+            return
+        }
+
+        this._wsClosed = false
+
+        // Create readiness promise
+        this._wsReady = new Promise<void>((resolve) => {
+            this._wsReadyResolve = resolve
+        })
+
+        const url = this._getWsUrl()
+        const ws = new WebSocket(url)
+        this._ws = ws
+
+        ws.onopen = () => {
+            this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
+            if (this._wsReadyResolve) {
+                this._wsReadyResolve()
+                this._wsReadyResolve = null
+            }
+            // Start application-level ping to detect stale connections
+            this._startPing()
+        }
+
+        ws.onmessage = (event) => {
+            let parsed: Record<string, unknown>
+            try { parsed = JSON.parse(event.data) } catch (e) {
+                console.error('Error parsing WebSocket data:', e)
+                return
+            }
+            // Ignore pong messages from the server
+            if (parsed.type === 'pong') return
+            for (const cb of this._wsCallbacks) cb(parsed)
+        }
+
+        ws.onerror = (e) => {
+            console.error('WebSocket error:', e)
+        }
+
+        ws.onclose = () => {
+            this._stopPing()
+            this._ws = null
+            if (!this._wsClosed && this._wsCallbacks.size > 0) {
+                // Auto-reconnect with exponential backoff
+                this._scheduleReconnect()
+            }
+        }
+    }
+
+    private _startPing(): void {
+        this._stopPing()
+        // Send application-level ping every 30s to detect dead connections
+        this._wsPingTimer = setInterval(() => {
+            if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+                this._ws.send(JSON.stringify({ type: 'ping' }))
+            }
+        }, 30_000)
+    }
+
+    private _stopPing(): void {
+        if (this._wsPingTimer) {
+            clearInterval(this._wsPingTimer)
+            this._wsPingTimer = null
+        }
+    }
+
+    private _scheduleReconnect(): void {
+        if (this._wsReconnectTimer) return
+        const delay = this._wsReconnectDelay
+        this._wsReconnectDelay = Math.min(this._wsReconnectDelay * 2, MAX_RECONNECT_DELAY_MS)
+        this._wsReconnectTimer = setTimeout(() => {
+            this._wsReconnectTimer = null
+            if (!this._wsClosed && this._wsCallbacks.size > 0) {
+                this._ensureWs()
+            }
+        }, delay)
+    }
 
     subscribe<T = SseEvent>(path: string, callback: (data: T) => void): () => void {
-        // Single /events endpoint — all event types multiplexed, server filters per-user.
-        const targetPath = '/api/v1/events'
-        const url = `${this.baseUrl}${targetPath}`
-        const tokenParam = this.token ? `token=${encodeURIComponent(this.token)}` : ''
-        const separator = url.includes('?') ? '&' : '?'
-        const fullUrl = tokenParam ? `${url}${separator}${tokenParam}` : url
-
-        let entry = this._eventSources.get(fullUrl)
-        if (!entry) {
-            const es = nativeFetch
-                ? new EventSource(fullUrl, { fetch: nativeFetch })
-                : new EventSource(fullUrl)
-            // Track when the SSE connection is established so callers can
-            // await readiness instead of relying on an arbitrary delay.
-            const ready = new Promise<void>((resolve) => {
-                const orig = es.onmessage
-                // Resolve on first successful message (connection is live).
-                const onFirstEvent = (event: { data: string }) => {
-                    resolve()
-                    // Delegate to the real handler for this first event too.
-                    if (es.onmessage && es.onmessage !== onFirstEvent) {
-                        es.onmessage(event)
-                    }
-                }
-                es.onmessage = onFirstEvent
-                // Also resolve after a short timeout as fallback — the server
-                // may not send an event immediately, but the connection is open.
-                setTimeout(resolve, 200)
-            })
-            entry = { es, callbacks: new Set(), ready }
-            const ref = entry          // stable reference for closure
-            // Replace the temporary onmessage with the real dispatcher.
-            // If the first-event handler already fired, this just overwrites it.
-            // If not, the first-event handler will call through to this one.
-            es.onmessage = (event) => {
-                let parsed: Record<string, unknown>
-                try { parsed = JSON.parse(event.data) } catch (e) {
-                    console.error('Error parsing SSE data:', e)
-                    return
-                }
-                for (const cb of ref.callbacks) cb(parsed)
-            }
-            es.onerror = (e) => { console.error('SSE error:', e) }
-            this._eventSources.set(fullUrl, entry)
-        }
-
-        entry.callbacks.add(callback as (data: unknown) => void)
+        this._wsCallbacks.add(callback as (data: unknown) => void)
+        this._ensureWs()
 
         return () => {
-            const e = this._eventSources.get(fullUrl)
-            if (!e) return
-            e.callbacks.delete(callback as (data: unknown) => void)
-            if (e.callbacks.size === 0) {
-                e.es.close()
-                this._eventSources.delete(fullUrl)
+            this._wsCallbacks.delete(callback as (data: unknown) => void)
+            if (this._wsCallbacks.size === 0) {
+                this._closeWs()
             }
         }
     }
 
-    /** Wait until the SSE connection for the given path is established. */
+    /** Wait until the WebSocket connection is established. */
     async waitForSubscription(path: string): Promise<void> {
-        const targetPath = '/api/v1/events'
-        const url = `${this.baseUrl}${targetPath}`
-        const tokenParam = this.token ? `token=${encodeURIComponent(this.token)}` : ''
-        const separator = url.includes('?') ? '&' : '?'
-        const fullUrl = tokenParam ? `${url}${separator}${tokenParam}` : url
-        const entry = this._eventSources.get(fullUrl)
-        if (entry) await entry.ready
+        if (this._wsReady) await this._wsReady
     }
 
-    /** Close all open EventSource connections */
-    closeAll(): void {
-        for (const [url, entry] of this._eventSources) {
-            entry.es.close()
-            entry.callbacks.clear()
+    private _closeWs(): void {
+        this._stopPing()
+        if (this._wsReconnectTimer) {
+            clearTimeout(this._wsReconnectTimer)
+            this._wsReconnectTimer = null
         }
-        this._eventSources.clear()
+        if (this._ws) {
+            this._wsClosed = true
+            this._ws.close()
+            this._ws = null
+        }
+    }
+
+    /** Close all open WebSocket connections */
+    closeAll(): void {
+        this._closeWs()
+        this._wsCallbacks.clear()
     }
 }

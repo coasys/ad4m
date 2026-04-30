@@ -8,6 +8,7 @@ pub mod audio_ws;
 pub mod auth;
 pub mod errors;
 pub mod events;
+pub mod events_ws;
 pub mod expressions;
 pub mod hosting;
 pub mod languages;
@@ -396,6 +397,8 @@ pub fn rest_router(state: AppState) -> Router {
             .route("/ws/audio", get(audio_ws::audio_websocket))
             // ── SSE Events (single endpoint) ──
             .route("/events", get(events::events))
+            // ── WebSocket Events (single endpoint) ──
+            .route("/ws/events", get(events_ws::events_ws))
             // ── Stub routes: SDK endpoints not yet implemented on server (501) ──
             .route("/runtime/unyt/agent-key", get(runtime::unyt_agent_key))
             .route(

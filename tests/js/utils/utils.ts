@@ -5,16 +5,11 @@ import os from "node:os";
 import path from "path";
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
-import { EventSource } from "eventsource";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// The REST client uses SSE subscriptions, but Node-based test entry points do
-// not provide a global EventSource by default. Polyfill it once here because
-// this helper module is imported by the affected integration test lanes.
-// @ts-ignore
-(global as any).EventSource = EventSource;
+// WebSocket is available natively in Node 21+.
 
 export async function isProcessRunning(processName: string): Promise<boolean> {
     const cmd = (() => {

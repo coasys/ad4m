@@ -72,7 +72,7 @@ export class Ad4mClient {
         return this.#aiClient
     }
 
-    /** Start SSE subscriptions (agent-updated, agent-status-changed, apps-changed).
+    /** Start event subscriptions (agent-updated, agent-status-changed, apps-changed).
      *  Safe to call if subscriptions were deferred at construction (subscribe=false). */
     startSubscriptions(): void {
         this.#agentClient.subscribeAgentUpdated()
@@ -80,7 +80,7 @@ export class Ad4mClient {
         this.#agentClient.subscribeAppsChanged()
     }
 
-    /** Close all SSE connections */
+    /** Close all event connections */
     close(): void {
         this.#restClient.closeAll()
     }

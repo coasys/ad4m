@@ -34,7 +34,7 @@ use ad4m_rest_macros::rest_handler;
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Convert a BroadcastStream result, emitting a lagged marker on overflow.
-fn handle_broadcast_result(
+pub(crate) fn handle_broadcast_result(
     r: Result<String, BroadcastStreamRecvError>,
 ) -> Option<Result<String, u64>> {
     match r {
@@ -49,7 +49,7 @@ fn handle_broadcast_result(
 ///   `{"type": "foo", ...original}`
 /// Otherwise it becomes:
 ///   `{"type": "foo", "data": <original>}`
-fn wrap_event(event_type: &str, raw_json: &str) -> String {
+pub(crate) fn wrap_event(event_type: &str, raw_json: &str) -> String {
     if let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str(raw_json) {
         map.insert(
             "type".to_string(),
@@ -62,7 +62,7 @@ fn wrap_event(event_type: &str, raw_json: &str) -> String {
     }
 }
 
-fn wrap_event_nested(event_type: &str, payload_key: &str, raw_json: &str) -> String {
+pub(crate) fn wrap_event_nested(event_type: &str, payload_key: &str, raw_json: &str) -> String {
     format!(
         r#"{{"type":"{}","{}":{}}}"#,
         event_type, payload_key, raw_json
@@ -74,7 +74,7 @@ fn wrap_event_nested(event_type: &str, payload_key: &str, raw_json: &str) -> Str
 /// Perspective lifecycle events and link events include an `owner` DID.
 /// For managed users, only emit events whose owner matches.  For main agent /
 /// admin (current_did is None), emit all events.
-fn matches_owner(msg: &str, current_did: Option<&str>) -> bool {
+pub(crate) fn matches_owner(msg: &str, current_did: Option<&str>) -> bool {
     match current_did {
         None => true,
         Some(did) => {
@@ -90,7 +90,7 @@ fn matches_owner(msg: &str, current_did: Option<&str>) -> bool {
 }
 
 /// Neighbourhood signals: `recipient` field must match or be absent (broadcast).
-fn matches_signal_recipient(msg: &str, current_did: Option<&str>) -> bool {
+pub(crate) fn matches_signal_recipient(msg: &str, current_did: Option<&str>) -> bool {
     match serde_json::from_str::<serde_json::Value>(msg) {
         Ok(serde_json::Value::Object(map)) => match map.get("recipient") {
             Some(serde_json::Value::String(recipient)) => {
@@ -106,7 +106,7 @@ fn matches_signal_recipient(msg: &str, current_did: Option<&str>) -> bool {
 
 /// Agent events: the payload contains a `did` field.  For managed users, only
 /// emit when it matches.  Main agent / admin sees all.
-fn matches_agent_did(msg: &str, current_did: Option<&str>) -> bool {
+pub(crate) fn matches_agent_did(msg: &str, current_did: Option<&str>) -> bool {
     match current_did {
         None => true,
         Some(did) => {
@@ -121,7 +121,7 @@ fn matches_agent_did(msg: &str, current_did: Option<&str>) -> bool {
 }
 
 /// Apps-changed events: the auth payload contains `user_did`.
-fn matches_apps_user(msg: &str, current_did: Option<&str>) -> bool {
+pub(crate) fn matches_apps_user(msg: &str, current_did: Option<&str>) -> bool {
     match current_did {
         None => true,
         Some(did) => {
@@ -139,7 +139,7 @@ fn matches_apps_user(msg: &str, current_did: Option<&str>) -> bool {
 
 /// Hosting-user-info events: payload has `email`.  Match against the requesting
 /// user's email (derived from the auth token).
-fn matches_hosting_user(msg: &str, user_email: Option<&str>) -> bool {
+pub(crate) fn matches_hosting_user(msg: &str, user_email: Option<&str>) -> bool {
     match user_email {
         None => true,
         Some(email) => {
@@ -155,7 +155,7 @@ fn matches_hosting_user(msg: &str, user_email: Option<&str>) -> bool {
 
 /// Transcription events: payload has `userDid`.  Match against the requesting
 /// user's DID.  Main agent / admin sees all.
-fn matches_transcription_user(msg: &str, current_did: Option<&str>) -> bool {
+pub(crate) fn matches_transcription_user(msg: &str, current_did: Option<&str>) -> bool {
     match current_did {
         None => true,
         Some(did) => {
@@ -172,7 +172,7 @@ fn matches_transcription_user(msg: &str, current_did: Option<&str>) -> bool {
 
 /// Notification events: payload has a `perspective_id` (or `perspectiveId`).
 /// Look up the perspective's owners and check if the current user is among them.
-fn matches_notification_owner(msg: &str, current_did: Option<&str>) -> bool {
+pub(crate) fn matches_notification_owner(msg: &str, current_did: Option<&str>) -> bool {
     match current_did {
         None => true,
         Some(did) => {
@@ -191,7 +191,7 @@ fn matches_notification_owner(msg: &str, current_did: Option<&str>) -> bool {
 
 /// Query-subscription events: payload has `uuid` (perspective UUID).
 /// Look up the perspective's owners to check if the current user owns it.
-fn matches_query_subscription_owner(msg: &str, current_did: Option<&str>) -> bool {
+pub(crate) fn matches_query_subscription_owner(msg: &str, current_did: Option<&str>) -> bool {
     match current_did {
         None => true,
         Some(did) => {
@@ -208,7 +208,7 @@ fn matches_query_subscription_owner(msg: &str, current_did: Option<&str>) -> boo
 /// Check if a perspective is owned by (or visible to) the given DID.
 /// Falls back to `true` if the perspective doesn't exist or has no owners
 /// (unowned perspectives are visible to everyone).
-fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
+pub(crate) fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
     use crate::perspectives::get_perspective;
     match get_perspective(uuid) {
         Some(instance) => {

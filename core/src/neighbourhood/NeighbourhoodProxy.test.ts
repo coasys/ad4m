@@ -1,7 +1,7 @@
 import { NeighbourhoodClient } from "./NeighbourhoodClient";
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy";
 
-// Mock RestClient's subscribe to avoid real SSE connections
+// Mock RestClient's subscribe to avoid real WebSocket connections
 jest.mock('../restClient', () => {
   return {
     RestClient: jest.fn().mockImplementation(() => ({

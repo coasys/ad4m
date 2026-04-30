@@ -12,13 +12,10 @@ import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.j
 import path from "path";
 import fetch from 'node-fetch';
 import { fileURLToPath } from 'url';
-import { EventSource } from 'eventsource';
 
-// Polyfill for Node.js
+// Polyfill fetch for Node.js (WebSocket is native in Node 21+)
 //@ts-ignore
 global.fetch = fetch;
-//@ts-ignore
-global.EventSource = EventSource;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -325,15 +322,15 @@ describe("REST Integration", function() {
     });
 
     // === Subscription Tests ===
-    describe("Subscriptions (SSE)", () => {
-        it("should receive link-added callback via SSE", async function() {
+    describe("Subscriptions (WebSocket)", () => {
+        it("should receive link-added callback via WebSocket", async function() {
             this.timeout(30000);
 
             // Create a fresh perspective with subscriptions enabled
             const client = new Ad4mClient(`http://127.0.0.1:${gqlPort}`, undefined, true);
-            await sleep(1000); // Let SSE connections establish
+            await sleep(1000); // Let WebSocket connections establish
 
-            const proxy = await client.perspective.add("SSE Test Perspective");
+            const proxy = await client.perspective.add("WS Test Perspective");
             const uuid = proxy.uuid;
 
             let receivedLink: LinkExpression | null = null;
@@ -345,28 +342,28 @@ describe("REST Integration", function() {
                 });
             });
 
-            // Give SSE time to establish
+            // Give WebSocket time to establish
             await sleep(2000);
 
             // Add a link
             await proxy.add(new Link({
-                source: "sse://test",
-                target: "sse://callback",
-                predicate: "sse://verify"
+                source: "ws://test",
+                target: "ws://callback",
+                predicate: "ws://verify"
             }));
 
             // Wait for callback (with timeout)
             const timeout = new Promise<void>((_, reject) =>
-                setTimeout(() => reject(new Error("SSE callback timeout")), 15000)
+                setTimeout(() => reject(new Error("WebSocket callback timeout")), 15000)
             );
 
             try {
                 await Promise.race([linkPromise, timeout]);
                 expect(receivedLink).to.not.be.null;
-                expect((receivedLink as any).data.source).to.equal("sse://test");
+                expect((receivedLink as any).data.source).to.equal("ws://test");
             } catch (e) {
-                console.log("SSE subscription test:", (e as Error).message);
-                // SSE may not be fully working in test env
+                console.log("WebSocket subscription test:", (e as Error).message);
+                // WebSocket may not be fully working in test env
             }
 
             // Cleanup
