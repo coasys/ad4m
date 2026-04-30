@@ -709,7 +709,8 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
                 continue;
             }
 
-            let direction = rel_meta["direction"].as_str().map(|s| s.to_string());
+            let direction = rel_meta["direction"].as_str().map(|s| s.to_string())
+                .or_else(|| Some("forward".to_string()));
 
             let kind = rel_meta["kind"].as_str().unwrap_or("hasMany").to_string();
             let is_scalar_relation = kind == "hasOne" || kind == "belongsToOne";
