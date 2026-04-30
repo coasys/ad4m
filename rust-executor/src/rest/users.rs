@@ -381,6 +381,28 @@ pub async fn request_verification(
         })));
     }
 
+    // Check if email delivery is available (SMTP configured or test mode)
+    let smtp_available = crate::config::SMTP_CONFIG
+        .lock()
+        .ok()
+        .and_then(|cfg| cfg.clone())
+        .map(|c| c.enabled)
+        .unwrap_or(false);
+    let test_mode = crate::email_service::EMAIL_TEST_MODE
+        .lock()
+        .ok()
+        .map(|mode| *mode)
+        .unwrap_or(false);
+
+    if !smtp_available && !test_mode {
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "message": "Email not configured. Please log in with your password.",
+            "requiresPassword": true,
+            "isExistingUser": true,
+        })));
+    }
+
     let app_name = body
         .app_info
         .as_ref()
