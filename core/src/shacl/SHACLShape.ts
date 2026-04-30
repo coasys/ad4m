@@ -788,6 +788,18 @@ export class SHACLShape {
         prop.class = classLink.target;
       }
 
+      const inLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "sh://in"
+      );
+      if (inLink) {
+        try {
+          const jsonStr = inLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
+          prop.in = JSON.parse(jsonStr);
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+
       shape.addProperty(prop);
     }
     

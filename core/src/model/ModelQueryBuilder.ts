@@ -646,23 +646,25 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       className, queryJson, shapeJson
     );
 
-    // Build the paginated query for Rust endpoint
+    // Build the paginated query for Rust endpoint (count: true fetches both results and totalCount in one call)
     const paginatedQuery = {
       ...(this.queryParams || {}),
       limit: pageSize,
       offset: pageSize * (pageNumber - 1),
+      count: true,
     };
 
     const processResults = async () => {
-      const countQuery = { ...(this.queryParams || {}), limit: 0 };
-      const { totalCount } = await (ctor as any).executeModelQuery(this.perspective, countQuery, this.modelClassName);
-      const { results } = await (ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
+      const { results, totalCount } = await (ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
       callback({ results, totalCount, pageSize, pageNumber });
     };
 
     const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
       subscriptionId,
-      () => { processResults().catch(e => console.error('Paginate subscription error:', e)); },
+      (rawResult: any) => {
+        if (rawResult && rawResult.isInit) return;
+        processResults().catch(e => console.error('Paginate subscription error:', e));
+      },
     );
 
     const keepaliveTimer = setInterval(() => {
@@ -677,10 +679,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       },
     };
 
-    // Initial fetch
-    const countQuery = { ...(this.queryParams || {}), limit: 0 };
-    const { totalCount } = await (ctor as any).executeModelQuery(this.perspective, countQuery, this.modelClassName);
-    const { results } = await (ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
+    // Initial fetch (single call with count: true)
+    const { results, totalCount } = await (ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
     return { results, totalCount, pageSize, pageNumber };
   }
 

@@ -4116,11 +4116,14 @@ impl PerspectiveInstance {
         };
 
         if let Some(existing_id) = existing_subscription {
-            // Update last_result with fresh data and re-send
+            // Update last_result and trigger metadata with fresh data
             {
                 let mut queries = self.subscribed_queries.lock().await;
                 if let Some(q) = queries.get_mut(&existing_id) {
+                    q.query = trigger_sparql.clone();
+                    q.predicates = predicate_set.clone();
                     q.last_result = initial_result.clone();
+                    q.last_keepalive = Instant::now();
                 }
             }
             let init_string = format!("#init#{}", initial_result);
@@ -4207,14 +4210,14 @@ impl PerspectiveInstance {
             }
         }
 
-        // Fallback: try to read shape from the store
-        if predicates.is_empty() {
-            if let Ok(shape) =
-                super::model_query::load_shape_from_store(&self.sparql_store, class_name)
-            {
-                predicates = shape.predicates();
-            }
+        // Always merge in the persisted shape predicates as a safe superset
+        if let Ok(shape) =
+            super::model_query::load_shape_from_store(&self.sparql_store, class_name)
+        {
+            predicates.extend(shape.predicates());
         }
+        predicates.sort();
+        predicates.dedup();
 
         predicates
     }

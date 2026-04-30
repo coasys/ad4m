@@ -261,10 +261,19 @@ pub(crate) struct ModelShape {
 impl ModelShape {
     /// Returns all predicate IRIs declared in this shape (properties + relations + flags).
     pub fn predicates(&self) -> Vec<String> {
-        self.properties
+        let mut preds: Vec<String> = self.properties
             .iter()
+            .filter(|p| !p.predicate.is_empty())
             .map(|p| p.predicate.clone())
-            .collect()
+            .collect();
+        for r in &self.include_relations {
+            if !r.predicate.is_empty() {
+                preds.push(r.predicate.clone());
+            }
+        }
+        preds.sort();
+        preds.dedup();
+        preds
     }
 }
 
@@ -1648,8 +1657,7 @@ fn evaluate_getters(
             // Substitute Base / ?source with the instance IRI
             let sparql = getter
                 .replace("?source", &format!("<{}>", instance_id))
-                .replace("<Base>", &format!("<{}>", instance_id))
-                .replace("Base", &format!("<{}>", instance_id));
+                .replace("<Base>", &format!("<{}>", instance_id));
 
             log::debug!(
                 "evaluate_getters: prop='{}' collection={} sparql={}",

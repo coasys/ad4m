@@ -1997,8 +1997,10 @@ export class PerspectiveProxy {
             if (row.shIn) {
                 try {
                     let raw = row.shIn;
-                    // Strip literal: prefix if present
-                    if (raw.startsWith('literal:string:')) raw = raw.substring('literal:string:'.length);
+                    // Strip literal: prefix if present, and URI-decode for robustness
+                    if (raw.startsWith('literal:string:')) {
+                        raw = decodeURIComponent(raw.substring('literal:string:'.length));
+                    }
                     options = JSON.parse(raw);
                 } catch { /* ignore parse errors */ }
             }
