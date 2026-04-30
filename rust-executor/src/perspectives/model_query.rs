@@ -2393,6 +2393,7 @@ mod tests {
             datatype: None,
             direction: None,
             is_scalar_relation: false,
+            getter: None,
         }
     }
 
@@ -2409,6 +2410,7 @@ mod tests {
             datatype: None,
             direction: Some("forward".to_string()),
             is_scalar_relation: false,
+            getter: None,
         }
     }
 
@@ -2425,6 +2427,7 @@ mod tests {
             datatype: None,
             direction: None,
             is_scalar_relation: false,
+            getter: None,
         }
     }
 
