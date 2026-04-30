@@ -2144,7 +2144,9 @@ export class Ad4mModel {
    * WeakMap metadata registries.
    *
    * Properties with `hasValue` (flag / type-discrimination markers) are
-   * excluded, as are properties without a `name` field.
+   * registered as hidden flag entries so that the SPARQL query builder emits
+   * the fixed triple `?source <predicate> <value>` needed for type discrimination.
+   * Properties without a `name` field are skipped.
    *
    * @param shape - SHACL node shape (as returned by `PerspectiveProxy.getAllShacl()`)
    * @param name  - Class name to assign (e.g. "Channel")
@@ -2155,9 +2157,47 @@ export class Ad4mModel {
     (DynamicModelClass as any).className = name;
     (DynamicModelClass.prototype as any).className = name;
 
+    // Build a backward-compat fallback map: predicate → fixed-IRI-value from
+    // constructor actions.  Old SHACL stores (created before sh:hasValue was
+    // persisted) don't carry sh:hasValue links on the property shape, but the
+    // shape-level constructor actions always contain an addLink action with the
+    // fixed flag value as the target.  We use these to recover the hasValue
+    // when the property shape itself doesn't carry it.
+    const flagValueFromConstructor = new Map<string, string>();
+    for (const action of shape.constructor_actions ?? []) {
+      if (
+        action.action === 'addLink' &&
+        typeof action.predicate === 'string' &&
+        typeof action.target === 'string' &&
+        action.target !== 'value' &&
+        !action.target.startsWith('literal:')
+      ) {
+        flagValueFromConstructor.set(action.predicate, action.target);
+      }
+    }
+
     for (const prop of shape.properties) {
-      // Skip flag properties — type-discrimination markers, not data properties
-      if (prop.hasValue !== undefined) continue;
+      // Resolve hasValue: prefer the property shape's own sh:hasValue, then
+      // fall back to the constructor-action map for backward compat.
+      const resolvedHasValue = prop.hasValue ?? flagValueFromConstructor.get(prop.path);
+
+      // Register flag properties as type-discrimination entries.
+      // A flag property (sh:hasValue) is not a user-visible data field, but it
+      // IS needed by the SPARQL query builder — it emits a fixed triple pattern
+      //   ?source <predicate> <value> .
+      // that ensures only instances of the correct type are returned.
+      if (resolvedHasValue !== undefined) {
+        const flagKey = prop.name ?? `_flag_${prop.path.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+        setPropertyRegistryEntry(DynamicModelClass, flagKey, {
+          through: prop.path,
+          required: true,
+          initial: resolvedHasValue,
+          flag: true,
+          writable: false,
+          readOnly: true,
+        });
+        continue;
+      }
       // Skip properties without a declared name
       if (!prop.name) continue;
 

@@ -2672,16 +2672,35 @@ describe("Ad4mModel.fromSHACL()", () => {
     expect(meta.properties["id"].readOnly).toBe(true);
   });
 
-  it("skips properties that have hasValue (flag/type-discrimination markers)", () => {
+  it("registers flag properties (hasValue) as type-discrimination entries", () => {
     const shape = makeShape("flux://Message", [
       { name: "type", path: "flux://entry_type", hasValue: "flux://message" },
       { name: "body", path: "flux://body", maxCount: 1 },
     ]);
     const Cls = Ad4mModel.fromSHACL(shape, "Message");
     const meta = Cls.getModelMetadata();
-    expect(meta.properties["type"]).toBeUndefined();
-    expect(meta.relations["type"]).toBeUndefined();
+    // Flag property IS registered so the SPARQL query can emit the type discriminator triple
+    expect(meta.properties["type"]).toBeDefined();
+    expect(meta.properties["type"].predicate).toBe("flux://entry_type");
+    expect(meta.properties["type"].flag).toBe(true);
+    expect(meta.properties["type"].required).toBe(true);
+    expect(meta.properties["type"].initial).toBe("flux://message");
+    // Regular data property is also registered
     expect(meta.properties["body"]).toBeDefined();
+  });
+
+  it("flag property from fromSHACL produces SPARQL type-discriminator triple", () => {
+    const shape = makeShape("flux://Message", [
+      { name: "type", path: "flux://entry_type", hasValue: "flux://message" },
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Message");
+    const meta = Cls.getModelMetadata();
+    const allRelsMeta = {} as any;
+    const sparql = buildSPARQLQuery(meta, allRelsMeta, {}, Cls);
+    // The SPARQL query must contain the fixed type-discriminator triple
+    expect(sparql).toContain("<flux://entry_type>");
+    expect(sparql).toContain("<flux://message>");
   });
 
   it("skips properties without a name field", () => {
