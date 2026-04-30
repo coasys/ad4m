@@ -4211,8 +4211,7 @@ impl PerspectiveInstance {
         }
 
         // Always merge in the persisted shape predicates as a safe superset
-        if let Ok(shape) =
-            super::model_query::load_shape_from_store(&self.sparql_store, class_name)
+        if let Ok(shape) = super::model_query::load_shape_from_store(&self.sparql_store, class_name)
         {
             predicates.extend(shape.predicates());
         }

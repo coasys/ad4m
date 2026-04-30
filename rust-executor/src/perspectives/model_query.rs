@@ -261,7 +261,8 @@ pub(crate) struct ModelShape {
 impl ModelShape {
     /// Returns all predicate IRIs declared in this shape (properties + relations + flags).
     pub fn predicates(&self) -> Vec<String> {
-        let mut preds: Vec<String> = self.properties
+        let mut preds: Vec<String> = self
+            .properties
             .iter()
             .filter(|p| !p.predicate.is_empty())
             .map(|p| p.predicate.clone())
