@@ -709,7 +709,9 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
                 continue;
             }
 
-            let direction = rel_meta["direction"].as_str().map(|s| s.to_string())
+            let direction = rel_meta["direction"]
+                .as_str()
+                .map(|s| s.to_string())
                 .or_else(|| Some("forward".to_string()));
 
             let kind = rel_meta["kind"].as_str().unwrap_or("hasMany").to_string();
@@ -2272,7 +2274,9 @@ mod tests {
         let result = hydrate_one(&s, &inst).unwrap();
 
         // All three relations must contain both children
-        let views = result["views"].as_array().expect("views should be an array");
+        let views = result["views"]
+            .as_array()
+            .expect("views should be an array");
         let messages = result["messages"]
             .as_array()
             .expect("messages should be an array");
@@ -2285,8 +2289,7 @@ mod tests {
         assert_eq!(conversations.len(), 2, "conversations must have 2 items");
 
         // All must contain the same IDs (raw IRIs for relations)
-        let expected_ids: Vec<&str> =
-            vec!["literal:string:app1", "literal:string:conv1"];
+        let expected_ids: Vec<&str> = vec!["literal:string:app1", "literal:string:conv1"];
         for rel_name in &["views", "messages", "conversations"] {
             let ids: Vec<String> = result[rel_name]
                 .as_array()
@@ -2323,7 +2326,9 @@ mod tests {
         );
 
         let result = hydrate_one(&s, &inst).unwrap();
-        let items = result["items"].as_array().expect("items should be an array");
+        let items = result["items"]
+            .as_array()
+            .expect("items should be an array");
         assert_eq!(items.len(), 2);
     }
 
@@ -2755,8 +2760,7 @@ mod integration_tests {
         }"#;
 
         let query = ModelQueryInput::default();
-        let result =
-            execute_model_query(&store, "Channel", &query, Some(shape_json)).unwrap();
+        let result = execute_model_query(&store, "Channel", &query, Some(shape_json)).unwrap();
 
         assert_eq!(result.instances.len(), 1, "Should find 1 channel");
 
@@ -2764,9 +2768,7 @@ mod integration_tests {
         assert_eq!(channel["name"], json!("General"));
 
         // All 3 relations must have all 3 children (raw IRI strings, no include)
-        let views = channel["views"]
-            .as_array()
-            .expect("views must be an array");
+        let views = channel["views"].as_array().expect("views must be an array");
         let messages = channel["messages"]
             .as_array()
             .expect("messages must be an array");
@@ -2793,7 +2795,11 @@ mod integration_tests {
         );
 
         // Verify the actual IDs are present
-        let expected_ids = vec!["literal:string:app1", "literal:string:conv1", "literal:string:msg1"];
+        let expected_ids = vec![
+            "literal:string:app1",
+            "literal:string:conv1",
+            "literal:string:msg1",
+        ];
         for rel_name in &["views", "messages", "conversations"] {
             let ids: Vec<String> = channel[*rel_name]
                 .as_array()
@@ -2878,8 +2884,7 @@ mod integration_tests {
         }"#;
 
         let query = ModelQueryInput::default();
-        let result =
-            execute_model_query(&store, "Parent", &query, Some(shape_json)).unwrap();
+        let result = execute_model_query(&store, "Parent", &query, Some(shape_json)).unwrap();
 
         assert_eq!(result.instances.len(), 1);
         let inst = &result.instances[0];
