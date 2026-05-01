@@ -38,11 +38,9 @@ function mapTypeToRoute(
         return parts.length ? `?${parts.join('&')}` : '';
     };
 
-    /** Clone params, removing id, type, and any extra excluded keys. Returns the body for POST/PUT/etc. */
+    /** Clone params, removing any specified excluded keys. Returns the body for POST/PUT/etc. */
     const bodyWithout = (exclude: string[]): Record<string, unknown> => {
         const result: Record<string, unknown> = { ...params };
-        delete result.id;
-        delete result.type;
         for (const key of exclude) delete result[key];
         return result;
     };
