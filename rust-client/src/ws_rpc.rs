@@ -39,8 +39,7 @@ struct RpcError {
 }
 
 type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value>>>>>;
-type WsSink =
-    futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 
 pub struct WsRpcClient {
     sender: Arc<Mutex<WsSink>>,
@@ -56,11 +55,7 @@ fn to_ws_url(executor_url: &str, token: &str) -> String {
     if token.is_empty() {
         format!("{}/api/v1/ws", ws_base)
     } else {
-        format!(
-            "{}/api/v1/ws?token={}",
-            ws_base,
-            urlencoding::encode(token)
-        )
+        format!("{}/api/v1/ws?token={}", ws_base, urlencoding::encode(token))
     }
 }
 
@@ -120,11 +115,7 @@ impl WsRpcClient {
         })
     }
 
-    pub async fn call<T: DeserializeOwned>(
-        &self,
-        msg_type: &str,
-        params: Value,
-    ) -> Result<T> {
+    pub async fn call<T: DeserializeOwned>(&self, msg_type: &str, params: Value) -> Result<T> {
         let id = next_id();
         let msg = RpcMessage {
             id: id.clone(),
@@ -136,21 +127,14 @@ impl WsRpcClient {
         self.pending.lock().await.insert(id.clone(), tx);
 
         let json = serde_json::to_string(&msg)?;
-        let send_result = self
-            .sender
-            .lock()
-            .await
-            .send(Message::Text(json))
-            .await;
+        let send_result = self.sender.lock().await.send(Message::Text(json)).await;
 
         if let Err(e) = send_result {
             self.pending.lock().await.remove(&id);
             return Err(anyhow!("Failed to send WS message: {}", e));
         }
 
-        let result = rx
-            .await
-            .map_err(|_| anyhow!("Response channel closed"))??;
+        let result = rx.await.map_err(|_| anyhow!("Response channel closed"))??;
 
         serde_json::from_value(result.clone()).map_err(|e| {
             anyhow!(

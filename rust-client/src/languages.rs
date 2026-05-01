@@ -92,19 +92,13 @@ impl LanguagesClient {
 
     pub async fn source(&self, address: String) -> Result<String> {
         self.ws
-            .call(
-                "language.source",
-                serde_json::json!({ "address": address }),
-            )
+            .call("language.source", serde_json::json!({ "address": address }))
             .await
     }
 
     pub async fn remove(&self, address: String) -> Result<bool> {
         self.ws
-            .call(
-                "language.remove",
-                serde_json::json!({ "address": address }),
-            )
+            .call("language.remove", serde_json::json!({ "address": address }))
             .await
     }
 }

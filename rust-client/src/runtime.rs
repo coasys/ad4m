@@ -52,10 +52,7 @@ impl RuntimeClient {
             .await
     }
 
-    pub async fn add_link_language_templates(
-        &self,
-        addresses: Vec<String>,
-    ) -> Result<Vec<String>> {
+    pub async fn add_link_language_templates(&self, addresses: Vec<String>) -> Result<Vec<String>> {
         self.ws
             .call(
                 "runtime.addLinkLanguageTemplates",
@@ -77,9 +74,7 @@ impl RuntimeClient {
     }
 
     pub async fn friends(&self) -> Result<Vec<String>> {
-        self.ws
-            .call("runtime.friends", serde_json::json!({}))
-            .await
+        self.ws.call("runtime.friends", serde_json::json!({})).await
     }
 
     pub async fn add_friends(&self, dids: Vec<String>) -> Result<Vec<String>> {
@@ -90,10 +85,7 @@ impl RuntimeClient {
 
     pub async fn remove_friends(&self, dids: Vec<String>) -> Result<Vec<String>> {
         self.ws
-            .call(
-                "runtime.removeFriends",
-                serde_json::json!({ "dids": dids }),
-            )
+            .call("runtime.removeFriends", serde_json::json!({ "dids": dids }))
             .await
     }
 
@@ -109,10 +101,7 @@ impl RuntimeClient {
             .await
     }
 
-    pub async fn hc_add_agent_infos(
-        &self,
-        agent_infos: Vec<String>,
-    ) -> Result<serde_json::Value> {
+    pub async fn hc_add_agent_infos(&self, agent_infos: Vec<String>) -> Result<serde_json::Value> {
         self.ws
             .call(
                 "runtime.addHcAgentInfos",
@@ -143,26 +132,17 @@ impl RuntimeClient {
 
     pub async fn set_status(&self, status: serde_json::Value) -> Result<serde_json::Value> {
         self.ws
-            .call(
-                "runtime.setStatus",
-                serde_json::json!({ "status": status }),
-            )
+            .call("runtime.setStatus", serde_json::json!({ "status": status }))
             .await
     }
 
-    pub async fn message_inbox(
-        &self,
-        filter: Option<String>,
-    ) -> Result<Vec<serde_json::Value>> {
+    pub async fn message_inbox(&self, filter: Option<String>) -> Result<Vec<serde_json::Value>> {
         self.ws
             .call("runtime.inbox", serde_json::json!({ "filter": filter }))
             .await
     }
 
-    pub async fn message_outbox(
-        &self,
-        filter: Option<String>,
-    ) -> Result<Vec<serde_json::Value>> {
+    pub async fn message_outbox(&self, filter: Option<String>) -> Result<Vec<serde_json::Value>> {
         self.ws
             .call("runtime.outbox", serde_json::json!({ "filter": filter }))
             .await

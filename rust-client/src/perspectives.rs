@@ -30,9 +30,7 @@ impl PerspectivesClient {
     }
 
     pub async fn all(&self) -> Result<Vec<PerspectiveHandle>> {
-        self.ws
-            .call("perspective.all", serde_json::json!({}))
-            .await
+        self.ws.call("perspective.all", serde_json::json!({})).await
     }
 
     pub async fn add(&self, name: String) -> Result<PerspectiveHandle> {
@@ -109,10 +107,7 @@ impl PerspectivesClient {
 
     pub async fn snapshot(&self, uuid: String) -> Result<Perspective> {
         self.ws
-            .call(
-                "perspective.snapshot",
-                serde_json::json!({ "uuid": uuid }),
-            )
+            .call("perspective.snapshot", serde_json::json!({ "uuid": uuid }))
             .await
     }
 

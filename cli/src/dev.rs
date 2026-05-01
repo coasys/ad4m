@@ -72,7 +72,9 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 let client = ad4m_client::Ad4mClient::connect(
                     String::from("http://127.0.0.1:4000"),
                     String::from("*"),
-                ).await.expect("could not connect to executor");
+                )
+                .await
+                .expect("could not connect to executor");
                 let me = client.agent.me().await;
                 println!("Me: {:?}", me);
                 let agent_generate = client.agent.generate(String::from("test")).await;

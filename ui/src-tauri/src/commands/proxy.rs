@@ -36,7 +36,9 @@ pub async fn login_proxy(
     let ad4m_client = Ad4mClient::connect(
         format!("{}:{}", AD4M_SERVER, port),
         req_credential.to_string(),
-    ).await.map_err(|err| {
+    )
+    .await
+    .map_err(|err| {
         log::error!("Error connecting to executor: {:?}", err);
         format!("Set proxy error: {:?}", err)
     })?;

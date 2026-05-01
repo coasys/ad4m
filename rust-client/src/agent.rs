@@ -90,11 +90,7 @@ impl AgentClient {
             .await
     }
 
-    pub async fn retrieve_capability(
-        &self,
-        request_id: String,
-        rand: String,
-    ) -> Result<String> {
+    pub async fn retrieve_capability(&self, request_id: String, rand: String) -> Result<String> {
         self.ws
             .call(
                 "agent.generateJwt",
@@ -129,16 +125,16 @@ impl AgentClient {
 
     pub async fn remove_app(&self, request_id: String) -> Result<Vec<Apps>> {
         self.ws
-            .call(
-                "agent.removeApp",
-                serde_json::json!({ "id": request_id }),
-            )
+            .call("agent.removeApp", serde_json::json!({ "id": request_id }))
             .await
     }
 
     pub async fn lock(&self, passphrase: String) -> Result<AgentStatus> {
         self.ws
-            .call("agent.lock", serde_json::json!({ "passphrase": passphrase }))
+            .call(
+                "agent.lock",
+                serde_json::json!({ "passphrase": passphrase }),
+            )
             .await
     }
 

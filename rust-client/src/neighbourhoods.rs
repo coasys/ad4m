@@ -48,10 +48,7 @@ impl NeighbourhoodsClient {
             .await
     }
 
-    pub async fn has_telepresence_adapter(
-        &self,
-        perspective_uuid: String,
-    ) -> Result<bool> {
+    pub async fn has_telepresence_adapter(&self, perspective_uuid: String) -> Result<bool> {
         self.ws
             .call(
                 "neighbourhood.hasTelepresence",
@@ -60,10 +57,7 @@ impl NeighbourhoodsClient {
             .await
     }
 
-    pub async fn online_agents(
-        &self,
-        perspective_uuid: String,
-    ) -> Result<Vec<OnlineAgent>> {
+    pub async fn online_agents(&self, perspective_uuid: String) -> Result<Vec<OnlineAgent>> {
         self.ws
             .call(
                 "neighbourhood.onlineAgents",
