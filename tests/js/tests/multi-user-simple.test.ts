@@ -2121,7 +2121,7 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should sync links correctly between all users across nodes", async function() {
-            this.timeout(180000); // Increased for Holochain 0.7.0 - link sync takes longer
+            this.timeout(300000); // Increased for Holochain 0.7.0 + WS transport - link sync takes longer
 
             console.log("\n=== Testing cross-node link synchronization ===");
 
@@ -2173,6 +2173,9 @@ describe("Multi-User Simple integration tests", () => {
             });
             console.log("Node 2 User 2 added link");
 
+            // Wait for background Holochain commits to complete before polling
+            await sleep(5000);
+
             // Re-exchange agent infos before sync polling — K2 spaces created
             // during link-language install may need fresh peer info
             console.log("Re-exchanging agent infos before link sync polling...");
@@ -2190,7 +2193,7 @@ describe("Multi-User Simple integration tests", () => {
 
             // Wait for cross-node Holochain gossip synchronization with retry
             console.log("\nWaiting for cross-node sync (polling until all users see >= 5 links)...");
-            const syncTimeout = 150000; // 2.5 minutes max
+            const syncTimeout = 240000; // 4 minutes max — WS transport adds slight overhead to gossip timing
             const syncStart = Date.now();
             let synced = false;
             let pollCount = 0;
@@ -2204,8 +2207,8 @@ describe("Multi-User Simple integration tests", () => {
                 await sleep(5000);
                 pollCount++;
 
-                // Re-exchange agent infos every 30s to help K2 peer discovery
-                if (pollCount % 6 === 0) {
+                // Re-exchange agent infos every 15s to help K2 peer discovery
+                if (pollCount % 3 === 0) {
                     try {
                         const n1Infos = await adminAd4mClient!.runtime.hcAgentInfos();
                         const n2Infos = await node2AdminClient!.runtime.hcAgentInfos();
