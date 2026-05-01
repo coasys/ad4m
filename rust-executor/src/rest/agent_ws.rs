@@ -117,10 +117,7 @@ async fn get_agent_by_did(params: Value, ctx: Arc<RequestContext>) -> Result<Val
             match controller.get_expression(&lang_address, &did).await {
                 Ok(Some(expr_json)) => {
                     let agent: Option<Agent> = serde_json::from_value(
-                        expr_json
-                            .get("data")
-                            .cloned()
-                            .unwrap_or(Value::Null),
+                        expr_json.get("data").cloned().unwrap_or(Value::Null),
                     )
                     .ok();
                     let agent = agent.map(|mut a| {
@@ -157,8 +154,8 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: UpdateProfileRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: UpdateProfileRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     // If dm_language provided, update it
     if let Some(dm_lang) = body.dm_language {
@@ -270,8 +267,8 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     check_capability(&ctx.capabilities, &AGENT_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: GenerateAgentRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: GenerateAgentRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut agent = AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.create_new_keys();
@@ -342,8 +339,8 @@ async fn lock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: LockAgentRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: LockAgentRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent = AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.lock(body.passphrase.clone());
@@ -366,8 +363,8 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     check_capability(&ctx.capabilities, &AGENT_SIGN_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: UnlockAgentRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: UnlockAgentRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent_instance = AgentService::global_instance();
     {
@@ -455,8 +452,8 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     check_capability(&ctx.capabilities, &AGENT_SIGN_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: SignMessageRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: SignMessageRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let sig = InternalAgentSignature::from_message(body.message)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -482,8 +479,8 @@ async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<V
     check_capability(&ctx.capabilities, &AGENT_AUTH_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: RequestCapabilityRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: RequestCapabilityRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let auth_info: AuthInfo = body
         .auth_info
@@ -509,12 +506,15 @@ async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<V
 }
 
 /// agent.permitCapability — permit capability
-async fn permit_capability_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn permit_capability_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_PERMIT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: PermitCapabilityRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: PermitCapabilityRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let auth: AuthInfoExtended = serde_json::from_str(&body.auth)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid auth info: {}", e)))?;
@@ -528,8 +528,8 @@ async fn generate_jwt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     check_capability(&ctx.capabilities, &AGENT_AUTH_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: GenerateJwtRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: GenerateJwtRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let cap_token = generate_capability_token(body.request_id, body.rand)
         .await
@@ -599,11 +599,8 @@ async fn is_locked(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, W
 
 /// agent.getTrustedAgents — list trusted agents
 async fn get_trusted_agents(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    check_capability(&ctx.capabilities, &RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let agents = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.get_trusted_agents()
@@ -613,14 +610,11 @@ async fn get_trusted_agents(_params: Value, ctx: Arc<RequestContext>) -> Result<
 
 /// agent.addTrustedAgents — add trusted agents
 async fn add_trusted_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    check_capability(&ctx.capabilities, &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: TrustedAgentsWrapper =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: TrustedAgentsWrapper = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.add_trusted_agent(body.agents);
@@ -633,15 +627,15 @@ async fn add_trusted_agents(params: Value, ctx: Arc<RequestContext>) -> Result<V
 }
 
 /// agent.deleteTrustedAgents — remove trusted agents
-async fn delete_trusted_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+async fn delete_trusted_agents(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: TrustedAgentsWrapper =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: TrustedAgentsWrapper = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.remove_trusted_agent(body.agents);
@@ -674,8 +668,8 @@ async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: EntanglementProofsWrapper =
-        serde_json::from_value(params.clone()).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: EntanglementProofsWrapper = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     // Check for preflight mode
     let preflight = params
@@ -694,7 +688,9 @@ async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Val
                 .map(|b| b.device_key_type.clone())
                 .unwrap_or_default(),
         );
-        return Ok(serde_json::to_value(vec![serde_json::to_value(signed).unwrap_or_default()])?);
+        return Ok(serde_json::to_value(vec![
+            serde_json::to_value(signed).unwrap_or_default()
+        ])?);
     }
 
     let agent_did = AgentService::with_global_instance(|a| a.did.clone().unwrap_or_default());
@@ -727,8 +723,8 @@ async fn delete_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: EntanglementProofsWrapper =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: EntanglementProofsWrapper = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent_did = AgentService::with_global_instance(|a| a.did.clone().unwrap_or_default());
     let agent_key_id =
@@ -774,8 +770,8 @@ async fn entanglement_proof_preflight(
     check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: EntanglementProofPreflightRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: EntanglementProofPreflightRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let signed = sign_device_key(body.device_key, body.device_key_type);
     Ok(serde_json::to_value(signed).unwrap_or_default())
@@ -809,5 +805,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("agent.getEntanglementProofs", get_entanglement);
     map.register("agent.addEntanglementProofs", add_entanglement);
     map.register("agent.deleteEntanglementProofs", delete_entanglement);
-    map.register("agent.entanglementProofPreflight", entanglement_proof_preflight);
+    map.register(
+        "agent.entanglementProofPreflight",
+        entanglement_proof_preflight,
+    );
 }

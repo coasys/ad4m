@@ -33,8 +33,8 @@ async fn set_multi_user_enabled(
         return Err(WsRpcError::forbidden("Admin credential required"));
     }
 
-    let body: SetMultiUserRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: SetMultiUserRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(body.enabled))
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -42,11 +42,8 @@ async fn set_multi_user_enabled(
 }
 
 async fn list_users(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    check_capability(&ctx.capabilities, &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     if !crate::user_management::is_multi_user_enabled() {
         return Ok(serde_json::json!([]));
@@ -59,11 +56,8 @@ async fn list_users(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn get_user_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    check_capability(&ctx.capabilities, &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let email = params.require_str("email")?;
 
@@ -82,8 +76,8 @@ async fn set_user_free_access(
         return Err(WsRpcError::forbidden("Admin credential required"));
     }
 
-    let body: SetUserFreeAccessRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: SetUserFreeAccessRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let email = body.email.trim().to_lowercase();
     Ad4mDb::with_global_instance(|db| db.set_user_free_access(&email, body.enabled)).map_err(
@@ -109,8 +103,8 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: CreateUserRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: CreateUserRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let email = body.email.trim().to_lowercase();
 
@@ -141,8 +135,8 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         }
     }
 
-    let did = um::create_user(&email, &body.password)
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let did =
+        um::create_user(&email, &body.password).map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     {
         use crate::agent::{AgentContext, AgentService};
@@ -174,14 +168,11 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn login_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    check_capability(&ctx.capabilities, &RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: LoginUserRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: LoginUserRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let email = body.email.trim().to_lowercase();
     let app_name = body.app_name.as_deref().unwrap_or("ad4m");
@@ -198,8 +189,8 @@ async fn verify_email(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: VerifyEmailRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: VerifyEmailRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let email = body.email.trim().to_lowercase();
     let verification_type = body.verification_type.as_deref().unwrap_or("signup");
@@ -212,11 +203,10 @@ async fn verify_email(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 async fn email_test(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &ALL_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
+    check_capability(&ctx.capabilities, &ALL_CAPABILITY).map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: EmailTestRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: EmailTestRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     match body.action.as_str() {
         "send" => Err(WsRpcError::internal(
@@ -259,7 +249,10 @@ async fn email_test(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 
             Ok(Value::Bool(true))
         }
-        other => Err(WsRpcError::bad_request(format!("Unknown action: {}", other))),
+        other => Err(WsRpcError::bad_request(format!(
+            "Unknown action: {}",
+            other
+        ))),
     }
 }
 
@@ -275,8 +268,8 @@ async fn request_verification(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: RequestVerificationRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: RequestVerificationRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let email = body.email.trim().to_lowercase();
 

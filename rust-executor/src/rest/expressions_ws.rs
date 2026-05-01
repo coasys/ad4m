@@ -65,8 +65,8 @@ async fn get_many_expressions(
     check_capability(&ctx.capabilities, &EXPRESSION_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: ExpressionManyRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: ExpressionManyRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let controller = LanguageController::global_instance();
     let mut results: Vec<Option<ExpressionRendered>> = Vec::new();
@@ -102,8 +102,8 @@ async fn create_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     check_capability(&ctx.capabilities, &EXPRESSION_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: CreateExpressionRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: CreateExpressionRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let controller = LanguageController::global_instance();
     let content_json: serde_json::Value =
@@ -151,10 +151,7 @@ async fn get_interactions(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     Ok(serde_json::to_value(Vec::<InteractionMeta>::new())?)
 }
 
-async fn interact_expression(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
+async fn interact_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &EXPRESSION_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 

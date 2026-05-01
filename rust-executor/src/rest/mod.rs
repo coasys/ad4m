@@ -11,7 +11,6 @@ pub mod types;
 pub mod ws_rpc;
 
 // ── WS-native handler modules ──
-pub mod ws_handler;
 pub mod agent_ws;
 pub mod ai_ws;
 pub mod expressions_ws;
@@ -21,6 +20,7 @@ pub mod neighbourhoods_ws;
 pub mod perspectives_ws;
 pub mod runtime_ws;
 pub mod users_ws;
+pub mod ws_handler;
 
 #[cfg(test)]
 mod tests;

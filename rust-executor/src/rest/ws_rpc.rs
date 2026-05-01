@@ -48,10 +48,8 @@ pub async fn ws_rpc(
     let token = query.token.unwrap_or_default();
 
     // Build RequestContext once for the lifetime of this connection.
-    let capabilities =
-        capabilities_from_token(token.clone(), state.admin_credential.clone());
-    let is_admin =
-        is_admin_credential_token(&token, &state.admin_credential);
+    let capabilities = capabilities_from_token(token.clone(), state.admin_credential.clone());
+    let is_admin = is_admin_credential_token(&token, &state.admin_credential);
 
     let ctx = Arc::new(RequestContext {
         capabilities,
@@ -82,8 +80,7 @@ async fn handle_ws(
     let tx_events = tx.clone();
     tokio::spawn(async move {
         let user_email = user_email_from_token(token_for_events.clone());
-        let event_stream =
-            super::events_ws::build_event_stream(token_for_events, user_email).await;
+        let event_stream = super::events_ws::build_event_stream(token_for_events, user_email).await;
         tokio::pin!(event_stream);
         while let Some(msg) = event_stream.next().await {
             if tx_events.send(msg).is_err() {
@@ -115,8 +112,7 @@ async fn handle_ws(
         let parsed: Value = match serde_json::from_str(&text) {
             Ok(v) => v,
             Err(_) => {
-                let _ =
-                    tx.send(json!({"error":{"code":400,"message":"Invalid JSON"}}).to_string());
+                let _ = tx.send(json!({"error":{"code":400,"message":"Invalid JSON"}}).to_string());
                 continue;
             }
         };

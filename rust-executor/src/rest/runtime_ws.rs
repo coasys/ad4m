@@ -10,12 +10,12 @@ use crate::globals::AD4M_VERSION;
 use crate::holochain_service::get_holochain_service;
 use crate::runtime_service::RuntimeService;
 use crate::types::Notification;
-use crate::types::{RequestContext, RuntimeInfo, SentMessage, PerspectiveExpression};
+use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
 
 use super::types::{
-    OpenLinkRequest, ExportRequest, ImportRequest, VerifySignatureRequest,
-    FriendsListRequest, FriendSendMessageRequest, NotificationInput, NotificationGrantRequest,
-    LinkLanguageTemplatesRequest, AddAgentInfosRequest,
+    AddAgentInfosRequest, ExportRequest, FriendSendMessageRequest, FriendsListRequest,
+    ImportRequest, LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput,
+    OpenLinkRequest, VerifySignatureRequest,
 };
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
@@ -52,7 +52,9 @@ async fn set_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let _ = params;
-    Err(WsRpcError::internal("Runtime status update not implemented"))
+    Err(WsRpcError::internal(
+        "Runtime status update not implemented",
+    ))
 }
 
 async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -60,8 +62,8 @@ async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
         return Err(WsRpcError::forbidden("Admin credential required"));
     }
 
-    let body: OpenLinkRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: OpenLinkRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     if !body.url.starts_with("http://") && !body.url.starts_with("https://") {
         return Err(WsRpcError::bad_request(
@@ -92,8 +94,8 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: ExportRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: ExportRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     match body.export_type.as_str() {
         "db" => {
@@ -142,8 +144,8 @@ async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: ImportRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: ImportRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     match body.import_type.as_str() {
         "db" => {
@@ -181,8 +183,8 @@ async fn verify_signature(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: VerifySignatureRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: VerifySignatureRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let result = crate::agent::signatures::verify_string_signed_by_did(
         &body.did,
@@ -206,11 +208,8 @@ async fn list_friends(_params: Value, ctx: Arc<RequestContext>) -> Result<Value,
 }
 
 async fn get_friend_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_FRIEND_STATUS_READ_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    check_capability(&ctx.capabilities, &RUNTIME_FRIEND_STATUS_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let _ = params.require_str("did")?;
     Err(WsRpcError::not_implemented("Friend status not implemented"))
@@ -220,8 +219,8 @@ async fn add_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: FriendsListRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: FriendsListRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let friends = RuntimeService::with_global_instance(|runtime| {
         runtime.add_friend(body.dids);
@@ -234,8 +233,8 @@ async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_DELETE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: FriendsListRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: FriendsListRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let friends = RuntimeService::with_global_instance(|runtime| {
         runtime.remove_friend(body.dids);
@@ -244,10 +243,7 @@ async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     Ok(serde_json::to_value(friends)?)
 }
 
-async fn send_friend_message(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
+async fn send_friend_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
@@ -283,10 +279,7 @@ async fn get_outbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 
 // ── Notifications ──
 
-async fn list_notifications(
-    _params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
+async fn list_notifications(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
@@ -298,15 +291,12 @@ async fn list_notifications(
     Ok(serde_json::to_value(notifications)?)
 }
 
-async fn create_notification(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
+async fn create_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: NotificationInput =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: NotificationInput = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let domain_input = crate::types::domain::NotificationInput {
         description: body.description,
@@ -327,10 +317,7 @@ async fn create_notification(
     Ok(Value::String(id))
 }
 
-async fn update_notification(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
+async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
@@ -389,10 +376,7 @@ async fn grant_notification(params: Value, ctx: Arc<RequestContext>) -> Result<V
     Ok(Value::Bool(true))
 }
 
-async fn delete_notification(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
+async fn delete_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
@@ -431,8 +415,8 @@ async fn add_link_language_templates(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: LinkLanguageTemplatesRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: LinkLanguageTemplatesRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let templates = RuntimeService::with_global_instance(|runtime| {
         runtime.add_know_link_language(body.addresses);
@@ -451,8 +435,8 @@ async fn remove_link_language_templates(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: LinkLanguageTemplatesRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: LinkLanguageTemplatesRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let templates = RuntimeService::with_global_instance(|runtime| {
         runtime.remove_know_link_language(body.addresses);
@@ -463,15 +447,9 @@ async fn remove_link_language_templates(
 
 // ── Holochain ──
 
-async fn get_hc_agent_infos(
-    _params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+async fn get_hc_agent_infos(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let hc = get_holochain_service().await;
     let infos = hc
@@ -482,14 +460,11 @@ async fn get_hc_agent_infos(
 }
 
 async fn add_hc_agent_infos(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: AddAgentInfosRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: AddAgentInfosRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let hc = get_holochain_service().await;
     hc.add_agent_infos(body.agent_infos)
@@ -503,11 +478,8 @@ async fn get_network_metrics(
     _params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let hc = get_holochain_service().await;
     let metrics = hc
@@ -558,13 +530,11 @@ async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
     let email = user_email.unwrap_or_default();
     let since = params.opt_str("since");
-    let limit = params
-        .get("limit")
-        .and_then(|l| l.as_i64())
-        .unwrap_or(100);
+    let limit = params.get("limit").and_then(|l| l.as_i64()).unwrap_or(100);
 
-    let logs = Ad4mDb::with_global_instance(|db| db.get_compute_log(&email, since.as_deref(), limit))
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let logs =
+        Ad4mDb::with_global_instance(|db| db.get_compute_log(&email, since.as_deref(), limit))
+            .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(logs).unwrap_or_default())
 }
@@ -587,7 +557,9 @@ async fn get_host_rates(_params: Value, _ctx: Arc<RequestContext>) -> Result<Val
 // ── Stubs for unyt endpoints ──
 
 async fn stub_not_impl(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    Err(WsRpcError::not_implemented("Not yet implemented on the server"))
+    Err(WsRpcError::not_implemented(
+        "Not yet implemented on the server",
+    ))
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -617,8 +589,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("runtime.deleteNotification", delete_notification);
     // Link language templates
     map.register("runtime.linkLanguageTemplates", get_link_language_templates);
-    map.register("runtime.addLinkLanguageTemplates", add_link_language_templates);
-    map.register("runtime.removeLinkLanguageTemplates", remove_link_language_templates);
+    map.register(
+        "runtime.addLinkLanguageTemplates",
+        add_link_language_templates,
+    );
+    map.register(
+        "runtime.removeLinkLanguageTemplates",
+        remove_link_language_templates,
+    );
     // Holochain
     map.register("runtime.hcAgentInfos", get_hc_agent_infos);
     map.register("runtime.addHcAgentInfos", add_hc_agent_infos);

@@ -575,10 +575,10 @@ fn snake_case_rejected() {
 
 // ── AI Transcription request types ──
 
+use crate::rest::audio_ws::AudioWsParams;
 use crate::rest::types::{
     CloseTranscriptionRequest, FeedTranscriptionRequest, OpenTranscriptionRequest,
 };
-use crate::rest::audio_ws::AudioWsParams;
 
 #[test]
 fn parse_open_transcription_request() {

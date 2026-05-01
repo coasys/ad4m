@@ -51,8 +51,9 @@ async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let model: ModelInput = serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
-        .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+    let model: ModelInput =
+        serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
+            .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
 
     let service = AIService::global_instance()
         .await
@@ -71,8 +72,9 @@ async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let id = params.require_str("id")?;
-    let model: ModelInput = serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
-        .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+    let model: ModelInput =
+        serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
+            .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
 
     let service = AIService::global_instance()
         .await
@@ -179,8 +181,9 @@ async fn add_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let task: AITaskInput = serde_json::from_value(params.get("task").cloned().unwrap_or(Value::Null))
-        .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+    let task: AITaskInput =
+        serde_json::from_value(params.get("task").cloned().unwrap_or(Value::Null))
+            .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
 
     let service = AIService::global_instance()
         .await
@@ -238,8 +241,8 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
         .map_err(|e| WsRpcError::forbidden(e))?;
     check_compute_credits_ws(&ctx.auth_token)?;
 
-    let body: PromptRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: PromptRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let service = AIService::global_instance()
         .await
@@ -258,8 +261,8 @@ async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::forbidden(e))?;
     check_compute_credits_ws(&ctx.auth_token)?;
 
-    let body: EmbedRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: EmbedRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let service = AIService::global_instance()
         .await
@@ -288,8 +291,8 @@ async fn open_transcription_stream(
         .map_err(|e| WsRpcError::forbidden(e))?;
     check_compute_credits_ws(&ctx.auth_token)?;
 
-    let body: OpenTranscriptionRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: OpenTranscriptionRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let service = AIService::global_instance()
         .await
@@ -314,8 +317,8 @@ async fn close_transcription_stream(
     check_capability(&ctx.capabilities, &AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: CloseTranscriptionRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: CloseTranscriptionRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let service = AIService::global_instance()
         .await
@@ -351,10 +354,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
 // This endpoint receives raw PCM Float32 LE bytes via HTTP POST.
 // It cannot go through WS JSON, so it stays as a regular Axum handler.
 
-use axum::extract::State;
-use axum::response::Json;
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
+use axum::extract::State;
+use axum::response::Json;
 
 /// POST /ai/transcription/feed
 ///
@@ -369,8 +372,7 @@ pub async fn feed_transcription_stream(
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
-    check_compute_credits_ws(&context.auth_token)
-        .map_err(|e| ApiError::Forbidden(e.message))?;
+    check_compute_credits_ws(&context.auth_token).map_err(|e| ApiError::Forbidden(e.message))?;
 
     let stream_ids_header = headers
         .get("x-stream-ids")

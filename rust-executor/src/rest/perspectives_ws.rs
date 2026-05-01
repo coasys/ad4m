@@ -189,7 +189,10 @@ async fn query_links(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         until_date: params
             .opt_str("untilDate")
             .and_then(|s| serde_json::from_value(Value::String(s)).ok()),
-        limit: params.get("limit").and_then(|v| v.as_i64()).map(|v| v as i32),
+        limit: params
+            .get("limit")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32),
     };
 
     let links = perspective
@@ -199,15 +202,12 @@ async fn query_links(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     Ok(serde_json::to_value(links)?)
 }
 
-async fn create_perspective(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
+async fn create_perspective(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &PERSPECTIVE_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: CreatePerspectiveRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: CreatePerspectiveRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let user_email_opt = user_email_from_token(ctx.auth_token.clone());
 
@@ -407,10 +407,7 @@ async fn link_mutations(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     })?)
 }
 
-async fn add_link_expression(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
+async fn add_link_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
         &ctx.capabilities,

@@ -133,8 +133,8 @@ async fn publish_language(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     check_capability(&ctx.capabilities, &LANGUAGE_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: PublishLanguageRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: PublishLanguageRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let controller = LanguageController::global_instance();
 
@@ -197,8 +197,8 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     check_capability(&ctx.capabilities, &LANGUAGE_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: ApplyTemplateRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: ApplyTemplateRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let controller = LanguageController::global_instance();
 

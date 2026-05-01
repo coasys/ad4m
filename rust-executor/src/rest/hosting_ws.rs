@@ -68,7 +68,10 @@ async fn get_hosting_wallet(_params: Value, ctx: Arc<RequestContext>) -> Result<
 
     let pubkey = crate::unyt_service::get_or_create_agent_key().await.ok();
 
-    Ok(serde_json::to_value(HostingWalletResponse { balance, pubkey })?)
+    Ok(serde_json::to_value(HostingWalletResponse {
+        balance,
+        pubkey,
+    })?)
 }
 
 async fn get_hosting_wallet_history(
@@ -89,8 +92,8 @@ async fn request_payment(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: RequestPaymentRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: RequestPaymentRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     Ok(serde_json::json!({
         "success": true,
@@ -102,8 +105,8 @@ async fn set_hot_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: SetHotWalletAddressRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: SetHotWalletAddressRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let email = user_email_from_token(ctx.auth_token.clone())
         .ok_or_else(|| WsRpcError::forbidden("User email required"))?;

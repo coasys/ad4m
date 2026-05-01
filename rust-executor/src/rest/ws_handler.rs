@@ -24,22 +24,40 @@ pub struct WsRpcError {
 
 impl WsRpcError {
     pub fn bad_request(msg: impl Into<String>) -> Self {
-        Self { code: 400, message: msg.into() }
+        Self {
+            code: 400,
+            message: msg.into(),
+        }
     }
     pub fn unauthorized(msg: impl Into<String>) -> Self {
-        Self { code: 401, message: msg.into() }
+        Self {
+            code: 401,
+            message: msg.into(),
+        }
     }
     pub fn forbidden(msg: impl Into<String>) -> Self {
-        Self { code: 403, message: msg.into() }
+        Self {
+            code: 403,
+            message: msg.into(),
+        }
     }
     pub fn not_found(msg: impl Into<String>) -> Self {
-        Self { code: 404, message: msg.into() }
+        Self {
+            code: 404,
+            message: msg.into(),
+        }
     }
     pub fn internal(msg: impl Into<String>) -> Self {
-        Self { code: 500, message: msg.into() }
+        Self {
+            code: 500,
+            message: msg.into(),
+        }
     }
     pub fn not_implemented(msg: impl Into<String>) -> Self {
-        Self { code: 501, message: msg.into() }
+        Self {
+            code: 501,
+            message: msg.into(),
+        }
     }
 }
 
@@ -63,7 +81,10 @@ impl From<serde_json::Error> for WsRpcError {
 ///
 /// Takes `(params: Value, ctx: Arc<RequestContext>)` and returns `Result<Value, WsRpcError>`.
 pub type WsHandler = Box<
-    dyn Fn(Value, Arc<RequestContext>) -> Pin<Box<dyn Future<Output = Result<Value, WsRpcError>> + Send>>
+    dyn Fn(
+            Value,
+            Arc<RequestContext>,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, WsRpcError>> + Send>>
         + Send
         + Sync,
 >;
@@ -160,16 +181,20 @@ impl ParamExt for Value {
         self.get(key)
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| WsRpcError::bad_request(format!("Missing required parameter: '{}'", key)))
+            .ok_or_else(|| {
+                WsRpcError::bad_request(format!("Missing required parameter: '{}'", key))
+            })
     }
 
     fn opt_str(&self, key: &str) -> Option<String> {
-        self.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+        self.get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     }
 
     fn require(&self, key: &str) -> Result<Value, WsRpcError> {
-        self.get(key)
-            .cloned()
-            .ok_or_else(|| WsRpcError::bad_request(format!("Missing required parameter: '{}'", key)))
+        self.get(key).cloned().ok_or_else(|| {
+            WsRpcError::bad_request(format!("Missing required parameter: '{}'", key))
+        })
     }
 }

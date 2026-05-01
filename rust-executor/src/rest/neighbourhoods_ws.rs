@@ -17,8 +17,8 @@ async fn join_neighbourhood(params: Value, ctx: Arc<RequestContext>) -> Result<V
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: JoinNeighbourhoodRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: JoinNeighbourhoodRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
     let handle = install_neighbourhood_with_context(body.url, &agent_context)
@@ -35,8 +35,8 @@ async fn publish_neighbourhood(
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: PublishNeighbourhoodRequest =
-        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let body: PublishNeighbourhoodRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
     let url = neighbourhoods::neighbourhood_publish_from_perspective_with_context(
@@ -58,15 +58,16 @@ fn build_signed_perspective(
 ) -> Result<PerspectiveExpression, WsRpcError> {
     if signed {
         let perspective_input: crate::types::PerspectiveInput =
-            serde_json::from_value(payload.clone())
-                .map_err(|e| WsRpcError::bad_request(format!("Invalid perspective input: {}", e)))?;
+            serde_json::from_value(payload.clone()).map_err(|e| {
+                WsRpcError::bad_request(format!("Invalid perspective input: {}", e))
+            })?;
         let perspective = DomainPerspective::from(perspective_input);
         let signed = create_signed_expression(perspective, agent_context)
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         Ok(PerspectiveExpression::from(signed))
     } else {
-        let unsigned: PerspectiveUnsignedInput = serde_json::from_value(payload.clone())
-            .map_err(|e| {
+        let unsigned: PerspectiveUnsignedInput =
+            serde_json::from_value(payload.clone()).map_err(|e| {
                 WsRpcError::bad_request(format!("Invalid unsigned perspective input: {}", e))
             })?;
         let links: Vec<DecoratedLinkExpression> = unsigned
