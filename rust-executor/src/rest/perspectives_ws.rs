@@ -481,7 +481,7 @@ async fn remove_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     Ok(Value::Bool(true))
 }
 
-async fn query_perspective(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn query_prolog(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
         &ctx.capabilities,
@@ -489,31 +489,43 @@ async fn query_perspective(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: QueryRequest = serde_json::from_value(params.clone())
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-
+    let query = params.require_str("query")?;
     let perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
-    match body.engine.as_str() {
-        "prolog" => {
-            let res = perspective
-                .prolog_query_with_context(body.query, &agent_context)
-                .await
-                .map_err(|e| WsRpcError::internal(e.to_string()))?;
-            Ok(serde_json::to_value(prolog_resolution_to_string(res))?)
-        }
+    let res = perspective
+        .prolog_query_with_context(query, &agent_context)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(prolog_resolution_to_string(res))?)
+}
+
+async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let query = params.require_str("query")?;
+    let engine = params
+        .opt_str("engine")
+        .unwrap_or_else(|| "sparql".to_string());
+    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+
+    match engine.as_str() {
         "sparql" => {
             let res = perspective
-                .sparql_query(body.query)
+                .sparql_query(query)
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             Ok(serde_json::to_value(res)?)
         }
         "surreal" => Err(WsRpcError::bad_request(
-            "SurrealDB query engine not available. Use 'prolog' or 'sparql'.",
+            "SurrealDB query engine not available. Use 'sparql'.",
         )),
         other => Err(WsRpcError::bad_request(format!(
-            "Unknown query engine: {}. Use 'prolog', 'surreal', or 'sparql'.",
+            "Unknown query engine: {}. Use 'sparql' or 'surreal'.",
             other
         ))),
     }
@@ -799,8 +811,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.removeLink", remove_link);
     map.register("perspective.removeLinks", remove_links_bulk);
     map.register("perspective.linkMutations", link_mutations);
-    map.register("perspective.queryProlog", query_perspective);
-    map.register("perspective.querySparql", query_perspective);
+    map.register("perspective.queryProlog", query_prolog);
+    map.register("perspective.querySparql", query_sparql);
     map.register("perspective.addSdna", add_sdna);
     map.register("perspective.executeCommands", execute_commands);
     map.register("perspective.createSubject", create_subject);

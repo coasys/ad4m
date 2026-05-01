@@ -144,8 +144,16 @@ async fn handle_ws(
         let handler_map = handler_map.clone();
         let ctx = ctx.clone();
         let tx_clone = tx.clone();
+        let token_for_dispatch = token.clone();
 
         tokio::spawn(async move {
+            // Re-check token revocation on every request so that
+            // revokeToken() takes effect immediately for existing connections.
+            if let Err(e) = check_token_revoked(&token_for_dispatch) {
+                let _ = tx_clone
+                    .send(json!({"id": id, "error": {"code": 401, "message": e}}).to_string());
+                return;
+            }
             let result = handler_map.dispatch(&msg_type, params, ctx).await;
             let response = match result {
                 Ok(val) => json!({"id": id, "result": val}),
