@@ -69,10 +69,10 @@ pub async fn run(command: DevFunctions) -> Result<()> {
 
             let test_res = tokio::task::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
-                let client = ad4m_client::Ad4mClient::new(
+                let client = ad4m_client::Ad4mClient::connect(
                     String::from("http://127.0.0.1:4000"),
                     String::from("*"),
-                );
+                ).await.expect("could not connect to executor");
                 let me = client.agent.me().await;
                 println!("Me: {:?}", me);
                 let agent_generate = client.agent.generate(String::from("test")).await;

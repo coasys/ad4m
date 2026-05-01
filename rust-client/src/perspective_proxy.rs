@@ -3,10 +3,9 @@ use std::sync::Arc;
 
 use crate::{
     literal::{Literal, LiteralValue},
-    perspectives,
     subject_proxy::SubjectProxy,
-    types::{LinkExpression, LinkInput},
-    ClientInfo,
+    types::{LinkExpression, LinkExpressionInput, LinkInput},
+    ws_rpc::WsRpcClient,
 };
 use anyhow::{anyhow, Result};
 use chrono::naive::NaiveDateTime;
@@ -15,14 +14,14 @@ use serde_json::Value;
 type DateTime = NaiveDateTime;
 
 pub struct PerspectiveProxy {
-    info: Arc<ClientInfo>,
+    ws: Arc<WsRpcClient>,
     perspective_uuid: String,
 }
 
 impl PerspectiveProxy {
-    pub fn new(info: Arc<ClientInfo>, perspective_uuid: String) -> Self {
+    pub fn new(ws: Arc<WsRpcClient>, perspective_uuid: String) -> Self {
         Self {
-            info,
+            ws,
             perspective_uuid,
         }
     }
@@ -39,13 +38,15 @@ impl PerspectiveProxy {
             target,
             predicate,
         };
-        perspectives::add_link(
-            self.info.executor_url.clone(),
-            self.info.cap_token.clone(),
-            self.perspective_uuid.clone(),
-            link,
-        )
-        .await
+        self.ws
+            .call(
+                "perspective.addLink",
+                serde_json::json!({
+                    "uuid": self.perspective_uuid,
+                    "link": link,
+                }),
+            )
+            .await
     }
 
     pub async fn get(
@@ -57,28 +58,51 @@ impl PerspectiveProxy {
         until_date: Option<DateTime>,
         limit: Option<f64>,
     ) -> Result<Vec<LinkExpression>> {
-        perspectives::query_links(
-            self.info.executor_url.clone(),
-            self.info.cap_token.clone(),
-            self.perspective_uuid.clone(),
-            source,
-            target,
-            predicate,
-            from_date.map(|d| d.and_utc().to_rfc3339()),
-            until_date.map(|d| d.and_utc().to_rfc3339()),
-            limit.map(|l| l as i64),
-        )
-        .await
+        let mut params = serde_json::json!({ "uuid": self.perspective_uuid });
+        if let Some(v) = source {
+            params["source"] = Value::String(v);
+        }
+        if let Some(v) = target {
+            params["target"] = Value::String(v);
+        }
+        if let Some(v) = predicate {
+            params["predicate"] = Value::String(v);
+        }
+        if let Some(v) = from_date {
+            params["fromDate"] = Value::String(v.and_utc().to_rfc3339());
+        }
+        if let Some(v) = until_date {
+            params["untilDate"] = Value::String(v.and_utc().to_rfc3339());
+        }
+        if let Some(v) = limit {
+            params["limit"] = serde_json::json!(v as i64);
+        }
+        self.ws.call("perspective.queryLinks", params).await
     }
 
     pub async fn infer(&self, prolog_query: String) -> Result<Value> {
-        perspectives::infer(
-            self.info.executor_url.clone(),
-            self.info.cap_token.clone(),
-            self.perspective_uuid.clone(),
-            prolog_query,
-        )
-        .await
+        self.ws
+            .call(
+                "perspective.queryProlog",
+                serde_json::json!({
+                    "uuid": self.perspective_uuid,
+                    "query": prolog_query,
+                }),
+            )
+            .await
+    }
+
+    pub async fn remove_link(&self, link: LinkExpression) -> Result<bool> {
+        let link_input: LinkExpressionInput = link.into();
+        self.ws
+            .call(
+                "perspective.removeLink",
+                serde_json::json!({
+                    "uuid": self.perspective_uuid,
+                    "link": link_input,
+                }),
+            )
+            .await
     }
 
     pub async fn add_dna(&self, name: String, dna: String, dna_type: String) -> Result<()> {
@@ -355,18 +379,9 @@ impl PerspectiveProxy {
     }
 
     pub async fn get_single_target(&self, source: String, predicate: String) -> Result<String> {
-        let links = perspectives::query_links(
-            self.info.executor_url.clone(),
-            self.info.cap_token.clone(),
-            self.perspective_uuid.clone(),
-            Some(source),
-            None,
-            Some(predicate),
-            None,
-            None,
-            None,
-        )
-        .await?;
+        let links = self
+            .get(Some(source), None, Some(predicate), None, None, None)
+            .await?;
         if links.is_empty() {
             return Err(anyhow::anyhow!("No links found"));
         }
@@ -382,27 +397,19 @@ impl PerspectiveProxy {
         predicate: String,
         target: String,
     ) -> Result<()> {
-        let links = perspectives::query_links(
-            self.info.executor_url.clone(),
-            self.info.cap_token.clone(),
-            self.perspective_uuid.clone(),
-            Some(source.clone()),
-            None,
-            Some(predicate.clone()),
-            None,
-            None,
-            None,
-        )
-        .await?;
-
-        for link in links {
-            perspectives::remove_link(
-                self.info.executor_url.clone(),
-                self.info.cap_token.clone(),
-                self.perspective_uuid.clone(),
-                link,
+        let links = self
+            .get(
+                Some(source.clone()),
+                None,
+                Some(predicate.clone()),
+                None,
+                None,
+                None,
             )
             .await?;
+
+        for link in links {
+            self.remove_link(link).await?;
         }
 
         let link_input = LinkInput {
@@ -410,13 +417,15 @@ impl PerspectiveProxy {
             target,
             predicate: Some(predicate),
         };
-        perspectives::add_link(
-            self.info.executor_url.clone(),
-            self.info.cap_token.clone(),
-            self.perspective_uuid.clone(),
-            link_input,
-        )
-        .await?;
+        self.ws
+            .call::<LinkExpression>(
+                "perspective.addLink",
+                serde_json::json!({
+                    "uuid": self.perspective_uuid,
+                    "link": link_input,
+                }),
+            )
+            .await?;
         Ok(())
     }
 

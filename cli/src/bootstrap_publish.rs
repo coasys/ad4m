@@ -61,7 +61,7 @@ pub async fn start_publishing(
     seed_proto: SeedProto,
     language_language_bundle: String,
 ) {
-    let ad4m_client = Ad4mClient::new("http://localhost:12000".to_string(), "".to_string());
+    let ad4m_client = Ad4mClient::connect("http://localhost:12000".to_string(), "".to_string()).await.expect("could not connect to executor");
 
     let agent = ad4m_client
         .agent

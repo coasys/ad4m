@@ -52,13 +52,14 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap 4.6.0",
+ "futures-util",
  "maplit",
  "rand 0.8.5",
  "regex",
- "reqwest 0.11.27",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite 0.21.0",
  "unicode-width 0.1.14",
  "urlencoding",
 ]
@@ -21071,7 +21072,9 @@ checksum = "c83b561d025642014097b66e6c1bb422783339e0909e4429cde4749d1990bc38"
 dependencies = [
  "futures-util",
  "log",
+ "native-tls",
  "tokio",
+ "tokio-native-tls",
  "tungstenite 0.21.0",
 ]
 
@@ -21630,6 +21633,7 @@ dependencies = [
  "http 1.4.0",
  "httparse",
  "log",
+ "native-tls",
  "rand 0.8.5",
  "sha1 0.10.6",
  "thiserror 1.0.69",

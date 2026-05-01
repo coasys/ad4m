@@ -1,14 +1,15 @@
 use std::sync::Arc;
 
 use agent::AgentClient;
+use anyhow::Result;
 use expressions::ExpressionsClient;
 use languages::LanguagesClient;
 use neighbourhoods::NeighbourhoodsClient;
 use perspectives::PerspectivesClient;
 use runtime::RuntimeClient;
+use ws_rpc::WsRpcClient;
 
 extern crate anyhow;
-extern crate reqwest;
 extern crate serde;
 extern crate serde_json;
 extern crate tokio;
@@ -24,7 +25,7 @@ pub mod perspectives;
 pub mod runtime;
 pub mod subject_proxy;
 pub mod types;
-mod util;
+pub mod ws_rpc;
 
 pub struct Ad4mClient {
     pub agent: AgentClient,
@@ -35,25 +36,17 @@ pub struct Ad4mClient {
     pub runtime: RuntimeClient,
 }
 
-pub struct ClientInfo {
-    pub executor_url: String,
-    pub cap_token: String,
-}
-
 impl Ad4mClient {
-    pub fn new(executor_url: String, cap_token: String) -> Self {
-        let info = Arc::new(ClientInfo {
-            executor_url,
-            cap_token,
-        });
+    pub async fn connect(executor_url: String, cap_token: String) -> Result<Self> {
+        let ws = Arc::new(WsRpcClient::connect(&executor_url, &cap_token).await?);
 
-        Self {
-            agent: AgentClient::new(info.clone()),
-            languages: LanguagesClient::new(info.clone()),
-            neighbourhoods: NeighbourhoodsClient::new(info.clone()),
-            perspectives: PerspectivesClient::new(info.clone()),
-            expressions: ExpressionsClient::new(info.clone()),
-            runtime: RuntimeClient::new(info),
-        }
+        Ok(Self {
+            agent: AgentClient::new(ws.clone()),
+            languages: LanguagesClient::new(ws.clone()),
+            neighbourhoods: NeighbourhoodsClient::new(ws.clone()),
+            perspectives: PerspectivesClient::new(ws.clone()),
+            expressions: ExpressionsClient::new(ws.clone()),
+            runtime: RuntimeClient::new(ws),
+        })
     }
 }

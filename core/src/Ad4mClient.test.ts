@@ -1,4 +1,3 @@
-import express from 'express';
 import { Ad4mClient } from './Ad4mClient';
 import { Perspective } from './perspectives/Perspective';
 import { LinkQuery } from './perspectives/LinkQuery';
@@ -6,205 +5,242 @@ import { LinkQuery } from './perspectives/LinkQuery';
 // Save original WebSocket so we can restore it after the suite
 const originalWebSocket = (global as any).WebSocket;
 
-// Module-level variable for the mock server base URL.
-// MockWebSocket reads this to proxy RPC calls to Express.
-let mockServerBaseUrl = '';
-
 /**
- * Map a WS-RPC message type + params to an HTTP method, path, and optional body.
- * Mirrors the Rust `map_message_to_route` in ws_rpc.rs.
+ * Test architecture:
+ *
+ * The AD4M server exposes NO REST endpoints for authenticated operations.
+ * Everything goes through WebSocket RPC at /api/v1/ws.
+ *
+ * MockWebSocket intercepts all WS RPC messages and resolves them directly
+ * from a response map — no HTTP server, no Express, no REST translation.
+ *
+ * Server-side unauthenticated WS RPC types (empty token allowed):
+ *   user.create, user.login, user.verifyEmail, user.requestVerification,
+ *   user.multiUserEnabled, runtime.info, runtime.tlsDomain
+ *
+ * The only real HTTP endpoints on the server are:
+ *   GET  /           — server info
+ *   GET  /health     — health check
+ *   POST /api/v1/ai/transcription/feed — binary PCM audio (not JSON)
  */
-function mapTypeToRoute(
-    msgType: string,
-    params: Record<string, unknown>
-): { method: string; path: string; body?: Record<string, unknown> } | null {
-    const s = (key: string): string => {
-        const v = params[key];
-        return typeof v === 'string' ? v : '';
-    };
 
-    /** Build a query string from the given keys present in params. */
-    const queryString = (keys: string[]): string => {
-        const parts: string[] = [];
-        for (const key of keys) {
-            const val = params[key];
-            if (val === undefined || val === null) continue;
-            if (typeof val === 'string' && val !== '') {
-                parts.push(`${key}=${encodeURIComponent(val)}`);
-            } else if (typeof val === 'number' || typeof val === 'boolean') {
-                parts.push(`${key}=${val}`);
-            }
-        }
-        return parts.length ? `?${parts.join('&')}` : '';
-    };
+// ===================== WS RPC MOCK RESPONSES =====================
+// Each key is a WS RPC message type. The value is either a static response
+// or a function (params) => response for dynamic behaviour.
 
-    /** Clone params, removing any specified excluded keys. Returns the body for POST/PUT/etc. */
-    const bodyWithout = (exclude: string[]): Record<string, unknown> => {
-        const result: Record<string, unknown> = { ...params };
-        for (const key of exclude) delete result[key];
-        return result;
-    };
+type RpcHandler = unknown | ((params: Record<string, unknown>) => unknown);
 
-    switch (msgType) {
-        // ── Agent ──
-        case 'agent.get':            return { method: 'GET', path: '/api/v1/agent' };
-        case 'agent.status':         return { method: 'GET', path: '/api/v1/agent/status' };
-        case 'agent.generate':       return { method: 'POST', path: '/api/v1/agent/generate', body: bodyWithout([]) };
-        case 'agent.lock':           return { method: 'POST', path: '/api/v1/agent/lock', body: bodyWithout([]) };
-        case 'agent.unlock':         return { method: 'POST', path: '/api/v1/agent/unlock', body: bodyWithout([]) };
-        case 'agent.import':         return { method: 'POST', path: '/api/v1/agent/import', body: bodyWithout([]) };
-        case 'agent.byDid':          return { method: 'GET', path: `/api/v1/agent/by-did/${encodeURIComponent(s('did'))}` };
-        case 'agent.updateProfile':  return { method: 'PATCH', path: '/api/v1/agent/profile', body: bodyWithout([]) };
-        case 'agent.sign':           return { method: 'POST', path: '/api/v1/agent/sign', body: bodyWithout([]) };
-        case 'agent.isLocked':       return { method: 'GET', path: '/api/v1/agent/is-locked' };
-        case 'agent.requestCapability': return { method: 'POST', path: '/api/v1/agent/auth/request', body: bodyWithout([]) };
-        case 'agent.permitCapability': return { method: 'POST', path: '/api/v1/agent/auth/permit', body: bodyWithout([]) };
-        case 'agent.generateJwt':    return { method: 'POST', path: '/api/v1/agent/auth/jwt', body: bodyWithout([]) };
-        case 'agent.getApps':        return { method: 'GET', path: '/api/v1/agent/apps' };
-        case 'agent.removeApp':      return { method: 'DELETE', path: `/api/v1/agent/apps/${encodeURIComponent(s('id'))}` };
-        case 'agent.revokeToken':    return { method: 'DELETE', path: `/api/v1/agent/auth/token/${encodeURIComponent(s('token'))}` };
-        case 'agent.getTrustedAgents': return { method: 'GET', path: '/api/v1/agent/trusted' };
-        case 'agent.addTrustedAgents': return { method: 'PUT', path: '/api/v1/agent/trusted', body: bodyWithout([]) };
-        case 'agent.deleteTrustedAgents': return { method: 'DELETE', path: '/api/v1/agent/trusted', body: bodyWithout([]) };
-        case 'agent.getEntanglementProofs': return { method: 'GET', path: '/api/v1/agent/entanglement' };
-        case 'agent.addEntanglementProofs': return { method: 'POST', path: '/api/v1/agent/entanglement', body: bodyWithout([]) };
-        case 'agent.deleteEntanglementProofs': return { method: 'DELETE', path: '/api/v1/agent/entanglement', body: bodyWithout([]) };
-        case 'agent.entanglementProofPreflight': return { method: 'POST', path: '/api/v1/agent/entanglement-preflight', body: bodyWithout([]) };
+const MOCK_RESPONSES: Record<string, RpcHandler> = {
+    // ── Agent ──
+    'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
+    'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true },
+    'agent.generate': { did: 'did:test:generated', didDocument: 'doc', isInitialized: true, isUnlocked: true },
+    'agent.lock': { did: 'did:test:123', isInitialized: true, isUnlocked: false },
+    'agent.unlock': { did: 'did:test:123', isInitialized: true, isUnlocked: true },
+    'agent.import': { did: 'did:test:imported', isInitialized: true, isUnlocked: true },
+    'agent.byDid': (p: Record<string, unknown>) => ({ did: p.did, perspective: new Perspective() }),
+    'agent.updateProfile': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
+    'agent.sign': 'signed-message-data',
+    'agent.isLocked': false,
+    'agent.requestCapability': 'request-id-123',
+    'agent.permitCapability': 'permitted-token',
+    'agent.generateJwt': 'jwt-token-abc',
+    'agent.getApps': [{ requestId: 'app1', auth: {}, token: 'tok', revoked: false }],
+    'agent.removeApp': [],
+    'agent.revokeToken': [],
+    'agent.getTrustedAgents': ['did:trusted:1'],
+    'agent.addTrustedAgents': ['did:trusted:1', 'did:trusted:2'],
+    'agent.deleteTrustedAgents': ['did:trusted:1'],
+    'agent.getEntanglementProofs': ['proof1', 'proof2'],
+    'agent.addEntanglementProofs': [{ did: 'did:test:123', deviceKey: 'key1', deviceKeyType: 'type1' }],
+    'agent.deleteEntanglementProofs': [],
+    'agent.entanglementProofPreflight': { did: 'did:test:123', deviceKey: 'key1', deviceKeyType: 'type1' },
 
-        // ── Perspectives ──
-        case 'perspective.all':      return { method: 'GET', path: '/api/v1/perspectives' };
-        case 'perspective.get':      return { method: 'GET', path: `/api/v1/perspectives/${s('uuid')}` };
-        case 'perspective.create':   return { method: 'POST', path: '/api/v1/perspectives', body: bodyWithout([]) };
-        case 'perspective.update':   return { method: 'PUT', path: `/api/v1/perspectives/${s('uuid')}`, body: bodyWithout(['uuid']) };
-        case 'perspective.remove':   return { method: 'DELETE', path: `/api/v1/perspectives/${s('uuid')}` };
-        case 'perspective.snapshot':  return { method: 'GET', path: `/api/v1/perspectives/${s('uuid')}/snapshot` };
-        case 'perspective.publishSnapshot': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/publish-snapshot`, body: bodyWithout(['uuid']) };
-        case 'perspective.queryLinks': {
-            const uuid = s('uuid');
-            const qs = queryString(['source', 'predicate', 'target', 'fromDate', 'untilDate', 'limit']);
-            return { method: 'GET', path: `/api/v1/perspectives/${uuid}/links${qs}` };
-        }
-        case 'perspective.addLink':  return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/links`, body: bodyWithout(['uuid']) };
-        case 'perspective.addLinkExpression': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/links/expression`, body: bodyWithout(['uuid']) };
-        case 'perspective.addLinks': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/links/bulk`, body: bodyWithout(['uuid']) };
-        case 'perspective.updateLink': return { method: 'PUT', path: `/api/v1/perspectives/${s('uuid')}/links`, body: bodyWithout(['uuid']) };
-        case 'perspective.removeLink': return { method: 'DELETE', path: `/api/v1/perspectives/${s('uuid')}/links`, body: bodyWithout(['uuid']) };
-        case 'perspective.removeLinks': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/links/remove-bulk`, body: bodyWithout(['uuid']) };
-        case 'perspective.linkMutations': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/links/mutations`, body: bodyWithout(['uuid']) };
-        case 'perspective.queryProlog': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/query`, body: bodyWithout(['uuid']) };
-        case 'perspective.querySparql': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/query/surreal`, body: bodyWithout(['uuid']) };
-        case 'perspective.addSdna':  return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/sdna`, body: bodyWithout(['uuid']) };
-        case 'perspective.executeCommands': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/execute-commands`, body: bodyWithout(['uuid']) };
-        case 'perspective.createSubject': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/create-subject`, body: bodyWithout(['uuid']) };
-        case 'perspective.getSubjectData': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/get-subject-data`, body: bodyWithout(['uuid']) };
-        case 'perspective.createBatch': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/batch`, body: bodyWithout(['uuid']) };
-        case 'perspective.commitBatch': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/batch/commit`, body: bodyWithout(['uuid']) };
-        case 'perspective.subscribeQuery': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/subscribe-query`, body: bodyWithout(['uuid']) };
-        case 'perspective.keepAliveQuery': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/keep-alive-query`, body: bodyWithout(['uuid']) };
-        case 'perspective.disposeQuery': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/dispose-query`, body: bodyWithout(['uuid']) };
+    // ── Perspectives ──
+    'perspective.all': [{ uuid: 'uuid-1', name: 'test-perspective', sharedUrl: null, neighbourhood: null, state: 'Synced' }],
+    'perspective.get': (p: Record<string, unknown>) => ({
+        uuid: p.uuid, name: 'test-perspective', sharedUrl: null, neighbourhood: null, state: 'Synced',
+    }),
+    'perspective.create': (p: Record<string, unknown>) => ({
+        uuid: 'uuid-new', name: p.name, sharedUrl: null, neighbourhood: null, state: 'Synced',
+    }),
+    'perspective.update': (p: Record<string, unknown>) => ({
+        uuid: p.uuid, name: p.name, sharedUrl: null, neighbourhood: null, state: 'Synced',
+    }),
+    'perspective.remove': true,
+    'perspective.snapshot': {
+        links: [{ author: 'did:test:123', timestamp: '2024-01-01', data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true } }],
+    },
+    'perspective.publishSnapshot': 'Qm123',
+    'perspective.queryLinks': [
+        { author: 'did:test:123', timestamp: '2024-01-01', data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true } },
+    ],
+    'perspective.addLink': {
+        author: 'did:test:123', timestamp: '2024-01-01',
+        data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true },
+    },
+    'perspective.addLinkExpression': {
+        author: 'did:test:123', timestamp: '2024-01-01',
+        data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true },
+    },
+    'perspective.addLinks': [
+        { author: 'did:test:123', timestamp: '2024-01-01', data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true } },
+    ],
+    'perspective.removeLinks': [],
+    'perspective.linkMutations': {
+        additions: [{ author: 'did:test:123', timestamp: '2024-01-01', data: { source: 'a', predicate: 'p', target: 't' }, proof: { valid: true } }],
+        removals: [],
+    },
+    'perspective.updateLink': {
+        author: 'did:test:123', timestamp: '2024-01-01',
+        data: { source: 'new-s', predicate: 'p', target: 't' }, proof: { valid: true },
+    },
+    'perspective.removeLink': true,
+    'perspective.queryProlog': JSON.stringify([{ X: 'test' }]),
+    'perspective.querySparql': JSON.stringify([{ id: '1' }]),
+    'perspective.addSdna': true,
+    'perspective.executeCommands': true,
+    'perspective.createSubject': true,
+    'perspective.getSubjectData': '{"name":"test"}',
+    'perspective.createBatch': 'batch-id-1',
+    'perspective.commitBatch': { additions: [], removals: [] },
+    'perspective.subscribeQuery': true,
+    'perspective.keepAliveQuery': true,
+    'perspective.disposeQuery': true,
 
-        // ── Languages ──
-        case 'language.all': {
-            const qs = queryString(['filter']);
-            return { method: 'GET', path: `/api/v1/languages${qs}` };
-        }
-        case 'language.get':         return { method: 'GET', path: `/api/v1/languages/${encodeURIComponent(s('address'))}` };
-        case 'language.meta':        return { method: 'GET', path: `/api/v1/languages/${encodeURIComponent(s('address'))}/meta` };
-        case 'language.source':      return { method: 'GET', path: `/api/v1/languages/${encodeURIComponent(s('address'))}/source` };
-        case 'language.writeSettings': return { method: 'PUT', path: `/api/v1/languages/${encodeURIComponent(s('address'))}/settings`, body: bodyWithout(['address']) };
-        case 'language.applyTemplate': return { method: 'POST', path: '/api/v1/languages/apply-template', body: bodyWithout([]) };
-        case 'language.publish':     return { method: 'POST', path: '/api/v1/languages/publish', body: bodyWithout([]) };
-        case 'language.remove':      return { method: 'DELETE', path: `/api/v1/languages/${encodeURIComponent(s('address'))}` };
+    // ── Languages ──
+    'language.all': [{ name: 'test-lang', address: 'lang://test', settings: '{}', icon: null, constructorIcon: null }],
+    'language.get': (p: Record<string, unknown>) => ({
+        name: 'test-lang', address: p.address, settings: '{}', icon: null, constructorIcon: null,
+    }),
+    'language.meta': {
+        name: 'test-lang', address: 'lang://test', description: 'A test language',
+        author: 'did:test:123', templated: false, templateSourceLanguageAddress: null,
+        templateAppliedParams: null, possibleTemplateParams: null, sourceCodeLink: null,
+    },
+    'language.source': 'source-code-here',
+    'language.writeSettings': true,
+    'language.applyTemplate': { name: 'applied-lang', address: 'lang://applied' },
+    'language.publish': {
+        name: 'published-lang', address: 'lang://published', description: 'Published',
+        author: 'did:test:123', templated: false,
+    },
+    'language.remove': true,
 
-        // ── Neighbourhoods ──
-        case 'neighbourhood.publish':    return { method: 'POST', path: '/api/v1/neighbourhoods/publish', body: bodyWithout([]) };
-        case 'neighbourhood.join':       return { method: 'POST', path: '/api/v1/neighbourhoods/join', body: bodyWithout([]) };
-        case 'neighbourhood.otherAgents': return { method: 'GET', path: `/api/v1/neighbourhoods/${s('uuid')}/other-agents` };
-        case 'neighbourhood.hasTelepresence': return { method: 'GET', path: `/api/v1/neighbourhoods/${s('uuid')}/has-telepresence` };
-        case 'neighbourhood.onlineAgents': return { method: 'GET', path: `/api/v1/neighbourhoods/${s('uuid')}/online-agents` };
-        case 'neighbourhood.setOnlineStatus': return { method: 'PUT', path: `/api/v1/neighbourhoods/${s('uuid')}/online-status`, body: bodyWithout(['uuid']) };
-        case 'neighbourhood.sendSignal': return { method: 'POST', path: `/api/v1/neighbourhoods/${s('uuid')}/signal`, body: bodyWithout(['uuid']) };
-        case 'neighbourhood.sendBroadcast': return { method: 'POST', path: `/api/v1/neighbourhoods/${s('uuid')}/broadcast`, body: bodyWithout(['uuid']) };
+    // ── Neighbourhoods ──
+    'neighbourhood.publish': 'neighbourhood://published',
+    'neighbourhood.join': {
+        uuid: 'uuid-joined', name: 'joined-neighbourhood', sharedUrl: 'neighbourhood://url',
+        neighbourhood: {}, state: 'Synced',
+    },
+    'neighbourhood.otherAgents': ['did:other:1', 'did:other:2'],
+    'neighbourhood.hasTelepresence': true,
+    'neighbourhood.onlineAgents': [{ did: 'did:test:1', status: new Perspective() }],
+    'neighbourhood.setOnlineStatus': true,
+    'neighbourhood.sendSignal': true,
+    'neighbourhood.sendBroadcast': true,
 
-        // ── Expressions ──
-        case 'expression.get': {
-            const url = s('url');
-            const raw = params.raw === true;
-            const qs = raw ? '?raw=true' : '';
-            return { method: 'GET', path: `/api/v1/expressions/${encodeURIComponent(url)}${qs}` };
-        }
-        case 'expression.getMany':   return { method: 'POST', path: '/api/v1/expressions/many', body: bodyWithout([]) };
-        case 'expression.create':    return { method: 'POST', path: '/api/v1/expressions', body: bodyWithout([]) };
-        case 'expression.interactions': return { method: 'GET', path: `/api/v1/expressions/${encodeURIComponent(s('url'))}/interactions` };
-        case 'expression.interact':  return { method: 'POST', path: `/api/v1/expressions/${encodeURIComponent(s('url'))}/interact`, body: bodyWithout(['url']) };
+    // ── Expressions ──
+    'expression.get': (p: Record<string, unknown>) => {
+        if (p.raw === true) return 'raw-expression-data';
+        return {
+            author: 'did:test:123', timestamp: '2024-01-01', data: '{"content":"hello"}',
+            language: { address: 'lang://test' }, proof: { valid: true },
+        };
+    },
+    'expression.getMany': [
+        { author: 'did:test:1', timestamp: '2023-01-01', data: { type: 'test' }, language: { address: 'lang://test' }, proof: { valid: true } },
+    ],
+    'expression.create': 'Qm-expression-hash',
+    'expression.interactions': [{ label: 'interact1', name: 'doSomething', parameters: [] }],
+    'expression.interact': 'interaction-result',
 
-        // ── Runtime ──
-        case 'runtime.info':         return { method: 'GET', path: '/api/v1/runtime/info' };
-        case 'runtime.quit':         return { method: 'POST', path: '/api/v1/runtime/quit' };
-        case 'runtime.openLink':     return { method: 'POST', path: '/api/v1/runtime/open-link', body: bodyWithout([]) };
-        case 'runtime.friends':      return { method: 'GET', path: '/api/v1/runtime/friends' };
-        case 'runtime.addFriends':   return { method: 'PUT', path: '/api/v1/runtime/friends', body: bodyWithout([]) };
-        case 'runtime.removeFriends': return { method: 'DELETE', path: '/api/v1/runtime/friends', body: bodyWithout([]) };
-        case 'runtime.friendStatus': return { method: 'GET', path: `/api/v1/runtime/friends/${encodeURIComponent(s('did'))}` };
-        case 'runtime.sendFriendMessage': return { method: 'POST', path: `/api/v1/runtime/friends/${encodeURIComponent(s('did'))}/message`, body: bodyWithout(['did']) };
-        case 'runtime.inbox':        return { method: 'GET', path: '/api/v1/runtime/messages/inbox' };
-        case 'runtime.outbox':       return { method: 'GET', path: '/api/v1/runtime/messages/outbox' };
-        case 'runtime.notifications': return { method: 'GET', path: '/api/v1/runtime/notifications' };
-        case 'runtime.createNotification': return { method: 'POST', path: '/api/v1/runtime/notifications', body: bodyWithout([]) };
-        case 'runtime.updateNotification': return { method: 'PATCH', path: `/api/v1/runtime/notifications/${s('id')}`, body: bodyWithout(['id']) };
-        case 'runtime.grantNotification': return { method: 'PATCH', path: `/api/v1/runtime/notifications/${s('id')}/grant`, body: bodyWithout(['id']) };
-        case 'runtime.deleteNotification': return { method: 'DELETE', path: `/api/v1/runtime/notifications/${s('id')}` };
-        case 'runtime.setStatus':    return { method: 'PUT', path: '/api/v1/runtime/status', body: bodyWithout([]) };
-        case 'runtime.linkLanguageTemplates': return { method: 'GET', path: '/api/v1/runtime/link-language-templates' };
-        case 'runtime.addLinkLanguageTemplates': return { method: 'PUT', path: '/api/v1/runtime/link-language-templates', body: bodyWithout([]) };
-        case 'runtime.removeLinkLanguageTemplates': return { method: 'DELETE', path: '/api/v1/runtime/link-language-templates', body: bodyWithout([]) };
-        case 'runtime.hcAgentInfos': return { method: 'GET', path: '/api/v1/runtime/hc/agent-infos' };
-        case 'runtime.addHcAgentInfos': return { method: 'POST', path: '/api/v1/runtime/hc/agent-infos', body: bodyWithout([]) };
-        case 'runtime.networkMetrics': return { method: 'GET', path: '/api/v1/runtime/network-metrics' };
-        case 'runtime.restartHolochain': return { method: 'POST', path: '/api/v1/runtime/holochain/restart' };
-        case 'runtime.verifySignature': return { method: 'POST', path: '/api/v1/runtime/verify-signature', body: bodyWithout([]) };
-        case 'runtime.tlsDomain':    return { method: 'GET', path: '/api/v1/runtime/tls-domain' };
-        case 'runtime.exportData':   return { method: 'POST', path: '/api/v1/runtime/export', body: bodyWithout([]) };
-        case 'runtime.importData':   return { method: 'POST', path: '/api/v1/runtime/import', body: bodyWithout([]) };
-        case 'runtime.freeHostingEnabled': return { method: 'GET', path: '/api/v1/runtime/free-hosting-enabled' };
-        case 'runtime.setFreeHostingEnabled': return { method: 'PUT', path: '/api/v1/runtime/free-hosting-enabled', body: bodyWithout([]) };
-        case 'runtime.computeLog':   return { method: 'GET', path: '/api/v1/runtime/compute-log' };
+    // ── Runtime ──
+    'runtime.info': { ad4mExecutorVersion: '0.1.0', isUnlocked: true, isInitialized: true },
+    'runtime.tlsDomain': 'test.domain.com',
+    'runtime.quit': true,
+    'runtime.openLink': true,
+    'runtime.friends': ['did:friend:1', 'did:friend:2'],
+    'runtime.addFriends': ['did:friend:1', 'did:friend:2', 'did:friend:3'],
+    'runtime.removeFriends': ['did:friend:1'],
+    'runtime.friendStatus': (p: Record<string, unknown>) => ({
+        author: p.did, timestamp: '2023-01-01', data: JSON.stringify({ recipe_name: 'test' }), proof: { valid: true },
+    }),
+    'runtime.sendFriendMessage': true,
+    'runtime.inbox': [{ author: 'did:friend:1', timestamp: '2024-01-01', data: new Perspective() }],
+    'runtime.outbox': [],
+    'runtime.notifications': [],
+    'runtime.createNotification': true,
+    'runtime.updateNotification': true,
+    'runtime.grantNotification': true,
+    'runtime.deleteNotification': true,
+    'runtime.setStatus': true,
+    'runtime.linkLanguageTemplates': ['lang://template1'],
+    'runtime.addLinkLanguageTemplates': ['lang://template1', 'lang://template2'],
+    'runtime.removeLinkLanguageTemplates': ['lang://template1'],
+    'runtime.hcAgentInfos': ['hc-agent-info-1', 'hc-agent-info-2'],
+    'runtime.addHcAgentInfos': true,
+    'runtime.networkMetrics': 'metrics-data',
+    'runtime.restartHolochain': true,
+    'runtime.verifySignature': true,
+    'runtime.exportData': true,
+    'runtime.importData': { success: true, count: 5 },
+    'runtime.freeHostingEnabled': false,
+    'runtime.setFreeHostingEnabled': true,
+    'runtime.computeLog': [],
 
-        // ── AI ──
-        case 'ai.models':            return { method: 'GET', path: '/api/v1/ai/models' };
-        case 'ai.addModel':          return { method: 'POST', path: '/api/v1/ai/models', body: bodyWithout([]) };
-        case 'ai.updateModel':       return { method: 'PUT', path: `/api/v1/ai/models/${s('id')}`, body: bodyWithout(['id']) };
-        case 'ai.removeModel':       return { method: 'DELETE', path: `/api/v1/ai/models/${s('id')}` };
-        case 'ai.setDefaultModel':   return { method: 'PUT', path: `/api/v1/ai/models/${s('id')}/default`, body: bodyWithout(['id']) };
-        case 'ai.getDefaultModel':   return { method: 'GET', path: '/api/v1/ai/models/default' };
-        case 'ai.tasks':             return { method: 'GET', path: '/api/v1/ai/tasks' };
-        case 'ai.addTask':           return { method: 'POST', path: '/api/v1/ai/tasks', body: bodyWithout([]) };
-        case 'ai.updateTask':        return { method: 'PUT', path: `/api/v1/ai/tasks/${s('id')}`, body: bodyWithout(['id']) };
-        case 'ai.removeTask':        return { method: 'DELETE', path: `/api/v1/ai/tasks/${s('id')}` };
-        case 'ai.prompt':            return { method: 'POST', path: '/api/v1/ai/prompt', body: bodyWithout([]) };
-        case 'ai.embed':             return { method: 'POST', path: '/api/v1/ai/embed', body: bodyWithout([]) };
-        case 'ai.modelLoadingStatus': {
-            const qs = queryString(['modelId', 'model']);
-            return { method: 'GET', path: `/api/v1/ai/model-loading-status${qs}` };
-        }
+    // ── AI ──
+    'ai.models': [{ id: 'model-1', name: 'GPT-Test', modelType: 'LLM', api: 'openai' }],
+    'ai.addModel': 'model-new-id',
+    'ai.updateModel': true,
+    'ai.removeModel': true,
+    'ai.setDefaultModel': true,
+    'ai.getDefaultModel': { id: 'model-1', name: 'GPT-Test', modelType: 'LLM' },
+    'ai.tasks': [{ taskId: 'task-1', name: 'summarize', modelId: 'model-1', systemPrompt: 'Summarize', promptExamples: [] }],
+    'ai.addTask': { taskId: 'task-new', name: 'new-task', modelId: 'model-1', systemPrompt: 'Do stuff', promptExamples: [] },
+    'ai.updateTask': { taskId: 'task-1', name: 'updated', modelId: 'model-1', systemPrompt: 'Updated', promptExamples: [] },
+    'ai.removeTask': { taskId: 'task-1', name: 'summarize', modelId: 'model-1', systemPrompt: 'Summarize', promptExamples: [] },
+    'ai.prompt': 'This is the AI response',
+    'ai.modelLoadingStatus': { model: 'model-1', progress: 100, status: 'loaded' },
 
-        // ── Users ──
-        case 'user.create':          return { method: 'POST', path: '/api/v1/users', body: bodyWithout([]) };
-        case 'user.login':           return { method: 'POST', path: '/api/v1/users/login', body: bodyWithout([]) };
-        case 'user.verifyEmail':     return { method: 'POST', path: '/api/v1/users/verify-email', body: bodyWithout([]) };
-        case 'user.list':            return { method: 'GET', path: '/api/v1/users' };
-        case 'user.multiUserEnabled': return { method: 'GET', path: '/api/v1/users/multi-user-enabled' };
-        case 'user.setMultiUserEnabled': return { method: 'PUT', path: '/api/v1/users/multi-user-enabled', body: bodyWithout([]) };
+    // ── Users (unauthenticated on server — empty token allowed) ──
+    'user.create': { success: true, did: 'did:test:new-user' },
+    'user.login': 'login-jwt-token',
+    'user.verifyEmail': 'verified-token',
+    'user.requestVerification': { success: true, message: 'Verification email sent', requiresPassword: false, isExistingUser: true },
+    'user.list': [{ email: 'user@test.com', credits: 100, freeAccess: false }],
+    'user.multiUserEnabled': false,
+    'user.setMultiUserEnabled': true,
+    'user.credits': true,
+    'user.freeAccess': true,
+    'user.wallet': '0x1234567890abcdef',
+    'user.emailTest': (p: Record<string, unknown>) => {
+        if (p.action === 'get-code') return '123456';
+        return true;
+    },
 
-        // ── Hosting ──
-        case 'hosting.info':         return { method: 'GET', path: '/api/v1/hosting' };
-        case 'hosting.setHotWallet': return { method: 'PUT', path: '/api/v1/runtime/hosting/hot-wallet-address', body: bodyWithout([]) };
-        case 'hosting.requestPayment': return { method: 'POST', path: '/api/v1/runtime/hosting/request-payment', body: bodyWithout([]) };
+    // ── Hosting ──
+    'hosting.info': { email: 'test@test.com' },
+    'hosting.setHotWallet': true,
+    'hosting.requestPayment': { paymentUrl: 'https://pay.test' },
 
-        default:
-            return null;
-    }
-}
+    // ── Runtime: host rates & Unyt ──
+    'runtime.getHostRates': JSON.stringify([{ description: 'Link write', priceInHOT: 0.001 }]),
+    'runtime.setHostRates': true,
+    'runtime.unytAgentKey': 'unyt-agent-key-123',
+    'runtime.unytHotAgentPubkey': 'unyt-hot-pubkey-456',
+    'runtime.unytWalletBalance': '1000.50',
+    'runtime.unytWalletHistory': '[]',
+    'runtime.unytVersionInfo': '{"version":"0.1.0"}',
+    'runtime.unytSetMembraneProof': { success: true, message: 'ok' },
+    'runtime.unytReinstallDna': { success: true, message: 'reinstalled' },
+    'runtime.unytSendHot': { success: true, message: 'sent' },
+};
+
+// ===================== MOCK WEBSOCKET =====================
+
+/** Tracks the last RPC call for test assertions. */
+let lastRpcCall: { type: string; params: Record<string, unknown> } | null = null;
 
 class MockWebSocket {
     static instances: MockWebSocket[] = [];
@@ -230,50 +266,43 @@ class MockWebSocket {
     send(data: string) {
         try {
             const parsed = JSON.parse(data);
+
+            // Ping/pong keepalive
             if (parsed.type === 'ping') {
-                // Respond with pong asynchronously
                 setTimeout(() => {
                     this.onmessage?.({ data: JSON.stringify({ type: 'pong' }) });
                 }, 0);
                 return;
             }
 
-            // It's an RPC call — proxy to Express mock server
+            // RPC call — resolve directly from MOCK_RESPONSES
             const { id, type: msgType, params: rpcParams } = parsed;
-            const paramObj = (rpcParams && typeof rpcParams === 'object') ? rpcParams as Record<string, unknown> : {} as Record<string, unknown>;
-            const route = mapTypeToRoute(msgType, paramObj);
-            if (!route) {
+            const params = (rpcParams && typeof rpcParams === 'object')
+                ? rpcParams as Record<string, unknown>
+                : {} as Record<string, unknown>;
+
+            // Track for assertions
+            lastRpcCall = { type: msgType, params };
+
+            const handler = MOCK_RESPONSES[msgType];
+            if (handler === undefined) {
                 setTimeout(() => {
-                    this.onmessage?.({ data: JSON.stringify({ id, error: { code: 404, message: `Unknown type: ${msgType}` } }) });
+                    this.onmessage?.({ data: JSON.stringify({ id, error: { code: 404, message: `Unknown RPC type: ${msgType}` } }) });
                 }, 0);
                 return;
             }
 
-            const fetchOpts: RequestInit = {
-                method: route.method,
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Bearer test-token',
-                },
-            };
-            if (route.body && route.method !== 'GET') {
-                fetchOpts.body = JSON.stringify(route.body);
-            }
+            const result = typeof handler === 'function'
+                ? (handler as (p: Record<string, unknown>) => unknown)(params)
+                : handler;
 
-            fetch(`${mockServerBaseUrl}${route.path}`, fetchOpts)
-                .then(async (res) => {
-                    const text = await res.text();
-                    let json: unknown;
-                    try { json = JSON.parse(text); } catch { json = text; }
-                    this.onmessage?.({ data: JSON.stringify({ id, result: json }) });
-                })
-                .catch((err) => {
-                    this.onmessage?.({ data: JSON.stringify({ id, error: { code: 500, message: (err as Error).message } }) });
-                });
-        } catch {}
+            setTimeout(() => {
+                this.onmessage?.({ data: JSON.stringify({ id, result }) });
+            }, 0);
+        } catch { /* malformed JSON — ignore */ }
     }
 
-    /** Simulate server sending an event to the client */
+    /** Simulate server pushing an event to the client. */
     emit(payload: unknown) {
         this.onmessage?.({ data: JSON.stringify(payload) });
     }
@@ -302,413 +331,22 @@ function lastOf<T>(arr: T[]): T {
     return arr[arr.length - 1];
 }
 
-let app: ReturnType<typeof express>;
-let httpServer: any;
-let baseUrl: string;
+// ===================== TEST SETUP =====================
+
 let ad4m: Ad4mClient;
 
-// Track requests for assertion
-let lastRequest: { method: string; path: string; body: any; query: any; headers: any } | null = null;
-
-function trackRequest(req: express.Request) {
-    lastRequest = {
-        method: req.method,
-        path: req.path,
-        body: req.body,
-        query: req.query,
-        headers: req.headers,
-    };
-}
-
-beforeAll(async () => {
+beforeAll(() => {
     (global as any).WebSocket = MockWebSocket as any;
-
-    app = express();
-    app.use(express.json());
-
-    // Middleware to track all requests
-    app.use((req, _res, next) => {
-        trackRequest(req);
-        next();
-    });
-
-    // ===================== AGENT ENDPOINTS =====================
-    app.get('/api/v1/agent', (_req, res) => res.json({
-        did: 'did:test:123',
-        perspective: new Perspective(),
-        directMessageLanguage: 'lang://dm'
-    }));
-
-    app.get('/api/v1/agent/status', (_req, res) => res.json({
-        did: 'did:test:123',
-        didDocument: 'doc',
-        isInitialized: true,
-        isUnlocked: true
-    }));
-
-    app.post('/api/v1/agent', (_req, res) => res.json({
-        did: 'did:test:generated',
-        didDocument: 'doc',
-        isInitialized: true,
-        isUnlocked: true
-    }));
-
-    app.post('/api/v1/agent/lock', (_req, res) => res.json({
-        did: 'did:test:123',
-        isInitialized: true,
-        isUnlocked: false
-    }));
-
-    app.post('/api/v1/agent/unlock', (_req, res) => res.json({
-        did: 'did:test:123',
-        isInitialized: true,
-        isUnlocked: true
-    }));
-
-    app.post('/api/v1/agent/import', (_req, res) => res.json({
-        did: 'did:test:imported',
-        isInitialized: true,
-        isUnlocked: true
-    }));
-
-    app.get('/api/v1/agent/by-did/:did', (req, res) => res.json({
-        did: req.params.did,
-        perspective: new Perspective()
-    }));
-
-    app.patch('/api/v1/agent/profile', (_req, res) => res.json({
-        did: 'did:test:123',
-        perspective: new Perspective(),
-        directMessageLanguage: 'lang://dm'
-    }));
-
-    app.post('/api/v1/agent/entanglement-proofs', (_req, res) => res.json([
-        { did: 'did:test:123', deviceKey: 'key1', deviceKeyType: 'type1' }
-    ]));
-
-    app.delete('/api/v1/agent/entanglement-proofs', (_req, res) => res.json([]));
-
-    app.get('/api/v1/agent/entanglement-proofs', (_req, res) => res.json(['proof1', 'proof2']));
-
-    // Entanglement routes used by WS RPC (different paths from the legacy ones above)
-    app.post('/api/v1/agent/entanglement', (_req, res) => res.json([
-        { did: 'did:test:123', deviceKey: 'key1', deviceKeyType: 'type1' }
-    ]));
-
-    app.delete('/api/v1/agent/entanglement', (_req, res) => res.json([]));
-
-    app.get('/api/v1/agent/entanglement', (_req, res) => res.json(['proof1', 'proof2']));
-
-    app.post('/api/v1/agent/entanglement-preflight', (_req, res) => res.json({
-        did: 'did:test:123', deviceKey: 'key1', deviceKeyType: 'type1'
-    }));
-
-    app.post('/api/v1/agent/sign', (_req, res) => res.json('signed-message-data'));
-
-    app.get('/api/v1/agent/is-locked', (_req, res) => res.json(false));
-
-    app.post('/api/v1/agent/auth/request', (_req, res) => res.json('request-id-123'));
-    app.post('/api/v1/agent/auth/permit', (_req, res) => res.json('permitted-token'));
-    app.post('/api/v1/agent/auth/jwt', (_req, res) => res.json('jwt-token-abc'));
-
-    app.get('/api/v1/agent/apps', (_req, res) => res.json([
-        { requestId: 'app1', auth: {}, token: 'tok', revoked: false }
-    ]));
-    app.delete('/api/v1/agent/apps/:requestId', (_req, res) => res.json([]));
-    app.delete('/api/v1/agent/auth/token/:requestId', (_req, res) => res.json([]));
-
-    // Trusted agents (used by RuntimeClient but routed under /agent)
-    app.get('/api/v1/agent/trusted', (_req, res) => res.json(['did:trusted:1']));
-    app.post('/api/v1/agent/trusted', (_req, res) => res.json(['did:trusted:1', 'did:trusted:2']));
-    app.delete('/api/v1/agent/trusted', (_req, res) => res.json(['did:trusted:1']));
-
-    // ===================== PERSPECTIVE ENDPOINTS =====================
-    app.get('/api/v1/perspectives', (_req, res) => res.json([
-        { uuid: 'uuid-1', name: 'test-perspective', sharedUrl: null, neighbourhood: null, state: 'Synced' }
-    ]));
-
-    app.get('/api/v1/perspectives/:uuid', (req, res) => res.json({
-        uuid: req.params.uuid, name: 'test-perspective', sharedUrl: null, neighbourhood: null, state: 'Synced'
-    }));
-
-    app.get('/api/v1/perspectives/:uuid/snapshot', (_req, res) => res.json({
-        links: [{ author: 'did:test:123', timestamp: '2024-01-01', data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true } }]
-    }));
-
-    app.post('/api/v1/perspectives', (req, res) => res.json({
-        uuid: 'uuid-new', name: req.body.name, sharedUrl: null, neighbourhood: null, state: 'Synced'
-    }));
-
-    app.put('/api/v1/perspectives/:uuid', (req, res) => res.json({
-        uuid: req.params.uuid, name: req.body.name, sharedUrl: null, neighbourhood: null, state: 'Synced'
-    }));
-
-    app.delete('/api/v1/perspectives/:uuid', (_req, res) => res.json(true));
-
-    app.get('/api/v1/perspectives/:uuid/links', (_req, res) => res.json([
-        { author: 'did:test:123', timestamp: '2024-01-01', data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true } }
-    ]));
-
-    app.post('/api/v1/perspectives/:uuid/links', (_req, res) => res.json({
-        author: 'did:test:123', timestamp: '2024-01-01',
-        data: { source: 's', predicate: 'p', target: 't' },
-        proof: { valid: true }
-    }));
-
-    app.post('/api/v1/perspectives/:uuid/links/bulk', (_req, res) => res.json([
-        { author: 'did:test:123', timestamp: '2024-01-01', data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true } }
-    ]));
-
-    app.post('/api/v1/perspectives/:uuid/links/remove-bulk', (_req, res) => res.json([]));
-
-    app.post('/api/v1/perspectives/:uuid/links/mutations', (_req, res) => res.json({
-        additions: [{ author: 'did:test:123', timestamp: '2024-01-01', data: { source: 'a', predicate: 'p', target: 't' }, proof: { valid: true } }],
-        removals: []
-    }));
-
-    app.post('/api/v1/perspectives/:uuid/links/expression', (_req, res) => res.json({
-        author: 'did:test:123', timestamp: '2024-01-01', data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true }
-    }));
-
-    app.put('/api/v1/perspectives/:uuid/links', (_req, res) => res.json({
-        author: 'did:test:123', timestamp: '2024-01-01', data: { source: 'new-s', predicate: 'p', target: 't' }, proof: { valid: true }
-    }));
-
-    app.delete('/api/v1/perspectives/:uuid/links', (_req, res) => res.json(true));
-
-    app.post('/api/v1/perspectives/:uuid/sdna', (_req, res) => res.json(true));
-    app.post('/api/v1/perspectives/:uuid/execute-commands', (_req, res) => res.json(true));
-    app.post('/api/v1/perspectives/:uuid/create-subject', (_req, res) => res.json(true));
-    app.post('/api/v1/perspectives/:uuid/get-subject-data', (_req, res) => res.json('{"name":"test"}'));
-    app.post('/api/v1/perspectives/:uuid/publish-snapshot', (_req, res) => res.json('Qm123'));
-
-    app.post('/api/v1/perspectives/:uuid/query/prolog', (_req, res) => res.json(JSON.stringify([{X: 'test'}])));
-    app.post('/api/v1/perspectives/:uuid/query/surreal', (_req, res) => res.json(JSON.stringify([{id: '1'}])));
-
-    app.post('/api/v1/perspectives/:uuid/batch', (_req, res) => res.json('batch-id-1'));
-    app.post('/api/v1/perspectives/:uuid/batch/commit', (_req, res) => res.json({ additions: [], removals: [] }));
-
-    // ===================== LANGUAGE ENDPOINTS =====================
-    app.get('/api/v1/languages', (_req, res) => res.json([
-        { name: 'test-lang', address: 'lang://test', settings: '{}', icon: null, constructorIcon: null }
-    ]));
-
-    app.get('/api/v1/languages/:address', (req, res) => {
-        if (req.path.endsWith('/meta')) return; // handled below
-        if (req.path.endsWith('/source')) return;
-        res.json({ name: 'test-lang', address: req.params.address, settings: '{}', icon: null, constructorIcon: null });
-    });
-
-    app.get('/api/v1/languages/:address/meta', (_req, res) => res.json({
-        name: 'test-lang', address: 'lang://test', description: 'A test language',
-        author: 'did:test:123', templated: false, templateSourceLanguageAddress: null,
-        templateAppliedParams: null, possibleTemplateParams: null, sourceCodeLink: null
-    }));
-
-    app.get('/api/v1/languages/:address/source', (_req, res) => res.json('source-code-here'));
-
-    app.put('/api/v1/languages/:address/settings', (_req, res) => res.json(true));
-
-    app.post('/api/v1/languages/apply-template', (_req, res) => res.json({
-        name: 'applied-lang', address: 'lang://applied'
-    }));
-
-    app.post('/api/v1/languages/publish', (_req, res) => res.json({
-        name: 'published-lang', address: 'lang://published', description: 'Published',
-        author: 'did:test:123', templated: false
-    }));
-
-    app.delete('/api/v1/languages/:address', (_req, res) => res.json(true));
-
-    // ===================== NEIGHBOURHOOD ENDPOINTS =====================
-    app.post('/api/v1/neighbourhoods/publish', (_req, res) => res.json('neighbourhood://published'));
-
-    app.post('/api/v1/neighbourhoods/join', (_req, res) => res.json({
-        uuid: 'uuid-joined', name: 'joined-neighbourhood', sharedUrl: 'neighbourhood://url',
-        neighbourhood: {}, state: 'Synced'
-    }));
-
-    app.get('/api/v1/neighbourhoods/:uuid/other-agents', (_req, res) => res.json(['did:other:1', 'did:other:2']));
-    app.get('/api/v1/neighbourhoods/:uuid/has-telepresence-adapter', (_req, res) => res.json(true));
-    app.get('/api/v1/neighbourhoods/:uuid/online-agents', (_req, res) => res.json([
-        { did: 'did:test:1', status: new Perspective() }
-    ]));
-    app.put('/api/v1/neighbourhoods/:uuid/online-status', (_req, res) => res.json(true));
-    app.put('/api/v1/neighbourhoods/:uuid/online-status-unsigned', (_req, res) => res.json(true));
-    app.post('/api/v1/neighbourhoods/:uuid/signal', (_req, res) => res.json(true));
-    app.post('/api/v1/neighbourhoods/:uuid/signal-unsigned', (_req, res) => res.json(true));
-    app.post('/api/v1/neighbourhoods/:uuid/broadcast', (_req, res) => res.json(true));
-    app.post('/api/v1/neighbourhoods/:uuid/broadcast-unsigned', (_req, res) => res.json(true));
-
-    // ===================== EXPRESSION ENDPOINTS =====================
-    app.get('/api/v1/expressions', (req, res) => res.json({
-        author: 'did:test:123', timestamp: '2024-01-01', data: '{"content":"hello"}',
-        language: { address: 'lang://test' }, proof: { valid: true }
-    }));
-
-    app.get('/api/v1/expressions/many', (_req, res) => res.json([
-        { author: 'did:test:123', timestamp: '2024-01-01', data: '{"content":"hello"}', language: { address: 'lang://test' }, proof: { valid: true } }
-    ]));
-
-    app.get('/api/v1/expressions/raw', (_req, res) => res.json('raw-expression-data'));
-
-    app.post('/api/v1/expressions', (_req, res) => res.json('Qm-expression-hash'));
-
-    app.get('/api/v1/expressions/interactions', (_req, res) => res.json([
-        { label: 'interact1', name: 'doSomething', parameters: [] }
-    ]));
-
-    app.post('/api/v1/expressions/interact', (_req, res) => res.json('interaction-result'));
-
-    // ===================== RUNTIME ENDPOINTS =====================
-    app.get('/api/v1/runtime/info', (_req, res) => res.json({
-        ad4mExecutorVersion: '0.1.0', isUnlocked: true, isInitialized: true
-    }));
-
-    app.get('/api/v1/runtime/tls-domain', (_req, res) => res.json('test.domain.com'));
-
-    app.post('/api/v1/runtime/quit', (_req, res) => res.json(true));
-    app.post('/api/v1/runtime/open-link', (_req, res) => res.json(true));
-
-    app.get('/api/v1/runtime/link-language-templates', (_req, res) => res.json(['lang://template1']));
-    app.post('/api/v1/runtime/link-language-templates', (_req, res) => res.json(['lang://template1', 'lang://template2']));
-    app.delete('/api/v1/runtime/link-language-templates', (_req, res) => res.json(['lang://template1']));
-
-    app.get('/api/v1/runtime/friends', (_req, res) => res.json(['did:friend:1', 'did:friend:2']));
-    app.post('/api/v1/runtime/friends', (_req, res) => res.json(['did:friend:1', 'did:friend:2', 'did:friend:3']));
-    app.delete('/api/v1/runtime/friends', (_req, res) => res.json(['did:friend:1']));
-
-    app.get('/api/v1/runtime/hc/agent-infos', (_req, res) => res.json(['hc-agent-info-1', 'hc-agent-info-2']));
-    app.post('/api/v1/runtime/hc/agent-infos', (req, res) => {
-        if (!Array.isArray(req.body.agentInfos)) {
-            return res.status(400).json({ error: 'agentInfos must be an array' });
-        }
-
-        return res.json(true);
-    });
-    app.get('/api/v1/runtime/network-metrics', (_req, res) => res.json('metrics-data'));
-    app.post('/api/v1/runtime/holochain/restart', (_req, res) => res.json(true));
-
-    app.post('/api/v1/runtime/verify-signature', (_req, res) => res.json(true));
-
-    app.put('/api/v1/runtime/status', (_req, res) => res.json(true));
-    app.get('/api/v1/runtime/friends/:did/status', (_req, res) => res.json({
-        author: 'did:friend:1', timestamp: '2024-01-01', data: new Perspective()
-    }));
-    app.post('/api/v1/runtime/friends/:did/message', (_req, res) => res.json(true));
-
-    app.get('/api/v1/runtime/messages/inbox', (_req, res) => res.json([
-        { author: 'did:friend:1', timestamp: '2024-01-01', data: new Perspective() }
-    ]));
-    app.get('/api/v1/runtime/messages/outbox', (_req, res) => res.json([]));
-
-    app.post('/api/v1/runtime/notifications', (_req, res) => res.json(true));
-    app.get('/api/v1/runtime/notifications', (_req, res) => res.json([]));
-    app.patch('/api/v1/runtime/notifications/:id', (_req, res) => res.json(true));
-    app.patch('/api/v1/runtime/notifications/:id/grant', (_req, res) => res.json(true));
-    app.put('/api/v1/runtime/notifications/:id', (_req, res) => res.json(true));
-    app.delete('/api/v1/runtime/notifications/:id', (_req, res) => res.json(true));
-
-    app.post('/api/v1/runtime/export', (_req, res) => res.json(true));
-    app.post('/api/v1/runtime/import', (_req, res) => res.json({ success: true, count: 5 }));
-    app.post('/api/v1/runtime/export-perspective', (_req, res) => res.json(true));
-    app.post('/api/v1/runtime/import-perspective', (_req, res) => res.json(true));
-
-    app.get('/api/v1/runtime/multi-user-enabled', (_req, res) => res.json(false));
-    app.put('/api/v1/runtime/multi-user-enabled', (_req, res) => res.json(true));
-    app.get('/api/v1/runtime/free-hosting-enabled', (_req, res) => res.json(false));
-    app.put('/api/v1/runtime/free-hosting-enabled', (_req, res) => res.json(true));
-
-    app.get('/api/v1/runtime/users', (_req, res) => res.json([]));
-
-    // ===================== AI ENDPOINTS =====================
-    app.get('/api/v1/ai/models', (_req, res) => res.json([
-        { id: 'model-1', name: 'GPT-Test', modelType: 'LLM', api: 'openai' }
-    ]));
-
-    app.post('/api/v1/ai/models', (_req, res) => res.json('model-new-id'));
-    app.put('/api/v1/ai/models/:modelId', (_req, res) => res.json(true));
-    app.delete('/api/v1/ai/models/:modelId', (_req, res) => res.json(true));
-    app.put('/api/v1/ai/models/default', (_req, res) => res.json(true));
-    app.get('/api/v1/ai/models/default', (_req, res) => res.json({ id: 'model-1', name: 'GPT-Test', modelType: 'LLM' }));
-
-    app.get('/api/v1/ai/tasks', (_req, res) => res.json([
-        { taskId: 'task-1', name: 'summarize', modelId: 'model-1', systemPrompt: 'Summarize', promptExamples: [] }
-    ]));
-    app.post('/api/v1/ai/tasks', (_req, res) => res.json({
-        taskId: 'task-new', name: 'new-task', modelId: 'model-1', systemPrompt: 'Do stuff', promptExamples: []
-    }));
-    app.put('/api/v1/ai/tasks/:taskId', (_req, res) => res.json({
-        taskId: 'task-1', name: 'updated', modelId: 'model-1', systemPrompt: 'Updated', promptExamples: []
-    }));
-    app.delete('/api/v1/ai/tasks/:taskId', (_req, res) => res.json({
-        taskId: 'task-1', name: 'summarize', modelId: 'model-1', systemPrompt: 'Summarize', promptExamples: []
-    }));
-
-    app.post('/api/v1/ai/prompt', (_req, res) => res.json('This is the AI response'));
-
-    app.get('/api/v1/ai/model-loading-status', (_req, res) => res.json({
-        model: 'model-1', progress: 100, status: 'loaded'
-    }));
-
-    // ===================== USER/HOSTING ENDPOINTS =====================
-    app.post('/api/v1/users', (_req, res) => res.json({ success: true, did: 'did:test:new-user' }));
-    app.post('/api/v1/users/login', (_req, res) => res.json('login-jwt-token'));
-    app.post('/api/v1/users/verify-email', (_req, res) => res.json('verified-token'));
-
-    app.get('/api/v1/runtime/hosting/user-info', (_req, res) => res.json({ email: 'test@test.com' }));
-    app.get('/api/v1/runtime/compute-log', (_req, res) => res.json([]));
-    app.put('/api/v1/runtime/hosting/hot-wallet-address', (_req, res) => res.json(true));
-    app.post('/api/v1/runtime/hosting/request-payment', (_req, res) => res.json({ paymentUrl: 'https://pay.test' }));
-
-    // ── Missing routes (client paths that differ from original stubs) ──
-    app.post('/api/v1/agent/generate', (_req, res) => res.json({
-        did: 'did:test:generated',
-        didDocument: 'doc',
-        isInitialized: true,
-        isUnlocked: true
-    }));
-    app.put('/api/v1/agent/trusted', (_req, res) => res.json(['did:trusted:1', 'did:trusted:2']));
-    app.post('/api/v1/perspectives/:uuid/query', (_req, res) => res.json(JSON.stringify([{X: 'test'}])));
-    app.get('/api/v1/neighbourhoods/:uuid/has-telepresence', (_req, res) => res.json(true));
-    app.post('/api/v1/expressions/many', (_req, res) => res.json([
-        { author: 'did:test:1', timestamp: '2023-01-01', data: { type: 'test' }, language: { address: 'lang://test' }, proof: { valid: true } }
-    ]));
-    app.get('/api/v1/expressions/:url', (req, res) => {
-        if (req.query.raw === 'true') return res.json('raw-expression-data');
-        res.json({ author: 'did:test:123', timestamp: '2024-01-01', data: '{"content":"hello"}', language: { address: 'lang://test' }, proof: { valid: true } });
-    });
-    app.get('/api/v1/expressions/:url/interactions', (_req, res) => res.json([
-        { label: 'interact1', name: 'doSomething', parameters: [] }
-    ]));
-    app.post('/api/v1/expressions/:url/interact', (_req, res) => res.json('interaction-result'));
-    app.put('/api/v1/runtime/friends', (_req, res) => res.json(['did:friend:1', 'did:friend:2', 'did:friend:3']));
-    app.get('/api/v1/runtime/friends/:did', (req, res) => res.json({
-        author: req.params.did, timestamp: '2023-01-01', data: JSON.stringify({ recipe_name: 'test' }), proof: { valid: true }
-    }));
-    app.get('/api/v1/users/multi-user-enabled', (_req, res) => res.json(false));
-    app.put('/api/v1/users/multi-user-enabled', (_req, res) => res.json(true));
-    app.put('/api/v1/ai/models/:modelId/default', (_req, res) => res.json(true));
-    app.get('/api/v1/hosting', (_req, res) => res.json({ email: 'test@test.com' }));
-
-    // ===================== WebSocket EVENTS (stub - not testing WS server) =====================
-    // subscribe=false prevents client from connecting; stub avoids hanging if accidentally hit
-    app.get('/api/v1/events', (_req, res) => res.status(404).end());
-
-    httpServer = app.listen(0);
-    const addr = httpServer.address() as { port: number };
-    baseUrl = `http://127.0.0.1:${addr.port}`;
-    mockServerBaseUrl = baseUrl;
-    ad4m = new Ad4mClient(baseUrl, 'test-token', false);
+    // Ad4mClient takes an HTTP base URL; restClient converts to ws:// internally
+    ad4m = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
 });
 
 afterAll(() => {
-    httpServer?.close();
     (global as any).WebSocket = originalWebSocket;
 });
 
 beforeEach(() => {
-    lastRequest = null;
+    lastRpcCall = null;
     MockWebSocket.instances = [];
 });
 
@@ -728,28 +366,28 @@ describe('AgentClient', () => {
 
     test('generate() sends passphrase and returns status', async () => {
         const status = await ad4m.agent.generate('secret123');
-        expect(lastRequest!.body.passphrase).toBe('secret123');
+        expect(lastRpcCall!.params.passphrase).toBe('secret123');
         expect(status.did).toBe('did:test:generated');
     });
 
     test('lock() locks the agent', async () => {
         const status = await ad4m.agent.lock('secret123');
-        expect(lastRequest!.body.passphrase).toBe('secret123');
+        expect(lastRpcCall!.params.passphrase).toBe('secret123');
         expect(status.isUnlocked).toBe(false);
     });
 
     test('unlock() unlocks the agent', async () => {
         const status = await ad4m.agent.unlock('secret123');
-        expect(lastRequest!.body.passphrase).toBe('secret123');
-        expect(lastRequest!.body.holochain).toBe(true);
+        expect(lastRpcCall!.params.passphrase).toBe('secret123');
+        expect(lastRpcCall!.params.holochain).toBe(true);
         expect(status.isUnlocked).toBe(true);
     });
 
     test('import() imports a DID keystore', async () => {
         const status = await ad4m.agent.import({
-            did: 'did:test:import', didDocument: 'doc', keystore: 'ks', passphrase: 'pass'
+            did: 'did:test:import', didDocument: 'doc', keystore: 'ks', passphrase: 'pass',
         });
-        expect(lastRequest!.body.did).toBe('did:test:import');
+        expect(lastRpcCall!.params.did).toBe('did:test:import');
         expect(status.did).toBe('did:test:imported');
     });
 
@@ -760,7 +398,7 @@ describe('AgentClient', () => {
 
     test('signMessage() signs a message', async () => {
         const signed = await ad4m.agent.signMessage('hello');
-        expect(lastRequest!.body.message).toBe('hello');
+        expect(lastRpcCall!.params.message).toBe('hello');
         expect(signed).toBe('signed-message-data');
     });
 
@@ -796,7 +434,7 @@ describe('AgentClient', () => {
 
     test('generateJwt() returns JWT', async () => {
         const jwt = await ad4m.agent.generateJwt('req-1', 'rand-1');
-        expect(lastRequest!.body.requestId).toBe('req-1');
+        expect(lastRpcCall!.params.requestId).toBe('req-1');
         expect(jwt).toBe('jwt-token-abc');
     });
 
@@ -816,14 +454,13 @@ describe('AgentClient', () => {
     });
 
     test('agent-updated event unwraps nested agent payload', async () => {
-        const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
         const callback = jest.fn();
         freshClient.agent.addUpdatedListener(callback);
         freshClient.agent.subscribeAgentUpdated();
 
         const ws = lastOf(MockWebSocket.instances);
 
-        // Server now sends { type: "agent-updated", agent: { did, ... } }
         ws.emit({
             type: 'agent-updated',
             agent: { did: 'did:test:updated', directMessageLanguage: 'lang://dm2', perspective: null, isInitialized: true, isUnlocked: true },
@@ -833,12 +470,11 @@ describe('AgentClient', () => {
         const received = callback.mock.calls[0][0];
         expect(received.did).toBe('did:test:updated');
         expect(received.directMessageLanguage).toBe('lang://dm2');
-        // The type field from the event envelope must NOT leak into the agent object
         expect(received).not.toHaveProperty('type');
     });
 
     test('agent-status-changed event unwraps nested agent payload', async () => {
-        const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
         const callback = jest.fn();
         freshClient.agent.addAgentStatusChangedListener(callback);
         freshClient.agent.subscribeAgentStatusChanged();
@@ -880,13 +516,13 @@ describe('PerspectiveClient', () => {
 
     test('add() creates a new perspective', async () => {
         const p = await ad4m.perspective.add('new-perspective');
-        expect(lastRequest!.body.name).toBe('new-perspective');
+        expect(lastRpcCall!.params.name).toBe('new-perspective');
         expect(p.uuid).toBe('uuid-new');
     });
 
     test('update() updates a perspective name', async () => {
         const p = await ad4m.perspective.update('uuid-1', 'renamed');
-        expect(lastRequest!.body.name).toBe('renamed');
+        expect(lastRpcCall!.params.name).toBe('renamed');
         expect(p.name).toBe('renamed');
     });
 
@@ -898,42 +534,41 @@ describe('PerspectiveClient', () => {
     test('queryLinks() queries links with parameters', async () => {
         const links = await ad4m.perspective.queryLinks('uuid-1', new LinkQuery({ source: 'src', predicate: 'pred' }));
         expect(links).toHaveLength(1);
-        expect(lastRequest!.query.source).toBe('src');
-        expect(lastRequest!.query.predicate).toBe('pred');
+        expect(lastRpcCall!.params.source).toBe('src');
+        expect(lastRpcCall!.params.predicate).toBe('pred');
     });
 
     test('addLink() adds a link', async () => {
         const link = await ad4m.perspective.addLink('uuid-1', { source: 's', predicate: 'p', target: 't' });
         expect(link.data.source).toBe('s');
-        expect(lastRequest!.body.link.source).toBe('s');
+        expect(lastRpcCall!.params.link).toEqual({ source: 's', predicate: 'p', target: 't' });
     });
 
     test('addLinks() adds multiple links', async () => {
         const links = await ad4m.perspective.addLinks('uuid-1', [
             { source: 's1', predicate: 'p', target: 't1' },
-            { source: 's2', predicate: 'p', target: 't2' }
+            { source: 's2', predicate: 'p', target: 't2' },
         ]);
         expect(links).toHaveLength(1);
-        expect(lastRequest!.body.links).toHaveLength(2);
+        expect(lastRpcCall!.params.links).toHaveLength(2);
     });
 
     test('removeLinks() forwards batchId in the bulk remove request', async () => {
         const removed = await ad4m.perspective.removeLinks('uuid-1', [{
-            author: 'a',
-            timestamp: 't',
+            author: 'a', timestamp: 't',
             data: { source: 's', predicate: 'p', target: 't' },
-            proof: { valid: true }
+            proof: { valid: true },
         }] as any, 'batch-id-1');
         expect(removed).toHaveLength(0);
-        expect(lastRequest!.path).toBe('/api/v1/perspectives/uuid-1/links/remove-bulk');
-        expect(lastRequest!.body.links).toHaveLength(1);
-        expect(lastRequest!.body.batchId).toBe('batch-id-1');
+        expect(lastRpcCall!.type).toBe('perspective.removeLinks');
+        expect(lastRpcCall!.params.links).toHaveLength(1);
+        expect(lastRpcCall!.params.batchId).toBe('batch-id-1');
     });
 
     test('updateLink() updates a link', async () => {
         const link = await ad4m.perspective.updateLink('uuid-1',
             { author: 'a', timestamp: 't', data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true } } as any,
-            { source: 'new-s', predicate: 'p', target: 't' }
+            { source: 'new-s', predicate: 'p', target: 't' },
         );
         expect(link.data.source).toBe('new-s');
     });
@@ -942,7 +577,7 @@ describe('PerspectiveClient', () => {
         const result = await ad4m.perspective.removeLink('uuid-1', {
             author: 'a', timestamp: 't',
             data: { source: 's', predicate: 'p', target: 't' },
-            proof: { valid: true }
+            proof: { valid: true },
         } as any);
         expect(result).toBe(true);
     });
@@ -950,7 +585,7 @@ describe('PerspectiveClient', () => {
     test('linkMutations() applies mutations', async () => {
         const result = await ad4m.perspective.linkMutations('uuid-1', {
             additions: [{ source: 'a', predicate: 'p', target: 't' }],
-            removals: []
+            removals: [],
         });
         expect(result.additions).toHaveLength(1);
     });
@@ -962,32 +597,32 @@ describe('PerspectiveClient', () => {
 
     test('queryProlog() runs prolog query', async () => {
         const result = await ad4m.perspective.queryProlog('uuid-1', 'test(X)');
-        expect(result).toEqual([{X: 'test'}]);
+        expect(result).toEqual([{ X: 'test' }]);
     });
 
     test('subscribeToQueryUpdates() routes through the WebSocket endpoint', async () => {
-        const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
         const callback = jest.fn();
         const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
         const ws = lastOf(MockWebSocket.instances);
 
-        expect(ws.url).toBe(`ws://127.0.0.1:${(httpServer.address() as any).port}/api/v1/ws?token=test-token`);
+        expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=test-token');
 
         unsubscribe();
         expect(ws.closed).toBe(true);
     });
 
     test('perspective lifecycle subscriptions use the WebSocket endpoint', async () => {
-        const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
         freshClient.perspective.addPerspectiveAddedListener(jest.fn());
         freshClient.perspective.subscribePerspectiveAdded();
 
         const ws = lastOf(MockWebSocket.instances);
-        expect(ws.url).toBe(`ws://127.0.0.1:${(httpServer.address() as any).port}/api/v1/ws?token=test-token`);
+        expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=test-token');
     });
 
     test('perspective-scoped link subscriptions ignore events for other perspectives', async () => {
-        const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
         const linkAddedCallback = jest.fn();
         const linkRemovedCallback = jest.fn();
         const linkUpdatedCallback = jest.fn();
@@ -997,87 +632,47 @@ describe('PerspectiveClient', () => {
         await freshClient.perspective.addPerspectiveLinkUpdatedListener('uuid-1', [linkUpdatedCallback]);
 
         const ws = lastOf(MockWebSocket.instances);
-        expect(ws.url).toBe(`ws://127.0.0.1:${(httpServer.address() as any).port}/api/v1/ws?token=test-token`);
+        expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=test-token');
 
+        // Events for a different perspective should be ignored
         ws.emit({
             type: 'link-added',
             perspectiveUuid: 'uuid-2',
-            link: {
-                author: 'did:test:123',
-                timestamp: '2024-01-01T00:00:00.000Z',
-                data: { source: 'test://other-added', predicate: 'test://has', target: 'test://value' },
-                proof: { valid: true }
-            }
+            link: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://other-added', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
         });
         ws.emit({
             type: 'link-removed',
             perspectiveUuid: 'uuid-2',
-            link: {
-                author: 'did:test:123',
-                timestamp: '2024-01-01T00:00:00.000Z',
-                data: { source: 'test://other-removed', predicate: 'test://has', target: 'test://value' },
-                proof: { valid: true }
-            }
+            link: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://other-removed', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
         });
         ws.emit({
             type: 'link-updated',
             perspectiveUuid: 'uuid-2',
-            oldLink: {
-                author: 'did:test:123',
-                timestamp: '2024-01-01T00:00:00.000Z',
-                data: { source: 'test://other-old', predicate: 'test://has', target: 'test://value' },
-                proof: { valid: true }
-            },
-            newLink: {
-                author: 'did:test:123',
-                timestamp: '2024-01-01T00:00:00.000Z',
-                data: { source: 'test://other-new', predicate: 'test://has', target: 'test://value' },
-                proof: { valid: true }
-            }
+            oldLink: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://other-old', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
+            newLink: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://other-new', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
         });
 
         expect(linkAddedCallback).not.toHaveBeenCalled();
         expect(linkRemovedCallback).not.toHaveBeenCalled();
         expect(linkUpdatedCallback).not.toHaveBeenCalled();
 
+        // Events for the correct perspective should fire
         const addedLink = {
-            author: 'did:test:123',
-            timestamp: '2024-01-01T00:00:00.000Z',
-            data: { source: 'test://added', predicate: 'test://has', target: 'test://value' },
-            proof: { valid: true }
+            author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z',
+            data: { source: 'test://added', predicate: 'test://has', target: 'test://value' }, proof: { valid: true },
         };
         const removedLink = {
-            author: 'did:test:123',
-            timestamp: '2024-01-01T00:00:00.000Z',
-            data: { source: 'test://removed', predicate: 'test://has', target: 'test://value' },
-            proof: { valid: true }
+            author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z',
+            data: { source: 'test://removed', predicate: 'test://has', target: 'test://value' }, proof: { valid: true },
         };
 
-        ws.emit({
-            type: 'link-added',
-            perspectiveUuid: 'uuid-1',
-            link: addedLink
-        });
-        ws.emit({
-            type: 'link-removed',
-            perspectiveUuid: 'uuid-1',
-            link: removedLink
-        });
+        ws.emit({ type: 'link-added', perspectiveUuid: 'uuid-1', link: addedLink });
+        ws.emit({ type: 'link-removed', perspectiveUuid: 'uuid-1', link: removedLink });
         ws.emit({
             type: 'link-updated',
             perspectiveUuid: 'uuid-1',
-            oldLink: {
-                author: 'did:test:123',
-                timestamp: '2024-01-01T00:00:00.000Z',
-                data: { source: 'test://updated-old', predicate: 'test://has', target: 'test://value' },
-                proof: { valid: true }
-            },
-            newLink: {
-                author: 'did:test:123',
-                timestamp: '2024-01-01T00:00:00.000Z',
-                data: { source: 'test://updated-new', predicate: 'test://has', target: 'test://value' },
-                proof: { valid: true }
-            }
+            oldLink: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://updated-old', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
+            newLink: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://updated-new', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
         });
 
         expect(linkAddedCallback).toHaveBeenCalledWith(addedLink);
@@ -1085,8 +680,8 @@ describe('PerspectiveClient', () => {
         expect(linkUpdatedCallback).toHaveBeenCalledTimes(1);
     });
 
-    test('runtime exception subscriptions normalize PascalCase exception types from REST', async () => {
-        const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
+    test('runtime exception subscriptions normalize PascalCase exception types', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
         const callback = jest.fn(() => null);
         freshClient.runtime.addExceptionCallback(callback);
         freshClient.runtime.subscribeExceptionOccurred();
@@ -1111,7 +706,7 @@ describe('PerspectiveClient', () => {
     });
 
     test('subscribeToQueryUpdates() ignores unrelated events and accepts object results', async () => {
-        const freshClient = new Ad4mClient(baseUrl, 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
         const callback = jest.fn();
         const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
         const ws = lastOf(MockWebSocket.instances);
@@ -1161,8 +756,8 @@ describe('LanguageClient', () => {
     });
 
     test('byFilter() filters languages', async () => {
-        const langs = await ad4m.languages.byFilter('test');
-        expect(lastRequest!.query.filter).toBe('test');
+        await ad4m.languages.byFilter('test');
+        expect(lastRpcCall!.params.filter).toBe('test');
     });
 
     test('byAddress() returns a language handle', async () => {
@@ -1184,7 +779,7 @@ describe('LanguageClient', () => {
     test('writeSettings() writes language settings', async () => {
         const result = await ad4m.languages.writeSettings('lang://test', '{"key":"value"}');
         expect(result).toBe(true);
-        expect(lastRequest!.body.settings).toBe('{"key":"value"}');
+        expect(lastRpcCall!.params.settings).toBe('{"key":"value"}');
     });
 
     test('applyTemplateAndPublish() applies a template', async () => {
@@ -1208,16 +803,16 @@ describe('LanguageClient', () => {
 describe('NeighbourhoodClient', () => {
     test('publishFromPerspective() publishes a neighbourhood', async () => {
         const url = await ad4m.neighbourhood.publishFromPerspective(
-            'uuid-1', 'lang://link', new Perspective()
+            'uuid-1', 'lang://link', new Perspective(),
         );
         expect(url).toBe('neighbourhood://published');
-        expect(lastRequest!.body.perspectiveUUID).toBe('uuid-1');
+        expect(lastRpcCall!.params.perspectiveUUID).toBe('uuid-1');
     });
 
     test('joinFromUrl() joins a neighbourhood', async () => {
         const handle = await ad4m.neighbourhood.joinFromUrl('neighbourhood://test');
         expect(handle.uuid).toBe('uuid-joined');
-        expect(lastRequest!.body.url).toBe('neighbourhood://test');
+        expect(lastRpcCall!.params.url).toBe('neighbourhood://test');
     });
 
     test('otherAgents() returns other agents', async () => {
@@ -1243,13 +838,13 @@ describe('NeighbourhoodClient', () => {
     test('sendSignal() sends a signal', async () => {
         const result = await ad4m.neighbourhood.sendSignal('uuid-1', 'did:other:1', new Perspective());
         expect(result).toBe(true);
-        expect(lastRequest!.body.remoteAgentDid).toBe('did:other:1');
+        expect(lastRpcCall!.params.remoteAgentDid).toBe('did:other:1');
     });
 
     test('sendBroadcast() sends a broadcast', async () => {
         const result = await ad4m.neighbourhood.sendBroadcast('uuid-1', new Perspective(), true);
         expect(result).toBe(true);
-        expect(lastRequest!.body.loopback).toBe(true);
+        expect(lastRpcCall!.params.loopback).toBe(true);
     });
 });
 
@@ -1273,7 +868,7 @@ describe('ExpressionClient', () => {
     test('create() creates an expression', async () => {
         const hash = await ad4m.expression.create({ content: 'hello' }, 'lang://test');
         expect(hash).toBe('Qm-expression-hash');
-        expect(lastRequest!.body.languageAddress).toBe('lang://test');
+        expect(lastRpcCall!.params.languageAddress).toBe('lang://test');
     });
 
     test('interactions() returns interaction meta', async () => {
@@ -1313,7 +908,7 @@ describe('RuntimeClient', () => {
     test('addFriends() adds friends', async () => {
         const result = await ad4m.runtime.addFriends(['did:friend:3']);
         expect(result).toHaveLength(3);
-        expect(lastRequest!.body.dids).toEqual(['did:friend:3']);
+        expect(lastRpcCall!.params.dids).toEqual(['did:friend:3']);
     });
 
     test('removeFriends() removes friends', async () => {
@@ -1349,13 +944,13 @@ describe('RuntimeClient', () => {
     test('hcAddAgentInfos() sends array payload and returns boolean', async () => {
         const result = await ad4m.runtime.hcAddAgentInfos(['hc-agent-info-1', 'hc-agent-info-2']);
         expect(result).toBe(true);
-        expect(lastRequest!.body.agentInfos).toEqual(['hc-agent-info-1', 'hc-agent-info-2']);
+        expect(lastRpcCall!.params.agentInfos).toEqual(['hc-agent-info-1', 'hc-agent-info-2']);
     });
 
     test('verifyStringSignedByDid() verifies signature', async () => {
         const result = await ad4m.runtime.verifyStringSignedByDid('did:test:1', 'key-1', 'data', 'signed');
         expect(result).toBe(true);
-        expect(lastRequest!.body.did).toBe('did:test:1');
+        expect(lastRpcCall!.params.did).toBe('did:test:1');
     });
 
     test('friendStatus() gets friend status', async () => {
@@ -1376,7 +971,7 @@ describe('RuntimeClient', () => {
     test('openLink() opens a link', async () => {
         const result = await ad4m.runtime.openLink('https://example.com');
         expect(result).toBe(true);
-        expect(lastRequest!.body.url).toBe('https://example.com');
+        expect(lastRpcCall!.params.url).toBe('https://example.com');
     });
 
     test('notifications() returns notifications', async () => {
@@ -1404,17 +999,6 @@ describe('RuntimeClient', () => {
         expect(result).toBe(true);
     });
 
-    test('hcAgentInfos() returns string array', async () => {
-        const infos = await ad4m.runtime.hcAgentInfos();
-        expect(infos).toEqual(['hc-agent-info-1', 'hc-agent-info-2']);
-    });
-
-    test('hcAddAgentInfos() posts string array and returns boolean', async () => {
-        const result = await ad4m.runtime.hcAddAgentInfos(['info-a', 'info-b']);
-        expect(result).toBe(true);
-        expect(lastRequest!.body.agentInfos).toEqual(['info-a', 'info-b']);
-    });
-
     test('restartHolochain() restarts holochain', async () => {
         const result = await ad4m.runtime.restartHolochain();
         expect(result).toBe(true);
@@ -1432,19 +1016,19 @@ describe('AIClient', () => {
     test('addModel() adds a model', async () => {
         const id = await ad4m.ai.addModel({ name: 'New Model', modelType: 'LLM' } as any);
         expect(id).toBe('model-new-id');
-        expect(lastRequest!.body.model.type).toBe('LLM');
-        expect(lastRequest!.body.model.modelType).toBeUndefined();
+        expect(lastRpcCall!.params.model).toBeDefined();
+        expect((lastRpcCall!.params.model as any).type).toBe('LLM');
+        expect((lastRpcCall!.params.model as any).modelType).toBeUndefined();
     });
 
     test('updateModel() updates a model', async () => {
         const result = await ad4m.ai.updateModel('model-1', { name: 'Updated', modelType: 'EMBEDDING' } as any);
         expect(result).toBe(true);
-        expect(lastRequest!.body.model.type).toBe('EMBEDDING');
-        expect(lastRequest!.body.model.modelType).toBeUndefined();
+        expect((lastRpcCall!.params.model as any).type).toBe('EMBEDDING');
+        expect((lastRpcCall!.params.model as any).modelType).toBeUndefined();
     });
 
     test('removeModel() removes a model', async () => {
-
         const result = await ad4m.ai.removeModel('model-1');
         expect(result).toBe(true);
     });
@@ -1467,8 +1051,8 @@ describe('AIClient', () => {
     test('prompt() sends a prompt', async () => {
         const response = await ad4m.ai.prompt('task-1', 'Hello AI');
         expect(response).toBe('This is the AI response');
-        expect(lastRequest!.body.taskId).toBe('task-1');
-        expect(lastRequest!.body.prompt).toBe('Hello AI');
+        expect(lastRpcCall!.params.taskId).toBe('task-1');
+        expect(lastRpcCall!.params.prompt).toBe('Hello AI');
     });
 
     test('modelLoadingStatus() returns status', async () => {
@@ -1503,6 +1087,128 @@ describe('User and Auth', () => {
         const info = await ad4m.agent.hostingUserInfo();
         expect(info.email).toBe('test@test.com');
     });
+
+    test('requestLoginVerification() sends email and returns result', async () => {
+        const result = await ad4m.agent.requestLoginVerification('test@test.com');
+        expect(result.success).toBe(true);
+        expect(result.isExistingUser).toBe(true);
+        expect(lastRpcCall!.params.email).toBe('test@test.com');
+    });
+
+    test('setHotWalletAddress() sends address', async () => {
+        const result = await ad4m.agent.setHotWalletAddress('0xABC');
+        expect(result).toBe(true);
+        expect(lastRpcCall!.params.address).toBe('0xABC');
+    });
+
+    test('requestPayment() sends amount', async () => {
+        const result = await ad4m.agent.requestPayment('100');
+        expect(lastRpcCall!.params.amountHOT).toBe('100');
+    });
+});
+
+// ===================== MULTI-USER EXTENDED TESTS =====================
+describe('Multi-user and Hosting', () => {
+    test('listUsers() returns user statistics', async () => {
+        const users = await ad4m.runtime.listUsers();
+        expect(users).toHaveLength(1);
+        expect(users[0].email).toBe('user@test.com');
+    });
+
+    test('setUserCredits() sets credits for a user', async () => {
+        const result = await ad4m.runtime.setUserCredits('user@test.com', 500);
+        expect(result).toBe(true);
+        expect(lastRpcCall!.params.email).toBe('user@test.com');
+        expect(lastRpcCall!.params.amount).toBe(500);
+    });
+
+    test('setUserFreeAccess() toggles free access', async () => {
+        const result = await ad4m.runtime.setUserFreeAccess('user@test.com', true);
+        expect(result).toBe(true);
+        expect(lastRpcCall!.params.email).toBe('user@test.com');
+        expect(lastRpcCall!.params.enabled).toBe(true);
+    });
+
+    test('userWalletAddress() returns wallet address', async () => {
+        const addr = await ad4m.runtime.userWalletAddress('user@test.com');
+        expect(addr).toBe('0x1234567890abcdef');
+    });
+
+    test('emailTestModeEnable() enables email test mode', async () => {
+        const result = await ad4m.runtime.emailTestModeEnable();
+        expect(result).toBe(true);
+        expect(lastRpcCall!.params.action).toBe('enable');
+    });
+
+    test('emailTestModeDisable() disables email test mode', async () => {
+        const result = await ad4m.runtime.emailTestModeDisable();
+        expect(result).toBe(true);
+        expect(lastRpcCall!.params.action).toBe('disable');
+    });
+
+    test('emailTestClearCodes() clears test codes', async () => {
+        const result = await ad4m.runtime.emailTestClearCodes();
+        expect(result).toBe(true);
+        expect(lastRpcCall!.params.action).toBe('clear-codes');
+    });
+
+    test('getHostRates() returns parsed rates', async () => {
+        const rates = await ad4m.runtime.getHostRates();
+        expect(rates).toHaveLength(1);
+        expect(rates[0].description).toBe('Link write');
+        expect(rates[0].priceInHOT).toBe(0.001);
+    });
+
+    test('setHostRates() sends rates JSON', async () => {
+        const result = await ad4m.runtime.setHostRates(JSON.stringify([{ description: 'test', priceInHOT: 1 }]));
+        expect(result).toBe(true);
+    });
+});
+
+// ===================== UNYT / mHOT TESTS =====================
+describe('Unyt Integration', () => {
+    test('unytAgentKey() returns agent key', async () => {
+        const key = await ad4m.runtime.unytAgentKey();
+        expect(key).toBe('unyt-agent-key-123');
+    });
+
+    test('unytHotAgentPubkey() returns pubkey', async () => {
+        const key = await ad4m.runtime.unytHotAgentPubkey();
+        expect(key).toBe('unyt-hot-pubkey-456');
+    });
+
+    test('unytWalletBalance() returns balance', async () => {
+        const balance = await ad4m.runtime.unytWalletBalance();
+        expect(balance).toBe('1000.50');
+    });
+
+    test('unytWalletHistory() returns history', async () => {
+        const history = await ad4m.runtime.unytWalletHistory();
+        expect(history).toBe('[]');
+    });
+
+    test('unytVersionInfo() returns version info', async () => {
+        const info = await ad4m.runtime.unytVersionInfo();
+        expect(info).toContain('version');
+    });
+
+    test('unytSetMembraneProof() sets proof', async () => {
+        const result = await ad4m.runtime.unytSetMembraneProof('proof-data');
+        expect(result.success).toBe(true);
+        expect(lastRpcCall!.params.proof).toBe('proof-data');
+    });
+
+    test('unytReinstallDna() reinstalls DNA', async () => {
+        const result = await ad4m.runtime.unytReinstallDna();
+        expect(result.success).toBe(true);
+    });
+
+    test('unytSendHot() sends HOT tokens', async () => {
+        const result = await ad4m.runtime.unytSendHot('recipient-123', '50');
+        expect(result.success).toBe(true);
+        expect(lastRpcCall!.params.recipient).toBe('recipient-123');
+        expect(lastRpcCall!.params.amount).toBe('50');
+    });
 });
 
 // ===================== AD4M CLIENT INTEGRATION =====================
@@ -1517,13 +1223,16 @@ describe('Ad4mClient', () => {
         expect(ad4m.ai).toBeDefined();
     });
 
-    test('auth header is sent with requests', async () => {
-        await ad4m.agent.me();
-        expect(lastRequest!.headers.authorization).toBe('Bearer test-token');
+    test('token is passed via WebSocket URL query param', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'my-secret-token', false);
+        await freshClient.agent.me();
+        const ws = lastOf(MockWebSocket.instances);
+        expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=my-secret-token');
     });
 
-    test('content-type header is JSON', async () => {
+    test('WS RPC message contains type and params', async () => {
         await ad4m.agent.generate('pass');
-        expect(lastRequest!.headers['content-type']).toContain('application/json');
+        expect(lastRpcCall!.type).toBe('agent.generate');
+        expect(lastRpcCall!.params).toBeDefined();
     });
 });

@@ -33,10 +33,13 @@ pub async fn login_proxy(
             format!("Set proxy error:  {:?}", err)
         })?;
 
-    let ad4m_client = Ad4mClient::new(
+    let ad4m_client = Ad4mClient::connect(
         format!("{}:{}", AD4M_SERVER, port),
         req_credential.to_string(),
-    );
+    ).await.map_err(|err| {
+        log::error!("Error connecting to executor: {:?}", err);
+        format!("Set proxy error: {:?}", err)
+    })?;
     let signed_message = ad4m_client.agent.sign_message(rand).await.map_err(|err| {
         log::error!("Error happend when agent sign message: {:?}", err);
         format!("Set proxy error:  {:?}", err)
