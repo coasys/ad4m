@@ -6,6 +6,208 @@ import { LinkQuery } from './perspectives/LinkQuery';
 // Save original WebSocket so we can restore it after the suite
 const originalWebSocket = (global as any).WebSocket;
 
+// Module-level variable for the mock server base URL.
+// MockWebSocket reads this to proxy RPC calls to Express.
+let mockServerBaseUrl = '';
+
+/**
+ * Map a WS-RPC message type + params to an HTTP method, path, and optional body.
+ * Mirrors the Rust `map_message_to_route` in ws_rpc.rs.
+ */
+function mapTypeToRoute(
+    msgType: string,
+    params: Record<string, unknown>
+): { method: string; path: string; body?: Record<string, unknown> } | null {
+    const s = (key: string): string => {
+        const v = params[key];
+        return typeof v === 'string' ? v : '';
+    };
+
+    /** Build a query string from the given keys present in params. */
+    const queryString = (keys: string[]): string => {
+        const parts: string[] = [];
+        for (const key of keys) {
+            const val = params[key];
+            if (val === undefined || val === null) continue;
+            if (typeof val === 'string' && val !== '') {
+                parts.push(`${key}=${encodeURIComponent(val)}`);
+            } else if (typeof val === 'number' || typeof val === 'boolean') {
+                parts.push(`${key}=${val}`);
+            }
+        }
+        return parts.length ? `?${parts.join('&')}` : '';
+    };
+
+    /** Clone params, removing id, type, and any extra excluded keys. Returns the body for POST/PUT/etc. */
+    const bodyWithout = (exclude: string[]): Record<string, unknown> => {
+        const result: Record<string, unknown> = { ...params };
+        delete result.id;
+        delete result.type;
+        for (const key of exclude) delete result[key];
+        return result;
+    };
+
+    switch (msgType) {
+        // ── Agent ──
+        case 'agent.get':            return { method: 'GET', path: '/api/v1/agent' };
+        case 'agent.status':         return { method: 'GET', path: '/api/v1/agent/status' };
+        case 'agent.generate':       return { method: 'POST', path: '/api/v1/agent/generate', body: bodyWithout([]) };
+        case 'agent.lock':           return { method: 'POST', path: '/api/v1/agent/lock', body: bodyWithout([]) };
+        case 'agent.unlock':         return { method: 'POST', path: '/api/v1/agent/unlock', body: bodyWithout([]) };
+        case 'agent.import':         return { method: 'POST', path: '/api/v1/agent/import', body: bodyWithout([]) };
+        case 'agent.byDid':          return { method: 'GET', path: `/api/v1/agent/by-did/${encodeURIComponent(s('did'))}` };
+        case 'agent.updateProfile':  return { method: 'PATCH', path: '/api/v1/agent/profile', body: bodyWithout([]) };
+        case 'agent.sign':           return { method: 'POST', path: '/api/v1/agent/sign', body: bodyWithout([]) };
+        case 'agent.isLocked':       return { method: 'GET', path: '/api/v1/agent/is-locked' };
+        case 'agent.requestCapability': return { method: 'POST', path: '/api/v1/agent/auth/request', body: bodyWithout([]) };
+        case 'agent.permitCapability': return { method: 'POST', path: '/api/v1/agent/auth/permit', body: bodyWithout([]) };
+        case 'agent.generateJwt':    return { method: 'POST', path: '/api/v1/agent/auth/jwt', body: bodyWithout([]) };
+        case 'agent.getApps':        return { method: 'GET', path: '/api/v1/agent/apps' };
+        case 'agent.removeApp':      return { method: 'DELETE', path: `/api/v1/agent/apps/${encodeURIComponent(s('id'))}` };
+        case 'agent.revokeToken':    return { method: 'DELETE', path: `/api/v1/agent/auth/token/${encodeURIComponent(s('token'))}` };
+        case 'agent.getTrustedAgents': return { method: 'GET', path: '/api/v1/agent/trusted' };
+        case 'agent.addTrustedAgents': return { method: 'PUT', path: '/api/v1/agent/trusted', body: bodyWithout([]) };
+        case 'agent.deleteTrustedAgents': return { method: 'DELETE', path: '/api/v1/agent/trusted', body: bodyWithout([]) };
+        case 'agent.getEntanglementProofs': return { method: 'GET', path: '/api/v1/agent/entanglement' };
+        case 'agent.addEntanglementProofs': return { method: 'POST', path: '/api/v1/agent/entanglement', body: bodyWithout([]) };
+        case 'agent.deleteEntanglementProofs': return { method: 'DELETE', path: '/api/v1/agent/entanglement', body: bodyWithout([]) };
+        case 'agent.entanglementProofPreflight': return { method: 'POST', path: '/api/v1/agent/entanglement-preflight', body: bodyWithout([]) };
+
+        // ── Perspectives ──
+        case 'perspective.all':      return { method: 'GET', path: '/api/v1/perspectives' };
+        case 'perspective.get':      return { method: 'GET', path: `/api/v1/perspectives/${s('uuid')}` };
+        case 'perspective.create':   return { method: 'POST', path: '/api/v1/perspectives', body: bodyWithout([]) };
+        case 'perspective.update':   return { method: 'PUT', path: `/api/v1/perspectives/${s('uuid')}`, body: bodyWithout(['uuid']) };
+        case 'perspective.remove':   return { method: 'DELETE', path: `/api/v1/perspectives/${s('uuid')}` };
+        case 'perspective.snapshot':  return { method: 'GET', path: `/api/v1/perspectives/${s('uuid')}/snapshot` };
+        case 'perspective.publishSnapshot': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/publish-snapshot`, body: bodyWithout(['uuid']) };
+        case 'perspective.queryLinks': {
+            const uuid = s('uuid');
+            const qs = queryString(['source', 'predicate', 'target', 'fromDate', 'untilDate', 'limit']);
+            return { method: 'GET', path: `/api/v1/perspectives/${uuid}/links${qs}` };
+        }
+        case 'perspective.addLink':  return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/links`, body: bodyWithout(['uuid']) };
+        case 'perspective.addLinkExpression': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/links/expression`, body: bodyWithout(['uuid']) };
+        case 'perspective.addLinks': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/links/bulk`, body: bodyWithout(['uuid']) };
+        case 'perspective.updateLink': return { method: 'PUT', path: `/api/v1/perspectives/${s('uuid')}/links`, body: bodyWithout(['uuid']) };
+        case 'perspective.removeLink': return { method: 'DELETE', path: `/api/v1/perspectives/${s('uuid')}/links`, body: bodyWithout(['uuid']) };
+        case 'perspective.removeLinks': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/links/remove-bulk`, body: bodyWithout(['uuid']) };
+        case 'perspective.linkMutations': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/links/mutations`, body: bodyWithout(['uuid']) };
+        case 'perspective.queryProlog': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/query`, body: bodyWithout(['uuid']) };
+        case 'perspective.querySparql': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/query/surreal`, body: bodyWithout(['uuid']) };
+        case 'perspective.addSdna':  return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/sdna`, body: bodyWithout(['uuid']) };
+        case 'perspective.executeCommands': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/execute-commands`, body: bodyWithout(['uuid']) };
+        case 'perspective.createSubject': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/create-subject`, body: bodyWithout(['uuid']) };
+        case 'perspective.getSubjectData': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/get-subject-data`, body: bodyWithout(['uuid']) };
+        case 'perspective.createBatch': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/batch`, body: bodyWithout(['uuid']) };
+        case 'perspective.commitBatch': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/batch/commit`, body: bodyWithout(['uuid']) };
+        case 'perspective.subscribeQuery': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/subscribe-query`, body: bodyWithout(['uuid']) };
+        case 'perspective.keepAliveQuery': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/keep-alive-query`, body: bodyWithout(['uuid']) };
+        case 'perspective.disposeQuery': return { method: 'POST', path: `/api/v1/perspectives/${s('uuid')}/dispose-query`, body: bodyWithout(['uuid']) };
+
+        // ── Languages ──
+        case 'language.all': {
+            const qs = queryString(['filter']);
+            return { method: 'GET', path: `/api/v1/languages${qs}` };
+        }
+        case 'language.get':         return { method: 'GET', path: `/api/v1/languages/${encodeURIComponent(s('address'))}` };
+        case 'language.meta':        return { method: 'GET', path: `/api/v1/languages/${encodeURIComponent(s('address'))}/meta` };
+        case 'language.source':      return { method: 'GET', path: `/api/v1/languages/${encodeURIComponent(s('address'))}/source` };
+        case 'language.writeSettings': return { method: 'PUT', path: `/api/v1/languages/${encodeURIComponent(s('address'))}/settings`, body: bodyWithout(['address']) };
+        case 'language.applyTemplate': return { method: 'POST', path: '/api/v1/languages/apply-template', body: bodyWithout([]) };
+        case 'language.publish':     return { method: 'POST', path: '/api/v1/languages/publish', body: bodyWithout([]) };
+        case 'language.remove':      return { method: 'DELETE', path: `/api/v1/languages/${encodeURIComponent(s('address'))}` };
+
+        // ── Neighbourhoods ──
+        case 'neighbourhood.publish':    return { method: 'POST', path: '/api/v1/neighbourhoods/publish', body: bodyWithout([]) };
+        case 'neighbourhood.join':       return { method: 'POST', path: '/api/v1/neighbourhoods/join', body: bodyWithout([]) };
+        case 'neighbourhood.otherAgents': return { method: 'GET', path: `/api/v1/neighbourhoods/${s('uuid')}/other-agents` };
+        case 'neighbourhood.hasTelepresence': return { method: 'GET', path: `/api/v1/neighbourhoods/${s('uuid')}/has-telepresence` };
+        case 'neighbourhood.onlineAgents': return { method: 'GET', path: `/api/v1/neighbourhoods/${s('uuid')}/online-agents` };
+        case 'neighbourhood.setOnlineStatus': return { method: 'PUT', path: `/api/v1/neighbourhoods/${s('uuid')}/online-status`, body: bodyWithout(['uuid']) };
+        case 'neighbourhood.sendSignal': return { method: 'POST', path: `/api/v1/neighbourhoods/${s('uuid')}/signal`, body: bodyWithout(['uuid']) };
+        case 'neighbourhood.sendBroadcast': return { method: 'POST', path: `/api/v1/neighbourhoods/${s('uuid')}/broadcast`, body: bodyWithout(['uuid']) };
+
+        // ── Expressions ──
+        case 'expression.get': {
+            const url = s('url');
+            const raw = params.raw === true;
+            const qs = raw ? '?raw=true' : '';
+            return { method: 'GET', path: `/api/v1/expressions/${encodeURIComponent(url)}${qs}` };
+        }
+        case 'expression.getMany':   return { method: 'POST', path: '/api/v1/expressions/many', body: bodyWithout([]) };
+        case 'expression.create':    return { method: 'POST', path: '/api/v1/expressions', body: bodyWithout([]) };
+        case 'expression.interactions': return { method: 'GET', path: `/api/v1/expressions/${encodeURIComponent(s('url'))}/interactions` };
+        case 'expression.interact':  return { method: 'POST', path: `/api/v1/expressions/${encodeURIComponent(s('url'))}/interact`, body: bodyWithout(['url']) };
+
+        // ── Runtime ──
+        case 'runtime.info':         return { method: 'GET', path: '/api/v1/runtime/info' };
+        case 'runtime.quit':         return { method: 'POST', path: '/api/v1/runtime/quit' };
+        case 'runtime.openLink':     return { method: 'POST', path: '/api/v1/runtime/open-link', body: bodyWithout([]) };
+        case 'runtime.friends':      return { method: 'GET', path: '/api/v1/runtime/friends' };
+        case 'runtime.addFriends':   return { method: 'PUT', path: '/api/v1/runtime/friends', body: bodyWithout([]) };
+        case 'runtime.removeFriends': return { method: 'DELETE', path: '/api/v1/runtime/friends', body: bodyWithout([]) };
+        case 'runtime.friendStatus': return { method: 'GET', path: `/api/v1/runtime/friends/${encodeURIComponent(s('did'))}` };
+        case 'runtime.sendFriendMessage': return { method: 'POST', path: `/api/v1/runtime/friends/${encodeURIComponent(s('did'))}/message`, body: bodyWithout(['did']) };
+        case 'runtime.inbox':        return { method: 'GET', path: '/api/v1/runtime/messages/inbox' };
+        case 'runtime.outbox':       return { method: 'GET', path: '/api/v1/runtime/messages/outbox' };
+        case 'runtime.notifications': return { method: 'GET', path: '/api/v1/runtime/notifications' };
+        case 'runtime.createNotification': return { method: 'POST', path: '/api/v1/runtime/notifications', body: bodyWithout([]) };
+        case 'runtime.updateNotification': return { method: 'PATCH', path: `/api/v1/runtime/notifications/${s('id')}`, body: bodyWithout(['id']) };
+        case 'runtime.grantNotification': return { method: 'PATCH', path: `/api/v1/runtime/notifications/${s('id')}/grant`, body: bodyWithout(['id']) };
+        case 'runtime.deleteNotification': return { method: 'DELETE', path: `/api/v1/runtime/notifications/${s('id')}` };
+        case 'runtime.setStatus':    return { method: 'PUT', path: '/api/v1/runtime/status', body: bodyWithout([]) };
+        case 'runtime.linkLanguageTemplates': return { method: 'GET', path: '/api/v1/runtime/link-language-templates' };
+        case 'runtime.addLinkLanguageTemplates': return { method: 'PUT', path: '/api/v1/runtime/link-language-templates', body: bodyWithout([]) };
+        case 'runtime.removeLinkLanguageTemplates': return { method: 'DELETE', path: '/api/v1/runtime/link-language-templates', body: bodyWithout([]) };
+        case 'runtime.hcAgentInfos': return { method: 'GET', path: '/api/v1/runtime/hc/agent-infos' };
+        case 'runtime.addHcAgentInfos': return { method: 'POST', path: '/api/v1/runtime/hc/agent-infos', body: bodyWithout([]) };
+        case 'runtime.networkMetrics': return { method: 'GET', path: '/api/v1/runtime/network-metrics' };
+        case 'runtime.restartHolochain': return { method: 'POST', path: '/api/v1/runtime/holochain/restart' };
+        case 'runtime.verifySignature': return { method: 'POST', path: '/api/v1/runtime/verify-signature', body: bodyWithout([]) };
+        case 'runtime.tlsDomain':    return { method: 'GET', path: '/api/v1/runtime/tls-domain' };
+        case 'runtime.exportData':   return { method: 'POST', path: '/api/v1/runtime/export', body: bodyWithout([]) };
+        case 'runtime.importData':   return { method: 'POST', path: '/api/v1/runtime/import', body: bodyWithout([]) };
+        case 'runtime.freeHostingEnabled': return { method: 'GET', path: '/api/v1/runtime/free-hosting-enabled' };
+        case 'runtime.setFreeHostingEnabled': return { method: 'PUT', path: '/api/v1/runtime/free-hosting-enabled', body: bodyWithout([]) };
+        case 'runtime.computeLog':   return { method: 'GET', path: '/api/v1/runtime/compute-log' };
+
+        // ── AI ──
+        case 'ai.models':            return { method: 'GET', path: '/api/v1/ai/models' };
+        case 'ai.addModel':          return { method: 'POST', path: '/api/v1/ai/models', body: bodyWithout([]) };
+        case 'ai.updateModel':       return { method: 'PUT', path: `/api/v1/ai/models/${s('id')}`, body: bodyWithout(['id']) };
+        case 'ai.removeModel':       return { method: 'DELETE', path: `/api/v1/ai/models/${s('id')}` };
+        case 'ai.setDefaultModel':   return { method: 'PUT', path: `/api/v1/ai/models/${s('id')}/default`, body: bodyWithout(['id']) };
+        case 'ai.getDefaultModel':   return { method: 'GET', path: '/api/v1/ai/models/default' };
+        case 'ai.tasks':             return { method: 'GET', path: '/api/v1/ai/tasks' };
+        case 'ai.addTask':           return { method: 'POST', path: '/api/v1/ai/tasks', body: bodyWithout([]) };
+        case 'ai.updateTask':        return { method: 'PUT', path: `/api/v1/ai/tasks/${s('id')}`, body: bodyWithout(['id']) };
+        case 'ai.removeTask':        return { method: 'DELETE', path: `/api/v1/ai/tasks/${s('id')}` };
+        case 'ai.prompt':            return { method: 'POST', path: '/api/v1/ai/prompt', body: bodyWithout([]) };
+        case 'ai.embed':             return { method: 'POST', path: '/api/v1/ai/embed', body: bodyWithout([]) };
+        case 'ai.modelLoadingStatus': {
+            const qs = queryString(['modelId', 'model']);
+            return { method: 'GET', path: `/api/v1/ai/model-loading-status${qs}` };
+        }
+
+        // ── Users ──
+        case 'user.create':          return { method: 'POST', path: '/api/v1/users', body: bodyWithout([]) };
+        case 'user.login':           return { method: 'POST', path: '/api/v1/users/login', body: bodyWithout([]) };
+        case 'user.verifyEmail':     return { method: 'POST', path: '/api/v1/users/verify-email', body: bodyWithout([]) };
+        case 'user.list':            return { method: 'GET', path: '/api/v1/users' };
+        case 'user.multiUserEnabled': return { method: 'GET', path: '/api/v1/users/multi-user-enabled' };
+        case 'user.setMultiUserEnabled': return { method: 'PUT', path: '/api/v1/users/multi-user-enabled', body: bodyWithout([]) };
+
+        // ── Hosting ──
+        case 'hosting.info':         return { method: 'GET', path: '/api/v1/hosting' };
+        case 'hosting.setHotWallet': return { method: 'PUT', path: '/api/v1/runtime/hosting/hot-wallet-address', body: bodyWithout([]) };
+        case 'hosting.requestPayment': return { method: 'POST', path: '/api/v1/runtime/hosting/request-payment', body: bodyWithout([]) };
+
+        default:
+            return null;
+    }
+}
+
 class MockWebSocket {
     static instances: MockWebSocket[] = [];
     static CONNECTING = 0;
@@ -28,7 +230,6 @@ class MockWebSocket {
     }
 
     send(data: string) {
-        // Handle ping/pong
         try {
             const parsed = JSON.parse(data);
             if (parsed.type === 'ping') {
@@ -36,7 +237,40 @@ class MockWebSocket {
                 setTimeout(() => {
                     this.onmessage?.({ data: JSON.stringify({ type: 'pong' }) });
                 }, 0);
+                return;
             }
+
+            // It's an RPC call — proxy to Express mock server
+            const { id, type: msgType, ...params } = parsed;
+            const route = mapTypeToRoute(msgType, params);
+            if (!route) {
+                setTimeout(() => {
+                    this.onmessage?.({ data: JSON.stringify({ id, error: { code: 404, message: `Unknown type: ${msgType}` } }) });
+                }, 0);
+                return;
+            }
+
+            const fetchOpts: RequestInit = {
+                method: route.method,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer test-token',
+                },
+            };
+            if (route.body && route.method !== 'GET') {
+                fetchOpts.body = JSON.stringify(route.body);
+            }
+
+            fetch(`${mockServerBaseUrl}${route.path}`, fetchOpts)
+                .then(async (res) => {
+                    const text = await res.text();
+                    let json: unknown;
+                    try { json = JSON.parse(text); } catch { json = text; }
+                    this.onmessage?.({ data: JSON.stringify({ id, result: json }) });
+                })
+                .catch((err) => {
+                    this.onmessage?.({ data: JSON.stringify({ id, error: { code: 500, message: (err as Error).message } }) });
+                });
         } catch {}
     }
 
@@ -157,7 +391,16 @@ beforeAll(async () => {
 
     app.get('/api/v1/agent/entanglement-proofs', (_req, res) => res.json(['proof1', 'proof2']));
 
-    app.post('/api/v1/agent/entanglement-proof-preflight', (_req, res) => res.json({
+    // Entanglement routes used by WS RPC (different paths from the legacy ones above)
+    app.post('/api/v1/agent/entanglement', (_req, res) => res.json([
+        { did: 'did:test:123', deviceKey: 'key1', deviceKeyType: 'type1' }
+    ]));
+
+    app.delete('/api/v1/agent/entanglement', (_req, res) => res.json([]));
+
+    app.get('/api/v1/agent/entanglement', (_req, res) => res.json(['proof1', 'proof2']));
+
+    app.post('/api/v1/agent/entanglement-preflight', (_req, res) => res.json({
         did: 'did:test:123', deviceKey: 'key1', deviceKeyType: 'type1'
     }));
 
@@ -456,6 +699,7 @@ beforeAll(async () => {
     httpServer = app.listen(0);
     const addr = httpServer.address() as { port: number };
     baseUrl = `http://127.0.0.1:${addr.port}`;
+    mockServerBaseUrl = baseUrl;
     ad4m = new Ad4mClient(baseUrl, 'test-token', false);
 });
 

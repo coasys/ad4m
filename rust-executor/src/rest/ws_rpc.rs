@@ -42,17 +42,6 @@ pub struct WsAuthQuery {
 
 // ── Message type → HTTP route mapping ───────────────────────────────────────
 
-struct RouteMapping {
-    method: &'static str,
-    path_template: &'static str,
-    /// Fields from the WS message to substitute into path placeholders
-    path_params: &'static [&'static str],
-    /// Fields from the WS message to put in query string
-    query_params: &'static [&'static str],
-    /// Whether to send the remaining params as JSON body
-    has_body: bool,
-}
-
 /// Map a WS message type to its HTTP route.
 /// Returns (method, path, query_string_suffix, body_json).
 fn map_message_to_route(msg_type: &str, params: &Value) -> Option<(&'static str, String, Value)> {
@@ -566,12 +555,12 @@ fn map_message_to_route(msg_type: &str, params: &Value) -> Option<(&'static str,
         ),
         "runtime.hcAgentInfos" => (
             "GET",
-            "/api/v1/runtime/hc-agent-infos".to_string(),
+            "/api/v1/runtime/hc/agent-infos".to_string(),
             json!(null),
         ),
         "runtime.addHcAgentInfos" => (
             "POST",
-            "/api/v1/runtime/hc-agent-infos".to_string(),
+            "/api/v1/runtime/hc/agent-infos".to_string(),
             body_without(&[]),
         ),
         "runtime.networkMetrics" => (
