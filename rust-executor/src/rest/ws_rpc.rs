@@ -165,21 +165,21 @@ fn map_message_to_route(msg_type: &str, params: &Value) -> Option<(&'static str,
             body_without(&[]),
         ),
         "agent.getEntanglementProofs" => {
-            ("GET", "/api/v1/agent/entanglement".to_string(), json!(null))
+            ("GET", "/api/v1/agent/entanglement-proofs".to_string(), json!(null))
         }
         "agent.addEntanglementProofs" => (
             "POST",
-            "/api/v1/agent/entanglement".to_string(),
+            "/api/v1/agent/entanglement-proofs".to_string(),
             body_without(&[]),
         ),
         "agent.deleteEntanglementProofs" => (
             "DELETE",
-            "/api/v1/agent/entanglement".to_string(),
+            "/api/v1/agent/entanglement-proofs".to_string(),
             body_without(&[]),
         ),
         "agent.entanglementProofPreflight" => (
             "POST",
-            "/api/v1/agent/entanglement-preflight".to_string(),
+            "/api/v1/agent/entanglement-proof-preflight".to_string(),
             body_without(&[]),
         ),
 
@@ -273,7 +273,7 @@ fn map_message_to_route(msg_type: &str, params: &Value) -> Option<(&'static str,
         ),
         "perspective.querySparql" => (
             "POST",
-            format!("/api/v1/perspectives/{}/query/surreal", s("uuid")),
+            format!("/api/v1/perspectives/{}/query", s("uuid")),
             body_without(&["uuid"]),
         ),
         "perspective.addSdna" => (
@@ -283,7 +283,7 @@ fn map_message_to_route(msg_type: &str, params: &Value) -> Option<(&'static str,
         ),
         "perspective.executeCommands" => (
             "POST",
-            format!("/api/v1/perspectives/{}/execute-commands", s("uuid")),
+            format!("/api/v1/perspectives/{}/commands", s("uuid")),
             body_without(&["uuid"]),
         ),
         "perspective.createSubject" => (
@@ -318,7 +318,7 @@ fn map_message_to_route(msg_type: &str, params: &Value) -> Option<(&'static str,
         ),
         "perspective.disposeQuery" => (
             "POST",
-            format!("/api/v1/perspectives/{}/dispose-query", s("uuid")),
+            format!("/api/v1/perspectives/{}/dispose-query-subscription", s("uuid")),
             body_without(&["uuid"]),
         ),
         "perspective.subscribeSparql" => (
@@ -336,7 +336,7 @@ fn map_message_to_route(msg_type: &str, params: &Value) -> Option<(&'static str,
         ),
         "perspective.disposeSparql" => (
             "POST",
-            format!("/api/v1/perspectives/{}/dispose-surreal-query", s("uuid")),
+            format!("/api/v1/perspectives/{}/dispose-surreal-query-subscription", s("uuid")),
             body_without(&["uuid"]),
         ),
 
@@ -729,7 +729,7 @@ fn map_message_to_route(msg_type: &str, params: &Value) -> Option<(&'static str,
             "/api/v1/users/free-access".to_string(),
             body_without(&[]),
         ),
-        "user.credits" => ("GET", "/api/v1/users/credits".to_string(), json!(null)),
+        "user.credits" => ("POST", "/api/v1/users/credits".to_string(), body_without(&[])),
         "user.wallet" => (
             "GET",
             format!("/api/v1/users/{}/wallet", urlencoding::encode(&s("email"))),
@@ -746,7 +746,7 @@ fn map_message_to_route(msg_type: &str, params: &Value) -> Option<(&'static str,
         "hosting.wallet" => ("GET", "/api/v1/hosting/wallet".to_string(), json!(null)),
         "hosting.walletHistory" => (
             "GET",
-            "/api/v1/hosting/wallet-history".to_string(),
+            "/api/v1/hosting/wallet/history".to_string(),
             json!(null),
         ),
         "hosting.requestPayment" => (
@@ -756,7 +756,7 @@ fn map_message_to_route(msg_type: &str, params: &Value) -> Option<(&'static str,
         ),
         "hosting.setHotWallet" => (
             "PUT",
-            "/api/v1/hosting/wallet".to_string(),
+            "/api/v1/hosting/wallet/hot-wallet-address".to_string(),
             body_without(&[]),
         ),
 
@@ -945,6 +945,7 @@ async fn proxy_to_http(
     } else {
         let code = status.as_u16();
         let body_str = String::from_utf8_lossy(&body_bytes);
+        eprintln!("[WS_RPC] proxy error: {} {} → HTTP {} body={}", method, path, code, body_str);
         // Try to extract error message from JSON body
         let message = serde_json::from_str::<Value>(&body_str)
             .ok()

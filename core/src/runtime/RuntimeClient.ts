@@ -167,7 +167,7 @@ export class RuntimeClient {
     }
 
     async updateNotification(id: string, notification: NotificationInput): Promise<boolean> {
-        return this.#restClient.call<boolean>('runtime.updateNotification', { id, ...notification })
+        return this.#restClient.call<boolean>('runtime.updateNotification', { ...notification, id })
     }
 
     async removeNotification(id: string): Promise<boolean> {
