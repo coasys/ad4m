@@ -200,7 +200,10 @@ export class RestClient {
         await this._ready()
 
         const id = nextId()
-        const message: Record<string, unknown> = { id, type, ...params }
+        // Put params under a "params" key to avoid collision with
+        // protocol fields "id" and "type" (e.g. params might contain
+        // { id: modelId } or { type: "db" }).
+        const message: Record<string, unknown> = { id, type, params: params || {} }
 
         return new Promise<T>((resolve, reject) => {
             const timer = setTimeout(() => {

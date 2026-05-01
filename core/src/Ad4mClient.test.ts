@@ -241,8 +241,9 @@ class MockWebSocket {
             }
 
             // It's an RPC call — proxy to Express mock server
-            const { id, type: msgType, ...params } = parsed;
-            const route = mapTypeToRoute(msgType, params);
+            const { id, type: msgType, params: rpcParams } = parsed;
+            const paramObj = (rpcParams && typeof rpcParams === 'object') ? rpcParams as Record<string, unknown> : {} as Record<string, unknown>;
+            const route = mapTypeToRoute(msgType, paramObj);
             if (!route) {
                 setTimeout(() => {
                     this.onmessage?.({ data: JSON.stringify({ id, error: { code: 404, message: `Unknown type: ${msgType}` } }) });
@@ -972,7 +973,7 @@ describe('PerspectiveClient', () => {
         const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
         const ws = lastOf(MockWebSocket.instances);
 
-        expect(ws.url).toBe(`ws://127.0.0.1:${(httpServer.address() as any).port}/api/v1/ws/events?token=test-token`);
+        expect(ws.url).toBe(`ws://127.0.0.1:${(httpServer.address() as any).port}/api/v1/ws?token=test-token`);
 
         unsubscribe();
         expect(ws.closed).toBe(true);
@@ -984,7 +985,7 @@ describe('PerspectiveClient', () => {
         freshClient.perspective.subscribePerspectiveAdded();
 
         const ws = lastOf(MockWebSocket.instances);
-        expect(ws.url).toBe(`ws://127.0.0.1:${(httpServer.address() as any).port}/api/v1/ws/events?token=test-token`);
+        expect(ws.url).toBe(`ws://127.0.0.1:${(httpServer.address() as any).port}/api/v1/ws?token=test-token`);
     });
 
     test('perspective-scoped link subscriptions ignore events for other perspectives', async () => {
@@ -998,7 +999,7 @@ describe('PerspectiveClient', () => {
         await freshClient.perspective.addPerspectiveLinkUpdatedListener('uuid-1', [linkUpdatedCallback]);
 
         const ws = lastOf(MockWebSocket.instances);
-        expect(ws.url).toBe(`ws://127.0.0.1:${(httpServer.address() as any).port}/api/v1/ws/events?token=test-token`);
+        expect(ws.url).toBe(`ws://127.0.0.1:${(httpServer.address() as any).port}/api/v1/ws?token=test-token`);
 
         ws.emit({
             type: 'link-added',

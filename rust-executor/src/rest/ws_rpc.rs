@@ -856,7 +856,10 @@ async fn handle_ws_rpc(socket: WebSocket, state: AppState, token: String) {
         };
 
         // Map to HTTP route
-        let route_info = match map_message_to_route(&msg_type, &parsed) {
+        // Client sends params under a "params" sub-key to avoid collision
+        // with protocol fields "id" and "type".
+        let rpc_params = parsed.get("params").cloned().unwrap_or(json!({}));
+        let route_info = match map_message_to_route(&msg_type, &rpc_params) {
             Some(info) => info,
             None => {
                 let _ = tx.send(
