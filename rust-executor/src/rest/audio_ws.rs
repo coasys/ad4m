@@ -17,7 +17,6 @@ use crate::ai_service::AIService;
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
-use ad4m_rest_macros::rest_handler;
 
 #[derive(Deserialize)]
 pub struct AudioWsParams {
@@ -29,7 +28,6 @@ pub struct AudioWsParams {
 ///
 /// Authentication is via `token` query parameter (same as SSE endpoints).
 /// Stream IDs are comma-separated in `stream_ids`.
-#[rest_handler(GET, "/ws/audio", response = "void")]
 pub async fn audio_websocket(
     ws: WebSocketUpgrade,
     State(_state): State<AppState>,

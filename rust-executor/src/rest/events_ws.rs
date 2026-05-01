@@ -34,11 +34,6 @@ use crate::pubsub::{
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
-use super::events::{
-    handle_broadcast_result, matches_agent_did, matches_apps_user, matches_hosting_user,
-    matches_notification_owner, matches_owner, matches_query_subscription_owner,
-    matches_signal_recipient, matches_transcription_user, wrap_event, wrap_event_nested,
-};
 
 #[derive(Deserialize)]
 pub struct EventsWsParams {
@@ -370,5 +365,172 @@ async fn handle_events_ws(mut socket: WebSocket, auth_token: String, user_email:
                 }
             }
         }
+    }
+}
+
+// ── Event helper functions ──────────────────────────────────────────────────
+
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+
+pub(crate) fn handle_broadcast_result(
+    r: Result<String, BroadcastStreamRecvError>,
+) -> Option<Result<String, u64>> {
+    match r {
+        Ok(msg) => Some(Ok(msg)),
+        Err(BroadcastStreamRecvError::Lagged(n)) => Some(Err(n)),
+    }
+}
+
+pub(crate) fn wrap_event(event_type: &str, raw_json: &str) -> String {
+    if let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str(raw_json) {
+        map.insert(
+            "type".to_string(),
+            serde_json::Value::String(event_type.to_string()),
+        );
+        serde_json::to_string(&map)
+            .unwrap_or_else(|_| format!(r#"{{"type":"{}","data":{}}}"#, event_type, raw_json))
+    } else {
+        format!(r#"{{"type":"{}","data":{}}}"#, event_type, raw_json)
+    }
+}
+
+pub(crate) fn wrap_event_nested(event_type: &str, payload_key: &str, raw_json: &str) -> String {
+    format!(
+        r#"{{"type":"{}","{}":{}}}"#,
+        event_type, payload_key, raw_json
+    )
+}
+
+pub(crate) fn matches_owner(msg: &str, current_did: Option<&str>) -> bool {
+    match current_did {
+        None => true,
+        Some(did) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::String(owner)) = map.get("owner") {
+                    return owner == did;
+                }
+            }
+            true
+        }
+    }
+}
+
+pub(crate) fn matches_signal_recipient(msg: &str, current_did: Option<&str>) -> bool {
+    match serde_json::from_str::<serde_json::Value>(msg) {
+        Ok(serde_json::Value::Object(map)) => match map.get("recipient") {
+            Some(serde_json::Value::String(recipient)) => {
+                current_did.is_some_and(|did| did == recipient)
+            }
+            Some(serde_json::Value::Null) | None => true,
+            _ => false,
+        },
+        Err(_) => true,
+        _ => false,
+    }
+}
+
+pub(crate) fn matches_agent_did(msg: &str, current_did: Option<&str>) -> bool {
+    match current_did {
+        None => true,
+        Some(did) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::String(agent_did)) = map.get("did") {
+                    return agent_did == did;
+                }
+            }
+            true
+        }
+    }
+}
+
+pub(crate) fn matches_apps_user(msg: &str, current_did: Option<&str>) -> bool {
+    match current_did {
+        None => true,
+        Some(did) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::Object(auth)) = map.get("auth") {
+                    if let Some(serde_json::Value::String(user_did)) = auth.get("user_did") {
+                        return user_did == did;
+                    }
+                }
+            }
+            true
+        }
+    }
+}
+
+pub(crate) fn matches_hosting_user(msg: &str, user_email: Option<&str>) -> bool {
+    match user_email {
+        None => true,
+        Some(email) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::String(msg_email)) = map.get("email") {
+                    return msg_email == email;
+                }
+            }
+            true
+        }
+    }
+}
+
+pub(crate) fn matches_transcription_user(msg: &str, current_did: Option<&str>) -> bool {
+    match current_did {
+        None => true,
+        Some(did) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::String(user_did)) = map.get("userDid") {
+                    return user_did == did;
+                }
+            }
+            true
+        }
+    }
+}
+
+pub(crate) fn matches_notification_owner(msg: &str, current_did: Option<&str>) -> bool {
+    match current_did {
+        None => true,
+        Some(did) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::String(uuid)) = map
+                    .get("perspectiveId")
+                    .or_else(|| map.get("perspective_id"))
+                {
+                    return perspective_is_owned_by(uuid, did);
+                }
+            }
+            true
+        }
+    }
+}
+
+pub(crate) fn matches_query_subscription_owner(msg: &str, current_did: Option<&str>) -> bool {
+    match current_did {
+        None => true,
+        Some(did) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::String(uuid)) = map.get("uuid") {
+                    return perspective_is_owned_by(uuid, did);
+                }
+            }
+            true
+        }
+    }
+}
+
+fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
+    use crate::perspectives::get_perspective;
+    match get_perspective(uuid) {
+        Some(instance) => match instance.persisted.try_lock() {
+            Ok(handle) => {
+                if handle.is_unowned() {
+                    true
+                } else {
+                    handle.is_owned_by(did)
+                }
+            }
+            Err(_) => true,
+        },
+        None => true,
     }
 }

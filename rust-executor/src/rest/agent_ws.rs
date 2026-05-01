@@ -1,11 +1,9 @@
-//! Agent REST endpoints: /api/v1/agent/*
+//! Agent WS-native handlers.
 //!
-//! 19 harmonised endpoints covering agent info, auth, trust, entanglement, and profile.
+//! 19 handlers covering agent info, auth, trust, entanglement, and profile.
 
-use axum::{
-    extract::{Path, State},
-    Json,
-};
+use serde_json::Value;
+use std::sync::Arc;
 
 use crate::agent::capabilities::*;
 use crate::agent::{
@@ -19,10 +17,8 @@ use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
-use super::auth::{AppState, AuthContext};
-use super::errors::ApiError;
 use super::types::*;
-use ad4m_rest_macros::rest_handler;
+use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
 fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLinkExpression {
     DecoratedLinkExpression {
@@ -43,39 +39,17 @@ fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLin
     }
 }
 
-fn link_input_to_decorated(link_input: &LinkInput) -> DecoratedLinkExpression {
-    DecoratedLinkExpression {
-        author: String::new(),
-        timestamp: String::new(),
-        data: Link {
-            source: link_input.source.clone(),
-            target: link_input.target.clone(),
-            predicate: link_input.predicate.clone(),
-        },
-        proof: DecoratedExpressionProof {
-            key: String::new(),
-            signature: String::new(),
-            valid: None,
-            invalid: None,
-        },
-        status: None,
-    }
-}
+// ── Handlers ────────────────────────────────────────────────────────────────
 
-/// GET /agent — current agent info + status + lock state
-#[rest_handler(GET, "/agent", response = "Agent")]
-pub async fn get_agent(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-) -> Result<Json<Agent>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.get — current agent info + status + lock state
+async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     // Multi-user mode: extract user DID from JWT token if present
-    if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
+    if let Some(user_email) = user_email_from_token(ctx.auth_token.clone()) {
         let agent_data = AgentService::get_user_agent_data(&user_email)
-            .map_err(|e| ApiError::Internal(format!("User agent not available: {}", e)))?;
+            .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
 
         let agent = match AgentService::with_global_instance(|agent_service| {
             agent_service.load_user_agent_profile(&user_email)
@@ -87,7 +61,7 @@ pub async fn get_agent(
                 perspective: Some(DomainPerspective { links: vec![] }),
             },
         };
-        return Ok(Json(agent));
+        return Ok(serde_json::to_value(agent)?);
     }
 
     // Fallback to main agent for admin/legacy mode.
@@ -96,42 +70,33 @@ pub async fn get_agent(
         let mut agent = agent_service
             .agent
             .clone()
-            .ok_or_else(|| ApiError::NotFound("Agent not found".into()))?;
+            .ok_or_else(|| WsRpcError::not_found("Agent not found"))?;
         if agent.perspective.is_some() {
             agent
                 .perspective
                 .as_mut()
                 .map(|p| p.verify_link_signatures());
         }
-        Ok::<Agent, ApiError>(agent)
+        Ok::<Agent, WsRpcError>(agent)
     })?;
 
-    Ok(Json(agent))
+    Ok(serde_json::to_value(agent)?)
 }
 
-/// GET /agent/apps — list registered apps
-#[rest_handler(GET, "/agent/apps", response = "Apps[]")]
-pub async fn get_apps(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-) -> Result<Json<Vec<Apps>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.apps — list registered apps
+async fn get_apps(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
-    Ok(Json(apps_map::get_apps()))
+    Ok(serde_json::to_value(apps_map::get_apps())?)
 }
 
-/// GET /agent/by-did/:did — get agent by DID
-#[rest_handler(GET, "/agent/by-did/:did", response = "Agent | null")]
-pub async fn get_agent_by_did(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Path(did): Path<String>,
-) -> Result<Json<Option<Agent>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.byDid — get agent by DID
+async fn get_agent_by_did(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let did = params.require_str("did")?;
 
     // Check if DID matches main agent
     let did_match = {
@@ -139,13 +104,12 @@ pub async fn get_agent_by_did(
         let agent_service = agent_instance.lock().expect("agent lock");
         let agent_ref = agent_service.as_ref().expect("agent instance");
         match &agent_ref.did {
-            Some(existing) => &did == existing,
+            Some(existing) => did == *existing,
             None => false,
         }
     };
 
     if !did_match {
-        // Look up the agent expression via the agent language
         let controller = LanguageController::global_instance();
         let agent_lang = controller.get_agent_language().await;
         if let Ok(lang) = agent_lang {
@@ -156,7 +120,7 @@ pub async fn get_agent_by_did(
                         expr_json
                             .get("data")
                             .cloned()
-                            .unwrap_or(serde_json::Value::Null),
+                            .unwrap_or(Value::Null),
                     )
                     .ok();
                     let agent = agent.map(|mut a| {
@@ -165,44 +129,36 @@ pub async fn get_agent_by_did(
                         }
                         a
                     });
-                    Ok(Json(agent))
+                    Ok(serde_json::to_value(agent)?)
                 }
-                Ok(None) => Ok(Json(None)),
+                Ok(None) => Ok(Value::Null),
                 Err(e) => {
                     log::warn!("agentByDID: failed to get expression for {}: {}", did, e);
-                    Err(ApiError::Internal(format!(
+                    Err(WsRpcError::internal(format!(
                         "agentByDID: failed to get expression for {}: {}",
                         did, e
                     )))
                 }
             }
         } else {
-            Ok(Json(None))
+            Ok(Value::Null)
         }
     } else {
         let agent = AgentService::with_mutable_global_instance(|agent_service| {
             agent_service.ensure_main_agent_loaded();
             agent_service.agent.clone()
         });
-        Ok(Json(agent))
+        Ok(serde_json::to_value(agent)?)
     }
 }
 
-/// PATCH /agent/profile — update DM language and/or public perspective
-#[rest_handler(
-    PATCH,
-    "/agent/profile",
-    request = "UpdateProfileRequest",
-    response = "Agent"
-)]
-pub async fn update_profile(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<UpdateProfileRequest>,
-) -> Result<Json<Agent>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.updateProfile — update DM language and/or public perspective
+async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: UpdateProfileRequest =
+        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     // If dm_language provided, update it
     if let Some(dm_lang) = body.dm_language {
@@ -215,7 +171,6 @@ pub async fn update_profile(
             }
         });
 
-        // Publish updated agent to agent language
         if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
             log::warn!(
                 "Failed to publish agent expression after DM language update: {}",
@@ -227,9 +182,9 @@ pub async fn update_profile(
     // If public_perspective provided, update it
     if let Some(pub_persp) = body.public_perspective {
         // For multi-user mode
-        if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
+        if let Some(user_email) = user_email_from_token(ctx.auth_token.clone()) {
             let agent_data = AgentService::get_user_agent_data(&user_email)
-                .map_err(|e| ApiError::Internal(format!("User agent not available: {}", e)))?;
+                .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
 
             let decorated_links: Vec<DecoratedLinkExpression> = pub_persp
                 .links
@@ -248,7 +203,7 @@ pub async fn update_profile(
             AgentService::with_global_instance(|agent_service| {
                 agent_service.store_user_agent_profile(&user_email, &agent)
             })
-            .map_err(|e| ApiError::Internal(format!("Failed to store user profile: {}", e)))?;
+            .map_err(|e| WsRpcError::internal(format!("Failed to store user profile: {}", e)))?;
 
             if let Err(e) =
                 AgentService::publish_agent_to_language(&AgentContext::for_user_email(user_email))
@@ -260,7 +215,7 @@ pub async fn update_profile(
                 );
             }
 
-            return Ok(Json(agent));
+            return Ok(serde_json::to_value(agent)?);
         } else {
             // Main agent path
             let decorated_links: Vec<DecoratedLinkExpression> = pub_persp
@@ -296,10 +251,9 @@ pub async fn update_profile(
         agent_service
             .agent
             .clone()
-            .ok_or_else(|| ApiError::NotFound("Agent not found".into()))
+            .ok_or_else(|| WsRpcError::not_found("Agent not found"))
     })?;
 
-    // Notify subscribers
     get_global_pubsub()
         .await
         .publish(
@@ -308,29 +262,20 @@ pub async fn update_profile(
         )
         .await;
 
-    Ok(Json(agent))
+    Ok(serde_json::to_value(agent)?)
 }
 
-/// POST /agent/generate — generate agent identity
-#[rest_handler(
-    POST,
-    "/agent/generate",
-    request = "GenerateAgentRequest",
-    response = "AgentStatus"
-)]
-pub async fn generate_agent(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<GenerateAgentRequest>,
-) -> Result<Json<AgentStatus>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_CREATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.generate — generate agent identity
+async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_CREATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: GenerateAgentRequest =
+        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut agent = AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.create_new_keys();
 
-        // Set the direct message language from bootstrap seed
         let dm_language = crate::runtime_service::RuntimeService::with_global_instance(|rt| {
             rt.get_direct_message_language()
         });
@@ -360,7 +305,6 @@ pub async fn generate_agent(
         log::info!("Holochain init complete");
     }
 
-    // Load system languages
     let language_language_only = config.language_language_only.unwrap_or(false);
     let controller = LanguageController::global_instance();
     if let Err(e) = controller
@@ -373,7 +317,6 @@ pub async fn generate_agent(
         log::info!("System languages loaded");
     }
 
-    // Publish agent expression
     if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
         log::warn!("Error publishing agent expression: {}", e);
     }
@@ -391,24 +334,16 @@ pub async fn generate_agent(
         .await;
 
     log::info!("AD4M init complete");
-    Ok(Json(agent))
+    Ok(serde_json::to_value(agent)?)
 }
 
-/// POST /agent/lock — lock agent
-#[rest_handler(
-    POST,
-    "/agent/lock",
-    request = "LockAgentRequest",
-    response = "AgentStatus"
-)]
-pub async fn lock_agent(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<LockAgentRequest>,
-) -> Result<Json<AgentStatus>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.lock — lock agent
+async fn lock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: LockAgentRequest =
+        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent = AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.lock(body.passphrase.clone());
@@ -423,24 +358,16 @@ pub async fn lock_agent(
         )
         .await;
 
-    Ok(Json(agent))
+    Ok(serde_json::to_value(agent)?)
 }
 
-/// POST /agent/unlock — unlock agent
-#[rest_handler(
-    POST,
-    "/agent/unlock",
-    request = "UnlockAgentRequest",
-    response = "AgentStatus"
-)]
-pub async fn unlock_agent(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<UnlockAgentRequest>,
-) -> Result<Json<AgentStatus>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.unlock — unlock agent
+async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_SIGN_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: UnlockAgentRequest =
+        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent_instance = AgentService::global_instance();
     {
@@ -448,7 +375,7 @@ pub async fn unlock_agent(
         let agent_ref = agent_service.as_mut().expect("agent instance");
         agent_ref
             .unlock(body.passphrase.clone())
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
+            .map_err(|e| WsRpcError::internal(e.to_string()))?;
     }
 
     let mut init_errors: Vec<String> = Vec::new();
@@ -461,7 +388,6 @@ pub async fn unlock_agent(
         .is_unlocked();
 
     if is_unlocked {
-        // Start Holochain conductor if not already running
         if crate::holochain_service::maybe_get_holochain_service()
             .await
             .is_none()
@@ -481,7 +407,6 @@ pub async fn unlock_agent(
             }
         }
 
-        // Load system languages
         let config = crate::config::get_global_config();
         let language_language_only = config.language_language_only.unwrap_or(false);
         let controller = LanguageController::global_instance();
@@ -497,7 +422,6 @@ pub async fn unlock_agent(
 
         log::info!("AD4M init complete");
 
-        // Publish agent expression
         if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
             log::warn!("Error publishing agent expression: {}", e);
         }
@@ -523,71 +447,51 @@ pub async fn unlock_agent(
         )
         .await;
 
-    Ok(Json(agent))
+    Ok(serde_json::to_value(agent)?)
 }
 
-/// POST /agent/sign — sign a message
-#[rest_handler(
-    POST,
-    "/agent/sign",
-    request = "SignMessageRequest",
-    response = "AgentSignature"
-)]
-pub async fn sign_message(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<SignMessageRequest>,
-) -> Result<Json<AgentSignature>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.sign — sign a message
+async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_SIGN_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: SignMessageRequest =
+        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let sig = InternalAgentSignature::from_message(body.message)
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    Ok(Json(sig.into()))
+    let out: AgentSignature = sig.into();
+    Ok(serde_json::to_value(out)?)
 }
 
-/// DELETE /agent/apps/:id — remove app
-#[rest_handler(DELETE, "/agent/apps/:id", response = "Apps[]")]
-pub async fn remove_app(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Path(request_id): Path<String>,
-) -> Result<Json<Vec<Apps>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.removeApp — remove app
+async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
-    apps_map::remove_app(&request_id).map_err(|e| ApiError::Internal(e))?;
-    Ok(Json(apps_map::get_apps()))
+    let request_id = params.require_str("id")?;
+    apps_map::remove_app(&request_id).map_err(|e| WsRpcError::internal(e))?;
+    Ok(serde_json::to_value(apps_map::get_apps())?)
 }
 
 // ── Auth ──
 
-/// POST /agent/auth/request — request capability
-#[rest_handler(
-    POST,
-    "/agent/auth/request",
-    request = "RequestCapabilityRequest",
-    response = "string"
-)]
-pub async fn request_capability(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<RequestCapabilityRequest>,
-) -> Result<Json<String>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.requestCapability — request capability
+async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_AUTH_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: RequestCapabilityRequest =
+        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let auth_info: AuthInfo = body
         .auth_info
         .try_into()
-        .map_err(|e: String| ApiError::BadRequest(e))?;
+        .map_err(|e: String| WsRpcError::bad_request(e))?;
     let request_id = crate::agent::capabilities::request_capability(auth_info.clone()).await;
 
-    if context.auto_permit_cap_requests {
+    if ctx.auto_permit_cap_requests {
         println!("======================================");
         println!("Got capability request: \n{:?}", auth_info);
         let random_number_challenge =
@@ -595,166 +499,128 @@ pub async fn request_capability(
                 request_id: request_id.clone(),
                 auth: auth_info,
             })
-            .map_err(|e| ApiError::Internal(e))?;
+            .map_err(|e| WsRpcError::internal(e))?;
         println!("--------------------------------------");
         println!("Random number challenge: {}", random_number_challenge);
         println!("======================================");
     }
 
-    Ok(Json(request_id))
+    Ok(Value::String(request_id))
 }
 
-/// POST /agent/auth/permit — permit capability
-#[rest_handler(
-    POST,
-    "/agent/auth/permit",
-    request = "PermitCapabilityRequest",
-    response = "string"
-)]
-pub async fn permit_capability(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<PermitCapabilityRequest>,
-) -> Result<Json<String>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_PERMIT_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.permitCapability — permit capability
+async fn permit_capability_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_PERMIT_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: PermitCapabilityRequest =
+        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let auth: AuthInfoExtended = serde_json::from_str(&body.auth)
-        .map_err(|e| ApiError::BadRequest(format!("Invalid auth info: {}", e)))?;
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid auth info: {}", e)))?;
     let random_number_challenge =
-        crate::agent::capabilities::permit_capability(auth).map_err(|e| ApiError::Internal(e))?;
-    Ok(Json(random_number_challenge))
+        crate::agent::capabilities::permit_capability(auth).map_err(|e| WsRpcError::internal(e))?;
+    Ok(Value::String(random_number_challenge))
 }
 
-/// POST /agent/auth/jwt — generate JWT
-#[rest_handler(
-    POST,
-    "/agent/auth/jwt",
-    request = "GenerateJwtRequest",
-    response = "string"
-)]
-pub async fn generate_jwt(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<GenerateJwtRequest>,
-) -> Result<Json<String>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.generateJwt — generate JWT
+async fn generate_jwt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_AUTH_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: GenerateJwtRequest =
+        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let cap_token = generate_capability_token(body.request_id, body.rand)
         .await
-        .map_err(|e| ApiError::Internal(e))?;
-    Ok(Json(cap_token))
+        .map_err(|e| WsRpcError::internal(e))?;
+    Ok(Value::String(cap_token))
 }
 
-/// DELETE /agent/auth/token/:token — revoke token
-#[rest_handler(DELETE, "/agent/auth/token/:token", response = "Apps[]")]
-pub async fn revoke_token(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Path(request_id): Path<String>,
-) -> Result<Json<Vec<Apps>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.revokeToken — revoke token
+async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
-    apps_map::revoke_app(&request_id).map_err(|e| ApiError::Internal(e))?;
-    Ok(Json(apps_map::get_apps()))
+    let token = params.require_str("token")?;
+    apps_map::revoke_app(&token).map_err(|e| WsRpcError::internal(e))?;
+    Ok(serde_json::to_value(apps_map::get_apps())?)
 }
 
 // ── Status ──
 
-/// GET /agent/status — agent status
-#[rest_handler(GET, "/agent/status", response = "AgentStatus")]
-pub async fn get_agent_status(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-) -> Result<Json<AgentStatus>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.status — agent status
+async fn get_agent_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     // Multi-user mode
-    if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
+    if let Some(user_email) = user_email_from_token(ctx.auth_token.clone()) {
         let agent_data = AgentService::get_user_agent_data(&user_email)
-            .map_err(|e| ApiError::Internal(format!("User agent not available: {}", e)))?;
+            .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
 
         let agent_context = AgentContext::for_user_email(user_email);
         let did_document = did_document_for_context(&agent_context).map_err(|e| {
-            ApiError::Internal(format!("Failed to get DID document for user: {}", e))
+            WsRpcError::internal(format!("Failed to get DID document for user: {}", e))
         })?;
 
-        return Ok(Json(AgentStatus {
+        return Ok(serde_json::to_value(AgentStatus {
             did: Some(agent_data.did),
             did_document: Some(serde_json::Value::String(
                 serde_json::to_string(&did_document).map_err(|e| {
-                    ApiError::Internal(format!("Failed to serialize DID document: {}", e))
+                    WsRpcError::internal(format!("Failed to serialize DID document: {}", e))
                 })?,
             )),
             error: None,
             is_initialized: true,
             is_unlocked: true,
-        }));
+        })?);
     }
 
     // Fallback to main agent status
     let status = AgentService::with_global_instance(|agent_service| agent_service.dump());
-    Ok(Json(status))
+    Ok(serde_json::to_value(status)?)
 }
 
-/// GET /agent/is-locked — check if agent is locked
-#[rest_handler(GET, "/agent/is-locked", response = "boolean")]
-pub async fn is_locked(
-    State(_state): State<AppState>,
-    _auth: AuthContext,
-) -> Result<Json<bool>, ApiError> {
+/// agent.isLocked — check if agent is locked
+async fn is_locked(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let locked = AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.ensure_main_agent_loaded();
         agent_service
             .agent
             .clone()
-            .ok_or_else(|| ApiError::NotFound("Agent not found".into()))?;
-        Ok::<bool, ApiError>(!agent_service.is_unlocked())
+            .ok_or_else(|| WsRpcError::not_found("Agent not found"))?;
+        Ok::<bool, WsRpcError>(!agent_service.is_unlocked())
     })?;
-    Ok(Json(locked))
+    Ok(Value::Bool(locked))
 }
 
 // ── Trust ──
 
-/// GET /agent/trusted — list trusted agents
-#[rest_handler(GET, "/agent/trusted", response = "string[]")]
-pub async fn get_trusted_agents(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-) -> Result<Json<Vec<String>>, ApiError> {
-    let context = auth.to_request_context();
+/// agent.getTrustedAgents — list trusted agents
+async fn get_trusted_agents(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(
-        &context.capabilities,
+        &ctx.capabilities,
         &RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY,
     )
-    .map_err(|e| ApiError::Forbidden(e))?;
+    .map_err(|e| WsRpcError::forbidden(e))?;
 
     let agents = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.get_trusted_agents()
     });
-    Ok(Json(agents))
+    Ok(serde_json::to_value(agents)?)
 }
 
-/// PUT /agent/trusted — add trusted agents
-#[rest_handler(PUT, "/agent/trusted", request = "string[]", response = "string[]")]
-pub async fn add_trusted_agents(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<TrustedAgentsWrapper>,
-) -> Result<Json<Vec<String>>, ApiError> {
-    let context = auth.to_request_context();
+/// agent.addTrustedAgents — add trusted agents
+async fn add_trusted_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(
-        &context.capabilities,
+        &ctx.capabilities,
         &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY,
     )
-    .map_err(|e| ApiError::Forbidden(e))?;
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: TrustedAgentsWrapper =
+        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.add_trusted_agent(body.agents);
@@ -763,22 +629,19 @@ pub async fn add_trusted_agents(
     let result = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.get_trusted_agents()
     });
-    Ok(Json(result))
+    Ok(serde_json::to_value(result)?)
 }
 
-/// DELETE /agent/trusted — remove trusted agents
-#[rest_handler(DELETE, "/agent/trusted", request = "string[]", response = "string[]")]
-pub async fn delete_trusted_agents(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<TrustedAgentsWrapper>,
-) -> Result<Json<Vec<String>>, ApiError> {
-    let context = auth.to_request_context();
+/// agent.deleteTrustedAgents — remove trusted agents
+async fn delete_trusted_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(
-        &context.capabilities,
+        &ctx.capabilities,
         &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY,
     )
-    .map_err(|e| ApiError::Forbidden(e))?;
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: TrustedAgentsWrapper =
+        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.remove_trusted_agent(body.agents);
@@ -787,54 +650,40 @@ pub async fn delete_trusted_agents(
     let result = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.get_trusted_agents()
     });
-    Ok(Json(result))
+    Ok(serde_json::to_value(result)?)
 }
 
 // ── Entanglement ──
 
-/// GET /agent/entanglement-proofs — list
-#[rest_handler(GET, "/agent/entanglement-proofs", response = "EntanglementProof[]")]
-pub async fn get_entanglement(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.getEntanglementProofs — list
+async fn get_entanglement(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let proofs = get_entanglement_proofs();
-    Ok(Json(
+    Ok(serde_json::to_value(
         proofs
             .into_iter()
             .map(|p| serde_json::to_value(p).unwrap_or_default())
-            .collect(),
-    ))
+            .collect::<Vec<_>>(),
+    )?)
 }
 
-/// POST /agent/entanglement-proofs — add (with ?preflight=true option)
-#[rest_handler(
-    POST,
-    "/agent/entanglement-proofs",
-    request = "EntanglementProofInput[]",
-    response = "EntanglementProof[]"
-)]
-pub async fn add_entanglement(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-    Json(body): Json<EntanglementProofsWrapper>,
-) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.addEntanglementProofs — add
+async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
+    let body: EntanglementProofsWrapper =
+        serde_json::from_value(params.clone()).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    // Check for preflight mode
     let preflight = params
         .get("preflight")
-        .map(|v| v == "true")
+        .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
     if preflight {
-        // Pre-flight: just validate
         let signed = sign_device_key(
             body.proofs
                 .first()
@@ -845,10 +694,9 @@ pub async fn add_entanglement(
                 .map(|b| b.device_key_type.clone())
                 .unwrap_or_default(),
         );
-        return Ok(Json(vec![serde_json::to_value(signed).unwrap_or_default()]));
+        return Ok(serde_json::to_value(vec![serde_json::to_value(signed).unwrap_or_default()])?);
     }
 
-    // add_entanglement_proofs returns () not Result, and takes domain EntanglementProof
     let agent_did = AgentService::with_global_instance(|a| a.did.clone().unwrap_or_default());
     let agent_key_id =
         AgentService::with_global_instance(|a| a.signing_key_id.clone().unwrap_or_default());
@@ -866,29 +714,21 @@ pub async fn add_entanglement(
         .collect();
     add_entanglement_proofs(domain_proofs.clone());
 
-    Ok(Json(
+    Ok(serde_json::to_value(
         domain_proofs
             .into_iter()
             .map(|p| serde_json::to_value(p).unwrap_or_default())
-            .collect(),
-    ))
+            .collect::<Vec<_>>(),
+    )?)
 }
 
-/// DELETE /agent/entanglement-proofs — delete
-#[rest_handler(
-    DELETE,
-    "/agent/entanglement-proofs",
-    request = "EntanglementProofInput[]",
-    response = "EntanglementProof[]"
-)]
-pub async fn delete_entanglement(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<EntanglementProofsWrapper>,
-) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.deleteEntanglementProofs — delete
+async fn delete_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: EntanglementProofsWrapper =
+        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent_did = AgentService::with_global_instance(|a| a.did.clone().unwrap_or_default());
     let agent_key_id =
@@ -908,52 +748,66 @@ pub async fn delete_entanglement(
     delete_entanglement_proof(domain_proofs);
 
     let remaining = get_entanglement_proofs();
-    Ok(Json(
+    Ok(serde_json::to_value(
         remaining
             .into_iter()
             .map(|p| serde_json::to_value(p).unwrap_or_default())
-            .collect(),
+            .collect::<Vec<_>>(),
+    )?)
+}
+
+/// agent.import — import agent from keystore
+async fn import_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_CREATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    Err(WsRpcError::not_implemented(
+        "Agent import not yet implemented",
     ))
 }
 
-/// POST /agent/import — import agent from keystore
-#[rest_handler(
-    POST,
-    "/agent/import",
-    request = "ImportAgentRequest",
-    response = "AgentStatus"
-)]
-pub async fn import_agent(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(_body): Json<ImportAgentRequest>,
-) -> Result<Json<AgentStatus>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_CREATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+/// agent.entanglementProofPreflight — pre-flight check
+async fn entanglement_proof_preflight(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
-    // TODO: implement agent import from keystore
-    Err(ApiError::Internal(
-        "Agent import not yet implemented in REST API".into(),
-    ))
-}
-
-/// POST /agent/entanglement-proof-preflight — pre-flight check
-#[rest_handler(
-    POST,
-    "/agent/entanglement-proof-preflight",
-    request = "EntanglementProofPreflightRequest",
-    response = "EntanglementProof"
-)]
-pub async fn entanglement_proof_preflight(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<EntanglementProofPreflightRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+    let body: EntanglementProofPreflightRequest =
+        serde_json::from_value(params).map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let signed = sign_device_key(body.device_key, body.device_key_type);
-    Ok(Json(serde_json::to_value(signed).unwrap_or_default()))
+    Ok(serde_json::to_value(signed).unwrap_or_default())
+}
+
+// ── Registration ────────────────────────────────────────────────────────────
+
+/// Register all agent WS handlers.
+///
+/// Message types match the client SDK's `restClient.call()` type strings.
+pub fn register_ws_handlers(map: &mut HandlerMap) {
+    map.register("agent.get", get_agent);
+    map.register("agent.getApps", get_apps);
+    map.register("agent.byDid", get_agent_by_did);
+    map.register("agent.updateProfile", update_profile);
+    map.register("agent.generate", generate_agent);
+    map.register("agent.import", import_agent);
+    map.register("agent.lock", lock_agent);
+    map.register("agent.unlock", unlock_agent);
+    map.register("agent.sign", sign_message);
+    map.register("agent.removeApp", remove_app);
+    map.register("agent.requestCapability", request_capability);
+    map.register("agent.permitCapability", permit_capability_handler);
+    map.register("agent.generateJwt", generate_jwt);
+    map.register("agent.revokeToken", revoke_token);
+    map.register("agent.status", get_agent_status);
+    map.register("agent.isLocked", is_locked);
+    map.register("agent.getTrustedAgents", get_trusted_agents);
+    map.register("agent.addTrustedAgents", add_trusted_agents);
+    map.register("agent.deleteTrustedAgents", delete_trusted_agents);
+    map.register("agent.getEntanglementProofs", get_entanglement);
+    map.register("agent.addEntanglementProofs", add_entanglement);
+    map.register("agent.deleteEntanglementProofs", delete_entanglement);
+    map.register("agent.entanglementProofPreflight", entanglement_proof_preflight);
 }

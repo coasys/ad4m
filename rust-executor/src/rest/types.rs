@@ -691,6 +691,28 @@ pub struct RequestVerificationRequest {
     pub app_info: Option<serde_json::Value>,
 }
 
+// ── AI Transcription ──
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenTranscriptionRequest {
+    pub model_id: String,
+    pub params: Option<crate::types::VoiceActivityParamsInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedTranscriptionRequest {
+    pub stream_ids: Vec<String>,
+    pub audio: Vec<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseTranscriptionRequest {
+    pub stream_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
