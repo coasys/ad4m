@@ -157,6 +157,7 @@ dependencies = [
  "tokio-stream",
  "tower 0.5.3",
  "tower-http",
+ "tower-service",
  "ts-rs",
  "url",
  "urlencoding",

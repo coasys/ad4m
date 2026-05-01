@@ -18,6 +18,7 @@ pub mod route_meta;
 pub mod runtime;
 pub mod types;
 pub mod users;
+pub mod ws_rpc;
 
 #[cfg(test)]
 mod tests;
@@ -36,6 +37,18 @@ use serde_json::json;
 use std::net::SocketAddr;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+
+/// Dispatch a request through the REST router.
+/// `Router<()>` implements `tower_service::Service<Request<Body>>`.
+pub(crate) async fn dispatch_request(
+    router: &Router,
+    request: axum::http::Request<axum::body::Body>,
+) -> axum::http::Response<axum::body::Body> {
+    use tower_service::Service;
+    let mut svc = router.clone().into_service();
+    // Router<()>'s Service impl never errors (Infallible)
+    svc.call(request).await.unwrap()
+}
 
 /// Build the full REST API router.
 pub fn rest_router(state: AppState) -> Router {
@@ -399,6 +412,8 @@ pub fn rest_router(state: AppState) -> Router {
             .route("/events", get(events::events))
             // ── WebSocket Events (single endpoint) ──
             .route("/ws/events", get(events_ws::events_ws))
+            // ── WebSocket RPC (replaces REST for clients) ──
+            .route("/ws", get(ws_rpc::ws_rpc))
             // ── Stub routes: SDK endpoints not yet implemented on server (501) ──
             .route("/runtime/unyt/agent-key", get(runtime::unyt_agent_key))
             .route(

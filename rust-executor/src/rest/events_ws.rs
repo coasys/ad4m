@@ -70,7 +70,7 @@ pub async fn events_ws(
 ///
 /// Returns a boxed stream of (event_type, data_string) tuples, already filtered
 /// per-user.
-async fn build_event_stream(
+pub(crate) async fn build_event_stream(
     auth_token: String,
     user_email: Option<String>,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
