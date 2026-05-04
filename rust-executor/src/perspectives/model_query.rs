@@ -615,14 +615,16 @@ fn resolve_projections(
             Some(_) => {
                 log::warn!(
                     "IncludeProjection '{}': relation '{}' has empty predicate — skipping",
-                    key, proj.from
+                    key,
+                    proj.from
                 );
                 continue;
             }
             None => {
                 log::warn!(
                     "IncludeProjection '{}': relation '{}' not found in shape — skipping",
-                    key, proj.from
+                    key,
+                    proj.from
                 );
                 continue;
             }
@@ -633,7 +635,8 @@ fn resolve_projections(
             Err(_) => {
                 log::warn!(
                     "IncludeProjection '{}': predicate '{}' is not a valid IRI — skipping",
-                    key, predicate
+                    key,
+                    predicate
                 );
                 continue;
             }
@@ -804,10 +807,7 @@ fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
             match condition {
                 WhereCondition::String(val) => {
                     let escaped = escape_sparql_string(val);
-                    patterns.push(format!(
-                        "    FILTER(STR(?t) = \"{}\")\n",
-                        escaped
-                    ));
+                    patterns.push(format!("    FILTER(STR(?t) = \"{}\")\n", escaped));
                 }
                 WhereCondition::StringArray(vals) => {
                     let list = vals
@@ -848,8 +848,10 @@ fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
                 // Values may be stored as literal: URIs — use STR() for comparison.
                 patterns.push(format!(
                     "    FILTER(STR(?{}) = \"{}\" || STR(?{}) = \"literal:string:{}\")\n",
-                    safe_var, escaped,
-                    safe_var, urlencoding::encode(val),
+                    safe_var,
+                    escaped,
+                    safe_var,
+                    urlencoding::encode(val),
                 ));
             }
             WhereCondition::Bool(b) => {
@@ -873,10 +875,7 @@ fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
                     .flat_map(|v| {
                         let r = escape_sparql_string(v);
                         let e = urlencoding::encode(v).to_string();
-                        vec![
-                            format!("\"{}\"", r),
-                            format!("\"literal:string:{}\"", e),
-                        ]
+                        vec![format!("\"{}\"", r), format!("\"literal:string:{}\"", e)]
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
