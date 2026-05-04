@@ -86,7 +86,6 @@ pub(crate) async fn build_event_stream(
     let d_link_added = resolved_did.clone();
     let d_link_removed = resolved_did.clone();
     let d_link_updated = resolved_did.clone();
-    let d_signal = resolved_did.clone();
     let d_agent_status = resolved_did.clone();
     let d_agent_updated = resolved_did.clone();
     let d_apps = resolved_did.clone();
@@ -256,12 +255,34 @@ pub(crate) async fn build_event_stream(
     );
 
     // ── Neighbourhood signals ──
-    let s_signal = did_stream!(
-        pubsub.subscribe(&NEIGHBOURHOOD_SIGNAL_TOPIC).await,
-        "signal",
-        d_signal,
-        matches_signal_recipient
-    );
+    // Lazy DID resolution: the WebSocket may connect before agent.generate()
+    // completes, leaving resolved_did as None. Resolve on each signal event
+    // so that by the time signals actually flow, the DID is available.
+    let s_signal = {
+        let rx = pubsub.subscribe(&NEIGHBOURHOOD_SIGNAL_TOPIC).await;
+        let token = auth_token.clone();
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let token = token.clone();
+                async move {
+                    match result {
+                        Ok(ref msg) => {
+                            let did = {
+                                let ctx = AgentContext::from_auth_token(token.clone());
+                                did_for_context(&ctx).ok()
+                            };
+                            if matches_signal_recipient(msg, did.as_deref()) {
+                                Some(wrap_event("signal", msg))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+            })
+    };
 
     // ── Runtime events ──
     let s_msg = broadcast_stream_nested!(
@@ -420,8 +441,7 @@ pub(crate) fn matches_signal_recipient(msg: &str, current_did: Option<&str>) -> 
     match serde_json::from_str::<serde_json::Value>(msg) {
         Ok(serde_json::Value::Object(map)) => match map.get("recipient") {
             Some(serde_json::Value::String(recipient)) => {
-                // If no DID resolved (e.g., connection before agent init), allow all signals
-                current_did.map_or(true, |did| did == recipient)
+                current_did.is_some_and(|did| did == recipient)
             }
             Some(serde_json::Value::Null) | None => true,
             _ => false,
