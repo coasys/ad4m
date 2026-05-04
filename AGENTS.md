@@ -52,30 +52,3 @@ The integration tests use the `ad4m-executor` CLI binary. Depending on what code
 2. Then build in `rust-executor/`
 
 **Deno Snapshot**: Anything that changes the content of the Deno JS engine at startup (like the JS executor or extensions) requires rebuilding the Deno snapshot. This is done with `pnpm build` in `rust-executor/` - a mere `cargo build --release` in `cli/` is NOT sufficient.
-
-## REST API Conventions
-
-### Request Body Wrapper Types
-
-The SDK sends certain payloads wrapped in a named object for clarity and self-documentation:
-
-| Endpoint | SDK sends | Rust deserializes via |
-|---|---|---|
-| `PUT /agent/trusted` | `{ agents: [...] }` | `TrustedAgentsWrapper` |
-| `POST /agent/entanglement-proofs` | `{ proofs: [...] }` | `EntanglementProofsWrapper` |
-| `POST /expressions/:url/interact` | `{ interactionCall: {...} }` | `InteractionCallWrapper` |
-| `PUT /languages/:address/settings` | `{ settings: ... }` | `LanguageSettingsWrapper` |
-
-**Convention:** The SDK wraps payloads in a named key when the raw body would be an array or when the field name adds semantic clarity. The server has corresponding wrapper types in `rust-executor/src/rest/types.rs`. When adding new endpoints:
-
-- If the body is a simple object with named fields, send it flat (no wrapper).
-- If the body would be a bare array, wrap it in a named key (e.g. `{ items: [...] }`).
-- Always add a corresponding Rust wrapper struct in `types.rs` with `#[serde(rename_all = "camelCase")]`.
-
-### Notification Grant
-
-`grantNotification(id)` uses a dedicated `PATCH /runtime/notifications/:id/grant` endpoint that accepts `{ granted: bool }` — separate from the full `PATCH /runtime/notifications/:id` update endpoint which requires all notification fields.
-
-### Query Subscription SSE
-
-Query subscription updates are delivered via the unified `GET /events` SSE endpoint. Events of type `query-subscription-updated` include the `subscription_id` field and are filtered per-user based on perspective ownership.
