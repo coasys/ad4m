@@ -575,7 +575,6 @@ fn snake_case_rejected() {
 
 // ── AI Transcription request types ──
 
-use crate::rest::audio_ws::AudioWsParams;
 use crate::rest::types::{
     CloseTranscriptionRequest, FeedTranscriptionRequest, OpenTranscriptionRequest,
 };
@@ -623,13 +622,6 @@ fn parse_close_transcription_request() {
     let json = json!({"streamId": "abc-123"});
     let req: CloseTranscriptionRequest = serde_json::from_value(json).unwrap();
     assert_eq!(req.stream_id, "abc-123");
-}
-
-#[test]
-fn parse_audio_ws_params() {
-    let json = json!({"stream_ids": "s1,s2"});
-    let params: AudioWsParams = serde_json::from_value(json).unwrap();
-    assert_eq!(params.stream_ids, "s1,s2");
 }
 
 // ── Agent infos contract regression tests ──
