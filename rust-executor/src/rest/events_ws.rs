@@ -5,6 +5,44 @@
 //! Events are filtered per-user in multi-user mode, identical to the SSE
 //! endpoint.
 //!
+//! Server → Client message types
+//! -----------------------------
+//! Agent / app lifecycle:
+//!   - `agent-status-changed`        — payload nested under `agent`
+//!   - `agent-updated`               — payload nested under `agent`
+//!   - `apps-changed`                — apps list for the current user
+//!   - `hosting-user-info-changed`   — filtered by authenticated user email
+//!
+//! Perspective lifecycle:
+//!   - `perspective-added`           — owned-by-DID filtered
+//!   - `perspective-removed`         — owned-by-DID filtered
+//!   - `perspective-updated`         — owned-by-DID filtered
+//!   - `sync-state-change`           — broadcast to all subscribers
+//!
+//! Link events (per-perspective, owned-by-DID filtered):
+//!   - `link-added`
+//!   - `link-removed`
+//!   - `link-updated`
+//!
+//! Neighbourhood:
+//!   - `signal`                      — recipient-DID filtered
+//!
+//! Runtime:
+//!   - `message-received`            — payload nested under `message`
+//!   - `notification-triggered`      — payload nested under `notification`,
+//!                                     filtered by perspective owner
+//!   - `exception-occurred`          — payload nested under `exception`
+//!
+//! AI:
+//!   - `transcription-text`          — filtered by `userDid`
+//!   - `model-loading-status`        — broadcast to all subscribers
+//!
+//! Query subscriptions:
+//!   - `query-subscription-update`   — filtered by perspective owner
+//!
+//! Keepalive:
+//!   - `pong`                        — response to client `{"type":"ping"}`
+//!
 //! Client → Server messages:
 //!   `{"type":"ping"}` → server responds with `{"type":"pong"}`
 //!   Other messages are silently ignored (future extensibility).
