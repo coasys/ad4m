@@ -178,6 +178,28 @@ pub enum IncludeValue {
     SubQuery(Box<ModelQueryInput>),
 }
 
+/// Input for a single projection key (mirrors TS IncludeProjection).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectionInput {
+    /// The relation name on the parent model to project over.
+    pub from: String,
+    /// When true, attach a count (integer) instead of a list.
+    #[serde(default)]
+    pub count: bool,
+    /// Optional target class shape for resolving where-clause predicates.
+    #[serde(default)]
+    pub target_shape: Option<Value>,
+    /// Optional where filter applied against target instance properties.
+    #[serde(default, rename = "where")]
+    pub where_clause: Option<HashMap<String, WhereCondition>>,
+    /// Limit the number of linked results (when 1, value is unwrapped to scalar).
+    pub limit: Option<usize>,
+    /// Order results before limiting.
+    #[serde(default, deserialize_with = "deserialize_order_flex")]
+    pub order: Option<Vec<(String, OrderDirection)>>,
+}
+
 /// The structured query input (mirrors TS Query type).
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -188,6 +210,10 @@ pub struct ModelQueryInput {
     pub properties: Option<Vec<String>>,
     #[serde(default)]
     pub include: Option<HashMap<String, IncludeValue>>,
+    /// Projection keys (begin with `$`): lightweight aggregations/lists that
+    /// are computed Rust-side with a single grouped SPARQL per key.
+    #[serde(default)]
+    pub projections: Option<HashMap<String, ProjectionInput>>,
     #[serde(default, rename = "where")]
     pub where_clause: Option<HashMap<String, WhereCondition>>,
     #[serde(default, deserialize_with = "deserialize_order_flex")]
@@ -540,6 +566,359 @@ fn get_initial_value(
 // Core query execution
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Projection resolution ($-prefixed keys)
+// ---------------------------------------------------------------------------
+
+/// Resolve projection keys for a set of already-paginated instances.
+///
+/// For each key in `projections`, issues a single grouped SPARQL query
+/// (O(1) per key) and attaches results to the matching instances.
+///
+/// - `count: true` → attaches an integer (0 when no links exist).
+/// - `limit: Some(1)` → attaches the first linked ID as a string, or `null`.
+/// - otherwise → attaches an array of linked IDs.
+fn resolve_projections(
+    store: &SparqlStore,
+    instances: &mut Vec<Value>,
+    projections: &HashMap<String, ProjectionInput>,
+    shape: &ModelShape,
+) -> Result<(), Error> {
+    if instances.is_empty() || projections.is_empty() {
+        return Ok(());
+    }
+
+    // Collect parent IDs (validate each as a safe IRI).
+    let parent_ids: Vec<String> = instances
+        .iter()
+        .filter_map(|inst| inst["id"].as_str())
+        .filter_map(|id| validate_iri(id).ok().map(|s| s.to_string()))
+        .collect();
+
+    if parent_ids.is_empty() {
+        return Ok(());
+    }
+
+    // Build VALUES clause: `<id1> <id2> …`
+    let values_clause = parent_ids
+        .iter()
+        .map(|id| format!("<{}>", id))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    for (key, proj) in projections {
+        // ------------------------------------------------------------------
+        // 1. Resolve predicate from the parent shape's properties/relations.
+        // ------------------------------------------------------------------
+        let predicate = match shape.properties.iter().find(|p| p.name == proj.from) {
+            Some(p) if !p.predicate.is_empty() => p.predicate.clone(),
+            Some(_) => {
+                log::warn!(
+                    "IncludeProjection '{}': relation '{}' has empty predicate — skipping",
+                    key, proj.from
+                );
+                continue;
+            }
+            None => {
+                log::warn!(
+                    "IncludeProjection '{}': relation '{}' not found in shape — skipping",
+                    key, proj.from
+                );
+                continue;
+            }
+        };
+
+        let safe_pred = match validate_iri(&predicate) {
+            Ok(p) => p.to_string(),
+            Err(_) => {
+                log::warn!(
+                    "IncludeProjection '{}': predicate '{}' is not a valid IRI — skipping",
+                    key, predicate
+                );
+                continue;
+            }
+        };
+
+        // ------------------------------------------------------------------
+        // 2. Build optional where-clause patterns for target properties.
+        // ------------------------------------------------------------------
+        let where_patterns = build_projection_where_patterns(proj);
+
+        // ------------------------------------------------------------------
+        // 3. Issue the grouped SPARQL query and attach results.
+        // ------------------------------------------------------------------
+        if proj.count {
+            // COUNT query — returns one row per parent with the count.
+            let sparql = format!(
+                concat!(
+                    "SELECT ?parent (COUNT(DISTINCT ?t) AS ?n) WHERE {{\n",
+                    "    VALUES ?parent {{ {values_clause} }}\n",
+                    "    ?parent <{safe_pred}> ?t .\n",
+                    "{where_patterns}",
+                    "}} GROUP BY ?parent"
+                ),
+                values_clause = values_clause,
+                safe_pred = safe_pred,
+                where_patterns = where_patterns,
+            );
+
+            let result_json = store.query(&sparql)?;
+            let rows: Vec<Value> = serde_json::from_str(&result_json)?;
+
+            // parent_id → count
+            let mut count_map: HashMap<String, u64> = HashMap::new();
+            for row in &rows {
+                let parent = row["parent"].as_str().unwrap_or("");
+                let n: u64 = row["n"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| row["n"].as_u64())
+                    .unwrap_or(0);
+                count_map.insert(parent.to_string(), n);
+            }
+
+            for inst in instances.iter_mut() {
+                if let Some(obj) = inst.as_object_mut() {
+                    let id = obj
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let cnt = count_map.get(&id).copied().unwrap_or(0);
+                    obj.insert(key.clone(), Value::Number(cnt.into()));
+                }
+            }
+        } else {
+            // LIST / SCALAR query.
+            // Note: LIMIT is NOT added to the SPARQL — a global LIMIT on a
+            // VALUES-clause query limits the *total* row count, not per-parent.
+            // Instead we collect all rows and truncate per-parent in Rust below.
+            let order_clause = build_projection_order_clause(proj);
+
+            let sparql = format!(
+                concat!(
+                    "SELECT ?parent ?t WHERE {{\n",
+                    "    VALUES ?parent {{ {values_clause} }}\n",
+                    "    ?parent <{safe_pred}> ?t .\n",
+                    "{where_patterns}",
+                    "}}{order_clause}"
+                ),
+                values_clause = values_clause,
+                safe_pred = safe_pred,
+                where_patterns = where_patterns,
+                order_clause = order_clause,
+            );
+
+            let result_json = store.query(&sparql)?;
+            let rows: Vec<Value> = serde_json::from_str(&result_json)?;
+
+            // parent_id → Vec<target_id>
+            let mut list_map: HashMap<String, Vec<Value>> = HashMap::new();
+            for row in &rows {
+                if let Some(parent) = row["parent"].as_str() {
+                    let t = row["t"]
+                        .as_str()
+                        .map(|s| Value::String(s.to_string()))
+                        .unwrap_or(Value::Null);
+                    list_map.entry(parent.to_string()).or_default().push(t);
+                }
+            }
+
+            for inst in instances.iter_mut() {
+                if let Some(obj) = inst.as_object_mut() {
+                    let id = obj
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let val = match proj.limit {
+                        Some(1) => list_map
+                            .get(&id)
+                            .and_then(|v| v.first().cloned())
+                            .unwrap_or(Value::Null),
+                        Some(n) => Value::Array(
+                            list_map
+                                .get(&id)
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .take(n)
+                                .collect(),
+                        ),
+                        None => Value::Array(list_map.get(&id).cloned().unwrap_or_default()),
+                    };
+                    obj.insert(key.clone(), val);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Build SPARQL triple patterns for a projection's `where` clause.
+///
+/// When a `targetShape` is supplied, property names in the `where` clause are
+/// resolved to their predicate IRIs.  Without a target shape, only `id`/`base`
+/// (direct IRI equality) filters are supported.
+///
+/// Returns a string ready to insert into the SPARQL `WHERE {}` block (each
+/// line already ends with `\n`).
+fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
+    let Some(ref wc) = proj.where_clause else {
+        return String::new();
+    };
+
+    // Try to build a property-name → predicate lookup from the target shape.
+    let pred_lookup: HashMap<String, String> = if let Some(ref ts) = proj.target_shape {
+        let mut map = HashMap::new();
+        if let Some(props) = ts["properties"].as_object() {
+            for (name, pm) in props {
+                if let Some(pred) = pm["predicate"].as_str() {
+                    if !pred.is_empty() {
+                        map.insert(name.clone(), pred.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(rels) = ts["relations"].as_object() {
+            for (name, rm) in rels {
+                if let Some(pred) = rm["predicate"].as_str() {
+                    if !pred.is_empty() {
+                        map.insert(name.clone(), pred.to_string());
+                    }
+                }
+            }
+        }
+        map
+    } else {
+        HashMap::new()
+    };
+
+    let mut patterns = Vec::new();
+    let mut filter_idx = 0usize;
+
+    for (prop_name, condition) in wc {
+        // id / base → direct IRI equality on ?t
+        if prop_name == "id" || prop_name == "base" {
+            match condition {
+                WhereCondition::String(val) => {
+                    let escaped = escape_sparql_string(val);
+                    patterns.push(format!(
+                        "    FILTER(STR(?t) = \"{}\")\n",
+                        escaped
+                    ));
+                }
+                WhereCondition::StringArray(vals) => {
+                    let list = vals
+                        .iter()
+                        .map(|v| format!("\"{}\"", escape_sparql_string(v)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    patterns.push(format!("    FILTER(STR(?t) IN ({}))\n", list));
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        // author / timestamp — standard metadata fields (not link targets, skip for now)
+        if prop_name == "author" || prop_name == "timestamp" {
+            continue;
+        }
+
+        // Resolve via target shape
+        let pred = match pred_lookup.get(prop_name) {
+            Some(p) => p.clone(),
+            None => continue, // unknown property without a shape — skip
+        };
+
+        if let Err(_) = validate_iri(&pred) {
+            continue;
+        }
+
+        let var = format!("_pw{}", filter_idx);
+        filter_idx += 1;
+        let safe_var = var.replace(|c: char| !c.is_alphanumeric() && c != '_', "_");
+
+        match condition {
+            WhereCondition::String(val) => {
+                let escaped = escape_sparql_string(val);
+                patterns.push(format!("    ?t <{}> ?{} .\n", pred, safe_var));
+                // Values may be stored as literal: URIs — use STR() for comparison.
+                patterns.push(format!(
+                    "    FILTER(STR(?{}) = \"{}\" || STR(?{}) = \"literal:string:{}\")\n",
+                    safe_var, escaped,
+                    safe_var, urlencoding::encode(val),
+                ));
+            }
+            WhereCondition::Bool(b) => {
+                let bval = if *b { "true" } else { "false" };
+                patterns.push(format!("    ?t <{}> ?{} .\n", pred, safe_var));
+                patterns.push(format!(
+                    "    FILTER(STR(?{}) = \"{}\" || STR(?{}) = \"literal:boolean:{}\")\n",
+                    safe_var, bval, safe_var, bval,
+                ));
+            }
+            WhereCondition::Number(n) => {
+                patterns.push(format!("    ?t <{}> ?{} .\n", pred, safe_var));
+                patterns.push(format!(
+                    "    FILTER(STR(?{}) = \"{}\" || STR(?{}) = \"literal:number:{}\")\n",
+                    safe_var, n, safe_var, n,
+                ));
+            }
+            WhereCondition::StringArray(vals) => {
+                let list = vals
+                    .iter()
+                    .flat_map(|v| {
+                        let r = escape_sparql_string(v);
+                        let e = urlencoding::encode(v).to_string();
+                        vec![
+                            format!("\"{}\"", r),
+                            format!("\"literal:string:{}\"", e),
+                        ]
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                patterns.push(format!("    ?t <{}> ?{} .\n", pred, safe_var));
+                patterns.push(format!("    FILTER(STR(?{}) IN ({}))\n", safe_var, list));
+            }
+            _ => {} // complex ops not yet supported for projections
+        }
+    }
+
+    patterns.join("")
+}
+
+/// Build an `ORDER BY` clause string for a list projection.
+///
+/// Only `id`/`base` (which map to `?t`) are supported — ordering by arbitrary
+/// child properties would require an extra JOIN in the projection query.
+/// Returns a string starting with `\n` (e.g. `"\nORDER BY ASC(?t)"`) or empty.
+fn build_projection_order_clause(proj: &ProjectionInput) -> String {
+    let Some(ref order) = proj.order else {
+        return String::new();
+    };
+    let terms: Vec<String> = order
+        .iter()
+        .filter_map(|(k, dir)| {
+            if k == "id" || k == "base" {
+                Some(match dir {
+                    OrderDirection::ASC => "ASC(?t)".to_string(),
+                    OrderDirection::DESC => "DESC(?t)".to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+    if terms.is_empty() {
+        String::new()
+    } else {
+        format!("\nORDER BY {}", terms.join(" "))
+    }
+}
+
 /// Execute a model query against the Oxigraph store.
 ///
 /// This is the main entry point that replaces the TS SPARQL-build → hydrate → filter pipeline.
@@ -675,7 +1054,7 @@ fn execute_model_query_inner(
     }
 
     // Strip unrequested properties if specified
-    let final_instances = if let Some(ref requested) = query_input.properties {
+    let mut final_instances: Vec<Value> = if let Some(ref requested) = query_input.properties {
         // When includes are present, keep the included relation fields
         let mut keep = requested.clone();
         if let Some(ref inc) = query_input.include {
@@ -692,6 +1071,12 @@ fn execute_model_query_inner(
     } else {
         paginated
     };
+
+    // ── Attach projection results ($-prefixed aggregations / lists) ──────
+    // Issued as one grouped VALUES SPARQL per key — O(projections) total.
+    if let Some(ref projections) = query_input.projections {
+        resolve_projections(store, &mut final_instances, projections, &shape)?;
+    }
 
     Ok(ModelQueryResult {
         instances: final_instances,
@@ -3124,5 +3509,102 @@ mod integration_tests {
         assert_eq!(alpha[0].as_str().unwrap(), "literal:string:shared_child");
         assert_eq!(beta[0].as_str().unwrap(), "literal:string:shared_child");
         assert_eq!(special[0].as_str().unwrap(), "literal:string:special_child");
+    }
+
+    // --- IncludeProjection helpers ---
+
+    #[test]
+    fn test_build_projection_where_patterns_empty_when_no_clause() {
+        let proj = ProjectionInput {
+            from: "signals".to_string(),
+            count: true,
+            target_shape: None,
+            where_clause: None,
+            limit: None,
+            order: None,
+        };
+        assert_eq!(build_projection_where_patterns(&proj), "");
+    }
+
+    #[test]
+    fn test_build_projection_where_patterns_id_filter() {
+        let mut wc = HashMap::new();
+        wc.insert(
+            "id".to_string(),
+            WhereCondition::String("signal://abc".to_string()),
+        );
+        let proj = ProjectionInput {
+            from: "signals".to_string(),
+            count: false,
+            target_shape: None,
+            where_clause: Some(wc),
+            limit: None,
+            order: None,
+        };
+        let patterns = build_projection_where_patterns(&proj);
+        assert!(
+            patterns.contains("FILTER(STR(?t) = \"signal://abc\")"),
+            "expected id IRI filter, got: {patterns}"
+        );
+    }
+
+    #[test]
+    fn test_build_projection_where_patterns_with_target_shape() {
+        let target_shape = json!({
+            "className": "Signal",
+            "properties": {
+                "signalTypeId": { "predicate": "signal://type" }
+            },
+            "relations": {}
+        });
+        let mut wc = HashMap::new();
+        wc.insert(
+            "signalTypeId".to_string(),
+            WhereCondition::String("like".to_string()),
+        );
+        let proj = ProjectionInput {
+            from: "signals".to_string(),
+            count: true,
+            target_shape: Some(target_shape),
+            where_clause: Some(wc),
+            limit: None,
+            order: None,
+        };
+        let patterns = build_projection_where_patterns(&proj);
+        assert!(
+            patterns.contains("?t <signal://type>"),
+            "expected triple pattern for signal://type, got: {patterns}"
+        );
+        assert!(
+            patterns.contains("FILTER(STR(?"),
+            "expected FILTER, got: {patterns}"
+        );
+    }
+
+    #[test]
+    fn test_build_projection_order_clause_empty_when_no_order() {
+        let proj = ProjectionInput {
+            from: "signals".to_string(),
+            count: false,
+            target_shape: None,
+            where_clause: None,
+            limit: Some(5),
+            order: None,
+        };
+        assert_eq!(build_projection_order_clause(&proj), "");
+    }
+
+    #[test]
+    fn test_build_projection_order_clause_by_id() {
+        let proj = ProjectionInput {
+            from: "signals".to_string(),
+            count: false,
+            target_shape: None,
+            where_clause: None,
+            limit: None,
+            order: Some(vec![("id".to_string(), OrderDirection::DESC)]),
+        };
+        let clause = build_projection_order_clause(&proj);
+        assert!(clause.contains("ORDER BY DESC(?t)"), "got: {clause}");
     }
 }
