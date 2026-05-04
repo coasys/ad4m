@@ -72,34 +72,39 @@ pub(crate) async fn build_event_stream(
     use futures::stream;
     use tokio_stream::wrappers::BroadcastStream;
 
-    // Clone auth tokens for each filter closure
-    let t_persp_added = auth_token.clone();
-    let t_persp_removed = auth_token.clone();
-    let t_persp_updated = auth_token.clone();
-    let t_link_added = auth_token.clone();
-    let t_link_removed = auth_token.clone();
-    let t_link_updated = auth_token.clone();
-    let t_signal = auth_token.clone();
-    let t_agent_status = auth_token.clone();
-    let t_agent_updated = auth_token.clone();
-    let t_apps = auth_token.clone();
-    let t_trans = auth_token.clone();
-    let t_notif = auth_token.clone();
-    let t_query_sub = auth_token;
+    // Resolve the DID once at subscription time — avoids repeated JWT decode +
+    // DB / AgentService lookups on every single event.
+    let resolved_did: Option<String> = {
+        let ctx = AgentContext::from_auth_token(auth_token.clone());
+        did_for_context(&ctx).ok()
+    };
+
+    // Clone the pre-resolved DID for each filter closure
+    let d_persp_added = resolved_did.clone();
+    let d_persp_removed = resolved_did.clone();
+    let d_persp_updated = resolved_did.clone();
+    let d_link_added = resolved_did.clone();
+    let d_link_removed = resolved_did.clone();
+    let d_link_updated = resolved_did.clone();
+    let d_signal = resolved_did.clone();
+    let d_agent_status = resolved_did.clone();
+    let d_agent_updated = resolved_did.clone();
+    let d_apps = resolved_did.clone();
+    let d_trans = resolved_did.clone();
+    let d_notif = resolved_did.clone();
+    let d_query_sub = resolved_did;
 
     let pubsub = get_global_pubsub().await;
 
     // ── Helper macros ──
 
     macro_rules! owner_stream {
-        ($rx:expr, $ty:expr, $token:expr) => {
+        ($rx:expr, $ty:expr, $did:expr) => {
             BroadcastStream::new($rx)
                 .filter_map(|r| async { handle_broadcast_result(r) })
                 .filter_map(move |result| {
-                    let token = $token.clone();
+                    let current_did = $did.clone();
                     async move {
-                        let current_did =
-                            did_for_context(&AgentContext::from_auth_token(token)).ok();
                         match result {
                             Ok(ref msg) if matches_owner(msg, current_did.as_deref()) => {
                                 Some(wrap_event($ty, msg))
@@ -112,14 +117,12 @@ pub(crate) async fn build_event_stream(
     }
 
     macro_rules! did_stream {
-        ($rx:expr, $ty:expr, $token:expr, $filter_fn:expr) => {
+        ($rx:expr, $ty:expr, $did:expr, $filter_fn:expr) => {
             BroadcastStream::new($rx)
                 .filter_map(|r| async { handle_broadcast_result(r) })
                 .filter_map(move |result| {
-                    let token = $token.clone();
+                    let current_did = $did.clone();
                     async move {
-                        let current_did =
-                            did_for_context(&AgentContext::from_auth_token(token)).ok();
                         match result {
                             Ok(ref msg) if $filter_fn(msg, current_did.as_deref()) => {
                                 Some(wrap_event($ty, msg))
@@ -132,14 +135,12 @@ pub(crate) async fn build_event_stream(
     }
 
     macro_rules! did_stream_nested {
-        ($rx:expr, $ty:expr, $key:expr, $token:expr, $filter_fn:expr) => {
+        ($rx:expr, $ty:expr, $key:expr, $did:expr, $filter_fn:expr) => {
             BroadcastStream::new($rx)
                 .filter_map(|r| async { handle_broadcast_result(r) })
                 .filter_map(move |result| {
-                    let token = $token.clone();
+                    let current_did = $did.clone();
                     async move {
-                        let current_did =
-                            did_for_context(&AgentContext::from_auth_token(token)).ok();
                         match result {
                             Ok(ref msg) if $filter_fn(msg, current_did.as_deref()) => {
                                 Some(wrap_event_nested($ty, $key, msg))
@@ -182,20 +183,20 @@ pub(crate) async fn build_event_stream(
         pubsub.subscribe(&AGENT_STATUS_CHANGED_TOPIC).await,
         "agent-status-changed",
         "agent",
-        t_agent_status,
+        d_agent_status,
         matches_agent_did
     );
     let s_agent_updated = did_stream_nested!(
         pubsub.subscribe(&AGENT_UPDATED_TOPIC).await,
         "agent-updated",
         "agent",
-        t_agent_updated,
+        d_agent_updated,
         matches_agent_did
     );
     let s_apps = did_stream!(
         pubsub.subscribe(&APPS_CHANGED).await,
         "apps-changed",
-        t_apps,
+        d_apps,
         matches_apps_user
     );
 
@@ -220,17 +221,17 @@ pub(crate) async fn build_event_stream(
     let s_persp_added = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_ADDED_TOPIC).await,
         "perspective-added",
-        t_persp_added
+        d_persp_added
     );
     let s_persp_removed = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_REMOVED_TOPIC).await,
         "perspective-removed",
-        t_persp_removed
+        d_persp_removed
     );
     let s_persp_updated = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_UPDATED_TOPIC).await,
         "perspective-updated",
-        t_persp_updated
+        d_persp_updated
     );
     let s_sync = broadcast_stream!(
         pubsub.subscribe(&PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC).await,
@@ -241,24 +242,24 @@ pub(crate) async fn build_event_stream(
     let s_link_added = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_LINK_ADDED_TOPIC).await,
         "link-added",
-        t_link_added
+        d_link_added
     );
     let s_link_removed = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_LINK_REMOVED_TOPIC).await,
         "link-removed",
-        t_link_removed
+        d_link_removed
     );
     let s_link_updated = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_LINK_UPDATED_TOPIC).await,
         "link-updated",
-        t_link_updated
+        d_link_updated
     );
 
     // ── Neighbourhood signals ──
     let s_signal = did_stream!(
         pubsub.subscribe(&NEIGHBOURHOOD_SIGNAL_TOPIC).await,
         "signal",
-        t_signal,
+        d_signal,
         matches_signal_recipient
     );
 
@@ -274,7 +275,7 @@ pub(crate) async fn build_event_stream(
             .await,
         "notification-triggered",
         "notification",
-        t_notif,
+        d_notif,
         matches_notification_owner
     );
     let s_exc = broadcast_stream_nested!(
@@ -287,7 +288,7 @@ pub(crate) async fn build_event_stream(
     let s_trans = did_stream!(
         pubsub.subscribe(&AI_TRANSCRIPTION_TEXT_TOPIC).await,
         "transcription-text",
-        t_trans,
+        d_trans,
         matches_transcription_user
     );
     let s_loading = broadcast_stream!(
@@ -301,7 +302,7 @@ pub(crate) async fn build_event_stream(
             .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
             .await,
         "query-subscription-update",
-        t_query_sub,
+        d_query_sub,
         matches_query_subscription_owner
     );
 
