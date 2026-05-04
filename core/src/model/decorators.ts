@@ -858,8 +858,17 @@ export function HasMany(
     first: (() => Ad4mModelLike) | RelationOptions,
     second?: Omit<RelationOptions, 'target'>,
 ): PropertyDecorator {
+    const explicitThrough = typeof first === 'function' ? second?.through : (first as RelationOptions).through;
     const opts = resolveRelationArgs(first, second);
     return function <T>(target: T, key: keyof T) {
+        if (!explicitThrough && !opts.getter) {
+            const className = ((target as any).constructor?.name) ?? 'unknown';
+            console.warn(
+                `@HasMany on ${className}.${String(key)} has no 'through' predicate — defaulting to 'ad4m://has_child'. ` +
+                `Add { through: 'ad4m://has_child' } to silence this warning, or use a semantic predicate ` +
+                `like { through: 'myns://has_${String(key)}' } for efficient targeted queries.`
+            );
+        }
         // --- relation registry ---
         const ctor = (target as any).constructor;
         if (!relationRegistry.has(ctor)) relationRegistry.set(ctor, {});
