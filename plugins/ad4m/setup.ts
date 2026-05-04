@@ -28,7 +28,7 @@ const SEPARATOR = "════════════════════�
  * @param openclawConfig - The full OpenClaw config object (provides hooks.token)
  * @param logger         - Plugin logger
  * @param endpoint       - MCP endpoint URL
- * @param executorUrl    - REST URL
+ * @param executorUrl    - Executor URL
  */
 export async function runSetup(
   openclawConfig: any,
@@ -188,12 +188,12 @@ async function setupExternalMode(
   logger: any,
   endpoint: string,
   wakeToken?: string,
-  detectedVia: "mcp" | "rest" = "mcp",
+  detectedVia: "mcp" | "http" = "mcp",
   executorUrl: string = "http://localhost:12000",
 ): Promise<void> {
-  if (detectedVia === "rest") {
-    // Executor found via REST (MCP is disabled / not available).
-    // Use Ad4mClient REST API to request capabilities.
+  if (detectedVia === "http") {
+    // Executor found via HTTP (MCP is disabled / not available).
+    // Use Ad4mClient API to request capabilities.
     logger.info(
       `[ad4m-setup] Found a running AD4M executor via REST at ${executorUrl}. ` +
         "MCP does not appear to be enabled.",
@@ -203,11 +203,11 @@ async function setupExternalMode(
     );
 
     try {
-      await setupExternalModeViaRest(logger, executorUrl, wakeToken);
+      await setupExternalModeViaHttp(logger, executorUrl, wakeToken);
       return;
     } catch (e: any) {
       logger.error(
-        `[ad4m-setup] REST auth flow failed: ${e.message}`,
+        `[ad4m-setup] HTTP auth flow failed: ${e.message}`,
       );
       if (e.stack) {
         logger.error(`[ad4m-setup] Stack: ${e.stack}`);
@@ -314,22 +314,22 @@ function promptUser(question: string): Promise<string> {
 }
 
 /**
- * External-mode auth flow using Ad4mClient over REST.
- * Used when the executor is detected via REST (MCP disabled).
+ * External-mode auth flow using Ad4mClient over HTTP.
+ * Used when the executor is detected via HTTP (MCP disabled).
  *
  * Flow:
  * 1. requestCapability → returns requestId, launcher shows 6-digit code
  * 2. User enters the 6-digit code from the launcher UI
  * 3. generateJwt(requestId, code) → returns JWT
  */
-async function setupExternalModeViaRest(
+async function setupExternalModeViaHttp(
   logger: any,
   executorUrl: string,
   wakeToken?: string,
 ): Promise<void> {
   const { Ad4mClient } = require("@coasys/ad4m");
 
-  logger.info(`[ad4m-setup] Creating REST client for ${executorUrl}...`);
+  logger.info(`[ad4m-setup] Creating API client for ${executorUrl}...`);
 
   try {
     const client = new Ad4mClient(executorUrl, undefined, false);
@@ -421,7 +421,7 @@ async function setupExternalModeViaRest(
       });
     }
   } catch (e: any) {
-    logger.error(`[ad4m-setup] REST auth flow failed: ${e.message}`);
+    logger.error(`[ad4m-setup] HTTP auth flow failed: ${e.message}`);
     if (e.stack) logger.error(`[ad4m-setup] Stack: ${e.stack}`);
     printConfigSnippet(logger, "external", {
       executorUrl,

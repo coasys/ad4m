@@ -8,7 +8,7 @@ export interface AgentResult {
 /**
  * Ensure the AD4M agent is initialized and unlocked.
  *
- * Creates a REST Ad4mClient connection to the executor, checks agent
+ * Creates an Ad4mClient connection to the executor, checks agent
  * status, and generates (first run) or unlocks (subsequent runs) as needed.
  *
  * Returns { did, passphrase? } on success (passphrase only set when a new
@@ -36,7 +36,7 @@ export async function ensureAgentReady(
       );
     }
 
-    // Retry loop: the REST server may not be ready immediately after
+    // Retry loop: the server may not be ready immediately after
     // the MCP endpoint comes up. We retry the initial status check.
     // When _testClient is provided (tests), skip retries.
     const maxAttempts = _testClient ? 1 : MAX_CONNECT_ATTEMPTS;

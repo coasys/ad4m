@@ -6,7 +6,7 @@
  * 2. Discovering all available tools (including dynamic SHACL-generated ones)
  * 3. Registering each tool with OpenClaw via api.registerTool()
  * 4. Periodically polling for new dynamic tools as perspectives sync SHACL schemas
- * 5. Embedded waker: subscribes to AD4M perspectives via REST SSE and
+ * 5. Embedded waker: subscribes to AD4M perspectives via WebSocket and
  *    wakes the agent via /hooks/wake when changes are detected
  */
 
@@ -1160,7 +1160,7 @@ Notes:
           "Set up the AD4M plugin (discover executor, generate agent, print config)",
         )
         .option("--endpoint <url>", "MCP endpoint URL", endpoint)
-        .option("--executor-url <url>", "Executor REST URL", executorUrl)
+        .option("--executor-url <url>", "Executor URL", executorUrl)
         .action(async (opts: any) => {
           await runSetup(ctx.config, ctx.logger, opts.endpoint, opts.executorUrl);
         });

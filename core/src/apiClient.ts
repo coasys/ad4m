@@ -5,7 +5,7 @@ export interface WsEvent {
 }
 
 /** Error thrown by ApiClient when an RPC call fails. */
-export class RestError extends Error {
+export class RpcError extends Error {
     /** Error code (maps to HTTP status semantics: 400, 401, 403, 404, 500). */
     readonly status: number
     /** Raw error message from server. */
@@ -13,7 +13,7 @@ export class RestError extends Error {
 
     constructor(status: number, body: string) {
         super(`RPC error ${status}: ${body}`)
-        this.name = 'RestError'
+        this.name = "RpcError"
         this.status = status
         this.body = body
     }
@@ -81,6 +81,8 @@ export class ApiClient {
         if (this._ws && (this._ws.readyState === WebSocket.OPEN || this._ws.readyState === WebSocket.CONNECTING)) {
             return
         }
+        // Prevent duplicate connections from concurrent callers
+        if (this._wsReady) return
 
         this._wsClosed = false
 
@@ -120,7 +122,7 @@ export class ApiClient {
 
                 if (parsed.error) {
                     const err = parsed.error as { code?: number; message?: string }
-                    pending.reject(new RestError(err.code ?? 500, err.message ?? 'Unknown error'))
+                    pending.reject(new RpcError(err.code ?? 500, err.message ?? 'Unknown error'))
                 } else {
                     pending.resolve(parsed.result)
                 }
@@ -144,7 +146,7 @@ export class ApiClient {
             // Reject all pending calls
             for (const [id, pending] of this._pendingCalls) {
                 clearTimeout(pending.timer)
-                pending.reject(new RestError(503, 'WebSocket connection closed'))
+                pending.reject(new RpcError(503, 'WebSocket connection closed'))
             }
             this._pendingCalls.clear()
 
@@ -208,7 +210,7 @@ export class ApiClient {
         return new Promise<T>((resolve, reject) => {
             const timer = setTimeout(() => {
                 this._pendingCalls.delete(id)
-                reject(new RestError(408, `RPC call '${type}' timed out after ${DEFAULT_TIMEOUT_MS}ms`))
+                reject(new RpcError(408, `RPC call '${type}' timed out after ${DEFAULT_TIMEOUT_MS}ms`))
             }, DEFAULT_TIMEOUT_MS)
 
             this._pendingCalls.set(id, {
@@ -222,7 +224,7 @@ export class ApiClient {
             } else {
                 this._pendingCalls.delete(id)
                 clearTimeout(timer)
-                reject(new RestError(503, 'WebSocket not connected'))
+                reject(new RpcError(503, 'WebSocket not connected'))
             }
         })
     }
@@ -271,7 +273,7 @@ export class ApiClient {
         // Reject pending calls
         for (const [id, pending] of this._pendingCalls) {
             clearTimeout(pending.timer)
-            pending.reject(new RestError(503, 'Client closed'))
+            pending.reject(new RpcError(503, 'Client closed'))
         }
         this._pendingCalls.clear()
         this._closeWs()

@@ -38,12 +38,11 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        State,
     },
     response::IntoResponse,
 };
 use futures::stream::StreamExt;
-use serde::Deserialize;
 use std::pin::Pin;
 
 use crate::agent::capabilities::*;
@@ -61,12 +60,6 @@ use crate::pubsub::{
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 
-#[derive(Deserialize)]
-pub struct EventsWsParams {
-    #[allow(dead_code)]
-    pub token: Option<String>,
-}
-
 /// GET /ws/events — WebSocket endpoint for all real-time events.
 ///
 /// Authentication is via `token` query parameter or `Authorization` header.
@@ -75,7 +68,6 @@ pub async fn events_ws(
     ws: WebSocketUpgrade,
     State(_state): State<AppState>,
     auth: AuthContext,
-    Query(_params): Query<EventsWsParams>,
 ) -> Result<impl IntoResponse, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)

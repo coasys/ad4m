@@ -71,6 +71,26 @@ async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
         ));
     }
 
+    // Block opening URLs pointing to localhost/private IPs to prevent SSRF
+    let url_lower = body.url.to_lowercase();
+    let host_part = url_lower
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let host = host_part.split('/').next().unwrap_or("");
+    let host_no_port = host.split(':').next().unwrap_or("");
+    if host_no_port == "localhost"
+        || host_no_port == "127.0.0.1"
+        || host_no_port == "0.0.0.0"
+        || host_no_port == "::1"
+        || host_no_port.starts_with("10.")
+        || host_no_port.starts_with("192.168.")
+        || host_no_port.starts_with("169.254.")
+    {
+        return Err(WsRpcError::bad_request(
+            "Cannot open URLs pointing to localhost or private networks",
+        ));
+    }
+
     #[cfg(target_os = "macos")]
     std::process::Command::new("open")
         .arg(&body.url)

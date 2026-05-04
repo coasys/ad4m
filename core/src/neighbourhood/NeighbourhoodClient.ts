@@ -117,6 +117,14 @@ export class NeighbourhoodClient {
             if (index > -1) {
                 handlersForPerspective.splice(index, 1)
             }
+            if (handlersForPerspective.length === 0) {
+                this.#signalHandlers.delete(perspectiveUUID)
+                const unsub = this.#signalUnsubscribers.get(perspectiveUUID)
+                if (unsub) {
+                    unsub()
+                    this.#signalUnsubscribers.delete(perspectiveUUID)
+                }
+            }
         }
     }
 }

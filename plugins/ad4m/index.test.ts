@@ -292,12 +292,12 @@ describe("isExecutorRunning", () => {
     expect(result).toBe("mcp");
   });
 
-  it("returns 'rest' when only REST endpoint responds", async () => {
+  it("returns 'http' when only HTTP endpoint responds", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((url: any) => {
       if (String(url).includes("/mcp")) {
         return Promise.reject(new Error("ECONNREFUSED"));
       }
-      // REST endpoint responds
+      // HTTP endpoint responds
       return Promise.resolve(
         fakeJsonResponse({ data: { agentStatus: { isInitialized: true } } }),
       );
@@ -307,15 +307,15 @@ describe("isExecutorRunning", () => {
       1000,
       "http://localhost:12000",
     );
-    expect(result).toBe("rest");
+    expect(result).toBe("http");
   });
 
-  it("returns 'rest' when REST returns 200 with any JSON", async () => {
+  it("returns 'http' when HTTP endpoint returns 200 with any JSON", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((url: any) => {
       if (String(url).includes("/mcp")) {
         return Promise.reject(new Error("ECONNREFUSED"));
       }
-      // REST 200 with error response
+      // HTTP 200 with error response
       return Promise.resolve(
         fakeJsonResponse({ errors: [{ message: "not ready" }], data: null }),
       );
@@ -325,7 +325,7 @@ describe("isExecutorRunning", () => {
       1000,
       "http://localhost:12000",
     );
-    expect(result).toBe("rest");
+    expect(result).toBe("http");
   });
 
   it("returns false when both endpoints fail", async () => {

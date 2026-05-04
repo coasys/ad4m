@@ -1,4 +1,4 @@
-import { ApiClient } from "../apiClient";
+import { ApiClient, RpcError } from "../apiClient";
 import { ExpressionRendered } from "../expression/Expression";
 import { ExpressionClient } from "../expression/ExpressionClient";
 import { Link, LinkExpressionInput, LinkExpression, LinkInput, LinkMutations, LinkExpressionMutations } from "../links/Links";
@@ -113,7 +113,8 @@ export class PerspectiveClient {
             if(!perspective) return null
             return new PerspectiveProxy(perspective, this)
         } catch(e) {
-            return null
+            if (e instanceof RpcError && e.status === 404) return null
+            throw e
         }
     }
 

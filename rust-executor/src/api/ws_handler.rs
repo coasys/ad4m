@@ -109,6 +109,7 @@ impl HandlerMap {
     /// Register a handler for a message type (e.g. `"agent.get"`).
     ///
     /// Panics if the type is already registered (catches duplicate registrations at startup).
+    /// This is intentional — duplicates are programming errors and should fail fast.
     pub fn register<F, Fut>(&mut self, msg_type: &str, handler: F)
     where
         F: Fn(Value, Arc<RequestContext>) -> Fut + Send + Sync + 'static,

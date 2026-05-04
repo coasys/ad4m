@@ -1,6 +1,6 @@
 // Write throughput benchmark suite
 
-import type { RestBenchClient } from '../client'
+import type { HttpBenchClient } from '../client'
 import { timeIt, createRng, generateId, type Stats, computeStats } from '../utils'
 
 export interface WriteBenchmarkResult {
@@ -13,7 +13,7 @@ export interface WriteBenchmarkResult {
 }
 
 async function benchSingleWrite(
-  client: RestBenchClient,
+  client: HttpBenchClient,
   uuid: string,
   iterations: number,
   warmup: number,
@@ -34,7 +34,7 @@ async function benchSingleWrite(
 }
 
 async function benchBatchWrite(
-  client: RestBenchClient,
+  client: HttpBenchClient,
   uuid: string,
   batchSize: number,
   iterations: number,
@@ -65,8 +65,8 @@ async function benchBatchWrite(
 }
 
 export async function run(
-  sparqlClient: RestBenchClient,
-  baselineClient: RestBenchClient,
+  sparqlClient: HttpBenchClient,
+  baselineClient: HttpBenchClient,
   iterations: number,
   warmup: number,
 ): Promise<WriteBenchmarkResult> {

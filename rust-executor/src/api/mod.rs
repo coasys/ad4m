@@ -110,7 +110,7 @@ pub fn api_router(state: AppState) -> Router {
     .layer(cors)
 }
 
-/// Start the REST API server.
+/// Start the API server (HTTP + WebSocket).
 pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     // Set global SMTP config for email verification
     crate::config::set_smtp_config(config.smtp_config.clone())?;
@@ -131,8 +131,8 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         let cert_path = tls_config.cert_file_path.clone();
         let key_path = tls_config.key_file_path.clone();
 
-        log::info!("Starting REST API (HTTP) on 127.0.0.1:{}", port);
-        log::info!("Starting REST API (HTTPS) on 0.0.0.0:{}", tls_port);
+        log::info!("Starting API server (HTTP) on 127.0.0.1:{}", port);
+        log::info!("Starting API server (HTTPS) on 0.0.0.0:{}", tls_port);
 
         let tls_state = AppState {
             admin_credential: admin_credential.clone(),
@@ -163,7 +163,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         };
 
         let addr = SocketAddr::from((address, port));
-        log::info!("REST API server starting on http://{}/api/v1", addr);
+        log::info!("API server starting on http://{}/api/v1", addr);
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, app.into_make_service()).await?;

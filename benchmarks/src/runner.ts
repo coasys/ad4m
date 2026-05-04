@@ -1,6 +1,6 @@
 // Benchmark runner — orchestrates suites
 
-import type { RestBenchClient } from './client'
+import type { HttpBenchClient } from './client'
 import type { SuiteResult, BenchmarkReport } from './reporter'
 import { run as runWrite } from './suites/write-throughput'
 import { run as runPointQueries } from './suites/point-queries'
@@ -12,8 +12,8 @@ export const SUITE_NAMES = ['write', 'query', 'sparql', 'subject', 'scale'] as c
 export type SuiteName = typeof SUITE_NAMES[number]
 
 export interface RunConfig {
-  sparqlClient: RestBenchClient
-  baselineClient: RestBenchClient
+  sparqlClient: HttpBenchClient
+  baselineClient: HttpBenchClient
   suites: SuiteName[]
   iterations: number
   warmup: number

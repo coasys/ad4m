@@ -153,7 +153,7 @@ export default class Ad4mConnect extends EventTarget {
     try {
       console.log('[Ad4m Connect] Checking authentication status...');
 
-      // isLocked may not exist on REST-only executors (404). Treat errors
+      // isLocked may not exist on older executors (404). Treat errors
       // as "not locked" and fall through to the status check.
       let isLocked = false;
       try {

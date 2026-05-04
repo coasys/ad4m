@@ -328,18 +328,18 @@ let executorLogStream: fs.WriteStream | null = null;
 /**
  * Check whether an executor is reachable.
  *
- * Tries the MCP endpoint first, then falls back to a lightweight REST
+ * Tries the MCP endpoint first, then falls back to a lightweight HTTP
  * request on the default HTTP port (12000).  This ensures we detect executors
  * launched via ad4m-launcher where MCP is typically disabled.
  *
- * Returns `"mcp"` or `"rest"` to indicate which interface responded,
+ * Returns `"mcp"` or `"http"` to indicate which interface responded,
  * or `false` if neither is reachable.
  */
 export async function isExecutorRunning(
   endpoint: string,
   timeoutMs: number = 3000,
-  restHttpUrl: string = "http://localhost:12000",
-): Promise<"mcp" | "rest" | false> {
+  httpUrl: string = "http://localhost:12000",
+): Promise<"mcp" | "http" | false> {
   const probe = (url: string, init: RequestInit, validate?: (json: any) => boolean): Promise<boolean> =>
     new Promise((resolve) => {
       const controller = new AbortController();
@@ -369,7 +369,7 @@ export async function isExecutorRunning(
         });
     });
 
-  // Try MCP and REST in parallel — return the first that succeeds
+  // Try MCP and HTTP in parallel — return the first that succeeds
   const [mcp, rest] = await Promise.all([
     probe(
       endpoint,
@@ -380,7 +380,7 @@ export async function isExecutorRunning(
       },
     ),
     probe(
-      `${restHttpUrl}/api/v1/agent/status`,
+      `${httpUrl}/api/v1/agent/status`,
       { method: "GET" },
       // Any JSON response (even an auth error) confirms an executor is listening
       (json) => json != null,
@@ -388,7 +388,7 @@ export async function isExecutorRunning(
   ]);
 
   if (mcp) return "mcp";
-  if (rest) return "rest";
+  if (rest) return "http";
   return false;
 }
 

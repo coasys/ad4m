@@ -33,4 +33,6 @@ export { ModelApi, TokenizerSource, LocalModel, ModelType, ModelApiInput, Tokeni
 export * from './shacl/SHACLShape'
 export { SHACLFlow, FlowState, FlowTransition, LinkPattern, FlowableCondition } from './shacl/SHACLFlow'
 export * from "./generated/api";
-export { RestError } from "./apiClient";
+export { RpcError } from "./apiClient";
+/** @deprecated Use `RpcError` instead. */
+export { RpcError as RestError } from "./apiClient";

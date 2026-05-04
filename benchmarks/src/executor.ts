@@ -2,7 +2,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdir, rm } from 'node:fs/promises'
-import { RestBenchClient, type ExecutorEndpoint } from './client'
+import { HttpBenchClient, type ExecutorEndpoint } from './client'
 
 export interface ExecutorConfig {
   binary: string
@@ -33,8 +33,8 @@ function makeEndpoint(config: ExecutorConfig): ExecutorEndpoint {
   }
 }
 
-export function getClient(config: ExecutorConfig): RestBenchClient {
-  return new RestBenchClient(makeEndpoint(config))
+export function getClient(config: ExecutorConfig): HttpBenchClient {
+  return new HttpBenchClient(makeEndpoint(config))
 }
 
 export async function startExecutor(config: ExecutorConfig): Promise<void> {

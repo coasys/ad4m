@@ -26,7 +26,7 @@ impl AuthContext {
     }
 }
 
-/// AppState shared across all REST handlers.
+/// AppState shared across all API handlers.
 #[derive(Clone)]
 pub struct AppState {
     pub admin_credential: Option<String>,

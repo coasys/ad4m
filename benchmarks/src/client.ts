@@ -1,4 +1,4 @@
-// REST client wrapper using native fetch
+// HTTP client wrapper using native fetch
 
 export interface LinkExpression {
   author: string
@@ -17,7 +17,7 @@ export interface ExecutorEndpoint {
   adminCredential: string
 }
 
-export class RestBenchClient {
+export class HttpBenchClient {
   endpoint: ExecutorEndpoint
   timeoutMs: number
   constructor(endpoint: ExecutorEndpoint, timeoutMs = 30_000) {
@@ -40,7 +40,7 @@ export class RestBenchClient {
       signal: AbortSignal.timeout(this.timeoutMs),
     })
     if (!resp.ok) {
-      throw new Error(`REST request failed (${resp.status}): ${await resp.text()}`)
+      throw new Error(`HTTP request failed (${resp.status}): ${await resp.text()}`)
     }
     const text = await resp.text()
     if (!text) return undefined as T
@@ -120,5 +120,5 @@ export class RestBenchClient {
   }
 }
 
-/** @deprecated Use RestBenchClient instead */
-export const GraphQLClient = RestBenchClient
+/** @deprecated Use HttpBenchClient instead */
+export const GraphQLClient = HttpBenchClient

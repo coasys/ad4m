@@ -1,8 +1,8 @@
 /**
- * REST Integration Tests
+ * WebSocket Integration Tests
  * 
- * Tests the core AD4M operations through the REST API transport.
- * Uses Ad4mClient directly with a REST base URL.
+ * Tests the core AD4M operations through the WebSocket RPC transport.
+ * Uses Ad4mClient directly with a WebSocket base URL.
  */
 import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
