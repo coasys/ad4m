@@ -982,6 +982,7 @@ describe("SPARQL comparison filters", () => {
 // ──────────────────────────────────────────────────────────
 
 import { buildSPARQLQuery, formatSPARQLValue } from "./query-sparql";
+import { SHACLShape } from "../shacl/SHACLShape";
 
 describe("SPARQL direct triple pattern generation", () => {
   @Model({ name: "Channel" })
@@ -2082,5 +2083,160 @@ describe("deepQuery opt-in — getter evaluation", () => {
       (builder as any).deepQuery();
       expect((builder as any).queryParams.deepQuery).toBe(true);
     });
+  });
+});
+
+// ─── Ad4mModel.fromSHACL() ───────────────────────────────────────────────────
+
+describe("Ad4mModel.fromSHACL()", () => {
+  function makeShape(targetClass: string, props: Array<import("../shacl/SHACLShape").SHACLPropertyShape>) {
+    const shape = new SHACLShape(targetClass);
+    for (const p of props) shape.addProperty(p);
+    return shape;
+  }
+
+  it("assigns the given name as className", () => {
+    const shape = makeShape("flux://Channel", []);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    expect((Cls as any).className).toBe("Channel");
+    expect((new (Cls as any)({}, "flux://1")).className).toBe("Channel");
+  });
+
+  it("registers scalar property (maxCount=1) via setPropertyRegistryEntry", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "title", path: "flux://has_title", maxCount: 1, writable: true },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["title"]).toBeDefined();
+    expect(meta.properties["title"].predicate).toBe("flux://has_title");
+    expect(meta.properties["title"].readOnly).toBe(false);
+  });
+
+  it("registers collection property (no maxCount) as hasMany relation", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "messages", path: "flux://has_message" },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.relations["messages"]).toBeDefined();
+    expect(meta.relations["messages"].predicate).toBe("flux://has_message");
+    expect(meta.relations["messages"].direction).toBe("forward");
+  });
+
+  it("registers collection property (maxCount=5) as hasMany relation", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "participants", path: "flux://participant", maxCount: 5 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.relations["participants"]).toBeDefined();
+    expect(meta.relations["participants"].direction).toBe("forward");
+  });
+
+  it("propagates resolveLanguage onto scalar properties", () => {
+    const shape = makeShape("flux://Post", [
+      { name: "body", path: "flux://body", maxCount: 1, resolveLanguage: "literal" },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Post");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["body"].resolveLanguage).toBe("literal");
+  });
+
+  it("defaults writable to true when not specified", () => {
+    const shape = makeShape("flux://Post", [
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Post");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["body"].readOnly).toBe(false);
+  });
+
+  it("respects writable:false", () => {
+    const shape = makeShape("flux://Post", [
+      { name: "id", path: "flux://id", maxCount: 1, writable: false },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Post");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["id"].readOnly).toBe(true);
+  });
+
+  it("registers flag properties (hasValue) as type-discrimination entries", () => {
+    const shape = makeShape("flux://Message", [
+      { name: "type", path: "flux://entry_type", hasValue: "flux://message" },
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Message");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["type"]).toBeDefined();
+    expect(meta.properties["type"].predicate).toBe("flux://entry_type");
+    expect(meta.properties["type"].flag).toBe(true);
+    expect(meta.properties["type"].required).toBe(true);
+    expect(meta.properties["type"].initial).toBe("flux://message");
+    expect(meta.properties["body"]).toBeDefined();
+  });
+
+  it("flag property from fromSHACL produces SPARQL type-discriminator triple", () => {
+    const shape = makeShape("flux://Message", [
+      { name: "type", path: "flux://entry_type", hasValue: "flux://message" },
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Message");
+    const meta = Cls.getModelMetadata();
+    const allRelsMeta = {} as any;
+    const sparql = buildSPARQLQuery(meta, allRelsMeta, {}, Cls);
+    expect(sparql).toContain("<flux://entry_type>");
+    expect(sparql).toContain("<flux://message>");
+  });
+
+  it("recovers flag value from constructor_actions (backward-compat for old shapes)", () => {
+    const shape = new SHACLShape("flux://Channel");
+    // An old shape: property has NO hasValue, but constructor_actions carries it
+    shape.addProperty({ name: "type", path: "flux://entry_type", maxCount: 1 });
+    shape.addProperty({ name: "name", path: "flux://name", maxCount: 1 });
+    shape.constructor_actions = [
+      { action: "addLink", source: "this", predicate: "flux://entry_type", target: "flux://channel" },
+    ];
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["type"]).toBeDefined();
+    expect(meta.properties["type"].flag).toBe(true);
+    expect(meta.properties["type"].initial).toBe("flux://channel");
+  });
+
+  it("skips properties without a name field", () => {
+    const shape = makeShape("flux://Message", [
+      { path: "flux://anonymous" } as any,
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Message");
+    const meta = Cls.getModelMetadata();
+    expect(Object.keys(meta.properties)).toEqual(["body"]);
+  });
+
+  it("propagates local flag onto relations", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "drafts", path: "flux://draft", local: true },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.relations["drafts"].local).toBe(true);
+  });
+
+  it("applies Model decorator so generateSHACL and generateSDNA are available", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "title", path: "flux://has_title", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    expect(typeof (Cls as any).generateSDNA).toBe("function");
+    expect(typeof (Cls as any).generateSHACL).toBe("function");
+  });
+
+  it("handles shapes with no properties", () => {
+    const shape = makeShape("flux://Empty", []);
+    const Cls = Ad4mModel.fromSHACL(shape, "Empty");
+    const meta = Cls.getModelMetadata();
+    expect(Object.keys(meta.properties)).toHaveLength(0);
+    expect(Object.keys(meta.relations)).toHaveLength(0);
   });
 });
