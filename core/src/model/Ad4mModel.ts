@@ -950,6 +950,20 @@ export class Ad4mModel {
     const metadata = this.getModelMetadata();
     const className = classNameOverride || metadata.className;
 
+    // Expand includeAll: true to a full IncludeMap covering every forward relation.
+    // Done before queryInput is built so all downstream uses of query.include see the expansion.
+    if (query.includeAll) {
+      const allRelMeta = getRelationsMetadata(this as any);
+      const expanded: IncludeMap = {};
+      for (const [relName, relMeta] of Object.entries(allRelMeta)) {
+        if ((relMeta as any).direction !== 'reverse') {
+          expanded[relName] = true;
+        }
+      }
+      // Explicit include entries take precedence over the expansion
+      query = { ...query, include: { ...expanded, ...query.include } };
+    }
+
     // Build the query input that the Rust endpoint expects.
     // Convert the TS Query type to the executor's ModelQueryInput format.
     const queryInput: any = {};
