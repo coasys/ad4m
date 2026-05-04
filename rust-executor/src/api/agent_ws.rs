@@ -781,7 +781,7 @@ async fn entanglement_proof_preflight(
 
 /// Register all agent WS handlers.
 ///
-/// Message types match the client SDK's `restClient.call()` type strings.
+/// Message types match the client SDK's `apiClient.call()` type strings.
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("agent.get", get_agent);
     map.register("agent.getApps", get_apps);

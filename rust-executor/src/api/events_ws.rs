@@ -1,51 +1,39 @@
 //! WebSocket event endpoint: GET /api/v1/ws/events
 //!
-//! Single WebSocket endpoint serving ALL event types as an alternative to SSE.
+//! Single WebSocket endpoint serving ALL event types.
 //! Each message is a JSON object `{ "type": "<event-type>", ...payload }`.
-//! Events are filtered per-user in multi-user mode, identical to the SSE
-//! endpoint.
+//! Events are filtered per-user in multi-user mode.
 //!
-//! Server → Client message types
-//! -----------------------------
-//! Agent / app lifecycle:
-//!   - `agent-status-changed`        — payload nested under `agent`
-//!   - `agent-updated`               — payload nested under `agent`
-//!   - `apps-changed`                — apps list for the current user
-//!   - `hosting-user-info-changed`   — filtered by authenticated user email
+//! ## Event types
 //!
-//! Perspective lifecycle:
-//!   - `perspective-added`           — owned-by-DID filtered
-//!   - `perspective-removed`         — owned-by-DID filtered
-//!   - `perspective-updated`         — owned-by-DID filtered
-//!   - `sync-state-change`           — broadcast to all subscribers
+//! | Type                          | Payload key   | Filtering              | Description                          |
+//! |-------------------------------|---------------|------------------------|--------------------------------------|
+//! | `agent-status-changed`        | `agent`       | DID                    | Agent status changed                 |
+//! | `agent-updated`               | `agent`       | DID                    | Agent profile updated                |
+//! | `apps-changed`                | (inline)      | user                   | Installed apps changed               |
+//! | `hosting-user-info-changed`   | (inline)      | email                  | Hosting user info changed            |
+//! | `perspective-added`           | (inline)      | owner DID              | New perspective created              |
+//! | `perspective-removed`         | (inline)      | owner DID              | Perspective deleted                  |
+//! | `perspective-updated`         | (inline)      | owner DID              | Perspective metadata updated         |
+//! | `sync-state-change`           | (inline)      | broadcast              | Neighbourhood sync state changed     |
+//! | `link-added`                  | (inline)      | owner DID              | Link added to perspective            |
+//! | `link-removed`                | (inline)      | owner DID              | Link removed from perspective        |
+//! | `link-updated`                | (inline)      | owner DID              | Link updated in perspective          |
+//! | `signal`                      | (inline)      | recipient DID (lazy)   | Neighbourhood signal received        |
+//! | `message-received`            | `message`     | broadcast              | Runtime message received             |
+//! | `notification-triggered`      | `notification`| perspective owner      | Notification triggered               |
+//! | `exception-occurred`          | `exception`   | broadcast              | Exception occurred                   |
+//! | `transcription-text`          | (inline)      | userDid                | AI transcription text                |
+//! | `model-loading-status`        | (inline)      | broadcast              | AI model loading status              |
+//! | `query-subscription-update`   | (inline)      | perspective owner      | Live query subscription update       |
 //!
-//! Link events (per-perspective, owned-by-DID filtered):
-//!   - `link-added`
-//!   - `link-removed`
-//!   - `link-updated`
+//! ## Client → Server messages
 //!
-//! Neighbourhood:
-//!   - `signal`                      — recipient-DID filtered
+//! | Type     | Description                          |
+//! |----------|--------------------------------------|
+//! | `ping`   | Server responds with `{"type":"pong"}`|
 //!
-//! Runtime:
-//!   - `message-received`            — payload nested under `message`
-//!   - `notification-triggered`      — payload nested under `notification`,
-//!                                     filtered by perspective owner
-//!   - `exception-occurred`          — payload nested under `exception`
-//!
-//! AI:
-//!   - `transcription-text`          — filtered by `userDid`
-//!   - `model-loading-status`        — broadcast to all subscribers
-//!
-//! Query subscriptions:
-//!   - `query-subscription-update`   — filtered by perspective owner
-//!
-//! Keepalive:
-//!   - `pong`                        — response to client `{"type":"ping"}`
-//!
-//! Client → Server messages:
-//!   `{"type":"ping"}` → server responds with `{"type":"pong"}`
-//!   Other messages are silently ignored (future extensibility).
+//! Other messages are silently ignored (future extensibility).
 
 use axum::{
     extract::{
@@ -99,9 +87,9 @@ pub async fn events_ws(
     Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, auth_token, user_email)))
 }
 
-/// Build the merged event stream — identical logic to the SSE endpoint.
+/// Build the merged event stream for a given user.
 ///
-/// Returns a boxed stream of (event_type, data_string) tuples, already filtered
+/// Returns a boxed stream of JSON-stringified event messages, already filtered
 /// per-user.
 pub(crate) async fn build_event_stream(
     auth_token: String,

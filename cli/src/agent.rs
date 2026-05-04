@@ -35,13 +35,17 @@ pub enum AgentFunctions {
         device_key: String,
         device_key_signed_by_did: String,
         device_key_type: String,
+        did: Option<String>,
         did_signed_by_device_key: String,
+        did_signing_key_id: Option<String>,
     },
     DeleteEntanglementProof {
         device_key: String,
         device_key_signed_by_did: String,
         device_key_type: String,
+        did: Option<String>,
         did_signed_by_device_key: String,
+        did_signing_key_id: Option<String>,
     },
     EntanglementProofPreFlight {
         device_key: String,
@@ -136,13 +140,17 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             device_key,
             device_key_signed_by_did,
             device_key_type,
+            did,
             did_signed_by_device_key,
+            did_signing_key_id,
         } => {
             let input = EntanglementProof {
                 device_key,
                 device_key_signed_by_did: Some(device_key_signed_by_did),
                 device_key_type,
+                did,
                 did_signed_by_device_key: Some(did_signed_by_device_key),
+                did_signing_key_id,
             };
             ad4m_client
                 .agent
@@ -154,13 +162,17 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             device_key,
             device_key_signed_by_did,
             device_key_type,
+            did,
             did_signed_by_device_key,
+            did_signing_key_id,
         } => {
             let input = EntanglementProof {
                 device_key,
                 device_key_signed_by_did: Some(device_key_signed_by_did),
                 device_key_type,
+                did,
                 did_signed_by_device_key: Some(did_signed_by_device_key),
+                did_signing_key_id,
             };
             ad4m_client
                 .agent

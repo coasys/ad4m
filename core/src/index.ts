@@ -32,5 +32,5 @@ export * from "./runtime/RuntimeTypes"
 export { ModelApi, TokenizerSource, LocalModel, ModelType, ModelApiInput, TokenizerSourceInput, LocalModelInput, ModelInput, VoiceActivityParamsInput } from "./ai/AITypes"
 export * from './shacl/SHACLShape'
 export { SHACLFlow, FlowState, FlowTransition, LinkPattern, FlowableCondition } from './shacl/SHACLFlow'
-export * from "./generated/rest";
-export { RestError } from "./restClient";
+export * from "./generated/api";
+export { RestError } from "./apiClient";

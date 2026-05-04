@@ -337,7 +337,7 @@ let ad4m: Ad4mClient;
 
 beforeAll(() => {
     (global as any).WebSocket = MockWebSocket as any;
-    // Ad4mClient takes an HTTP base URL; restClient converts to ws:// internally
+    // Ad4mClient takes an HTTP base URL; apiClient converts to ws:// internally
     ad4m = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
 });
 

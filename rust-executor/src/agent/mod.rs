@@ -1264,4 +1264,71 @@ mod tests {
             did_before_save, did_after_reload
         );
     }
+
+    /// Regression test: generate + save to disk, then clear in-memory state and
+    /// verify that `ensure_main_agent_loaded` recovers from disk.
+    #[test]
+    fn get_agent_recovers_from_disk_after_memory_cleared() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let app_path = tmp.path().to_str().unwrap().to_string();
+        std::fs::create_dir_all(format!("{}/ad4m", app_path)).expect("create ad4m dir");
+
+        // Bootstrap wallet
+        {
+            let wallet_instance = crate::wallet::Wallet::instance();
+            let mut wallet = wallet_instance.lock().expect("wallet lock");
+            let wallet_ref = wallet.as_mut().expect("wallet instance");
+            wallet_ref.generate_keypair("main".to_string());
+        }
+
+        let expected_did = {
+            let global = AgentService::global_instance();
+            let mut lock = global.lock().unwrap();
+            *lock = Some(AgentService::new(app_path.clone()));
+            let svc = lock.as_mut().unwrap();
+
+            svc.create_new_keys();
+            let did = svc
+                .agent
+                .as_ref()
+                .expect("agent must exist after create_new_keys")
+                .did
+                .clone();
+
+            svc.save("test-passphrase".to_string());
+
+            assert!(
+                std::path::Path::new(&format!("{}/ad4m/agent.json", app_path)).exists(),
+                "agent.json must exist on disk after save()"
+            );
+
+            svc.agent = None;
+            did
+        };
+
+        AgentService::with_global_instance(|svc| {
+            assert!(svc.agent.is_none(), "in-memory agent should be None");
+            assert!(svc.is_initialized(), "agent.json must still be on disk");
+        });
+
+        AgentService::with_mutable_global_instance(|svc| {
+            svc.ensure_main_agent_loaded();
+        });
+
+        let recovered = AgentService::with_global_instance(|svc| svc.agent.clone());
+        assert!(
+            recovered.is_some(),
+            "agent must be recovered from disk instead of remaining None"
+        );
+
+        let agent = recovered.unwrap();
+        assert_eq!(
+            agent.did, expected_did,
+            "recovered agent must have the same DID as the generated one"
+        );
+        assert!(
+            agent.perspective.is_some(),
+            "recovered agent must have a perspective"
+        );
+    }
 }

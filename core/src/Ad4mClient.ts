@@ -5,7 +5,7 @@ import { PerspectiveClient } from './perspectives/PerspectiveClient'
 import { RuntimeClient } from './runtime/RuntimeClient'
 import { ExpressionClient } from './expression/ExpressionClient'
 import { AIClient } from './ai/AIClient'
-import { RestClient } from './restClient'
+import { ApiClient } from './apiClient'
 
 /**
  * Client for the Ad4m interface wrapping WebSocket RPC calls
@@ -19,7 +19,7 @@ import { RestClient } from './restClient'
 export class Ad4mClient {
     #baseUrl: string
     #token?: string
-    #restClient: RestClient
+    #apiClient: ApiClient
     #agentClient: AgentClient
     #expressionClient: ExpressionClient
     #languageClient: LanguageClient
@@ -31,17 +31,17 @@ export class Ad4mClient {
     constructor(baseUrl: string, token?: string, subscribe: boolean = true) {
         this.#baseUrl = baseUrl
         this.#token = token
-        this.#restClient = new RestClient(baseUrl, token)
-        this.#agentClient = new AgentClient(baseUrl, token, subscribe, this.#restClient)
-        this.#expressionClient = new ExpressionClient(baseUrl, token, this.#restClient)
-        this.#languageClient = new LanguageClient(baseUrl, token, this.#restClient)
-        this.#neighbourhoodClient = new NeighbourhoodClient(baseUrl, token, this.#restClient)
-        this.#aiClient = new AIClient(baseUrl, token, subscribe, this.#restClient)
-        this.#perspectiveClient = new PerspectiveClient(baseUrl, token, subscribe, this.#restClient)
+        this.#apiClient = new ApiClient(baseUrl, token)
+        this.#agentClient = new AgentClient(baseUrl, token, subscribe, this.#apiClient)
+        this.#expressionClient = new ExpressionClient(baseUrl, token, this.#apiClient)
+        this.#languageClient = new LanguageClient(baseUrl, token, this.#apiClient)
+        this.#neighbourhoodClient = new NeighbourhoodClient(baseUrl, token, this.#apiClient)
+        this.#aiClient = new AIClient(baseUrl, token, subscribe, this.#apiClient)
+        this.#perspectiveClient = new PerspectiveClient(baseUrl, token, subscribe, this.#apiClient)
         this.#perspectiveClient.setExpressionClient(this.#expressionClient)
         this.#perspectiveClient.setNeighbourhoodClient(this.#neighbourhoodClient)
         this.#perspectiveClient.setAIClient(this.#aiClient)
-        this.#runtimeClient = new RuntimeClient(baseUrl, token, subscribe, this.#restClient)
+        this.#runtimeClient = new RuntimeClient(baseUrl, token, subscribe, this.#apiClient)
     }
 
     get agent(): AgentClient {
@@ -82,6 +82,6 @@ export class Ad4mClient {
 
     /** Close all event connections */
     close(): void {
-        this.#restClient.closeAll()
+        this.#apiClient.closeAll()
     }
 }

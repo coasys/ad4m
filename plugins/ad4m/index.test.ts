@@ -2205,7 +2205,7 @@ describe("WakerSubscriptionManager", () => {
   };
 
   const mockPerspectiveClientSimple = {
-    querySurrealDB: vi.fn(() => Promise.resolve([])),
+    querySparql: vi.fn(() => Promise.resolve({ results: { bindings: [] }})),
   };
 
   it("should ignore non-array results (e.g. false) and not store them as seen", async () => {
@@ -2322,23 +2322,23 @@ describe("WakerSubscriptionManager", () => {
     const mock = makeMockProxy();
     let capturedMentions: any[] | undefined;
 
-    // Mock perspectiveClient.querySurrealDB to return has_child links for parent resolution
+    // Mock perspectiveClient.querySparql to return has_child links for parent resolution
     const mockPerspectiveClient = {
-      querySurrealDB: vi.fn((_perspectiveId: string, query: string) => {
+      querySparql: vi.fn((_perspectiveId: string, query: string) => {
         // msg-1 has two parents (channel + conversation thread)
         if (query.includes("msg-1")) {
-          return Promise.resolve([
-            { source: "channel-abc", target: "msg-1", predicate: "ad4m://has_child" },
-            { source: "conversation-xyz", target: "msg-1", predicate: "ad4m://has_child" },
-          ]);
+          return Promise.resolve({ results: { bindings: [
+            { source: { value: "channel-abc" } },
+            { source: { value: "conversation-xyz" } },
+          ]}});
         }
         // msg-2 is only in channel-abc
         if (query.includes("msg-2")) {
-          return Promise.resolve([
-            { source: "channel-abc", target: "msg-2", predicate: "ad4m://has_child" },
-          ]);
+          return Promise.resolve({ results: { bindings: [
+            { source: { value: "channel-abc" } },
+          ]}});
         }
-        return Promise.resolve([]);
+        return Promise.resolve({ results: { bindings: [] }});
       }),
     };
 
@@ -2367,7 +2367,7 @@ describe("WakerSubscriptionManager", () => {
     ]);
     await new Promise(r => setTimeout(r, 50));
 
-    expect(mockPerspectiveClient.querySurrealDB).toHaveBeenCalledTimes(2);
+    expect(mockPerspectiveClient.querySparql).toHaveBeenCalledTimes(2);
     expect(capturedMentions).toBeDefined();
     expect(capturedMentions).toHaveLength(2);
     // msg-1 has two parents
@@ -2385,7 +2385,7 @@ describe("WakerSubscriptionManager", () => {
     let capturedMentions: any[] | undefined;
 
     const mockPerspectiveClient = {
-      querySurrealDB: vi.fn(() => Promise.resolve([])),
+      querySparql: vi.fn(() => Promise.resolve({ results: { bindings: [] }})),
     };
 
     const manager = new WakerSubscriptionManager({
@@ -2422,7 +2422,7 @@ describe("WakerSubscriptionManager", () => {
     let wakeCount = 0;
 
     const mockPerspectiveClient = {
-      querySurrealDB: vi.fn(() => Promise.reject(new Error("network error"))),
+      querySparql: vi.fn(() => Promise.reject(new Error("network error"))),
     };
 
     const manager = new WakerSubscriptionManager({

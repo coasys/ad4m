@@ -3,7 +3,7 @@
 use axum::response::IntoResponse;
 use http_body_util::BodyExt;
 
-use crate::rest::errors::ApiError;
+use crate::api::errors::ApiError;
 
 async fn error_to_json(error: ApiError) -> (u16, serde_json::Value) {
     let response = error.into_response();
@@ -83,7 +83,7 @@ async fn error_response_is_json_content_type() {
 
 #[tokio::test]
 async fn capability_err_to_api_forbidden() {
-    use crate::rest::errors::capability_err_to_api;
+    use crate::api::errors::capability_err_to_api;
     let err = capability_err_to_api("Capability not permitted for this resource");
     let (status, _) = error_to_json(err).await;
     assert_eq!(status, 403);
@@ -91,7 +91,7 @@ async fn capability_err_to_api_forbidden() {
 
 #[tokio::test]
 async fn capability_err_to_api_unauthorized() {
-    use crate::rest::errors::capability_err_to_api;
+    use crate::api::errors::capability_err_to_api;
     let err = capability_err_to_api("Invalid token");
     let (status, _) = error_to_json(err).await;
     assert_eq!(status, 401);

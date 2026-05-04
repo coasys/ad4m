@@ -1,10 +1,10 @@
 import { NeighbourhoodClient } from "./NeighbourhoodClient";
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy";
 
-// Mock RestClient's subscribe to avoid real WebSocket connections
-jest.mock('../restClient', () => {
+// Mock ApiClient's subscribe to avoid real WebSocket connections
+jest.mock('../apiClient', () => {
   return {
-    RestClient: jest.fn().mockImplementation(() => ({
+    ApiClient: jest.fn().mockImplementation(() => ({
       get: jest.fn(),
       post: jest.fn(),
       put: jest.fn(),
@@ -48,8 +48,8 @@ describe("NeighbourhoodProxy", () => {
 
     // Track subscribe calls via the mock
     let subscribeCallCount = 0;
-    const { RestClient } = jest.requireMock('../restClient');
-    RestClient.mockImplementation(() => ({
+    const { ApiClient } = jest.requireMock('../apiClient');
+    ApiClient.mockImplementation(() => ({
       get: jest.fn(),
       post: jest.fn(),
       put: jest.fn(),

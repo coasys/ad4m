@@ -11,7 +11,7 @@ pub mod js_core;
 pub mod mcp;
 pub mod perspectives;
 mod prolog_service;
-pub mod rest;
+pub mod api;
 pub mod runtime_service;
 pub mod unyt_service;
 pub mod user_management;
@@ -622,6 +622,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             .enable_all()
             .build()
             .unwrap();
-        runtime.block_on(rest::start_server(config)).unwrap();
+        runtime.block_on(api::start_server(config)).unwrap();
     })
 }

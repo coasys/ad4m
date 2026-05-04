@@ -9,6 +9,9 @@ pub mod events_ws;
 pub mod types;
 pub mod ws_rpc;
 
+#[cfg(test)]
+mod types_tests;
+
 // ── WS-native handler modules ──
 pub mod agent_ws;
 pub mod ai_ws;
@@ -41,7 +44,7 @@ use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 /// Build the API router.
-pub fn rest_router(state: AppState) -> Router {
+pub fn api_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::any())
         .allow_methods([
@@ -121,7 +124,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         auto_permit_cap_requests: auto_permit,
     };
 
-    let app = rest_router(state);
+    let app = api_router(state);
 
     if let Some(tls_config) = &config.tls {
         let tls_port = tls_config.tls_port;
@@ -135,7 +138,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
             admin_credential: admin_credential.clone(),
             auto_permit_cap_requests: auto_permit,
         };
-        let tls_app = rest_router(tls_state);
+        let tls_app = api_router(tls_state);
 
         let rustls_config =
             axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)

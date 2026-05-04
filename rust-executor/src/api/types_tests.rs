@@ -2,7 +2,7 @@
 
 use serde_json::json;
 
-use crate::rest::types::*;
+use crate::api::types::*;
 
 // ── Agent request types ──
 
@@ -575,7 +575,7 @@ fn snake_case_rejected() {
 
 // ── AI Transcription request types ──
 
-use crate::rest::types::{
+use crate::api::types::{
     CloseTranscriptionRequest, FeedTranscriptionRequest, OpenTranscriptionRequest,
 };
 

@@ -9,7 +9,7 @@
     "build": "patch-package && tsc && pnpm run bundle",
     "bundle": "rollup -c rollup.config.js",
     "test": "jest --forceExit",
-    "generate:rest-types": "cd ../rust-executor && TS_RS_EXPORT_DIR=../core/src/generated/rest/ cargo test --lib 2>/dev/null && echo \"REST types generated to core/src/generated/rest/\""
+    "generate:api-types": "cd ../rust-executor && TS_RS_EXPORT_DIR=../core/src/generated/api/ cargo test --lib 2>/dev/null && echo \"API types generated to core/src/generated/api/\""
   },
   "repository": {
     "type": "git",

@@ -1,16 +1,16 @@
-import { RestClient } from "../restClient";
+import { ApiClient } from "../apiClient";
 import base64js from 'base64-js';
 import pako from 'pako'
 import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
 import { ModelInput, Model, ModelType } from "./AITypes"
-import type { PromptRequest, EmbedRequest, SetDefaultModelRequest } from "../generated/rest";
+import type { PromptRequest, EmbedRequest, SetDefaultModelRequest } from "../generated/api";
 
 export class AIClient {
-    #restClient: RestClient;
+    #apiClient: ApiClient;
     #transcriptionUnsubscribers: Map<string, () => void> = new Map();
 
-    constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedRestClient?: RestClient) {
-        this.#restClient = sharedRestClient || new RestClient(baseUrl, token);
+    constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedApiClient?: ApiClient) {
+        this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
     }
 
     private serializeModelInput(model: ModelInput): Record<string, unknown> {
@@ -23,44 +23,44 @@ export class AIClient {
     }
 
     async getModels(): Promise<Model[]> {
-        return this.#restClient.call<Model[]>('ai.models');
+        return this.#apiClient.call<Model[]>('ai.models');
     }
 
     async addModel(model: ModelInput): Promise<string> {
-        return this.#restClient.call<string>('ai.addModel', { model: this.serializeModelInput(model) });
+        return this.#apiClient.call<string>('ai.addModel', { model: this.serializeModelInput(model) });
     }
 
     async updateModel(modelId: string, model: ModelInput): Promise<boolean> {
-        return this.#restClient.call<boolean>('ai.updateModel', { id: modelId, model: this.serializeModelInput(model) });
+        return this.#apiClient.call<boolean>('ai.updateModel', { id: modelId, model: this.serializeModelInput(model) });
     }
 
     async removeModel(modelId: string): Promise<boolean> {
-        return this.#restClient.call<boolean>('ai.removeModel', { id: modelId });
+        return this.#apiClient.call<boolean>('ai.removeModel', { id: modelId });
     }
 
     async setDefaultModel(modelType: ModelType, modelId: string): Promise<boolean> {
-        return this.#restClient.call<boolean>('ai.setDefaultModel', { id: modelId, modelType });
+        return this.#apiClient.call<boolean>('ai.setDefaultModel', { id: modelId, modelType });
     }
 
     async getDefaultModel(modelType: ModelType): Promise<Model> {
-        return this.#restClient.call<Model>('ai.getDefaultModel', { modelType });
+        return this.#apiClient.call<Model>('ai.getDefaultModel', { modelType });
     }
 
     async tasks(): Promise<AITask[]> {
-        return this.#restClient.call<AITask[]>('ai.tasks');
+        return this.#apiClient.call<AITask[]>('ai.tasks');
     }
 
     async addTask(name: string, modelId: string, systemPrompt: string, promptExamples: { input: string, output: string }[], metaData?: string): Promise<AITask> {
         const task = new AITaskInput(name, modelId, systemPrompt, promptExamples, metaData);
-        return this.#restClient.call<AITask>('ai.addTask', { task });
+        return this.#apiClient.call<AITask>('ai.addTask', { task });
     }
 
     async removeTask(taskId: string): Promise<AITask> {
-        return this.#restClient.call<AITask>('ai.removeTask', { id: taskId });
+        return this.#apiClient.call<AITask>('ai.removeTask', { id: taskId });
     }
 
     async updateTask(taskId: string, task: AITask): Promise<AITask> {
-        return this.#restClient.call<AITask>('ai.updateTask', {
+        return this.#apiClient.call<AITask>('ai.updateTask', {
             id: taskId,
             task: {
                 name: task.name,
@@ -72,15 +72,15 @@ export class AIClient {
     }
 
     async modelLoadingStatus(model: string): Promise<AIModelLoadingStatus> {
-        return this.#restClient.call<AIModelLoadingStatus>('ai.modelLoadingStatus', { model });
+        return this.#apiClient.call<AIModelLoadingStatus>('ai.modelLoadingStatus', { model });
     }
 
     async prompt(taskId: string, prompt: string): Promise<string> {
-        return this.#restClient.call<string>('ai.prompt', { taskId, prompt });
+        return this.#apiClient.call<string>('ai.prompt', { taskId, prompt });
     }
 
     async embed(modelId: string, text: string): Promise<Array<number>> {
-        const aiEmbed = await this.#restClient.call<string>('ai.embed', { modelId, text });
+        const aiEmbed = await this.#apiClient.call<string>('ai.embed', { modelId, text });
 
         const compressed = base64js.toByteArray(aiEmbed);
         const decompressed = JSON.parse(pako.inflate(compressed, { to: 'string' }));
@@ -99,9 +99,9 @@ export class AIClient {
             timeBeforeSpeech?: number;
         }
     ): Promise<string> {
-        const streamId = await this.#restClient.call<string>('ai.transcriptionOpen', { modelId, params });
+        const streamId = await this.#apiClient.call<string>('ai.transcriptionOpen', { modelId, params });
 
-        const unsub = this.#restClient.subscribe(
+        const unsub = this.#apiClient.subscribe(
             (data) => {
                 if (data.type === 'transcription-text' && data.streamId === streamId && data.text) {
                     streamCallback(data.text as string);
@@ -116,7 +116,7 @@ export class AIClient {
 
     async closeTranscriptionStream(streamId: string): Promise<void> {
         this.#pendingStreamIds.delete(streamId);
-        await this.#restClient.call<void>('ai.transcriptionClose', { streamId });
+        await this.#apiClient.call<void>('ai.transcriptionClose', { streamId });
 
         const unsub = this.#transcriptionUnsubscribers.get(streamId);
         if (unsub) {
@@ -146,8 +146,8 @@ export class AIClient {
             return;
         }
 
-        const baseUrl = this.#restClient.getBaseUrl();
-        const token = this.#restClient.getToken();
+        const baseUrl = this.#apiClient.getBaseUrl();
+        const token = this.#apiClient.getToken();
 
         // Use slice to get only the relevant portion of the underlying ArrayBuffer
         // (Float32Array may be a view over a larger buffer)

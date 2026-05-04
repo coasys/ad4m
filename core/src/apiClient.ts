@@ -4,7 +4,7 @@ export interface WsEvent {
     [key: string]: unknown
 }
 
-/** Error thrown by RestClient when an RPC call fails. */
+/** Error thrown by ApiClient when an RPC call fails. */
 export class RestError extends Error {
     /** Error code (maps to HTTP status semantics: 400, 401, 403, 404, 500). */
     readonly status: number
@@ -40,7 +40,7 @@ interface PendingCall {
     timer: ReturnType<typeof setTimeout>
 }
 
-export class RestClient {
+export class ApiClient {
     private baseUrl: string
     private token?: string
 

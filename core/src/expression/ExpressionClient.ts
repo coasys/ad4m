@@ -1,14 +1,14 @@
-import { RestClient } from "../restClient";
+import { ApiClient } from "../apiClient";
 import { InteractionCall, InteractionMeta } from "../language/Language";
 import { ExpressionRendered } from "./Expression";
 import { Literal } from "../Literal";
-import type { CreateExpressionRequest, ExpressionManyRequest } from "../generated/rest";
+import type { CreateExpressionRequest, ExpressionManyRequest } from "../generated/api";
 
 export class ExpressionClient {
-    #restClient: RestClient
+    #apiClient: ApiClient
 
-    constructor(baseUrl: string, token?: string, sharedRestClient?: RestClient) {
-        this.#restClient = sharedRestClient || new RestClient(baseUrl, token)
+    constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
+        this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
     }
 
     async get(url: string, alwaysGet: boolean = false): Promise<ExpressionRendered> {
@@ -23,27 +23,27 @@ export class ExpressionClient {
             } catch(e) {}
         }
 
-        return this.#restClient.call<ExpressionRendered>('expression.get', { url })
+        return this.#apiClient.call<ExpressionRendered>('expression.get', { url })
     }
 
     async getMany(urls: string[]): Promise<ExpressionRendered[]> {
-        return this.#restClient.call<ExpressionRendered[]>('expression.getMany', { urls })
+        return this.#apiClient.call<ExpressionRendered[]>('expression.getMany', { urls })
     }
 
     async getRaw(url: string): Promise<string> {
-        return this.#restClient.call<string>('expression.get', { url, raw: true })
+        return this.#apiClient.call<string>('expression.get', { url, raw: true })
     }
 
     async create(content: unknown, languageAddress: string): Promise<string> {
         const serialized = JSON.stringify(content)
-        return this.#restClient.call<string>('expression.create', { content: serialized, languageAddress })
+        return this.#apiClient.call<string>('expression.create', { content: serialized, languageAddress })
     }
 
     async interactions(url: string): Promise<InteractionMeta[]> {
-        return this.#restClient.call<InteractionMeta[]>('expression.interactions', { url })
+        return this.#apiClient.call<InteractionMeta[]>('expression.interactions', { url })
     }
 
     async interact(url: string, interactionCall: InteractionCall): Promise<string|null> {
-        return this.#restClient.call<string|null>('expression.interact', { url, interactionCall })
+        return this.#apiClient.call<string|null>('expression.interact', { url, interactionCall })
     }
 }

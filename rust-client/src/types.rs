@@ -95,7 +95,9 @@ pub struct EntanglementProof {
     pub device_key: String,
     pub device_key_type: String,
     pub device_key_signed_by_did: Option<String>,
+    pub did: Option<String>,
     pub did_signed_by_device_key: Option<String>,
+    pub did_signing_key_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

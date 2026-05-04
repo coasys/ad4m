@@ -69,6 +69,9 @@ async fn handle_ws(
     ctx: Arc<RequestContext>,
     token: String,
 ) {
+    // Track last_seen at connect time (also updated on each RPC call below)
+    track_last_seen_from_token(token.clone()).await;
+
     let (mut ws_sink, mut ws_stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
