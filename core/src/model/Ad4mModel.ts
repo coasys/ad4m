@@ -3,11 +3,12 @@ import { Link } from "../links/Links";
 import { LinkQuery } from "../perspectives/LinkQuery";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomId } from "./util";
-import { getPropertiesMetadata, getRelationsMetadata, buildConformanceFilter } from "./decorators";
+import { getPropertiesMetadata, getRelationsMetadata, buildConformanceFilter, setPropertyRegistryEntry, setRelationRegistryEntry, Model } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { formatQueryValue, compileWhereClause } from "./query-utils";
 import { resolveParentPredicate } from "./query-common";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
+import type { SHACLShape } from "../shacl/SHACLShape";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
 import { buildSPARQLQuery } from "./query-sparql";
@@ -2098,6 +2099,97 @@ export class Ad4mModel {
     options: JSONSchemaToModelOptions
   ): typeof Ad4mModel {
     return buildModelFromJSONSchema(this, schema, options);
+  }
+
+  /**
+   * Creates a fully functional Ad4mModel subclass from a SHACL shape.
+   *
+   * Unlike `fromJSONSchema()`, no predicate inference is required —
+   * `SHACLShape` already contains the exact predicate URI in `path` for
+   * every property. The method reads each property's `path`, `maxCount`,
+   * `writable`, and `resolveLanguage` directly and writes them to the
+   * WeakMap metadata registries.
+   *
+   * Properties with `hasValue` (flag / type-discrimination markers) are
+   * registered as hidden flag entries so that the SPARQL query builder emits
+   * the fixed triple `?source <predicate> <value>` needed for type discrimination.
+   * Properties without a `name` field are skipped.
+   *
+   * **Backward-compat:** Old Flux SHACL shapes (created before `sh:hasValue`
+   * was persisted on property shapes) carry the flag value only in
+   * `shape.constructor_actions` as the `target` of an `addLink` action.
+   * This method recovers those values so that old perspectives are queried
+   * with the correct type-discriminator triple.
+   *
+   * @param shape - SHACL node shape (as returned by `PerspectiveProxy.getAllShacl()`)
+   * @param name  - Class name to assign (e.g. "Channel")
+   * @returns Generated Ad4mModel subclass, ready for querying
+   */
+  static fromSHACL(shape: SHACLShape, name: string): typeof Ad4mModel {
+    const DynamicModelClass = class extends (this as any) {} as unknown as typeof Ad4mModel;
+    (DynamicModelClass as any).className = name;
+    (DynamicModelClass.prototype as any).className = name;
+
+    // Build a backward-compat fallback map: predicate → fixed-IRI-value from
+    // constructor actions. Old SHACL stores (created before sh:hasValue was
+    // persisted on the property shape) don't carry sh:hasValue on properties,
+    // but the shape-level constructor_actions always contain an addLink action
+    // with the fixed flag value as the target.
+    const flagValueFromConstructor = new Map<string, string>();
+    for (const action of shape.constructor_actions ?? []) {
+      if (
+        action.action === 'addLink' &&
+        typeof action.predicate === 'string' &&
+        typeof action.target === 'string' &&
+        action.target !== 'value' &&
+        !action.target.startsWith('literal:')
+      ) {
+        flagValueFromConstructor.set(action.predicate, action.target);
+      }
+    }
+
+    for (const prop of shape.properties) {
+      const resolvedHasValue = prop.hasValue ?? flagValueFromConstructor.get(prop.path);
+
+      if (resolvedHasValue !== undefined) {
+        const flagKey = prop.name ?? `_flag_${prop.path.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+        setPropertyRegistryEntry(DynamicModelClass, flagKey, {
+          through: prop.path,
+          required: true,
+          initial: resolvedHasValue,
+          flag: true,
+          writable: false,
+          readOnly: true,
+        });
+        continue;
+      }
+
+      // Skip properties without a declared name
+      if (!prop.name) continue;
+
+      const isCollection = prop.maxCount === undefined || prop.maxCount > 1;
+
+      if (isCollection) {
+        setRelationRegistryEntry(DynamicModelClass, prop.name, {
+          predicate: prop.path,
+          kind: 'hasMany',
+          ...(prop.local !== undefined && { local: prop.local }),
+          ...(prop.getter !== undefined && { getter: prop.getter }),
+        });
+      } else {
+        setPropertyRegistryEntry(DynamicModelClass, prop.name, {
+          through: prop.path,
+          writable: prop.writable ?? true,
+          ...(prop.resolveLanguage !== undefined && { resolveLanguage: prop.resolveLanguage }),
+          ...(prop.local !== undefined && { local: prop.local }),
+        });
+      }
+    }
+
+    const ModelDecorator = Model({ name });
+    ModelDecorator(DynamicModelClass);
+
+    return DynamicModelClass as typeof Ad4mModel;
   }
 }
 
