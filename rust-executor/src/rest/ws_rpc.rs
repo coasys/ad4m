@@ -69,9 +69,6 @@ async fn handle_ws(
     ctx: Arc<RequestContext>,
     token: String,
 ) {
-    // Track last_seen once at connect time
-    track_last_seen_from_token(token.clone()).await;
-
     let (mut ws_sink, mut ws_stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
@@ -154,6 +151,10 @@ async fn handle_ws(
                     .send(json!({"id": id, "error": {"code": 401, "message": e}}).to_string());
                 return;
             }
+            // Refresh last_seen on every RPC dispatch so long-lived
+            // connections don't appear stale. Internally throttled to one
+            // DB write per 5 minutes per user.
+            track_last_seen_from_token(token_for_dispatch.clone()).await;
             let result = handler_map.dispatch(&msg_type, params, ctx).await;
             let response = match result {
                 Ok(val) => json!({"id": id, "result": val}),
