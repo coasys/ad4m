@@ -35,7 +35,6 @@ pub enum RuntimeFunctions {
     },
     VerifySignature {
         did: String,
-        did_signing_key_id: Option<String>,
         data: String,
         signed_data: String,
     },
@@ -152,18 +151,12 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
         }
         RuntimeFunctions::VerifySignature {
             did,
-            did_signing_key_id,
             data,
             signed_data,
         } => {
             let result = ad4m_client
                 .runtime
-                .verify_string_signed_by_did(
-                    did,
-                    did_signing_key_id.unwrap_or_default(),
-                    data,
-                    signed_data,
-                )
+                .verify_string_signed_by_did(did, String::new(), data, signed_data)
                 .await?;
             println!("{:?}", result);
         }

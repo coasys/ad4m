@@ -71,6 +71,9 @@ pub enum PerspectiveFunctions {
     /// Run Prolog / SDNA query on perspective with given uuid
     Infer { id: String, query: String },
 
+    /// Stay connected and print any changes (links added/removed) to the perspective
+    Watch { id: String },
+
     /// Interactive Perspective shell based on Prolog/SDNA runtime
     Repl { id: String },
 
@@ -171,6 +174,56 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
         PerspectiveFunctions::Infer { id, query } => {
             let results = ad4m_client.perspectives.infer(id, query).await?;
             print_prolog_results(results)?;
+        }
+        PerspectiveFunctions::Watch { id } => {
+            println!("Watching perspective {} for link changes...", id);
+            println!("(Press Ctrl+C to stop)\n");
+            let mut rx = ad4m_client.subscribe_events();
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        let event_uuid = event.get("uuid").and_then(|v| v.as_str()).unwrap_or("");
+                        if event_uuid != id {
+                            continue;
+                        }
+                        match event_type {
+                            "link-added" | "link-removed" | "link-updated" => {
+                                let label = match event_type {
+                                    "link-added" => "\x1b[32m+ ADDED",
+                                    "link-removed" => "\x1b[31m- REMOVED",
+                                    "link-updated" => "\x1b[33m~ UPDATED",
+                                    _ => unreachable!(),
+                                };
+                                if let Some(link_val) =
+                                    event.get("link").or_else(|| event.get("data"))
+                                {
+                                    if let Ok(link) = serde_json::from_value::<
+                                        ad4m_client::types::LinkExpression,
+                                    >(
+                                        link_val.clone()
+                                    ) {
+                                        print!("{}\x1b[0m ", label);
+                                        print_link(link.into());
+                                    } else {
+                                        println!("{}\x1b[0m {}", label, link_val);
+                                    }
+                                } else {
+                                    println!("{}\x1b[0m {}", label, event);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        eprintln!("Warning: dropped {} events (too slow)", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        eprintln!("Event stream closed");
+                        break;
+                    }
+                }
+            }
         }
         PerspectiveFunctions::Snapshot { id } => {
             let result = ad4m_client.perspectives.snapshot(id).await?;

@@ -34,6 +34,7 @@ pub struct Ad4mClient {
     pub perspectives: PerspectivesClient,
     pub expressions: ExpressionsClient,
     pub runtime: RuntimeClient,
+    ws: Arc<WsRpcClient>,
 }
 
 impl Ad4mClient {
@@ -46,7 +47,14 @@ impl Ad4mClient {
             neighbourhoods: NeighbourhoodsClient::new(ws.clone()),
             perspectives: PerspectivesClient::new(ws.clone()),
             expressions: ExpressionsClient::new(ws.clone()),
-            runtime: RuntimeClient::new(ws),
+            runtime: RuntimeClient::new(ws.clone()),
+            ws,
         })
+    }
+
+    /// Subscribe to server-push events (link changes, agent status, etc.).
+    /// Returns a broadcast receiver yielding raw event JSON values.
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<serde_json::Value> {
+        self.ws.subscribe_events()
     }
 }

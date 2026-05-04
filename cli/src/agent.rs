@@ -35,17 +35,13 @@ pub enum AgentFunctions {
         device_key: String,
         device_key_signed_by_did: String,
         device_key_type: String,
-        did: String,
         did_signed_by_device_key: String,
-        did_signing_key_id: String,
     },
     DeleteEntanglementProof {
         device_key: String,
         device_key_signed_by_did: String,
         device_key_type: String,
-        did: String,
         did_signed_by_device_key: String,
-        did_signing_key_id: String,
     },
     EntanglementProofPreFlight {
         device_key: String,
@@ -55,6 +51,8 @@ pub enum AgentFunctions {
         request_id: String,
         rand: String,
     },
+    /// Stay connected and print any agent status changed events
+    Watch {},
 }
 
 pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()> {
@@ -138,9 +136,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             device_key,
             device_key_signed_by_did,
             device_key_type,
-            did: _did,
             did_signed_by_device_key,
-            did_signing_key_id: _did_signing_key_id,
         } => {
             let input = EntanglementProof {
                 device_key,
@@ -158,9 +154,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             device_key,
             device_key_signed_by_did,
             device_key_type,
-            did: _did,
             did_signed_by_device_key,
-            did_signing_key_id: _did_signing_key_id,
         } => {
             let input = EntanglementProof {
                 device_key,
@@ -190,6 +184,42 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
                 .retrieve_capability(request_id, rand)
                 .await?;
             println!("JWT: {:#?}", result);
+        }
+        AgentFunctions::Watch {} => {
+            println!("Watching for agent status changes...");
+            println!("(Press Ctrl+C to stop)\n");
+            let mut rx = ad4m_client.subscribe_events();
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        match event_type {
+                            "agent-status-changed" => {
+                                if let Some(agent) = event.get("agent") {
+                                    println!("Agent status changed: {}", agent);
+                                } else {
+                                    println!("Agent status changed: {}", event);
+                                }
+                            }
+                            "agent-updated" => {
+                                if let Some(agent) = event.get("agent") {
+                                    println!("Agent updated: {}", agent);
+                                } else {
+                                    println!("Agent updated: {}", event);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        eprintln!("Warning: dropped {} events (too slow)", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        eprintln!("Event stream closed");
+                        break;
+                    }
+                }
+            }
         }
     };
     Ok(())

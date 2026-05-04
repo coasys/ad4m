@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{broadcast, oneshot, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
@@ -44,6 +44,7 @@ type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<Tcp
 pub struct WsRpcClient {
     sender: Arc<Mutex<WsSink>>,
     pending: PendingMap,
+    events: broadcast::Sender<Value>,
 }
 
 fn to_ws_url(executor_url: &str, token: &str) -> String {
@@ -70,7 +71,11 @@ impl WsRpcClient {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let pending_reader = pending.clone();
 
-        // Background reader task: dispatches responses to pending callers
+        let (events_tx, _) = broadcast::channel::<Value>(256);
+        let events_tx_reader = events_tx.clone();
+
+        // Background reader task: dispatches RPC responses to pending callers
+        // and broadcasts server-push events to subscribers.
         tokio::spawn(async move {
             while let Some(msg) = read.next().await {
                 let text = match msg {
@@ -80,12 +85,17 @@ impl WsRpcClient {
                     _ => continue,
                 };
 
-                let resp: RpcResponse = match serde_json::from_str(&text) {
-                    Ok(r) => r,
-                    Err(_) => continue, // ignore unparseable messages
+                let parsed: Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
                 };
 
-                if let Some(id) = resp.id {
+                // RPC responses have an "id" field; events do not.
+                if let Some(id) = parsed.get("id").and_then(|v| v.as_str()).map(str::to_owned) {
+                    let resp: RpcResponse = match serde_json::from_value(parsed) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
                     if let Some(tx) = pending_reader.lock().await.remove(&id) {
                         if let Some(error) = resp.error {
                             let _ = tx.send(Err(anyhow!(
@@ -97,9 +107,10 @@ impl WsRpcClient {
                             let _ = tx.send(Ok(resp.result.unwrap_or(Value::Null)));
                         }
                     }
+                } else {
+                    // Server-push event — broadcast to subscribers
+                    let _ = events_tx_reader.send(parsed);
                 }
-                // Server-push events without matching pending id are ignored
-                // (the rust-client doesn't subscribe to events currently)
             }
 
             // Connection closed — reject all pending calls
@@ -112,6 +123,7 @@ impl WsRpcClient {
         Ok(Self {
             sender: Arc::new(Mutex::new(write)),
             pending,
+            events: events_tx,
         })
     }
 
@@ -150,6 +162,13 @@ impl WsRpcClient {
     pub async fn call_void(&self, msg_type: &str, params: Value) -> Result<()> {
         let _: Value = self.call(msg_type, params).await?;
         Ok(())
+    }
+
+    /// Subscribe to server-push events.
+    /// Returns a broadcast receiver that yields raw event JSON values.
+    /// Each event has a `"type"` field indicating the event kind.
+    pub fn subscribe_events(&self) -> broadcast::Receiver<Value> {
+        self.events.subscribe()
     }
 }
 
