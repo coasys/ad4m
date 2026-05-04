@@ -290,7 +290,10 @@ mod tests {
         let url = format!("http://127.0.0.1:{}", addr.port());
         let client = WsRpcClient::connect(&url, "").await.unwrap();
 
-        let result: Value = client.call("test.echo", serde_json::json!({"key": "value"})).await.unwrap();
+        let result: Value = client
+            .call("test.echo", serde_json::json!({"key": "value"}))
+            .await
+            .unwrap();
         assert_eq!(result, serde_json::json!({"hello": "world"}));
     }
 
@@ -323,7 +326,15 @@ mod tests {
         let result: Result<Value> = client.call("test.forbidden", serde_json::json!({})).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("403"), "Error should contain code: {}", err_msg);
-        assert!(err_msg.contains("Forbidden"), "Error should contain message: {}", err_msg);
+        assert!(
+            err_msg.contains("403"),
+            "Error should contain code: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("Forbidden"),
+            "Error should contain message: {}",
+            err_msg
+        );
     }
 }
