@@ -142,3 +142,39 @@ pub fn stop_proxy(proxy: State<'_, ProxyState>) {
 fn format_subdomain(subdomain: &str) -> String {
     subdomain.replace("did:key:", "")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_subdomain_strips_did_key_prefix() {
+        let result = format_subdomain("did:key:z6MkweDLCqTEeM3DxR6BHqWRn3q5tW7LmxSJR");
+        assert_eq!(result, "z6MkweDLCqTEeM3DxR6BHqWRn3q5tW7LmxSJR");
+    }
+
+    #[test]
+    fn format_subdomain_no_prefix_unchanged() {
+        let result = format_subdomain("z6MkweDLCqTEeM3DxR6BHqWRn3q5tW7LmxSJR");
+        assert_eq!(result, "z6MkweDLCqTEeM3DxR6BHqWRn3q5tW7LmxSJR");
+    }
+
+    #[test]
+    fn format_subdomain_empty_string() {
+        let result = format_subdomain("");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn format_subdomain_only_prefix() {
+        let result = format_subdomain("did:key:");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn format_subdomain_multiple_occurrences() {
+        // If somehow "did:key:" appears multiple times, all are stripped
+        let result = format_subdomain("did:key:abc:did:key:xyz");
+        assert_eq!(result, "abc:xyz");
+    }
+}

@@ -152,3 +152,178 @@ impl WsRpcClient {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_ws_url_converts_http_to_ws() {
+        let url = to_ws_url("http://localhost:12000", "");
+        assert_eq!(url, "ws://localhost:12000/api/v1/ws");
+    }
+
+    #[test]
+    fn to_ws_url_converts_https_to_wss() {
+        let url = to_ws_url("https://remote.host:443", "");
+        assert_eq!(url, "wss://remote.host:443/api/v1/ws");
+    }
+
+    #[test]
+    fn to_ws_url_appends_token_query_param() {
+        let url = to_ws_url("http://localhost:12000", "my-jwt-token");
+        assert_eq!(url, "ws://localhost:12000/api/v1/ws?token=my-jwt-token");
+    }
+
+    #[test]
+    fn to_ws_url_encodes_special_chars_in_token() {
+        let url = to_ws_url("http://localhost:12000", "tok en+special=chars&more");
+        assert!(url.contains("token=tok%20en%2Bspecial%3Dchars%26more"));
+    }
+
+    #[test]
+    fn to_ws_url_strips_trailing_slash() {
+        let url = to_ws_url("http://localhost:12000/", "");
+        assert_eq!(url, "ws://localhost:12000/api/v1/ws");
+    }
+
+    #[test]
+    fn to_ws_url_empty_token_no_query_param() {
+        let url = to_ws_url("http://localhost:12000", "");
+        assert!(!url.contains("?token="));
+        assert!(!url.contains("?token"));
+    }
+
+    #[test]
+    fn next_id_increments() {
+        let id1 = next_id();
+        let id2 = next_id();
+        let n1: u64 = id1.parse().unwrap();
+        let n2: u64 = id2.parse().unwrap();
+        assert_eq!(n2, n1 + 1);
+    }
+
+    #[test]
+    fn rpc_message_serializes_correctly() {
+        let msg = RpcMessage {
+            id: "42".to_string(),
+            msg_type: "agent.status".to_string(),
+            params: serde_json::json!({}),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["id"], "42");
+        assert_eq!(json["type"], "agent.status");
+        assert_eq!(json["params"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn rpc_response_deserializes_success() {
+        let json = r#"{"id": "1", "result": {"status": "ok"}}"#;
+        let resp: RpcResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, Some("1".to_string()));
+        assert!(resp.result.is_some());
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn rpc_response_deserializes_error() {
+        let json = r#"{"id": "2", "error": {"code": 401, "message": "Unauthorized"}}"#;
+        let resp: RpcResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, Some("2".to_string()));
+        assert!(resp.result.is_none());
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, Some(401));
+        assert_eq!(err.message, Some("Unauthorized".to_string()));
+    }
+
+    #[tokio::test]
+    async fn call_fails_on_closed_channel() {
+        // Create a client with a mock sender that simulates a closed connection
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn a WS server that immediately closes
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = accept_async(stream).await.unwrap();
+            drop(ws); // Close immediately
+        });
+
+        let url = format!("http://127.0.0.1:{}", addr.port());
+        let client = WsRpcClient::connect(&url, "").await.unwrap();
+
+        // Wait for server to close
+        server.await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Call should fail because connection is closed
+        let result: Result<Value> = client.call("test.method", serde_json::json!({})).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn call_receives_response() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn a WS server that echoes back a result
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            if let Some(Ok(Message::Text(text))) = ws.next().await {
+                let req: Value = serde_json::from_str(&text).unwrap();
+                let id = req["id"].as_str().unwrap().to_string();
+                let response = serde_json::json!({
+                    "id": id,
+                    "result": {"hello": "world"}
+                });
+                ws.send(Message::Text(response.to_string())).await.unwrap();
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{}", addr.port());
+        let client = WsRpcClient::connect(&url, "").await.unwrap();
+
+        let result: Value = client.call("test.echo", serde_json::json!({"key": "value"})).await.unwrap();
+        assert_eq!(result, serde_json::json!({"hello": "world"}));
+    }
+
+    #[tokio::test]
+    async fn call_returns_error_from_server() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn a WS server that returns an error response
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            if let Some(Ok(Message::Text(text))) = ws.next().await {
+                let req: Value = serde_json::from_str(&text).unwrap();
+                let id = req["id"].as_str().unwrap().to_string();
+                let response = serde_json::json!({
+                    "id": id,
+                    "error": {"code": 403, "message": "Forbidden"}
+                });
+                ws.send(Message::Text(response.to_string())).await.unwrap();
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{}", addr.port());
+        let client = WsRpcClient::connect(&url, "").await.unwrap();
+
+        let result: Result<Value> = client.call("test.forbidden", serde_json::json!({})).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("403"), "Error should contain code: {}", err_msg);
+        assert!(err_msg.contains("Forbidden"), "Error should contain message: {}", err_msg);
+    }
+}
