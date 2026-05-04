@@ -8,7 +8,7 @@ import { AIClient } from './ai/AIClient'
 import { RestClient } from './restClient'
 
 /**
- * Client for the Ad4m interface wrapping REST API calls
+ * Client for the Ad4m interface wrapping WebSocket RPC calls
  * for convenient use in user facing code.
  * 
  * Aggregates the six sub-clients:

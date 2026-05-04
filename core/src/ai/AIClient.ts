@@ -102,7 +102,6 @@ export class AIClient {
         const streamId = await this.#restClient.call<string>('ai.transcriptionOpen', { modelId, params });
 
         const unsub = this.#restClient.subscribe(
-            '/api/v1/events',
             (data) => {
                 if (data.type === 'transcription-text' && data.streamId === streamId && data.text) {
                     streamCallback(data.text as string);

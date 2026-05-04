@@ -193,7 +193,6 @@ export class PerspectiveClient {
 
     subscribeToQueryUpdates(subscriptionId: string, onData: (result: AllInstancesResult) => void): () => void {
         const unsub = this.#restClient.subscribe(
-            '/api/v1/events',
             (data) => {
                 const event = data as Record<string, unknown>
                 if (event.type !== 'query-subscription-update') return
@@ -326,7 +325,7 @@ export class PerspectiveClient {
     }
 
     subscribePerspectiveAdded() {
-        const unsub = this.#restClient.subscribe('/api/v1/events', (data) => {
+        const unsub = this.#restClient.subscribe((data) => {
             if (data.type === 'perspective-added') {
                 this.#perspectiveAddedCallbacks.forEach(cb => cb(data.perspective as PerspectiveHandle))
             }
@@ -339,7 +338,7 @@ export class PerspectiveClient {
     }
 
     subscribePerspectiveUpdated() {
-        const unsub = this.#restClient.subscribe('/api/v1/events', (data) => {
+        const unsub = this.#restClient.subscribe((data) => {
             if (data.type === 'perspective-updated') {
                 this.#perspectiveUpdatedCallbacks.forEach(cb => cb(data.perspective as PerspectiveHandle))
             }
@@ -353,7 +352,6 @@ export class PerspectiveClient {
 
     async addPerspectiveSyncStateChangeListener(uuid: String, cb: SyncStateChangeCallback[]): Promise<void> {
         const unsub = this.#restClient.subscribe(
-            '/api/v1/events',
             (data) => {
                 if (data.type === 'sync-state-change' && data.uuid === uuid) {
                     cb.forEach(c => c(data.state as PerspectiveState))
@@ -369,7 +367,7 @@ export class PerspectiveClient {
     }
 
     subscribePerspectiveRemoved() {
-        const unsub = this.#restClient.subscribe('/api/v1/events', (data) => {
+        const unsub = this.#restClient.subscribe((data) => {
             if (data.type === 'perspective-removed') {
                 this.#perspectiveRemovedCallbacks.forEach(cb => cb(data.uuid as string))
             }
@@ -379,7 +377,6 @@ export class PerspectiveClient {
 
     async addPerspectiveLinkAddedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
         const unsub = this.#restClient.subscribe(
-            '/api/v1/events',
             (data) => {
                 if (data.type === 'link-added' && data.perspectiveUuid === uuid) {
                     cb.forEach(c => c(data.link as LinkExpression))
@@ -389,12 +386,11 @@ export class PerspectiveClient {
         let existing = this.#linkUnsubscribers.get(uuid as string) || []
         existing.push(unsub)
         this.#linkUnsubscribers.set(uuid as string, existing)
-        await this.#restClient.waitForSubscription('/api/v1/events')
+        await this.#restClient.waitForSubscription()
     }
 
     async addPerspectiveLinkRemovedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
         const unsub = this.#restClient.subscribe(
-            '/api/v1/events',
             (data) => {
                 if (data.type === 'link-removed' && data.perspectiveUuid === uuid) {
                     const link = data.link as LinkExpression & { status?: unknown }
@@ -408,12 +404,11 @@ export class PerspectiveClient {
         let existing = this.#linkUnsubscribers.get(uuid as string) || []
         existing.push(unsub)
         this.#linkUnsubscribers.set(uuid as string, existing)
-        await this.#restClient.waitForSubscription('/api/v1/events')
+        await this.#restClient.waitForSubscription()
     }
 
     async addPerspectiveLinkUpdatedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
         const unsub = this.#restClient.subscribe(
-            '/api/v1/events',
             (data) => {
                 if (data.type === 'link-updated' && data.perspectiveUuid === uuid) {
                     const newLink = data.newLink as LinkExpression & { status?: unknown }
@@ -431,7 +426,7 @@ export class PerspectiveClient {
         let existing = this.#linkUnsubscribers.get(uuid as string) || []
         existing.push(unsub)
         this.#linkUnsubscribers.set(uuid as string, existing)
-        await this.#restClient.waitForSubscription('/api/v1/events')
+        await this.#restClient.waitForSubscription()
     }
 
     getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {

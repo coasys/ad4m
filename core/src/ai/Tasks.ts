@@ -1,4 +1,3 @@
-import { string } from "yargs";
 export class AIPromptExamplesInput {
     input: string;
     output: string;

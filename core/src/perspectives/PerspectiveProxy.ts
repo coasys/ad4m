@@ -21,7 +21,7 @@ type QueryCallback = (result: AllInstancesResult) => void;
 
 
 
-// Generic subscription interface that matches Apollo's Subscription
+// Generic unsubscribe interface for event subscriptions
 interface Unsubscribable {
     unsubscribe(): void;
 }

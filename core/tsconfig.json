@@ -1,6 +1,6 @@
 {
-  "include": ["./src/**/*.ts", "./src/*.ts", "./shims"],
-  "exclude": ["./src/*.test.ts", "./src/**/*Resolver.ts", "./src/**/PubSub.ts"],
+  "include": ["./src/**/*.ts", "./src/*.ts"],
+  "exclude": ["./src/*.test.ts", "./src/**/*.test.ts"],
   "compilerOptions": {
     /* Visit https://aka.ms/tsconfig.json to read more about this file */
     /* Basic Options */

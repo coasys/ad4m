@@ -21,7 +21,7 @@ export class ExpressionProofInput {
     invalid?: boolean;
 }
 
-//Note having any as return type here fixes compilation errors but I think we loose the ExpressionClass type in resulting .d.ts gql files
+//Note having any as return type here fixes compilation errors but we lose the ExpressionClass type in resulting .d.ts files
 export function ExpressionGeneric<DataType>(DataTypeClass: ClassType<DataType>): any {
     abstract class ExpressionClass {
         author: string;

@@ -1,5 +1,5 @@
-/** Shape of event data parsed from JSON. Callers can narrow via generics. */
-export interface SseEvent {
+/** Shape of event data pushed via WebSocket. Callers can narrow via generics. */
+export interface WsEvent {
     type: string
     [key: string]: unknown
 }
@@ -229,7 +229,7 @@ export class RestClient {
 
     // ── Event subscriptions (same interface as before) ──────────────────────
 
-    subscribe<T = SseEvent>(path: string, callback: (data: T) => void): () => void {
+    subscribe<T = WsEvent>(callback: (data: T) => void): () => void {
         this._wsCallbacks.add(callback as (data: unknown) => void)
         this._ensureWs()
 
@@ -242,7 +242,7 @@ export class RestClient {
     }
 
     /** Wait until the WebSocket connection is established. */
-    async waitForSubscription(path: string): Promise<void> {
+    async waitForSubscription(): Promise<void> {
         await this._ready()
     }
 

@@ -27,7 +27,7 @@ export class NotificationInput {
 
     // This is a query which will be executed on every perspective change.
     // All matched unbound variables will be part of the triggerMatch, i.e.
-    // the content that will be sent to the launcher via subscription 
+    // the content that will be sent to the launcher via event push
     // and to the webhook.
     trigger: string;
 

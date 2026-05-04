@@ -89,7 +89,6 @@ export class NeighbourhoodClient {
 
     async subscribeToSignals(perspectiveUUID: string): Promise<void> {
         const unsub = this.#restClient.subscribe(
-            '/api/v1/events',
             (data) => {
                 if (data.type === 'signal') {
                     this.dispatchSignal(perspectiveUUID, data.signal)
