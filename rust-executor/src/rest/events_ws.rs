@@ -420,7 +420,8 @@ pub(crate) fn matches_signal_recipient(msg: &str, current_did: Option<&str>) -> 
     match serde_json::from_str::<serde_json::Value>(msg) {
         Ok(serde_json::Value::Object(map)) => match map.get("recipient") {
             Some(serde_json::Value::String(recipient)) => {
-                current_did.is_some_and(|did| did == recipient)
+                // If no DID resolved (e.g., connection before agent init), allow all signals
+                current_did.map_or(true, |did| did == recipient)
             }
             Some(serde_json::Value::Null) | None => true,
             _ => false,
