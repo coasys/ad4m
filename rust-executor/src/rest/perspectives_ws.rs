@@ -29,15 +29,18 @@ fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpcError>
 async fn get_perspective_with_access(
     uuid: &str,
     auth_token: &str,
+    is_admin: bool,
 ) -> Result<PerspectiveInstance, WsRpcError> {
     let perspective = get_perspective_or_404(uuid)?;
-    let user_email = user_email_from_token(auth_token.to_string());
 
-    let handle = perspective.persisted.lock().await.clone();
-    if !can_access_perspective(&user_email, &handle) {
-        return Err(WsRpcError::forbidden(
-            "Access denied: You don't have permission to access this perspective",
-        ));
+    if !is_admin {
+        let user_email = user_email_from_token(auth_token.to_string());
+        let handle = perspective.persisted.lock().await.clone();
+        if !can_access_perspective(&user_email, &handle) {
+            return Err(WsRpcError::forbidden(
+                "Access denied: You don't have permission to access this perspective",
+            ));
+        }
     }
 
     Ok(perspective)
@@ -100,9 +103,18 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let user_email = user_email_from_token(ctx.auth_token.clone());
     let all: Vec<PerspectiveInstance> = crate::perspectives::all_perspectives();
 
+    // Admin sees everything; regular users see only their own perspectives
+    if ctx.is_admin_credential {
+        let mut handles: Vec<PerspectiveHandle> = Vec::new();
+        for p in all {
+            handles.push(p.persisted.lock().await.clone());
+        }
+        return Ok(serde_json::to_value(handles)?);
+    }
+
+    let user_email = user_email_from_token(ctx.auth_token.clone());
     let mut filtered: Vec<PerspectiveHandle> = Vec::new();
     for p in all {
         let handle = p.persisted.lock().await.clone();
@@ -125,7 +137,7 @@ async fn get_perspective_handler(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let handle = perspective.persisted.lock().await.clone();
     Ok(serde_json::to_value(handle)?)
 }
@@ -138,7 +150,7 @@ async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let links = perspective
         .get_links(&LinkQuery {
             source: None,
@@ -163,7 +175,7 @@ async fn publish_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let _perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let _perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     Err(WsRpcError::not_implemented(
         "publish_snapshot not yet implemented",
     ))
@@ -177,7 +189,7 @@ async fn query_links(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
 
     let query = LinkQuery {
         source: params.opt_str("source"),
@@ -247,7 +259,7 @@ async fn update_perspective_handler(
     let body: UpdatePerspectiveRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let mut handle = perspective.persisted.lock().await.clone();
     handle.name = Some(body.name);
     update_perspective(&handle)
@@ -265,7 +277,7 @@ async fn delete_perspective(params: Value, ctx: Arc<RequestContext>) -> Result<V
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let _perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let _perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     remove_perspective(&uuid).await;
     Ok(Value::Bool(true))
 }
@@ -282,7 +294,7 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
     let body: AddLinkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let status = parse_link_status(body.status.as_deref());
@@ -308,7 +320,7 @@ async fn add_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let body: AddLinksBulkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let status = parse_link_status(body.status.as_deref());
@@ -342,7 +354,7 @@ async fn remove_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     let body: RemoveLinksBulkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     if let Some(batch_id) = body.batch_id {
@@ -385,7 +397,7 @@ async fn link_mutations(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let body: LinkMutationsRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let status = parse_link_status(body.status.as_deref());
@@ -419,7 +431,7 @@ async fn add_link_expression(params: Value, ctx: Arc<RequestContext>) -> Result<
     let body: AddLinkExpressionRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
 
     let status = parse_link_status(body.status.as_deref());
 
@@ -443,7 +455,7 @@ async fn update_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     let body: UpdateLinkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let result = perspective
@@ -470,7 +482,7 @@ async fn remove_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     let body: RemoveLinkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
 
     let link_expr = LinkExpression::from_input_without_proof(body.link);
     perspective
@@ -490,7 +502,7 @@ async fn query_prolog(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     .map_err(|e| WsRpcError::forbidden(e))?;
 
     let query = params.require_str("query")?;
-    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let res = perspective
@@ -512,7 +524,7 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let engine = params
         .opt_str("engine")
         .unwrap_or_else(|| "sparql".to_string());
-    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
 
     match engine.as_str() {
         "sparql" => {
@@ -542,7 +554,7 @@ async fn add_sdna(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
     let body: AddSdnaRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let sdna_type = SdnaType::from_string(&body.sdna_type)
@@ -573,7 +585,7 @@ async fn execute_commands(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     let body: ExecuteCommandsRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let commands: Vec<crate::perspectives::perspective_instance::Command> =
@@ -611,7 +623,7 @@ async fn create_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let batch_id = perspective.create_batch().await;
 
     Ok(Value::String(batch_id))
@@ -628,7 +640,7 @@ async fn commit_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let body: CommitBatchRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let diff = perspective
@@ -654,7 +666,7 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     let body: SubscribeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let user_email = user_email_from_token(ctx.auth_token.clone());
 
     let (subscription_id, result) = perspective
@@ -679,7 +691,7 @@ async fn subscribe_surreal_query(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let _ = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let _ = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     Err(WsRpcError::not_implemented(
         "subscribe_surreal_query not yet implemented",
     ))
@@ -690,7 +702,7 @@ async fn keep_alive_query(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     let body: KeepAliveQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     perspective
         .keepalive_query(body.subscription_id)
         .await
@@ -704,7 +716,7 @@ async fn dispose_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
     let body: DisposeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     perspective
         .dispose_query_subscription(body.subscription_id)
         .await
@@ -724,7 +736,7 @@ async fn create_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let body: CreateSubjectRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let (resolved_class_name, parsed_initial_values) =
@@ -774,7 +786,7 @@ async fn get_subject_data(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     let body: GetSubjectDataRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token).await?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx.auth_token, ctx.is_admin_credential).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let subject_class = crate::perspectives::perspective_instance::SubjectClassOption {
