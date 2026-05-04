@@ -66,6 +66,3 @@ export function getHue(str: string): number {
   return ((hash % 360) + 360) % 360;
 }
 
-// Re-export getAd4mClient for backward compatibility with hooks packages
-export { getAd4mClient } from "./index";
-

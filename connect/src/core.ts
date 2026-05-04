@@ -398,8 +398,6 @@ export default class Ad4mConnect extends EventTarget {
     const referrerOrigin = document.referrer ? new URL(document.referrer).origin : null;
     if (referrerOrigin && this.options.allowedOrigins?.includes(referrerOrigin)) {
       parentOrigin = referrerOrigin;
-    } else if (referrerOrigin) {
-      parentOrigin = referrerOrigin;
     } else if (this.options.allowedOrigins && this.options.allowedOrigins.length === 1) {
       parentOrigin = this.options.allowedOrigins[0];
     }
