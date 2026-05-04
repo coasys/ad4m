@@ -3,7 +3,6 @@
 //! All SDK operations go through the WebSocket at `/api/v1/ws`.
 //! The only HTTP routes are health, info, and binary audio feed.
 
-pub mod audio_ws;
 pub mod auth;
 pub mod errors;
 pub mod events_ws;
@@ -94,8 +93,6 @@ pub fn rest_router(state: AppState) -> Router {
             .route("/ws", get(ws_rpc::ws_rpc))
             // ── WebSocket Events (event stream) ──
             .route("/ws/events", get(events_ws::events_ws))
-            // ── WebSocket Audio (binary audio stream) ──
-            .route("/ws/audio", get(audio_ws::audio_websocket))
             // ── HTTP-only: binary transcription feed (can't go through WS JSON) ──
             .route(
                 "/ai/transcription/feed",

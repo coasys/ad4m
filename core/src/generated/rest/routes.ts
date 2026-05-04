@@ -253,7 +253,6 @@ export interface RouteMap {
   'PUT /users/multi-user-enabled': { request: SetMultiUserRequest; response: boolean };
   'POST /users/request-verification': { request: RequestVerificationRequest; response: VerificationRequestResult };
   'POST /users/verify-email': { request: VerifyEmailRequest; response: string };
-  'GET /ws/audio': { request: never; response: void };
 }
 
 /** Extract the HTTP method from a route key */
