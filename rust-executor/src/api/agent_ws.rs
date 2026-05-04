@@ -255,7 +255,10 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .await
         .publish(
             &AGENT_UPDATED_TOPIC,
-            &serde_json::to_string(&agent).unwrap_or_else(|e| { log::error!("Failed to serialize agent for pubsub: {e}"); String::new() }),
+            &serde_json::to_string(&agent).unwrap_or_else(|e| {
+                log::error!("Failed to serialize agent for pubsub: {e}");
+                String::new()
+            }),
         )
         .await;
 
@@ -326,7 +329,10 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .await
         .publish(
             &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&agent).unwrap_or_else(|e| { log::error!("Failed to serialize agent for pubsub: {e}"); String::new() }),
+            &serde_json::to_string(&agent).unwrap_or_else(|e| {
+                log::error!("Failed to serialize agent for pubsub: {e}");
+                String::new()
+            }),
         )
         .await;
 
@@ -351,7 +357,10 @@ async fn lock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
         .await
         .publish(
             &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&agent).unwrap_or_else(|e| { log::error!("Failed to serialize agent for pubsub: {e}"); String::new() }),
+            &serde_json::to_string(&agent).unwrap_or_else(|e| {
+                log::error!("Failed to serialize agent for pubsub: {e}");
+                String::new()
+            }),
         )
         .await;
 
@@ -440,7 +449,10 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .await
         .publish(
             &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&agent).unwrap_or_else(|e| { log::error!("Failed to serialize agent for pubsub: {e}"); String::new() }),
+            &serde_json::to_string(&agent).unwrap_or_else(|e| {
+                log::error!("Failed to serialize agent for pubsub: {e}");
+                String::new()
+            }),
         )
         .await;
 

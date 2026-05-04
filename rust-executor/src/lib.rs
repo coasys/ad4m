@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate lazy_static;
 
+pub mod api;
 pub mod config;
 pub mod email_service;
 pub mod entanglement_service;
@@ -11,7 +12,6 @@ pub mod js_core;
 pub mod mcp;
 pub mod perspectives;
 mod prolog_service;
-pub mod api;
 pub mod runtime_service;
 pub mod unyt_service;
 pub mod user_management;
