@@ -85,8 +85,8 @@ describe("NeighbourhoodProxy", () => {
     // Add signal handler 2
     await neighbourhoodProxy.addSignalHandler(handler2);
 
-    // Check that only one subscription was added (handlers share subscription per perspective)
-    expect(subscribeCallCount).toBe(1);
+    // Check that subscription was re-created (handler1 removed = unsub, handler2 added = new sub)
+    expect(subscribeCallCount).toBe(2);
 
     // Dispatch signal
     neighbourhoodClient.dispatchSignal(neighbourhoodURI, true);
