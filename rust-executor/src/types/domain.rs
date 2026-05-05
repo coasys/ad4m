@@ -18,6 +18,10 @@ pub struct RequestContext {
     /// Only the launcher (or legacy single-user empty-token) qualifies.
     /// Regular app tokens (JWT) never have this set, regardless of which capabilities they hold.
     pub is_admin_credential: bool,
+    /// Cached user email resolved once at connection time (multi-user mode).
+    pub user_email: Option<String>,
+    /// Cached user DID resolved once at connection time (multi-user mode).
+    pub user_did: Option<String>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]

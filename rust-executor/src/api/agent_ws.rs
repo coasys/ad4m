@@ -47,7 +47,7 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     // Multi-user mode: extract user DID from JWT token if present
-    if let Some(user_email) = user_email_from_token(ctx.auth_token.clone()) {
+    if let Some(user_email) = ctx.user_email.clone() {
         let agent_data = AgentService::get_user_agent_data(&user_email)
             .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
 
@@ -183,7 +183,7 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     // If public_perspective provided, update it
     if let Some(pub_persp) = body.public_perspective {
         // For multi-user mode
-        if let Some(user_email) = user_email_from_token(ctx.auth_token.clone()) {
+        if let Some(user_email) = ctx.user_email.clone() {
             let agent_data = AgentService::get_user_agent_data(&user_email)
                 .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
 
@@ -579,7 +579,7 @@ async fn get_agent_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     // Multi-user mode
-    if let Some(user_email) = user_email_from_token(ctx.auth_token.clone()) {
+    if let Some(user_email) = ctx.user_email.clone() {
         let agent_data = AgentService::get_user_agent_data(&user_email)
             .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
 

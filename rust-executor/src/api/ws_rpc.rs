@@ -23,6 +23,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::agent::capabilities::*;
+use crate::agent::AgentService;
 use crate::types::RequestContext;
 
 use super::auth::AppState;
@@ -51,11 +52,18 @@ pub async fn ws_rpc(
     let capabilities = capabilities_from_token(token.clone(), state.admin_credential.clone());
     let is_admin = is_admin_credential_token(&token, &state.admin_credential);
 
+    let user_email = user_email_from_token(token.clone());
+    let user_did = user_email
+        .as_ref()
+        .and_then(|email| AgentService::get_user_did_by_email(email).ok());
+
     let ctx = Arc::new(RequestContext {
         capabilities,
         auto_permit_cap_requests: state.auto_permit_cap_requests,
         auth_token: token.clone(),
         is_admin_credential: is_admin,
+        user_email: user_email.clone(),
+        user_did,
     });
 
     ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx, token))
@@ -77,10 +85,11 @@ async fn handle_ws(
 
     // ── Event broadcast ─────────────────────────────────────────────────
     let token_for_events = token.clone();
+    let user_email_for_events = ctx.user_email.clone();
     let tx_events = tx.clone();
     tokio::spawn(async move {
-        let user_email = user_email_from_token(token_for_events.clone());
-        let event_stream = super::events_ws::build_event_stream(token_for_events, user_email).await;
+        let event_stream =
+            super::events_ws::build_event_stream(token_for_events, user_email_for_events).await;
         tokio::pin!(event_stream);
         while let Some(msg) = event_stream.next().await {
             if tx_events.send(msg).is_err() {

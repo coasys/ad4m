@@ -16,7 +16,7 @@ async fn get_hosting_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
 
     let global_free =
         Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
-    let user_info = if let Some(user_email) = user_email_from_token(ctx.auth_token.clone()) {
+    let user_info = if let Some(user_email) = ctx.user_email.clone() {
         let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(&user_email)).ok();
         let hot_wallet_address =
             Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
@@ -108,7 +108,9 @@ async fn set_hot_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let body: SetHotWalletAddressRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let email = user_email_from_token(ctx.auth_token.clone())
+    let email = ctx
+        .user_email
+        .clone()
         .ok_or_else(|| WsRpcError::forbidden("User email required"))?;
 
     Ad4mDb::with_global_instance(|db| db.set_user_hot_wallet(&email, &body.address))

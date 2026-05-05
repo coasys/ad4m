@@ -5,13 +5,13 @@ use crate::types::domain::LanguageRef;
 use crate::types::{DecoratedExpressionProof, ExpressionRendered, Icon, PerspectiveHandle};
 
 /// Check if a user (identified by email) or the main agent can access a perspective.
+/// Prefer `can_access_perspective_with_did` when a pre-resolved DID is available.
 pub fn can_access_perspective(
     user_email: &Option<String>,
     perspective: &PerspectiveHandle,
 ) -> bool {
     match user_email {
         Some(email) => {
-            // User context: check if user is in owners list
             if let Ok(user_did) = AgentService::get_user_did_by_email(email) {
                 log::debug!(
                     "📋 can_access_perspective(): user {} perspective {} user_did {}",
@@ -29,21 +29,32 @@ pub fn can_access_perspective(
                 false
             }
         }
-        None => {
-            // Main agent context: access unowned perspectives OR perspectives owned by main agent
-            if perspective.is_unowned() {
-                true
+        None => check_main_agent_access(perspective),
+    }
+}
+
+/// Fast path: check perspective access using a pre-resolved DID (avoids wallet mutex).
+pub fn can_access_perspective_with_did(
+    user_did: &Option<String>,
+    perspective: &PerspectiveHandle,
+) -> bool {
+    match user_did {
+        Some(did) => perspective.is_owned_by(did),
+        None => check_main_agent_access(perspective),
+    }
+}
+
+fn check_main_agent_access(perspective: &PerspectiveHandle) -> bool {
+    if perspective.is_unowned() {
+        true
+    } else {
+        AgentService::with_global_instance(|agent_service| {
+            if let Some(main_agent_did) = &agent_service.did {
+                perspective.is_owned_by(main_agent_did)
             } else {
-                // Check if the main agent owns this perspective
-                AgentService::with_global_instance(|agent_service| {
-                    if let Some(main_agent_did) = &agent_service.did {
-                        perspective.is_owned_by(main_agent_did)
-                    } else {
-                        false
-                    }
-                })
+                false
             }
-        }
+        })
     }
 }
 

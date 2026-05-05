@@ -303,7 +303,7 @@ async fn list_notifications(_params: Value, ctx: Arc<RequestContext>) -> Result<
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let user_email = user_email_from_token(ctx.auth_token.clone());
+    let user_email = ctx.user_email.clone();
     let notifications =
         Ad4mDb::with_global_instance(|db| db.get_notifications_for_user(user_email))
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -329,7 +329,7 @@ async fn create_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
         webhook_auth: body.webhook_auth,
     };
 
-    let user_email = user_email_from_token(ctx.auth_token.clone());
+    let user_email = ctx.user_email.clone();
     let id = RuntimeService::request_install_notification(domain_input, user_email)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -369,7 +369,7 @@ async fn grant_notification(params: Value, ctx: Arc<RequestContext>) -> Result<V
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    if user_email_from_token(ctx.auth_token.clone()).is_some() {
+    if ctx.user_email.is_some() {
         return Err(WsRpcError::forbidden(
             "Permission denied: managed users cannot call grantNotification",
         ));
@@ -546,7 +546,7 @@ async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
     let user_email = params
         .opt_str("userEmail")
-        .or_else(|| user_email_from_token(ctx.auth_token.clone()));
+        .or_else(|| ctx.user_email.clone());
 
     let email = user_email.unwrap_or_default();
     let since = params.opt_str("since");

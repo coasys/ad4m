@@ -1,7 +1,10 @@
 use axum::{extract::FromRequestParts, http::request::Parts};
 
 use super::errors::ApiError;
-use crate::agent::capabilities::{capabilities_from_token, is_admin_credential_token, Capability};
+use crate::agent::capabilities::{
+    capabilities_from_token, is_admin_credential_token, user_email_from_token, Capability,
+};
+use crate::agent::AgentService;
 use crate::types::RequestContext;
 
 /// Auth context extracted from the Authorization header.
@@ -17,11 +20,17 @@ pub struct AuthContext {
 impl AuthContext {
     /// Convert to the existing RequestContext used by internal functions.
     pub fn to_request_context(&self) -> RequestContext {
+        let user_email = user_email_from_token(self.auth_token.clone());
+        let user_did = user_email
+            .as_ref()
+            .and_then(|email| AgentService::get_user_did_by_email(email).ok());
         RequestContext {
             capabilities: self.capabilities.clone(),
             auto_permit_cap_requests: self.auto_permit_cap_requests,
             auth_token: self.auth_token.clone(),
             is_admin_credential: self.is_admin_credential,
+            user_email,
+            user_did,
         }
     }
 }
