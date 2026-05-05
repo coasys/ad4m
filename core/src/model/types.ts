@@ -113,6 +113,13 @@ export type Query = {
   parent?: ParentScope;
   properties?: string[];
   include?: IncludeMap;
+  /**
+   * When true, eager-loads every declared forward relation on the model.
+   * Equivalent to listing all relation field names in `include: {}` explicitly.
+   * Useful for tree-walking and manifest-style inspections.
+   * Individual relations can still be overridden via `include` (explicit entries take precedence).
+   */
+  includeAll?: boolean;
   where?: Where;
   order?: Order;
   offset?: number;
