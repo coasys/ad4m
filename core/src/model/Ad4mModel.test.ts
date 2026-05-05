@@ -1,5 +1,6 @@
 import { Ad4mModel } from "./Ad4mModel";
-import { Model, Property, Optional, ReadOnly, HasMany, Flag } from "./decorators";
+import { isIncludeProjection } from "./types";
+import { Model, Property, Optional, ReadOnly, HasMany, HasOne, Flag } from "./decorators";
 
 describe("Ad4mModel.getModelMetadata()", () => {
   it("should extract basic model metadata with className", () => {
@@ -2238,5 +2239,190 @@ describe("Ad4mModel.fromSHACL()", () => {
     const meta = Cls.getModelMetadata();
     expect(Object.keys(meta.properties)).toHaveLength(0);
     expect(Object.keys(meta.relations)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IncludeProjection — key splitting and query routing
+// ---------------------------------------------------------------------------
+
+describe("IncludeProjection type guard and key splitting", () => {
+  // Shared test models
+  @Model({ name: "Signal" })
+  class Signal extends Ad4mModel {
+    @Property({ through: "signal://type" })
+    signalTypeId: string = "";
+
+    @Property({ through: "signal://author" })
+    author: string = "";
+  }
+
+  @Model({ name: "Post" })
+  class Post extends Ad4mModel {
+    @Property({ through: "post://title" })
+    title: string = "";
+
+    @HasMany({ through: "post://signal", target: () => Signal })
+    signals: Signal[] = [];
+
+    @HasMany({ through: "post://comment" })
+    comments: string[] = [];
+  }
+
+  const mockPerspective = {
+    querySparql: jest.fn(),
+    modelQuery: jest.fn(),
+    infer: jest.fn(),
+    uuid: "test-perspective-uuid",
+    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("Post"),
+  } as any;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [{ id: "post://1", title: "Hello", $signalCount: 3 }],
+      totalCount: 1,
+    });
+  });
+
+  // --- isIncludeProjection type guard ---
+
+  it("isIncludeProjection returns true for objects with a 'from' field", () => {
+    expect(isIncludeProjection({ from: "signals", count: true })).toBe(true);
+    expect(isIncludeProjection({ from: "comments", limit: 1 })).toBe(true);
+  });
+
+  it("isIncludeProjection returns false for non-projection values", () => {
+    expect(isIncludeProjection(true)).toBe(false);
+    expect(isIncludeProjection(false)).toBe(false);
+    expect(isIncludeProjection(null)).toBe(false);
+    expect(isIncludeProjection(undefined)).toBe(false);
+    expect(isIncludeProjection(42)).toBe(false);
+    // RelationSubQuery (has no 'from' key)
+    expect(isIncludeProjection({ limit: 5, order: { timestamp: "DESC" } })).toBe(false);
+  });
+
+  // --- $-key splitting ---
+
+  it("routes $-prefixed keys to queryInput.projections, not queryInput.include", async () => {
+    await Post.findAll(mockPerspective, {
+      include: {
+        $signalCount: { from: "signals", count: true },
+        comments: true,
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    // Normal relation goes to include
+    expect(qi.include?.comments).toBe(true);
+    expect(qi.include?.$signalCount).toBeUndefined();
+
+    // Projection goes to projections
+    expect(qi.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    expect(qi.projections?.comments).toBeUndefined();
+  });
+
+  it("routes $-prefixed IncludeProjection values to projections ($ prefix required)", async () => {
+    await Post.findAll(mockPerspective, {
+      include: {
+        $mySignals: { from: "signals", limit: 1 },
+        comments: true,
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    expect(qi.projections?.$mySignals).toMatchObject({ from: "signals", limit: 1 });
+    expect(qi.include?.comments).toBe(true);
+  });
+
+  it("does NOT route non-$ keys to projections even if value has 'from' shape", async () => {
+    // $ prefix is required — a key without it goes to include, not projections
+    await Post.findAll(mockPerspective, {
+      include: {
+        mySignals: { from: "signals", limit: 1 } as any,
+        comments: true,
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    // Without $ prefix it stays in include (behaviour is undefined/broken but not silently rerouted)
+    expect(qi.projections?.mySignals).toBeUndefined();
+    expect(qi.include?.mySignals).toBeDefined();
+  });
+
+  it("omits queryInput.include when all keys are projections", async () => {
+    await Post.findAll(mockPerspective, {
+      include: {
+        $count: { from: "signals", count: true },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    expect(qi.include).toBeUndefined();
+    expect(qi.projections?.$count).toMatchObject({ from: "signals", count: true });
+  });
+
+  it("omits queryInput.projections when all keys are normal includes", async () => {
+    await Post.findAll(mockPerspective, {
+      include: { comments: true },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    expect(qi.projections).toBeUndefined();
+    expect(qi.include?.comments).toBe(true);
+  });
+
+  it("enriches projection with targetShape when relation target is registered", async () => {
+    await Post.findAll(mockPerspective, {
+      include: {
+        $signalCount: { from: "signals", count: true },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    // targetShape should have been injected from the Signal model
+    // ($ prefix is required for projection enrichment to apply)
+    expect(qi.projections?.$signalCount?.targetShape?.className).toBe("Signal");
+  });
+
+  it("leaves targetShape absent when relation has no target decorator", async () => {
+    await Post.findAll(mockPerspective, {
+      include: {
+        $commentCount: { from: "comments", count: true },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    // 'comments' HasMany has no target() thunk → no targetShape
+    expect(qi.projections?.$commentCount?.targetShape).toBeUndefined();
+  });
+
+  // --- result passthrough ---
+
+  it("returns $-keyed projection values attached by Rust on instances", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [{ id: "post://1", title: "Hello", $signalCount: 7 }],
+      totalCount: 1,
+    });
+
+    const results = await Post.findAll(mockPerspective, {
+      include: { $signalCount: { from: "signals", count: true } },
+    });
+
+    expect((results[0] as any).$signalCount).toBe(7);
   });
 });

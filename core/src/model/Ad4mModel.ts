@@ -21,7 +21,9 @@ import type {
   ParentScope, IncludeMap, Query,
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
+  IncludeProjection,
 } from "./types";
+
 
 // ---------------------------------------------------------------------------
 // Helpers for Rust-side include resolution
@@ -959,7 +961,37 @@ export class Ad4mModel {
       queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
     }
     if (query.properties) queryInput.properties = query.properties;
-    if (query.include) queryInput.include = query.include;
+    if (query.include) {
+      // Split include keys: $-prefixed / IncludeProjection values → queryInput.projections
+      // All other keys (boolean | RelationSubQuery) → queryInput.include
+      const normalIncludes: IncludeMap = {};
+      const projections: Record<string, IncludeProjection> = {};
+      for (const [key, val] of Object.entries(query.include)) {
+        if (key.startsWith('$')) {
+          projections[key] = val as IncludeProjection;
+        } else {
+          normalIncludes[key] = val;
+        }
+      }
+      if (Object.keys(normalIncludes).length > 0) queryInput.include = normalIncludes;
+      if (Object.keys(projections).length > 0) {
+        // Enrich projections with target shapes so Rust can apply where clause filtering
+        const allRelMeta = getRelationsMetadata(this as any);
+        for (const [, proj] of Object.entries(projections)) {
+          const relMeta = allRelMeta[proj.from];
+          if (!proj.targetShape && relMeta?.target) {
+            try {
+              const TargetClass = relMeta.target();
+              const targetMeta = (TargetClass as any).getModelMetadata?.();
+              if (targetMeta) {
+                proj.targetShape = targetMeta;
+              }
+            } catch (_) { /* target class may not be available */ }
+          }
+        }
+        queryInput.projections = projections;
+      }
+    }
     if (query.where) queryInput.where = query.where;
     if (query.order) {
       // Convert { propName: 'ASC' | 'DESC' } to [[propName, 'ASC'|'DESC'], ...]
@@ -972,9 +1004,9 @@ export class Ad4mModel {
     // Enrich relation metadata with target class shapes for Rust-side
     // include resolution. This eliminates per-relation GraphQL round-trips
     // by letting the Rust endpoint resolve includes in-process.
-    if (query.include) {
+    if (queryInput.include) {
       const allRelMeta = getRelationsMetadata(this as any);
-      enrichShapeForIncludes(metadata, query.include, allRelMeta);
+      enrichShapeForIncludes(metadata, queryInput.include, allRelMeta);
     }
 
     // ── Pre-compute conformance getters for Rust-side evaluation ──────
@@ -1092,7 +1124,7 @@ export class Ad4mModel {
     // TS-side evaluation as a fallback. Running evaluateCustomGettersForInstance
     // with skipPropertyGetters ensures conformance + JS post-filtering for
     // where clauses that couldn't be compiled to SPARQL.
-    const includedRelNames = query.include ? new Set(Object.keys(query.include)) : new Set<string>();
+    const includedRelNames = queryInput.include ? new Set(Object.keys(queryInput.include)) : new Set<string>();
     for (const inst of instances) {
       // Save included relation values that came from Rust hydration
       const savedIncluded: Record<string, any> = {};
@@ -1124,7 +1156,7 @@ export class Ad4mModel {
     }
 
     // Take snapshots for dirty tracking
-    const snapshotRelations = query.include;
+    const snapshotRelations = queryInput.include;
     for (const inst of instances) {
       (inst as Ad4mModel).takeSnapshot(snapshotRelations);
     }
