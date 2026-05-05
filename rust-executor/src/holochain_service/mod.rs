@@ -1048,7 +1048,14 @@ mod tests {
 
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-        let tmp = std::env::temp_dir().join(format!("ad4m_test_keypair_{}", std::process::id()));
+        // Use /tmp directly on Unix to keep the path under the 104-byte
+        // SUN_LEN limit for Unix domain sockets (macOS temp dirs are ~50 chars).
+        let tmp_base = if cfg!(unix) {
+            std::path::PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let tmp = tmp_base.join(format!("ad4m_test_kp2_{}", std::process::id()));
         let conductor_path = tmp.join("conductor");
         std::fs::create_dir_all(&conductor_path).unwrap();
 
@@ -1145,8 +1152,14 @@ mod tests {
 
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-        let tmp =
-            std::env::temp_dir().join(format!("ad4m_test_keypair_iface_{}", std::process::id()));
+        // Use /tmp directly on Unix to keep the path under the 104-byte
+        // SUN_LEN limit for Unix domain sockets (macOS temp dirs are ~50 chars).
+        let tmp_base = if cfg!(unix) {
+            std::path::PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let tmp = tmp_base.join(format!("ad4m_test_kp_{}", std::process::id()));
         let conductor_path = tmp.join("conductor");
         std::fs::create_dir_all(&conductor_path).unwrap();
 
