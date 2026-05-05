@@ -135,7 +135,7 @@ enum Domain {
         language_language_only: Option<bool>,
         #[arg(long, action)]
         run_dapp_server: Option<bool>,
-        #[arg(short, long, action)]
+        #[arg(short = 'p', long = "port", action)]
         gql_port: Option<u16>,
         #[arg(long, action)]
         hc_admin_port: Option<u16>,

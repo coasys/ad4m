@@ -63,7 +63,7 @@ Creates:
 ```bash
 ad4m-executor run \
   --app-data-path /path/to/.ad4m \
-  --gql-port 12000 \
+  --port 12000 \
   --admin-credential <your-secret> \
   --enable-mcp true
 ```
@@ -72,7 +72,7 @@ ad4m-executor run \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--app-data-path` | (required) | Data directory |
-| `--gql-port` | 12000 | HTTP API port |
+| `--port` | 12000 | API port (WebSocket RPC + HTTP) |
 | `--admin-credential` | (none) | Admin auth token — without this, empty token has admin access |
 | `--enable-mcp` | false | Enable MCP server |
 | `--mcp-port` | 3001 | MCP server port |
@@ -82,7 +82,7 @@ ad4m-executor run \
 **For AI agents**: Always run in a screen session with logging:
 
 ```bash
-screen -dmS ad4m-executor bash -c 'ad4m-executor run --app-data-path ~/.ad4m --gql-port 12000 --admin-credential mysecret --enable-mcp true 2>&1 | tee /tmp/ad4m-executor.log'
+screen -dmS ad4m-executor bash -c 'ad4m-executor run --app-data-path ~/.ad4m --port 12000 --admin-credential mysecret --enable-mcp true 2>&1 | tee /tmp/ad4m-executor.log'
 ```
 
 After startup, **write down** the admin credential, screen session name (`ad4m-executor`), log path (`/tmp/ad4m-executor.log`), MCP endpoint, and data path so you and your human can debug later. The executor is now running in the background — don't start another one.

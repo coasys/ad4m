@@ -10,7 +10,7 @@ pub mod types;
 pub mod ws_rpc;
 
 #[cfg(test)]
-mod types_tests;
+mod tests;
 
 // ── WS-native handler modules ──
 pub mod agent_ws;
@@ -23,9 +23,6 @@ pub mod perspectives_ws;
 pub mod runtime_ws;
 pub mod users_ws;
 pub mod ws_handler;
-
-#[cfg(test)]
-mod tests;
 
 use crate::Ad4mConfig;
 use auth::AppState;
