@@ -101,8 +101,12 @@ async fn get_agent_by_did(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     // Check if DID matches main agent
     let did_match = {
         let agent_instance = AgentService::global_instance();
-        let agent_service = agent_instance.lock().expect("agent lock");
-        let agent_ref = agent_service.as_ref().expect("agent instance");
+        let agent_service = agent_instance
+            .lock()
+            .map_err(|_| WsRpcError::internal("Agent service unavailable"))?;
+        let agent_ref = agent_service
+            .as_ref()
+            .ok_or_else(|| WsRpcError::internal("Agent not initialized"))?;
         match &agent_ref.did {
             Some(existing) => did == *existing,
             None => false,
@@ -377,8 +381,12 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 
     let agent_instance = AgentService::global_instance();
     {
-        let mut agent_service = agent_instance.lock().expect("agent lock");
-        let agent_ref = agent_service.as_mut().expect("agent instance");
+        let mut agent_service = agent_instance
+            .lock()
+            .map_err(|_| WsRpcError::internal("Agent service unavailable"))?;
+        let agent_ref = agent_service
+            .as_mut()
+            .ok_or_else(|| WsRpcError::internal("Agent not initialized"))?;
         agent_ref
             .unlock(body.passphrase.clone())
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -388,9 +396,9 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 
     let is_unlocked = agent_instance
         .lock()
-        .expect("agent lock")
+        .map_err(|_| WsRpcError::internal("Agent service unavailable"))?
         .as_ref()
-        .expect("agent instance")
+        .ok_or_else(|| WsRpcError::internal("Agent not initialized"))?
         .is_unlocked();
 
     if is_unlocked {
@@ -434,8 +442,12 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     }
 
     let mut agent = {
-        let agent_service = agent_instance.lock().expect("agent lock");
-        let agent_ref = agent_service.as_ref().expect("agent instance");
+        let agent_service = agent_instance
+            .lock()
+            .map_err(|_| WsRpcError::internal("Agent service unavailable"))?;
+        let agent_ref = agent_service
+            .as_ref()
+            .ok_or_else(|| WsRpcError::internal("Agent not initialized"))?;
         agent_ref.dump().clone()
     };
 

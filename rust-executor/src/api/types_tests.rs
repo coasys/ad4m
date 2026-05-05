@@ -1,4 +1,4 @@
-//! Request/Response type serialization tests — verify REST types parse from JSON correctly.
+//! Request/Response type serialization tests — verify API types parse from JSON correctly.
 
 use serde_json::json;
 

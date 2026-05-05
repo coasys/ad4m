@@ -115,7 +115,9 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     // Set global SMTP config for email verification
     crate::config::set_smtp_config(config.smtp_config.clone())?;
 
-    let port = config.gql_port.expect("Did not get port");
+    let port = config
+        .gql_port
+        .ok_or_else(|| deno_core::anyhow::anyhow!("API port not configured"))?;
     let admin_credential = config.admin_credential.clone();
     let auto_permit = config.auto_permit_cap_requests.unwrap_or(false);
 

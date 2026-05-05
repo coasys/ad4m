@@ -390,6 +390,20 @@ pub async fn feed_transcription_stream(
         ));
     }
 
+    if stream_ids.len() > 32 {
+        return Err(ApiError::BadRequest("Too many stream IDs (max 32)".into()));
+    }
+
+    // Limit audio buffer to 10 MB (2.5M float32 samples)
+    const MAX_AUDIO_BYTES: usize = 10 * 1024 * 1024;
+    if body.len() > MAX_AUDIO_BYTES {
+        return Err(ApiError::BadRequest(format!(
+            "Audio buffer too large ({} bytes, max {})",
+            body.len(),
+            MAX_AUDIO_BYTES
+        )));
+    }
+
     if body.len() % 4 != 0 {
         return Err(ApiError::BadRequest(
             "Body length must be a multiple of 4 (Float32 samples)".into(),
@@ -404,13 +418,22 @@ pub async fn feed_transcription_stream(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
+    let mut errors: Vec<String> = Vec::new();
     for stream_id in &stream_ids {
         if let Err(e) = service
             .feed_transcription_stream(stream_id, audio_f32.clone(), &context.auth_token)
             .await
         {
             log::warn!("Error feeding stream {}: {}", stream_id, e);
+            errors.push(format!("{}: {}", stream_id, e));
         }
+    }
+
+    if errors.len() == stream_ids.len() {
+        return Err(ApiError::Internal(format!(
+            "All streams failed: {}",
+            errors.join("; ")
+        )));
     }
 
     Ok(Json("true".to_string()))

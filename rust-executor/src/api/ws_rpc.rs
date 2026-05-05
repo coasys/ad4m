@@ -168,5 +168,7 @@ async fn handle_ws(
     }
 
     drop(tx);
-    let _ = write_handle.await;
+    if let Err(e) = write_handle.await {
+        log::error!("WS RPC writer task failed: {}", e);
+    }
 }
