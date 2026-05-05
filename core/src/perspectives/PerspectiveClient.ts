@@ -1,7 +1,7 @@
 import { ApiClient, RpcError } from "../apiClient";
 import { ExpressionRendered } from "../expression/Expression";
 import { ExpressionClient } from "../expression/ExpressionClient";
-import { Link, LinkExpressionInput, LinkExpression, LinkInput, LinkMutations, LinkExpressionMutations } from "../links/Links";
+import { Link, LinkExpressionInput, LinkExpression, LinkMutations, LinkExpressionMutations } from "../links/Links";
 import { NeighbourhoodClient } from "../neighbourhood/NeighbourhoodClient";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { LinkQuery } from "./LinkQuery";
@@ -10,22 +10,6 @@ import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
-import type {
-  CreatePerspectiveRequest,
-  UpdatePerspectiveRequest,
-  AddLinkRequest,
-  AddLinksBulkRequest,
-  RemoveLinksBulkRequest,
-  AddLinkExpressionRequest,
-  UpdateLinkRequest,
-  RemoveLinkRequest,
-  AddSdnaRequest,
-  ExecuteCommandsRequest,
-  CreateSubjectRequest,
-  GetSubjectDataRequest,
-  CommitBatchRequest,
-  QueryRequest,
-} from "../generated/api";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
