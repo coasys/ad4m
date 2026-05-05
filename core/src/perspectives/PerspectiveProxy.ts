@@ -119,7 +119,7 @@ export class QuerySubscriptionProxy {
             this.#subscriptionId = initialResult.subscriptionId;
 
             // Process the initial result immediately for fast UX.
-            // The REST subscribeQuery() endpoint already returns the initial result,
+            // The subscribeQuery() RPC call already returns the initial result,
             // so treat that as successful initialization instead of waiting for a
             // follow-up WebSocket update that may never arrive until the query changes.
             if (initialResult.result !== undefined) {
@@ -1061,7 +1061,7 @@ export class PerspectiveProxy {
      * Adds Social DNA code to the perspective.
      * 
      * **Recommended:** Use {@link addShacl} instead, which accepts the `SHACLShape` type directly.
-     * This method is primarily for the REST API layer and legacy Prolog code.
+     * This method is primarily for the RPC API layer and legacy Prolog code.
      * 
      * @param name - Unique name for this SDNA definition
      * @param sdnaCode - Prolog SDNA code (legacy, can be empty string if shaclJson provided)
@@ -1322,7 +1322,7 @@ export class PerspectiveProxy {
      */
     async subjectClasses(): Promise<string[]> {
         try {
-            // Query SHACL class links directly — no need for a separate REST endpoint
+            // Query SHACL class links directly — no need for a separate RPC endpoint
             const classLinks = await this.get(new LinkQuery({
                 predicate: "rdf://type",
                 target: "ad4m://SubjectClass"

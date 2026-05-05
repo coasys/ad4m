@@ -24,7 +24,7 @@ import { PerspectiveExpression } from "../perspectives/Perspective";
 //
 // Languages optionally publish a list of user-invocable actions per
 // Expression ("interactions"). The runtime surfaces these to UIs via
-// the REST API as first-class objects.
+// the API as first-class objects.
 
 export class InteractionParameter {
     name: string;

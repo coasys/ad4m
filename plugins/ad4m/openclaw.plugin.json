@@ -37,7 +37,7 @@
       "executorUrl": {
         "type": "string",
         "default": "http://localhost:12000",
-        "description": "AD4M executor REST URL"
+        "description": "AD4M executor URL"
       },
       "wakerEnabled": {
         "type": "boolean",
