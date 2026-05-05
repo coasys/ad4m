@@ -8,8 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -63,7 +64,12 @@ fn to_ws_url(executor_url: &str, token: &str) -> String {
 impl WsRpcClient {
     pub async fn connect(executor_url: &str, token: &str) -> Result<Self> {
         let url = to_ws_url(executor_url, token);
-        let (ws_stream, _) = connect_async(&url)
+        let ws_config = WebSocketConfig {
+            max_message_size: Some(256 * 1024 * 1024),
+            max_frame_size: Some(64 * 1024 * 1024),
+            ..Default::default()
+        };
+        let (ws_stream, _) = connect_async_with_config(&url, Some(ws_config), false)
             .await
             .map_err(|e| anyhow!("WebSocket connection to {} failed: {}", url, e))?;
         let (write, mut read) = ws_stream.split();
@@ -80,8 +86,14 @@ impl WsRpcClient {
             while let Some(msg) = read.next().await {
                 let text = match msg {
                     Ok(Message::Text(t)) => t,
-                    Ok(Message::Close(_)) => break,
-                    Err(_) => break,
+                    Ok(Message::Close(frame)) => {
+                        eprintln!("[ws-rpc] connection closed by server: {:?}", frame);
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("[ws-rpc] read error: {:?}", e);
+                        break;
+                    }
                     _ => continue,
                 };
 

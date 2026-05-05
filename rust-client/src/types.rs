@@ -101,6 +101,7 @@ pub struct EntanglementProof {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct Neighbourhood {
     pub link_language: String,
     pub meta: Perspective,
