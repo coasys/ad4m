@@ -646,6 +646,9 @@ fn resolve_projections(
         // 2. Build optional where-clause patterns for target properties.
         // ------------------------------------------------------------------
         let where_patterns = build_projection_where_patterns(proj);
+        // Reifier join + FILTER for author/timestamp — emitted only when those
+        // fields appear in the where clause.
+        let reifier_patterns = build_projection_reifier_patterns(proj, &safe_pred);
 
         // ------------------------------------------------------------------
         // 3. Issue the grouped SPARQL query and attach results.
@@ -658,11 +661,13 @@ fn resolve_projections(
                     "    VALUES ?parent {{ {values_clause} }}\n",
                     "    ?parent <{safe_pred}> ?t .\n",
                     "{where_patterns}",
+                    "{reifier_patterns}",
                     "}} GROUP BY ?parent"
                 ),
                 values_clause = values_clause,
                 safe_pred = safe_pred,
                 where_patterns = where_patterns,
+                reifier_patterns = reifier_patterns,
             );
 
             let result_json = store.query(&sparql)?;
@@ -671,13 +676,13 @@ fn resolve_projections(
             // parent_id → count
             let mut count_map: HashMap<String, u64> = HashMap::new();
             for row in &rows {
-                let parent = row["parent"].as_str().unwrap_or("");
+                let parent = row["parent"].as_str().unwrap_or("").to_string();
                 let n: u64 = row["n"]
                     .as_str()
                     .and_then(|s| s.parse().ok())
                     .or_else(|| row["n"].as_u64())
                     .unwrap_or(0);
-                count_map.insert(parent.to_string(), n);
+                count_map.insert(parent, n);
             }
 
             for inst in instances.iter_mut() {
@@ -704,11 +709,13 @@ fn resolve_projections(
                     "    VALUES ?parent {{ {values_clause} }}\n",
                     "    ?parent <{safe_pred}> ?t .\n",
                     "{where_patterns}",
+                    "{reifier_patterns}",
                     "}}{order_clause}"
                 ),
                 values_clause = values_clause,
                 safe_pred = safe_pred,
                 where_patterns = where_patterns,
+                reifier_patterns = reifier_patterns,
                 order_clause = order_clause,
             );
 
@@ -759,20 +766,30 @@ fn resolve_projections(
     Ok(())
 }
 
-/// Build SPARQL triple patterns for a projection's `where` clause.
+/// Build SPARQL triple patterns and FILTER clauses for a projection's `where`
+/// clause.
 ///
-/// When a `targetShape` is supplied, property names in the `where` clause are
-/// resolved to their predicate IRIs.  Without a target shape, only `id`/`base`
-/// (direct IRI equality) filters are supported.
+/// Uses `STR()` comparison against both the plain value and the stored
+/// `literal:` URI form (e.g. `literal:string:X`, `literal:boolean:true`).
+/// This covers plain IRI targets and the `literal:string:` / `literal:number:`
+/// / `literal:boolean:` encodings used by the executor.
 ///
-/// Returns a string ready to insert into the SPARQL `WHERE {}` block (each
-/// line already ends with `\n`).
+/// `author` and `timestamp` are **not** handled here — they live on the
+/// reification node, not on `?t`.  See `build_projection_reifier_patterns`
+/// which emits the required `rdf:reifies` join and FILTER for those fields.
+///
+/// **Limitation:** Values stored as `literal:json:` signed-expression blobs
+/// (as used for `@Property` values in Flux models) cannot be matched here.
+/// `STR(?v)` returns the opaque blob URI — the encoded payload is invisible
+/// to SPARQL-side filtering.  `parse_literal_value` can decode the blob in
+/// Rust, but only after fetching all rows first; supporting this case requires
+/// a full post-fetch filter pass and is deferred until concretely needed.
 fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
     let Some(ref wc) = proj.where_clause else {
         return String::new();
     };
 
-    // Try to build a property-name → predicate lookup from the target shape.
+    // Build predicate lookup from the optional target shape.
     let pred_lookup: HashMap<String, String> = if let Some(ref ts) = proj.target_shape {
         let mut map = HashMap::new();
         if let Some(props) = ts["properties"].as_object() {
@@ -822,7 +839,9 @@ fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
             continue;
         }
 
-        // author / timestamp — standard metadata fields (not link targets, skip for now)
+        // author / timestamp — not properties of ?t; handled via reifier join
+        // in build_projection_reifier_patterns, which adds the necessary
+        // <<(?parent <pred> ?t)>> ~> ?_prj_reif join + FILTER to the query.
         if prop_name == "author" || prop_name == "timestamp" {
             continue;
         }
@@ -833,40 +852,38 @@ fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
             None => continue, // unknown property without a shape — skip
         };
 
-        if let Err(_) = validate_iri(&pred) {
+        if validate_iri(&pred).is_err() {
             continue;
         }
 
         let var = format!("_pw{}", filter_idx);
         filter_idx += 1;
-        let safe_var = var.replace(|c: char| !c.is_alphanumeric() && c != '_', "_");
 
         match condition {
             WhereCondition::String(val) => {
                 let escaped = escape_sparql_string(val);
-                patterns.push(format!("    ?t <{}> ?{} .\n", pred, safe_var));
-                // Values may be stored as literal: URIs — use STR() for comparison.
+                patterns.push(format!("    ?t <{}> ?{} .\n", pred, var));
                 patterns.push(format!(
                     "    FILTER(STR(?{}) = \"{}\" || STR(?{}) = \"literal:string:{}\")\n",
-                    safe_var,
+                    var,
                     escaped,
-                    safe_var,
+                    var,
                     urlencoding::encode(val),
                 ));
             }
             WhereCondition::Bool(b) => {
                 let bval = if *b { "true" } else { "false" };
-                patterns.push(format!("    ?t <{}> ?{} .\n", pred, safe_var));
+                patterns.push(format!("    ?t <{}> ?{} .\n", pred, var));
                 patterns.push(format!(
                     "    FILTER(STR(?{}) = \"{}\" || STR(?{}) = \"literal:boolean:{}\")\n",
-                    safe_var, bval, safe_var, bval,
+                    var, bval, var, bval,
                 ));
             }
             WhereCondition::Number(n) => {
-                patterns.push(format!("    ?t <{}> ?{} .\n", pred, safe_var));
+                patterns.push(format!("    ?t <{}> ?{} .\n", pred, var));
                 patterns.push(format!(
                     "    FILTER(STR(?{}) = \"{}\" || STR(?{}) = \"literal:number:{}\")\n",
-                    safe_var, n, safe_var, n,
+                    var, n, var, n,
                 ));
             }
             WhereCondition::StringArray(vals) => {
@@ -879,10 +896,10 @@ fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                patterns.push(format!("    ?t <{}> ?{} .\n", pred, safe_var));
-                patterns.push(format!("    FILTER(STR(?{}) IN ({}))\n", safe_var, list));
+                patterns.push(format!("    ?t <{}> ?{} .\n", pred, var));
+                patterns.push(format!("    FILTER(STR(?{}) IN ({}))\n", var, list));
             }
-            _ => {} // complex ops not yet supported for projections
+            _ => {} // Ops not supported for projection where clauses
         }
     }
 
@@ -916,6 +933,65 @@ fn build_projection_order_clause(proj: &ProjectionInput) -> String {
     } else {
         format!("\nORDER BY {}", terms.join(" "))
     }
+}
+
+/// Build SPARQL reifier join + FILTER patterns for `author` / `timestamp`
+/// conditions in a projection's `where` clause.
+///
+/// Returns an empty string when neither field is present.  When present,
+/// emits the RDF 1.2 triple-term reifier join:
+///
+/// ```sparql
+/// ?_prj_reif <rdf:reifies> <<(?parent <pred> ?t)>> .
+/// ?_prj_reif <ad4m://ontology/author> ?_prj_author .
+/// FILTER(STR(?_prj_author) = "did:key:…")
+/// ```
+///
+/// This is a required (non-OPTIONAL) join — every link stored by the executor
+/// carries a reifier, so this will never silently drop valid rows.
+fn build_projection_reifier_patterns(proj: &ProjectionInput, safe_pred: &str) -> String {
+    let Some(ref wc) = proj.where_clause else {
+        return String::new();
+    };
+
+    let author_cond = wc.get("author");
+    let timestamp_cond = wc.get("timestamp");
+
+    if author_cond.is_none() && timestamp_cond.is_none() {
+        return String::new();
+    }
+
+    let mut patterns = Vec::new();
+
+    // Join the reification node for the (?parent <pred> ?t) triple.
+    patterns.push(format!(
+        "    ?_prj_reif <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<(?parent <{safe_pred}> ?t)>> .\n"
+    ));
+
+    if let Some(cond) = author_cond {
+        patterns.push("    ?_prj_reif <ad4m://ontology/author> ?_prj_author .\n".to_string());
+        // Only String (DID) conditions make sense for author.
+        // Non-String variants (Ops, etc.) are not supported and are silently ignored.
+        if let WhereCondition::String(did) = cond {
+            let escaped = escape_sparql_string(did);
+            patterns.push(format!("    FILTER(STR(?_prj_author) = \"{escaped}\")\n"));
+        }
+    }
+
+    if let Some(cond) = timestamp_cond {
+        patterns.push("    ?_prj_reif <ad4m://ontology/timestamp> ?_prj_timestamp .\n".to_string());
+        // String condition → exact ISO timestamp match.
+        // Ops-style range conditions (e.g. { gt: 1000 }) are not yet handled here;
+        // they would require post-fetch Rust filtering rather than a SPARQL FILTER.
+        if let WhereCondition::String(ts) = cond {
+            let escaped = escape_sparql_string(ts);
+            patterns.push(format!(
+                "    FILTER(STR(?_prj_timestamp) = \"{escaped}\")\n"
+            ));
+        }
+    }
+
+    patterns.join("")
 }
 
 /// Execute a model query against the Oxigraph store.
@@ -3606,4 +3682,319 @@ mod integration_tests {
         let clause = build_projection_order_clause(&proj);
         assert!(clause.contains("ORDER BY DESC(?t)"), "got: {clause}");
     }
+
+    // -----------------------------------------------------------------------
+    // Integration tests: resolve_projections()
+    //
+    // These tests verify that resolve_projections() correctly issues grouped
+    // SPARQL queries against a real SparqlStore and attaches the results to
+    // the parent instance objects.
+    // -----------------------------------------------------------------------
+
+    /// Helper to build a minimal ModelShape with one forward collection property.
+    fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> ModelShape {
+        ModelShape {
+            target_class: class.to_string(),
+            shape_uri: format!("{}Shape", class),
+            properties: vec![ShapeProperty {
+                name: rel_name.to_string(),
+                predicate: predicate.to_string(),
+                is_collection: true,
+                is_flag: false,
+                is_required: false,
+                initial_value: None,
+                resolve_language: None,
+                datatype: None,
+                direction: Some("forward".to_string()),
+                is_scalar_relation: false,
+                getter: None,
+            }],
+            include_relations: vec![],
+        }
+    }
+
+    #[test]
+    fn test_resolve_projections_count() {
+        // Set up a store with two parent nodes, each linked to different numbers
+        // of child targets via the "test://has_item" predicate.
+        let store = SparqlStore::new(None).unwrap();
+
+        let parent_a = "test://parent/a";
+        let parent_b = "test://parent/b";
+        let item_1 = "test://item/1";
+        let item_2 = "test://item/2";
+        let item_3 = "test://item/3";
+
+        store
+            .add_link(&make_link(parent_a, "test://has_item", item_1, "1000"))
+            .unwrap();
+        store
+            .add_link(&make_link(parent_a, "test://has_item", item_2, "1001"))
+            .unwrap();
+        store
+            .add_link(&make_link(parent_b, "test://has_item", item_3, "1002"))
+            .unwrap();
+
+        let shape = make_shape_with_relation("Parent", "items", "test://has_item");
+
+        let mut instances = vec![json!({ "id": parent_a }), json!({ "id": parent_b })];
+
+        let mut projections = HashMap::new();
+        projections.insert(
+            "$itemCount".to_string(),
+            ProjectionInput {
+                from: "items".to_string(),
+                count: true,
+                target_shape: None,
+                where_clause: None,
+                limit: None,
+                order: None,
+            },
+        );
+
+        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+
+        let count_a = instances[0]["$itemCount"].as_u64().unwrap_or(999);
+        let count_b = instances[1]["$itemCount"].as_u64().unwrap_or(999);
+        assert_eq!(count_a, 2, "parent_a should have 2 items, got {count_a}");
+        assert_eq!(count_b, 1, "parent_b should have 1 item, got {count_b}");
+    }
+
+    #[test]
+    fn test_resolve_projections_list() {
+        // parent_a has two children; verify list projection returns them as an array.
+        let store = SparqlStore::new(None).unwrap();
+
+        let parent_a = "test://parent/a";
+        let item_1 = "test://item/1";
+        let item_2 = "test://item/2";
+
+        store
+            .add_link(&make_link(parent_a, "test://has_item", item_1, "1000"))
+            .unwrap();
+        store
+            .add_link(&make_link(parent_a, "test://has_item", item_2, "1001"))
+            .unwrap();
+
+        let shape = make_shape_with_relation("Parent", "items", "test://has_item");
+
+        let mut instances = vec![json!({ "id": parent_a })];
+
+        let mut projections = HashMap::new();
+        projections.insert(
+            "$items".to_string(),
+            ProjectionInput {
+                from: "items".to_string(),
+                count: false,
+                target_shape: None,
+                where_clause: None,
+                limit: None,
+                order: None,
+            },
+        );
+
+        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+
+        let items = instances[0]["$items"]
+            .as_array()
+            .expect("$items should be an array");
+        assert_eq!(items.len(), 2, "expected 2 items, got {}", items.len());
+        let item_strs: Vec<&str> = items.iter().filter_map(|v| v.as_str()).collect();
+        assert!(item_strs.contains(&item_1), "missing {item_1}");
+        assert!(item_strs.contains(&item_2), "missing {item_2}");
+    }
+
+    #[test]
+    fn test_resolve_projections_scalar() {
+        // limit: Some(1) should unwrap to a single string, not an array.
+        let store = SparqlStore::new(None).unwrap();
+
+        let parent_a = "test://parent/a";
+        let item_1 = "test://item/1";
+
+        store
+            .add_link(&make_link(parent_a, "test://has_item", item_1, "1000"))
+            .unwrap();
+
+        let shape = make_shape_with_relation("Parent", "items", "test://has_item");
+
+        let mut instances = vec![json!({ "id": parent_a })];
+
+        let mut projections = HashMap::new();
+        projections.insert(
+            "$firstItem".to_string(),
+            ProjectionInput {
+                from: "items".to_string(),
+                count: false,
+                target_shape: None,
+                where_clause: None,
+                limit: Some(1),
+                order: None,
+            },
+        );
+
+        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+
+        let val = &instances[0]["$firstItem"];
+        assert_eq!(
+            val.as_str(),
+            Some(item_1),
+            "limit:1 should return a scalar string, got: {val}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_projections_count_zero_when_no_links() {
+        // A parent with no linked children should get count 0, not be absent.
+        let store = SparqlStore::new(None).unwrap();
+        let parent_a = "test://parent/a";
+
+        let shape = make_shape_with_relation("Parent", "items", "test://has_item");
+        let mut instances = vec![json!({ "id": parent_a })];
+
+        let mut projections = HashMap::new();
+        projections.insert(
+            "$itemCount".to_string(),
+            ProjectionInput {
+                from: "items".to_string(),
+                count: true,
+                target_shape: None,
+                where_clause: None,
+                limit: None,
+                order: None,
+            },
+        );
+
+        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+
+        let count = instances[0]["$itemCount"].as_u64().unwrap_or(999);
+        assert_eq!(
+            count, 0,
+            "count should be 0 when no links exist, got {count}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_projections_where_filter_by_plain_iri() {
+        // Flux reactions are stored as plain expression IRIs (e.g. emoji://1f44d),
+        // not as literal:json: blobs.  The STR() FILTER correctly narrows to
+        // only the matching reaction type.
+        let store = SparqlStore::new(None).unwrap();
+
+        let parent_a = "test://parent/a";
+        let like_iri = "emoji://1f44d";
+        let dislike_iri = "emoji://1f44e";
+
+        store
+            .add_link(&make_link(
+                parent_a,
+                "test://has_reaction",
+                like_iri,
+                "1000",
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                parent_a,
+                "test://has_reaction",
+                dislike_iri,
+                "1001",
+            ))
+            .unwrap();
+        // Note: COUNT(DISTINCT ?t) is used, so only distinct target IRIs are counted.
+
+        let shape = make_shape_with_relation("Parent", "reactions", "test://has_reaction");
+
+        // Filter by the plain IRI of the reaction target.
+        let mut wc = HashMap::new();
+        wc.insert(
+            "id".to_string(),
+            WhereCondition::String(like_iri.to_string()),
+        );
+
+        let mut instances = vec![json!({ "id": parent_a })];
+
+        let mut projections = HashMap::new();
+        projections.insert(
+            "$likeCount".to_string(),
+            ProjectionInput {
+                from: "reactions".to_string(),
+                count: true,
+                target_shape: None,
+                where_clause: Some(wc),
+                limit: None,
+                order: None,
+            },
+        );
+
+        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+
+        let count = instances[0]["$likeCount"].as_u64().unwrap_or(999);
+        assert_eq!(
+            count, 1,
+            "should count only the 'like' reaction, got {count}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_projections_where_filter_by_author() {
+        // Mirrors the WE $myLikeSignal pattern:
+        //   where: { author: { $store: 'adamStore.me.did' } }
+        // This was previously silently ignored because the projection SPARQL
+        // did not join the reifier. Now a ?_prj_reif join + FILTER is emitted.
+        let store = SparqlStore::new(None).unwrap();
+
+        let parent_a = "test://parent/a";
+        let signal_1 = "test://signal/1";
+        let signal_2 = "test://signal/2";
+        let signal_3 = "test://signal/3";
+
+        let alice = "did:key:alice";
+        let bob = "did:key:bob";
+
+        // Two signals from alice, one from bob.
+        let mut link1 = make_link(parent_a, "test://has_signal", signal_1, "1000");
+        link1.author = alice.to_string();
+        let mut link2 = make_link(parent_a, "test://has_signal", signal_2, "1001");
+        link2.author = alice.to_string();
+        let mut link3 = make_link(parent_a, "test://has_signal", signal_3, "1002");
+        link3.author = bob.to_string();
+
+        store.add_link(&link1).unwrap();
+        store.add_link(&link2).unwrap();
+        store.add_link(&link3).unwrap();
+
+        let shape = make_shape_with_relation("Parent", "signals", "test://has_signal");
+
+        let mut wc = HashMap::new();
+        wc.insert(
+            "author".to_string(),
+            WhereCondition::String(alice.to_string()),
+        );
+
+        let mut instances = vec![json!({ "id": parent_a })];
+        let mut projections = HashMap::new();
+        projections.insert(
+            "$mySignalCount".to_string(),
+            ProjectionInput {
+                from: "signals".to_string(),
+                count: true,
+                target_shape: None,
+                where_clause: Some(wc),
+                limit: None,
+                order: None,
+            },
+        );
+
+        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+
+        let count = instances[0]["$mySignalCount"].as_u64().unwrap_or(999);
+        assert_eq!(count, 2, "should count only alice's 2 signals, got {count}");
+    }
+
+    // NOTE: Filtering where-clause values stored as `literal:json:` signed-expression
+    // blobs (e.g. @Property values) is NOT supported by this SPARQL-FILTER approach.
+    // STR(?v) returns the raw "literal:json:..." URI, not the decoded `data` field.
+    // Supporting that case requires fetching all rows and post-filtering in Rust via
+    // parse_literal_value — a more involved change deferred until concretely needed.
 }
