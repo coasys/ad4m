@@ -40,6 +40,52 @@ openclaw plugins install -l plugins/ad4m
 
 ---
 
+## What Gets Installed
+
+When you run `openclaw plugins install @coasys/openclaw-ad4m`, three components are set up:
+
+### 1. Plugin (runtime bridge)
+
+Installed to `~/.openclaw/plugins/ad4m/`. The plugin handles:
+- Spawning/managing the executor process (managed mode)
+- Establishing an MCP session with the executor
+- Registering all AD4M tools as native agent tools
+- Running the waker service for real-time subscriptions
+- Dynamically discovering new tools as SHACL schemas sync
+
+### 2. Skill (agent instructions)
+
+Bundled at `plugins/ad4m/skills/ad4m/SKILL.md`. The plugin declares this via `"skills": ["skills/ad4m"]` in its manifest. OpenClaw loads it automatically when the plugin is enabled. The skill teaches the agent:
+- How to use AD4M tools correctly
+- Rules for message posting, channel creation, subject classes
+- How to handle wake events and subscriptions
+- Data model conventions (Flux compatibility)
+
+The skill does **not** provide tools — it provides **instructions** for using the 77+ tools registered by the MCP bridge.
+
+### 3. MCP tools (dynamic)
+
+The executor's MCP server exposes tools based on the connected perspectives and their SHACL schemas. New tools appear as neighbourhoods sync their data models. The plugin polls for changes every 30 seconds (configurable via `toolRefreshIntervalMs`).
+
+### Verification
+
+```bash
+# Verify plugin is loaded
+openclaw plugins list | grep ad4m
+# Expected: ✓ loaded
+
+# Verify skill is available
+openclaw skills list | grep ad4m
+# Expected: ✓ ready, source: openclaw-extra
+
+# Verify tools are registered (after executor starts)
+# In chat, the agent will have tools like ad4m_list_perspectives, ad4m_message_create, etc.
+```
+
+**Note:** Skills are snapshotted per session. If you install the plugin mid-session, start a new session (or `/reset`) to pick up the skill.
+
+---
+
 ## Setup
 
 ### Automated setup (recommended)
@@ -220,6 +266,21 @@ The agent wallet exists but hasn't been unlocked yet. The plugin handles this au
 ### MCP probe returns 406 (Not Acceptable)
 
 The plugin sends the required `Accept: application/json, text/event-stream` header. If you see this in manual testing, ensure you include that header.
+
+### AD4M skill not appearing in agent's available skills
+
+OpenClaw snapshots eligible skills **when a session starts**. If you install the plugin mid-session, the skill won't appear until the next new session. To verify the skill is loaded by the gateway:
+
+```bash
+openclaw skills list | grep ad4m
+```
+
+If it shows `✓ ready` with source `openclaw-extra`, the skill is loaded — start a new session (or run `/reset`) to pick it up.
+
+If it doesn't appear at all, ensure:
+- The plugin is enabled (`plugins.entries.ad4m.enabled: true`)
+- The plugin manifest has `"skills": ["skills/ad4m"]`
+- The `skills/ad4m/SKILL.md` file exists with valid frontmatter
 
 ### Tools not appearing after joining a neighbourhood
 
