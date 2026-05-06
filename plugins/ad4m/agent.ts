@@ -93,6 +93,36 @@ export async function ensureAgentReady(
         );
         break; // Connected successfully
       } catch (e: any) {
+        // Handle "main key not found" — wallet is locked, not a connection error
+        if (e.message && e.message.includes("main key not found")) {
+          if (agentPassphrase) {
+            logger.info(
+              `[ad4m] Wallet locked ("main key not found"), attempting unlock...`,
+            );
+            try {
+              await client.agent.unlock(agentPassphrase);
+              const newStatus = await client.agent.status();
+              logger.info(
+                `[ad4m] Agent unlocked successfully. DID: ${newStatus.did}`,
+              );
+              return { did: newStatus.did };
+            } catch (unlockErr: any) {
+              logger.error(
+                `[ad4m] Failed to unlock agent after "main key not found": ${unlockErr.message}`,
+              );
+              logger.warn(
+                `[ad4m] You may need to provide the correct agentPassphrase in config or reconfigure.`,
+              );
+              return null;
+            }
+          } else {
+            logger.error(
+              `[ad4m] Wallet locked ("main key not found") but no passphrase available. Set agentPassphrase in plugin config.`,
+            );
+            return null;
+          }
+        }
+
         if (attempt < maxAttempts) {
           logger.info(
             `[ad4m] WS not ready yet (${e.message}), retrying in ${CONNECT_RETRY_DELAY_MS}ms... (${attempt}/${maxAttempts})`,

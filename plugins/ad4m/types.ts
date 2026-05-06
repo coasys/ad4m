@@ -21,6 +21,8 @@ export interface PluginConfig {
   token?: string;
   agentPassphrase?: string;
   ad4mBinaryPath?: string;
+  /** Custom data directory for the AD4M executor (passed as --data-path to init/run). */
+  appDataPath?: string;
   toolRefreshIntervalMs?: number;
   wakerEnabled?: boolean;
   executorWsUrl?: string;

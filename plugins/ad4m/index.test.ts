@@ -46,6 +46,7 @@ import {
   extractMcpResultData,
   buildWakeMessage,
   postWake,
+  EXECUTOR_STARTUP_WAIT_ITERATIONS,
   type PluginConfig,
   type WakerSubscription,
   type McpTool,
@@ -1025,11 +1026,279 @@ describe("ensureAgentReady", () => {
       ),
     ).toBe(true);
   });
+
+  it("handles 'main key not found' error with passphrase by unlocking", async () => {
+    const mockStatus = vi.fn()
+      .mockRejectedValueOnce(new Error("main key not found"))
+      .mockResolvedValueOnce({
+        isInitialized: true,
+        isUnlocked: true,
+        did: "did:key:z6MkUnlockedAfterMainKeyError",
+      });
+    const mockUnlock = vi.fn().mockResolvedValue(undefined);
+    const client = makeMockAd4mClient({
+      status: mockStatus,
+      unlock: mockUnlock,
+    });
+
+    const logger = makeMockLogger();
+    const result = await ensureAgentReady(
+      "ws://localhost:12000/graphql",
+      "test-cred",
+      logger,
+      "my-passphrase",
+      client,
+    );
+
+    expect(result).toEqual({ did: "did:key:z6MkUnlockedAfterMainKeyError" });
+    expect(mockUnlock).toHaveBeenCalledWith("my-passphrase");
+
+    const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      msgs.some((m: string) => m.includes("main key not found")),
+    ).toBe(true);
+    expect(
+      msgs.some((m: string) => m.includes("unlocked successfully")),
+    ).toBe(true);
+  });
+
+  it("handles 'main key not found' error without passphrase gracefully", async () => {
+    const mockStatus = vi.fn()
+      .mockRejectedValue(new Error("main key not found"));
+    const mockUnlock = vi.fn();
+    const client = makeMockAd4mClient({
+      status: mockStatus,
+      unlock: mockUnlock,
+    });
+
+    const logger = makeMockLogger();
+    const result = await ensureAgentReady(
+      "ws://localhost:12000/graphql",
+      "test-cred",
+      logger,
+      undefined,
+      client,
+    );
+
+    expect(result).toBeNull();
+    expect(mockUnlock).not.toHaveBeenCalled();
+
+    const errorMsgs = logger.error.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      errorMsgs.some((m: string) =>
+        m.includes("main key not found") && m.includes("no passphrase"),
+      ),
+    ).toBe(true);
+  });
+
+  it("handles 'main key not found' when unlock itself fails", async () => {
+    const mockStatus = vi.fn()
+      .mockRejectedValue(new Error("main key not found"));
+    const mockUnlock = vi.fn().mockRejectedValue(new Error("wrong passphrase"));
+    const client = makeMockAd4mClient({
+      status: mockStatus,
+      unlock: mockUnlock,
+    });
+
+    const logger = makeMockLogger();
+    const result = await ensureAgentReady(
+      "ws://localhost:12000/graphql",
+      "test-cred",
+      logger,
+      "bad-passphrase",
+      client,
+    );
+
+    expect(result).toBeNull();
+    expect(mockUnlock).toHaveBeenCalledWith("bad-passphrase");
+
+    const errorMsgs = logger.error.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      errorMsgs.some((m: string) =>
+        m.includes("Failed to unlock agent after"),
+      ),
+    ).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
-// parseSSEStream
+// isExecutorRunning — port configuration and Accept header
 // ---------------------------------------------------------------------------
+
+describe("isExecutorRunning — port and header tests", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("probes custom GraphQL port when provided", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((url: any) => {
+      if (String(url).includes(":15000/graphql")) {
+        return Promise.resolve(
+          fakeJsonResponse({ data: { agentStatus: { isInitialized: true } } }),
+        );
+      }
+      return Promise.reject(new Error("ECONNREFUSED"));
+    });
+
+    const result = await isExecutorRunning(
+      "http://localhost:3001/mcp",
+      1000,
+      "http://localhost:15000/graphql",
+    );
+    expect(result).toBe("graphql");
+
+    // Verify it called with the custom port
+    const calls = fetchSpy.mock.calls.map((c: any[]) => String(c[0]));
+    expect(calls.some((url: string) => url.includes(":15000/graphql"))).toBe(true);
+  });
+
+  it("sends Accept header on MCP probe", async () => {
+    let capturedHeaders: Record<string, string> | null = null;
+    vi.spyOn(globalThis, "fetch").mockImplementation((url: any, opts: any) => {
+      if (String(url).includes("/mcp")) {
+        capturedHeaders = opts?.headers ?? null;
+        return Promise.resolve(
+          fakeJsonResponse({ jsonrpc: "2.0", id: 0, result: {} }),
+        );
+      }
+      return Promise.reject(new Error("ECONNREFUSED"));
+    });
+
+    await isExecutorRunning("http://localhost:3001/mcp", 1000);
+
+    expect(capturedHeaders).not.toBeNull();
+    expect(capturedHeaders!["Accept"]).toBe("application/json, text/event-stream");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ensureExecutorRunning — wait loop timeout and init --data-path
+// ---------------------------------------------------------------------------
+
+describe("ensureExecutorRunning — timeout and data-path", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("passes --data-path to init when appDataPath is provided", async () => {
+    const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
+    const customDataPath = "/custom/ad4m-data";
+
+    // Mock fs.existsSync to report custom data directory as missing
+    const realExistsSync = fs.existsSync;
+    vi.spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
+      if (p === customDataPath) return false;
+      return realExistsSync(p);
+    });
+
+    try {
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+      mockExecFileSync.mockReturnValue(Buffer.from(""));
+
+      const fakeProc = createFakeChildProcess();
+      mockSpawn.mockReturnValue(fakeProc as any);
+
+      const logger = makeMockLogger();
+      const resultPromise = ensureExecutorRunning(
+        "cred",
+        logger,
+        "http://localhost:3001/mcp",
+        "ws://localhost:12000/graphql",
+        undefined,
+        undefined,
+        "file",
+        customDataPath,
+      );
+
+      setTimeout(() => {
+        fakeProc.emit("error", new Error("spawn ENOENT"));
+      }, 100);
+
+      await resultPromise;
+
+      // Should have called init with --data-path
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "ad4m-executor",
+        ["init", "--data-path", customDataPath],
+        expect.any(Object),
+      );
+    } finally {
+      mockExecFileSync.mockReset();
+    }
+  }, 10000);
+
+  it("does not pass --data-path to init when appDataPath is not provided", async () => {
+    const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
+    const ad4mDir = path.join(home, ".ad4m");
+
+    // Mock fs.existsSync to report default data directory as missing
+    const realExistsSync = fs.existsSync;
+    vi.spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
+      if (p === ad4mDir) return false;
+      return realExistsSync(p);
+    });
+
+    try {
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+      mockExecFileSync.mockReturnValue(Buffer.from(""));
+
+      const fakeProc = createFakeChildProcess();
+      mockSpawn.mockReturnValue(fakeProc as any);
+
+      const logger = makeMockLogger();
+      const resultPromise = ensureExecutorRunning("cred", logger);
+
+      setTimeout(() => {
+        fakeProc.emit("error", new Error("spawn ENOENT"));
+      }, 100);
+
+      await resultPromise;
+
+      // Should have called init without --data-path
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "ad4m-executor",
+        ["init"],
+        expect.any(Object),
+      );
+    } finally {
+      mockExecFileSync.mockReset();
+    }
+  }, 10000);
+
+  it("uses EXECUTOR_STARTUP_WAIT_ITERATIONS constant (90)", () => {
+    expect(EXECUTOR_STARTUP_WAIT_ITERATIONS).toBe(90);
+  });
+
+  it("derives graphqlHttpUrl from wsEndpoint for probes", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((url: any) => {
+      // Only respond to the custom port
+      if (String(url).includes(":15000/graphql")) {
+        return Promise.resolve(
+          fakeJsonResponse({ data: { agentStatus: { isInitialized: true } } }),
+        );
+      }
+      if (String(url).includes("/mcp")) {
+        return Promise.reject(new Error("ECONNREFUSED"));
+      }
+      return Promise.reject(new Error("ECONNREFUSED"));
+    });
+
+    const logger = makeMockLogger();
+    const result = await ensureExecutorRunning(
+      "cred",
+      logger,
+      "http://localhost:3001/mcp",
+      "ws://localhost:15000/graphql",
+    );
+
+    // Should detect the executor via GraphQL on port 15000
+    expect(result).toBe("already_running");
+
+    // Verify fetch was called with port 15000
+    const calls = fetchSpy.mock.calls.map((c: any[]) => String(c[0]));
+    expect(calls.some((url: string) => url.includes(":15000/graphql"))).toBe(true);
+  });
+});
 
 describe("parseSSEStream", () => {
   it("parses a valid SSE stream with a JSON-RPC message", async () => {

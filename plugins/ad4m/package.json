@@ -5,27 +5,37 @@
   "license": "MIT",
   "main": "index.ts",
   "openclaw": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "repository": {
     "type": "git",
     "url": "https://github.com/coasys/ad4m",
     "directory": "plugins/ad4m"
   },
-  "keywords": ["openclaw", "ad4m", "mcp", "p2p", "holochain", "neighbourhoods"],
+  "keywords": [
+    "openclaw",
+    "ad4m",
+    "mcp",
+    "p2p",
+    "holochain",
+    "neighbourhoods"
+  ],
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@coasys/ad4m": "0.12.0-rc1-dev.5",
     "@apollo/client": "^3.7.10",
+    "@coasys/ad4m": "0.12.0-rc1-dev.5",
     "graphql": "^15.7.2",
     "graphql-ws": "^5.14.0",
     "ws": "^8.16.0"
   },
   "devDependencies": {
-    "vitest": "^3.0.0",
-    "typescript": "^5.0.0"
+    "@types/node": "^25.6.0",
+    "typescript": "^5.0.0",
+    "vitest": "^3.0.0"
   }
 }

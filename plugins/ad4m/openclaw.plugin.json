@@ -67,6 +67,10 @@
         "enum": ["file", "openclaw", "both"],
         "default": "file",
         "description": "Where to send executor logs: 'file' = ~/.ad4m/ad4m.log only (default), 'openclaw' = OpenClaw logs only, 'both' = both destinations."
+      },
+      "appDataPath": {
+        "type": "string",
+        "description": "Custom data directory for the AD4M executor (passed as --data-path to init and --app-data-path to run). Defaults to ~/.ad4m if not set."
       }
     },
     "required": [],
