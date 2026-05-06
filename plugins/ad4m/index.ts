@@ -913,6 +913,7 @@ Notes:
           binaryPath,
           config.rustLog,
           config.executorLogTarget ?? "file",
+          providedConfig.appDataPath,
         );
         if (!executorStartResult) {
           logger.error(
