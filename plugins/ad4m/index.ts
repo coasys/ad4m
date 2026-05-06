@@ -63,6 +63,7 @@ export {
   ensureExecutorRunning,
   stopExecutor,
   downloadExecutor,
+  EXECUTOR_STARTUP_WAIT_ITERATIONS,
 } from "./executor";
 export type { ExecutorStartResult } from "./executor";
 export { ensureAgentReady } from "./agent";

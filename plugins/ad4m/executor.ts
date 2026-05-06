@@ -340,7 +340,7 @@ export async function isExecutorRunning(
   timeoutMs: number = 3000,
   graphqlHttpUrl: string = "http://localhost:12000/graphql",
 ): Promise<"mcp" | "graphql" | false> {
-  const probe = (url: string, body: string, validate?: (json: any) => boolean): Promise<boolean> =>
+  const probe = (url: string, body: string, headers?: Record<string, string>, validate?: (json: any) => boolean): Promise<boolean> =>
     new Promise((resolve) => {
       const controller = new AbortController();
       const timeout = setTimeout(() => {
@@ -350,7 +350,7 @@ export async function isExecutorRunning(
 
       fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...headers },
         body,
         signal: controller.signal,
       })
@@ -376,10 +376,12 @@ export async function isExecutorRunning(
     probe(
       endpoint,
       JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/list", params: {} }),
+      { "Accept": "application/json, text/event-stream" },
     ),
     probe(
       graphqlHttpUrl,
       JSON.stringify({ query: "{ agentStatus { isInitialized } }" }),
+      undefined,
       // Unauthenticated requests lack AGENT_READ_CAPABILITY so the query
       // returns errors — but any GraphQL-shaped response (data or errors key)
       // confirms an AD4M executor is listening.
@@ -391,6 +393,9 @@ export async function isExecutorRunning(
   if (gql) return "graphql";
   return false;
 }
+
+/** Maximum iterations to wait for the executor to become ready (1 iteration = 1 second). */
+export const EXECUTOR_STARTUP_WAIT_ITERATIONS = 90;
 
 /**
  * Result of ensureExecutorRunning:
@@ -408,11 +413,17 @@ export async function ensureExecutorRunning(
   binaryPath?: string,
   rustLog?: string,
   logTarget: "file" | "openclaw" | "both" = "file",
+  appDataPath?: string,
 ): Promise<ExecutorStartResult> {
+  // Derive the GraphQL HTTP URL from the WS endpoint for probe consistency
+  const graphqlHttpUrl = wsEndpoint
+    .replace(/^ws:/, "http:")
+    .replace(/^wss:/, "https:");
+
   logger.info(`[ad4m] Checking if executor is running at ${endpoint}...`);
 
   // Check if already running
-  if (await isExecutorRunning(endpoint, 3000)) {
+  if (await isExecutorRunning(endpoint, 3000, graphqlHttpUrl)) {
     logger.info(`[ad4m] Executor is already running`);
     return "already_running";
   }
@@ -427,14 +438,18 @@ export async function ensureExecutorRunning(
   // Running init on an existing directory can wipe agent keys via
   // its version-mismatch cleanup logic.
   const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
-  const ad4mDir = path.join(home, ".ad4m");
+  const ad4mDir = appDataPath || path.join(home, ".ad4m");
 
   if (!fs.existsSync(ad4mDir)) {
     logger.info(
       `[ad4m] Data directory ${ad4mDir} not found — running init for first-time setup...`,
     );
     try {
-      execFileSync(executorPath, ["init"], {
+      const initArgs = ["init"];
+      if (appDataPath) {
+        initArgs.push("--data-path", appDataPath);
+      }
+      execFileSync(executorPath, initArgs, {
         stdio: ["ignore", "pipe", "pipe"],
         timeout: 30000,
       });
@@ -545,7 +560,7 @@ export async function ensureExecutorRunning(
 
     // Wait for executor to be ready (check spawn failure each iteration)
     logger.info(`[ad4m] Waiting for executor to start...`);
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < EXECUTOR_STARTUP_WAIT_ITERATIONS; i++) {
       await new Promise((r) => setTimeout(r, 1000));
 
       // If spawn failed (ENOENT, permission, non-zero exit), stop waiting
@@ -561,14 +576,17 @@ export async function ensureExecutorRunning(
         return false;
       }
 
-      if (await isExecutorRunning(endpoint, 2000)) {
+      if (await isExecutorRunning(endpoint, 2000, graphqlHttpUrl)) {
         logger.info(`[ad4m] Executor started successfully`);
         return "spawned";
       }
-      logger.info(`[ad4m] Waiting... (${i + 1}/30)`);
+      // Log progress every 10 iterations to reduce spam
+      if ((i + 1) % 10 === 0) {
+        logger.info(`[ad4m] Waiting... (${i + 1}/${EXECUTOR_STARTUP_WAIT_ITERATIONS})`);
+      }
     }
 
-    logger.error(`[ad4m] Executor failed to start within 30 seconds`);
+    logger.error(`[ad4m] Executor failed to start within ${EXECUTOR_STARTUP_WAIT_ITERATIONS} seconds`);
     return false;
   } catch (err: any) {
     logger.error(`[ad4m] Error starting executor: ${err.message}`);
