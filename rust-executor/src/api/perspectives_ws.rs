@@ -802,10 +802,7 @@ async fn get_subject_data(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     Ok(Value::String(data))
 }
 
-async fn model_query_handler(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
+async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
         &ctx.capabilities,
