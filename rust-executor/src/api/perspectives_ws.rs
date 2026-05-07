@@ -134,7 +134,12 @@ async fn get_perspective_handler(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    // Return null (via 404, caught by client) if perspective doesn't exist or user can't access it
+    let perspective = match get_perspective_with_access(&uuid, &ctx).await {
+        Ok(p) => p,
+        Err(e) if e.code == 403 || e.code == 404 => return Ok(Value::Null),
+        Err(e) => return Err(e),
+    };
     let handle = perspective.persisted.lock().await.clone();
     Ok(serde_json::to_value(handle)?)
 }
@@ -147,7 +152,12 @@ async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    // Return null if perspective doesn't exist or user can't access it
+    let perspective = match get_perspective_with_access(&uuid, &ctx).await {
+        Ok(p) => p,
+        Err(e) if e.code == 403 || e.code == 404 => return Ok(Value::Null),
+        Err(e) => return Err(e),
+    };
     let links = perspective
         .get_links(&LinkQuery {
             source: None,
