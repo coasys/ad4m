@@ -265,6 +265,7 @@ export class ApiClient {
             this._wsClosed = true
             this._ws.close()
             this._ws = null
+            this._wsReady = null
         }
     }
 
