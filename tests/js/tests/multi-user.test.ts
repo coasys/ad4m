@@ -22,7 +22,7 @@ describe("Multi-User integration tests", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "multi-user-agent");
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    let gqlPort: number;
+    let apiPort: number;
     let hcAdminPort: number;
     let hcAppPort: number;
 
@@ -30,17 +30,17 @@ describe("Multi-User integration tests", () => {
     let adminAd4mClient: Ad4mClient | null = null
 
     before(async () => {
-        [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
-        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
+        [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+        registerPorts([apiPort, hcAdminPort, hcAppPort]);
         if (!fs.existsSync(appDataPath)) {
             fs.mkdirSync(appDataPath, { recursive: true });
         }
 
         // Start executor with multi-user mode enabled
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-            gqlPort, hcAdminPort, hcAppPort, false, "admin123");
+            apiPort, hcAdminPort, hcAppPort, false, "admin123");
 
-        adminAd4mClient = new Ad4mClient(baseUrl(gqlPort), "admin123", false)
+        adminAd4mClient = new Ad4mClient(baseUrl(apiPort), "admin123", false)
         
         // Generate initial admin agent
         await adminAd4mClient.agent.generate("passphrase")
@@ -48,9 +48,9 @@ describe("Multi-User integration tests", () => {
 
     after(async () => {
         if (executorProcess) {
-            await quitExecutor(executorProcess, gqlPort);
+            await quitExecutor(executorProcess, apiPort);
         }
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
+        deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
     })
 
     describe("User Registration and Authentication", () => {
@@ -167,8 +167,8 @@ describe("Multi-User integration tests", () => {
             const aliceJwt = await adminAd4mClient!.agent.generateJwtForUser("alice_persp", aliceRequestId, aliceRand);
             const bobJwt = await adminAd4mClient!.agent.generateJwtForUser("bob_persp", bobRequestId, bobRand);
 
-            aliceClient = new Ad4mClient(baseUrl(gqlPort), aliceJwt, false);
-            bobClient = new Ad4mClient(baseUrl(gqlPort), bobJwt, false);
+            aliceClient = new Ad4mClient(baseUrl(apiPort), aliceJwt, false);
+            bobClient = new Ad4mClient(baseUrl(apiPort), bobJwt, false);
         })
 
         it("should create perspectives scoped to specific users", async () => {
@@ -261,7 +261,7 @@ describe("Multi-User integration tests", () => {
             const rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"user-ops-app","appDesc":"test user operations","appUrl":"test-url","capabilities":[{"with":{"domain":"*","pointers":["*"]},"can":["*"]}]}}`);
             const jwt = await adminAd4mClient!.agent.generateJwtForUser("test_user_ops", requestId, rand);
 
-            userClient = new Ad4mClient(baseUrl(gqlPort), jwt, false);
+            userClient = new Ad4mClient(baseUrl(apiPort), jwt, false);
         })
 
         it("should return correct agent status for user", async () => {

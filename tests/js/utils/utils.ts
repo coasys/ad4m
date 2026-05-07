@@ -153,7 +153,7 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
 
 export async function startExecutor(dataPath: string,
     bootstrapSeedPath: string,
-    gqlPort: number,
+    apiPort: number,
     hcAdminPort: number,
     hcAppPort: number,
     languageLanguageOnly: boolean = false,
@@ -202,7 +202,7 @@ export async function startExecutor(dataPath: string,
     const args = [
         'run',
         '--app-data-path', effectiveDataPath,
-        '--port', String(gqlPort),
+        '--port', String(apiPort),
         '--hc-admin-port', String(hcAdminPort),
         '--hc-app-port', String(hcAppPort),
         '--hc-proxy-url', proxyUrl,
@@ -224,8 +224,8 @@ export async function startExecutor(dataPath: string,
         // REST branch no longer emits the old `listening on http://127.0.0.1:<port>`
         // marker consistently. Accept either the legacy marker or the REST startup log so tests
         // can run against both pre-REST and REST executors.
-        const legacyApiMarker = `listening on http://127.0.0.1:${gqlPort}`;
-        const restApiMarker = `REST API server starting on http://127.0.0.1:${gqlPort}/api/v1`;
+        const legacyApiMarker = `listening on http://127.0.0.1:${apiPort}`;
+        const restApiMarker = `REST API server starting on http://127.0.0.1:${apiPort}/api/v1`;
         const mcpMarker = 'MCP HTTP server listening';
         let apiReady = false;
         let mcpReady = !enableMcp;
@@ -363,7 +363,7 @@ export async function gracefulShutdown(proc: ChildProcess | null | undefined, la
  */
 export async function quitExecutor(
     executorProcess: ChildProcess,
-    gqlPort: number,
+    apiPort: number,
     adminCredential?: string,
     timeoutMs: number = 8000,
 ): Promise<void> {
@@ -380,7 +380,7 @@ export async function quitExecutor(
         }
 
         await Promise.race([
-            fetch(`http://127.0.0.1:${gqlPort}/api/v1/runtime/quit`, {
+            fetch(`http://127.0.0.1:${apiPort}/api/v1/runtime/quit`, {
                 method: 'POST',
                 headers,
             }).then(async (res) => {
@@ -404,7 +404,7 @@ export async function quitExecutor(
 
     if (!exited) {
         // runtime quit didn't work — fall back to SIGTERM/SIGKILL escalation
-        console.warn(`quitExecutor: executor (port ${gqlPort}) still running after runtime quit, falling back to gracefulShutdown`);
-        await gracefulShutdown(executorProcess, `executor:${gqlPort}`);
+        console.warn(`quitExecutor: executor (port ${apiPort}) still running after runtime quit, falling back to gracefulShutdown`);
+        await gracefulShutdown(executorProcess, `executor:${apiPort}`);
     }
 }

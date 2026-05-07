@@ -18,7 +18,7 @@ const perspectiveDiffSyncHashPath = path.resolve(__dirname, '..', 'scripts', 'pe
 // Allow env-var override so concurrent CI jobs can each use a unique port range
 // and avoid stomping on each other during the setup phase.
 // Defaults: 15700/15701/15702 (used by integration-tests-js / test-main)
-const gqlPort = parseInt(process.env.AD4M_SETUP_GQL_PORT || '15700', 10);
+const apiPort = parseInt(process.env.AD4M_SETUP_API_PORT || '15700', 10);
 const hcAdminPort = parseInt(process.env.AD4M_SETUP_HC_ADMIN_PORT || '15701', 10);
 const hcAppPort = parseInt(process.env.AD4M_SETUP_HC_APP_PORT || '15702', 10);
 
@@ -74,7 +74,7 @@ function injectLangAliasHashes() {
 }
 
 async function publish() {
-    const setupPorts = [gqlPort, hcAdminPort, hcAppPort];
+    const setupPorts = [apiPort, hcAdminPort, hcAppPort];
 
     // Pre-clean: kill any orphaned executor from a previous CI job that may be
     // squatting on our ports. Self-hosted runners reuse workdirs between jobs
@@ -85,10 +85,10 @@ async function publish() {
 
     createTestingAgent();
 
-    const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, gqlPort, hcAdminPort, hcAppPort, true);
+    const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, apiPort, hcAdminPort, hcAppPort, true);
 
     try {
-        const ad4mClient = new Ad4mClient(baseUrl(gqlPort));
+        const ad4mClient = new Ad4mClient(baseUrl(apiPort));
         await ad4mClient.agent.generate("passphrase");
 
         for (const [language, languageMeta] of Object.entries(languagesToPublish)) {

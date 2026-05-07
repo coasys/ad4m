@@ -89,7 +89,7 @@ describe("Integration tests", function () {
     this.timeout(200000)
     const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    let gqlPort: number;
+    let apiPort: number;
     let hcAdminPort: number;
     let hcAppPort: number;
 
@@ -101,8 +101,8 @@ describe("Integration tests", function () {
     let relayUrl: string | null = null;
 
     before(async () => {
-        [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
-        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
+        [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+        registerPorts([apiPort, hcAdminPort, hcAppPort]);
         if(!fs.existsSync(TEST_DIR)) {
           throw Error("Please ensure that prepare-test is run before running tests!");
         }
@@ -118,20 +118,20 @@ describe("Integration tests", function () {
         relayUrl = localServices.relayUrl;
 
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-          gqlPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!, relayUrl!);
+          apiPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!, relayUrl!);
 
-        testContext.alice = new Ad4mClient(baseUrl(gqlPort))
+        testContext.alice = new Ad4mClient(baseUrl(apiPort))
         testContext.aliceCore = executorProcess
     })
 
     after(async () => {
       if (executorProcess) {
-        await quitExecutor(executorProcess, gqlPort);
+        await quitExecutor(executorProcess, apiPort);
       }
       if (localServicesProcess) {
         localServicesProcess.kill('SIGKILL');
       }
-      deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
+      deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))

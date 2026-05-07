@@ -39,7 +39,7 @@ describe("MCP mcporter Integration Tests", function() {
     const appDataPath = path.join(TEST_DIR, "agents", "mcp-mcporter-test");
     const bootstrapSeedPath = path.join(__dirname + "/../bootstrapSeed.json");
     // Unique ports for mcporter tests
-    let gqlPort: number;
+    let apiPort: number;
     let hcAdminPort: number;
     let hcAppPort: number;
     const adminCredential = "mcporter-test-admin-credential-12345";
@@ -48,9 +48,9 @@ describe("MCP mcporter Integration Tests", function() {
     let mcporterConfigPath: string;
 
     before(async () => {
-        [gqlPort, hcAdminPort, hcAppPort, MCP_PORT] = await getFreePorts(4);
+        [apiPort, hcAdminPort, hcAppPort, MCP_PORT] = await getFreePorts(4);
         MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
-        registerPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        registerPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
 
         // Clean up and create test directory
         if (fs.existsSync(appDataPath)) {
@@ -62,7 +62,7 @@ describe("MCP mcporter Integration Tests", function() {
         executorProcess = await startExecutor(
             appDataPath,
             bootstrapSeedPath,
-            gqlPort,
+            apiPort,
             hcAdminPort,
             hcAppPort,
             true,               // languageLanguageOnly
@@ -77,7 +77,7 @@ describe("MCP mcporter Integration Tests", function() {
         await sleep(3000);
 
         // Generate agent via REST
-        const adminClient = new Ad4mClient(`http://127.0.0.1:${gqlPort}`, adminCredential, false);
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
         await adminClient.agent.generate("test-passphrase");
         console.log("Agent generated via REST");
 
@@ -109,8 +109,8 @@ describe("MCP mcporter Integration Tests", function() {
                 executorProcess.kill('SIGKILL');
             }
         }
-        killByPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        killByPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        deregisterPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
     });
 
     // ========================================================================

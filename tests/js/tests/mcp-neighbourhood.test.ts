@@ -34,7 +34,7 @@ const __dirname = path.dirname(__filename);
 const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
 const MCP_PORT = 3003;
 const MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
-const GQL_PORT = 15800;
+const API_PORT = 15800;
 const HC_ADMIN_PORT = 15801;
 const HC_APP_PORT = 15802;
 const ADMIN_CREDENTIAL = "mcp-neighbourhood-test-secret";
@@ -61,7 +61,7 @@ describe("MCP Neighbourhood Integration Tests", function () {
 
         executorProcess = await startExecutor(
             appDataPath, bootstrapSeedPath,
-            GQL_PORT, HC_ADMIN_PORT, HC_APP_PORT,
+            API_PORT, HC_ADMIN_PORT, HC_APP_PORT,
             true,               // languageLanguageOnly
             ADMIN_CREDENTIAL,
             undefined, undefined, undefined,
@@ -71,7 +71,7 @@ describe("MCP Neighbourhood Integration Tests", function () {
 
         await sleep(3000);
 
-        const adminClient = new Ad4mClient(`http://127.0.0.1:${GQL_PORT}`, ADMIN_CREDENTIAL, false);
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${API_PORT}`, ADMIN_CREDENTIAL, false);
         await adminClient.agent.generate("test-passphrase");
         console.log("Agent generated");
     });
@@ -82,7 +82,7 @@ describe("MCP Neighbourhood Integration Tests", function () {
             await sleep(1000);
             if (!executorProcess.killed) executorProcess.kill('SIGKILL');
         }
-        killByPorts([GQL_PORT, HC_ADMIN_PORT, HC_APP_PORT, MCP_PORT]);
+        killByPorts([API_PORT, HC_ADMIN_PORT, HC_APP_PORT, MCP_PORT]);
     });
 
     // ========================================================================

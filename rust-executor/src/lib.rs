@@ -406,7 +406,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         init_prolog_service().await;
     }
 
-    find_and_set_port(&mut config.gql_port, 4000, "REST API");
+    find_and_set_port(&mut config.port, 4000, "REST API");
     find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");
     find_and_set_port(&mut config.hc_app_port, 1337, "Holochain app");
 

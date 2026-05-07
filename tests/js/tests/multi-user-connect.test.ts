@@ -23,7 +23,7 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "multi-user-connect-agent");
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    let gqlPort: number;
+    let apiPort: number;
     let hcAdminPort: number;
     let hcAppPort: number;
 
@@ -31,17 +31,17 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
     let adminAd4mClient: Ad4mClient | null = null
 
     before(async () => {
-        [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
-        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
+        [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+        registerPorts([apiPort, hcAdminPort, hcAppPort]);
         if (!fs.existsSync(appDataPath)) {
             fs.mkdirSync(appDataPath, { recursive: true });
         }
 
         // Start executor with multi-user mode enabled (no admin credential for this test)
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-            gqlPort, hcAdminPort, hcAppPort, false);
+            apiPort, hcAdminPort, hcAppPort, false);
 
-        adminAd4mClient = new Ad4mClient(baseUrl(gqlPort), undefined, false)
+        adminAd4mClient = new Ad4mClient(baseUrl(apiPort), undefined, false)
         
         // Generate initial admin agent (needed for JWT signing)
         await adminAd4mClient.agent.generate("passphrase")
@@ -49,9 +49,9 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
 
     after(async () => {
         if (executorProcess) {
-            await quitExecutor(executorProcess, gqlPort);
+            await quitExecutor(executorProcess, apiPort);
         }
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
+        deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
     })
 
     describe("Multi-User Connect Flow", () => {
@@ -67,7 +67,7 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
                     can: ["*"] 
                 }],
                 multiUser: true,
-                url: `http://localhost:${gqlPort}`,
+                url: `http://localhost:${apiPort}`,
                 userEmail: "test@example.com",
                 userPassword: "password123"
             });
@@ -104,7 +104,7 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
                     can: ["*"] 
                 }],
                 multiUser: true,
-                url: `http://localhost:${gqlPort}`,
+                url: `http://localhost:${apiPort}`,
                 userEmail: "existing@example.com",
                 userPassword: "password456"
             });
@@ -131,7 +131,7 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
                     can: ["*"] 
                 }],
                 multiUser: true,
-                url: `http://localhost:${gqlPort}`,
+                url: `http://localhost:${apiPort}`,
                 userEmail: "existing@example.com",
                 userPassword: "wrongpassword"
             });

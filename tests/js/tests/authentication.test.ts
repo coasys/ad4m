@@ -20,7 +20,7 @@ describe("Authentication integration tests", () => {
         const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
         const appDataPath = path.join(TEST_DIR, "agents", "unauth-agent");
         const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-        let gqlPort: number;
+        let apiPort: number;
         let hcAdminPort: number;
         let hcAppPort: number;
 
@@ -28,24 +28,24 @@ describe("Authentication integration tests", () => {
         let ad4mClient: Ad4mClient | null = null
 
         before(async () => {
-            [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
-            registerPorts([gqlPort, hcAdminPort, hcAppPort]);
+            [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+            registerPorts([apiPort, hcAdminPort, hcAppPort]);
             if (!fs.existsSync(appDataPath)) {
                 fs.mkdirSync(appDataPath, { recursive: true });
             }
 
             executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-                gqlPort, hcAdminPort, hcAppPort);
+                apiPort, hcAdminPort, hcAppPort);
 
-            ad4mClient = new Ad4mClient(baseUrl(gqlPort), undefined, false)
+            ad4mClient = new Ad4mClient(baseUrl(apiPort), undefined, false)
             await ad4mClient.agent.generate("passphrase")
         })
 
         after(async () => {
             if (executorProcess) {
-                await quitExecutor(executorProcess, gqlPort);
+                await quitExecutor(executorProcess, apiPort);
             }
-            deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
+            deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
         })
 
         it("unauthenticated user has all the capabilities", async () => {
@@ -81,7 +81,7 @@ describe("Authentication integration tests", () => {
         const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
         const appDataPath = path.join(TEST_DIR, "agents", "auth-agent");
         const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-        let gqlPort: number;
+        let apiPort: number;
         let hcAdminPort: number;
         let hcAppPort: number;
 
@@ -90,26 +90,26 @@ describe("Authentication integration tests", () => {
         let unAuthenticatedAppAd4mClient: Ad4mClient | null = null
 
         before(async () => {
-            [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
-            registerPorts([gqlPort, hcAdminPort, hcAppPort]);
+            [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+            registerPorts([apiPort, hcAdminPort, hcAppPort]);
             if (!fs.existsSync(appDataPath)) {
                 fs.mkdirSync(appDataPath, { recursive: true });
             }
 
             executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-                gqlPort, hcAdminPort, hcAppPort, false, "123");
+                apiPort, hcAdminPort, hcAppPort, false, "123");
        
-            adminAd4mClient = new Ad4mClient(baseUrl(gqlPort), "123", false)
+            adminAd4mClient = new Ad4mClient(baseUrl(apiPort), "123", false)
             await adminAd4mClient.agent.generate("passphrase")
             
-            unAuthenticatedAppAd4mClient = new Ad4mClient(baseUrl(gqlPort), undefined, false)
+            unAuthenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), undefined, false)
         })
 
         after(async () => {
             if (executorProcess) {
-                await quitExecutor(executorProcess, gqlPort, "123");
+                await quitExecutor(executorProcess, apiPort, "123");
             }
-            deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
+            deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
         })
 
         it("unauthenticated user can not query agent status", async () => {
@@ -210,13 +210,13 @@ describe("Authentication integration tests", () => {
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
             // @ts-ignore
-            let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(gqlPort), jwt, false)
+            let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt, false)
             expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).to.be.true;
         })
 
         it("user with invalid jwt can not query agent status", async () => {
             // @ts-ignore
-            let ad4mClient = new Ad4mClient(baseUrl(gqlPort), "invalid-jwt", false)
+            let ad4mClient = new Ad4mClient(baseUrl(apiPort), "invalid-jwt", false)
 
             const call = async () => {
                 return await ad4mClient!.agent.status()
@@ -245,7 +245,7 @@ describe("Authentication integration tests", () => {
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
             // @ts-ignore
-            let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(gqlPort), jwt, false)
+            let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt, false)
 
             const call = async () => {
                 return await authenticatedAppAd4mClient!.agent.status()
@@ -274,7 +274,7 @@ describe("Authentication integration tests", () => {
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
             // @ts-ignore
-            let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(gqlPort), jwt, false)
+            let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt, false)
             expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).to.be.true;
 
             let oldApps = await adminAd4mClient!.agent.getApps();

@@ -160,7 +160,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     const TEST_DIR = path.join(__dirname + "/../tst-tmp");
     const appDataPath = path.join(TEST_DIR, "agents", "mcp-http-test");
     const bootstrapSeedPath = path.join(__dirname + "/../bootstrapSeed.json");
-    let gqlPort: number;
+    let apiPort: number;
     let hcAdminPort: number;
     let hcAppPort: number;
     const adminCredential = "mcp-http-test-admin";
@@ -178,9 +178,9 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     let msg3Addr: string = "";
 
     before(async () => {
-        [gqlPort, hcAdminPort, hcAppPort, MCP_PORT] = await getFreePorts(4);
+        [apiPort, hcAdminPort, hcAppPort, MCP_PORT] = await getFreePorts(4);
         MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
-        registerPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        registerPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
 
         console.log(bootstrapSeedPath);
         console.log(appDataPath);
@@ -195,7 +195,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         executorProcess = await startExecutor(
             appDataPath,
             bootstrapSeedPath,
-            gqlPort,
+            apiPort,
             hcAdminPort,
             hcAppPort,
             true,               // languageLanguageOnly (skip network bootstrap)
@@ -211,7 +211,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         await sleep(3000);
 
         // Generate agent via REST (no MCP equivalent yet)
-        const adminClient = new Ad4mClient(`http://127.0.0.1:${gqlPort}`, adminCredential, false);
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
         const agentStatus = await adminClient.agent.generate("test-passphrase");
         agentDid = agentStatus.did!;
         console.log("Agent generated via REST, DID:", agentDid);
@@ -226,8 +226,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }
         }
         // Port-based kill as safety net
-        killByPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        killByPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        deregisterPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
     });
 
     // ========================================================================
@@ -1362,7 +1362,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
         before(async function() {
             // Create a dedicated Ad4mClient for subscriptions (REST + SSE transport)
-            wakerClient = new Ad4mClient(`http://127.0.0.1:${gqlPort}`, adminCredential, false);
+            wakerClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
 
             // Set up a profile so get_mention_waker_config has names to search for
             await callMcpTool(MCP_BASE_URL, 'set_agent_profile', {

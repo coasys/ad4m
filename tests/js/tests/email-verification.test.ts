@@ -28,7 +28,7 @@ describe("Email Verification with Mock Service", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "email-verification");
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    let gqlPort: number;
+    let apiPort: number;
     let hcAdminPort: number;
     let hcAppPort: number;
 
@@ -40,8 +40,8 @@ describe("Email Verification with Mock Service", () => {
     let localServicesProcess: ChildProcess | null = null;
 
     before(async () => {
-        [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
-        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
+        [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+        registerPorts([apiPort, hcAdminPort, hcAppPort]);
         if (!fs.existsSync(appDataPath)) {
             fs.mkdirSync(appDataPath, { recursive: true });
         }
@@ -60,11 +60,11 @@ describe("Email Verification with Mock Service", () => {
 
         executorProcess = proxyUrl && bootstrapUrl
             ? await startExecutor(appDataPath, bootstrapSeedPath,
-                gqlPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl, bootstrapUrl)
+                apiPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl, bootstrapUrl)
             : await startExecutor(appDataPath, bootstrapSeedPath,
-                gqlPort, hcAdminPort, hcAppPort, false);
+                apiPort, hcAdminPort, hcAppPort, false);
 
-        adminAd4mClient = new Ad4mClient(`http://127.0.0.1:${gqlPort}`, undefined, false)
+        adminAd4mClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, undefined, false)
 
         // Generate initial admin agent (needed for JWT signing)
         await adminAd4mClient.agent.generate("passphrase")
@@ -83,12 +83,12 @@ describe("Email Verification with Mock Service", () => {
         }
 
         if (executorProcess) {
-            await quitExecutor(executorProcess, gqlPort);
+            await quitExecutor(executorProcess, apiPort);
         }
         if (localServicesProcess) {
             localServicesProcess.kill('SIGKILL');
         }
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
+        deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
     })
 
     beforeEach(async () => {
