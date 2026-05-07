@@ -135,9 +135,8 @@ export default function runtimeTests(testContext: TestContext) {
 
         it("can deal with Holochain's agent_infos", async () => {
             const ad4mClient = testContext.ad4mClient!
-            // @ts-ignore
             const agentInfos = await ad4mClient.runtime.hcAgentInfos()
-            // @ts-ignore
+            expect(agentInfos).to.be.an('array')
             expect(await ad4mClient.runtime.hcAddAgentInfos(agentInfos)).to.be.true;
         })
 

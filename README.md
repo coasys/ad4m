@@ -58,7 +58,7 @@ AD4M integrates several powerful technologies into a cohesive whole:
 - [Deno & V8](https://github.com/denoland/deno): For secure JavaScript/TypeScript execution
 - [SurrealDB](https://github.com/surrealdb/surrealdb): For local graph-relational data persistence and live queries
 - [Scryer-Prolog](https://github.com/mthom/scryer-prolog): For semantic reasoning and queries
-- [Juniper](https://github.com/graphql-rust/juniper): For GraphQL API capabilities
+- [Axum](https://github.com/tokio-rs/axum): For WebSocket RPC and HTTP API
 - [Kalosm](https://github.com/floneum/floneum): For AI model inference with Candle
 
 This complexity is necessary to provide a rich, sovereign computing environment – but it's all packaged to run smoothly on personal devices.
@@ -249,7 +249,7 @@ Find the launcher bundle in `target/release/bundle`.
 ```
 ad4m/
 ├── core/                   # Core AD4M types, Ad4mModel, and TypeScript client (@coasys/ad4m)
-├── rust-executor/         # Rust executor: GraphQL server, Deno runtime, Holochain, AI, Prolog
+├── rust-executor/         # Rust executor: WebSocket RPC server, Deno runtime, Holochain, AI, Prolog
 ├── rust-client/          # Rust client library (ad4m-client on crates.io)
 ├── executor/             # JavaScript executor: agent state, perspectives, languages, expressions
 ├── bootstrap-languages/  # Core Languages required for AD4M to function

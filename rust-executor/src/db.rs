@@ -1,11 +1,11 @@
-use crate::graphql::graphql_types::{
+use crate::types::{
     AIModelLoadingStatus, EntanglementProof, ImportResult, LinkStatus, ModelInput,
     NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
 };
 use crate::types::{
-    AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
-    ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff, TokenizerSource, User,
-    UserInfo,
+    AIPromptExamples, AITask, DateTime, Expression, ExpressionProof, Link, LinkExpression,
+    LocalModel, Model, ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff,
+    TokenizerSource, User, UserInfo, UserStatistics,
 };
 use crate::utils::constant_time_eq;
 use argon2::{
@@ -3026,6 +3026,53 @@ impl Ad4mDb {
         Ok(users)
     }
 
+    pub fn list_user_statistics(&self) -> Ad4mDbResult<Vec<UserStatistics>> {
+        use chrono::TimeZone;
+
+        let perspectives = self.get_all_perspectives()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT username, did, last_seen, remaining_credits, hot_wallet_address, free_access
+             FROM users
+             ORDER BY last_seen DESC NULLS LAST",
+        )?;
+
+        let users = stmt
+            .query_map([], |row| {
+                let email: String = row.get(0)?;
+                let did: String = row.get(1)?;
+                let last_seen_ts: Option<i64> = row.get(2)?;
+                let remaining_credits: Option<f64> = row.get(3)?;
+                let hot_wallet_address: Option<String> = row.get(4)?;
+                let free_access: Option<bool> = row.get(5)?;
+
+                let perspective_count = perspectives
+                    .iter()
+                    .filter(|perspective| {
+                        perspective
+                            .owners
+                            .as_ref()
+                            .map(|owners| owners.contains(&did))
+                            .unwrap_or(false)
+                    })
+                    .count() as i32;
+
+                Ok(UserStatistics {
+                    email,
+                    did,
+                    last_seen: last_seen_ts
+                        .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single())
+                        .map(DateTime::from),
+                    perspective_count,
+                    remaining_credits: remaining_credits.unwrap_or(0.0).to_string(),
+                    free_access: free_access.unwrap_or(false),
+                    hot_wallet_address,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(users)
+    }
+
     // Verify user password against stored hash
     // Uses internal function to access password_hash
     pub fn verify_user_password(&self, username: &str, password: &str) -> Ad4mDbResult<bool> {
@@ -3876,10 +3923,10 @@ impl Ad4mDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graphql::graphql_types::{PerspectiveHandle, PerspectiveState};
+    use crate::types::{PerspectiveHandle, PerspectiveState};
     use crate::{
-        graphql::graphql_types::{LocalModelInput, ModelApiInput, TokenizerSourceInput},
         types::{ExpressionProof, Link, LinkExpression, ModelApiType, ModelType},
+        types::{LocalModelInput, ModelApiInput, TokenizerSourceInput},
     };
     use chrono::Utc;
     use fake::{Fake, Faker};
@@ -3904,10 +3951,9 @@ mod tests {
 
     #[test]
     fn test_export_import_all_tables() {
-        use crate::graphql::graphql_types::{
-            DecoratedNeighbourhoodExpression, Neighbourhood, Perspective, PerspectiveState,
-        };
+        use crate::types::domain::{Neighbourhood, Perspective};
         use crate::types::DecoratedExpressionProof;
+        use crate::types::{DecoratedNeighbourhoodExpression, PerspectiveState};
 
         // Initialize test database
         let db = Ad4mDb::new(":memory:").unwrap();
@@ -5214,6 +5260,41 @@ mod tests {
         );
 
         println!("✅ User list ordering tests passed");
+    }
+
+    #[test]
+    fn test_list_user_statistics_includes_counts_and_free_access() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        db.add_user("stats1@example.com", "did:key:stats1", "pass1")
+            .unwrap();
+        db.add_user("stats2@example.com", "did:key:stats2", "pass2")
+            .unwrap();
+        db.update_user_last_seen("stats1@example.com").unwrap();
+        db.set_user_free_access("stats1@example.com", true).unwrap();
+
+        db.add_perspective(&PerspectiveHandle {
+            name: Some("User 1 Perspective".into()),
+            uuid: "perspective-1".into(),
+            neighbourhood: None,
+            shared_url: None,
+            state: PerspectiveState::Private,
+            owners: Some(vec!["did:key:stats1".into()]),
+        })
+        .unwrap();
+
+        let users = db.list_user_statistics().unwrap();
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0].email, "stats1@example.com");
+        assert!(users[0].last_seen.is_some());
+        assert_eq!(users[0].perspective_count, 1);
+        assert_eq!(users[0].remaining_credits, "0");
+        assert!(users[0].free_access);
+        assert_eq!(users[1].email, "stats2@example.com");
+        assert_eq!(users[1].perspective_count, 0);
+        assert!(!users[1].free_access);
+
+        println!("✅ User statistics tests passed");
     }
 
     #[test]

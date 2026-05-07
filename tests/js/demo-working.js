@@ -1,5 +1,5 @@
 import { Ad4mClient } from "@coasys/ad4m";
-import { apolloClient, startExecutor } from "./utils/utils.ts";
+import { startExecutor, baseUrl } from "./utils/utils.ts";
 import path from "path";
 import fs from "fs-extra";
 import { fileURLToPath } from 'url';
@@ -14,7 +14,7 @@ async function demoWorkingMultiUser() {
     const TEST_DIR = path.join(`${__dirname}/tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "demo-working");
     const bootstrapSeedPath = path.join(`${__dirname}/bootstrapSeed.json`);
-    const gqlPort = 16200;
+    const apiPort = 16200;
     const hcAdminPort = 16201;
     const hcAppPort = 16202;
 
@@ -24,14 +24,14 @@ async function demoWorkingMultiUser() {
 
     console.log("📡 Starting Ad4m executor as multi-user backend...");
     const executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-        gqlPort, hcAdminPort, hcAppPort, false);
+        apiPort, hcAdminPort, hcAppPort, false);
 
     // Wait for full initialization
     await new Promise(resolve => setTimeout(resolve, 5000));
 
     try {
         // Initialize the main agent (needed for JWT signing)
-        const adminClient = new Ad4mClient(apolloClient(gqlPort), false);
+        const adminClient = new Ad4mClient(baseUrl(apiPort), undefined, false);
         await adminClient.agent.generate("passphrase");
         console.log("✅ Backend initialized and ready for multi-user connections");
 
@@ -47,7 +47,7 @@ async function demoWorkingMultiUser() {
         console.log("✅ Login token generated");
         
         // Create authenticated client for user 1
-        const user1Client = new Ad4mClient(apolloClient(gqlPort, user1Token), false);
+        const user1Client = new Ad4mClient(baseUrl(apiPort), user1Token, false);
         const user1Agent = await user1Client.agent.me();
         console.log("✅ User 1 authenticated as:", user1Agent.did);
 
@@ -63,7 +63,7 @@ async function demoWorkingMultiUser() {
         console.log("✅ Login token generated");
         
         // Create authenticated client for user 2
-        const user2Client = new Ad4mClient(apolloClient(gqlPort, user2Token), false);
+        const user2Client = new Ad4mClient(baseUrl(apiPort), user2Token, false);
         const user2Agent = await user2Client.agent.me();
         console.log("✅ User 2 authenticated as:", user2Agent.did);
 
@@ -72,7 +72,7 @@ async function demoWorkingMultiUser() {
         
         // Test login persistence
         const user1Token2 = await adminClient.agent.loginUser("alice@example.com", "alice123");
-        const user1Client2 = new Ad4mClient(apolloClient(gqlPort, user1Token2), false);
+        const user1Client2 = new Ad4mClient(baseUrl(apiPort), user1Token2, false);
         const user1Agent2 = await user1Client2.agent.me();
         console.log("✅ User 1 logged in again as:", user1Agent2.did);
 

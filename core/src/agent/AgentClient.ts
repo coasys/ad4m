@@ -1,6 +1,5 @@
-import { ApolloClient, gql } from "@apollo/client/core";
+import { ApiClient } from "../apiClient";
 import { PerspectiveInput } from "../perspectives/Perspective";
-import unwrapApolloResult from "../unwrapApolloResult";
 import {
   Agent,
   Apps,
@@ -10,67 +9,20 @@ import {
   EntanglementProofInput,
   UserCreationResult,
 } from "./Agent";
-import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runtime/RuntimeResolver";
+import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runtime/RuntimeTypes";
 import { AgentStatus } from "./AgentStatus";
-import { LinkMutations } from "../links/Links";
+import { LinkMutations, LinkExpression } from "../links/Links";
 import { PerspectiveClient } from "../perspectives/PerspectiveClient";
-import { VerificationRequestResult } from "../runtime/RuntimeResolver";
-
-const AGENT_SUBITEMS = `
-    did
-    directMessageLanguage
-    perspective { 
-        links {
-            author, timestamp, 
-            proof {
-                signature, key, valid, invalid
-            }
-            data {
-                source, predicate, target
-            }
-        }
-    }
-`;
-
-const Apps_FIELDS = `
-    requestId
-    revoked
-    auth {
-        appName
-        appDesc
-        appUrl
-        appIconPath
-        capabilities {
-            with {
-                domain
-                pointers
-            }
-            can 
-        }
-    }
-`;
-
-const AGENT_STATUS_FIELDS = `
-    isInitialized
-    isUnlocked
-    did
-    didDocument
-    error
-`;
-
-const ENTANGLEMENT_PROOF_FIELDS = `
-    did
-    didSigningKeyId
-    deviceKeyType
-    deviceKey
-    deviceKeySignedByDid
-    didSignedByDeviceKey
-`;
-
-const AGENT_SIGNATURE_FIELDS = `
-    signature
-    publicKey
-`;
+import { VerificationRequestResult } from "../runtime/RuntimeTypes";
+import type {
+  GenerateAgentRequest,
+  ImportAgentRequest,
+  LockAgentRequest,
+  UnlockAgentRequest,
+  SignMessageRequest,
+  PermitCapabilityRequest,
+  GenerateJwtRequest,
+} from "../generated/api";
 
 export interface InitializeArgs {
   did: string;
@@ -84,26 +36,28 @@ export type AgentStatusChangedCallback = (agent: Agent) => null;
 export type AgentAppsUpdatedCallback = () => null;
 export type HostingUserInfoChangedCallback = (info: HostingUserInfo) => void;
 export type ComputeLogUpdatedCallback = (entry: ComputeLogEntry) => void;
-/**
- * Provides access to all functions regarding the local agent,
- * such as generating, locking, unlocking, importing the DID keystore,
- * as well as updating the publicly shared Agent expression.
- */
+
 export class AgentClient {
-  #apolloClient: ApolloClient<any>;
+  #apiClient: ApiClient;
+  #baseUrl: string;
+  #token?: string;
   #appsChangedCallback: AgentAppsUpdatedCallback[];
   #updatedCallbacks: AgentUpdatedCallback[];
   #agentStatusChangedCallbacks: AgentStatusChangedCallback[];
   #hostingUserInfoChangedCallbacks: HostingUserInfoChangedCallback[];
   #computeLogUpdatedCallbacks: ComputeLogUpdatedCallback[];
+  #unsubscribers: (() => void)[];
 
-  constructor(client: ApolloClient<any>, subscribe: boolean = true) {
-    this.#apolloClient = client;
+  constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedApiClient?: ApiClient) {
+    this.#baseUrl = baseUrl;
+    this.#token = token;
+    this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
     this.#updatedCallbacks = [];
     this.#agentStatusChangedCallbacks = [];
     this.#appsChangedCallback = [];
     this.#hostingUserInfoChangedCallbacks = [];
     this.#computeLogUpdatedCallbacks = [];
+    this.#unsubscribers = [];
 
     if (subscribe) {
       this.subscribeAgentUpdated();
@@ -112,155 +66,68 @@ export class AgentClient {
     }
   }
 
-  /**
-   * Returns the Agent expression of the local agent as it is shared
-   * publicly via the AgentLanguage.
-   *
-   * I.e. this is the users profile.
-   */
   async me(): Promise<Agent> {
-    const { agent } = unwrapApolloResult(
-      await this.#apolloClient.query({
-        query: gql`query agent { agent { ${AGENT_SUBITEMS} } }`,
-      })
-    );
+    const agent = await this.#apiClient.call<Agent>('agent.get');
     let agentObject = new Agent(agent.did, agent.perspective);
     agentObject.directMessageLanguage = agent.directMessageLanguage;
     return agentObject;
   }
 
   async status(): Promise<AgentStatus> {
-    const { agentStatus } = unwrapApolloResult(
-      await this.#apolloClient.query({
-        query: gql`query agentStatus {
-                agentStatus {
-                    ${AGENT_STATUS_FIELDS}
-                }
-            }`,
-      })
-    );
+    const agentStatus = await this.#apiClient.call<AgentStatus>('agent.status');
     return new AgentStatus(agentStatus);
   }
 
   async generate(passphrase: string): Promise<AgentStatus> {
-    const { agentGenerate } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation agentGenerate(
-                $passphrase: String!
-            ) {
-                agentGenerate(passphrase: $passphrase) {
-                    ${AGENT_STATUS_FIELDS}
-                }
-            }`,
-        variables: { passphrase },
-      })
-    );
-    return new AgentStatus(agentGenerate);
+    const result = await this.#apiClient.call<AgentStatus>('agent.generate', { passphrase });
+    return new AgentStatus(result);
   }
 
   async import(args: InitializeArgs): Promise<AgentStatus> {
-    let { did, didDocument, keystore, passphrase } = args;
-    const { agentImport } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation agentImport(
-                $did: String!,
-                $didDocument: String!,
-                $keystore: String!,
-                $passphrase: String!
-            ) {
-                agentImport(did: $did, didDocument: $didDocument, keystore: $keystore, passphrase: $passphrase) {
-                    ${AGENT_STATUS_FIELDS}
-                }
-            }`,
-        variables: { did, didDocument, keystore, passphrase },
-      })
-    );
-    return new AgentStatus(agentImport);
+    const result = await this.#apiClient.call<AgentStatus>('agent.import', { ...args });
+    return new AgentStatus(result);
   }
 
   async lock(passphrase: string): Promise<AgentStatus> {
-    const { agentLock } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation agentLock($passphrase: String!) {
-                agentLock(passphrase: $passphrase) {
-                    ${AGENT_STATUS_FIELDS}
-                }
-            }`,
-        variables: { passphrase },
-      })
-    );
-    return new AgentStatus(agentLock);
+    const result = await this.#apiClient.call<AgentStatus>('agent.lock', { passphrase });
+    return new AgentStatus(result);
   }
 
   async unlock(passphrase: string, holochain = true): Promise<AgentStatus> {
-    const { agentUnlock } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation agentUnlock($passphrase: String!, $holochain: Boolean!) {
-                agentUnlock(passphrase: $passphrase, holochain: $holochain) {
-                    ${AGENT_STATUS_FIELDS}
-                }
-            }`,
-        variables: { passphrase, holochain },
-      })
-    );
-    return new AgentStatus(agentUnlock);
+    const result = await this.#apiClient.call<AgentStatus>('agent.unlock', { passphrase, holochain });
+    return new AgentStatus(result);
   }
 
   async byDID(did: string): Promise<Agent> {
-    const { agentByDID } = unwrapApolloResult(
-      await this.#apolloClient.query({
-        query: gql`query agentByDID($did: String!) {
-                agentByDID(did: $did) {
-                    ${AGENT_SUBITEMS}
-                }
-            }`,
-        variables: { did },
-      })
-    );
-    return agentByDID as Agent;
+    return this.#apiClient.call<Agent>('agent.byDid', { did });
   }
 
   async updatePublicPerspective(perspective: PerspectiveInput): Promise<Agent> {
     const cleanedPerspective = JSON.parse(JSON.stringify(perspective));
     delete cleanedPerspective.__typename;
-    cleanedPerspective.links.forEach((link) => {
+    cleanedPerspective.links.forEach((link: LinkExpression) => {
       delete link.__typename;
       delete link.data.__typename;
       delete link.proof.__typename;
       delete link.status;
     });
 
-    const { agentUpdatePublicPerspective } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation agentUpdatePublicPerspective($perspective: PerspectiveInput!) {
-                agentUpdatePublicPerspective(perspective: $perspective) {
-                    ${AGENT_SUBITEMS}
-                }
-            }`,
-        variables: { perspective: cleanedPerspective },
-      })
-    );
-    const a = agentUpdatePublicPerspective;
+    const a = await this.#apiClient.call<Agent>('agent.updateProfile', { publicPerspective: cleanedPerspective });
     const agent = new Agent(a.did, a.perspective);
     agent.directMessageLanguage = a.directMessageLanguage;
     return agent;
   }
 
   async mutatePublicPerspective(mutations: LinkMutations): Promise<Agent> {
-    const perspectiveClient = new PerspectiveClient(this.#apolloClient);
-    const agentClient = new AgentClient(this.#apolloClient);
+    const perspectiveClient = new PerspectiveClient(this.#baseUrl, this.#token);
 
-    //Create the proxy perspective and load existing links
-    const proxyPerspective = await perspectiveClient.add(
-      "Agent Perspective Proxy"
-    );
-    const agentMe = await agentClient.me();
+    const proxyPerspective = await perspectiveClient.add("Agent Perspective Proxy");
+    const agentMe = await this.me();
 
     if (agentMe.perspective) {
       await proxyPerspective.loadSnapshot(agentMe.perspective);
     }
 
-    //Make the mutations on the proxy perspective
     for (const addition of mutations.additions) {
       await proxyPerspective.add(addition);
     }
@@ -268,164 +135,72 @@ export class AgentClient {
       await proxyPerspective.remove(removal);
     }
 
-    //Get the snapshot of the proxy perspective
     const snapshot = await proxyPerspective.snapshot();
-    //Update the users public perspective
     const agent = await this.updatePublicPerspective(snapshot);
-    //Cleanup and return
     await perspectiveClient.remove(proxyPerspective.uuid);
     return agent;
   }
 
-  async updateDirectMessageLanguage(
-    directMessageLanguage: string
-  ): Promise<Agent> {
-    const { agentUpdateDirectMessageLanguage } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation agentUpdateDirectMessageLanguage($directMessageLanguage: String!) {
-                agentUpdateDirectMessageLanguage(directMessageLanguage: $directMessageLanguage) {
-                    ${AGENT_SUBITEMS}
-                }
-            }`,
-        variables: { directMessageLanguage },
-      })
-    );
-    const a = agentUpdateDirectMessageLanguage;
+  async updateDirectMessageLanguage(directMessageLanguage: string): Promise<Agent> {
+    const a = await this.#apiClient.call<Agent>('agent.updateProfile', { dmLanguage: directMessageLanguage });
     const agent = new Agent(a.did, a.perspective);
     agent.directMessageLanguage = a.directMessageLanguage;
     return agent;
   }
 
-  async addEntanglementProofs(
-    proofs: EntanglementProofInput[]
-  ): Promise<EntanglementProof[]> {
-    const { agentAddEntanglementProofs } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation agentAddEntanglementProofs($proofs: [EntanglementProofInput!]!) {
-                agentAddEntanglementProofs(proofs: $proofs) {
-                    ${ENTANGLEMENT_PROOF_FIELDS}
-                }
-            }`,
-        variables: { proofs },
-      })
-    );
-    return agentAddEntanglementProofs;
+  async addEntanglementProofs(proofs: EntanglementProofInput[]): Promise<EntanglementProof[]> {
+    return this.#apiClient.call<EntanglementProof[]>('agent.addEntanglementProofs', { proofs });
   }
 
-  async deleteEntanglementProofs(
-    proofs: EntanglementProofInput[]
-  ): Promise<EntanglementProof[]> {
-    const { agentDeleteEntanglementProofs } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation agentDeleteEntanglementProofs($proofs: [EntanglementProofInput!]!) {
-                agentDeleteEntanglementProofs(proofs: $proofs) {
-                    ${ENTANGLEMENT_PROOF_FIELDS}
-                }
-            }`,
-        variables: { proofs },
-      })
-    );
-    return agentDeleteEntanglementProofs;
+  async deleteEntanglementProofs(proofs: EntanglementProofInput[]): Promise<EntanglementProof[]> {
+    return this.#apiClient.call<EntanglementProof[]>('agent.deleteEntanglementProofs', { proofs });
   }
 
   async getEntanglementProofs(): Promise<string[]> {
-    const { agentGetEntanglementProofs } = unwrapApolloResult(
-      await this.#apolloClient.query({
-        query: gql`query agentGetEntanglementProofs {
-                agentGetEntanglementProofs {
-                    ${ENTANGLEMENT_PROOF_FIELDS}
-                }
-            }`,
-      })
-    );
-    return agentGetEntanglementProofs;
+    return this.#apiClient.call<string[]>('agent.getEntanglementProofs');
   }
 
-  async entanglementProofPreFlight(
-    deviceKey: string,
-    deviceKeyType: string
-  ): Promise<EntanglementProof> {
-    const { agentEntanglementProofPreFlight } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation agentEntanglementProofPreFlight($deviceKey: String!, $deviceKeyType: String!) {
-                agentEntanglementProofPreFlight(deviceKey: $deviceKey, deviceKeyType: $deviceKeyType) {
-                    ${ENTANGLEMENT_PROOF_FIELDS}
-                }
-            }`,
-        variables: { deviceKey, deviceKeyType },
-      })
-    );
-    return agentEntanglementProofPreFlight;
+  async entanglementProofPreFlight(deviceKey: string, deviceKeyType: string): Promise<EntanglementProof> {
+    return this.#apiClient.call<EntanglementProof>('agent.entanglementProofPreflight', { deviceKey, deviceKeyType });
   }
 
-  addUpdatedListener(listener) {
+  addUpdatedListener(listener: AgentUpdatedCallback) {
     this.#updatedCallbacks.push(listener);
   }
 
-  addAppChangedListener(listener) {
+  addAppChangedListener(listener: AgentAppsUpdatedCallback) {
     this.#appsChangedCallback.push(listener);
   }
 
   subscribeAgentUpdated() {
-    this.#apolloClient
-      .subscribe({
-        query: gql` subscription {
-                agentUpdated { ${AGENT_SUBITEMS} }
-            }   
-        `,
-      })
-      .subscribe({
-        next: (result) => {
-          const agent = result.data.agentUpdated;
-          this.#updatedCallbacks.forEach((cb) => {
-            cb(agent);
-          });
-        },
-        error: (e) => console.error(e),
-      });
+    const unsub = this.#apiClient.subscribe((data) => {
+      if (data.type === 'agent-updated') {
+        this.#updatedCallbacks.forEach((cb) => cb((data.agent || data) as Agent));
+      }
+    });
+    this.#unsubscribers.push(unsub);
   }
 
   subscribeAppsChanged() {
-    this.#apolloClient
-      .subscribe({
-        query: gql` subscription {
-                agentAppsChanged { 
-                  ${Apps_FIELDS}
-                }
-            }   
-        `,
-      })
-      .subscribe({
-        next: (result) => {
-          this.#appsChangedCallback.forEach((cb) => {
-            cb();
-          });
-        },
-        error: (e) => console.error(e),
-      });
+    const unsub = this.#apiClient.subscribe((data) => {
+      if (data.type === 'apps-changed') {
+        this.#appsChangedCallback.forEach((cb) => cb());
+      }
+    });
+    this.#unsubscribers.push(unsub);
   }
 
-  addAgentStatusChangedListener(listener) {
+  addAgentStatusChangedListener(listener: AgentStatusChangedCallback) {
     this.#agentStatusChangedCallbacks.push(listener);
   }
 
   subscribeAgentStatusChanged() {
-    this.#apolloClient
-      .subscribe({
-        query: gql` subscription {
-                agentStatusChanged { ${AGENT_STATUS_FIELDS} }
-            }   
-        `,
-      })
-      .subscribe({
-        next: (result) => {
-          const agent = result.data.agentStatusChanged;
-          this.#agentStatusChangedCallbacks.forEach((cb) => {
-            cb(agent);
-          });
-        },
-        error: (e) => console.error(e),
-      });
+    const unsub = this.#apiClient.subscribe((data) => {
+      if (data.type === 'agent-status-changed') {
+        this.#agentStatusChangedCallbacks.forEach((cb) => cb((data.agent || data) as Agent));
+      }
+    });
+    this.#unsubscribers.push(unsub);
   }
 
   addHostingUserInfoChangedListener(listener: HostingUserInfoChangedCallback) {
@@ -433,24 +208,12 @@ export class AgentClient {
   }
 
   subscribeHostingUserInfoChanged() {
-    this.#apolloClient
-      .subscribe({
-        query: gql`subscription {
-          runtimeHostingUserInfoChanged {
-            email
-            remainingCredits
-            hotWalletAddress
-            freeAccess
-          }
-        }`,
-      })
-      .subscribe({
-        next: (result) => {
-          const info = result.data.runtimeHostingUserInfoChanged;
-          this.#hostingUserInfoChangedCallbacks.forEach((cb) => cb(info));
-        },
-        error: (e) => console.error(e),
-      });
+    const unsub = this.#apiClient.subscribe((data) => {
+      if (data.type === 'hosting-user-info-changed') {
+        this.#hostingUserInfoChangedCallbacks.forEach((cb) => cb((data.info || data) as HostingUserInfo));
+      }
+    });
+    this.#unsubscribers.push(unsub);
   }
 
   addComputeLogUpdatedListener(listener: ComputeLogUpdatedCallback) {
@@ -458,261 +221,84 @@ export class AgentClient {
   }
 
   subscribeComputeLogUpdated() {
-    this.#apolloClient
-      .subscribe({
-        query: gql`subscription {
-          runtimeComputeLogUpdated {
-            id
-            userEmail
-            timestamp
-            operation
-            summary
-            cost
-            creditsAfter
-          }
-        }`,
-      })
-      .subscribe({
-        next: (result) => {
-          const entry = result.data.runtimeComputeLogUpdated;
-          this.#computeLogUpdatedCallbacks.forEach((cb) => cb(entry));
-        },
-        error: (e) => console.error(e),
-      });
+    const unsub = this.#apiClient.subscribe((data) => {
+      if (data.type === 'compute-log-updated') {
+        this.#computeLogUpdatedCallbacks.forEach((cb) => cb((data.entry || data) as ComputeLogEntry));
+      }
+    });
+    this.#unsubscribers.push(unsub);
   }
 
   async requestCapability(authInfo: AuthInfoInput): Promise<string> {
-    const { agentRequestCapability } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`
-          mutation agentRequestCapability($authInfo: AuthInfoInput!) {
-            agentRequestCapability(authInfo: $authInfo)
-          }
-        `,
-        variables: { authInfo },
-      })
-    );
-    return agentRequestCapability;
+    return this.#apiClient.call<string>('agent.requestCapability', { authInfo });
   }
 
   async permitCapability(auth: string): Promise<string> {
-    const { agentPermitCapability } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`
-          mutation agentPermitCapability($auth: String!) {
-            agentPermitCapability(auth: $auth)
-          }
-        `,
-        variables: { auth },
-      })
-    );
-    return agentPermitCapability;
+    return this.#apiClient.call<string>('agent.permitCapability', { auth });
   }
 
   async generateJwt(requestId: string, rand: string): Promise<string> {
-    const { agentGenerateJwt } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`
-          mutation agentGenerateJwt($requestId: String!, $rand: String!) {
-            agentGenerateJwt(requestId: $requestId, rand: $rand)
-          }
-        `,
-        variables: { requestId, rand },
-      })
-    );
-    return agentGenerateJwt;
+    return this.#apiClient.call<string>('agent.generateJwt', { requestId, rand });
   }
 
   async getApps(): Promise<Apps[]> {
-    const { agentGetApps } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`query agentGetApps {
-                agentGetApps {
-                    ${Apps_FIELDS}
-                }
-            }`,
-      })
-    );
-    return agentGetApps;
+    return this.#apiClient.call<Apps[]>('agent.getApps');
   }
 
   async removeApp(requestId: string): Promise<Apps[]> {
-    const { agentRemoveApp } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation agentRemoveApp($requestId: String!) {
-                agentRemoveApp(requestId: $requestId) {
-                    ${Apps_FIELDS}
-                }
-            }`,
-        variables: { requestId },
-      })
-    );
-    return agentRemoveApp;
+    return this.#apiClient.call<Apps[]>('agent.removeApp', { id: requestId });
   }
 
   async revokeToken(requestId: string): Promise<Apps[]> {
-    const { agentRevokeToken } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation agentRevokeToken($requestId: String!) {
-                agentRevokeToken(requestId: $requestId) {
-                    ${Apps_FIELDS}
-                }
-            }`,
-        variables: { requestId },
-      })
-    );
-    return agentRevokeToken;
+    return this.#apiClient.call<Apps[]>('agent.revokeToken', { token: requestId });
   }
 
   async isLocked(): Promise<boolean> {
-    const { agentIsLocked } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`
-          query agentIsLocked {
-            agentIsLocked
-          }
-        `,
-      })
-    );
-    return agentIsLocked;
+    return this.#apiClient.call<boolean>('agent.isLocked');
   }
 
   async signMessage(message: string): Promise<string> {
-    const { agentSignMessage } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation agentSignMessage($message: String!) {
-          agentSignMessage(message: $message) {
-              ${AGENT_SIGNATURE_FIELDS}
-          }
-        }`,
-        variables: { message },
-      })
-    );
-    return agentSignMessage;
+    return this.#apiClient.call<string>('agent.sign', { message });
   }
 
   // Multi-user methods
   async createUser(email: string, password: string, appInfo?: AuthInfoInput): Promise<UserCreationResult> {
-    const { runtimeCreateUser } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation runtimeCreateUser($email: String!, $password: String!, $appInfo: AuthInfoInput) {
-          runtimeCreateUser(email: $email, password: $password, appInfo: $appInfo) {
-            did
-            success
-            error
-          }
-        }`,
-        variables: { email, password, appInfo },
-      })
-    );
-    return runtimeCreateUser;
+    return this.#apiClient.call<UserCreationResult>('user.create', { email, password, appInfo });
   }
 
   async loginUser(email: string, password: string): Promise<string> {
-    const { runtimeLoginUser } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation runtimeLoginUser($email: String!, $password: String!) {
-          runtimeLoginUser(email: $email, password: $password)
-        }`,
-        variables: { email, password },
-      })
-    );
-    return runtimeLoginUser;
+    return this.#apiClient.call<string>('user.login', { email, password });
   }
 
   async requestLoginVerification(email: string, appInfo?: AuthInfoInput): Promise<VerificationRequestResult> {
-    const { runtimeRequestLoginVerification } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation runtimeRequestLoginVerification($email: String!, $appInfo: AuthInfoInput) {
-          runtimeRequestLoginVerification(email: $email, appInfo: $appInfo) {
-            success
-            message
-            requiresPassword
-            isExistingUser
-          }
-        }`,
-        variables: { email, appInfo },
-      })
-    );
-    return runtimeRequestLoginVerification;
+    return this.#apiClient.call<VerificationRequestResult>('user.requestVerification', { email, appInfo });
   }
 
   async verifyEmailCode(email: string, code: string, verificationType: string): Promise<string> {
-    const { runtimeVerifyEmailCode } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation runtimeVerifyEmailCode($email: String!, $code: String!, $verificationType: String!) {
-          runtimeVerifyEmailCode(email: $email, code: $code, verificationType: $verificationType)
-        }`,
-        variables: { email, code, verificationType },
-      })
-    );
-    return runtimeVerifyEmailCode;
+    return this.#apiClient.call<string>('user.verifyEmail', { email, code, verificationType });
   }
 
   // Hosting methods
-
   async hostingUserInfo(): Promise<HostingUserInfo> {
-    const { runtimeHostingUserInfo } = unwrapApolloResult(
-      await this.#apolloClient.query({
-        query: gql`query runtimeHostingUserInfo {
-          runtimeHostingUserInfo {
-            email
-            remainingCredits
-            hotWalletAddress
-            freeAccess
-          }
-        }`,
-      })
+    const resp = await this.#apiClient.call<any>('hosting.info');
+    const info = resp?.userInfo || resp;
+    return new HostingUserInfo(
+      info.email || '',
+      info.freeAccess ? 'unlimited' : String(info.credits ?? info.remainingCredits ?? '0'),
+      info.hotWalletAddress || undefined,
+      !!info.freeAccess,
     );
-    return runtimeHostingUserInfo;
   }
 
   async computeLog(since?: string, limit?: number, userEmail?: string): Promise<ComputeLogEntry[]> {
-    const { runtimeComputeLog } = unwrapApolloResult(
-      await this.#apolloClient.query({
-        query: gql`query runtimeComputeLog($since: String, $limit: Int, $userEmail: String) {
-          runtimeComputeLog(since: $since, limit: $limit, userEmail: $userEmail) {
-            id
-            userEmail
-            timestamp
-            operation
-            summary
-            cost
-            creditsAfter
-          }
-        }`,
-        variables: { since, limit, userEmail },
-        fetchPolicy: 'network-only',
-      })
-    );
-    return runtimeComputeLog;
+    return this.#apiClient.call<ComputeLogEntry[]>('runtime.computeLog', { since, limit, userEmail });
   }
 
   async setHotWalletAddress(address: string): Promise<boolean> {
-    const { runtimeSetHotWalletAddress } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation runtimeSetHotWalletAddress($address: String!) {
-          runtimeSetHotWalletAddress(address: $address)
-        }`,
-        variables: { address },
-      })
-    );
-    return runtimeSetHotWalletAddress;
+    return this.#apiClient.call<boolean>('hosting.setHotWallet', { address });
   }
 
   async requestPayment(amountHOT: string): Promise<PaymentRequestResult> {
-    const { runtimeRequestPayment } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
-        mutation: gql`mutation runtimeRequestPayment($amountHOT: String!) {
-          runtimeRequestPayment(amountHOT: $amountHOT) {
-            success
-            message
-          }
-        }`,
-        variables: { amountHOT },
-      })
-    );
-    return runtimeRequestPayment;
+    return this.#apiClient.call<PaymentRequestResult>('hosting.requestPayment', { amountHOT });
   }
-
 }

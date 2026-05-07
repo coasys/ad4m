@@ -6,7 +6,7 @@ pub mod shacl_parser;
 pub mod shacl_to_prolog;
 pub mod sparql_store;
 pub mod utils;
-use crate::graphql::graphql_types::{
+use crate::types::{
     LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveExpression, PerspectiveHandle,
     PerspectiveRemovedWithOwner, PerspectiveState, PerspectiveWithOwner,
 };
@@ -521,7 +521,7 @@ pub fn handle_telepresence_signal_from_link_language(
     }
 }
 
-/// Publish a telepresence signal to PubSub for delivery to GraphQL subscribers
+/// Publish a telepresence signal to PubSub for delivery to REST subscribers
 pub(crate) async fn publish_telepresence_signal(
     handle: PerspectiveHandle,
     signal: PerspectiveExpression,
@@ -669,7 +669,7 @@ pub async fn import_perspective(
         })
         .collect();
 
-    let diff = crate::graphql::graphql_types::DecoratedPerspectiveDiff {
+    let diff = crate::types::DecoratedPerspectiveDiff {
         additions: decorated_links,
         removals: vec![],
     };

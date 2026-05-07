@@ -1,293 +1,88 @@
-import { ApolloClient, gql } from "@apollo/client";
-import unwrapApolloResult from "../unwrapApolloResult";
+import { ApiClient } from "../apiClient";
 import base64js from 'base64-js';
 import pako from 'pako'
 import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
-import { ModelInput, Model, ModelType } from "./AIResolver"
+import { ModelInput, Model, ModelType } from "./AITypes"
+import type { PromptRequest, EmbedRequest, SetDefaultModelRequest } from "../generated/api";
 
 export class AIClient {
-    #apolloClient: ApolloClient<any>;
-    #transcriptionSubscriptions: Map<string, any> = new Map();
+    #apiClient: ApiClient;
+    #transcriptionUnsubscribers: Map<string, () => void> = new Map();
 
-    constructor(apolloClient: ApolloClient<any>, subscribe: boolean = true) {
-        this.#apolloClient = apolloClient;
+    constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedApiClient?: ApiClient) {
+        this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
+    }
+
+    private serializeModelInput(model: ModelInput): Record<string, unknown> {
+        const payload: Record<string, unknown> = { ...model };
+        if ('modelType' in payload) {
+            payload.type = payload.modelType;
+            delete payload.modelType;
+        }
+        return payload;
     }
 
     async getModels(): Promise<Model[]> {
-        const result = await this.#apolloClient.query({
-            query: gql`
-                query {
-                    aiGetModels {
-                        id
-                        name
-                        api {
-                            baseUrl
-                            apiKey
-                            model
-                            apiType
-                        }
-                        local {
-                            fileName
-                            tokenizerSource {
-                                repo
-                                revision
-                                fileName
-                            }
-                            huggingfaceRepo
-                            revision
-                        }
-                        modelType
-                    }
-                }
-            `
-        });
-        return unwrapApolloResult(result).aiGetModels;
+        return this.#apiClient.call<Model[]>('ai.models');
     }
 
     async addModel(model: ModelInput): Promise<string> {
-        const result = await this.#apolloClient.mutate({
-            mutation: gql`
-                mutation($model: ModelInput!) {
-                    aiAddModel(model: $model)
-                }
-            `,
-            variables: { model }
-        });
-        return unwrapApolloResult(result).aiAddModel;
+        return this.#apiClient.call<string>('ai.addModel', { model: this.serializeModelInput(model) });
     }
 
     async updateModel(modelId: string, model: ModelInput): Promise<boolean> {
-        const result = await this.#apolloClient.mutate({
-            mutation: gql`
-                mutation($modelId: String!, $model: ModelInput!) {
-                    aiUpdateModel(modelId: $modelId, model: $model)
-                }
-            `,
-            variables: { modelId, model }
-        });
-        return unwrapApolloResult(result).aiUpdateModel;
+        return this.#apiClient.call<boolean>('ai.updateModel', { id: modelId, model: this.serializeModelInput(model) });
     }
 
     async removeModel(modelId: string): Promise<boolean> {
-        const result = await this.#apolloClient.mutate({
-            mutation: gql`
-                mutation($modelId: String!) {
-                    aiRemoveModel(modelId: $modelId)
-                }
-            `,
-            variables: { modelId }
-        });
-        return unwrapApolloResult(result).aiRemoveModel;
+        return this.#apiClient.call<boolean>('ai.removeModel', { id: modelId });
     }
 
     async setDefaultModel(modelType: ModelType, modelId: string): Promise<boolean> {
-        const result = await this.#apolloClient.mutate({
-            mutation: gql`
-                mutation($modelType: ModelType!, $modelId: String!) {
-                    aiSetDefaultModel(modelType: $modelType modelId: $modelId)
-                }
-            `,
-            variables: { modelId, modelType }
-        });
-        return unwrapApolloResult(result).aiSetDefaultModel;
+        return this.#apiClient.call<boolean>('ai.setDefaultModel', { id: modelId, modelType });
     }
 
     async getDefaultModel(modelType: ModelType): Promise<Model> {
-        const result = await this.#apolloClient.query({
-            query: gql`
-                query($modelType: ModelType!) {
-                    aiGetDefaultModel(modelType: $modelType) {
-                        id
-                        name
-                        api {
-                            baseUrl
-                            apiKey
-                            model
-                            apiType
-                        }
-                        local {
-                            fileName
-                            tokenizerSource {
-                                repo
-                                revision
-                                fileName
-                            }
-                            huggingfaceRepo
-                            revision
-                        }
-                        modelType
-                    }
-                }
-            `,
-            variables: { modelType }
-        });
-        return unwrapApolloResult(result).aiGetDefaultModel;
+        return this.#apiClient.call<Model>('ai.getDefaultModel', { modelType });
     }
 
     async tasks(): Promise<AITask[]> {
-        const { aiTasks } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`
-                query {
-                    aiTasks {
-                        name
-                        modelId
-                        taskId
-                        systemPrompt
-                        promptExamples {
-                            input
-                            output
-                        }
-                        metaData
-                        createdAt
-                        updatedAt
-                    }
-                }
-            `
-        }));
-
-        return aiTasks;
+        return this.#apiClient.call<AITask[]>('ai.tasks');
     }
 
     async addTask(name: string, modelId: string, systemPrompt: string, promptExamples: { input: string, output: string }[], metaData?: string): Promise<AITask> {
         const task = new AITaskInput(name, modelId, systemPrompt, promptExamples, metaData);
-        const { aiAddTask } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`
-                mutation AiAddTask($task: AITaskInput!) {
-                    aiAddTask(task: $task) {
-                        name
-                        modelId
-                        taskId
-                        systemPrompt
-                        promptExamples {
-                            input
-                            output
-                        }
-                        metaData
-                        createdAt
-                        updatedAt
-                    }
-                }
-            `,
-            variables: {
-                task
-            }
-        }));
-
-        return aiAddTask;
+        return this.#apiClient.call<AITask>('ai.addTask', { task });
     }
 
     async removeTask(taskId: string): Promise<AITask> {
-        const { aiRemoveTask } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`
-                mutation AiRemoveTask($taskId: String!) {
-                    aiRemoveTask(taskId: $taskId) {
-                        name
-                        modelId
-                        taskId
-                        systemPrompt
-                        promptExamples {
-                            input
-                            output
-                        }
-                        metaData
-                        createdAt
-                        updatedAt
-                    }
-                }
-            `,
-            variables: {
-                taskId
-            }
-        }));
-
-        return aiRemoveTask;
+        return this.#apiClient.call<AITask>('ai.removeTask', { id: taskId });
     }
 
     async updateTask(taskId: string, task: AITask): Promise<AITask> {
-        const { aiUpdateTask } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`
-                mutation AiUpdateTask($taskId: String!, $task: AITaskInput!) {
-                    aiUpdateTask(taskId: $taskId, task: $task) {
-                        name
-                        modelId
-                        taskId
-                        systemPrompt
-                        promptExamples {
-                            input
-                            output
-                        }
-                        metaData
-                        createdAt
-                        updatedAt
-                    }
-                }
-            `,
-            variables: {
-                taskId,
-                task: {
-                    name: task.name,
-                    modelId: task.modelId,
-                    systemPrompt: task.systemPrompt,
-                    promptExamples: task.promptExamples
-                }
+        return this.#apiClient.call<AITask>('ai.updateTask', {
+            id: taskId,
+            task: {
+                name: task.name,
+                modelId: task.modelId,
+                systemPrompt: task.systemPrompt,
+                promptExamples: task.promptExamples
             }
-        }));
-
-        return aiUpdateTask;
+        });
     }
 
     async modelLoadingStatus(model: string): Promise<AIModelLoadingStatus> {
-        const { aiModelLoadingStatus } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`
-                query AiModelLoadingStatus($model: String!) {
-                    aiModelLoadingStatus(model: $model) {
-                        model
-                        status
-                        progress
-                        loaded
-                        downloaded
-                    }
-                }
-            `,
-            variables: {
-                model
-            }
-        }));
-
-        return aiModelLoadingStatus
+        return this.#apiClient.call<AIModelLoadingStatus>('ai.modelLoadingStatus', { model });
     }
 
     async prompt(taskId: string, prompt: string): Promise<string> {
-        const { aiPrompt } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`
-                mutation AiPrompt($taskId: String!, $prompt: String!) {
-                    aiPrompt(taskId: $taskId, prompt: $prompt)
-                }
-            `,
-            variables: {
-                taskId,
-                prompt
-            }
-        }));
-
-        return aiPrompt;
+        return this.#apiClient.call<string>('ai.prompt', { taskId, prompt });
     }
 
     async embed(modelId: string, text: string): Promise<Array<number>> {
-        const { aiEmbed } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`
-                mutation aiEmbed($modelId: String!, $text: String!) {
-                    aiEmbed(modelId: $modelId, text: $text)
-                }
-            `,
-            variables: {
-                modelId,
-                text
-            }
-        }));
+        const aiEmbed = await this.#apiClient.call<string>('ai.embed', { modelId, text });
 
         const compressed = base64js.toByteArray(aiEmbed);
-
         const decompressed = JSON.parse(pako.inflate(compressed, { to: 'string' }));
 
         return decompressed;
@@ -304,72 +99,77 @@ export class AIClient {
             timeBeforeSpeech?: number;
         }
     ): Promise<string> {
-        const { aiOpenTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`
-                mutation AiOpenTranscriptionStream($modelId: String!, $params: VoiceActivityParamsInput) {
-                    aiOpenTranscriptionStream(modelId: $modelId, params: $params)
+        const streamId = await this.#apiClient.call<string>('ai.transcriptionOpen', { modelId, params });
+
+        const unsub = this.#apiClient.subscribe(
+            (data) => {
+                if (data.type === 'transcription-text' && data.streamId === streamId && data.text) {
+                    streamCallback(data.text as string);
                 }
-            `,
-            variables: {
-                modelId,
-                params
             }
-        }));
+        );
 
-        const subscription = this.#apolloClient.subscribe({
-            query: gql` subscription {
-                aiTranscriptionText(streamId: "${aiOpenTranscriptionStream}")
-            }`
-        }).subscribe({
-            next(data) {
-                streamCallback(data.data.aiTranscriptionText);
+        this.#transcriptionUnsubscribers.set(streamId, unsub);
 
-                return data.data.aiTranscriptionText;
-            },
-            error(err) {
-                console.error(err);
-            }
-        });
-
-        this.#transcriptionSubscriptions.set(aiOpenTranscriptionStream, subscription);
-
-        return aiOpenTranscriptionStream;
+        return streamId;
     }
 
     async closeTranscriptionStream(streamId: string): Promise<void> {
-        const { aiCloseTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`
-                mutation aiCloseTranscriptionStream($streamId: String!) {
-                    aiCloseTranscriptionStream(streamId: $streamId)
-                }
-            `,
-            variables: {
-                streamId
-            }
-        }));
+        this.#pendingStreamIds.delete(streamId);
+        await this.#apiClient.call<void>('ai.transcriptionClose', { streamId });
 
-        const subscription = this.#transcriptionSubscriptions.get(streamId);
+        const unsub = this.#transcriptionUnsubscribers.get(streamId);
+        if (unsub) {
+            unsub();
+            this.#transcriptionUnsubscribers.delete(streamId);
+        }
+    }
 
-        if (!subscription.closed) {
-            subscription.unsubscribe();
+    #pendingStreamIds: Set<string> = new Set();
+
+    /**
+     * Feed an audio utterance to one or more transcription streams.
+     * Sends raw binary Float32Array as application/octet-stream.
+     * NOTE: This method still uses HTTP fetch because binary audio data
+     * cannot be efficiently sent over the JSON-based WebSocket RPC protocol.
+     * Transcription results are delivered via the WS event channel.
+     */
+    async feedTranscriptionStream(streamIds: string | string[], audio: Float32Array | number[]): Promise<void> {
+        const ids = Array.isArray(streamIds) ? streamIds : [streamIds];
+
+        // Ensure we have a typed array for binary transport
+        const typedAudio = audio instanceof Float32Array
+            ? audio
+            : new Float32Array(audio);
+
+        if (ids.length === 0 || typedAudio.length === 0) {
+            return;
         }
 
-        return aiCloseTranscriptionStream;
+        const baseUrl = this.#apiClient.getBaseUrl();
+        const token = this.#apiClient.getToken();
+
+        // Use slice to get only the relevant portion of the underlying ArrayBuffer
+        // (Float32Array may be a view over a larger buffer)
+        const bodyBuffer = typedAudio.buffer.slice(
+            typedAudio.byteOffset,
+            typedAudio.byteOffset + typedAudio.byteLength
+        );
+
+        const response = await fetch(`${baseUrl}/api/v1/ai/transcription/feed`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/octet-stream',
+                'X-Stream-Ids': ids.join(','),
+                ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+            },
+            body: bodyBuffer,
+        });
+
+        if (!response.ok) {
+            const text = await response.text().catch(() => '');
+            throw new Error(`[AIClient] feed failed: ${response.status} ${response.statusText} ${text}`);
+        }
     }
 
-    async feedTranscriptionStream(streamIds: string | string[], audio: Float32Array): Promise<void> {
-        const { aiFeedTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`
-                mutation AiFeedTranscriptionStream($streamIds: [String!]!, $audio: [Float!]!) {
-                    aiFeedTranscriptionStream(streamIds: $streamIds, audio: $audio)
-                }
-            `,
-            variables: {
-                streamIds: Array.isArray(streamIds) ? streamIds : [streamIds],
-                audio: audio
-            }
-        }));
-
-        return aiFeedTranscriptionStream;
-    }
 }

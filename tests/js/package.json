@@ -29,10 +29,10 @@
     "inject-language-language": "node scripts/injectLanguageLanguageBundle.js",
     "inject-publishing-agent": "node scripts/injectPublishingAgent.js",
     "publish-test-languages": "node --no-warnings=ExperimentalWarning --experimental-specifier-resolution=node --loader ts-node/esm ./utils/publishTestLangs.ts",
-    "test-single-prepare": "node scripts/cleanTestingData.js && pnpm run prepare-test && node scripts/cleanup.js"
+    "test-single-prepare": "node scripts/cleanTestingData.js && pnpm run prepare-test && node scripts/cleanup.js",
+    "test-rest": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/rest-integration.test.ts"
   },
   "devDependencies": {
-    "@apollo/client": "3.7.10",
     "@coasys/ad4m": "link:../../core",
     "@coasys/ad4m-connect": "link:../../connect",
     "@peculiar/webcrypto": "^1.1.7",
@@ -56,7 +56,6 @@
     "express": "4.18.2",
     "faker": "^5.1.0",
     "fs-extra": "11.2.0",
-    "graphql-ws": "^5.14.2",
     "http": "0.0.1-security",
     "json-stable-stringify": "^1.1.0",
     "kill-process-by-name": "^1.0.5",
@@ -70,7 +69,7 @@
     "ts-node": "10.9.1",
     "typescript": "^4.6.2",
     "unzipper": "^0.10.11",
-    "ws": "8.13.0"
+    "eventsource": "^3.0.2"
   },
   "dependencies": {
     "fluent-ffmpeg": "^2.1.3",

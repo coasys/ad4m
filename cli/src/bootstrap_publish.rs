@@ -61,7 +61,9 @@ pub async fn start_publishing(
     seed_proto: SeedProto,
     language_language_bundle: String,
 ) {
-    let ad4m_client = Ad4mClient::new("http://localhost:12000/graphql".to_string(), "".to_string());
+    let ad4m_client = Ad4mClient::connect("http://localhost:12000".to_string(), "".to_string())
+        .await
+        .expect("could not connect to executor");
 
     let agent = ad4m_client
         .agent
@@ -98,7 +100,7 @@ pub async fn start_publishing(
             .languages
             .publish(
                 language.resource,
-                language.meta.name.clone(),
+                Some(language.meta.name.clone()),
                 Some(language.meta.description),
                 Some(language.meta.possible_template_params),
                 Some(language.meta.source_code_link),
@@ -131,7 +133,7 @@ pub async fn start_publishing(
             .languages
             .publish(
                 language.resource,
-                language.meta.name.clone(),
+                Some(language.meta.name.clone()),
                 Some(language.meta.description),
                 Some(language.meta.possible_template_params),
                 Some(language.meta.source_code_link),
@@ -154,7 +156,7 @@ pub async fn start_publishing(
             .languages
             .publish(
                 language.resource,
-                language.meta.name.clone(),
+                Some(language.meta.name.clone()),
                 Some(language.meta.description),
                 Some(language.meta.possible_template_params),
                 Some(language.meta.source_code_link),

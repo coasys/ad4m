@@ -4,13 +4,9 @@ import fs from "fs";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor, quitExecutor } from "../utils/utils";
+import { baseUrl, sleep, startExecutor, quitExecutor } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
-import fetch from 'node-fetch'
 import { ChildProcess } from "child_process";
-
-//@ts-ignore
-global.fetch = fetch
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -22,7 +18,7 @@ describe("Apps integration tests", () => {
   const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
   const appDataPath = path.join(TEST_DIR, "agents", "apps-agent");
   const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-  let gqlPort: number;
+  let apiPort: number;
   let hcAdminPort: number;
   let hcAppPort: number;
 
@@ -33,8 +29,8 @@ describe("Apps integration tests", () => {
   let executorProcess: ChildProcess | null = null
 
   before(async () => {
-    [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
-    registerPorts([gqlPort, hcAdminPort, hcAppPort]);
+    [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+    registerPorts([apiPort, hcAdminPort, hcAppPort]);
     if(!fs.existsSync(TEST_DIR)) {
         throw Error("Please ensure that prepare-test is run before running tests!");
     }
@@ -44,19 +40,19 @@ describe("Apps integration tests", () => {
         fs.mkdirSync(appDataPath)
 
     executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-      gqlPort, hcAdminPort, hcAppPort , false, "123");
+      apiPort, hcAdminPort, hcAppPort , false, "123");
 
-    adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "123"), false)
+    adminAd4mClient = new Ad4mClient(baseUrl(apiPort), "123", false)
     await adminAd4mClient.agent.generate("passphrase")
     
-    unAuthenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort), false)
+    unAuthenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), undefined, false)
   })
 
   after(async () => {
     if (executorProcess) {
-      await quitExecutor(executorProcess, gqlPort, "123");
+      await quitExecutor(executorProcess, apiPort, "123");
     }
-    deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
+    deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
   })
 
   it("once token issued user can get all authenticated apps", async () => {
@@ -78,7 +74,7 @@ describe("Apps integration tests", () => {
       let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appDomain": "test.ad4m.org","appUrl":"https://demo-link","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
-      let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
+      let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt, false)
   
       const call = async () => {
           return await authenticatedAppAd4mClient!.agent.getApps();
@@ -117,7 +113,7 @@ describe("Apps integration tests", () => {
       let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appDomain":"test.ad4m.org","appUrl":"https://demo-link","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
-      let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
+      let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt, false)
   
       const call = async () => {
         return await authenticatedAppAd4mClient!.agent.getApps();
@@ -155,7 +151,7 @@ describe("Apps integration tests", () => {
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
       // @ts-ignore
-      let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
+      let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt, false)
 
       const call = async () => {
           return await authenticatedAppAd4mClient!.agent.getApps();

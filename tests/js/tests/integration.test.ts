@@ -4,7 +4,7 @@ import { isProcessRunning, sleep } from "../utils/utils";
 import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
 import { fileURLToPath } from 'url';
 import { expect } from "chai";
-import { startExecutor, apolloClient, runHcLocalServices, quitExecutor } from "../utils/utils";
+import { startExecutor, baseUrl, runHcLocalServices, quitExecutor } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'child_process';
 import perspectiveTests from "./perspective";
@@ -18,10 +18,6 @@ import flatLanguageTests from "./flat-language.test";
 //import { Crypto } from "@peculiar/webcrypto"
 import agentLanguageTests from "./agent-language";
 import socialDNATests from "./social-dna-flow";
-import fetch from "node-fetch";
-
-//@ts-ignore
-global.fetch = fetch
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -93,7 +89,7 @@ describe("Integration tests", function () {
     this.timeout(200000)
     const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    let gqlPort: number;
+    let apiPort: number;
     let hcAdminPort: number;
     let hcAppPort: number;
 
@@ -105,8 +101,8 @@ describe("Integration tests", function () {
     let relayUrl: string | null = null;
 
     before(async () => {
-        [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
-        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
+        [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+        registerPorts([apiPort, hcAdminPort, hcAppPort]);
         if(!fs.existsSync(TEST_DIR)) {
           throw Error("Please ensure that prepare-test is run before running tests!");
         }
@@ -122,20 +118,20 @@ describe("Integration tests", function () {
         relayUrl = localServices.relayUrl;
 
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-          gqlPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!, relayUrl!);
+          apiPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!, relayUrl!);
 
-        testContext.alice = new Ad4mClient(apolloClient(gqlPort))
+        testContext.alice = new Ad4mClient(baseUrl(apiPort))
         testContext.aliceCore = executorProcess
     })
 
     after(async () => {
       if (executorProcess) {
-        await quitExecutor(executorProcess, gqlPort);
+        await quitExecutor(executorProcess, apiPort);
       }
       if (localServicesProcess) {
         localServicesProcess.kill('SIGKILL');
       }
-      deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
+      deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
@@ -165,7 +161,7 @@ describe("Integration tests", function () {
           bobExecutorProcess = await startExecutor(bobAppDataPath, bobBootstrapSeedPath,
             bobGqlPort, bobHcAdminPort, bobHcAppPort, false, undefined, proxyUrl!, bootstrapUrl!, relayUrl!);
 
-          testContext.bob = new Ad4mClient(apolloClient(bobGqlPort))
+          testContext.bob = new Ad4mClient(baseUrl(bobGqlPort))
           testContext.bobCore = bobExecutorProcess
           await testContext.bob.agent.generate("passphrase")
 

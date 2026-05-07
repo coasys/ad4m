@@ -287,17 +287,17 @@ describe("isExecutorRunning", () => {
     const result = await isExecutorRunning(
       "http://localhost:3001/mcp",
       1000,
-      "http://localhost:12000/graphql",
+      "http://localhost:12000",
     );
     expect(result).toBe("mcp");
   });
 
-  it("returns 'graphql' when only GraphQL endpoint responds", async () => {
+  it("returns 'http' when only HTTP endpoint responds", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((url: any) => {
       if (String(url).includes("/mcp")) {
         return Promise.reject(new Error("ECONNREFUSED"));
       }
-      // GraphQL endpoint responds
+      // HTTP endpoint responds
       return Promise.resolve(
         fakeJsonResponse({ data: { agentStatus: { isInitialized: true } } }),
       );
@@ -305,17 +305,17 @@ describe("isExecutorRunning", () => {
     const result = await isExecutorRunning(
       "http://localhost:3001/mcp",
       1000,
-      "http://localhost:12000/graphql",
+      "http://localhost:12000",
     );
-    expect(result).toBe("graphql");
+    expect(result).toBe("http");
   });
 
-  it("returns false when GraphQL returns 200 with errors", async () => {
+  it("returns 'http' when HTTP endpoint returns 200 with any JSON", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((url: any) => {
       if (String(url).includes("/mcp")) {
         return Promise.reject(new Error("ECONNREFUSED"));
       }
-      // GraphQL 200 but with errors array
+      // HTTP 200 with error response
       return Promise.resolve(
         fakeJsonResponse({ errors: [{ message: "not ready" }], data: null }),
       );
@@ -323,9 +323,9 @@ describe("isExecutorRunning", () => {
     const result = await isExecutorRunning(
       "http://localhost:3001/mcp",
       1000,
-      "http://localhost:12000/graphql",
+      "http://localhost:12000",
     );
-    expect(result).toBe("graphql");
+    expect(result).toBe("http");
   });
 
   it("returns false when both endpoints fail", async () => {
@@ -503,7 +503,7 @@ describe("ensureExecutorRunning", () => {
       "cred",
       logger,
       "http://localhost:3001/mcp",
-      "ws://localhost:12000/graphql",
+      "http://localhost:12000",
       "/opt/custom/bin/ad4m-executor",
     );
 
@@ -743,7 +743,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12000/graphql",
+      "http://localhost:12000",
       "test-cred",
       logger,
       undefined,
@@ -779,7 +779,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12000/graphql",
+      "http://localhost:12000",
       "test-cred",
       logger,
       undefined,
@@ -824,7 +824,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12000/graphql",
+      "http://localhost:12000",
       "test-cred",
       logger,
       "user-provided-passphrase",
@@ -862,7 +862,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12000/graphql",
+      "http://localhost:12000",
       "test-cred",
       logger,
       "test-stored-passphrase",
@@ -903,7 +903,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12000/graphql",
+      "http://localhost:12000",
       "test-cred",
       logger,
       "config-passphrase",
@@ -928,7 +928,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12000/graphql",
+      "http://localhost:12000",
       "test-cred",
       logger,
       undefined,
@@ -960,7 +960,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12000/graphql",
+      "http://localhost:12000",
       "test-cred",
       logger,
       undefined,
@@ -988,7 +988,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12000/graphql",
+      "http://localhost:12000",
       "test-cred",
       logger,
       "test-passphrase",
@@ -1010,7 +1010,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12000/graphql",
+      "http://localhost:12000",
       "test-cred",
       logger,
       undefined,
@@ -2205,7 +2205,7 @@ describe("WakerSubscriptionManager", () => {
   };
 
   const mockPerspectiveClientSimple = {
-    querySurrealDB: vi.fn(() => Promise.resolve([])),
+    querySparql: vi.fn(() => Promise.resolve({ results: { bindings: [] }})),
   };
 
   it("should ignore non-array results (e.g. false) and not store them as seen", async () => {
@@ -2322,23 +2322,23 @@ describe("WakerSubscriptionManager", () => {
     const mock = makeMockProxy();
     let capturedMentions: any[] | undefined;
 
-    // Mock perspectiveClient.querySurrealDB to return has_child links for parent resolution
+    // Mock perspectiveClient.querySparql to return has_child links for parent resolution
     const mockPerspectiveClient = {
-      querySurrealDB: vi.fn((_perspectiveId: string, query: string) => {
+      querySparql: vi.fn((_perspectiveId: string, query: string) => {
         // msg-1 has two parents (channel + conversation thread)
         if (query.includes("msg-1")) {
-          return Promise.resolve([
-            { source: "channel-abc", target: "msg-1", predicate: "ad4m://has_child" },
-            { source: "conversation-xyz", target: "msg-1", predicate: "ad4m://has_child" },
-          ]);
+          return Promise.resolve({ results: { bindings: [
+            { source: { value: "channel-abc" } },
+            { source: { value: "conversation-xyz" } },
+          ]}});
         }
         // msg-2 is only in channel-abc
         if (query.includes("msg-2")) {
-          return Promise.resolve([
-            { source: "channel-abc", target: "msg-2", predicate: "ad4m://has_child" },
-          ]);
+          return Promise.resolve({ results: { bindings: [
+            { source: { value: "channel-abc" } },
+          ]}});
         }
-        return Promise.resolve([]);
+        return Promise.resolve({ results: { bindings: [] }});
       }),
     };
 
@@ -2367,7 +2367,7 @@ describe("WakerSubscriptionManager", () => {
     ]);
     await new Promise(r => setTimeout(r, 50));
 
-    expect(mockPerspectiveClient.querySurrealDB).toHaveBeenCalledTimes(2);
+    expect(mockPerspectiveClient.querySparql).toHaveBeenCalledTimes(2);
     expect(capturedMentions).toBeDefined();
     expect(capturedMentions).toHaveLength(2);
     // msg-1 has two parents
@@ -2385,7 +2385,7 @@ describe("WakerSubscriptionManager", () => {
     let capturedMentions: any[] | undefined;
 
     const mockPerspectiveClient = {
-      querySurrealDB: vi.fn(() => Promise.resolve([])),
+      querySparql: vi.fn(() => Promise.resolve({ results: { bindings: [] }})),
     };
 
     const manager = new WakerSubscriptionManager({
@@ -2422,7 +2422,7 @@ describe("WakerSubscriptionManager", () => {
     let wakeCount = 0;
 
     const mockPerspectiveClient = {
-      querySurrealDB: vi.fn(() => Promise.reject(new Error("network error"))),
+      querySparql: vi.fn(() => Promise.reject(new Error("network error"))),
     };
 
     const manager = new WakerSubscriptionManager({

@@ -21,7 +21,6 @@
   },
   "preferGlobal": true,
   "dependencies": {
-    "@apollo/client": "3.7.10",
     "@coasys/ad4m": "*",
     "@types/fs-extra": "^9.0.13",
     "@types/node": "^18.0.0",
@@ -36,16 +35,12 @@
     "fs-extra": "^10.0.1",
     "get-port": "^5.1.1",
     "glob": "^7.2.0",
-    "graphql": "15.7.2",
-    "graphql-ws": "5.12.0",
     "node-fetch": "2",
-    "subscriptions-transport-ws": "^0.11.0",
     "tree-kill": "^1.2.2",
     "ts-node": "^10.5.0",
     "typescript": "^4.6.2",
     "uuid": "^8.3.2",
     "wget-improved": "^3.3.0",
-    "ws": "8.13.0",
     "yargs": "^17.3.1"
   },
   "devDependencies": {
