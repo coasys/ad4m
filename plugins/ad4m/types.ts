@@ -33,5 +33,15 @@ export interface PluginConfig {
   rustLog?: string;
   /** Where to send executor logs: "file" (default) = ~/.ad4m/ad4m.log only, "openclaw" = openclaw logs only, "both" = both. */
   executorLogTarget?: "file" | "openclaw" | "both";
+  /** Enable Holochain DHT connectivity (default: true). */
+  connectHolochain?: boolean;
+  /** Use Holochain bootstrap server for peer discovery (default: true). */
+  hcUseBootstrap?: boolean;
+  /** Use Holochain proxy for NAT traversal (default: true). */
+  hcUseProxy?: boolean;
+  /** Run the built-in dapp web server (default: false). */
+  runDappServer?: boolean;
+  /** Max auto-restart attempts within 60 seconds (default: 3). */
+  maxRestartAttempts?: number;
 }
 

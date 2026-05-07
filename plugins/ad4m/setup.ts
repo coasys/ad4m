@@ -363,11 +363,88 @@ async function setupExternalModeViaGraphQL(
     const client = new Ad4mClient(apollo, false);
     logger.info("[ad4m-setup] Ad4mClient created successfully");
 
+    // Check if this is a multi-user executor by attempting runtimeInfo query
+    let isMultiUser = false;
+    try {
+      const runtimeInfo = await client.runtime.info();
+      // If runtimeInfo returns successfully and has a multi-user indicator
+      if (runtimeInfo && runtimeInfo.isMultiUser) {
+        isMultiUser = true;
+      }
+    } catch {
+      // runtimeInfo failed — likely single-user or auth required
+      // Fall through to single-user flow
+    }
+
+    if (isMultiUser) {
+      // Multi-user executor: email/password login flow
+      logger.info(
+        "[ad4m-setup] Detected multi-user executor. Prompting for credentials...",
+      );
+      logger.info("");
+      logger.info(
+        "[ad4m-setup] ┌─────────────────────────────────────────────────────────┐",
+      );
+      logger.info(
+        "[ad4m-setup] │  This is a multi-user AD4M executor.                   │",
+      );
+      logger.info(
+        "[ad4m-setup] │  Please enter your login credentials below.            │",
+      );
+      logger.info(
+        "[ad4m-setup] └─────────────────────────────────────────────────────────┘",
+      );
+      logger.info("");
+
+      const email = await promptUser("[ad4m-setup] Enter your email: ");
+      const password = await promptUser("[ad4m-setup] Enter your password: ");
+
+      if (!email || !password) {
+        logger.warn("[ad4m-setup] Missing credentials. Setup cancelled.");
+        printConfigSnippet(logger, "external", {
+          executorWsUrl,
+          token: "<paste-your-jwt-here>",
+          wakeToken,
+        });
+        return;
+      }
+
+      try {
+        logger.info("[ad4m-setup] Attempting login...");
+        const jwt = await client.runtime.loginUser(email, password);
+
+        if (jwt) {
+          logger.info("[ad4m-setup] Login successful! JWT obtained.");
+          printConfigSnippet(logger, "external", {
+            executorWsUrl,
+            token: jwt,
+            wakeToken,
+          });
+        } else {
+          logger.warn(
+            "[ad4m-setup] Login returned no token. Check credentials and try again.",
+          );
+          printConfigSnippet(logger, "external", {
+            executorWsUrl,
+            token: "<paste-your-jwt-here>",
+            wakeToken,
+          });
+        }
+      } catch (loginErr: any) {
+        logger.error(
+          `[ad4m-setup] Login failed: ${loginErr.message}`,
+        );
+        printConfigSnippet(logger, "external", {
+          executorWsUrl,
+          token: "<paste-your-jwt-here>",
+          wakeToken,
+        });
+      }
+      return;
+    }
+
+    // Single-user executor: requestCapability + 6-digit code flow
     // Step 1: Request capability — triggers the verification popup in the launcher
-    // Use a plain object rather than `new AuthInfoInput()` — the GraphQL
-    // mutation only needs the correct field names in the variables, and
-    // constructing the class without its positional args can leave fields
-    // undefined depending on how type-graphql decorators serialise.
     const authInfo = {
       appName: "OpenClaw AD4M Plugin",
       appDesc: "OpenClaw agent plugin for AD4M neighbourhoods",

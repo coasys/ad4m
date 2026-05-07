@@ -325,6 +325,40 @@ export async function downloadExecutor(logger: any): Promise<boolean> {
 let executorProcess: ReturnType<typeof spawn> | null = null;
 let executorLogStream: fs.WriteStream | null = null;
 
+// --- Supervisor state ---
+let _shouldRestart = true;
+let _restartAttempts: number[] = []; // timestamps of restart attempts
+let _lastSpawnParams: {
+  adminCredential: string;
+  logger: any;
+  endpoint: string;
+  wsEndpoint: string;
+  binaryPath?: string;
+  rustLog?: string;
+  logTarget: "file" | "openclaw" | "both";
+  appDataPath?: string;
+  config?: PluginConfig;
+} | null = null;
+
+/**
+ * Parse the port from a URL string.
+ * Falls back to default ports (80 for http/ws, 443 for https/wss) if no port is specified.
+ */
+function parsePortFromUrl(url: string, fallback: string): string {
+  try {
+    // URL constructor doesn't handle ws:// natively in all environments,
+    // so normalise to http(s) for parsing
+    const normalized = url.replace(/^ws:/, "http:").replace(/^wss:/, "https:");
+    const parsed = new URL(normalized);
+    if (parsed.port) return parsed.port;
+    // No explicit port — use protocol defaults
+    if (url.startsWith("https:") || url.startsWith("wss:")) return "443";
+    return "80";
+  } catch {
+    return fallback;
+  }
+}
+
 /**
  * Check whether an executor is reachable.
  *
@@ -414,7 +448,11 @@ export async function ensureExecutorRunning(
   rustLog?: string,
   logTarget: "file" | "openclaw" | "both" = "file",
   appDataPath?: string,
+  config?: PluginConfig,
 ): Promise<ExecutorStartResult> {
+  // Store params for supervisor restart
+  _lastSpawnParams = { adminCredential, logger, endpoint, wsEndpoint, binaryPath, rustLog, logTarget, appDataPath, config };
+  _shouldRestart = true;
   // Derive the GraphQL HTTP URL from the WS endpoint for probe consistency
   const graphqlHttpUrl = wsEndpoint
     .replace(/^ws:/, "http:")
@@ -488,18 +526,43 @@ export async function ensureExecutorRunning(
       logger.info(`[ad4m] Setting RUST_LOG=${rustLog}`);
     }
 
+    // Parse ports from configured URLs
+    const mcpPort = parsePortFromUrl(endpoint, "3001");
+    const gqlPort = parsePortFromUrl(wsEndpoint, "12000");
+
+    // Build spawn args
+    const spawnArgs: string[] = [
+      "run",
+      "--enable-mcp", "true",
+      "--admin-credential", adminCredential,
+      "--mcp-port", mcpPort,
+      "--gql-port", gqlPort,
+    ];
+
+    // Fix 2: Pass --app-data-path to run command
+    if (appDataPath) {
+      spawnArgs.push("--app-data-path", appDataPath);
+    }
+
+    // Fix 3: Holochain connectivity flags
+    const hcUseBootstrap = config?.hcUseBootstrap !== false; // default true
+    const hcUseProxy = config?.hcUseProxy !== false; // default true
+    const connectHolochain = config?.connectHolochain !== false; // default true
+    const runDappServer = config?.runDappServer === true; // default false
+
+    spawnArgs.push("--hc-use-bootstrap", String(hcUseBootstrap));
+    spawnArgs.push("--hc-use-proxy", String(hcUseProxy));
+    if (connectHolochain) {
+      spawnArgs.push("--connect-holochain", "true");
+    }
+    spawnArgs.push("--run-dapp-server", String(runDappServer));
+
+    logger.info(`[ad4m] Spawn args: ${spawnArgs.join(" ")}`);
+
     // Start the executor as a child process
     executorProcess = spawn(
       executorPath,
-      [
-        "run",
-        "--enable-mcp",
-        "true",
-        "--admin-credential",
-        adminCredential,
-        "--mcp-port",
-        "3001",
-      ],
+      spawnArgs,
       {
         stdio: ["ignore", "pipe", "pipe"],
         detached: false,
@@ -545,8 +608,8 @@ export async function ensureExecutorRunning(
       executorProcess = null;
     });
 
-    executorProcess.on("exit", (code: number | null) => {
-      logger.info(`[ad4m] Executor exited with code ${code}`);
+    executorProcess.on("exit", (code: number | null, signal: string | null) => {
+      logger.info(`[ad4m] Executor exited with code ${code}, signal ${signal}`);
       if (code !== null && code !== 0) {
         spawnFailed = true;
         spawnError = `Executor exited with code ${code}`;
@@ -556,6 +619,36 @@ export async function ensureExecutorRunning(
         executorLogStream = null;
       }
       executorProcess = null;
+
+      // Supervisor: auto-restart on unexpected death
+      const isUnexpected = (code !== null && code !== 0) || signal != null;
+      if (_shouldRestart && isUnexpected && _lastSpawnParams) {
+        const maxAttempts = config?.maxRestartAttempts ?? 3;
+        const now = Date.now();
+        // Prune attempts older than 60 seconds
+        _restartAttempts = _restartAttempts.filter((t) => now - t < 60_000);
+        if (_restartAttempts.length < maxAttempts) {
+          _restartAttempts.push(now);
+          const attemptNum = _restartAttempts.length;
+          logger.warn(
+            `[ad4m] Executor died unexpectedly (code ${code}), restarting in 5s... (attempt ${attemptNum}/${maxAttempts})`,
+          );
+          setTimeout(() => {
+            if (!_shouldRestart || !_lastSpawnParams) return;
+            const p = _lastSpawnParams;
+            ensureExecutorRunning(
+              p.adminCredential, p.logger, p.endpoint, p.wsEndpoint,
+              p.binaryPath, p.rustLog, p.logTarget, p.appDataPath, p.config,
+            ).catch((err) => {
+              logger.error(`[ad4m] Supervisor restart failed: ${err.message}`);
+            });
+          }, 5000);
+        } else {
+          logger.error(
+            `[ad4m] Executor died unexpectedly (code ${code}). Max restart attempts (${maxAttempts}) reached within 60s. Giving up.`,
+          );
+        }
+      }
     });
 
     // Wait for executor to be ready (check spawn failure each iteration)
@@ -600,6 +693,7 @@ export async function ensureExecutorRunning(
 }
 
 export function stopExecutor(logger?: any): void {
+  _shouldRestart = false; // Prevent supervisor from restarting
   if (executorProcess) {
     executorProcess.kill("SIGTERM");
     executorProcess = null;

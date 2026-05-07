@@ -914,6 +914,7 @@ Notes:
           config.rustLog,
           config.executorLogTarget ?? "file",
           providedConfig.appDataPath,
+          config,
         );
         if (!executorStartResult) {
           logger.error(

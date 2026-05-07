@@ -71,6 +71,31 @@
       "appDataPath": {
         "type": "string",
         "description": "Custom data directory for the AD4M executor (passed as --data-path to init and --app-data-path to run). Defaults to ~/.ad4m if not set."
+      },
+      "connectHolochain": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable Holochain DHT connectivity"
+      },
+      "hcUseBootstrap": {
+        "type": "boolean",
+        "default": true,
+        "description": "Use Holochain bootstrap server for peer discovery"
+      },
+      "hcUseProxy": {
+        "type": "boolean",
+        "default": true,
+        "description": "Use Holochain proxy for NAT traversal"
+      },
+      "runDappServer": {
+        "type": "boolean",
+        "default": false,
+        "description": "Run the built-in dapp web server"
+      },
+      "maxRestartAttempts": {
+        "type": "number",
+        "default": 3,
+        "description": "Max auto-restart attempts within 60 seconds"
       }
     },
     "required": [],
