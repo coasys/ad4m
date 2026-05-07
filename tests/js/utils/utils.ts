@@ -225,7 +225,7 @@ export async function startExecutor(dataPath: string,
         // marker consistently. Accept either the legacy marker or the REST startup log so tests
         // can run against both pre-REST and REST executors.
         const legacyApiMarker = `listening on http://127.0.0.1:${apiPort}`;
-        const restApiMarker = `REST API server starting on http://127.0.0.1:${apiPort}/api/v1`;
+        const restApiMarker = `API server starting on http://127.0.0.1:${apiPort}/api/v1`;
         const mcpMarker = 'MCP HTTP server listening';
         let apiReady = false;
         let mcpReady = !enableMcp;

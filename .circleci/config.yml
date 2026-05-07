@@ -44,6 +44,8 @@ commands:
           name: Restore binaries from local stash (no CircleCI network storage needed — same host)
           command: |
             mkdir -p target/release
+            # Remove before copy: unlinking avoids ETXTBSY if a previous executor still holds the binary
+            rm -f target/release/ad4m target/release/ad4m-executor
             cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
             cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m-executor target/release/ad4m-executor
       - setup_env
