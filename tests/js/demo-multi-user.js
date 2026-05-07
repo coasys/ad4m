@@ -1,6 +1,6 @@
 import { Ad4mClient } from "@coasys/ad4m";
 import Ad4mConnect from "@coasys/ad4m-connect";
-import { apolloClient, startExecutor } from "./utils/utils.ts";
+import { startExecutor, baseUrl } from "./utils/utils.ts";
 import path from "path";
 import fs from "fs-extra";
 import { fileURLToPath } from 'url';
@@ -32,7 +32,7 @@ async function demoMultiUser() {
 
     try {
         // Initialize the main agent (needed for JWT signing)
-        const adminClient = new Ad4mClient(apolloClient(gqlPort), false);
+        const adminClient = new Ad4mClient(baseUrl(gqlPort), undefined, false);
         await adminClient.agent.generate("passphrase");
         console.log("✅ Backend initialized");
 
@@ -49,7 +49,7 @@ async function demoMultiUser() {
                 can: ["*"] 
             }],
             multiUser: true,
-            backendUrl: `ws://localhost:${gqlPort}/graphql`,
+            url: `http://localhost:${gqlPort}`,
             userEmail: "alice@example.com",
             userPassword: "alice123"
         });
@@ -71,7 +71,7 @@ async function demoMultiUser() {
                 can: ["*"] 
             }],
             multiUser: true,
-            backendUrl: `ws://localhost:${gqlPort}/graphql`,
+            url: `http://localhost:${gqlPort}`,
             userEmail: "bob@example.com",
             userPassword: "bob456"
         });
@@ -93,7 +93,7 @@ async function demoMultiUser() {
                 can: ["*"] 
             }],
             multiUser: true,
-            backendUrl: `ws://localhost:${gqlPort}/graphql`,
+            url: `http://localhost:${gqlPort}`,
             userEmail: "alice@example.com",
             userPassword: "alice123"
         });

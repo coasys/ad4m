@@ -67,7 +67,7 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
                     can: ["*"] 
                 }],
                 multiUser: true,
-                backendUrl: `ws://localhost:${gqlPort}/graphql`,
+                url: `http://localhost:${gqlPort}`,
                 userEmail: "test@example.com",
                 userPassword: "password123"
             });
@@ -104,7 +104,7 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
                     can: ["*"] 
                 }],
                 multiUser: true,
-                backendUrl: `ws://localhost:${gqlPort}/graphql`,
+                url: `http://localhost:${gqlPort}`,
                 userEmail: "existing@example.com",
                 userPassword: "password456"
             });
@@ -131,7 +131,7 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
                     can: ["*"] 
                 }],
                 multiUser: true,
-                backendUrl: `ws://localhost:${gqlPort}/graphql`,
+                url: `http://localhost:${gqlPort}`,
                 userEmail: "existing@example.com",
                 userPassword: "wrongpassword"
             });

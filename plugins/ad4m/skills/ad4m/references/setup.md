@@ -151,7 +151,7 @@ Agent on machine A, executor on machine B (LAN or internet). MCP works over plai
 **Option A: SSH tunnel (no TLS needed, simplest for agents)**
 
 ```bash
-# On agent machine — forward both GraphQL and MCP ports
+# On agent machine — forward both API and MCP ports
 ssh -L 12000:localhost:12000 -L 3001:localhost:3001 user@executor-host
 # Now agent connects to localhost:12000 / localhost:3001 as if local
 ```
@@ -228,7 +228,7 @@ After init + generate, `--app-data-path` contains:
 ├── ad4m_db.sqlite            # Agent database
 ├── mainnet_seed.seed         # Bootstrap configuration
 ├── surrealdb_perspectives/   # Per-perspective SurrealDB stores
-└── schema.gql                # GraphQL schema
+└── schema.gql                # Legacy GraphQL schema (unused)
 ```
 
 ## Security Considerations
@@ -247,23 +247,20 @@ The plugin manages MCP authentication internally — credentials are not sent in
 - The executor's API endpoint (`--port`, default 12000) should only be accessible to trusted agents
 - Use TLS (`--tls-cert-file`, `--tls-key-file`) for any remote executor access
 
-## GraphQL API (Fallback)
+## WebSocket RPC API (Fallback)
 
-**Use MCP tools first.** GraphQL is for low-level operations not exposed via MCP (language management, direct queries, debugging).
+**Use MCP tools first.** The WebSocket RPC API is for low-level operations not exposed via MCP (language management, direct queries, debugging).
 
-```graphql
-# Agent status
-{ agentStatus { isInitialized isUnlocked did } }
+Connect to `ws://localhost:12000/api/v1/ws` and send JSON-RPC messages:
 
-# Add a link
-mutation { perspectiveAddLink(
-  uuid: "<perspective-uuid>"
-  link: { source: "ad4m://self", predicate: "has_name", target: "literal://string:Data" }
-) { author timestamp } }
+```json
+{"method": "agent.status", "params": {}, "id": "1"}
+
+{"method": "perspectives.add_link", "params": {"uuid": "<perspective-uuid>", "link": {"source": "ad4m://self", "predicate": "has_name", "target": "literal://string:Data"}}, "id": "2"}
 ```
 
-**Auth header:** `Authorization: <admin-credential>` (single-user) or `Authorization: Bearer <jwt>` (multi-user)
-**Endpoint:** `http://localhost:12000/graphql` (configurable via `--port`)
+**Auth:** Send `{"method": "auth", "params": {"credential": "<admin-credential>"}}` (single-user) or `{"method": "auth", "params": {"jwt": "<token>"}}` (multi-user) as the first message.
+**Endpoint:** `ws://localhost:12000/api/v1/ws` (port configurable via `--port`)
 
 ## Troubleshooting
 
@@ -275,7 +272,7 @@ mutation { perspectiveAddLink(
 | Holochain conductor `IoError(internal)` | Corrupted conductor DB | Nuke `h/c/` directory, re-generate agent |
 | Port already in use | Previous instance running | Kill old process, clean lair files |
 | 404 on neighbourhood join | Version mismatch or expired link | Ensure same AD4M version as neighbourhood creator |
-| Cannot connect to executor | Executor not running or wrong port | `curl http://localhost:12000/graphql` to verify |
-| Waker not firing | WS not accessible or bad query | Check `ws://localhost:12100/graphql` and waker logs |
+| Cannot connect to executor | Executor not running or wrong port | `curl http://localhost:12000/health` to verify |
+| Waker not firing | WS not accessible or bad query | Check `ws://localhost:12000/api/v1/ws/events` and waker logs |
 | Messages "uninitialized" | Property set after creation (race) | Always use `message_create` or `create_subject` with `initial_values` |
 | Channel query returns empty | SHACL still syncing | Wait 3-5 min for Holochain gossip, then retry |
