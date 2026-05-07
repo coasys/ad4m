@@ -31,9 +31,9 @@ export interface InitializeArgs {
   passphrase: string;
 }
 
-export type AgentUpdatedCallback = (agent: Agent) => null;
-export type AgentStatusChangedCallback = (agent: Agent) => null;
-export type AgentAppsUpdatedCallback = () => null;
+export type AgentUpdatedCallback = (agent: Agent) => void;
+export type AgentStatusChangedCallback = (agent: Agent) => void;
+export type AgentAppsUpdatedCallback = () => void;
 export type HostingUserInfoChangedCallback = (info: HostingUserInfo) => void;
 export type ComputeLogUpdatedCallback = (entry: ComputeLogEntry) => void;
 
