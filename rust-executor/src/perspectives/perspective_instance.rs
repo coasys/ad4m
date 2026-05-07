@@ -4078,8 +4078,11 @@ impl PerspectiveInstance {
 
         // 2. Build trigger SPARQL from shape predicates.
         //    Parse the shape to extract required predicates for change detection.
-        let trigger_predicates =
-            self.build_model_trigger_predicates(&class_name, shape_json.as_deref(), Some(&query_json));
+        let trigger_predicates = self.build_model_trigger_predicates(
+            &class_name,
+            shape_json.as_deref(),
+            Some(&query_json),
+        );
 
         let trigger_sparql = if trigger_predicates.is_empty() {
             // Fallback: match any triple (always re-check)
