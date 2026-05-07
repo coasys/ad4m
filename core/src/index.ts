@@ -28,6 +28,11 @@ export * from "./utils";
 export * from "./agent/AgentClient";
 export * from "./ai/AIClient"
 export * from "./ai/Tasks"
-export * from "./runtime/RuntimeResolver"
+export * from "./runtime/RuntimeTypes"
+export { ModelApi, TokenizerSource, LocalModel, ModelType, ModelApiInput, TokenizerSourceInput, LocalModelInput, ModelInput, VoiceActivityParamsInput } from "./ai/AITypes"
 export * from './shacl/SHACLShape'
 export { SHACLFlow, FlowState, FlowTransition, LinkPattern, FlowableCondition } from './shacl/SHACLFlow'
+export * from "./generated/api";
+export { RpcError } from "./apiClient";
+/** @deprecated Use `RpcError` instead. */
+export { RpcError as RestError } from "./apiClient";

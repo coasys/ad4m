@@ -23,7 +23,7 @@ export interface PluginConfig {
   ad4mBinaryPath?: string;
   toolRefreshIntervalMs?: number;
   wakerEnabled?: boolean;
-  executorWsUrl?: string;
+  executorUrl?: string;
   wakeUrl?: string;
   wakeToken?: string;
   debounceMs?: number;

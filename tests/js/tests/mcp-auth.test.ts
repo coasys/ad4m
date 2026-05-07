@@ -4,14 +4,13 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor, killByPorts } from "../utils/utils";
+import { sleep, startExecutor, killByPorts } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
-import fetch from 'node-fetch';
 import { callMcpTool, initializeMcp } from './mcp-utils';
 
-//@ts-ignore
-global.fetch = fetch;
+// Keep Node's native fetch for REST client calls. The node-fetch override here
+// breaks web-stream/EventSource expectations used by the REST/MCP stack.
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -41,7 +40,7 @@ describe("MCP Authentication HTTP Tests", function() {
     const bootstrapSeedPath = path.join(__dirname + "/../bootstrapSeed.json");
     // Unique ports for mcp-auth tests — must not collide with other concurrent
     // CI jobs (integration-tests-js uses 15700-15702, mcp-http uses 16000-16002)
-    let gqlPort: number;
+    let apiPort: number;
     let hcAdminPort: number;
     let hcAppPort: number;
     const adminCredential = "mcp-auth-test-admin";
@@ -52,9 +51,9 @@ describe("MCP Authentication HTTP Tests", function() {
     let authedPerspectiveUuid: string = "";
 
     before(async () => {
-        [gqlPort, hcAdminPort, hcAppPort, MCP_PORT] = await getFreePorts(4);
+        [apiPort, hcAdminPort, hcAppPort, MCP_PORT] = await getFreePorts(4);
         MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
-        registerPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        registerPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
 
         // Clean up and create test directory
         if (fs.existsSync(appDataPath)) {
@@ -66,7 +65,7 @@ describe("MCP Authentication HTTP Tests", function() {
         executorProcess = await startExecutor(
             appDataPath,
             bootstrapSeedPath,
-            gqlPort,
+            apiPort,
             hcAdminPort,
             hcAppPort,
             true,               // languageLanguageOnly
@@ -80,10 +79,10 @@ describe("MCP Authentication HTTP Tests", function() {
 
         await sleep(3000);
 
-        // Generate agent via GraphQL (no MCP equivalent)
-        const adminClient = new Ad4mClient(apolloClient(gqlPort, adminCredential), false);
+        // Generate agent via REST (no MCP equivalent)
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
         await adminClient.agent.generate("test-passphrase");
-        console.log("Agent generated via GraphQL");
+        console.log("Agent generated via REST");
     });
 
     after(async () => {
@@ -96,8 +95,8 @@ describe("MCP Authentication HTTP Tests", function() {
         }
         // Port-based kill as safety net — catches the executor even if the
         // ChildProcess handle is stale or kill() missed a grandchild process.
-        killByPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        killByPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        deregisterPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
     });
 
     // ========================================================================
@@ -231,8 +230,8 @@ describe("MCP Authentication HTTP Tests", function() {
         let adminClient: Ad4mClient;
 
         before(async function() {
-            // Enable multi-user mode via GraphQL so email tools work
-            adminClient = new Ad4mClient(apolloClient(gqlPort, adminCredential), false);
+            // Enable multi-user mode via REST so email tools work
+            adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
             await adminClient.runtime.setMultiUserEnabled(true);
             console.log("Multi-user mode enabled");
         });

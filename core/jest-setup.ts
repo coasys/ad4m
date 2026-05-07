@@ -1,1 +1,1 @@
-import 'reflect-metadata';
+// Jest setup

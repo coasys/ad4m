@@ -34,3 +34,7 @@ kitsune2_gossip = { git = "https://github.com/holochain/kitsune2.git", rev = "32
 #kitsune2_test_utils = { git = "https://github.com/holochain/kitsune2.git", rev = "26159cb9bac7cc845fff57a1630aa9d7112c37d5" }
 kitsune2_transport_iroh = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
 kitsune2_transport_tx5 = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+# Optimization for test builds to keep binary under ARM64 ±128MB branch limit.
+# Without this, the test binary is too large for the linker on Apple Silicon.
+[profile.test]
+opt-level = 1

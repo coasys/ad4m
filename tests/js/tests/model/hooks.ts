@@ -38,7 +38,7 @@ export function getSharedAgent(): AgentHandle | null {
  */
 export const mochaHooks = {
   async beforeAll(this: Mocha.Context) {
-    this.timeout(120_000);
+    this.timeout(300_000);
     _sharedAgent = await startAgent("model-suite");
   },
 

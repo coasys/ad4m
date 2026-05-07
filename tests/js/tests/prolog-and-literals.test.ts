@@ -13,15 +13,11 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     PropertyOptions,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
-import { startExecutor, apolloClient, quitExecutor } from "../utils/utils";
+import { startExecutor, baseUrl, quitExecutor } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import path from "path";
 import { fileURLToPath } from 'url';
-import fetch from 'node-fetch'
 import sinon from 'sinon';
-
-//@ts-ignore
-global.fetch = fetch
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,19 +29,19 @@ describe("Prolog + Literals", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "prolog-agent");
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    let gqlPort: number;
+    let apiPort: number;
     let hcAdminPort: number;
     let hcAppPort: number;
 
     before(async () => {
-        [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
-        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
+        [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+        registerPorts([apiPort, hcAdminPort, hcAppPort]);
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-            gqlPort, hcAdminPort, hcAppPort);
+            apiPort, hcAdminPort, hcAppPort);
 
         console.log("Creating ad4m client")
         // @ts-ignore - Apollo Client version mismatch between dependencies
-        ad4m = new Ad4mClient(apolloClient(gqlPort))
+        ad4m = new Ad4mClient(baseUrl(apiPort))
         console.log("Generating agent")
         await ad4m.agent.generate("secret")
         console.log("Done")
@@ -53,9 +49,9 @@ describe("Prolog + Literals", () => {
 
     after(async () => {
         if (executorProcess) {
-            await quitExecutor(executorProcess, gqlPort);
+            await quitExecutor(executorProcess, apiPort);
         }
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
+        deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
     })
 
     it("should get agent status", async () => {

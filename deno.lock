@@ -513,7 +513,7 @@
         "packageJson": {
           "dependencies": [
             "npm:@coasys/ad4m@*",
-            "npm:@perspect3vism/rollup-plugin-dna@^0.0.2",
+            "npm:@coasys/rollup-plugin-holochain@*",
             "npm:@rollup/plugin-commonjs@14",
             "npm:@rollup/plugin-node-resolve@8",
             "npm:@rollup/plugin-typescript@4",
@@ -590,7 +590,6 @@
       "connect": {
         "packageJson": {
           "dependencies": [
-            "npm:@apollo/client@3.7.10",
             "npm:@types/node@^16.11.11",
             "npm:@undecaf/barcode-detector-polyfill@~0.9.15",
             "npm:@undecaf/zbar-wasm@~0.9.12",
@@ -599,7 +598,6 @@
             "npm:esbuild-plugin-lit@^0.0.10",
             "npm:esbuild-plugin-replace@^1.4.0",
             "npm:esbuild@~0.15.5",
-            "npm:graphql-ws@5.12.0",
             "npm:lit@^2.3.1",
             "npm:np@^7.6.2",
             "npm:npm-run-all@^4.1.5",
@@ -611,33 +609,25 @@
       "core": {
         "packageJson": {
           "dependencies": [
-            "npm:@apollo/client@3.7.10",
-            "npm:@apollo/server@^4.9.4",
             "npm:@holochain/client@0.16.0",
-            "npm:@rollup/plugin-alias@^3.1.5",
             "npm:@rollup/plugin-commonjs@20",
             "npm:@rollup/plugin-node-resolve@^13.0.4",
             "npm:@types/jest@29",
             "npm:@types/node@*",
             "npm:@types/yargs@*",
             "npm:base64-js@*",
-            "npm:class-validator@~0.13.1",
             "npm:concat-md@0.5",
             "npm:cross-fetch@^3.1.4",
             "npm:express@4.18.2",
-            "npm:graphql-ws@5.12.0",
-            "npm:graphql@15.7.2",
             "npm:honkit@4",
             "npm:jest@29",
             "npm:pako@*",
             "npm:patch-package@8",
             "npm:react-dom@*",
             "npm:react@*",
-            "npm:reflect-metadata@~0.1.13",
             "npm:rollup@^2.56.3",
             "npm:ts-jest@29",
             "npm:tsx@^4.21.0",
-            "npm:type-graphql@1.1.1",
             "npm:typescript@^4.6.2",
             "npm:ws@8.13.0"
           ]
@@ -735,6 +725,7 @@
             "npm:body-parser@^1.20.2",
             "npm:chai-as-promised@*",
             "npm:chai@*",
+            "npm:eventsource@^3.0.2",
             "npm:express@4.18.2",
             "npm:faker@^5.1.0",
             "npm:fluent-ffmpeg@^2.1.3",

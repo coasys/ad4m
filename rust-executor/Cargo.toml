@@ -68,7 +68,9 @@ argon2 = { version = "0.5.0", features = ["simple"] }
 rand = "0.8.5"
 base64 = "0.21.0"
 rmcp = { version = "0.15.0", features = ["server", "transport-streamable-http-server"] }
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tower-http = { version = "0.6", features = ["cors", "set-header", "catch-panic"] }
 schemars = "1.0"
 clap = { version = "4.0.8", features = ["derive"] }
 fs_extra = "1.3.0"
@@ -84,11 +86,6 @@ rust-embed="8.0.0"
 dirs = "5.0.1"
 rocket = "0.5.0"
 
-coasys_juniper = { version="0.16.0", features = ["chrono"] }
-coasys_juniper_subscriptions = { version="0.17.0" }
-coasys_juniper_graphql_transport_ws = { version="0.4.0" }
-coasys_juniper_warp = { version="0.8.0", features = ["subscriptions"] }
-warp = "0.3"
 
 jsonwebtoken = "8.3.0"
 
@@ -129,6 +126,7 @@ rustls-pemfile = "2"
 x509-parser = "0.16"
 
 kalosm = { version = "0.3.2", git = "https://github.com/coasys/floneum.git", branch = "coasys-2-without-pdf", features = ["language", "sound"] }
+voice_activity_detector = "0.1.1"
 candle-core = "0.8.2"
 deflate = "1.0.0"
 futures-core = "0.3.30"
@@ -142,12 +140,17 @@ portpicker = "0.1.1"
 deno_error = "0.5.6"
 thiserror = "2.0.12"
 oxigraph = { version = "0.4" }
+ts-rs = { version = "12.0.1", features = ["serde-compat"] }
+tower-service = "0.3"
 
 [dev-dependencies]
+tempfile = "3"
 maplit = "1.0.2"
 lazy_static = "1.4.0"
 itertools = "0.10.1"
-tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+tower-service = "0.3"
+http-body-util = "0.1"
 
 [build-dependencies]
 fs_extra = "1.3.0"

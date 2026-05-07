@@ -1,7 +1,7 @@
 use deno_core::op2;
 
-use crate::graphql::graphql_types::EntanglementProof;
 use crate::js_core::error::AnyhowWrapperError;
+use crate::types::EntanglementProof;
 
 use super::{
     add_entanglement_proofs as add_entanglement_proofs_service,

@@ -33,7 +33,7 @@ export interface WakerLogger {
 }
 
 export interface WakerSubscriptionManagerOptions {
-  /** PerspectiveClient from Ad4mClient (provides perspectiveSubscribeSurrealQuery etc.) */
+  /** PerspectiveClient from Ad4mClient (provides querySparql etc.) */
   perspectiveClient: any;
   /** Logger instance */
   logger: WakerLogger;
@@ -172,13 +172,14 @@ export class WakerSubscriptionManager {
           const parents: string[] = [];
           try {
             const escaped = msgAddr.replace(/'/g, "\\'");
-            const parentQuery = `SELECT * FROM link WHERE predicate = 'ad4m://has_child' AND target = '${escaped}'`;
+            const parentQuery = `SELECT ?source WHERE { ?source <ad4m://has_child> <${msgAddr}> }`;
             this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
-            const parentResult = await this.perspectiveClient.querySurrealDB(sub.perspective, parentQuery);
-            if (Array.isArray(parentResult)) {
-              for (const link of parentResult) {
-                if (link && link.source) {
-                  parents.push(link.source);
+            const parentResult = await this.perspectiveClient.querySparql(sub.perspective, parentQuery);
+            const bindings = (parentResult as any)?.results?.bindings;
+            if (Array.isArray(bindings)) {
+              for (const binding of bindings) {
+                if (binding?.source?.value) {
+                  parents.push(binding.source.value);
                 }
               }
             }

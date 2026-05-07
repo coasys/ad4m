@@ -1,6 +1,6 @@
 import { Ad4mClient } from "@coasys/ad4m";
 import Ad4mConnect from "@coasys/ad4m-connect";
-import { apolloClient, startExecutor } from "./utils/utils.ts";
+import { startExecutor, baseUrl } from "./utils/utils.ts";
 import path from "path";
 import fs from "fs-extra";
 import { fileURLToPath } from 'url';
@@ -15,7 +15,7 @@ async function demoMultiUser() {
     const TEST_DIR = path.join(`${__dirname}/tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "demo-multi-user");
     const bootstrapSeedPath = path.join(`${__dirname}/bootstrapSeed.json`);
-    const gqlPort = 16100;
+    const apiPort = 16100;
     const hcAdminPort = 16101;
     const hcAppPort = 16102;
 
@@ -25,14 +25,14 @@ async function demoMultiUser() {
 
     console.log("📡 Starting Ad4m executor as multi-user backend...");
     const executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-        gqlPort, hcAdminPort, hcAppPort, false);
+        apiPort, hcAdminPort, hcAppPort, false);
 
     // Wait for full initialization
     await new Promise(resolve => setTimeout(resolve, 5000));
 
     try {
         // Initialize the main agent (needed for JWT signing)
-        const adminClient = new Ad4mClient(apolloClient(gqlPort), false);
+        const adminClient = new Ad4mClient(baseUrl(apiPort), undefined, false);
         await adminClient.agent.generate("passphrase");
         console.log("✅ Backend initialized");
 
@@ -49,7 +49,7 @@ async function demoMultiUser() {
                 can: ["*"] 
             }],
             multiUser: true,
-            backendUrl: `ws://localhost:${gqlPort}/graphql`,
+            url: `http://localhost:${apiPort}`,
             userEmail: "alice@example.com",
             userPassword: "alice123"
         });
@@ -71,7 +71,7 @@ async function demoMultiUser() {
                 can: ["*"] 
             }],
             multiUser: true,
-            backendUrl: `ws://localhost:${gqlPort}/graphql`,
+            url: `http://localhost:${apiPort}`,
             userEmail: "bob@example.com",
             userPassword: "bob456"
         });
@@ -93,7 +93,7 @@ async function demoMultiUser() {
                 can: ["*"] 
             }],
             multiUser: true,
-            backendUrl: `ws://localhost:${gqlPort}/graphql`,
+            url: `http://localhost:${apiPort}`,
             userEmail: "alice@example.com",
             userPassword: "alice123"
         });

@@ -1,4 +1,4 @@
-use crate::types::Perspective;
+use ad4m_client::types::{LinkInput, Perspective};
 use ad4m_client::Ad4mClient;
 use anyhow::{anyhow, Result};
 
@@ -85,26 +85,30 @@ pub async fn string_2_perspective_snapshot(
         .map(char::from)
         .collect();
     let temp_perspective = ad4m_client.perspectives.add(rand_name).await?;
-    println!("Created temporary perspective: {}", temp_perspective);
+    println!("Created temporary perspective: {}", temp_perspective.uuid);
     ad4m_client
         .perspectives
         .add_link(
-            temp_perspective.clone(),
-            "ad4m://self".to_string(),
-            format!("literal:string:{}", urlencoding::encode(&string)),
-            None,
-            None,
+            temp_perspective.uuid.clone(),
+            LinkInput {
+                source: "ad4m://self".to_string(),
+                target: format!("literal:string:{}", urlencoding::encode(&string)),
+                predicate: None,
+            },
         )
         .await?;
     println!("Added status link to temporary perspective");
 
     let snapshot = ad4m_client
         .perspectives
-        .snapshot(temp_perspective.clone())
+        .snapshot(temp_perspective.uuid.clone())
         .await?;
     println!("Created snapshot of temporary perspective");
 
-    ad4m_client.perspectives.remove(temp_perspective).await?;
+    ad4m_client
+        .perspectives
+        .remove(temp_perspective.uuid)
+        .await?;
 
     Ok(snapshot)
 }

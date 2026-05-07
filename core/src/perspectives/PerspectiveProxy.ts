@@ -9,8 +9,7 @@ import { ExpressionRendered } from "../expression/Expression";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { AIClient } from "../ai/AIClient";
-import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
-import { gql } from "@apollo/client/core";
+
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
@@ -22,7 +21,7 @@ type QueryCallback = (result: AllInstancesResult) => void;
 
 
 
-// Generic subscription interface that matches Apollo's Subscription
+// Generic unsubscribe interface for event subscriptions
 interface Unsubscribable {
     unsubscribe(): void;
 }
@@ -32,7 +31,7 @@ interface Unsubscribable {
  * This class handles:
  * - Keeping the subscription alive by sending periodic keepalive signals
  * - Managing callbacks for result updates
- * - Subscribing to query updates via GraphQL subscriptions
+ * - Subscribing to query updates via WebSocket subscriptions
  * - Maintaining the latest query result
  * - Ensuring subscription is fully initialized before allowing access
  * - Cleaning up resources when disposed
@@ -119,22 +118,32 @@ export class QuerySubscriptionProxy {
             initialResult = await this.#client.subscribeQuery(this.#uuid, this.#query);
             this.#subscriptionId = initialResult.subscriptionId;
 
-            // Process the initial result immediately for fast UX
-            if (initialResult.result) {
+            // Process the initial result immediately for fast UX.
+            // The subscribeQuery() RPC call already returns the initial result,
+            // so treat that as successful initialization instead of waiting for a
+            // follow-up WebSocket update that may never arrive until the query changes.
+            if (initialResult.result !== undefined) {
                 this.#latestResult = initialResult.result;
                 this.#notifyCallbacks(initialResult.result);
+
+                if (this.#initResolve) {
+                    this.#initResolve(true);
+                    this.#initResolve = undefined;
+                    this.#initReject = undefined;
+                }
             } else {
                 console.warn('⚠️ No initial result returned from subscribeQuery!');
-            }
 
-            // Set up timeout for retry
-            this.#initTimeoutId = setTimeout(() => {
-                console.error('Subscription initialization timed out after 30 seconds. Resubscribing...');
-                // Recursively retry subscription, catching any errors
-                this.subscribe().catch(error => {
-                    console.error('Error during subscription retry after timeout:', error);
-                });
-            }, 30000);
+                // Only keep the initialization timeout when the backend did not
+                // provide an initial result up front.
+                this.#initTimeoutId = setTimeout(() => {
+                    console.error('Subscription initialization timed out after 30 seconds. Resubscribing...');
+                    // Recursively retry subscription, catching any errors
+                    this.subscribe().catch(error => {
+                        console.error('Error during subscription retry after timeout:', error);
+                    });
+                }, 30000);
+            }
             
             // Subscribe to query updates
             this.#unsubscribe = this.#client.subscribeToQueryUpdates(
@@ -281,7 +290,7 @@ export class QuerySubscriptionProxy {
      * 
      * This method:
      * 1. Stops the keepalive timer
-     * 2. Unsubscribes from GraphQL subscription updates
+     * 2. Unsubscribes from subscription updates
      * 3. Clears all registered callbacks
      * 4. Cleans up any pending initialization timeout
      * 
@@ -1052,7 +1061,7 @@ export class PerspectiveProxy {
      * Adds Social DNA code to the perspective.
      * 
      * **Recommended:** Use {@link addShacl} instead, which accepts the `SHACLShape` type directly.
-     * This method is primarily for the GraphQL layer and legacy Prolog code.
+     * This method is primarily for the RPC API layer and legacy Prolog code.
      * 
      * @param name - Unique name for this SDNA definition
      * @param sdnaCode - Prolog SDNA code (legacy, can be empty string if shaclJson provided)
@@ -1313,7 +1322,7 @@ export class PerspectiveProxy {
      */
     async subjectClasses(): Promise<string[]> {
         try {
-            // Query SHACL class links directly — no need for a separate GraphQL endpoint
+            // Query SHACL class links directly — no need for a separate RPC endpoint
             const classLinks = await this.get(new LinkQuery({
                 predicate: "rdf://type",
                 target: "ad4m://SubjectClass"

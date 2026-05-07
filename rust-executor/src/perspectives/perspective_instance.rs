@@ -4,12 +4,6 @@ use super::update_perspective;
 use super::utils::{prolog_get_all_string_bindings, prolog_resolution_to_string};
 use crate::agent::AgentContext;
 use crate::agent::{create_signed_expression, did_for_context};
-use crate::graphql::graphql_types::{
-    DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
-    OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
-    PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveState,
-    PerspectiveStateFilter,
-};
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
@@ -25,6 +19,12 @@ use crate::pubsub::{
     PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
     RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
+};
+use crate::types::{
+    DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
+    OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
+    PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveState,
+    PerspectiveStateFilter,
 };
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
@@ -164,9 +164,9 @@ pub struct PorpertyValue {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct SubjectClassOption {
     #[serde(rename = "className")]
-    class_name: Option<String>,
+    pub class_name: Option<String>,
     #[serde(rename = "query")]
-    query: Option<String>,
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -2503,9 +2503,7 @@ impl PerspectiveInstance {
 
         // Initialize user pool with correct neighbourhood author for SDNA governance
         // This ensures users can see SDNA from both themselves and the neighbourhood creator
-        let links = self
-            .get_links(&crate::graphql::graphql_types::LinkQuery::default())
-            .await?;
+        let links = self.get_links(&crate::types::LinkQuery::default()).await?;
 
         service
             .update_perspective_links(
@@ -3847,7 +3845,10 @@ impl PerspectiveInstance {
                                     .await
                                 {
                                     Ok(Some(expr_json)) => {
-                                        let rendered = crate::graphql::query_resolvers::build_expression_rendered(&expr_json, &lang_address);
+                                        let rendered = crate::helpers::build_expression_rendered(
+                                            &expr_json,
+                                            &lang_address,
+                                        );
                                         rendered.data
                                     }
                                     _ => prolog_value_to_json_string(property_value.clone()),
@@ -4440,18 +4441,18 @@ impl PerspectiveInstance {
             removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
         };
 
-        // Only spawn prolog facts update if there are changes to update
+        // Only update storage / subscription engines when there are changes.
+        // The SPARQL store must be updated first so any subscription re-checks
+        // triggered by update_prolog_engines() see the committed batch state.
         if !combined_diff.additions.is_empty() || !combined_diff.removals.is_empty() {
             //let prolog_start = std::time::Instant::now();
-            //log::info!("🔄 BATCH COMMIT: Starting prolog facts update - {} add, {} rem",
+            //log::info!("🔄 BATCH COMMIT: Starting DB + prolog updates - {} add, {} rem",
             //    combined_diff.additions.len(), combined_diff.removals.len());
 
-            // Update prolog facts once for all changes and wait for completion
-            // Update Prolog: subscription engine (immediate) + query engine (lazy)
-            // Update both Prolog engines: subscription (immediate) + query (lazy)
-            self.update_prolog_engines(combined_diff.clone()).await;
-
             self.persist_link_diff(&combined_diff).await?;
+
+            // Update Prolog: subscription engine (immediate) + query engine (lazy)
+            self.update_prolog_engines(combined_diff.clone()).await;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }
@@ -4484,10 +4485,10 @@ mod tests {
     use super::*;
     use crate::agent::AgentService;
     use crate::db::Ad4mDb;
-    use crate::graphql::graphql_types::PerspectiveState;
     use crate::perspectives::perspective_instance::PerspectiveHandle;
     use crate::prolog_service::init_prolog_service;
     use crate::test_utils::setup_wallet;
+    use crate::types::PerspectiveState;
     use fake::{Fake, Faker};
     use uuid::Uuid;
 

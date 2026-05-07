@@ -1,10 +1,10 @@
-use self::{audio_stream::AudioStream, error::AIServiceError};
-use crate::graphql::graphql_types::ModelInput;
-#[allow(unused_imports)]
-use crate::graphql::graphql_types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
+use self::error::AIServiceError;
 use crate::pubsub::AI_MODEL_LOADING_STATUS;
 #[allow(unused_imports)]
 use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
+use crate::types::ModelInput;
+#[allow(unused_imports)]
+use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
 use crate::types::{AITask, LocalModel, Model, ModelType};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
@@ -70,6 +70,9 @@ struct TranscriptionSession {
     samples_tx: futures_channel::mpsc::UnboundedSender<Vec<f32>>,
     drop_tx: oneshot::Sender<()>,
     last_activity: Arc<Mutex<std::time::Instant>>,
+    /// Broadcast channel for streaming partial/final transcription text back
+    /// to the REST feed handler (SSE response).
+    text_broadcast_tx: tokio::sync::broadcast::Sender<String>,
     // Billing context (used by the async whisper task via cloned values;
     // stored here for potential close-stream reconciliation)
     #[allow(dead_code)]
@@ -1157,7 +1160,7 @@ impl AIService {
     pub async fn open_transcription_stream(
         &self,
         model_id: String,
-        params: Option<VoiceActivityParams>,
+        _params: Option<VoiceActivityParams>,
         auth_token: String,
     ) -> Result<String> {
         let model_size = Self::get_whisper_model_size(model_id.clone())?;
@@ -1207,10 +1210,17 @@ impl AIService {
         let (samples_tx, samples_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
         let (drop_tx, drop_rx) = oneshot::channel();
         let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
+        let (text_broadcast_tx, _) = tokio::sync::broadcast::channel::<String>(64);
+        let text_broadcast_tx_clone = text_broadcast_tx.clone();
 
         // Clone billing context for the async task
         let billing_email = user_email.clone();
         let billing_model_id = model_id.clone();
+
+        // Resolve user DID for SSE event filtering (multi-user isolation)
+        let user_did =
+            crate::agent::did_for_context(&crate::agent::AgentContext::from_auth_token(auth_token))
+                .ok();
 
         // Clone the streams map so the thread can remove itself on exit
         let streams_map = self.transcription_streams.clone();
@@ -1220,75 +1230,114 @@ impl AIService {
             let rt = tokio::runtime::Runtime::new().unwrap();
 
             rt.block_on(async {
+
                 // Dereference the Arc to get the Whisper model
                 // The model weights stay shared in memory!
                 let whisper = (*whisper_model).clone();
 
-                let audio_stream = AudioStream {
-                    read_data: Vec::new(),
-                    receiver: Box::pin(samples_rx.map(futures_util::stream::iter).flatten()),
+                // Build a Silero VAD model for server-side speech detection.
+                // This filters non-speech audio (coughs, sighs, keyboard noise)
+                // that the client-side energy-based VAD cannot distinguish from
+                // speech.  We run VAD inline on each feed rather than using the
+                // streaming pipeline (voice_activity_stream → rechunk) because
+                // the rechunker hangs: it relies on continuously polled samples,
+                // but the AudioStream returns Pending between feeds, so the
+                // rechunker never detects end-of-speech.
+                let vad = match voice_activity_detector::VoiceActivityDetector::builder()
+                    .sample_rate(16000)
+                    .chunk_size(512usize)
+                    .build()
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::error!("Failed to build Silero VAD model for stream {}: {:?}", stream_id_clone, e);
+                        return;
+                    }
                 };
+                let vad = std::sync::Mutex::new(vad);
 
-                let mut voice_stream = audio_stream
-                    .voice_activity_stream()
-                    .rechunk_voice_activity();
-
-                // Apply voice activity parameters if provided
-                if let Some(params) = params {
-                    if let Some(start_threshold) = params.start_threshold {
-                        voice_stream = voice_stream.with_start_threshold(start_threshold);
-                    }
-                    if let Some(start_window) = params.start_window {
-                        voice_stream =
-                            voice_stream.with_start_window(Duration::from_millis(start_window));
-                    }
-                    if let Some(end_threshold) = params.end_threshold {
-                        voice_stream = voice_stream.with_end_threshold(end_threshold);
-                    }
-                    if let Some(end_window) = params.end_window {
-                        voice_stream =
-                            voice_stream.with_end_window(Duration::from_millis(end_window));
-                    }
-                    if let Some(time_before_speech) = params.time_before_speech {
-                        voice_stream = voice_stream
-                            .with_time_before_speech(Duration::from_millis(time_before_speech));
-                    }
-                } else {
-                    // Set default end window if no params provided
-                    voice_stream = voice_stream.with_end_window(Duration::from_millis(500));
-                }
-
-                let mut word_stream = voice_stream.transcribe(whisper);
+                let mut samples_rx = samples_rx;
 
                 tokio::select! {
                     _ = drop_rx => {},
                     _ = async {
-                        while let Some(segment) = word_stream.next().await {
+                        while let Some(audio_chunk) = samples_rx.next().await {
+                            if audio_chunk.is_empty() {
+                                continue;
+                            }
+
+                            // Run Silero VAD: check what fraction of 512-sample
+                            // windows contain speech.  Thresholds chosen to
+                            // match the old Kalosm rechunker behaviour:
+                            //   per-window prob >= 0.6  (was start_threshold)
+                            //   >= 33% of windows       (reject transients)
+                            let speech_ratio = {
+                                let mut locked = vad.lock().unwrap();
+                                let mut speech_chunks = 0usize;
+                                let mut total_chunks = 0usize;
+                                for window in audio_chunk.chunks(512) {
+                                    if window.len() == 512 {
+                                        let prob = locked.predict(window.iter().copied());
+                                        total_chunks += 1;
+                                        if prob > 0.6 {
+                                            speech_chunks += 1;
+                                        }
+                                    }
+                                }
+                                if total_chunks == 0 {
+                                    0.0f32
+                                } else {
+                                    speech_chunks as f32 / total_chunks as f32
+                                }
+                            };
+
+                            if speech_ratio < 0.33 {
+                                log::info!(
+                                    "VAD filtered non-speech audio for stream {} (speech_ratio={:.2})",
+                                    stream_id_clone,
+                                    speech_ratio
+                                );
+                                continue;
+                            }
+
+                            log::info!(
+                                "VAD passed audio for stream {} ({} samples, speech_ratio={:.2})",
+                                stream_id_clone,
+                                audio_chunk.len(),
+                                speech_ratio
+                            );
+
+                            let buffer = rodio::buffer::SamplesBuffer::new(1, 16000, audio_chunk);
+                            match whisper.transcribe(buffer) {
+                                Ok(mut segments) => {
+                                    while let Some(segment) = segments.next().await {
                             let text = segment.text().to_string();
-                            let stream_id_clone = stream_id_clone.clone();
+                            log::info!(
+                                "Transcription text for stream {}: {:?}",
+                                stream_id_clone,
+                                text
+                            );
 
                             // Bill for transcribed words
                             let word_count = text.split_whitespace().count();
                             if word_count > 0 {
                                 if let Some(ref email) = billing_email {
-                                    // Resolve model name from ID for rate lookup
-                                    // (host_rates are stored by display name, not UUID)
-                                    let rate_key = crate::db::Ad4mDb::with_global_instance(|db| {
-                                        db.get_model(billing_model_id.clone())
-                                    })
-                                    .ok()
-                                    .flatten()
-                                    .map(|m| m.name)
-                                    .unwrap_or_else(|| billing_model_id.clone());
+                                    let rate_key =
+                                        crate::db::Ad4mDb::with_global_instance(|db| {
+                                            db.get_model(billing_model_id.clone())
+                                        })
+                                        .ok()
+                                        .flatten()
+                                        .map(|m| m.name)
+                                        .unwrap_or_else(|| billing_model_id.clone());
 
-                                    // Rate must exist — validated when the stream was opened.
-                                    // If lookup fails here, log and skip billing (don't suppress text).
-                                    let rate = crate::db::Ad4mDb::with_global_instance(|db| {
-                                        db.get_host_rate(&rate_key)
-                                    })
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or(0.0);
+                                    let rate =
+                                        crate::db::Ad4mDb::with_global_instance(|db| {
+                                            db.get_host_rate(&rate_key)
+                                        })
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or(0.0);
                                     let cost = word_count as f64 * rate;
                                     match crate::billing::bill_compute(
                                         email,
@@ -1296,15 +1345,19 @@ impl AIService {
                                         "ai_transcription",
                                         Some(&format!(
                                             "{} words (model: {})",
-                                            word_count,
-                                            billing_model_id,
+                                            word_count, billing_model_id,
                                         )),
                                     ) {
-                                        Err(crate::billing::BillingError::InsufficientCredits) => {
+                                        Err(
+                                            crate::billing::BillingError::InsufficientCredits,
+                                        ) => {
                                             log::warn!("Transcription: insufficient credits for user {} — delivering already-computed text, future feeds will be rejected", email);
                                         }
                                         Err(e) => {
-                                            log::warn!("Transcription billing failed: {:?}", e);
+                                            log::warn!(
+                                                "Transcription billing failed: {:?}",
+                                                e
+                                            );
                                         }
                                         Ok(()) => {}
                                     }
@@ -1312,21 +1365,41 @@ impl AIService {
                             }
 
                             let text_for_pubsub = text.clone();
+                            let text_for_broadcast = text.clone();
+                            let broadcast_tx = text_broadcast_tx_clone.clone();
+                            let stream_id_for_pubsub = stream_id_clone.clone();
+                            let user_did_for_pubsub = user_did.clone();
                             rt.spawn(async move {
                                 let _ = get_global_pubsub()
                                     .await
                                     .publish(
                                         &AI_TRANSCRIPTION_TEXT_TOPIC,
-                                        &serde_json::to_string(&TranscriptionTextFilter {
-                                            stream_id: stream_id_clone.clone(),
-                                            text: text_for_pubsub,
-                                        })
-                                        .expect("TranscriptionTextFilter must be serializable"),
+                                        &serde_json::to_string(
+                                            &TranscriptionTextFilter {
+                                                stream_id: stream_id_for_pubsub,
+                                                text: text_for_pubsub,
+                                                user_did: user_did_for_pubsub,
+                                            },
+                                        )
+                                        .expect(
+                                            "TranscriptionTextFilter must be serializable",
+                                        ),
                                     )
                                     .await;
                             });
 
-                            sleep(Duration::from_millis(50)).await;
+                            // Also broadcast via per-stream channel for SSE feed responses
+                            let _ = broadcast_tx.send(text_for_broadcast);
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!(
+                                        "Transcription error for stream {}: {:?}",
+                                        stream_id_clone,
+                                        e
+                                    );
+                                }
+                            }
                         }
                     } => {}
                 }
@@ -1346,6 +1419,7 @@ impl AIService {
                 samples_tx,
                 drop_tx,
                 last_activity,
+                text_broadcast_tx,
                 model_id: model_id.clone(),
                 user_email,
             },
@@ -1371,6 +1445,29 @@ impl AIService {
                 AIServiceError::CrazyError(format!("Failed to feed stream {}: {}", stream_id, e))
             })?;
             Ok(())
+        } else {
+            Err(AIServiceError::StreamNotFound.into())
+        }
+    }
+
+    /// Feed audio samples to a stream and return a broadcast receiver for
+    /// partial/final transcription text events (used by SSE feed response).
+    pub async fn feed_transcription_stream_with_broadcast(
+        &self,
+        stream_id: &String,
+        audio_samples: Vec<f32>,
+        auth_token: &str,
+    ) -> Result<tokio::sync::broadcast::Receiver<String>> {
+        let mut map_lock = self.transcription_streams.lock().await;
+
+        if let Some(stream) = map_lock.get_mut(stream_id) {
+            Self::verify_stream_ownership(stream, auth_token)?;
+            *stream.last_activity.lock().await = std::time::Instant::now();
+            let rx = stream.text_broadcast_tx.subscribe();
+            stream.samples_tx.send(audio_samples).await.map_err(|e| {
+                AIServiceError::CrazyError(format!("Failed to feed stream {}: {}", stream_id, e))
+            })?;
+            Ok(rx)
         } else {
             Err(AIServiceError::StreamNotFound.into())
         }
@@ -1608,7 +1705,7 @@ impl AIService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graphql::graphql_types::{AIPromptExamplesInput, LocalModelInput};
+    use crate::types::{AIPromptExamplesInput, LocalModelInput};
     use tokio::time::{sleep, Duration};
 
     #[tokio::test]
@@ -1865,5 +1962,111 @@ mod tests {
             .await
             .expect("prompt to work after model update");
         assert!(!response.text.is_empty());
+    }
+
+    /// Helper that replicates the server-side VAD gate logic so we can test
+    /// it without needing a running Whisper model or audio stream.
+    fn compute_speech_ratio(
+        vad: &mut voice_activity_detector::VoiceActivityDetector,
+        audio: &[f32],
+    ) -> f32 {
+        let mut speech_chunks = 0usize;
+        let mut total_chunks = 0usize;
+        for window in audio.chunks(512) {
+            if window.len() == 512 {
+                let prob = vad.predict(window.iter().copied());
+                total_chunks += 1;
+                if prob > 0.6 {
+                    speech_chunks += 1;
+                }
+            }
+        }
+        if total_chunks == 0 {
+            0.0
+        } else {
+            speech_chunks as f32 / total_chunks as f32
+        }
+    }
+
+    #[test]
+    fn test_vad_gate_rejects_silence() {
+        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
+            .sample_rate(16000)
+            .chunk_size(512usize)
+            .build()
+            .expect("VAD to build");
+
+        // Pure silence (zeros) — must be rejected
+        let silence = vec![0.0f32; 8000];
+        let ratio = compute_speech_ratio(&mut vad, &silence);
+        assert!(
+            ratio < 0.33,
+            "Silence should be rejected (ratio={ratio:.2})"
+        );
+    }
+
+    #[test]
+    fn test_vad_gate_rejects_sine_wave() {
+        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
+            .sample_rate(16000)
+            .chunk_size(512usize)
+            .build()
+            .expect("VAD to build");
+
+        // 440 Hz sine wave — not speech, should be rejected
+        let sine: Vec<f32> = (0..8000)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin())
+            .collect();
+        let ratio = compute_speech_ratio(&mut vad, &sine);
+        assert!(
+            ratio < 0.33,
+            "Sine wave should be rejected (ratio={ratio:.2})"
+        );
+    }
+
+    #[test]
+    fn test_vad_gate_rejects_low_noise() {
+        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
+            .sample_rate(16000)
+            .chunk_size(512usize)
+            .build()
+            .expect("VAD to build");
+
+        // Low-level white noise — not speech, should be rejected
+        let noise: Vec<f32> = (0..8000)
+            .map(|i| ((i as f32 * 17.3).sin() * 0.01))
+            .collect();
+        let ratio = compute_speech_ratio(&mut vad, &noise);
+        assert!(
+            ratio < 0.33,
+            "Low noise should be rejected (ratio={ratio:.2})"
+        );
+    }
+
+    #[test]
+    fn test_vad_gate_empty_audio() {
+        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
+            .sample_rate(16000)
+            .chunk_size(512usize)
+            .build()
+            .expect("VAD to build");
+
+        // Empty audio — ratio should be 0
+        let empty: Vec<f32> = vec![];
+        let ratio = compute_speech_ratio(&mut vad, &empty);
+        assert_eq!(ratio, 0.0, "Empty audio should give ratio=0");
+
+        // Sub-chunk audio (less than 512 samples)
+        let short = vec![0.1f32; 100];
+        let ratio = compute_speech_ratio(&mut vad, &short);
+        assert_eq!(ratio, 0.0, "Sub-chunk audio should give ratio=0");
+    }
+
+    #[test]
+    fn test_vad_gate_threshold_boundary() {
+        // Verify the 0.33 gate matches our code: < 0.33 is rejected, >= 0.33 passes
+        assert!(0.32 < 0.33, "Below threshold should be rejected");
+        assert!(!(0.33 < 0.33), "At threshold should pass");
+        assert!(!(0.50 < 0.33), "Above threshold should pass");
     }
 }

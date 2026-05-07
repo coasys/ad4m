@@ -42,7 +42,7 @@
             "args": [
                 "run",
                 "--app-data-path", "/Users/nicolasluck/Coasys/code/ad4m/tests/js/tst-tmp/agents/integration-agent",
-                "--gql-port", "15500",
+                "--port", "15500",
                 "--hc-admin-port", "15501",
                 "--hc-app-port", "15502",
                 "--ipfs-swarm-port", "15503",

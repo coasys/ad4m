@@ -1,6 +1,6 @@
 import { ChildProcess } from "node:child_process";
 import { Ad4mClient } from "@coasys/ad4m";
-import { startExecutor, apolloClient } from "../utils/utils.js";
+import { startExecutor, baseUrl } from "../utils/utils.js";
 import { getFreePorts, registerPorts, deregisterPorts } from "./ports.js";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -44,8 +44,8 @@ const BOOTSTRAP_SEED = path.join(__dirname, "..", "bootstrapSeed.json");
 export type AgentHandle = {
   /** Connected Ad4mClient ready for use */
   client: Ad4mClient;
-  /** gqlPort — useful if a second client needs to connect to the same executor */
-  gqlPort: number;
+  /** apiPort — useful if a second client needs to connect to the same executor */
+  apiPort: number;
   /** Kills the executor process; safe to call multiple times */
   stop(): Promise<void>;
 };
@@ -70,10 +70,10 @@ export async function startAgent(
     adminCredential?: string;
   } = {},
 ): Promise<AgentHandle> {
-  const [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+  const [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
 
   // Register so cleanup.js can kill stray executors if mocha is force-killed
-  registerPorts([gqlPort, hcAdminPort, hcAppPort]);
+  registerPorts([apiPort, hcAdminPort, hcAppPort]);
 
   const appDataPath = path.join(TEST_DIR, "agents", agentName);
   const bootstrapSeedPath = opts.bootstrapSeedPath ?? BOOTSTRAP_SEED;
@@ -81,7 +81,7 @@ export async function startAgent(
   const executorProcess = await startExecutor(
     appDataPath,
     bootstrapSeedPath,
-    gqlPort,
+    apiPort,
     hcAdminPort,
     hcAppPort,
     false,
@@ -89,13 +89,13 @@ export async function startAgent(
   );
   _activeExecutors.add(executorProcess);
 
-  const client = new Ad4mClient(apolloClient(gqlPort, opts.adminCredential));
+  const client = new Ad4mClient(baseUrl(apiPort), opts.adminCredential);
   await client.agent.generate(opts.passphrase ?? "test-passphrase");
   await client.runtime.setMultiUserEnabled(true);
 
   async function stop(): Promise<void> {
     _activeExecutors.delete(executorProcess);
-    deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
+    deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
     await new Promise<void>((resolve) => {
       // Already exited?
       if (executorProcess.exitCode !== null) {
@@ -121,16 +121,16 @@ export async function startAgent(
     });
   }
 
-  return { client, gqlPort, stop };
+  return { client, apiPort, stop };
 }
 
 /**
  * Starts a second Ad4mClient that connects to an already-running executor
- * (identified by its gqlPort).  Useful for testing multi-client scenarios
+ * (identified by its apiPort).  Useful for testing multi-client scenarios
  * without spawning an extra executor process.
  */
-export function connectClient(gqlPort: number, token?: string): Ad4mClient {
-  return new Ad4mClient(apolloClient(gqlPort, token));
+export function connectClient(apiPort: number, token?: string): Ad4mClient {
+  return new Ad4mClient(baseUrl(apiPort), token);
 }
 
 export { TEST_DIR, BOOTSTRAP_SEED };
