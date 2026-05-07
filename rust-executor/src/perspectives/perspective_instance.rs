@@ -4079,7 +4079,7 @@ impl PerspectiveInstance {
         // 2. Build trigger SPARQL from shape predicates.
         //    Parse the shape to extract required predicates for change detection.
         let trigger_predicates =
-            self.build_model_trigger_predicates(&class_name, shape_json.as_deref());
+            self.build_model_trigger_predicates(&class_name, shape_json.as_deref(), Some(&query_json));
 
         let trigger_sparql = if trigger_predicates.is_empty() {
             // Fallback: match any triple (always re-check)
@@ -4178,6 +4178,7 @@ impl PerspectiveInstance {
         &self,
         class_name: &str,
         shape_json: Option<&str>,
+        query_json: Option<&str>,
     ) -> Vec<String> {
         let mut predicates = Vec::new();
 
@@ -4207,6 +4208,20 @@ impl PerspectiveInstance {
                             predicates.push(pred.to_string());
                         }
                     }
+                }
+            }
+        }
+
+        // Extract parent predicate from query JSON (parent-scoped subscriptions
+        // must trigger when the parent link is added/removed)
+        if let Some(qj) = query_json {
+            if let Ok(query) = serde_json::from_str::<serde_json::Value>(qj) {
+                if let Some(pred) = query
+                    .get("parent")
+                    .and_then(|p| p.get("predicate"))
+                    .and_then(|p| p.as_str())
+                {
+                    predicates.push(pred.to_string());
                 }
             }
         }

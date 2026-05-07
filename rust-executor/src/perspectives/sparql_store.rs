@@ -1,5 +1,6 @@
 use crate::types::LinkStatus;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
+use chrono::DateTime as ChronoDateTime;
 use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::*;
 use oxigraph::sparql::{QueryResults, SparqlEvaluator};
@@ -430,15 +431,42 @@ impl SparqlStore {
                     continue;
                 }
 
-                // Apply date filters
+                // Apply date filters using proper DateTime parsing
+                // (string comparison is unreliable when subsecond precision differs)
                 if let Some(from) = from_date {
-                    if timestamp.as_str() < from {
-                        continue;
+                    match (
+                        ChronoDateTime::parse_from_rfc3339(timestamp.as_str()),
+                        ChronoDateTime::parse_from_rfc3339(from),
+                    ) {
+                        (Ok(ts), Ok(fd)) => {
+                            if ts < fd {
+                                continue;
+                            }
+                        }
+                        _ => {
+                            // Fallback to string comparison if parsing fails
+                            if timestamp.as_str() < from {
+                                continue;
+                            }
+                        }
                     }
                 }
                 if let Some(until) = until_date {
-                    if timestamp.as_str() > until {
-                        continue;
+                    match (
+                        ChronoDateTime::parse_from_rfc3339(timestamp.as_str()),
+                        ChronoDateTime::parse_from_rfc3339(until),
+                    ) {
+                        (Ok(ts), Ok(ud)) => {
+                            if ts > ud {
+                                continue;
+                            }
+                        }
+                        _ => {
+                            // Fallback to string comparison if parsing fails
+                            if timestamp.as_str() > until {
+                                continue;
+                            }
+                        }
                     }
                 }
 
