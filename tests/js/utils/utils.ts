@@ -202,7 +202,7 @@ export async function startExecutor(dataPath: string,
     const args = [
         'run',
         '--app-data-path', effectiveDataPath,
-        '--gql-port', String(gqlPort),
+        '--port', String(gqlPort),
         '--hc-admin-port', String(hcAdminPort),
         '--hc-app-port', String(hcAppPort),
         '--hc-proxy-url', proxyUrl,

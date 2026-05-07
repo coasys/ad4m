@@ -138,10 +138,10 @@ curl -s http://localhost:12000/api/v1/agent/status \
 Agent and executor on the same machine. No TLS needed.
 
 ```bash
-ad4m-executor run --app-data-path ~/.ad4m --gql-port 12000 \
+ad4m-executor run --app-data-path ~/.ad4m --port 12000 \
   --admin-credential mysecret --enable-mcp true
 # MCP at http://localhost:3001/mcp
-# GraphQL at http://localhost:12000/graphql
+# API at http://localhost:12000
 ```
 
 ### Scenario 2: Agent connects to remote executor
@@ -186,7 +186,7 @@ Requires `--enable-multi-user true`. Each user authenticates separately.
 - Self-signed cert via `mkcert` (install CA on all client devices)
 
 ```bash
-ad4m-executor run --app-data-path ~/.ad4m --gql-port 12000 \
+ad4m-executor run --app-data-path ~/.ad4m --port 12000 \
   --admin-credential mysecret --enable-mcp true \
   --enable-multi-user true
 ```
@@ -244,7 +244,7 @@ The plugin manages MCP authentication internally — credentials are not sent in
 ### Executor Security
 
 - **Never expose the admin credential** in logs, chat messages, or shared config files
-- The executor's GraphQL endpoint (`--gql-port`, default 12000) should only be accessible to trusted agents
+- The executor's API endpoint (`--port`, default 12000) should only be accessible to trusted agents
 - Use TLS (`--tls-cert-file`, `--tls-key-file`) for any remote executor access
 
 ## GraphQL API (Fallback)
@@ -263,7 +263,7 @@ mutation { perspectiveAddLink(
 ```
 
 **Auth header:** `Authorization: <admin-credential>` (single-user) or `Authorization: Bearer <jwt>` (multi-user)
-**Endpoint:** `http://localhost:12000/graphql` (configurable via `--gql-port`)
+**Endpoint:** `http://localhost:12000/graphql` (configurable via `--port`)
 
 ## Troubleshooting
 

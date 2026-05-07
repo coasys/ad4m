@@ -155,7 +155,7 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
       'run',
       '--admin-credential', global.ad4mToken,
       '--app-data-path', relativePath,
-      '--gql-port', port.toString(),
+      '--port', port.toString(),
       '--language-language-only', 'false',
     ])
 
