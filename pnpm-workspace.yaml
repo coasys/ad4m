@@ -13,7 +13,6 @@ packages:
   - 'ad4m-hooks/react'
   - 'ad4m-hooks/vue'
   - 'ad4m-hooks/helpers'
-  - 'benchmarks'
   # exclude packages that are inside test directories
   - '!**/test/**'
 hoist: false
