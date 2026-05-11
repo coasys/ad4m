@@ -4392,13 +4392,13 @@ mod integration_tests {
         //   ?target <task://type> <task://task> .        -- flag conformance
         //   ?target <task://title> ?_v0 .                -- required prop exists
         //   ?target <task://status> ?_v1 .               -- required prop exists
-        //   ?target <task://status> <literal:string:active> .  -- where clause
+        //   ?target <task://status> ?_wc0 . FILTER(STR(?_wc0) = "active" || STR(?_wc0) = "literal:string:active")
         // }
         let getter = "SELECT ?target WHERE { <Base> <board://has_task> ?target . \
             ?target <task://type> <task://task> . \
             ?target <task://title> ?_v0 . \
             ?target <task://status> ?_v1 . \
-            ?target <task://status> <literal:string:active> . }";
+            ?target <task://status> ?_wc0 . FILTER(STR(?_wc0) = \"active\" || STR(?_wc0) = \"literal:string:active\") }";
 
         let shape = ModelShape {
             target_class: "TaskBoard".to_string(),
