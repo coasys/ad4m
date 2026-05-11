@@ -822,7 +822,10 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     Ok(Value::String(result))
 }
 
-async fn evaluate_getters_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn evaluate_getters_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
         &ctx.capabilities,
