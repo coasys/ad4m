@@ -1146,15 +1146,33 @@ fn execute_model_query_inner(
     // Build SPARQL to find conforming instances and their property values
     let sparql = build_instance_sparql(&shape, query_input);
 
+    log::info!(
+        "model_query[{}]: instance_sparql={}",
+        class_name,
+        &sparql[..sparql.len().min(600)]
+    );
+
     // Execute the SPARQL query
     let result_json = store.query(&sparql)?;
     let raw_results: Vec<Value> = serde_json::from_str(&result_json)?;
+
+    log::info!(
+        "model_query[{}]: raw_results={} rows",
+        class_name,
+        raw_results.len()
+    );
 
     // Group results by source (each instance may have multiple rows)
     let grouped = group_results_by_source(&raw_results, &shape);
 
     // Hydrate instances from grouped results
     let mut instances = hydrate_instances(&shape, &grouped);
+
+    log::info!(
+        "model_query[{}]: hydrated={} instances",
+        class_name,
+        instances.len()
+    );
 
     // Resolve reverse relations (BelongsToOne / BelongsToMany) — these are
     // links pointing TO our instances and aren't captured by the main SPARQL.
