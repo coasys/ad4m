@@ -634,7 +634,8 @@ impl PerspectiveInstance {
             if changed {
                 //log::debug!("Notification check loop triggered for perspective {}", uuid);
                 //let start = std::time::Instant::now();
-                self.trigger_notification_check.store(false, Ordering::Release);
+                self.trigger_notification_check
+                    .store(false, Ordering::Release);
                 //let snapshot_start = std::time::Instant::now();
 
                 let after = self.notification_trigger_snapshot().await;
@@ -2680,9 +2681,13 @@ impl PerspectiveInstance {
                 || PROLOG_MODE == PrologMode::SdnaOnly
             {
                 // Trigger notification, prolog subscription
-                self_clone.trigger_notification_check.store(true, Ordering::Release);
+                self_clone
+                    .trigger_notification_check
+                    .store(true, Ordering::Release);
                 self_clone.record_changed_predicates(&diff).await;
-                self_clone.trigger_prolog_subscription_check.store(true, Ordering::Release);
+                self_clone
+                    .trigger_prolog_subscription_check
+                    .store(true, Ordering::Release);
 
                 self_clone.pubsub_publish_diff(diff).await;
 
@@ -2801,8 +2806,12 @@ impl PerspectiveInstance {
                 self_clone.pubsub_publish_diff(diff).await;
 
                 // Trigger notification and subscription checks after prolog facts are updated
-                self_clone.trigger_notification_check.store(true, Ordering::Release);
-                self_clone.trigger_prolog_subscription_check.store(true, Ordering::Release);
+                self_clone
+                    .trigger_notification_check
+                    .store(true, Ordering::Release);
+                self_clone
+                    .trigger_prolog_subscription_check
+                    .store(true, Ordering::Release);
             }
 
             //log::info!("🔧 PROLOG UPDATE: Total prolog update task took {:?}", spawn_start.elapsed());
@@ -4293,7 +4302,9 @@ impl PerspectiveInstance {
 
     async fn check_subscribed_queries(&self, changed_predicates: ChangedPredicates) {
         let mut queries_to_remove = Vec::new();
-        let mut query_futures: Vec<std::pin::Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>> = Vec::new();
+        let mut query_futures: Vec<
+            std::pin::Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>,
+        > = Vec::new();
         let now = Instant::now();
 
         // Collect only the minimal data needed: ID, query string, user_email, keepalive time, predicates,
@@ -4446,14 +4457,17 @@ impl PerspectiveInstance {
 
         while !self.is_teardown.load(Ordering::Acquire) {
             // Check trigger without holding lock during the operation
-            let should_check = self.trigger_prolog_subscription_check.load(Ordering::Acquire);
+            let should_check = self
+                .trigger_prolog_subscription_check
+                .load(Ordering::Acquire);
 
             if should_check {
                 // Batch debounce: wait a short window for more changes to accumulate
                 sleep(Duration::from_millis(BATCH_WINDOW_MS)).await;
 
                 // Reset trigger and take the accumulated changed predicates
-                self.trigger_prolog_subscription_check.store(false, Ordering::Release);
+                self.trigger_prolog_subscription_check
+                    .store(false, Ordering::Release);
                 let changed_preds = std::mem::replace(
                     &mut *self.changed_predicates.lock().await,
                     ChangedPredicates::NoneRecorded,
