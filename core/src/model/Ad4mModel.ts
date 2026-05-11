@@ -869,10 +869,10 @@ export class Ad4mModel {
           const TargetClass = meta.target();
           const filter = buildConformanceFilter(meta.predicate, TargetClass);
 
-          // Only compile where clauses to SPARQL when the target properties
-          // are stored as plain IRIs (not signed expressions). Properties
-          // without resolveLanguage or with resolveLanguage='literal' store
-          // values as signed JSON envelopes, so SPARQL exact-match fails.
+          // Compile where clauses to SPARQL when all target properties use
+          // literal encoding (literal:string:X etc.) which is SPARQL-matchable.
+          // Properties with a non-literal resolveLanguage store expression hashes
+          // that can't be matched by value in SPARQL.
           let whereConditions: string[] = [];
           if (rel.where) {
             try {
@@ -882,13 +882,11 @@ export class Ad4mModel {
                 for (const propName of Object.keys(rel.where)) {
                   if (['id', 'author', 'timestamp'].includes(propName)) continue;
                   const propMeta = targetMetadata.properties[propName];
-                  if (propMeta && (!propMeta.resolveLanguage || propMeta.resolveLanguage === 'literal')) {
+                  if (propMeta?.resolveLanguage && propMeta.resolveLanguage !== 'literal') {
                     allSparqlFilterable = false;
                     break;
                   }
                 }
-              } else {
-                allSparqlFilterable = false;
               }
               if (allSparqlFilterable) {
                 whereConditions = compileWhereClause(rel.where, targetMetadata);
@@ -1046,10 +1044,10 @@ export class Ad4mModel {
           const TargetClass = meta.target();
           const filter = buildConformanceFilter(meta.predicate, TargetClass);
 
-          // Only compile where clauses to SPARQL when the target properties
-          // are stored as plain IRIs (not signed expressions). Properties
-          // without resolveLanguage or with resolveLanguage='literal' store
-          // values as signed JSON envelopes, so SPARQL exact-match fails.
+          // Compile where clauses to SPARQL when all target properties use
+          // literal encoding (literal:string:X etc.) which is SPARQL-matchable.
+          // Properties with a non-literal resolveLanguage store expression hashes
+          // that can't be matched by value in SPARQL.
           let whereConditions: string[] = [];
           if (rel.where) {
             try {
@@ -1059,13 +1057,11 @@ export class Ad4mModel {
                 for (const propName of Object.keys(rel.where)) {
                   if (['id', 'author', 'timestamp'].includes(propName)) continue;
                   const propMeta = targetMetadata.properties[propName];
-                  if (propMeta && (!propMeta.resolveLanguage || propMeta.resolveLanguage === 'literal')) {
+                  if (propMeta?.resolveLanguage && propMeta.resolveLanguage !== 'literal') {
                     allSparqlFilterable = false;
                     break;
                   }
                 }
-              } else {
-                allSparqlFilterable = false;
               }
               if (allSparqlFilterable) {
                 whereConditions = compileWhereClause(rel.where, targetMetadata);
