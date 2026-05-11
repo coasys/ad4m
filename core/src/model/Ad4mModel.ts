@@ -2173,7 +2173,24 @@ export class Ad4mModel {
    * @param name  - Class name to assign (e.g. "Channel")
    * @returns Generated Ad4mModel subclass, ready for querying
    */
-  static fromSHACL(shape: SHACLShape, name: string): typeof Ad4mModel {
+  /**
+   * Synthesise an `Ad4mModel` subclass from a SHACL shape.
+   *
+   * @param shape           - The SHACL shape to synthesise from.
+   * @param name            - The model name (e.g. "Channel").
+   * @param classResolver   - Optional thunk factory.  When provided, any collection
+   *   property that carries a `sh:class` URI will have its `target` wired up lazily:
+   *   `target: () => classResolver(localName)`.  Because `target` is only called at
+   *   query time (inside `enrichShapeForIncludes` / `jsonToModelInstance`), the
+   *   resolver just needs to return the correct class by the time a query runs —
+   *   making it safe to pass a closure over a registry object that is still being
+   *   populated (e.g. the `result` record inside `getModelClasses`).
+   */
+  static fromSHACL(
+    shape: SHACLShape,
+    name: string,
+    classResolver?: (localName: string) => typeof Ad4mModel | undefined,
+  ): typeof Ad4mModel {
     const DynamicModelClass = class extends (this as any) {} as unknown as typeof Ad4mModel;
     (DynamicModelClass as any).className = name;
     (DynamicModelClass.prototype as any).className = name;
@@ -2218,9 +2235,20 @@ export class Ad4mModel {
       const isCollection = prop.maxCount === undefined || prop.maxCount > 1;
 
       if (isCollection) {
+        // Derive a lazy `target` thunk when a sh:class URI is present and a
+        // classResolver was supplied.  The thunk is evaluated at query time so
+        // it is safe even if the target class hasn't been registered yet.
+        let targetThunk: (() => typeof Ad4mModel) | undefined;
+        if (prop.class && classResolver) {
+          const sep = Math.max(prop.class.lastIndexOf('#'), prop.class.lastIndexOf('/'));
+          const localName = sep >= 0 ? prop.class.slice(sep + 1) : prop.class;
+          targetThunk = () => classResolver(localName) as typeof Ad4mModel;
+        }
+
         setRelationRegistryEntry(DynamicModelClass, prop.name, {
           predicate: prop.path,
           kind: 'hasMany',
+          ...(targetThunk !== undefined && { target: targetThunk }),
           ...(prop.local !== undefined && { local: prop.local }),
           ...(prop.getter !== undefined && { getter: prop.getter }),
         });
