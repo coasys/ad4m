@@ -425,9 +425,15 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       },
     );
 
-    // Set up keepalive
+    // Set up keepalive with failure tracking
+    let keepaliveFailures = 0;
     const keepaliveTimer = setInterval(() => {
-      this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId).catch(() => {});
+      this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId).then(() => {
+        keepaliveFailures = 0;
+      }).catch((e: any) => {
+        keepaliveFailures++;
+        console.warn(`Model subscription keepalive failed (attempt ${keepaliveFailures}) for ${subscriptionId}:`, e);
+      });
     }, 30000);
 
     // Store dispose function
@@ -540,8 +546,14 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       },
     );
 
+    let keepaliveFailures = 0;
     const keepaliveTimer = setInterval(() => {
-      this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId).catch(() => {});
+      this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId).then(() => {
+        keepaliveFailures = 0;
+      }).catch((e: any) => {
+        keepaliveFailures++;
+        console.warn(`Count subscription keepalive failed (attempt ${keepaliveFailures}) for ${subscriptionId}:`, e);
+      });
     }, 30000);
 
     this.currentSubscription = {
@@ -667,8 +679,14 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       },
     );
 
+    let keepaliveFailures = 0;
     const keepaliveTimer = setInterval(() => {
-      this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId).catch(() => {});
+      this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId).then(() => {
+        keepaliveFailures = 0;
+      }).catch((e: any) => {
+        keepaliveFailures++;
+        console.warn(`Paginate subscription keepalive failed (attempt ${keepaliveFailures}) for ${subscriptionId}:`, e);
+      });
     }, 30000);
 
     this.currentSubscription = {
