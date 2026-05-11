@@ -256,8 +256,8 @@ pub struct PerspectiveInstance {
     sdna_change_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<RwLock<Option<Language>>>,
-    trigger_notification_check: Arc<Mutex<bool>>,
-    trigger_prolog_subscription_check: Arc<Mutex<bool>>,
+    trigger_notification_check: Arc<AtomicBool>,
+    trigger_prolog_subscription_check: Arc<AtomicBool>,
     /// Predicates of links changed since last subscription check.
     changed_predicates: Arc<Mutex<ChangedPredicates>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
@@ -290,8 +290,8 @@ impl PerspectiveInstance {
             sdna_change_mutex: Arc::new(Mutex::new(())),
             prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(RwLock::new(None)),
-            trigger_notification_check: Arc::new(Mutex::new(false)),
-            trigger_prolog_subscription_check: Arc::new(Mutex::new(false)),
+            trigger_notification_check: Arc::new(AtomicBool::new(false)),
+            trigger_prolog_subscription_check: Arc::new(AtomicBool::new(false)),
             changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
@@ -626,12 +626,12 @@ impl PerspectiveInstance {
         let mut before = self.notification_trigger_snapshot().await;
         while !self.is_teardown.load(Ordering::Acquire) {
             interval.tick().await;
-            let changed = *(self.trigger_notification_check.lock().await);
+            let changed = self.trigger_notification_check.load(Ordering::Acquire);
 
             if changed {
                 //log::debug!("Notification check loop triggered for perspective {}", uuid);
                 //let start = std::time::Instant::now();
-                *(self.trigger_notification_check.lock().await) = false;
+                self.trigger_notification_check.store(false, Ordering::Release);
                 //let snapshot_start = std::time::Instant::now();
 
                 let after = self.notification_trigger_snapshot().await;
@@ -2678,9 +2678,9 @@ impl PerspectiveInstance {
                 || PROLOG_MODE == PrologMode::SdnaOnly
             {
                 // Trigger notification, prolog subscription
-                *(self_clone.trigger_notification_check.lock().await) = true;
+                self_clone.trigger_notification_check.store(true, Ordering::Release);
                 self_clone.record_changed_predicates(&diff).await;
-                *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
+                self_clone.trigger_prolog_subscription_check.store(true, Ordering::Release);
 
                 self_clone.pubsub_publish_diff(diff).await;
 
@@ -2805,8 +2805,8 @@ impl PerspectiveInstance {
                 self_clone.pubsub_publish_diff(diff).await;
 
                 // Trigger notification and subscription checks after prolog facts are updated
-                *(self_clone.trigger_notification_check.lock().await) = true;
-                *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
+                self_clone.trigger_notification_check.store(true, Ordering::Release);
+                self_clone.trigger_prolog_subscription_check.store(true, Ordering::Release);
             }
 
             //log::info!("🔧 PROLOG UPDATE: Total prolog update task took {:?}", spawn_start.elapsed());
@@ -4451,14 +4451,14 @@ impl PerspectiveInstance {
 
         while !self.is_teardown.load(Ordering::Acquire) {
             // Check trigger without holding lock during the operation
-            let should_check = { *self.trigger_prolog_subscription_check.lock().await };
+            let should_check = self.trigger_prolog_subscription_check.load(Ordering::Acquire);
 
             if should_check {
                 // Batch debounce: wait a short window for more changes to accumulate
                 sleep(Duration::from_millis(BATCH_WINDOW_MS)).await;
 
                 // Reset trigger and take the accumulated changed predicates
-                *self.trigger_prolog_subscription_check.lock().await = false;
+                self.trigger_prolog_subscription_check.store(false, Ordering::Release);
                 let changed_preds = std::mem::replace(
                     &mut *self.changed_predicates.lock().await,
                     ChangedPredicates::NoneRecorded,
