@@ -2578,6 +2578,29 @@ impl PerspectiveInstance {
         })
     }
 
+    /// Evaluate property getters for a batch of instances in-process.
+    ///
+    /// Returns a JSON string of `{ instanceId: { prop: value, ... } }`.
+    pub fn evaluate_getters(
+        &self,
+        class_name: &str,
+        instance_ids: &[String],
+        property_names: Option<&[String]>,
+        shape_json: Option<&str>,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        let result = super::model_query::evaluate_getters_batch(
+            &self.sparql_store,
+            class_name,
+            instance_ids,
+            property_names,
+            shape_json,
+        )?;
+
+        serde_json::to_string(&result).map_err(|e| {
+            deno_core::anyhow::anyhow!("Failed to serialize evaluate_getters result: {}", e)
+        })
+    }
+
     pub(crate) async fn persist_link_diff(
         &self,
         diff: &DecoratedPerspectiveDiff,

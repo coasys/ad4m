@@ -15,7 +15,6 @@ import { buildSPARQLQuery } from "./query-sparql";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import {
   normalizeValue,
-  evaluateCustomGettersForInstance,
 } from "./hydration";
 import type {
   ParentScope, IncludeMap, Query,
@@ -745,6 +744,7 @@ export class Ad4mModel {
       const query: Query = {
         where: { id: this._baseExpression },
         limit: 1,
+        deepQuery: true,  // Single-instance get() always evaluates property getters
       };
       if (opts?.properties) query.properties = opts.properties;
       if (opts?.include) query.include = opts.include;
@@ -850,6 +850,7 @@ export class Ad4mModel {
     if (query.offset !== undefined) queryInput.offset = query.offset;
     if (query.limit !== undefined) queryInput.limit = query.limit;
     if (query.count !== undefined) queryInput.count = query.count;
+    if (query.deepQuery !== undefined) queryInput.deepQuery = query.deepQuery;
 
     if (query.include) {
       const allRelMeta = getRelationsMetadata(this as any);
@@ -1014,6 +1015,7 @@ export class Ad4mModel {
     if (query.offset !== undefined) queryInput.offset = query.offset;
     if (query.limit !== undefined) queryInput.limit = query.limit;
     if (query.count !== undefined) queryInput.count = query.count;
+    if (query.deepQuery !== undefined) queryInput.deepQuery = query.deepQuery;
 
     // Enrich relation metadata with target class shapes for Rust-side
     // include resolution. This eliminates per-relation GraphQL round-trips
@@ -1130,43 +1132,6 @@ export class Ad4mModel {
           }
         }),
       );
-    }
-
-    // Relation conformance getters are evaluated Rust-side via evaluate_getters()
-    // in model_query.rs. However, for relations with non-SPARQL-filterable where
-    // clauses (e.g. properties stored as signed expressions), we still need
-    // TS-side evaluation as a fallback. Running evaluateCustomGettersForInstance
-    // with skipPropertyGetters ensures conformance + JS post-filtering for
-    // where clauses that couldn't be compiled to SPARQL.
-    const includedRelNames = queryInput.include ? new Set(Object.keys(queryInput.include)) : new Set<string>();
-    for (const inst of instances) {
-      // Save included relation values that came from Rust hydration
-      const savedIncluded: Record<string, any> = {};
-      for (const relName of includedRelNames) {
-        if ((inst as any)[relName] !== undefined) {
-          savedIncluded[relName] = (inst as any)[relName];
-        }
-      }
-
-      await evaluateCustomGettersForInstance(inst, perspective, metadata, {
-        skipPropertyGetters: true,
-      });
-
-      // Restore hydrated include objects that were overwritten by conformance getters
-      for (const [relName, value] of Object.entries(savedIncluded)) {
-        (inst as any)[relName] = value;
-      }
-
-      // Fix cardinality for non-included HasOne/BelongsToOne relations:
-      // The conformance getter always produces arrays; unwrap to scalar.
-      for (const [relName, relMeta] of Object.entries(metadata.relations)) {
-        if (includedRelNames.has(relName)) continue;
-        const kind = (relMeta as any).kind;
-        if ((kind === 'hasOne' || kind === 'belongsToOne') && Array.isArray((inst as any)[relName])) {
-          const arr = (inst as any)[relName] as any[];
-          (inst as any)[relName] = arr.length > 0 ? arr[0] : null;
-        }
-      }
     }
 
     // Take snapshots for dirty tracking
@@ -1702,11 +1667,33 @@ export class Ad4mModel {
   ): Promise<void> {
     if (instances.length === 0) return;
     const metadata = this.getModelMetadata();
-    const opts = propertyNames && propertyNames.length > 0
-      ? { requestedProperties: propertyNames }
-      : undefined;
 
-    // Determine which property names will actually be evaluated
+    // Pre-compute conformance getters so the shape sent to Rust includes them
+    const allRelMeta = getRelationsMetadata(this as any);
+    for (const [relName, relMeta] of Object.entries(metadata.relations)) {
+      const rel = relMeta as any;
+      if (rel.getter || rel.direction === 'reverse' || rel.filter === false) continue;
+      const meta = allRelMeta[relName];
+      if (!meta?.target) continue;
+      try {
+        const TargetClass = meta.target();
+        const filter = buildConformanceFilter(meta.predicate, TargetClass);
+        if (filter) rel.getter = filter.getter;
+      } catch (_) { /* target class may not be available */ }
+    }
+
+    const shapeJson = JSON.stringify(metadata);
+    const instanceIds = instances.map(inst => inst.id || (inst as any)._baseExpression);
+
+    // Single RPC call evaluates all getters in-process on the executor
+    const result = await perspective.evaluateGetters(
+      metadata.className,
+      instanceIds,
+      shapeJson,
+      propertyNames,
+    );
+
+    // Determine which property names were evaluated for snapshot sync
     const evaluatedPropertyNames: string[] = [];
     for (const [propName, propMeta] of Object.entries(metadata.properties)) {
       if ((propMeta as any).getter) {
@@ -1715,14 +1702,25 @@ export class Ad4mModel {
         }
       }
     }
+    // Also include relation getters
+    for (const [relName, relMeta] of Object.entries(metadata.relations)) {
+      if ((relMeta as any).getter) {
+        if (!propertyNames || propertyNames.length === 0 || propertyNames.includes(relName)) {
+          evaluatedPropertyNames.push(relName);
+        }
+      }
+    }
 
+    // Apply results to instances and sync snapshots
     for (const instance of instances) {
-      await evaluateCustomGettersForInstance(instance, perspective, metadata, opts);
-      // Sync snapshot so isDirty() doesn't flag getter-only changes.
-      // evaluateGetters() mutates instances in place, but their snapshots
-      // were already taken during hydration. Without this sync, the computed
-      // getter values would make isDirty() return true and save() would try
-      // to write read-only computed properties.
+      const id = (instance as any).id || (instance as any)._baseExpression;
+      const props = result[id];
+      if (props) {
+        for (const [key, value] of Object.entries(props)) {
+          (instance as any)[key] = value;
+        }
+      }
+      // Sync snapshot so isDirty() doesn't flag getter-only changes
       const modelInstance = instance as Ad4mModel;
       if (modelInstance._snapshot) {
         for (const propName of evaluatedPropertyNames) {

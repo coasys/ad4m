@@ -822,6 +822,51 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     Ok(Value::String(result))
 }
 
+async fn evaluate_getters_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let class_name = params.require_str("class_name")?;
+    let shape_json = params.opt_str("shape_json");
+
+    // Parse instance_ids array
+    let instance_ids: Vec<String> = params
+        .get("instance_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Parse optional property_names array
+    let property_names: Option<Vec<String>> = params
+        .get("property_names")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        });
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let result = perspective
+        .evaluate_getters(
+            &class_name,
+            &instance_ids,
+            property_names.as_deref(),
+            shape_json.as_deref(),
+        )
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::String(result))
+}
+
 async fn model_subscribe_handler(
     params: Value,
     ctx: Arc<RequestContext>,
@@ -885,4 +930,5 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.disposeSparql", dispose_query);
     map.register("perspective.modelQuery", model_query_handler);
     map.register("perspective.modelSubscribe", model_subscribe_handler);
+    map.register("perspective.evaluateGetters", evaluate_getters_handler);
 }

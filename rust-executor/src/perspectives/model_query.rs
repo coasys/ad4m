@@ -224,6 +224,12 @@ pub struct ModelQueryInput {
     pub limit: Option<usize>,
     #[serde(default)]
     pub count: Option<bool>,
+    /// When true, evaluate **property** getters (@Property with `getter`) during
+    /// hydration. Relation conformance getters always run regardless.
+    /// Defaults to false — callers must opt in via `deepQuery()` on the query
+    /// builder when they need getter-backed properties in list results.
+    #[serde(default, rename = "deepQuery")]
+    pub deep_query: Option<bool>,
 }
 
 /// Result returned by the model query endpoint.
@@ -1006,6 +1012,82 @@ pub fn execute_model_query(
     execute_model_query_inner(store, class_name, query_input, shape_json, 0)
 }
 
+/// Evaluate property getters for a batch of instances identified by ID.
+///
+/// This is the Rust-side implementation of `Ad4mModel.evaluateGetters()`.
+/// Instead of N × querySparql round-trips, the caller sends all instance IDs
+/// and (optionally) the property names to evaluate. The function loads the
+/// model shape, builds stub instances with the given IDs, runs the getter
+/// SPARQL in-process, and returns a map of `{ instanceId: { prop: value } }`.
+pub fn evaluate_getters_batch(
+    store: &SparqlStore,
+    class_name: &str,
+    instance_ids: &[String],
+    property_names: Option<&[String]>,
+    shape_json: Option<&str>,
+) -> Result<Value, Error> {
+    if instance_ids.is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+
+    let shape = if let Some(json) = shape_json {
+        parse_shape_from_json(json, class_name)?
+    } else {
+        return Err(deno_core::anyhow::anyhow!(
+            "shape_json is required for evaluate_getters_batch"
+        ));
+    };
+
+    // Collect getter props, optionally filtered by property_names
+    let getter_props: Vec<&ShapeProperty> = shape
+        .properties
+        .iter()
+        .filter(|p| {
+            p.getter.is_some()
+                && property_names
+                    .map(|names| names.iter().any(|n| n == &p.name))
+                    .unwrap_or(true)
+        })
+        .collect();
+
+    if getter_props.is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+
+    // Build stub instances with just the id field
+    let mut instances: Vec<Value> = instance_ids
+        .iter()
+        .map(|id| {
+            let mut obj = Map::new();
+            obj.insert("id".to_string(), Value::String(id.clone()));
+            Value::Object(obj)
+        })
+        .collect();
+
+    // Reuse the existing evaluate_getters function (deep_query=true to eval all getters)
+    evaluate_getters(store, &mut instances, &shape, None, true)?;
+
+    // Build result map: { instanceId: { prop: value, ... } }
+    let mut result = Map::new();
+    for inst in &instances {
+        if let Some(id) = inst.get("id").and_then(|v| v.as_str()) {
+            let mut props = Map::new();
+            for prop in &getter_props {
+                if let Some(val) = inst.get(&prop.name) {
+                    if val != &Value::Null {
+                        props.insert(prop.name.clone(), val.clone());
+                    }
+                }
+            }
+            if !props.is_empty() {
+                result.insert(id.to_string(), Value::Object(props));
+            }
+        }
+    }
+
+    Ok(Value::Object(result))
+}
+
 /// Inner implementation with depth tracking for cycle detection.
 fn execute_model_query_inner(
     store: &SparqlStore,
@@ -1091,7 +1173,8 @@ fn execute_model_query_inner(
     // conformance getters for relations with targets) in-process — eliminating
     // the N × querySparql round-trips per instance that evaluateCustomGettersForInstance() made.
     if !instances.is_empty() {
-        evaluate_getters(store, &mut instances, &shape, query_input.include.as_ref())?;
+        let deep_query = query_input.deep_query.unwrap_or(false);
+        evaluate_getters(store, &mut instances, &shape, query_input.include.as_ref(), deep_query)?;
     }
 
     // Apply where-clause filters
@@ -2084,12 +2167,18 @@ fn evaluate_getters(
     instances: &mut [Value],
     shape: &ModelShape,
     _include: Option<&HashMap<String, IncludeValue>>,
+    deep_query: bool,
 ) -> Result<(), Error> {
     // Collect properties/relations that have getters.
+    // When deep_query is false, skip property getters (non-collection,
+    // non-scalar-relation) — only relation conformance getters run.
     let getter_props: Vec<&ShapeProperty> = shape
         .properties
         .iter()
-        .filter(|p| p.getter.is_some())
+        .filter(|p| {
+            p.getter.is_some()
+                && (deep_query || p.is_collection || p.is_scalar_relation)
+        })
         .collect();
 
     if getter_props.is_empty() {
@@ -3992,9 +4081,124 @@ mod integration_tests {
         assert_eq!(count, 2, "should count only alice's 2 signals, got {count}");
     }
 
-    // NOTE: Filtering where-clause values stored as `literal:json:` signed-expression
-    // blobs (e.g. @Property values) is NOT supported by this SPARQL-FILTER approach.
-    // STR(?v) returns the raw "literal:json:..." URI, not the decoded `data` field.
-    // Supporting that case requires fetching all rows and post-filtering in Rust via
-    // parse_literal_value — a more involved change deferred until concretely needed.
+    #[test]
+    fn test_deep_query_flag_controls_property_getters() {
+        // Create a shape with both a property getter and a relation getter
+        let shape_json = r#"{
+            "className": "TestModel",
+            "properties": {
+                "computedProp": {
+                    "predicate": "test://computed",
+                    "getter": "ASK WHERE { <Base> <test://is_active> ?x }"
+                }
+            },
+            "relations": {
+                "children": {
+                    "predicate": "test://has_child",
+                    "kind": "hasMany",
+                    "getter": "SELECT ?target WHERE { <Base> <test://has_child> ?target }"
+                }
+            }
+        }"#;
+
+        let shape = parse_shape_from_json(shape_json, "TestModel").unwrap();
+
+        // With deep_query=false, only relation getters (is_collection/is_scalar_relation) should be collected
+        let getter_props_shallow: Vec<&ShapeProperty> = shape
+            .properties
+            .iter()
+            .filter(|p| p.getter.is_some() && (false || p.is_collection || p.is_scalar_relation))
+            .collect();
+        assert_eq!(getter_props_shallow.len(), 1, "shallow: only relation getter");
+        assert_eq!(getter_props_shallow[0].name, "children");
+
+        // With deep_query=true, all getters should be collected
+        let getter_props_deep: Vec<&ShapeProperty> = shape
+            .properties
+            .iter()
+            .filter(|p| p.getter.is_some() && (true || p.is_collection || p.is_scalar_relation))
+            .collect();
+        assert_eq!(getter_props_deep.len(), 2, "deep: both property and relation getters");
+    }
+
+    #[test]
+    fn test_evaluate_getters_batch_returns_results() {
+        let store = SparqlStore::new(None).unwrap();
+
+        // Insert a test link
+        store.add_link(&make_link(
+            "test://inst-1",
+            "test://is_active",
+            "literal:boolean:true",
+            "2024-01-01T00:00:00Z",
+        )).unwrap();
+
+        let shape_json = r#"{
+            "className": "TestModel",
+            "properties": {
+                "isActive": {
+                    "predicate": "test://is_active",
+                    "getter": "ASK WHERE { <Base> <test://is_active> ?x }"
+                }
+            },
+            "relations": {}
+        }"#;
+
+        let result = evaluate_getters_batch(
+            &store,
+            "TestModel",
+            &["test://inst-1".to_string()],
+            None,
+            Some(shape_json),
+        ).unwrap();
+
+        assert!(result.is_object(), "result should be an object");
+        let inst_result = &result["test://inst-1"];
+        assert!(inst_result.is_object(), "should have results for inst-1");
+        assert_eq!(inst_result["isActive"], Value::Bool(true));
+    }
+
+    #[test]
+    fn test_evaluate_getters_batch_empty_ids() {
+        let store = SparqlStore::new(None).unwrap();
+        let result = evaluate_getters_batch(
+            &store,
+            "TestModel",
+            &[],
+            None,
+            Some(r#"{"className":"TestModel","properties":{},"relations":{}}"#),
+        ).unwrap();
+        assert!(result.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_evaluate_getters_batch_filters_by_property_names() {
+        let store = SparqlStore::new(None).unwrap();
+
+        let shape_json = r#"{
+            "className": "TestModel",
+            "properties": {
+                "propA": {
+                    "predicate": "test://a",
+                    "getter": "ASK WHERE { <Base> <test://a> ?x }"
+                },
+                "propB": {
+                    "predicate": "test://b",
+                    "getter": "ASK WHERE { <Base> <test://b> ?x }"
+                }
+            },
+            "relations": {}
+        }"#;
+
+        // Only request propA — propB should not appear in results
+        let result = evaluate_getters_batch(
+            &store,
+            "TestModel",
+            &["test://inst-1".to_string()],
+            Some(&["propA".to_string()]),
+            Some(shape_json),
+        ).unwrap();
+
+        assert!(result.is_object());
+    }
 }

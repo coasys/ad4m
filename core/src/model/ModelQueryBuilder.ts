@@ -242,7 +242,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   deepQuery(): ModelQueryBuilder<T> {
-    (this.queryParams as any).deepQuery = true;
+    this.queryParams.deepQuery = true;
     return this;
   }
 

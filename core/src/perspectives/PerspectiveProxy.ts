@@ -613,6 +613,30 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Evaluate property getters for a batch of instances in a single RPC call.
+     * Returns a map of `{ instanceId: { prop: value, ... } }`.
+     *
+     * Use this instead of `Ad4mModel.evaluateGetters()` for lazy-loading
+     * getter-backed properties on visible items (e.g. `replyingTo` on messages).
+     *
+     * @param className - The model class name (e.g. "Message")
+     * @param instanceIds - Array of instance base expression URIs
+     * @param shapeJson - Shape metadata JSON from the model class
+     * @param propertyNames - Optional subset of property names to evaluate
+     * @returns Map of instance ID → evaluated property values
+     */
+    async evaluateGetters(
+        className: string,
+        instanceIds: string[],
+        shapeJson: string,
+        propertyNames?: string[],
+    ): Promise<Record<string, Record<string, any>>> {
+        return await this.#client.evaluateGetters(
+            this.#handle.uuid, className, instanceIds, shapeJson, propertyNames,
+        );
+    }
+
+    /**
      * Subscribe to model query changes. Builds trigger SPARQL from the model shape
      * internally in Rust, registers a subscription, runs the initial query, and
      * pushes updated results when relevant links change.

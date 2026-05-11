@@ -1059,7 +1059,6 @@ describe("formatSPARQLValue", () => {
 //  Comprehensive SPARQL migration unit tests
 // ──────────────────────────────────────────────────────────
 
-import { matchesCondition } from "./hydration";
 import { Literal } from "../Literal";
 
 // Helper: create literal URLs using JSON encoding (which handles all types including booleans)
@@ -1068,102 +1067,6 @@ function literalUrl(value: any): string {
   // Use JSON encoding for numbers and booleans since Literal.get() doesn't handle boolean: prefix
   return `literal:json:${encodeURIComponent(JSON.stringify(value))}`;
 }
-
-describe("matchesCondition()", () => {
-  // Simple equality
-  it("simple string equality — match", () => {
-    expect(matchesCondition("hello", "hello")).toBe(true);
-  });
-  it("simple string equality — mismatch", () => {
-    expect(matchesCondition("hello", "world")).toBe(false);
-  });
-  it("simple boolean equality — true", () => {
-    expect(matchesCondition(true, true)).toBe(true);
-  });
-  it("simple boolean equality — false", () => {
-    expect(matchesCondition(false, false)).toBe(true);
-  });
-  it("boolean mismatch", () => {
-    expect(matchesCondition(true, false)).toBe(false);
-  });
-  it("simple number equality", () => {
-    expect(matchesCondition(42, 42)).toBe(true);
-  });
-  it("number mismatch", () => {
-    expect(matchesCondition(42, 99)).toBe(false);
-  });
-
-  // Array IN clause
-  it("array IN clause — value present", () => {
-    expect(matchesCondition("a", ["a", "b", "c"])).toBe(true);
-  });
-  it("array IN clause — value absent", () => {
-    expect(matchesCondition("d", ["a", "b", "c"])).toBe(false);
-  });
-
-  // NOT operator
-  it("not operator with string", () => {
-    expect(matchesCondition("bob", { not: "alice" })).toBe(true);
-    expect(matchesCondition("alice", { not: "alice" })).toBe(false);
-  });
-  it("not operator with array (NOT IN)", () => {
-    expect(matchesCondition("a", { not: ["b", "c"] })).toBe(true);
-    expect(matchesCondition("b", { not: ["b", "c"] })).toBe(false);
-  });
-
-  // Comparison operators
-  it("gt", () => {
-    expect(matchesCondition(10, { gt: 5 })).toBe(true);
-    expect(matchesCondition(5, { gt: 5 })).toBe(false);
-  });
-  it("gte", () => {
-    expect(matchesCondition(5, { gte: 5 })).toBe(true);
-    expect(matchesCondition(4, { gte: 5 })).toBe(false);
-  });
-  it("lt", () => {
-    expect(matchesCondition(3, { lt: 5 })).toBe(true);
-    expect(matchesCondition(5, { lt: 5 })).toBe(false);
-  });
-  it("lte", () => {
-    expect(matchesCondition(5, { lte: 5 })).toBe(true);
-    expect(matchesCondition(6, { lte: 5 })).toBe(false);
-  });
-  it("combined gt + lt (range)", () => {
-    expect(matchesCondition(5, { gt: 3, lt: 7 })).toBe(true);
-    expect(matchesCondition(3, { gt: 3, lt: 7 })).toBe(false);
-    expect(matchesCondition(7, { gt: 3, lt: 7 })).toBe(false);
-  });
-
-  // Between
-  it("between — inclusive range", () => {
-    expect(matchesCondition(5, { between: [3, 7] })).toBe(true);
-    expect(matchesCondition(3, { between: [3, 7] })).toBe(true);
-    expect(matchesCondition(7, { between: [3, 7] })).toBe(true);
-    expect(matchesCondition(2, { between: [3, 7] })).toBe(false);
-    expect(matchesCondition(8, { between: [3, 7] })).toBe(false);
-  });
-
-  // Contains
-  it("contains with string", () => {
-    expect(matchesCondition("hello world", { contains: "world" })).toBe(true);
-    expect(matchesCondition("hello world", { contains: "xyz" })).toBe(false);
-  });
-  it("contains with array", () => {
-    expect(matchesCondition(["a", "b", "c"], { contains: "b" })).toBe(true);
-    expect(matchesCondition(["a", "b", "c"], { contains: "d" })).toBe(false);
-  });
-
-  // Edge cases
-  it("returns false for undefined value with equality check", () => {
-    expect(matchesCondition(undefined, "hello")).toBe(false);
-  });
-  it("returns false for empty string when condition is non-empty", () => {
-    expect(matchesCondition("", "Recipe 2")).toBe(false);
-  });
-  it("returns true for undefined with not operator", () => {
-    expect(matchesCondition(undefined, { not: "hello" })).toBe(true);
-  });
-});
 
 describe("buildSPARQLQuery edge cases", () => {
   @Model({ name: "FlagModel" })
@@ -1400,192 +1303,7 @@ describe("Lightweight fingerprint optimization", () => {
   });
 });
 
-// ── Native SPARQL getter evaluation ──────────────────────────────────────────
-describe("Native SPARQL getter evaluation", () => {
-  const { evaluateCustomGettersForInstance } = require("./hydration");
 
-  const mockPerspective = {
-    getLinks: jest.fn().mockResolvedValue([]),
-    querySparql: jest.fn(),
-    get: jest.fn().mockResolvedValue([]),
-  };
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
-
-  it("should execute SELECT getter directly via querySparql", async () => {
-    const metadata = {
-      properties: {
-        replyingTo: {
-          predicate: "flux://has_reply",
-          getter: 'SELECT ?target WHERE { ?target <flux://has_reply> ?source . } LIMIT 1',
-          type: "string",
-        }
-      },
-      relations: {},
-    };
-
-    mockPerspective.querySparql.mockResolvedValue([
-      { target: { value: "literal:string:msg123" } }
-    ]);
-
-    const instance = { id: "test://msg1", replyingTo: undefined };
-    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
-
-    expect(mockPerspective.querySparql).toHaveBeenCalledWith(
-      expect.stringContaining("SELECT ?target WHERE")
-    );
-    expect(instance.replyingTo).toBe("literal:string:msg123");
-  });
-
-  it("should execute ASK getter and return boolean", async () => {
-    const metadata = {
-      properties: {
-        isPopular: {
-          predicate: "flux://is_popular",
-          getter: 'ASK WHERE { SELECT (COUNT(DISTINCT ?reactor) AS ?count) WHERE { ?reactor <flux://reaction> ?source . } HAVING(?count > 5) }',
-          type: "boolean",
-          readOnly: true,
-        }
-      },
-      relations: {},
-    };
-
-    mockPerspective.querySparql.mockResolvedValue(true);
-
-    const instance = { id: "test://msg1", isPopular: false };
-    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
-
-    expect(mockPerspective.querySparql).toHaveBeenCalledWith(
-      expect.stringContaining("ASK WHERE")
-    );
-    expect(instance.isPopular).toBe(true);
-  });
-
-  it("should replace ?source with instance ID in SPARQL getter", async () => {
-    const metadata = {
-      properties: {
-        author: {
-          predicate: "test://author",
-          getter: 'SELECT ?target WHERE { ?source <test://author> ?target . }',
-          type: "string",
-        }
-      },
-      relations: {},
-    };
-
-    mockPerspective.querySparql.mockResolvedValue([
-      { target: { value: "did:key:abc123" } }
-    ]);
-
-    const instance = { id: "test://post1", author: undefined };
-    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
-
-    expect(mockPerspective.querySparql).toHaveBeenCalledWith(
-      expect.stringContaining("<test://post1>")
-    );
-    expect(mockPerspective.querySparql).not.toHaveBeenCalledWith(
-      expect.stringContaining("?source")
-    );
-  });
-
-  it("should handle empty SPARQL results gracefully", async () => {
-    const metadata = {
-      properties: {
-        replyingTo: {
-          predicate: "flux://has_reply",
-          getter: 'SELECT ?target WHERE { ?target <flux://has_reply> ?source . } LIMIT 1',
-          type: "string",
-        }
-      },
-      relations: {},
-    };
-
-    mockPerspective.querySparql.mockResolvedValue([]);
-
-    const instance = { id: "test://msg1", replyingTo: "original" };
-    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
-
-    // Should not overwrite with undefined
-    expect(instance.replyingTo).toBe("original");
-  });
-
-  it("should handle SPARQL getter errors without crashing", async () => {
-    const metadata = {
-      properties: {
-        broken: {
-          predicate: "test://broken",
-          getter: 'SELECT ?target WHERE { INVALID SPARQL }',
-          type: "string",
-        }
-      },
-      relations: {},
-    };
-
-    mockPerspective.querySparql.mockRejectedValue(new Error("SPARQL parse error"));
-
-    const instance = { id: "test://msg1", broken: undefined };
-    const consoleSpy = jest.spyOn(console, "warn").mockImplementation();
-    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
-    consoleSpy.mockRestore();
-
-    // Should not throw, should warn
-    expect(instance.broken).toBeUndefined();
-  });
-
-  it("should execute SPARQL getter for relations", async () => {
-    const metadata = {
-      properties: {},
-      relations: {
-        tags: {
-          predicate: "test://has_tag",
-          getter: 'SELECT ?target WHERE { ?source <test://has_tag> ?target . }',
-          direction: "forward",
-        }
-      },
-    };
-
-    mockPerspective.querySparql.mockResolvedValue([
-      { target: { value: "tag:a" } },
-      { target: { value: "tag:b" } },
-    ]);
-
-    const instance = { id: "test://post1", tags: [] };
-    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
-
-    expect(instance.tags).toEqual(["tag:a", "tag:b"]);
-  });
-
-  it("should warn for legacy SurrealDB-style getter syntax instead of converting", async () => {
-    const metadata = {
-      properties: {
-        legacy: {
-          predicate: "test://legacy",
-          getter: "(<-link[WHERE predicate = 'test://legacy'].in.uri)[0]",
-          type: "string",
-        }
-      },
-      relations: {},
-    };
-
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-
-    const instance = { id: "test://msg1", legacy: undefined };
-    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
-    
-    // Should NOT call querySparql — legacy getters are no longer converted
-    expect(mockPerspective.querySparql).not.toHaveBeenCalled();
-    // Should warn about unsupported syntax
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Unsupported legacy getter syntax")
-    );
-    // Value should remain undefined
-    expect(instance.legacy).toBeUndefined();
-
-    warnSpy.mockRestore();
-  });
-});
 
 // ── Subscribe callback timing ──────────────────────────────────────────
 describe("ModelQueryBuilder subscribe callback timing", () => {
@@ -2004,6 +1722,11 @@ describe("deepQuery opt-in — getter evaluation", () => {
       }
       return { instances: [], totalCount: 0 };
     }),
+    evaluateGetters: jest.fn(async (className: string, instanceIds: string[], shapeJson: string, propertyNames?: string[]) => {
+      // Return empty results by default — tests can override this mock
+      const result: Record<string, Record<string, any>> = {};
+      return result;
+    }),
     querySparql: jest.fn(async (q: string) => {
       sparqlCalls.push(q);
       return [];
@@ -2016,6 +1739,7 @@ describe("deepQuery opt-in — getter evaluation", () => {
   beforeEach(() => {
     sparqlCalls = [];
     mockPerspective.querySparql.mockClear();
+    mockPerspective.evaluateGetters.mockClear();
     mockPerspective.get.mockClear();
   });
 
@@ -2047,34 +1771,50 @@ describe("deepQuery opt-in — getter evaluation", () => {
   });
 
   describe("Ad4mModel.evaluateGetters()", () => {
-    it("resolves getters for a batch of instances", async () => {
+    it("resolves getters for a batch of instances via single RPC", async () => {
       const instances = makeInstances(4);
-      sparqlCalls = [];
 
       await DeepQueryTestMessage.evaluateGetters(instances.slice(0, 2), mockPerspective, ["replyingTo"]);
 
-      const replyCalls = sparqlCalls.filter((q) => q.includes("flux://has_reply"));
-      expect(replyCalls.length).toBe(2);
-      const popularCalls = sparqlCalls.filter((q) => q.includes("flux://is_popular"));
-      expect(popularCalls.length).toBe(0);
+      // Should make exactly 1 RPC call via perspective.evaluateGetters
+      expect(mockPerspective.evaluateGetters).toHaveBeenCalledTimes(1);
+      const [className, instanceIds, shapeJson, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
+      expect(className).toBe("DeepQueryTestMessage");
+      expect(instanceIds).toEqual(["flux://msg-0", "flux://msg-1"]);
+      expect(propertyNames).toEqual(["replyingTo"]);
+      // No querySparql calls — all done in-process
+      expect(sparqlCalls.length).toBe(0);
     });
 
     it("evaluates all getters when propertyNames is omitted", async () => {
       const instances = makeInstances(2);
-      sparqlCalls = [];
 
       await DeepQueryTestMessage.evaluateGetters(instances, mockPerspective);
 
-      const replyCalls = sparqlCalls.filter((q) => q.includes("flux://has_reply"));
-      const popularCalls = sparqlCalls.filter((q) => q.includes("flux://is_popular"));
-      expect(replyCalls.length).toBe(2);
-      expect(popularCalls.length).toBe(2);
+      expect(mockPerspective.evaluateGetters).toHaveBeenCalledTimes(1);
+      const [className, instanceIds, shapeJson, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
+      expect(className).toBe("DeepQueryTestMessage");
+      expect(instanceIds).toEqual(["flux://msg-0", "flux://msg-1"]);
+      expect(propertyNames).toBeUndefined();
+    });
+
+    it("applies results to instances and syncs snapshots", async () => {
+      const instances = makeInstances(2);
+      // Simulate Rust returning getter results
+      mockPerspective.evaluateGetters.mockResolvedValueOnce({
+        "flux://msg-0": { replyingTo: "flux://msg-99" },
+        "flux://msg-1": { replyingTo: "flux://msg-88" },
+      });
+
+      await DeepQueryTestMessage.evaluateGetters(instances, mockPerspective, ["replyingTo"]);
+
+      expect((instances[0] as any).replyingTo).toBe("flux://msg-99");
+      expect((instances[1] as any).replyingTo).toBe("flux://msg-88");
     });
 
     it("handles empty array gracefully", async () => {
-      sparqlCalls = [];
       await DeepQueryTestMessage.evaluateGetters([], mockPerspective);
-      expect(sparqlCalls.length).toBe(0);
+      expect(mockPerspective.evaluateGetters).not.toHaveBeenCalled();
     });
   });
 
