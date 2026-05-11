@@ -850,7 +850,7 @@ export class Ad4mModel {
     if (query.offset !== undefined) queryInput.offset = query.offset;
     if (query.limit !== undefined) queryInput.limit = query.limit;
     if (query.count !== undefined) queryInput.count = query.count;
-    if (query.deepQuery !== undefined) queryInput.deepQuery = query.deepQuery;
+    queryInput.deepQuery = query.deepQuery ?? true;
 
     if (query.include) {
       const allRelMeta = getRelationsMetadata(this as any);
@@ -1015,7 +1015,7 @@ export class Ad4mModel {
     if (query.offset !== undefined) queryInput.offset = query.offset;
     if (query.limit !== undefined) queryInput.limit = query.limit;
     if (query.count !== undefined) queryInput.count = query.count;
-    if (query.deepQuery !== undefined) queryInput.deepQuery = query.deepQuery;
+    queryInput.deepQuery = query.deepQuery ?? true;
 
     // Enrich relation metadata with target class shapes for Rust-side
     // include resolution. This eliminates per-relation GraphQL round-trips
@@ -1640,10 +1640,10 @@ export class Ad4mModel {
   /**
    * Evaluate SPARQL getters for a batch of instances on demand.
    *
-   * Use after a shallow collection query (the default) to resolve
-   * getter-backed properties for visible items only.  This avoids the
-   * O(N × getters) cost of evaluating every getter on every instance in
-   * a large collection query.
+   * Since deepQuery defaults to true, property getters are evaluated
+   * automatically during collection queries.  Use this method when
+   * deepQuery was explicitly set to false and you want to lazily
+   * resolve getter-backed properties for a subset of instances.
    *
    * @param instances - Array of model instances to evaluate getters on
    * @param perspective - The perspective to query against
@@ -1652,8 +1652,8 @@ export class Ad4mModel {
    *
    * @example
    * ```typescript
-   * const messages = await Message.findAll(perspective, { parent: channel, limit: 30 });
-   * // messages[i].replyingTo is undefined (getter skipped by default)
+   * const messages = await Message.query(perspective).deepQuery(false).limit(30).get();
+   * // messages[i].replyingTo is undefined (getter skipped)
    *
    * // Evaluate getters for the visible subset
    * await Message.evaluateGetters(messages.slice(0, 10), perspective, ['replyingTo']);

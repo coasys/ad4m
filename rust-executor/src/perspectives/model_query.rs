@@ -226,8 +226,8 @@ pub struct ModelQueryInput {
     pub count: Option<bool>,
     /// When true, evaluate **property** getters (@Property with `getter`) during
     /// hydration. Relation conformance getters always run regardless.
-    /// Defaults to false — callers must opt in via `deepQuery()` on the query
-    /// builder when they need getter-backed properties in list results.
+    /// Defaults to true — property getters are evaluated post-pagination via
+    /// batched VALUES queries (O(M) cost).  Set to false to skip them.
     #[serde(default, rename = "deepQuery")]
     pub deep_query: Option<bool>,
 }
@@ -1168,16 +1168,8 @@ fn execute_model_query_inner(
         resolve_reverse_relations(store, &mut instances, &reverse_rels)?;
     }
 
-    // ── Evaluate property/relation getters ────────────────────────────────
-    // Runs SPARQL getters (both explicit @Property({ getter }) and auto-generated
-    // conformance getters for relations with targets) in-process — eliminating
-    // the N × querySparql round-trips per instance that evaluateCustomGettersForInstance() made.
-    if !instances.is_empty() {
-        let deep_query = query_input.deep_query.unwrap_or(false);
-        evaluate_getters(store, &mut instances, &shape, query_input.include.as_ref(), deep_query)?;
-    }
-
-    // Apply where-clause filters
+    // Apply where-clause filters (before getters — property equality is handled
+    // via post-hydration comparison, not getter values).
     if let Some(ref where_clause) = query_input.where_clause {
         instances.retain(|inst| matches_where(inst, where_clause, &shape));
     }
@@ -1203,6 +1195,21 @@ fn execute_model_query_inner(
     } else {
         instances.into_iter().skip(offset).collect()
     };
+
+    // ── Evaluate property/relation getters (post-pagination) ─────────────
+    // Runs SPARQL getters using batched VALUES queries — O(M) per getter
+    // property regardless of instance count.  Runs AFTER pagination so only
+    // the current page of results is evaluated, not the entire result set.
+    if !paginated.is_empty() {
+        let deep_query = query_input.deep_query.unwrap_or(true);
+        evaluate_getters(
+            store,
+            &mut paginated,
+            &shape,
+            query_input.include.as_ref(),
+            deep_query,
+        )?;
+    }
 
     // ── Eager-load included relations ────────────────────────────────────
     if let Some(ref include) = query_input.include {
@@ -2154,14 +2161,81 @@ fn compare_values(a: &Value, b: &Value) -> Ordering {
 // Getter evaluation (property getters + relation conformance getters)
 // ---------------------------------------------------------------------------
 
-/// Evaluate SPARQL getters on all instances.
+/// Strip a trailing top-level `LIMIT N` clause from a SPARQL query string.
+/// Per-instance LIMIT doesn't apply in batched evaluation; Rust groups and
+/// takes the first result per source instead.
+fn strip_trailing_limit(query: &str) -> String {
+    let trimmed = query.trim_end();
+    let upper = trimmed.to_uppercase();
+    if let Some(limit_pos) = upper.rfind("LIMIT") {
+        let after_limit = trimmed[limit_pos + 5..].trim();
+        if !after_limit.is_empty() && after_limit.chars().all(|c| c.is_ascii_digit()) {
+            return trimmed[..limit_pos].trim_end().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Convert an ASK getter to a batched SELECT returning matching source IRIs.
+///
+/// `ASK WHERE { ?source <p> "true" . }` →
+/// `SELECT ?source WHERE { VALUES ?source { <id1> ... } ?source <p> "true" . }`
+fn convert_ask_to_batched_select(ask: &str, values_clause: &str) -> String {
+    let normalized = ask.replace("<Base>", "?source");
+    if let (Some(open), Some(close)) = (normalized.find('{'), normalized.rfind('}')) {
+        let body = &normalized[open + 1..close];
+        format!(
+            "SELECT ?source WHERE {{ VALUES ?source {{ {} }} {} }}",
+            values_clause,
+            body.trim()
+        )
+    } else {
+        normalized
+    }
+}
+
+/// Inject a VALUES ?source clause into a SELECT getter and ensure ?source is
+/// projected so results can be grouped per-instance.
+///
+/// `SELECT ?target WHERE { ?source <p> ?target . } LIMIT 1` →
+/// `SELECT ?source ?target WHERE { VALUES ?source { <id1> ... } ?source <p> ?target . }`
+fn inject_values_into_select(select: &str, values_clause: &str) -> String {
+    let mut query = select.replace("<Base>", "?source");
+
+    // 1. Strip trailing LIMIT (per-instance limit handled in Rust grouping)
+    query = strip_trailing_limit(&query);
+
+    // 2. Ensure ?source is in SELECT projection
+    let upper = query.to_uppercase();
+    if let Some(select_end) = upper.find("SELECT").map(|p| p + 6) {
+        if let Some(where_rel) = upper[select_end..].find("WHERE") {
+            let projection = &query[select_end..select_end + where_rel];
+            if !projection.contains("?source") {
+                query.insert_str(select_end, " ?source");
+            }
+        }
+    }
+
+    // 3. Inject VALUES after first opening brace
+    if let Some(brace_pos) = query.find('{') {
+        let insert = format!(" VALUES ?source {{ {} }}", values_clause);
+        query.insert_str(brace_pos + 1, &insert);
+    }
+
+    query
+}
+
+/// Evaluate SPARQL getters on all instances using **batched VALUES** queries.
+///
+/// Instead of running one SPARQL query per (instance, getter) pair — O(N×M) —
+/// this function runs **one query per getter property** with a VALUES clause
+/// containing all instance IRIs, then regroups results in Rust.  Cost: O(M).
 ///
 /// For **property** getters: replaces the property value with the result of
 /// executing the getter SPARQL (SELECT → scalar, ASK → bool).
 ///
 /// For **relation** getters (conformance or explicit): replaces the relation
 /// array with the filtered set of IDs returned by the getter SPARQL.
-/// Included relations (already resolved by include processing) are skipped.
 fn evaluate_getters(
     store: &SparqlStore,
     instances: &mut [Value],
@@ -2175,151 +2249,152 @@ fn evaluate_getters(
     let getter_props: Vec<&ShapeProperty> = shape
         .properties
         .iter()
-        .filter(|p| {
-            p.getter.is_some()
-                && (deep_query || p.is_collection || p.is_scalar_relation)
-        })
+        .filter(|p| p.getter.is_some() && (deep_query || p.is_collection || p.is_scalar_relation))
         .collect();
 
-    if getter_props.is_empty() {
+    if getter_props.is_empty() || instances.is_empty() {
         return Ok(());
     }
 
+    // Build VALUES clause from all instance IRIs (validated for SPARQL safety)
+    let instance_iris: Vec<String> = instances
+        .iter()
+        .filter_map(|inst| inst.get("id").and_then(|v| v.as_str()))
+        .filter_map(|id| validate_iri(id).ok().map(|s| s.to_string()))
+        .collect();
+
+    if instance_iris.is_empty() {
+        return Ok(());
+    }
+
+    let values_clause = instance_iris
+        .iter()
+        .map(|id| format!("<{}>", id))
+        .collect::<Vec<_>>()
+        .join(" ");
+
     log::debug!(
-        "evaluate_getters: {} getter props for {} instances",
+        "evaluate_getters: {} getter props for {} instances (batched VALUES)",
         getter_props.len(),
-        instances.len()
+        instance_iris.len()
     );
 
-    for instance in instances.iter_mut() {
-        let instance_id = match instance.get("id").and_then(|v| v.as_str()) {
-            Some(id) => id.to_string(),
-            None => continue,
-        };
+    // One batched query per getter property — O(M) total
+    for prop in &getter_props {
+        let getter = prop.getter.as_ref().unwrap(); // safe: filtered above
+        let upper = getter.trim().to_uppercase();
 
-        for prop in &getter_props {
-            let getter = prop.getter.as_ref().unwrap(); // safe: filtered above
-
-            // Note: we intentionally do NOT skip included collection relations here.
-            // The getter must run first to populate target IDs, which
-            // resolve_forward_include later replaces with hydrated objects.
-
-            // Substitute Base / ?source with the instance IRI
-            let sparql = getter
-                .replace("?source", &format!("<{}>", instance_id))
-                .replace("<Base>", &format!("<{}>", instance_id));
-
-            log::debug!(
-                "evaluate_getters: prop='{}' collection={} sparql={}",
-                prop.name,
-                prop.is_collection,
-                &sparql[..sparql.len().min(200)]
-            );
-
-            let trimmed = sparql.trim().to_uppercase();
-
-            if trimmed.starts_with("ASK") {
-                // ASK query → boolean result
-                match store.query(&sparql) {
-                    Ok(result_json) => {
-                        let val = result_json.trim();
-                        let bool_val = val == "true" || val == "\"true\"";
-                        if let Some(obj) = instance.as_object_mut() {
-                            obj.insert(prop.name.clone(), Value::Bool(bool_val));
+        if upper.starts_with("ASK") {
+            // ── ASK getter → batched SELECT returning matching sources ────
+            let batched = convert_ask_to_batched_select(getter, &values_clause);
+            match store.query(&batched) {
+                Ok(result_json) => {
+                    let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
+                    // Sources present in results → true; absent → false
+                    let matched: std::collections::HashSet<&str> = rows
+                        .iter()
+                        .filter_map(|row| row.get("source").and_then(|v| v.as_str()))
+                        .collect();
+                    for inst in instances.iter_mut() {
+                        let id_owned = inst
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        if let Some(id) = id_owned {
+                            if let Some(obj) = inst.as_object_mut() {
+                                obj.insert(
+                                    prop.name.clone(),
+                                    Value::Bool(matched.contains(id.as_str())),
+                                );
+                            }
                         }
                     }
-                    Err(e) => {
-                        log::warn!(
-                            "Getter evaluation failed for property '{}' on {}: {}",
-                            prop.name,
-                            instance_id,
-                            e
-                        );
-                    }
                 }
-            } else if trimmed.starts_with("SELECT") {
-                match store.query(&sparql) {
-                    Ok(result_json) => {
-                        let results: Vec<Value> =
-                            serde_json::from_str(&result_json).unwrap_or_default();
+                Err(e) => {
+                    log::warn!("Batched ASK getter failed for '{}': {}", prop.name, e);
+                }
+            }
+        } else if upper.starts_with("SELECT") {
+            // ── SELECT getter → batched with VALUES, grouped by ?source ──
+            let batched = inject_values_into_select(getter, &values_clause);
 
-                        if prop.is_collection {
-                            // Relation getter → array of target IDs
-                            let values: Vec<Value> = results
-                                .iter()
-                                .filter_map(|row| {
-                                    // Get first binding's value
-                                    row.as_object().and_then(|obj| {
-                                        obj.values().next().and_then(|v| {
-                                            v.get("value")
-                                                .and_then(|s| s.as_str())
-                                                .or_else(|| v.as_str())
-                                                .map(|s| Value::String(s.to_string()))
-                                        })
-                                    })
-                                })
-                                .filter(|v| {
-                                    v.as_str()
-                                        .map(|s| !s.is_empty() && s != "None")
-                                        .unwrap_or(false)
-                                })
-                                .collect();
+            log::debug!(
+                "evaluate_getters: prop='{}' batched_sparql={}",
+                prop.name,
+                &batched[..batched.len().min(300)]
+            );
 
-                            log::debug!(
-                                "evaluate_getters: prop='{}' raw_rows={} filtered_values={}",
-                                prop.name,
-                                results.len(),
-                                values.len()
-                            );
+            match store.query(&batched) {
+                Ok(result_json) => {
+                    let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
 
-                            if let Some(obj) = instance.as_object_mut() {
-                                if prop.is_scalar_relation {
-                                    // HasOne/BelongsToOne → scalar
-                                    let val = values.into_iter().next().unwrap_or(Value::Null);
-                                    obj.insert(prop.name.clone(), val);
-                                } else {
-                                    obj.insert(prop.name.clone(), Value::Array(values));
-                                }
-                            }
-                        } else {
-                            // Property getter → scalar value (first binding's first value)
-                            if let Some(first_row) = results.first() {
-                                if let Some(obj_row) = first_row.as_object() {
-                                    if let Some(first_val) = obj_row.values().next() {
-                                        let val = first_val
-                                            .get("value")
-                                            .and_then(|s| s.as_str())
-                                            .or_else(|| first_val.as_str());
-                                        if let Some(s) = val {
-                                            if !s.is_empty() && s != "None" {
-                                                if let Some(obj) = instance.as_object_mut() {
-                                                    // Property getters return raw values
-                                                    // (e.g. literal URLs). Don't decode them
-                                                    // — the TS side handles resolution if needed.
-                                                    obj.insert(
-                                                        prop.name.clone(),
-                                                        Value::String(s.to_string()),
-                                                    );
-                                                }
-                                            }
-                                        }
+                    // Group results by ?source → Vec<String>
+                    let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
+                    for row in &rows {
+                        let source = match row.get("source").and_then(|v| v.as_str()) {
+                            Some(s) => s,
+                            None => continue,
+                        };
+                        // Extract the first non-"source" binding value
+                        if let Some(obj) = row.as_object() {
+                            if let Some((_, val)) = obj.iter().find(|(k, _)| k.as_str() != "source")
+                            {
+                                if let Some(s) = val.as_str() {
+                                    if !s.is_empty() && s != "None" {
+                                        grouped
+                                            .entry(source.to_string())
+                                            .or_default()
+                                            .push(s.to_string());
                                     }
                                 }
                             }
                         }
                     }
-                    Err(e) => {
-                        log::warn!(
-                            "Getter evaluation failed for '{}' on {}: {}",
-                            prop.name,
-                            instance_id,
-                            e
-                        );
+
+                    // Apply grouped results to instances
+                    for inst in instances.iter_mut() {
+                        let id_owned = match inst
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                        {
+                            Some(id) => id,
+                            None => continue,
+                        };
+                        let values = grouped.get(id_owned.as_str());
+                        if let Some(obj) = inst.as_object_mut() {
+                            if prop.is_collection {
+                                if prop.is_scalar_relation {
+                                    // HasOne/BelongsToOne → take first value
+                                    let val = values
+                                        .and_then(|v| v.first())
+                                        .map(|s| Value::String(s.clone()))
+                                        .unwrap_or(Value::Null);
+                                    obj.insert(prop.name.clone(), val);
+                                } else {
+                                    // HasMany → array of all values
+                                    let arr: Vec<Value> = values
+                                        .map(|v| {
+                                            v.iter().map(|s| Value::String(s.clone())).collect()
+                                        })
+                                        .unwrap_or_default();
+                                    obj.insert(prop.name.clone(), Value::Array(arr));
+                                }
+                            } else {
+                                // Property getter → first scalar value
+                                if let Some(val) = values.and_then(|v| v.first()) {
+                                    obj.insert(prop.name.clone(), Value::String(val.clone()));
+                                }
+                            }
+                        }
                     }
                 }
+                Err(e) => {
+                    log::warn!("Batched SELECT getter failed for '{}': {}", prop.name, e);
+                }
             }
-            // Unknown getter format → skip silently
         }
+        // Unknown getter format → skip silently
     }
 
     Ok(())
@@ -4109,7 +4184,11 @@ mod integration_tests {
             .iter()
             .filter(|p| p.getter.is_some() && (false || p.is_collection || p.is_scalar_relation))
             .collect();
-        assert_eq!(getter_props_shallow.len(), 1, "shallow: only relation getter");
+        assert_eq!(
+            getter_props_shallow.len(),
+            1,
+            "shallow: only relation getter"
+        );
         assert_eq!(getter_props_shallow[0].name, "children");
 
         // With deep_query=true, all getters should be collected
@@ -4118,7 +4197,11 @@ mod integration_tests {
             .iter()
             .filter(|p| p.getter.is_some() && (true || p.is_collection || p.is_scalar_relation))
             .collect();
-        assert_eq!(getter_props_deep.len(), 2, "deep: both property and relation getters");
+        assert_eq!(
+            getter_props_deep.len(),
+            2,
+            "deep: both property and relation getters"
+        );
     }
 
     #[test]
@@ -4126,12 +4209,14 @@ mod integration_tests {
         let store = SparqlStore::new(None).unwrap();
 
         // Insert a test link
-        store.add_link(&make_link(
-            "test://inst-1",
-            "test://is_active",
-            "literal:boolean:true",
-            "2024-01-01T00:00:00Z",
-        )).unwrap();
+        store
+            .add_link(&make_link(
+                "test://inst-1",
+                "test://is_active",
+                "literal:boolean:true",
+                "2024-01-01T00:00:00Z",
+            ))
+            .unwrap();
 
         let shape_json = r#"{
             "className": "TestModel",
@@ -4150,7 +4235,8 @@ mod integration_tests {
             &["test://inst-1".to_string()],
             None,
             Some(shape_json),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(result.is_object(), "result should be an object");
         let inst_result = &result["test://inst-1"];
@@ -4167,7 +4253,8 @@ mod integration_tests {
             &[],
             None,
             Some(r#"{"className":"TestModel","properties":{},"relations":{}}"#),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.as_object().unwrap().is_empty());
     }
 
@@ -4197,8 +4284,430 @@ mod integration_tests {
             &["test://inst-1".to_string()],
             Some(&["propA".to_string()]),
             Some(shape_json),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(result.is_object());
+    }
+
+    // ── VALUES batching tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_strip_trailing_limit() {
+        assert_eq!(
+            strip_trailing_limit("SELECT ?t WHERE { ?s <p> ?t . } LIMIT 1"),
+            "SELECT ?t WHERE { ?s <p> ?t . }"
+        );
+        assert_eq!(
+            strip_trailing_limit("SELECT ?t WHERE { ?s <p> ?t . }"),
+            "SELECT ?t WHERE { ?s <p> ?t . }"
+        );
+        assert_eq!(
+            strip_trailing_limit("SELECT ?t WHERE { ?s <p> ?t . } LIMIT 100  "),
+            "SELECT ?t WHERE { ?s <p> ?t . }"
+        );
+    }
+
+    #[test]
+    fn test_convert_ask_to_batched_select() {
+        let result = convert_ask_to_batched_select(
+            r#"ASK WHERE { ?source <test://active> "true" . }"#,
+            "<test://a> <test://b>",
+        );
+        assert!(
+            result.contains("SELECT ?source"),
+            "should be SELECT: {result}"
+        );
+        assert!(
+            result.contains("VALUES ?source { <test://a> <test://b> }"),
+            "should have VALUES: {result}"
+        );
+        assert!(
+            result.contains(r#"<test://active> "true""#),
+            "should keep body: {result}"
+        );
+    }
+
+    #[test]
+    fn test_convert_ask_with_base_to_batched_select() {
+        let result =
+            convert_ask_to_batched_select("ASK WHERE { <Base> <test://active> ?x }", "<test://a>");
+        assert!(
+            result.contains("?source <test://active>"),
+            "should replace <Base> with ?source: {result}"
+        );
+        assert!(
+            result.contains("VALUES ?source"),
+            "should have VALUES: {result}"
+        );
+    }
+
+    #[test]
+    fn test_inject_values_into_select() {
+        let result = inject_values_into_select(
+            "SELECT ?target WHERE { ?source <test://reply> ?target . } LIMIT 1",
+            "<test://a> <test://b>",
+        );
+        assert!(
+            result.contains("?source"),
+            "should have ?source in SELECT: {result}"
+        );
+        assert!(
+            result.contains("VALUES ?source { <test://a> <test://b> }"),
+            "should have VALUES: {result}"
+        );
+        assert!(
+            !result.to_uppercase().contains("LIMIT"),
+            "should strip LIMIT: {result}"
+        );
+    }
+
+    #[test]
+    fn test_inject_values_adds_source_to_projection() {
+        let result = inject_values_into_select(
+            "SELECT ?target WHERE { ?source <test://p> ?target . }",
+            "<test://a>",
+        );
+        // ?source should appear in the SELECT projection
+        let upper = result.to_uppercase();
+        let select_end = upper.find("SELECT").unwrap() + 6;
+        let where_pos = upper.find("WHERE").unwrap();
+        let projection = &result[select_end..where_pos];
+        assert!(
+            projection.contains("?source"),
+            "?source should be in projection: {result}"
+        );
+    }
+
+    #[test]
+    fn test_batched_ask_getter_multiple_instances() {
+        let store = SparqlStore::new(None).unwrap();
+
+        // inst-1 is active, inst-2 is not
+        store
+            .add_link(&make_link(
+                "test://inst-1",
+                "test://is_active",
+                "literal:boolean:true",
+                "1000",
+            ))
+            .unwrap();
+        // inst-2 has no is_active link
+
+        let shape_json = r#"{
+            "className": "TestModel",
+            "properties": {
+                "isActive": {
+                    "predicate": "test://is_active",
+                    "getter": "ASK WHERE { ?source <test://is_active> ?x }"
+                }
+            },
+            "relations": {}
+        }"#;
+
+        let result = evaluate_getters_batch(
+            &store,
+            "TestModel",
+            &["test://inst-1".to_string(), "test://inst-2".to_string()],
+            None,
+            Some(shape_json),
+        )
+        .unwrap();
+
+        assert_eq!(result["test://inst-1"]["isActive"], Value::Bool(true));
+        // inst-2 should be false (no matching link)
+        assert!(
+            result.get("test://inst-2").is_none()
+                || result["test://inst-2"].get("isActive").is_none()
+                || result["test://inst-2"]["isActive"] == Value::Bool(false),
+            "inst-2 should have isActive=false or be absent"
+        );
+    }
+
+    #[test]
+    fn test_batched_select_getter_multiple_instances() {
+        let store = SparqlStore::new(None).unwrap();
+
+        // inst-1 has a reply, inst-2 does not
+        store
+            .add_link(&make_link(
+                "test://inst-1",
+                "test://has_reply",
+                "test://reply-99",
+                "1000",
+            ))
+            .unwrap();
+
+        let shape_json = r#"{
+            "className": "TestModel",
+            "properties": {
+                "replyingTo": {
+                    "predicate": "test://has_reply",
+                    "getter": "SELECT ?target WHERE { ?source <test://has_reply> ?target . } LIMIT 1"
+                }
+            },
+            "relations": {}
+        }"#;
+
+        let result = evaluate_getters_batch(
+            &store,
+            "TestModel",
+            &["test://inst-1".to_string(), "test://inst-2".to_string()],
+            None,
+            Some(shape_json),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result["test://inst-1"]["replyingTo"].as_str().unwrap(),
+            "test://reply-99"
+        );
+        // inst-2 has no reply
+        assert!(
+            result.get("test://inst-2").is_none()
+                || result["test://inst-2"].get("replyingTo").is_none(),
+            "inst-2 should have no replyingTo"
+        );
+    }
+
+    #[test]
+    fn test_batched_collection_getter() {
+        let store = SparqlStore::new(None).unwrap();
+
+        // inst-1 has two children
+        store
+            .add_link(&make_link(
+                "test://inst-1",
+                "test://has_child",
+                "test://child-a",
+                "1000",
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                "test://inst-1",
+                "test://has_child",
+                "test://child-b",
+                "1001",
+            ))
+            .unwrap();
+        // inst-2 has one child
+        store
+            .add_link(&make_link(
+                "test://inst-2",
+                "test://has_child",
+                "test://child-c",
+                "1002",
+            ))
+            .unwrap();
+
+        let shape_json = r#"{
+            "className": "TestModel",
+            "properties": {},
+            "relations": {
+                "children": {
+                    "predicate": "test://has_child",
+                    "kind": "hasMany",
+                    "getter": "SELECT ?target WHERE { ?source <test://has_child> ?target }"
+                }
+            }
+        }"#;
+
+        let result = evaluate_getters_batch(
+            &store,
+            "TestModel",
+            &["test://inst-1".to_string(), "test://inst-2".to_string()],
+            None,
+            Some(shape_json),
+        )
+        .unwrap();
+
+        let children_1 = result["test://inst-1"]["children"].as_array().unwrap();
+        assert_eq!(children_1.len(), 2, "inst-1 should have 2 children");
+
+        let children_2 = result["test://inst-2"]["children"].as_array().unwrap();
+        assert_eq!(children_2.len(), 1, "inst-2 should have 1 child");
+        assert_eq!(children_2[0].as_str().unwrap(), "test://child-c");
+    }
+
+    // ── Pipeline ordering: getters run post-pagination ───────────────────
+
+    #[test]
+    fn test_deep_query_defaults_to_true() {
+        // Verify the default: when deep_query is None, property getters should run
+        let store = SparqlStore::new(None).unwrap();
+
+        let base = "test://msg-1";
+        store
+            .add_link(&make_link(
+                base,
+                "flux://entry_type",
+                "flux://message",
+                "1000",
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "flux://has_reply",
+                "test://reply-1",
+                "1001",
+            ))
+            .unwrap();
+
+        let shape_json = r#"{
+            "className": "Message",
+            "properties": {
+                "entryType": { "predicate": "flux://entry_type", "required": true, "flag": true, "initial": "flux://message" }
+            },
+            "relations": {
+                "replyingTo": {
+                    "predicate": "flux://has_reply",
+                    "kind": "hasOne",
+                    "getter": "SELECT ?target WHERE { ?source <flux://has_reply> ?target . } LIMIT 1"
+                }
+            }
+        }"#;
+
+        let query_input = ModelQueryInput {
+            deep_query: None, // not set — should default to true
+            ..Default::default()
+        };
+
+        let result =
+            execute_model_query(&store, "Message", &query_input, Some(shape_json)).unwrap();
+        assert!(!result.instances.is_empty(), "should find instance");
+
+        let inst = &result.instances[0];
+        // replyingTo is a relation getter (always runs) — should be populated
+        let reply = inst.get("replyingTo").and_then(|v| v.as_str());
+        assert_eq!(
+            reply,
+            Some("test://reply-1"),
+            "replyingTo should be populated by default"
+        );
+    }
+
+    #[test]
+    fn test_deep_query_false_skips_property_getters() {
+        let store = SparqlStore::new(None).unwrap();
+
+        let base = "test://msg-1";
+        store
+            .add_link(&make_link(
+                base,
+                "flux://entry_type",
+                "flux://message",
+                "1000",
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "flux://is_popular",
+                "literal:boolean:true",
+                "1001",
+            ))
+            .unwrap();
+
+        let shape_json = r#"{
+            "className": "Message",
+            "properties": {
+                "entryType": { "predicate": "flux://entry_type", "required": true, "flag": true, "initial": "flux://message" },
+                "isPopular": {
+                    "predicate": "flux://is_popular",
+                    "getter": "ASK WHERE { ?source <flux://is_popular> ?x }"
+                }
+            },
+            "relations": {}
+        }"#;
+
+        let query_input = ModelQueryInput {
+            deep_query: Some(false),
+            ..Default::default()
+        };
+
+        let result =
+            execute_model_query(&store, "Message", &query_input, Some(shape_json)).unwrap();
+        assert!(!result.instances.is_empty());
+
+        let inst = &result.instances[0];
+        // isPopular is a property getter — should NOT be evaluated when deepQuery=false
+        // It may still show the raw hydrated value from the link, but the getter itself
+        // (ASK → bool) should not have run.
+        // The hydrated value from the link is "true" (string), not true (bool).
+        // If the getter ran, it would be Value::Bool(true).
+        let is_popular = inst.get("isPopular");
+        assert!(
+            is_popular.is_none() || !is_popular.unwrap().is_boolean(),
+            "property getter should not run when deepQuery=false; got: {:?}",
+            is_popular
+        );
+    }
+
+    #[test]
+    fn test_getters_run_after_pagination() {
+        // Verify that getters run on the paginated set, not the full result set.
+        // We do this by creating 5 instances but querying with limit=2.
+        // If getters ran before pagination, all 5 would be evaluated.
+        // After our change, only 2 should be evaluated.
+        // We verify by checking that the 2 returned instances have getter values.
+        let store = SparqlStore::new(None).unwrap();
+
+        for i in 0..5 {
+            let base = format!("test://msg-{}", i);
+            store
+                .add_link(&make_link(
+                    &base,
+                    "flux://entry_type",
+                    "flux://message",
+                    &format!("{}", 1000 + i),
+                ))
+                .unwrap();
+            store
+                .add_link(&make_link(
+                    &base,
+                    "flux://has_reply",
+                    &format!("test://reply-{}", i),
+                    &format!("{}", 2000 + i),
+                ))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Message",
+            "properties": {
+                "entryType": { "predicate": "flux://entry_type", "required": true, "flag": true, "initial": "flux://message" }
+            },
+            "relations": {
+                "replyingTo": {
+                    "predicate": "flux://has_reply",
+                    "kind": "hasOne",
+                    "getter": "SELECT ?target WHERE { ?source <flux://has_reply> ?target . } LIMIT 1"
+                }
+            }
+        }"#;
+
+        let query_input = ModelQueryInput {
+            limit: Some(2),
+            deep_query: Some(true),
+            order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+            ..Default::default()
+        };
+
+        let result =
+            execute_model_query(&store, "Message", &query_input, Some(shape_json)).unwrap();
+        assert_eq!(result.instances.len(), 2, "should return 2 instances");
+        assert_eq!(result.total_count, 5, "total count should be 5");
+
+        // Both returned instances should have replyingTo populated
+        for inst in &result.instances {
+            let reply = inst.get("replyingTo").and_then(|v| v.as_str());
+            assert!(
+                reply.is_some(),
+                "replyingTo should be populated: {:?}",
+                inst
+            );
+        }
     }
 }

@@ -224,25 +224,25 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
-   * Opts in to evaluating SPARQL property getters during collection hydration.
+   * Controls whether SPARQL property getters are evaluated during hydration.
    *
-   * By default, collection queries skip getter evaluation for performance.
-   * Call `.deepQuery()` when you need getter-backed properties in the result set.
+   * By default, collection queries evaluate property getters (deepQuery=true).
+   * Call `.deepQuery(false)` to skip getter evaluation for performance.
    *
+   * @param enabled - Whether to evaluate property getters (default: true)
    * @returns The query builder for chaining
    *
    * @example
    * ```typescript
    * const messages = await Message.query(perspective)
    *   .parent(channel)
-   *   .deepQuery()
+   *   .deepQuery(false)  // skip property getters for performance
    *   .limit(30)
    *   .get();
-   * // messages[i].replyingTo is populated
    * ```
    */
-  deepQuery(): ModelQueryBuilder<T> {
-    this.queryParams.deepQuery = true;
+  deepQuery(enabled: boolean = true): ModelQueryBuilder<T> {
+    this.queryParams.deepQuery = enabled;
     return this;
   }
 

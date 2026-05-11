@@ -1679,10 +1679,10 @@ describe("Lazy Conformance Filters", () => {
 });
 
 // ──────────────────────────────────────────────────────────
-// deepQuery opt-in — getter evaluation on collection queries
+// deepQuery — getter evaluation on collection queries
 // ──────────────────────────────────────────────────────────
 
-describe("deepQuery opt-in — getter evaluation", () => {
+describe("deepQuery — getter evaluation", () => {
   @Model({ name: "DeepQueryTestMessage" })
   class DeepQueryTestMessage extends Ad4mModel {
     @Flag({ through: "flux://entry_type", value: "flux://message" })
@@ -1740,6 +1740,7 @@ describe("deepQuery opt-in — getter evaluation", () => {
     sparqlCalls = [];
     mockPerspective.querySparql.mockClear();
     mockPerspective.evaluateGetters.mockClear();
+    mockPerspective.modelQuery.mockClear();
     mockPerspective.get.mockClear();
   });
 
@@ -1823,6 +1824,26 @@ describe("deepQuery opt-in — getter evaluation", () => {
       const builder = DeepQueryTestMessage.query(mockPerspective);
       (builder as any).deepQuery();
       expect((builder as any).queryParams.deepQuery).toBe(true);
+    });
+
+    it("deepQuery defaults to true when not explicitly set", async () => {
+      mockPerspective.modelQuery.mockResolvedValueOnce({ instances: [], totalCount: 0 });
+      await DeepQueryTestMessage.query(mockPerspective).get();
+
+      expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+      const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+      const qi = JSON.parse(queryJson);
+      expect(qi.deepQuery).toBe(true);
+    });
+
+    it("deepQuery can be explicitly set to false", async () => {
+      mockPerspective.modelQuery.mockResolvedValueOnce({ instances: [], totalCount: 0 });
+      await DeepQueryTestMessage.query(mockPerspective).deepQuery(false).get();
+
+      expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+      const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+      const qi = JSON.parse(queryJson);
+      expect(qi.deepQuery).toBe(false);
     });
   });
 });

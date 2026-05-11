@@ -127,12 +127,11 @@ export type Query = {
   count?: boolean;
   /**
    * When true, SPARQL property getters (@Property with `getter`) ARE evaluated
-   * during collection hydration. By default, collection queries skip getter
-   * evaluation for performance — getters run only on single-instance get().
+   * during collection hydration.  Defaults to true — getters run post-pagination
+   * via batched VALUES queries so the cost is O(getters), not O(instances × getters).
    *
-   * Use this when you need getter-backed properties (e.g. `replyingTo`,
-   * `isPopular`) in a list query. For most list/feed UIs, leave this off
-   * and use `Ad4mModel.evaluateGetters()` on visible items only.
+   * Set to false to explicitly skip getter evaluation for performance-sensitive
+   * queries where getter-backed properties are not needed.
    */
   deepQuery?: boolean;
 };
