@@ -4314,24 +4314,78 @@ mod integration_tests {
         let task3 = "literal:string:task-done";
 
         // Board -> Task links
-        store.add_link(&make_link(board, "board://has_task", task1, ts)).unwrap();
-        store.add_link(&make_link(board, "board://has_task", task2, ts)).unwrap();
-        store.add_link(&make_link(board, "board://has_task", task3, ts)).unwrap();
+        store
+            .add_link(&make_link(board, "board://has_task", task1, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(board, "board://has_task", task2, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(board, "board://has_task", task3, ts))
+            .unwrap();
 
         // Task type flags
-        store.add_link(&make_link(task1, "task://type", "task://task", ts)).unwrap();
-        store.add_link(&make_link(task2, "task://type", "task://task", ts)).unwrap();
-        store.add_link(&make_link(task3, "task://type", "task://task", ts)).unwrap();
+        store
+            .add_link(&make_link(task1, "task://type", "task://task", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(task2, "task://type", "task://task", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(task3, "task://type", "task://task", ts))
+            .unwrap();
 
         // Task titles
-        store.add_link(&make_link(task1, "task://title", "literal:string:Active%201", ts)).unwrap();
-        store.add_link(&make_link(task2, "task://title", "literal:string:Active%202", ts)).unwrap();
-        store.add_link(&make_link(task3, "task://title", "literal:string:Done%20Task", ts)).unwrap();
+        store
+            .add_link(&make_link(
+                task1,
+                "task://title",
+                "literal:string:Active%201",
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                task2,
+                "task://title",
+                "literal:string:Active%202",
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                task3,
+                "task://title",
+                "literal:string:Done%20Task",
+                ts,
+            ))
+            .unwrap();
 
         // Task statuses
-        store.add_link(&make_link(task1, "task://status", "literal:string:active", ts)).unwrap();
-        store.add_link(&make_link(task2, "task://status", "literal:string:active", ts)).unwrap();
-        store.add_link(&make_link(task3, "task://status", "literal:string:done", ts)).unwrap();
+        store
+            .add_link(&make_link(
+                task1,
+                "task://status",
+                "literal:string:active",
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                task2,
+                "task://status",
+                "literal:string:active",
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                task3,
+                "task://status",
+                "literal:string:done",
+                ts,
+            ))
+            .unwrap();
 
         // Full getter mimicking buildConformanceFilter + compileWhereClause:
         // SELECT ?target WHERE { <Base> <board://has_task> ?target .
@@ -4349,31 +4403,40 @@ mod integration_tests {
         let shape = ModelShape {
             target_class: "TaskBoard".to_string(),
             shape_uri: String::new(),
-            properties: vec![
-                ShapeProperty {
-                    name: "activeTasks".to_string(),
-                    predicate: "board://has_task".to_string(),
-                    is_collection: true,
-                    is_flag: false,
-                    is_required: false,
-                    initial_value: None,
-                    resolve_language: None,
-                    datatype: None,
-                    direction: None,
-                    is_scalar_relation: false,
-                    getter: Some(getter.to_string()),
-                },
-            ],
+            properties: vec![ShapeProperty {
+                name: "activeTasks".to_string(),
+                predicate: "board://has_task".to_string(),
+                is_collection: true,
+                is_flag: false,
+                is_required: false,
+                initial_value: None,
+                resolve_language: None,
+                datatype: None,
+                direction: None,
+                is_scalar_relation: false,
+                getter: Some(getter.to_string()),
+            }],
             include_relations: vec![],
         };
 
         let mut instances = vec![serde_json::json!({"id": board})];
         let eval_result = evaluate_getters(&store, &mut instances, &shape, None, true);
-        assert!(eval_result.is_ok(), "evaluate_getters should succeed: {:?}", eval_result.err());
+        assert!(
+            eval_result.is_ok(),
+            "evaluate_getters should succeed: {:?}",
+            eval_result.err()
+        );
 
-        let active = instances[0].get("activeTasks").expect("activeTasks should be set");
+        let active = instances[0]
+            .get("activeTasks")
+            .expect("activeTasks should be set");
         let active_arr = active.as_array().expect("activeTasks should be array");
-        assert_eq!(active_arr.len(), 2, "Should have 2 active tasks via getter, got: {:?}", active_arr);
+        assert_eq!(
+            active_arr.len(),
+            2,
+            "Should have 2 active tasks via getter, got: {:?}",
+            active_arr
+        );
     }
 
     #[test]
