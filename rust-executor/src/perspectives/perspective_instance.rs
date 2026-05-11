@@ -1830,6 +1830,11 @@ impl PerspectiveInstance {
     }
 
     async fn ensure_prolog_engine_pool(&self) -> Result<(), AnyError> {
+        // Prolog engine pools are only used in Pooled mode
+        if PROLOG_MODE != PrologMode::Pooled {
+            return Ok(());
+        }
+
         // Get service reference and perspective data BEFORE acquiring write lock
         let service = get_prolog_service().await;
         let (uuid, owner_did, neighbourhood_author) = {
@@ -1950,8 +1955,11 @@ impl PerspectiveInstance {
             query
         };
 
+        // Only acquire the prolog read lock in Pooled mode where write locks
+        // are taken during fact updates. In other modes, no writes happen so
+        // the lock would only add contention without providing synchronization.
         let lock_start = std::time::Instant::now();
-        let _read_lock = if use_lock {
+        let _read_lock = if use_lock && PROLOG_MODE == PrologMode::Pooled {
             log::trace!("🧠🔒 Waiting for prolog_update_mutex read lock...");
             let guard = self.prolog_update_mutex.read().await;
             log::trace!(
@@ -2483,6 +2491,11 @@ impl PerspectiveInstance {
         &self,
         context: &AgentContext,
     ) -> Result<(), AnyError> {
+        // Prolog engine pools are only used in Pooled mode
+        if PROLOG_MODE != PrologMode::Pooled {
+            return Ok(());
+        }
+
         let (perspective_uuid, neighbourhood_author) = {
             let persisted_guard = self.persisted.lock().await;
             let neighbourhood_author = persisted_guard
