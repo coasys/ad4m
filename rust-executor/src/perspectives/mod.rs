@@ -699,7 +699,7 @@ mod tests {
         uuid: &String,
     ) -> Option<PerspectiveInstance> {
         for p in all_perspectives {
-            if p.persisted.lock().await.uuid == *uuid {
+            if p.uuid == *uuid {
                 return Some(p.clone());
             }
         }

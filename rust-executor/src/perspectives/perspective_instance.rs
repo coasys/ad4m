@@ -247,6 +247,8 @@ fn extract_predicates_from_sparql(query: &str) -> HashSet<String> {
 #[derive(Clone)]
 pub struct PerspectiveInstance {
     pub persisted: Arc<Mutex<PerspectiveHandle>>,
+    /// Cached UUID — never changes after construction, avoids locking `persisted`.
+    pub uuid: String,
 
     pub created_from_join: bool,
     pub is_fast_polling: bool,
@@ -282,6 +284,7 @@ impl PerspectiveInstance {
 
         PerspectiveInstance {
             persisted: Arc::new(Mutex::new(handle.clone())),
+            uuid: handle.uuid.clone(),
 
             created_from_join: created_from_join.unwrap_or(false),
             is_fast_polling: false,
@@ -516,7 +519,7 @@ impl PerspectiveInstance {
     }
 
     async fn pending_diffs_loop(&self) {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
         let mut interval = time::interval(Duration::from_millis(100));
         let mut last_diff_time = None;
 
@@ -575,7 +578,7 @@ impl PerspectiveInstance {
     }
 
     async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
 
         let (pending_diffs, pending_ids) = Ad4mDb::with_global_instance(|db| {
             db.get_pending_diffs_by_size(&uuid, MAX_COMMIT_BYTES, Some(MAX_PENDING_DIFFS_COUNT))
@@ -621,7 +624,7 @@ impl PerspectiveInstance {
 
     async fn notification_check_loop(&self) {
         //log::debug!("Starting notification check loop for perspective {}", self.persisted.lock().await.uuid);
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
         let mut interval = time::interval(Duration::from_secs(5));
         let mut before = self.notification_trigger_snapshot().await;
         while !self.is_teardown.load(Ordering::Acquire) {
@@ -655,7 +658,7 @@ impl PerspectiveInstance {
     }
 
     pub async fn ensure_public_links_are_shared(&self) -> bool {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
 
         // Clone link_language without holding the lock
         let link_language_clone = {
@@ -870,7 +873,7 @@ impl PerspectiveInstance {
     }
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) -> Result<(), AnyError> {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
         // Deduplicate by (author, timestamp, source, predicate, target)
         // Use structured keys to avoid delimiter collision issues
         let mut seen_add: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -963,7 +966,7 @@ impl PerspectiveInstance {
             .await?;
 
         if let Some(ref email) = context.user_email {
-            let uuid = self.persisted.lock().await.uuid.clone();
+            let uuid = self.uuid.clone();
             if let Err(e) = crate::billing::bill_compute(
                 email,
                 crate::billing::get_link_write_rate(),
@@ -1226,7 +1229,7 @@ impl PerspectiveInstance {
 
             // Bill for link writes
             if let Some(ref email) = context.user_email {
-                let uuid = self.persisted.lock().await.uuid.clone();
+                let uuid = self.uuid.clone();
                 let link_count = decorated_link_expressions.len();
                 if let Err(e) = crate::billing::bill_compute(
                     email,
@@ -1301,7 +1304,7 @@ impl PerspectiveInstance {
         let additions_count = decorated_diff.additions.len();
         if additions_count > 0 {
             if let Some(ref email) = context.user_email {
-                let uuid = self.persisted.lock().await.uuid.clone();
+                let uuid = self.uuid.clone();
                 if let Err(e) = crate::billing::bill_compute(
                     email,
                     additions_count as f64 * crate::billing::get_link_write_rate(),
@@ -1582,7 +1585,7 @@ impl PerspectiveInstance {
     /// The source of these links is the class URI (e.g., "recipe://Recipe")
     /// We extract the class name from the URI.
     pub async fn get_subject_classes_from_shacl(&self) -> Result<Vec<String>, AnyError> {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
         log::debug!(
             "🔶 get_subject_classes_from_shacl: uuid={}, Querying for SHACL class links",
             uuid
@@ -1933,12 +1936,7 @@ impl PerspectiveInstance {
         self.ensure_prolog_engine_pool().await?;
         log::trace!("🧠🔧 Engine pool ensured in {:?}", ensure_start.elapsed());
 
-        let uuid_start = std::time::Instant::now();
-        let uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
-        log::trace!("🧠🔑 UUID retrieved in {:?}", uuid_start.elapsed());
+        let uuid = self.uuid.clone();
 
         let service_start = std::time::Instant::now();
         let service = get_prolog_service().await;
@@ -2074,7 +2072,7 @@ impl PerspectiveInstance {
     /// Note: SdnaOnly mode doesn't use dirty flag - it compares SDNA links directly to avoid rebuilding on non-SDNA changes
     async fn mark_prolog_engine_dirty(&self) {
         if PROLOG_MODE == PrologMode::Simple {
-            let perspective_uuid = self.persisted.lock().await.uuid.clone();
+            let perspective_uuid = self.uuid.clone();
             get_prolog_service()
                 .await
                 .mark_dirty(&perspective_uuid)
@@ -2189,10 +2187,7 @@ impl PerspectiveInstance {
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach
-                let perspective_uuid = {
-                    let persisted_guard = self.persisted.lock().await;
-                    persisted_guard.uuid.clone()
-                };
+                let perspective_uuid = self.uuid.clone();
 
                 // Ensure the user-specific pool exists
                 self.ensure_prolog_engine_pool_for_context(context).await?;
@@ -2260,10 +2255,7 @@ impl PerspectiveInstance {
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach with context
-                let perspective_uuid = {
-                    let persisted_guard = self.persisted.lock().await;
-                    persisted_guard.uuid.clone()
-                };
+                let perspective_uuid = self.uuid.clone();
 
                 self.prolog_query_helper(
                     query,
@@ -2469,10 +2461,7 @@ impl PerspectiveInstance {
             }
             PrologMode::Pooled => {
                 // In pooled mode, use per-context SDNA pool
-                let perspective_uuid = {
-                    let persisted_guard = self.persisted.lock().await;
-                    persisted_guard.uuid.clone()
-                };
+                let perspective_uuid = self.uuid.clone();
 
                 // Ensure the user-specific pool exists
                 self.ensure_prolog_engine_pool_for_context(context).await?;
@@ -2705,13 +2694,7 @@ impl PerspectiveInstance {
             }
             //log::info!("🔧 PROLOG UPDATE: Engine pool ensured in {:?}", ensure_pool_start.elapsed());
 
-            // Get UUID before acquiring write lock
-            //let uuid_start = std::time::Instant::now();
-            let uuid = {
-                let persisted_guard = self_clone.persisted.lock().await;
-                persisted_guard.uuid.clone()
-            };
-            //log::info!("🔧 PROLOG UPDATE: UUID retrieved in {:?}", uuid_start.elapsed());
+            let uuid = self_clone.uuid.clone();
 
             //let analysis_start = std::time::Instant::now();
             let fact_rebuild_needed = !diff.removals.is_empty()
@@ -2828,11 +2811,7 @@ impl PerspectiveInstance {
     async fn calc_notification_trigger_matches(
         &self,
     ) -> Result<BTreeMap<Notification, Vec<serde_json::Value>>, AnyError> {
-        // Get UUID without holding lock during operations
-        let uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
+        let uuid = self.uuid.clone();
 
         let notifications = Self::all_notifications_for_perspective_id(uuid.clone())?;
         //log::info!("🔔 NOTIFICATIONS: Found {} notifications for perspective {}", notifications.len(), uuid);
@@ -3577,7 +3556,7 @@ impl PerspectiveInstance {
     ) -> Result<Option<Vec<Command>>, AnyError> {
         // Query SPARQL store for links with the given predicate whose source ends with {ClassName}Shape
         let shape_suffix = format!("{}Shape", class_name);
-        let _uuid = self.persisted.lock().await.uuid.clone();
+        let _uuid = self.uuid.clone();
 
         let links = self
             .sparql_store
@@ -3600,7 +3579,7 @@ impl PerspectiveInstance {
     ) -> Result<Option<Vec<Command>>, AnyError> {
         // Property shape URI format: {namespace}{ClassName}.{propertyName}
         let prop_suffix = format!("{}.{}", class_name, property);
-        let _uuid = self.persisted.lock().await.uuid.clone();
+        let _uuid = self.uuid.clone();
 
         let links = self
             .sparql_store
@@ -3621,7 +3600,7 @@ impl PerspectiveInstance {
         property: &str,
     ) -> Result<Option<String>, AnyError> {
         let prop_suffix = format!("{}.{}", class_name, property);
-        let _uuid = self.persisted.lock().await.uuid.clone();
+        let _uuid = self.uuid.clone();
 
         let links = self
             .sparql_store
@@ -3979,7 +3958,7 @@ impl PerspectiveInstance {
         result: String,
         delay: Option<Duration>,
     ) {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
         tokio::spawn(async move {
             if let Some(delay) = delay {
                 sleep(delay).await;
@@ -4285,7 +4264,7 @@ impl PerspectiveInstance {
 
         if let Some(query) = removed_query {
             // Notify prolog service that subscription ended
-            let uuid = self.persisted.lock().await.uuid.clone();
+            let uuid = self.uuid.clone();
             if let Err(e) = get_prolog_service()
                 .await
                 .subscription_ended(uuid, query.query)
@@ -4425,7 +4404,7 @@ impl PerspectiveInstance {
             };
 
             // Notify prolog service for each timed out subscription
-            let uuid = self.persisted.lock().await.uuid.clone();
+            let uuid = self.uuid.clone();
             for (_id, query) in removed_queries {
                 if let Err(e) = get_prolog_service()
                     .await
@@ -4472,7 +4451,7 @@ impl PerspectiveInstance {
             if log_counter >= LOG_INTERVAL {
                 log_counter = 0;
                 // Get perspective_uuid FIRST before acquiring subscribed_queries lock to avoid deadlock
-                let perspective_uuid = self.persisted.lock().await.uuid.clone();
+                let perspective_uuid = self.uuid.clone();
                 let queries = self.subscribed_queries.lock().await;
                 if !queries.is_empty() {
                     log::info!(
@@ -4496,7 +4475,7 @@ impl PerspectiveInstance {
     }
 
     async fn fallback_sync_loop(&self) {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
         log::debug!("Starting fallback sync loop for perspective {}", uuid);
 
         while !self.is_teardown.load(Ordering::Acquire) {
@@ -4587,7 +4566,7 @@ impl PerspectiveInstance {
     /// This ensures that new links get synced quickly
     async fn reset_fallback_sync_interval(&self) {
         *self.fallback_sync_interval.lock().await = Duration::from_secs(30);
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
         log::debug!(
             "Reset fallback sync interval to 30 seconds for perspective {}",
             uuid
