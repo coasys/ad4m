@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
@@ -251,7 +252,7 @@ pub struct PerspectiveInstance {
     pub is_fast_polling: bool,
     pub retries: u32,
 
-    is_teardown: Arc<Mutex<bool>>,
+    is_teardown: Arc<AtomicBool>,
     sdna_change_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<RwLock<Option<Language>>>,
@@ -285,7 +286,7 @@ impl PerspectiveInstance {
             created_from_join: created_from_join.unwrap_or(false),
             is_fast_polling: false,
             retries: 0,
-            is_teardown: Arc::new(Mutex::new(false)),
+            is_teardown: Arc::new(AtomicBool::new(false)),
             sdna_change_mutex: Arc::new(Mutex::new(())),
             prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(RwLock::new(None)),
@@ -317,7 +318,7 @@ impl PerspectiveInstance {
     }
 
     pub async fn teardown_background_tasks(&self) {
-        *self.is_teardown.lock().await = true;
+        self.is_teardown.store(true, Ordering::Release);
     }
 
     /// Sync all existing links to the SPARQL (Oxigraph) store
@@ -330,7 +331,7 @@ impl PerspectiveInstance {
 
     async fn ensure_link_language(&self) {
         let mut interval = time::interval(Duration::from_secs(5));
-        while !*self.is_teardown.lock().await {
+        while !self.is_teardown.load(Ordering::Acquire) {
             if self.link_language.read().await.is_none()
                 && self.persisted.lock().await.neighbourhood.is_some()
             {
@@ -461,7 +462,7 @@ impl PerspectiveInstance {
         const BASE_INTERVAL: Duration = Duration::from_secs(3);
         const MAX_INTERVAL: Duration = Duration::from_secs(300);
         let mut current_interval = BASE_INTERVAL;
-        while !*self.is_teardown.lock().await {
+        while !self.is_teardown.load(Ordering::Acquire) {
             // Clone the link_language without holding the lock during sync
             let link_language_clone = {
                 let link_language_guard = self.link_language.read().await;
@@ -504,7 +505,7 @@ impl PerspectiveInstance {
             let mut remaining = current_interval;
             let slice = Duration::from_secs(1);
             while remaining > Duration::from_millis(0) {
-                if *self.is_teardown.lock().await {
+                if self.is_teardown.load(Ordering::Acquire) {
                     return;
                 }
                 let step = std::cmp::min(slice, remaining);
@@ -519,7 +520,7 @@ impl PerspectiveInstance {
         let mut interval = time::interval(Duration::from_millis(100));
         let mut last_diff_time = None;
 
-        while !*self.is_teardown.lock().await {
+        while !self.is_teardown.load(Ordering::Acquire) {
             interval.tick().await;
 
             if self.has_link_language().await {
@@ -623,7 +624,7 @@ impl PerspectiveInstance {
         let uuid = self.persisted.lock().await.uuid.clone();
         let mut interval = time::interval(Duration::from_secs(5));
         let mut before = self.notification_trigger_snapshot().await;
-        while !*self.is_teardown.lock().await {
+        while !self.is_teardown.load(Ordering::Acquire) {
             interval.tick().await;
             let changed = *(self.trigger_notification_check.lock().await);
 
@@ -4448,7 +4449,7 @@ impl PerspectiveInstance {
         const LOG_INTERVAL: u32 = 300; // Log every ~60 seconds (300 * 200ms)
         const BATCH_WINDOW_MS: u64 = 50; // Debounce window for batching rapid link changes
 
-        while !*self.is_teardown.lock().await {
+        while !self.is_teardown.load(Ordering::Acquire) {
             // Check trigger without holding lock during the operation
             let should_check = { *self.trigger_prolog_subscription_check.lock().await };
 
@@ -4498,7 +4499,7 @@ impl PerspectiveInstance {
         let uuid = self.persisted.lock().await.uuid.clone();
         log::debug!("Starting fallback sync loop for perspective {}", uuid);
 
-        while !*self.is_teardown.lock().await {
+        while !self.is_teardown.load(Ordering::Acquire) {
             // Check if we should run the fallback sync (avoid holding multiple locks)
             let should_run = {
                 // Check perspective state first
@@ -4569,7 +4570,7 @@ impl PerspectiveInstance {
             let mut remaining = sleep_interval;
             let slice = Duration::from_secs(1);
             while remaining > Duration::from_millis(0) {
-                if *self.is_teardown.lock().await {
+                if self.is_teardown.load(Ordering::Acquire) {
                     log::debug!("Fallback sync loop ended for perspective {}", uuid);
                     return;
                 }
