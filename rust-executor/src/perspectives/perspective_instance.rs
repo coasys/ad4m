@@ -4280,7 +4280,7 @@ impl PerspectiveInstance {
 
     async fn check_subscribed_queries(&self, changed_predicates: ChangedPredicates) {
         let mut queries_to_remove = Vec::new();
-        let mut query_futures = Vec::new();
+        let mut query_futures: Vec<std::pin::Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>> = Vec::new();
         let now = Instant::now();
 
         // Collect only the minimal data needed: ID, query string, user_email, keepalive time, predicates,
@@ -4328,10 +4328,10 @@ impl PerspectiveInstance {
                 continue;
             }
 
-            // Spawn query check future
+            // Each future returns Option<(id, new_result)> instead of locking individually.
+            // This avoids a lock convoy where N futures all contend on subscribed_queries.
             let self_clone = self.clone();
-            let query_future = async move {
-                //let this_now = Instant::now();
+            let query_future = Box::pin(async move {
                 let _agent_context = if let Some(email) = user_email {
                     crate::agent::AgentContext::for_user_email(email)
                 } else {
@@ -4348,7 +4348,7 @@ impl PerspectiveInstance {
                         Ok(r) => r,
                         Err(e) => {
                             log::error!("Model subscription query failed: {}", e);
-                            return;
+                            return None;
                         }
                     }
                 } else if is_sparql_query(&query_string) {
@@ -4356,7 +4356,7 @@ impl PerspectiveInstance {
                         Ok(r) => r,
                         Err(e) => {
                             log::error!("SPARQL subscription query failed: {}", e);
-                            return;
+                            return None;
                         }
                     }
                 } else {
@@ -4365,33 +4365,36 @@ impl PerspectiveInstance {
                         .await
                     {
                         Ok(result) => prolog_resolution_to_string(result),
-                        Err(_) => return,
+                        Err(_) => return None,
                     }
                 };
-                // Compare with stored last_result only now, avoiding the clone earlier
-                let mut queries = self_clone.subscribed_queries.lock().await;
-                if let Some(stored_query) = queries.get_mut(&id) {
-                    if result_string != stored_query.last_result {
-                        // Release lock before sending update
-                        drop(queries);
-                        self_clone
-                            .send_subscription_update(id.clone(), result_string.clone(), None)
-                            .await;
-                        // Re-acquire lock to update the result
-                        let mut queries = self_clone.subscribed_queries.lock().await;
-                        if let Some(stored_query) = queries.get_mut(&id) {
-                            stored_query.last_result = result_string;
-                        }
-                    }
-                }
-                //log::info!("Query {} check took {:?}", id, this_now.elapsed());
-            };
+                Some((id, result_string))
+            });
             query_futures.push(query_future);
         }
 
-        // Wait for all query futures to complete
-        future::join_all(query_futures).await;
-        //log::info!("done checking subscribed queries in {:?}", now.elapsed());
+        // Run all queries concurrently — no lock contention during execution
+        let results = future::join_all(query_futures).await;
+
+        // Single lock acquisition to compare and update all results
+        let mut updates_to_send = Vec::new();
+        {
+            let mut queries = self.subscribed_queries.lock().await;
+            for result in results.into_iter().flatten() {
+                let (id, result_string) = result;
+                if let Some(stored_query) = queries.get_mut(&id) {
+                    if result_string != stored_query.last_result {
+                        stored_query.last_result = result_string.clone();
+                        updates_to_send.push((id, result_string));
+                    }
+                }
+            }
+        }
+
+        // Send updates outside the lock
+        for (id, result_string) in updates_to_send {
+            self.send_subscription_update(id, result_string, None).await;
+        }
 
         // Remove timed out queries and notify prolog service
         if !queries_to_remove.is_empty() {
