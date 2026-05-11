@@ -1093,6 +1093,14 @@ export class Ad4mModel {
     const shapeJson = JSON.stringify(metadata);
     const queryJson = JSON.stringify(queryInput);
 
+    // TEMP DEBUG: Log getters with where-clause filters to diagnose CI failure
+    for (const [relName, relMeta] of Object.entries(metadata.relations)) {
+      const rel = relMeta as any;
+      if (rel.where) {
+        console.log(`[MODEL_QUERY_DEBUG] relation="${relName}" getter=${rel.getter ?? 'NONE'} where=${JSON.stringify(rel.where)}`);
+      }
+    }
+
     const result = await perspective.modelQuery(className, queryJson, shapeJson);
 
     // Convert JSON instances to model class instances, recursively constructing
