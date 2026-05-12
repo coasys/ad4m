@@ -1424,66 +1424,6 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     expect(queryJson.offset).toBe(0);
   });
 
-  it("paginateSubscribe should skip isInit messages from subscription", async () => {
-    const mockSubscriptionId = "paginate-init-sub";
-    let capturedCallback: ((result: any) => void) | null = null;
-
-    const mockClient = {
-      modelSubscribe: jest.fn().mockResolvedValue({
-        subscriptionId: mockSubscriptionId,
-        result: { instances: [], totalCount: 0 },
-      }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        capturedCallback = cb;
-        return () => {};
-      }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
-      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-    };
-
-    let modelQueryCallCount = 0;
-    const mockPerspective = {
-      uuid: "test-uuid",
-      client: mockClient,
-      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string, shapeJson?: string) => {
-        return mockClient.modelSubscribe("test-uuid", className, queryJson, shapeJson);
-      }),
-      modelQuery: jest.fn().mockImplementation(async () => {
-        modelQueryCallCount++;
-        return { instances: [], totalCount: 0 };
-      }),
-    } as any;
-
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "InitGuardTest" })
-    class InitGuardTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://init" })
-      type: string = "test://init";
-      @Property({ through: "test://name" })
-      name: string = "";
-    }
-
-    const userCallback = jest.fn();
-    const builder = InitGuardTest.query(mockPerspective);
-    await builder.paginateSubscribe(10, 1, userCallback);
-
-    // Reset the count after initial fetch
-    const initialCallCount = modelQueryCallCount;
-
-    // Simulate an isInit message from subscription
-    expect(capturedCallback).not.toBeNull();
-    capturedCallback!({ isInit: true });
-
-    // Wait for any async processing
-    await new Promise(r => setTimeout(r, 50));
-
-    // modelQuery should NOT have been called again (isInit was filtered)
-    expect(modelQueryCallCount).toBe(initialCallCount);
-    // User callback should NOT have been invoked by isInit
-    expect(userCallback).not.toHaveBeenCalled();
-  });
-
   it("paginateSubscribe should re-fetch on real subscription updates", async () => {
     const mockSubscriptionId = "paginate-update-sub";
     let capturedCallback: ((result: any) => void) | null = null;
@@ -1530,7 +1470,7 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
 
     const initialCallCount = modelQueryCallCount;
 
-    // Simulate a real subscription update (not isInit)
+    // Simulate a subscription update
     capturedCallback!({ instances: [{ id: "new-item" }], totalCount: 1 });
 
     // Wait for async processing

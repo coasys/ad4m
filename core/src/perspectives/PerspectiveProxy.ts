@@ -171,9 +171,6 @@ export class QuerySubscriptionProxy {
                         this.#initReject = undefined;
                     }
 
-                    // Skip duplicate init messages
-                    if (updateResult.isInit && this.#latestResult) return;
-
                     this.#latestResult = updateResult;
                     this.#notifyCallbacks(updateResult);
                 }
