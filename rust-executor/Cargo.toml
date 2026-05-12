@@ -97,9 +97,9 @@ webbrowser = "0.8.12"
 holochain_cli_run_local_services = { version = "0.5.0-dev.12" }
 kitsune_p2p_types = { version = "0.5.0-dev.9" }
 #kitsune2_api = "0.1.15"
-holochain = { version = "0.7.0-dev.16", default-features = false, features = ["test_utils", "transport-iroh",   "sqlite-encrypted", "schema", "wasmer_sys"], git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys" }
-holochain_cli_bundle = { version = "0.7.0-dev.15", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys" }
-holochain_types = { version = "0.7.0-dev.15", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys" }
+holochain = { version = "0.7.0-dev.24", default-features = false, features = ["test_utils", "transport-iroh", "sqlite-encrypted", "schema", "wasmer-sys-cranelift"], git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.24-space-override-coasys" }
+holochain_cli_bundle = { version = "0.7.0-dev.23", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.24-space-override-coasys" }
+holochain_types = { version = "0.7.0-dev.23", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.24-space-override-coasys" }
 lair_keystore_api = { version = "0.6.3", git = "https://github.com/coasys/lair.git", branch = "0.6.3-coasys" }
 sodoken = "=0.1.0"
 
