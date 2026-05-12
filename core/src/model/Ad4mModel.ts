@@ -25,6 +25,46 @@ import type {
 
 
 // ---------------------------------------------------------------------------
+// Default decoder for file-storage (non-literal resolveLanguage) properties
+// ---------------------------------------------------------------------------
+
+/**
+ * When the Rust executor resolves a non-literal expression it may return a
+ * `FileData`-shaped object (`{ data_base64, file_type, ... }`) rather than a
+ * raw URI string.  If the model class has no custom `transform` registered
+ * (e.g. it was synthesised from a SHACL shape at runtime) we still want to
+ * decode the content rather than passing raw `FileData` to callers.
+ *
+ * Decoding rules (mirrors the JS `decodeFileAsJson` / `decodeFileAsString` helpers):
+ *   - `application/json` (default when `file_type` is absent) → JSON.parse
+ *   - anything else                                            → raw decoded string
+ *
+ * If `resolved` is not a `FileData` object the value is returned unchanged so
+ * that callers can use this as a safe unconditional fallback.
+ */
+function defaultFileDecode(resolved: unknown): unknown {
+  if (
+    resolved !== null &&
+    typeof resolved === 'object' &&
+    'data_base64' in (resolved as object)
+  ) {
+    const fd = resolved as { data_base64: string; file_type?: string };
+    let raw: string;
+    try {
+      raw = atob(fd.data_base64);
+    } catch {
+      return resolved; // malformed base64 — keep as-is
+    }
+    const isJson = !fd.file_type || fd.file_type === 'application/json';
+    if (isJson) {
+      try { return JSON.parse(raw); } catch { return raw; }
+    }
+    return raw;
+  }
+  return resolved;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers for Rust-side include resolution
 // ---------------------------------------------------------------------------
 
@@ -933,6 +973,60 @@ export class Ad4mModel {
     return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
   }
 
+  /**
+   * Resolve non-literal (file-language) properties on an array of already-constructed
+   * model instances.  Handles two cases:
+   *
+   *   1. The Rust executor returned a raw URI string → fetch via `getExpression` then apply transform.
+   *   2. The Rust executor already resolved the expression and returned a `FileData` object
+   *      (happens when the perspective backend eagerly fetches file content) → apply transform
+   *      (or `defaultFileDecode` if no transform is registered on the class, e.g. for SHACL-
+   *      synthesised model classes).
+   *
+   * Extracted as a public static so `ModelQueryBuilder.subscribe()` can reuse it without
+   * duplicating logic or introducing a circular dependency.
+   * @internal
+   */
+  static async resolveNonLiteralProps<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    instances: T[],
+  ): Promise<void> {
+    const propsMeta = getPropertiesMetadata(this as any);
+    const resolveProps = Object.entries(propsMeta).filter(
+      ([, opts]: [string, any]) =>
+        opts.resolveLanguage != null &&
+        opts.resolveLanguage !== 'literal',
+    );
+    if (resolveProps.length === 0) return;
+
+    await Promise.all(
+      instances.map(async (inst: any) => {
+        for (const [propName, opts] of resolveProps) {
+          const val = inst[propName];
+          const transform = (opts as any).transform;
+          const applyTransform = (resolved: unknown) =>
+            typeof transform === 'function' ? transform(resolved) : defaultFileDecode(resolved);
+
+          if (typeof val === 'string' && val && !val.startsWith('literal:')) {
+            // Case 1: raw URI — fetch from language runtime
+            try {
+              const expression = await perspective.getExpression(val);
+              if (expression) {
+                let resolved: any;
+                try { resolved = JSON.parse(expression.data); } catch { resolved = expression.data; }
+                inst[propName] = applyTransform(resolved);
+              }
+            } catch (_) { /* resolution failed — keep raw value */ }
+          } else if (val !== null && val !== undefined && typeof val === 'object') {
+            // Case 2: already resolved by Rust — apply transform / default decode
+            inst[propName] = applyTransform(val);
+          }
+        }
+      }),
+    );
+  }
+
   // instancesFromQueryResult — removed (superseded by Rust executeModelQuery pipeline)
 
   /**
@@ -1111,32 +1205,9 @@ export class Ad4mModel {
 
     // Resolve non-literal expressions (e.g. file languages where the stored
     // value is a content-addressed hash that must be fetched from the language
-    // runtime). The Rust endpoint returns raw target URIs; we resolve them here.
-    const propsMeta = getPropertiesMetadata(this as any);
-    const resolveProps = Object.entries(propsMeta).filter(
-      ([, opts]: [string, any]) =>
-        opts.resolveLanguage != null &&
-        opts.resolveLanguage !== 'literal',
-    );
-    if (resolveProps.length > 0) {
-      await Promise.all(
-        instances.map(async (inst: any) => {
-          for (const [propName, opts] of resolveProps) {
-            const val = inst[propName];
-            if (typeof val !== 'string' || !val || val.startsWith('literal:')) continue;
-            try {
-              const expression = await perspective.getExpression(val);
-              if (expression) {
-                let resolved: any;
-                try { resolved = JSON.parse(expression.data); } catch { resolved = expression.data; }
-                const transform = (opts as any).transform;
-                inst[propName] = typeof transform === 'function' ? transform(resolved) : resolved;
-              }
-            } catch (_) { /* resolution failed — keep raw value */ }
-          }
-        }),
-      );
-    }
+    // runtime). The Rust endpoint may return either a raw target URI (string)
+    // or an already-resolved FileData object — both cases are handled here.
+    await (this as any).resolveNonLiteralProps(perspective, instances);
 
     // Take snapshots for dirty tracking
     const snapshotRelations = queryInput.include;
