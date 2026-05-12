@@ -16,6 +16,9 @@ export type UuidCallback = (uuid: string) => null
 export type LinkCallback = (link: LinkExpression) => null
 export type SyncStateChangeCallback = (state: PerspectiveState) => null
 
+// DEPRECATED: #init# handling retained for backward compat with pre-WS executors.
+// The single-WebSocket architecture (commit 35140c10) makes the original race condition
+// impossible — the RPC response is the authoritative initial result.
 function normalizeQueryResult(raw: unknown, errorContext: string): { result: AllInstancesResult; isInit: boolean } {
     let finalResult: unknown = raw
     let isInit = false
