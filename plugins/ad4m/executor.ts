@@ -484,6 +484,8 @@ export async function ensureExecutorRunning(
         adminCredential,
         "--mcp-port",
         "3001",
+        "--run-dapp-server",
+        "false",
       ],
       {
         stdio: ["ignore", "pipe", "pipe"],
