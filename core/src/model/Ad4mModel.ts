@@ -857,7 +857,11 @@ export class Ad4mModel {
       enrichShapeForIncludes(metadata, query.include, allRelMeta);
     }
 
-    // Pre-compute conformance getters (with where-clause support)
+    // Pre-compute conformance getters for Rust-side evaluation.
+    // Where clauses are NOT compiled into getter SPARQL because stored
+    // property values are signed expression envelopes (literal:json:...),
+    // not simple literal:string:X values. Instead, where clauses are
+    // attached as metadata for Rust-side post-evaluation filtering.
     {
       const allRelMeta = getRelationsMetadata(this as any);
       for (const [relName, relMeta] of Object.entries(metadata.relations)) {
@@ -869,40 +873,29 @@ export class Ad4mModel {
           const TargetClass = meta.target();
           const filter = buildConformanceFilter(meta.predicate, TargetClass);
 
-          // Compile where clauses to SPARQL when all target properties use
-          // literal encoding (literal:string:X etc.) which is SPARQL-matchable.
-          // Properties with a non-literal resolveLanguage store expression hashes
-          // that can't be matched by value in SPARQL.
-          let whereConditions: string[] = [];
+          if (filter) {
+            rel.getter = filter.getter;
+          }
+
+          // Attach where-clause metadata for Rust-side post-getter filtering
           if (rel.where) {
             try {
               const targetMetadata = (TargetClass as any).getModelMetadata?.() ?? null;
-              let allSparqlFilterable = true;
               if (targetMetadata) {
+                const predicates: Record<string, string> = {};
                 for (const propName of Object.keys(rel.where)) {
                   if (['id', 'author', 'timestamp'].includes(propName)) continue;
                   const propMeta = targetMetadata.properties[propName];
-                  if (propMeta?.resolveLanguage && propMeta.resolveLanguage !== 'literal') {
-                    allSparqlFilterable = false;
-                    break;
+                  if (propMeta?.predicate) {
+                    predicates[propName] = propMeta.predicate;
                   }
                 }
-              }
-              if (allSparqlFilterable) {
-                whereConditions = compileWhereClause(rel.where, targetMetadata);
+                if (Object.keys(predicates).length > 0) {
+                  rel.whereFilter = rel.where;
+                  rel.wherePredicates = predicates;
+                }
               }
             } catch (_) {}
-          }
-
-          if (filter) {
-            let getter = filter.getter;
-            if (whereConditions.length > 0) {
-              getter = getter.replace(/ \}$/, ` ${whereConditions.join(' ')} }`);
-            }
-            rel.getter = getter;
-          } else if (whereConditions.length > 0) {
-            const escapedPred = meta.predicate.replace(/[<>"{}|\\^`\u0000-\u0020]/g, '');
-            rel.getter = `SELECT ?target WHERE { <Base> <${escapedPred}> ?target . ${whereConditions.join(' ')} }`;
           }
         } catch (_) {}
       }
@@ -1044,42 +1037,31 @@ export class Ad4mModel {
           const TargetClass = meta.target();
           const filter = buildConformanceFilter(meta.predicate, TargetClass);
 
-          // Compile where clauses to SPARQL when all target properties use
-          // literal encoding (literal:string:X etc.) which is SPARQL-matchable.
-          // Properties with a non-literal resolveLanguage store expression hashes
-          // that can't be matched by value in SPARQL.
-          let whereConditions: string[] = [];
+          if (filter) {
+            rel.getter = filter.getter;
+          }
+
+          // Attach where-clause metadata for Rust-side post-getter filtering.
+          // Property values are signed expression envelopes (literal:json:...)
+          // and cannot be matched by SPARQL FILTER on the raw IRI.
           if (rel.where) {
             try {
               const targetMetadata = (TargetClass as any).getModelMetadata?.() ?? null;
-              let allSparqlFilterable = true;
               if (targetMetadata) {
+                const predicates: Record<string, string> = {};
                 for (const propName of Object.keys(rel.where)) {
                   if (['id', 'author', 'timestamp'].includes(propName)) continue;
                   const propMeta = targetMetadata.properties[propName];
-                  if (propMeta?.resolveLanguage && propMeta.resolveLanguage !== 'literal') {
-                    allSparqlFilterable = false;
-                    break;
+                  if (propMeta?.predicate) {
+                    predicates[propName] = propMeta.predicate;
                   }
                 }
-              }
-              if (allSparqlFilterable) {
-                whereConditions = compileWhereClause(rel.where, targetMetadata);
+                if (Object.keys(predicates).length > 0) {
+                  rel.whereFilter = rel.where;
+                  rel.wherePredicates = predicates;
+                }
               }
             } catch (_) { /* target metadata unavailable */ }
-          }
-
-          if (filter) {
-            let getter = filter.getter;
-            if (whereConditions.length > 0) {
-              // Append where conditions before the closing }
-              getter = getter.replace(/ \}$/, ` ${whereConditions.join(' ')} }`);
-            }
-            rel.getter = getter;
-          } else if (whereConditions.length > 0) {
-            // No conformance filter but where clause exists — build getter from where alone
-            const escapedPred = meta.predicate.replace(/[<>"{}|\\^`\u0000-\u0020]/g, '');
-            rel.getter = `SELECT ?target WHERE { <Base> <${escapedPred}> ?target . ${whereConditions.join(' ')} }`;
           }
         } catch (e) {
           // Target class may not be available; skip silently

@@ -262,6 +262,14 @@ struct ShapeProperty {
     /// For properties: returns a scalar value.
     /// For relations: returns target IDs (conformance-filtered).
     getter: Option<String>,
+    /// Post-getter where-clause filter for relations.  Property values are
+    /// stored as signed expression envelopes (`literal:json:...`), so SPARQL
+    /// FILTER cannot match them.  This filter is applied in Rust after the
+    /// getter runs, by fetching the target property values and comparing
+    /// the parsed data.
+    where_filter: Option<HashMap<String, WhereCondition>>,
+    /// Predicate mappings for `where_filter` (property name → predicate IRI).
+    where_predicates: Option<HashMap<String, String>>,
 }
 
 /// Enriched relation metadata for include (eager-loading) resolution.
@@ -516,6 +524,8 @@ fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelShape, Error
             direction: None,
             is_scalar_relation: false,
             getter: None, // SHACL shapes don't carry getter metadata; JSON path does
+            where_filter: None,
+            where_predicates: None,
         });
     }
 
@@ -1249,6 +1259,24 @@ fn execute_model_query_inner(
     })
 }
 
+/// Parse a where-filter JSON object into a HashMap<String, WhereCondition>.
+/// Used for post-getter relation filtering (property values are signed
+/// expression envelopes and cannot be matched by SPARQL FILTER).
+fn parse_where_filter(val: &Value) -> Option<HashMap<String, WhereCondition>> {
+    let obj = val.as_object()?;
+    let mut map = HashMap::new();
+    for (key, cond) in obj {
+        if let Ok(wc) = serde_json::from_value::<WhereCondition>(cond.clone()) {
+            map.insert(key.clone(), wc);
+        }
+    }
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
+}
+
 /// Parse shape metadata from JSON sent by the TS client.
 /// This is more reliable than reading from the store because the TS client
 /// has the definitive decorator metadata (flags, required, initial values, etc.).
@@ -1288,6 +1316,8 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
                 direction: None,
                 is_scalar_relation: false,
                 getter,
+                where_filter: None,
+                where_predicates: None,
             });
         }
     }
@@ -1313,6 +1343,14 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
             let kind = rel_meta["kind"].as_str().unwrap_or("hasMany").to_string();
             let is_scalar_relation = kind == "hasOne" || kind == "belongsToOne";
 
+            // Parse post-getter where filter for relation properties
+            let where_filter = parse_where_filter(&rel_meta["whereFilter"]);
+            let where_predicates = rel_meta["wherePredicates"].as_object().map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect::<HashMap<String, String>>()
+            });
+
             properties.push(ShapeProperty {
                 name: name.clone(),
                 predicate: predicate.clone(),
@@ -1325,6 +1363,8 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
                 direction: direction.clone(),
                 is_scalar_relation,
                 getter,
+                where_filter,
+                where_predicates,
             });
 
             // Parse enriched relation metadata (target shapes for include resolution)
@@ -2391,6 +2431,144 @@ fn evaluate_getters(
         // Unknown getter format → skip silently
     }
 
+    // ── Post-getter where-clause filtering ─────────────────────────────
+    // For relations with where_filter, fetch the target property values
+    // and filter out non-matching targets.  This is necessary because
+    // stored property values are signed expression envelopes
+    // (literal:json:...) that cannot be matched by SPARQL FILTER.
+    for prop in &getter_props {
+        let (wf, wp) = match (&prop.where_filter, &prop.where_predicates) {
+            (Some(wf), Some(wp)) => (wf, wp),
+            _ => continue,
+        };
+        apply_where_filter_to_relation(store, instances, &prop.name, wf, wp)?;
+    }
+
+    Ok(())
+}
+
+/// Apply a where-clause filter to a relation property across all instances.
+///
+/// For each where-clause property, issues a single batched SPARQL query to
+/// fetch the property values for all target IDs, parses the literal values,
+/// and filters out non-matching targets.  Cost: O(1) per where-clause property.
+fn apply_where_filter_to_relation(
+    store: &SparqlStore,
+    instances: &mut [Value],
+    relation_name: &str,
+    where_filter: &HashMap<String, WhereCondition>,
+    where_predicates: &HashMap<String, String>,
+) -> Result<(), Error> {
+    // Collect all target IDs across all instances for this relation
+    let all_targets: Vec<String> = instances
+        .iter()
+        .filter_map(|inst| {
+            inst.get(relation_name)
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+        })
+        .flatten()
+        .collect();
+
+    if all_targets.is_empty() {
+        return Ok(());
+    }
+
+    // Deduplicate targets for batched query
+    let unique_targets: Vec<&str> = {
+        let mut seen = std::collections::HashSet::new();
+        all_targets
+            .iter()
+            .filter(|t| seen.insert(t.as_str()))
+            .map(|t| t.as_str())
+            .collect()
+    };
+
+    let values_clause = unique_targets
+        .iter()
+        .filter_map(|id| validate_iri(id).ok())
+        .map(|id| format!("<{}>", id))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if values_clause.is_empty() {
+        return Ok(());
+    }
+
+    // For each where-clause property, fetch values and build a pass/fail map
+    let mut target_pass: HashMap<String, bool> = unique_targets
+        .iter()
+        .map(|t| (t.to_string(), true))
+        .collect();
+
+    for (prop_name, condition) in where_filter {
+        let predicate = match where_predicates.get(prop_name) {
+            Some(p) => p,
+            None => continue,
+        };
+        if validate_iri(predicate).is_err() {
+            continue;
+        }
+
+        // Batched SPARQL to get property values for all targets
+        let query = format!(
+            "SELECT ?source ?val WHERE {{ VALUES ?source {{ {} }} ?source <{}> ?val . }}",
+            values_clause, predicate
+        );
+
+        let result_json = store.query(&query)?;
+        let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
+
+        // Parse literal values and check against the where condition
+        let mut target_vals: HashMap<String, Value> = HashMap::new();
+        for row in &rows {
+            if let (Some(source), Some(val_str)) = (
+                row.get("source").and_then(|v| v.as_str()),
+                row.get("val").and_then(|v| v.as_str()),
+            ) {
+                target_vals.insert(source.to_string(), parse_literal_value(val_str));
+            }
+        }
+
+        for (target_id, pass) in target_pass.iter_mut() {
+            if !*pass {
+                continue; // already failed a previous condition
+            }
+            match target_vals.get(target_id) {
+                Some(val) => {
+                    if !matches_condition(val, condition) {
+                        *pass = false;
+                    }
+                }
+                None => {
+                    // Target doesn't have this property → doesn't match
+                    *pass = false;
+                }
+            }
+        }
+    }
+
+    // Filter each instance's relation array
+    for inst in instances.iter_mut() {
+        if let Some(arr) = inst.get(relation_name).and_then(|v| v.as_array()).cloned() {
+            let filtered: Vec<Value> = arr
+                .into_iter()
+                .filter(|v| {
+                    v.as_str()
+                        .map(|id| target_pass.get(id).copied().unwrap_or(false))
+                        .unwrap_or(false)
+                })
+                .collect();
+            if let Some(obj) = inst.as_object_mut() {
+                obj.insert(relation_name.to_string(), Value::Array(filtered));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -3021,6 +3199,8 @@ mod tests {
             direction: None,
             is_scalar_relation: false,
             getter: None,
+            where_filter: None,
+            where_predicates: None,
         }
     }
 
@@ -3038,6 +3218,8 @@ mod tests {
             direction: Some("forward".to_string()),
             is_scalar_relation: false,
             getter: None,
+            where_filter: None,
+            where_predicates: None,
         }
     }
 
@@ -3055,6 +3237,8 @@ mod tests {
             direction: None,
             is_scalar_relation: false,
             getter: None,
+            where_filter: None,
+            where_predicates: None,
         }
     }
 
@@ -3866,6 +4050,8 @@ mod integration_tests {
                 direction: Some("forward".to_string()),
                 is_scalar_relation: false,
                 getter: None,
+                where_filter: None,
+                where_predicates: None,
             }],
             include_relations: vec![],
         }
@@ -4375,18 +4561,20 @@ mod integration_tests {
             ))
             .unwrap();
 
-        // Full getter mimicking buildConformanceFilter + compileWhereClause:
-        // SELECT ?target WHERE { <Base> <board://has_task> ?target .
-        //   ?target <task://type> <task://task> .        -- flag conformance
-        //   ?target <task://title> ?_v0 .                -- required prop exists
-        //   ?target <task://status> ?_v1 .               -- required prop exists
-        //   ?target <task://status> ?_wc0 . FILTER(STR(?_wc0) = "active" || STR(?_wc0) = "literal:string:active")
-        // }
+        // Conformance-only getter (no where clause in SPARQL).
+        // Where filtering is done post-evaluation in Rust via where_filter.
         let getter = "SELECT ?target WHERE { <Base> <board://has_task> ?target . \
             ?target <task://type> <task://task> . \
             ?target <task://title> ?_v0 . \
-            ?target <task://status> ?_v1 . \
-            ?target <task://status> ?_wc0 . FILTER(STR(?_wc0) = \"active\" || STR(?_wc0) = \"literal:string:active\") }";
+            ?target <task://status> ?_v1 . }";
+
+        let mut where_filter = HashMap::new();
+        where_filter.insert(
+            "status".to_string(),
+            WhereCondition::String("active".to_string()),
+        );
+        let mut where_predicates = HashMap::new();
+        where_predicates.insert("status".to_string(), "task://status".to_string());
 
         let shape = ModelShape {
             target_class: "TaskBoard".to_string(),
@@ -4403,6 +4591,8 @@ mod integration_tests {
                 direction: None,
                 is_scalar_relation: false,
                 getter: Some(getter.to_string()),
+                where_filter: Some(where_filter),
+                where_predicates: Some(where_predicates),
             }],
             include_relations: vec![],
         };
