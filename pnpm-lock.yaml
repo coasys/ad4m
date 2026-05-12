@@ -69,7 +69,7 @@ importers:
   ad4m-hooks/react:
     dependencies:
       '@coasys/ad4m':
-        specifier: workspace:0.13.0-test-2
+        specifier: workspace:0.13.0-test-3
         version: link:../../core
       '@coasys/hooks-helpers':
         specifier: workspace:*
@@ -90,7 +90,7 @@ importers:
   ad4m-hooks/vue:
     dependencies:
       '@coasys/ad4m':
-        specifier: workspace:0.13.0-test-2
+        specifier: workspace:0.13.0-test-3
         version: link:../../core
       '@coasys/hooks-helpers':
         specifier: workspace:*
@@ -562,7 +562,7 @@ importers:
         version: 2.8.0
     devDependencies:
       '@coasys/ad4m':
-        specifier: workspace:*
+        specifier: workspace:0.13.0-test-3
         version: link:../core
       '@types/node':
         specifier: ^16.11.11
