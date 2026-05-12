@@ -2356,8 +2356,12 @@ mod tests {
         message_count: usize,
     ) -> (String, String, Vec<String>) {
         // Channel entry_type flag
-        svc.add_link(&make_link(channel_id, "flux://entry_type", "flux://has_channel"))
-            .unwrap();
+        svc.add_link(&make_link(
+            channel_id,
+            "flux://entry_type",
+            "flux://has_channel",
+        ))
+        .unwrap();
 
         // isConversation property
         if is_conversation {
@@ -2371,12 +2375,8 @@ mod tests {
 
         // Conversation entity as child of channel
         let conv_id = format!("{}-conv", channel_id);
-        svc.add_link(&make_link(
-            channel_id,
-            "ad4m://has_child",
-            &conv_id,
-        ))
-        .unwrap();
+        svc.add_link(&make_link(channel_id, "ad4m://has_child", &conv_id))
+            .unwrap();
         svc.add_link(&make_link(
             &conv_id,
             "flux://entry_type",
@@ -2385,12 +2385,8 @@ mod tests {
         .unwrap();
 
         // Channel creation link (parent -> channel)
-        svc.add_link(&make_link(
-            "ad4m://self",
-            "flux://has_channel",
-            channel_id,
-        ))
-        .unwrap();
+        svc.add_link(&make_link("ad4m://self", "flux://has_channel", channel_id))
+            .unwrap();
 
         // Messages as children of channel
         let mut msg_ids = Vec::new();
@@ -2620,8 +2616,7 @@ mod tests {
     fn test_unprocessed_items_sparql_basic() {
         // Tests the exact SPARQL queries from Channel.unprocessedItems()
         let svc = new_service();
-        let (ch_id, _, msg_ids) =
-            setup_conversation_channel(&svc, "flux://ch-unproc", true, 5);
+        let (ch_id, _, msg_ids) = setup_conversation_channel(&svc, "flux://ch-unproc", true, 5);
 
         // Query 1: all items
         let all_items_query = format!(
@@ -2644,8 +2639,12 @@ mod tests {
 
         // Mark some as processed (add to subgroup)
         let sg_id = "flux://ch-unproc-sg-1";
-        svc.add_link(&make_link(sg_id, "flux://entry_type", "flux://conversation_subgroup"))
-            .unwrap();
+        svc.add_link(&make_link(
+            sg_id,
+            "flux://entry_type",
+            "flux://conversation_subgroup",
+        ))
+        .unwrap();
         svc.add_link(&make_link(sg_id, "flux://has_item", &msg_ids[0]))
             .unwrap();
         svc.add_link(&make_link(sg_id, "flux://has_item", &msg_ids[1]))
@@ -2671,8 +2670,7 @@ mod tests {
         // Tests Query 3 from unprocessedItems — fetching full item data
         // including reifier metadata (author, timestamp)
         let svc = new_service();
-        let (ch_id, _, msg_ids) =
-            setup_conversation_channel(&svc, "flux://ch-data", true, 2);
+        let (ch_id, _, msg_ids) = setup_conversation_channel(&svc, "flux://ch-data", true, 2);
 
         let values_clause = msg_ids
             .iter()
@@ -2741,8 +2739,12 @@ mod tests {
             "did:key:alice",
         );
         svc.add_link(&msg1).unwrap();
-        svc.add_link(&make_link("flux://ch-old-msg", "flux://entry_type", "flux://has_message"))
-            .unwrap();
+        svc.add_link(&make_link(
+            "flux://ch-old-msg",
+            "flux://entry_type",
+            "flux://has_message",
+        ))
+        .unwrap();
 
         // Channel 2: newer messages
         let ch2 = "flux://ch-new";
@@ -2758,8 +2760,12 @@ mod tests {
             "did:key:bob",
         );
         svc.add_link(&msg2).unwrap();
-        svc.add_link(&make_link("flux://ch-new-msg", "flux://entry_type", "flux://has_message"))
-            .unwrap();
+        svc.add_link(&make_link(
+            "flux://ch-new-msg",
+            "flux://entry_type",
+            "flux://has_message",
+        ))
+        .unwrap();
 
         let query = r#"
             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -2828,8 +2834,12 @@ mod tests {
     fn test_parse_literal_custom_function_in_sparql() {
         // Verify the custom function works when called through SPARQL
         let svc = new_service();
-        svc.add_link(&make_link("flux://test", "flux://prop", "literal:string:hello"))
-            .unwrap();
+        svc.add_link(&make_link(
+            "flux://test",
+            "flux://prop",
+            "literal:string:hello",
+        ))
+        .unwrap();
 
         let query = r#"SELECT ?val WHERE {
             <flux://test> <flux://prop> ?raw .
@@ -2849,7 +2859,8 @@ mod tests {
     fn test_parse_literal_bare_true_in_filter() {
         // Verify bare "true" (NamedNode) passes FILTER(STR(parse_literal(...)) = "true")
         let svc = new_service();
-        svc.add_link(&make_link("flux://item", "flux://flag", "true")).unwrap();
+        svc.add_link(&make_link("flux://item", "flux://flag", "true"))
+            .unwrap();
 
         let query = r#"SELECT ?s WHERE {
             ?s <flux://flag> ?val .
