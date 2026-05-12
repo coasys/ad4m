@@ -90,8 +90,9 @@ export class Ad4mClient {
         this.#agentClient.subscribeAppsChanged()
     }
 
-    /** Close all event connections */
+    /** Close all event connections and clear in-memory caches */
     close(): void {
+        this.#agentClient.clearByDidCache()
         this.#apiClient.closeAll()
     }
 }
