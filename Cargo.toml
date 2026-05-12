@@ -29,7 +29,16 @@ swc_config = { git = "https://github.com/coasys/deno.git", branch = "new-v8-dyli
 #kitsune2_bootstrap_client = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
 #kitsune2_bootstrap_client = { path = "../../kitsune2/crates/bootstrap_client" }
 
-# kitsune2 patches no longer needed - holochain 0.7.0-dev.24 uses kitsune2 0.5.0-dev.2 from crates.io
+# Local kitsune2 patches for testing per-space relay registration without auth
+kitsune2 = { path = "../kitsune2/crates/kitsune2" }
+kitsune2_api = { path = "../kitsune2/crates/api" }
+kitsune2_core = { path = "../kitsune2/crates/core" }
+kitsune2_dht = { path = "../kitsune2/crates/dht" }
+kitsune2_gossip = { path = "../kitsune2/crates/gossip" }
+kitsune2_bootstrap_client = { path = "../kitsune2/crates/bootstrap_client" }
+kitsune2_bootstrap_srv = { path = "../kitsune2/crates/bootstrap_srv" }
+kitsune2_transport_iroh = { path = "../kitsune2/crates/transport_iroh" }
+kitsune2_transport_tx5 = { path = "../kitsune2/crates/transport_tx5" }
 #kitsune2 = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
 #kitsune2_api = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
 #kitsune2_bootstrap_client = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
