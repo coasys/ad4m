@@ -380,10 +380,15 @@ export async function isExecutorRunning(
       },
     ),
     probe(
-      `${httpUrl}/api/v1/agent/status`,
+      // Root info endpoint — only HTTP route guaranteed to be reachable.
+      // All AD4M operations now go through the WebSocket at /api/v1/ws;
+      // the HTTP surface is intentionally minimal (`/`, `/health`, WS upgrades,
+      // and the audio transcription feed). See rust-executor/src/api/mod.rs.
+      `${httpUrl.replace(/\/+$/, "")}/`,
       { method: "GET" },
-      // Any JSON response (even an auth error) confirms an executor is listening
-      (json) => json != null,
+      // Positively identify the listener as AD4M Executor rather than
+      // accepting any random HTTP 200 on port 12000.
+      (json) => json != null && json.name === "AD4M Executor",
     ),
   ]);
 
