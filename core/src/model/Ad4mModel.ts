@@ -857,7 +857,11 @@ export class Ad4mModel {
       enrichShapeForIncludes(metadata, query.include, allRelMeta);
     }
 
-    // Pre-compute conformance getters (with where-clause support)
+    // Pre-compute conformance getters for Rust-side evaluation.
+    // Where clauses are NOT compiled into getter SPARQL because stored
+    // property values are signed expression envelopes (literal:json:...),
+    // not simple literal:string:X values. Instead, where clauses are
+    // attached as metadata for Rust-side post-evaluation filtering.
     {
       const allRelMeta = getRelationsMetadata(this as any);
       for (const [relName, relMeta] of Object.entries(metadata.relations)) {
@@ -869,40 +873,29 @@ export class Ad4mModel {
           const TargetClass = meta.target();
           const filter = buildConformanceFilter(meta.predicate, TargetClass);
 
-          // Compile where clauses to SPARQL when all target properties use
-          // literal encoding (literal:string:X etc.) which is SPARQL-matchable.
-          // Properties with a non-literal resolveLanguage store expression hashes
-          // that can't be matched by value in SPARQL.
-          let whereConditions: string[] = [];
+          if (filter) {
+            rel.getter = filter.getter;
+          }
+
+          // Attach where-clause metadata for Rust-side post-getter filtering
           if (rel.where) {
             try {
               const targetMetadata = (TargetClass as any).getModelMetadata?.() ?? null;
-              let allSparqlFilterable = true;
               if (targetMetadata) {
+                const predicates: Record<string, string> = {};
                 for (const propName of Object.keys(rel.where)) {
                   if (['id', 'author', 'timestamp'].includes(propName)) continue;
                   const propMeta = targetMetadata.properties[propName];
-                  if (propMeta?.resolveLanguage && propMeta.resolveLanguage !== 'literal') {
-                    allSparqlFilterable = false;
-                    break;
+                  if (propMeta?.predicate) {
+                    predicates[propName] = propMeta.predicate;
                   }
                 }
-              }
-              if (allSparqlFilterable) {
-                whereConditions = compileWhereClause(rel.where, targetMetadata);
+                if (Object.keys(predicates).length > 0) {
+                  rel.whereFilter = rel.where;
+                  rel.wherePredicates = predicates;
+                }
               }
             } catch (_) {}
-          }
-
-          if (filter) {
-            let getter = filter.getter;
-            if (whereConditions.length > 0) {
-              getter = getter.replace(/ \}$/, ` ${whereConditions.join(' ')} }`);
-            }
-            rel.getter = getter;
-          } else if (whereConditions.length > 0) {
-            const escapedPred = meta.predicate.replace(/[<>"{}|\\^`\u0000-\u0020]/g, '');
-            rel.getter = `SELECT ?target WHERE { <Base> <${escapedPred}> ?target . ${whereConditions.join(' ')} }`;
           }
         } catch (_) {}
       }
@@ -1044,42 +1037,31 @@ export class Ad4mModel {
           const TargetClass = meta.target();
           const filter = buildConformanceFilter(meta.predicate, TargetClass);
 
-          // Compile where clauses to SPARQL when all target properties use
-          // literal encoding (literal:string:X etc.) which is SPARQL-matchable.
-          // Properties with a non-literal resolveLanguage store expression hashes
-          // that can't be matched by value in SPARQL.
-          let whereConditions: string[] = [];
+          if (filter) {
+            rel.getter = filter.getter;
+          }
+
+          // Attach where-clause metadata for Rust-side post-getter filtering.
+          // Property values are signed expression envelopes (literal:json:...)
+          // and cannot be matched by SPARQL FILTER on the raw IRI.
           if (rel.where) {
             try {
               const targetMetadata = (TargetClass as any).getModelMetadata?.() ?? null;
-              let allSparqlFilterable = true;
               if (targetMetadata) {
+                const predicates: Record<string, string> = {};
                 for (const propName of Object.keys(rel.where)) {
                   if (['id', 'author', 'timestamp'].includes(propName)) continue;
                   const propMeta = targetMetadata.properties[propName];
-                  if (propMeta?.resolveLanguage && propMeta.resolveLanguage !== 'literal') {
-                    allSparqlFilterable = false;
-                    break;
+                  if (propMeta?.predicate) {
+                    predicates[propName] = propMeta.predicate;
                   }
                 }
-              }
-              if (allSparqlFilterable) {
-                whereConditions = compileWhereClause(rel.where, targetMetadata);
+                if (Object.keys(predicates).length > 0) {
+                  rel.whereFilter = rel.where;
+                  rel.wherePredicates = predicates;
+                }
               }
             } catch (_) { /* target metadata unavailable */ }
-          }
-
-          if (filter) {
-            let getter = filter.getter;
-            if (whereConditions.length > 0) {
-              // Append where conditions before the closing }
-              getter = getter.replace(/ \}$/, ` ${whereConditions.join(' ')} }`);
-            }
-            rel.getter = getter;
-          } else if (whereConditions.length > 0) {
-            // No conformance filter but where clause exists — build getter from where alone
-            const escapedPred = meta.predicate.replace(/[<>"{}|\\^`\u0000-\u0020]/g, '');
-            rel.getter = `SELECT ?target WHERE { <Base> <${escapedPred}> ?target . ${whereConditions.join(' ')} }`;
           }
         } catch (e) {
           // Target class may not be available; skip silently
@@ -1092,14 +1074,6 @@ export class Ad4mModel {
     // the TS decorators are the definitive source of truth.
     const shapeJson = JSON.stringify(metadata);
     const queryJson = JSON.stringify(queryInput);
-
-    // TEMP DEBUG: Log getters with where-clause filters to diagnose CI failure
-    for (const [relName, relMeta] of Object.entries(metadata.relations)) {
-      const rel = relMeta as any;
-      if (rel.where) {
-        console.log(`[MODEL_QUERY_DEBUG] relation="${relName}" getter=${rel.getter ?? 'NONE'} where=${JSON.stringify(rel.where)}`);
-      }
-    }
 
     const result = await perspective.modelQuery(className, queryJson, shapeJson);
 
@@ -2173,7 +2147,24 @@ export class Ad4mModel {
    * @param name  - Class name to assign (e.g. "Channel")
    * @returns Generated Ad4mModel subclass, ready for querying
    */
-  static fromSHACL(shape: SHACLShape, name: string): typeof Ad4mModel {
+  /**
+   * Synthesise an `Ad4mModel` subclass from a SHACL shape.
+   *
+   * @param shape           - The SHACL shape to synthesise from.
+   * @param name            - The model name (e.g. "Channel").
+   * @param classResolver   - Optional thunk factory.  When provided, any collection
+   *   property that carries a `sh:class` URI will have its `target` wired up lazily:
+   *   `target: () => classResolver(localName)`.  Because `target` is only called at
+   *   query time (inside `enrichShapeForIncludes` / `jsonToModelInstance`), the
+   *   resolver just needs to return the correct class by the time a query runs —
+   *   making it safe to pass a closure over a registry object that is still being
+   *   populated (e.g. the `result` record inside `getModelClasses`).
+   */
+  static fromSHACL(
+    shape: SHACLShape,
+    name: string,
+    classResolver?: (localName: string) => typeof Ad4mModel | undefined,
+  ): typeof Ad4mModel {
     const DynamicModelClass = class extends (this as any) {} as unknown as typeof Ad4mModel;
     (DynamicModelClass as any).className = name;
     (DynamicModelClass.prototype as any).className = name;
@@ -2218,9 +2209,20 @@ export class Ad4mModel {
       const isCollection = prop.maxCount === undefined || prop.maxCount > 1;
 
       if (isCollection) {
+        // Derive a lazy `target` thunk when a sh:class URI is present and a
+        // classResolver was supplied.  The thunk is evaluated at query time so
+        // it is safe even if the target class hasn't been registered yet.
+        let targetThunk: (() => typeof Ad4mModel) | undefined;
+        if (prop.class && classResolver) {
+          const sep = Math.max(prop.class.lastIndexOf('#'), prop.class.lastIndexOf('/'));
+          const localName = sep >= 0 ? prop.class.slice(sep + 1) : prop.class;
+          targetThunk = () => classResolver(localName) as typeof Ad4mModel;
+        }
+
         setRelationRegistryEntry(DynamicModelClass, prop.name, {
           predicate: prop.path,
           kind: 'hasMany',
+          ...(targetThunk !== undefined && { target: targetThunk }),
           ...(prop.local !== undefined && { local: prop.local }),
           ...(prop.getter !== undefined && { getter: prop.getter }),
         });

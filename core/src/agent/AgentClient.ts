@@ -14,6 +14,7 @@ import { AgentStatus } from "./AgentStatus";
 import { LinkMutations, LinkExpression } from "../links/Links";
 import { PerspectiveClient } from "../perspectives/PerspectiveClient";
 import { VerificationRequestResult } from "../runtime/RuntimeTypes";
+import { PersistentCache, createPersistentCache } from "../cache/PersistentCache";
 import type {
   GenerateAgentRequest,
   ImportAgentRequest,
@@ -48,6 +49,16 @@ export class AgentClient {
   #computeLogUpdatedCallbacks: ComputeLogUpdatedCallback[];
   #unsubscribers: (() => void)[];
 
+  // ── byDID cache ────────────────────────────────────────────────────
+  // L1: in-memory promise cache with timestamps for TTL
+  #memCache = new Map<string, { promise: Promise<Agent>; ts: number }>();
+  // L2: persistent cache (IndexedDB in browser, NullCache in Node)
+  #persistent: PersistentCache<Agent>;
+  // Self-DID for event-driven invalidation (no TTL for own profile)
+  #selfDid: string | null = null;
+  /** TTL for remote (non-self) agent profiles in L1 cache (ms). */
+  static REMOTE_AGENT_TTL_MS = 5 * 60_000; // 5 minutes
+
   constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedApiClient?: ApiClient) {
     this.#baseUrl = baseUrl;
     this.#token = token;
@@ -58,6 +69,7 @@ export class AgentClient {
     this.#hostingUserInfoChangedCallbacks = [];
     this.#computeLogUpdatedCallbacks = [];
     this.#unsubscribers = [];
+    this.#persistent = createPersistentCache<Agent>('ad4m-agent-cache', 'agents');
 
     if (subscribe) {
       this.subscribeAgentUpdated();
@@ -99,7 +111,66 @@ export class AgentClient {
   }
 
   async byDID(did: string): Promise<Agent> {
-    return this.#apiClient.call<Agent>('agent.byDid', { did });
+    const now = Date.now();
+    const cached = this.#memCache.get(did);
+
+    if (cached) {
+      const isSelf = did === this.#selfDid;
+      // Self-DID: L1 always valid (event-driven invalidation)
+      // Remote DID: L1 valid within TTL
+      if (isSelf || (now - cached.ts) < AgentClient.REMOTE_AGENT_TTL_MS) {
+        return cached.promise;
+      }
+    }
+
+    // Deduplicate: store the promise immediately so concurrent calls share one RPC
+    const promise = (async () => {
+      // L2: check persistent cache before network
+      const persisted = await this.#persistent.get(did);
+      if (persisted) {
+        return persisted;
+      }
+
+      // L3: network fetch
+      const result = await this.#apiClient.call<Agent>('agent.byDid', { did });
+      this.#persistent.put(did, result); // fire-and-forget write to L2
+      return result;
+    })();
+
+    this.#memCache.set(did, { promise, ts: now });
+
+    // Clean up on failure so next call retries
+    promise.catch(() => {
+      if (this.#memCache.get(did)?.promise === promise) {
+        this.#memCache.delete(did);
+      }
+    });
+
+    return promise;
+  }
+
+  /**
+   * Set the current agent's own DID.
+   * The self-DID receives event-driven invalidation and is never TTL-expired.
+   */
+  setSelfDid(did: string): void {
+    this.#selfDid = did;
+  }
+
+  /**
+   * Invalidate a specific DID's cache entry in both L1 and L2.
+   */
+  invalidateByDid(did: string): void {
+    this.#memCache.delete(did);
+    this.#persistent.delete(did); // fire-and-forget
+  }
+
+  /**
+   * Clear the entire L1 (memory) byDID cache.
+   * L2 (IndexedDB) is preserved — agent data remains valid across sessions.
+   */
+  clearByDidCache(): void {
+    this.#memCache.clear();
   }
 
   async updatePublicPerspective(perspective: PerspectiveInput): Promise<Agent> {
@@ -175,7 +246,18 @@ export class AgentClient {
   subscribeAgentUpdated() {
     const unsub = this.#apiClient.subscribe((data) => {
       if (data.type === 'agent-updated') {
-        this.#updatedCallbacks.forEach((cb) => cb((data.agent || data) as Agent));
+        const agent = (data.agent || data) as Agent;
+
+        // Update L1 and L2 cache from the event payload
+        if (agent.did) {
+          this.#memCache.set(agent.did, {
+            promise: Promise.resolve(agent),
+            ts: Date.now(),
+          });
+          this.#persistent.put(agent.did, agent); // fire-and-forget
+        }
+
+        this.#updatedCallbacks.forEach((cb) => cb(agent));
       }
     });
     this.#unsubscribers.push(unsub);

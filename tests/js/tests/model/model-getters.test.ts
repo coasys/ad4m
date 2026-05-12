@@ -228,31 +228,11 @@ describe("Ad4mModel — Where-Clause Relation Filtering", function () {
       );
     }
 
-    // DIAGNOSTIC: dump actual SPARQL links for active1 to see stored format
-    const sparqlDump = await perspective.querySparql(
-      `SELECT ?p ?o WHERE { <${active1.id}> ?p ?o . } LIMIT 20`
-    );
-    console.log("[WHERE_TEST_DEBUG] active1 links:", JSON.stringify(sparqlDump, null, 2));
-
-    // Also dump board→task links
-    const boardLinks = await perspective.querySparql(
-      `SELECT ?target WHERE { <${board.id}> <board://has_task> ?target . }`
-    );
-    console.log("[WHERE_TEST_DEBUG] board->task links:", JSON.stringify(boardLinks));
-
     // Retrieve the board and check filtered vs unfiltered relations
     const retrieved = new TaskBoard(perspective, board.id);
     await retrieved.get();
 
-    // DIAGNOSTIC: log actual values so CI output shows what's happening
-    console.log("[WHERE_TEST_DEBUG] activeTasks:", JSON.stringify(retrieved.activeTasks));
-    console.log("[WHERE_TEST_DEBUG] allTasks:", JSON.stringify(retrieved.allTasks));
-    console.log("[WHERE_TEST_DEBUG] board.id:", board.id);
-    console.log("[WHERE_TEST_DEBUG] active1.id:", active1.id);
-    console.log("[WHERE_TEST_DEBUG] active2.id:", active2.id);
-    console.log("[WHERE_TEST_DEBUG] done.id:", done.id);
-
-    // allTasks (no where filter) should have all 3 — check first to isolate conformance vs where-clause
+    // allTasks (no where filter) should have all 3
     expect(retrieved.allTasks).to.have.lengthOf(3);
 
     // activeTasks (where: status = "active") should only have 2

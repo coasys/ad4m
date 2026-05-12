@@ -4022,15 +4022,6 @@ impl PerspectiveInstance {
             };
 
             if let Some(last_result) = existing_result {
-                let result_string = format!("#init#{}", last_result);
-                for delay in [100, 1000] {
-                    self.send_subscription_update(
-                        existing_id.clone(),
-                        result_string.clone(),
-                        Some(Duration::from_millis(delay)),
-                    )
-                    .await;
-                }
                 return Ok((existing_id, last_result));
             }
         }
@@ -4072,17 +4063,6 @@ impl PerspectiveInstance {
             .lock()
             .await
             .insert(subscription_id.clone(), subscribed_query);
-
-        // Send initial result after 3 delays
-        let init_string = format!("#init#{}", result_string);
-        for delay in [100, 1000] {
-            self.send_subscription_update(
-                subscription_id.clone(),
-                init_string.clone(),
-                Some(Duration::from_millis(delay)),
-            )
-            .await;
-        }
 
         Ok((subscription_id, result_string))
     }
@@ -4155,15 +4135,6 @@ impl PerspectiveInstance {
                     q.last_keepalive = Instant::now();
                 }
             }
-            let init_string = format!("#init#{}", initial_result);
-            for delay in [100, 1000] {
-                self.send_subscription_update(
-                    existing_id.clone(),
-                    init_string.clone(),
-                    Some(Duration::from_millis(delay)),
-                )
-                .await;
-            }
             return Ok((existing_id, initial_result));
         }
 
@@ -4186,17 +4157,6 @@ impl PerspectiveInstance {
             .lock()
             .await
             .insert(subscription_id.clone(), subscribed_query);
-
-        // 5. Send initial result
-        let init_string = format!("#init#{}", initial_result);
-        for delay in [100, 1000] {
-            self.send_subscription_update(
-                subscription_id.clone(),
-                init_string.clone(),
-                Some(Duration::from_millis(delay)),
-            )
-            .await;
-        }
 
         Ok((subscription_id, initial_result))
     }

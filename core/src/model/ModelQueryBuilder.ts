@@ -409,10 +409,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
       subscriptionId,
       (rawResult: any) => {
-        // Skip delayed #init# messages — initial data was already returned
-        // synchronously from modelSubscribe(). Late init messages contain stale
-        // data that would overwrite real subscription updates.
-        if (rawResult && rawResult.isInit) return;
         try {
           const results = parseResults(rawResult);
           const fp = buildFingerprint(results);
@@ -537,7 +533,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
       subscriptionId,
       (rawResult: any) => {
-        if (rawResult && rawResult.isInit) return;
         try {
           callback(parseCount(rawResult));
         } catch (e) {
@@ -674,7 +669,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
       subscriptionId,
       (rawResult: any) => {
-        if (rawResult && rawResult.isInit) return;
         processResults().catch(e => console.error('Paginate subscription error:', e));
       },
     );
