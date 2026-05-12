@@ -27,7 +27,7 @@ js-sys = "0.3.82"
 
 hdi = { version = "0.8.0-dev.11", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.24-space-override-coasys" }
 hdk = { version = "0.7.0-dev.16", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.24-space-override-coasys" }
-holochain_serialized_bytes = "=0.0.56"
+holochain_serialized_bytes = "=0.0.57"
 
 [features]
 test = []

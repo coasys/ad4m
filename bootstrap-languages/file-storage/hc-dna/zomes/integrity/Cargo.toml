@@ -17,7 +17,7 @@ getrandom = { version = "0.3" }
 
 hdi = { version = "0.8.0-dev.11", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.24-space-override-coasys" }
 hdk = { version = "0.7.0-dev.16", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.24-space-override-coasys" }
-holochain_serialized_bytes = "=0.0.56"
+holochain_serialized_bytes = "=0.0.57"
 holo_hash =  { version = "0.7.0-dev.9", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.24-space-override-coasys" }
 
 [target.wasm32-unknown-unknown]

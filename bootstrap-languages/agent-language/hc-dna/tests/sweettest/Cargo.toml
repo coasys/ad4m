@@ -17,7 +17,7 @@ holochain = { version = "0.7.0-dev.24", git = "https://github.com/coasys/holocha
 hdk = { version = "0.7.0-dev.16", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.24-space-override-coasys" }
 hdi = { version = "0.8.0-dev.11", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.24-space-override-coasys" }
 holochain_types = { version = "0.7.0-dev.23", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.24-space-override-coasys" }
-holochain_serialized_bytes = "=0.0.56"
+holochain_serialized_bytes = "=0.0.57"
 holochain_zome_types = { version = "0.7.0-dev.15", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.24-space-override-coasys" }
 
 # Shared types from the integrity zome
