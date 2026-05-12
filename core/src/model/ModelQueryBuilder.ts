@@ -391,8 +391,15 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       return (ctor as any).parseModelResult(this.perspective, raw, this.queryParams.include, this.queryParams.properties);
     };
 
-    // Parse initial results
-    const initialResults = parseResults(initialModelResult);
+    // Resolve non-literal (file-language) properties — handles both raw URI strings
+    // and already-resolved FileData objects returned by the Rust executor.
+    const resolveAndReturn = async (instances: T[]): Promise<T[]> => {
+      await (ctor as any).resolveNonLiteralProps(this.perspective, instances);
+      return instances;
+    };
+
+    // Parse initial results (with non-literal resolution)
+    const initialResults = await resolveAndReturn(parseResults(initialModelResult));
 
     // Track last emitted result fingerprint to suppress duplicate callbacks
     let lastResultFingerprint: string | null = null;
@@ -410,11 +417,14 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       subscriptionId,
       (rawResult: any) => {
         try {
-          const results = parseResults(rawResult);
-          const fp = buildFingerprint(results);
-          if (fp === lastResultFingerprint) return;
-          lastResultFingerprint = fp;
-          callback(results);
+          resolveAndReturn(parseResults(rawResult)).then((results) => {
+            const fp = buildFingerprint(results);
+            if (fp === lastResultFingerprint) return;
+            lastResultFingerprint = fp;
+            callback(results);
+          }).catch((e) => {
+            console.error('Model subscription update resolve error:', e);
+          });
         } catch (e) {
           console.error('Model subscription update parse error:', e);
         }
