@@ -384,7 +384,11 @@ export default class Ad4mConnect extends EventTarget {
           // Set connection details from parent (after successful validation)
           this.port = parsedPort;
           this.token = normalizedToken;
-          this.url = `http://localhost:${parsedPort}`;
+          // Use the URL provided by the parent if valid (e.g. remote host), otherwise fall back to localhost
+          const rawUrl = event.data.url;
+          this.url = (rawUrl && typeof rawUrl === 'string' && rawUrl.startsWith('http'))
+            ? rawUrl
+            : `http://localhost:${parsedPort}`;
           
           // Store in localStorage for persistence (avoid storing undefined or stale credentials)
           setLocal('ad4m-port', parsedPort.toString());
