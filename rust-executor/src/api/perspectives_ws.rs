@@ -549,27 +549,55 @@ async fn add_sdna(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: AddSdnaRequest = serde_json::from_value(params.clone())
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
-    let sdna_type = SdnaType::from_string(&body.sdna_type)
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid SDNA type: {}", e)))?;
+    // Batch mode: entries array present
+    if let Some(entries_val) = params.get("entries") {
+        let entries: Vec<AddSdnaRequest> = serde_json::from_value(entries_val.clone())
+            .map_err(|e| WsRpcError::bad_request(format!("Invalid entries: {}", e)))?;
 
-    let result = perspective
-        .add_sdna(
-            body.name,
-            body.sdna_code.unwrap_or_default(),
-            sdna_type,
-            body.shacl_json,
-            &agent_context,
-        )
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        let batch: Vec<(String, String, SdnaType, Option<String>)> = entries
+            .into_iter()
+            .map(|entry| {
+                let sdna_type = SdnaType::from_string(&entry.sdna_type)
+                    .map_err(|e| WsRpcError::bad_request(format!("Invalid SDNA type: {}", e)))?;
+                Ok((
+                    entry.name,
+                    entry.sdna_code.unwrap_or_default(),
+                    sdna_type,
+                    entry.shacl_json,
+                ))
+            })
+            .collect::<Result<Vec<_>, WsRpcError>>()?;
 
-    Ok(Value::Bool(result))
+        let results = perspective
+            .add_sdna_batch(batch, &agent_context)
+            .await
+            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+        Ok(serde_json::to_value(results).unwrap())
+    } else {
+        // Single-entry mode (backward compatible)
+        let body: AddSdnaRequest = serde_json::from_value(params.clone())
+            .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+        let sdna_type = SdnaType::from_string(&body.sdna_type)
+            .map_err(|e| WsRpcError::bad_request(format!("Invalid SDNA type: {}", e)))?;
+
+        let result = perspective
+            .add_sdna(
+                body.name,
+                body.sdna_code.unwrap_or_default(),
+                sdna_type,
+                body.shacl_json,
+                &agent_context,
+            )
+            .await
+            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+        Ok(Value::Bool(result))
+    }
 }
 
 async fn execute_commands(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {

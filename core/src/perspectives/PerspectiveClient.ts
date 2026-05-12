@@ -279,6 +279,12 @@ export class PerspectiveClient {
         )
     }
 
+    async addSdnaBatch(uuid: string, entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[]): Promise<boolean[]> {
+        return this.#apiClient.call<boolean[]>(
+            'perspective.addSdna', { uuid, entries: entries.map(e => ({ ...e, sdnaCode: e.sdnaCode || "" })) }
+        )
+    }
+
     async executeCommands(uuid: string, commands: string, expression: string, parameters: string, batchId?: string): Promise<boolean> {
         return this.#apiClient.call<boolean>(
             'perspective.executeCommands', { uuid, commands, expression, parameters, batchId }

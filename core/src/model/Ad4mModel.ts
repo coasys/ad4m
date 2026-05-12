@@ -2069,6 +2069,26 @@ export class Ad4mModel {
   }
 
   /**
+   * Batch-registers multiple model classes on a perspective in a single RPC call.
+   * This is significantly faster than calling `register()` on each model individually
+   * because it eliminates N-1 round-trips and mutex acquisitions.
+   *
+   * @param perspective - The perspective to register the models on
+   * @param models - Array of Ad4mModel subclasses to register
+   *
+   * @example
+   * ```typescript
+   * await Ad4mModel.registerAll(perspective, [Community, Channel, Message, Task]);
+   * ```
+   */
+  static async registerAll(
+    perspective: PerspectiveProxy,
+    models: (typeof Ad4mModel)[],
+  ): Promise<void> {
+    await perspective.ensureSubjectClasses(models);
+  }
+
+  /**
    * Executes a set of model operations inside a single batch (transaction).
    *
    * All `save`, `update`, and `delete` calls made via the provided `batchId`

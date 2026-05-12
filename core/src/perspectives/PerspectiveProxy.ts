@@ -1163,6 +1163,43 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Batch variant of addSdna — registers multiple SDNA entries in a single RPC call.
+     * Acquires the Rust-side mutex once for the entire batch.
+     */
+    async addSdnaAll(entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[]): Promise<boolean[]> {
+        return this.#client.addSdnaBatch(this.#handle.uuid, entries)
+    }
+
+    /**
+     * Batch-registers multiple model classes as SHACL subject classes in a single RPC call.
+     * Skips classes already registered on this perspective instance.
+     */
+    async ensureSubjectClasses(jsClasses: any[]): Promise<void> {
+        const entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[] = [];
+        for (const jsClass of jsClasses) {
+            const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
+            if (this.#ensuredSubjectClasses.has(className)) continue;
+
+            if (!jsClass.generateSHACL) {
+                throw new Error(`Class ${jsClass.name} must have generateSHACL(). Use @Model decorator.`);
+            }
+
+            const { shape } = jsClass.generateSHACL();
+            entries.push({
+                name: className,
+                sdnaType: 'subject_class',
+                shaclJson: JSON.stringify(shape.toJSON()),
+            });
+        }
+        if (entries.length === 0) return;
+
+        await this.addSdnaAll(entries);
+        for (const entry of entries) {
+            this.#ensuredSubjectClasses.add(entry.name);
+        }
+    }
+
+    /**
      * Adds a subject class to the perspective.
      * Alias for addSdna() with sdnaType='subject_class'.
      */

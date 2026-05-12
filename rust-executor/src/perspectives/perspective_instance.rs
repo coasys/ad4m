@@ -1725,15 +1725,45 @@ impl PerspectiveInstance {
     pub async fn add_sdna(
         &mut self,
         name: String,
+        sdna_code: String,
+        sdna_type: SdnaType,
+        shacl_json: Option<String>,
+        context: &AgentContext,
+    ) -> Result<bool, AnyError> {
+        let mutex = self.sdna_change_mutex.clone();
+        let _guard = mutex.lock().await;
+        self.add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
+            .await
+    }
+
+    /// Batch variant: registers multiple SDNA entries under a single mutex acquisition.
+    pub async fn add_sdna_batch(
+        &mut self,
+        entries: Vec<(String, String, SdnaType, Option<String>)>,
+        context: &AgentContext,
+    ) -> Result<Vec<bool>, AnyError> {
+        let mutex = self.sdna_change_mutex.clone();
+        let _guard = mutex.lock().await;
+
+        let mut results = Vec::with_capacity(entries.len());
+        for (name, sdna_code, sdna_type, shacl_json) in entries {
+            let result = self
+                .add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
+                .await?;
+            results.push(result);
+        }
+        Ok(results)
+    }
+
+    /// Inner implementation of add_sdna without mutex acquisition.
+    async fn add_sdna_inner(
+        &mut self,
+        name: String,
         mut sdna_code: String,
         sdna_type: SdnaType,
         shacl_json: Option<String>,
         context: &AgentContext,
     ) -> Result<bool, AnyError> {
-        //let mut added = false;
-        let mutex = self.sdna_change_mutex.clone();
-        let _guard = mutex.lock().await;
-
         let predicate = match sdna_type {
             SdnaType::SubjectClass => "ad4m://has_subject_class",
             SdnaType::Flow => "ad4m://has_flow",
@@ -1783,22 +1813,6 @@ impl PerspectiveInstance {
                 .expect("just initialized Literal couldn't be turned into URL");
         }
 
-        // let links = self
-        //     .get_links(&LinkQuery {
-        //         source: Some("ad4m://self".to_string()),
-        //         predicate: Some(predicate.to_string()),
-        //         target: Some(literal_name.clone()),
-        //         from_date: None,
-        //         until_date: None,
-        //         limit: None,
-        //     })
-        //     .await?;
-        // let author = agent::did();
-        // let links = links
-        //     .into_iter()
-        //     .filter(|l| l.author == author)
-        //     .collect::<Vec<DecoratedLinkExpression>>();
-        //if links.is_empty() {
         sdna_links.push(Link {
             source: "ad4m://self".to_string(),
             predicate: Some(predicate.to_string()),
@@ -1824,9 +1838,6 @@ impl PerspectiveInstance {
                 .await?;
         }
 
-        //added = true;
-        //}
-        // Mutex guard is automatically dropped here
         Ok(true)
     }
 
