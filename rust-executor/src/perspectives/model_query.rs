@@ -3176,6 +3176,615 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // parse_literal_value: signed expression envelopes
+    //
+    // The #1 integration test failure was caused by property values stored as
+    // signed expression envelopes: literal:json:<percent_encoded_signed_JSON>.
+    // These tests cover the full decoding path that was silently failing.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_literal_value_json_signed_expression() {
+        // This is the exact format stored by createExpression("active", "literal"):
+        // literal:json:<percent_encoded({"author":"...","timestamp":"...","data":"active","proof":{...}})>
+        let signed = serde_json::json!({
+            "author": "did:key:z6MkfR",
+            "timestamp": "1700000000000",
+            "data": "active",
+            "proof": {"key": "k", "signature": "s"}
+        });
+        let signed_str = serde_json::to_string(&signed).unwrap();
+        let encoded = urlencoding::encode(&signed_str);
+        let iri = format!("literal:json:{}", encoded);
+
+        let parsed = parse_literal_value(&iri);
+        assert_eq!(
+            parsed,
+            Value::String("active".to_string()),
+            "literal:json with signed expression should extract data field"
+        );
+    }
+
+    #[test]
+    fn test_parse_literal_value_json_signed_expression_numeric_data() {
+        // data field is a number, not a string
+        let signed = serde_json::json!({
+            "author": "did:key:z6MkfR",
+            "timestamp": "1700000000000",
+            "data": 42,
+            "proof": {"key": "k", "signature": "s"}
+        });
+        let signed_str = serde_json::to_string(&signed).unwrap();
+        let encoded = urlencoding::encode(&signed_str);
+        let iri = format!("literal:json:{}", encoded);
+
+        let parsed = parse_literal_value(&iri);
+        assert_eq!(parsed, json!(42), "Should extract numeric data field");
+    }
+
+    #[test]
+    fn test_parse_literal_value_json_signed_expression_object_data() {
+        // data field is a JSON object
+        let signed = serde_json::json!({
+            "author": "did:key:z6MkfR",
+            "timestamp": "1700000000000",
+            "data": {"name": "Test", "count": 5},
+            "proof": {"key": "k", "signature": "s"}
+        });
+        let signed_str = serde_json::to_string(&signed).unwrap();
+        let encoded = urlencoding::encode(&signed_str);
+        let iri = format!("literal:json:{}", encoded);
+
+        let parsed = parse_literal_value(&iri);
+        assert_eq!(
+            parsed,
+            json!({"name": "Test", "count": 5}),
+            "Should extract object data field"
+        );
+    }
+
+    #[test]
+    fn test_parse_literal_value_json_no_data_field() {
+        // literal:json with valid JSON but no "data" field -> returns whole object
+        let obj = serde_json::json!({"name": "Test", "value": 123});
+        let obj_str = serde_json::to_string(&obj).unwrap();
+        let encoded = urlencoding::encode(&obj_str);
+        let iri = format!("literal:json:{}", encoded);
+
+        let parsed = parse_literal_value(&iri);
+        assert_eq!(parsed, obj, "Should return full JSON when no data field");
+    }
+
+    #[test]
+    fn test_parse_literal_value_json_invalid_json() {
+        // literal:json with invalid JSON -> returns raw string
+        let iri = "literal:json:not%20valid%20json";
+        let parsed = parse_literal_value(iri);
+        assert_eq!(parsed, Value::String("not valid json".to_string()));
+    }
+
+    #[test]
+    fn test_parse_literal_value_string_signed_expression() {
+        // literal:string: with a JSON signed expression as content
+        let signed = serde_json::json!({
+            "author": "did:key:z6MkfR",
+            "timestamp": "1700000000000",
+            "data": "hello",
+            "proof": {"key": "k", "signature": "s"}
+        });
+        let signed_str = serde_json::to_string(&signed).unwrap();
+        let encoded = urlencoding::encode(&signed_str);
+        let iri = format!("literal:string:{}", encoded);
+
+        let parsed = parse_literal_value(&iri);
+        assert_eq!(
+            parsed,
+            Value::String("hello".to_string()),
+            "literal:string with signed expression JSON should extract data"
+        );
+    }
+
+    #[test]
+    fn test_parse_literal_value_number_unparseable() {
+        assert_eq!(
+            parse_literal_value("literal:number:not_a_number"),
+            Value::String("not_a_number".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_literal_value_boolean_invalid() {
+        assert_eq!(
+            parse_literal_value("literal:boolean:yes"),
+            Value::String("yes".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_literal_value_unknown_subtype() {
+        // literal: prefix but unknown subtype -> returns full URI as string
+        assert_eq!(
+            parse_literal_value("literal:unknown:foo"),
+            Value::String("literal:unknown:foo".to_string())
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // matches_condition: missing variant coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_matches_condition_bool() {
+        assert!(matches_condition(
+            &Value::Bool(true),
+            &WhereCondition::Bool(true)
+        ));
+        assert!(!matches_condition(
+            &Value::Bool(true),
+            &WhereCondition::Bool(false)
+        ));
+        assert!(!matches_condition(
+            &Value::Null,
+            &WhereCondition::Bool(true)
+        ));
+    }
+
+    #[test]
+    fn test_matches_condition_string_array() {
+        // IN operator
+        let cond = WhereCondition::StringArray(vec!["active".to_string(), "pending".to_string()]);
+        assert!(matches_condition(
+            &Value::String("active".to_string()),
+            &cond
+        ));
+        assert!(matches_condition(
+            &Value::String("pending".to_string()),
+            &cond
+        ));
+        assert!(!matches_condition(
+            &Value::String("done".to_string()),
+            &cond
+        ));
+    }
+
+    #[test]
+    fn test_matches_condition_number_array() {
+        // IN for numbers
+        let cond = WhereCondition::NumberArray(vec![1.0, 2.0, 3.0]);
+        assert!(matches_condition(&Value::Number(2.into()), &cond));
+        assert!(!matches_condition(&Value::Number(4.into()), &cond));
+    }
+
+    #[test]
+    fn test_matches_condition_string_on_null() {
+        assert!(!matches_condition(
+            &Value::Null,
+            &WhereCondition::String("x".to_string())
+        ));
+    }
+
+    #[test]
+    fn test_matches_condition_number_on_null() {
+        assert!(!matches_condition(
+            &Value::Null,
+            &WhereCondition::Number(5.0)
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // matches_ops: additional operator coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_matches_ops_lte_gte() {
+        let val = Value::Number(5.into());
+        // gte: 5 >= 5 is true
+        assert!(matches_ops(
+            &val,
+            &WhereOps {
+                gte: Some(5.0),
+                ..Default::default()
+            }
+        ));
+        // gte: 5 >= 6 is false
+        assert!(!matches_ops(
+            &val,
+            &WhereOps {
+                gte: Some(6.0),
+                ..Default::default()
+            }
+        ));
+        // lte: 5 <= 5 is true
+        assert!(matches_ops(
+            &val,
+            &WhereOps {
+                lte: Some(5.0),
+                ..Default::default()
+            }
+        ));
+        // lte: 5 <= 4 is false
+        assert!(!matches_ops(
+            &val,
+            &WhereOps {
+                lte: Some(4.0),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn test_matches_ops_not_number() {
+        let val = Value::Number(42.into());
+        // not 42 -> false
+        assert!(!matches_ops(
+            &val,
+            &WhereOps {
+                not: Some(Value::Number(42.into())),
+                ..Default::default()
+            }
+        ));
+        // not 43 -> true
+        assert!(matches_ops(
+            &val,
+            &WhereOps {
+                not: Some(Value::Number(43.into())),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn test_matches_ops_not_bool() {
+        assert!(!matches_ops(
+            &Value::Bool(true),
+            &WhereOps {
+                not: Some(Value::Bool(true)),
+                ..Default::default()
+            }
+        ));
+        assert!(matches_ops(
+            &Value::Bool(true),
+            &WhereOps {
+                not: Some(Value::Bool(false)),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn test_matches_ops_not_array() {
+        // NOT IN: value must not be in array
+        let val = Value::String("active".to_string());
+        assert!(!matches_ops(
+            &val,
+            &WhereOps {
+                not: Some(json!(["active", "pending"])),
+                ..Default::default()
+            }
+        ));
+        assert!(matches_ops(
+            &val,
+            &WhereOps {
+                not: Some(json!(["done", "archived"])),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn test_matches_ops_contains_array() {
+        // contains on array value: check if item is in array
+        let val = json!(["apple", "banana", "cherry"]);
+        assert!(matches_ops(
+            &val,
+            &WhereOps {
+                contains: Some(Value::String("banana".to_string())),
+                ..Default::default()
+            }
+        ));
+        assert!(!matches_ops(
+            &val,
+            &WhereOps {
+                contains: Some(Value::String("grape".to_string())),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn test_matches_ops_null_with_numeric_ops() {
+        // Null value with numeric operators should not match
+        assert!(!matches_ops(
+            &Value::Null,
+            &WhereOps {
+                gt: Some(0.0),
+                ..Default::default()
+            }
+        ));
+        assert!(!matches_ops(
+            &Value::Null,
+            &WhereOps {
+                between: Some((0.0, 100.0)),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn test_matches_ops_non_numeric_string_with_numeric_ops() {
+        // Non-numeric string with numeric operator should not match
+        assert!(!matches_ops(
+            &Value::String("hello".to_string()),
+            &WhereOps {
+                gt: Some(0.0),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn test_matches_ops_numeric_string() {
+        // String containing a number should be parsed and compared
+        let val = Value::String("42".to_string());
+        assert!(matches_ops(
+            &val,
+            &WhereOps {
+                gt: Some(40.0),
+                lt: Some(50.0),
+                ..Default::default()
+            }
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // matches_where: multi-condition AND logic
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_matches_where_multiple_conditions() {
+        let instance = json!({
+            "id": "test://1",
+            "name": "Task 1",
+            "status": "active",
+            "priority": 5
+        });
+        let shape = shape(
+            "Task",
+            vec![
+                prop("name", "task://name"),
+                prop("status", "task://status"),
+                prop("priority", "task://priority"),
+            ],
+        );
+
+        // Both conditions match
+        let mut where_clause = HashMap::new();
+        where_clause.insert(
+            "status".to_string(),
+            WhereCondition::String("active".to_string()),
+        );
+        where_clause.insert("priority".to_string(), WhereCondition::Number(5.0));
+        assert!(matches_where(&instance, &where_clause, &shape));
+
+        // First matches, second doesn't
+        let mut where_clause2 = HashMap::new();
+        where_clause2.insert(
+            "status".to_string(),
+            WhereCondition::String("active".to_string()),
+        );
+        where_clause2.insert("priority".to_string(), WhereCondition::Number(10.0));
+        assert!(!matches_where(&instance, &where_clause2, &shape));
+    }
+
+    #[test]
+    fn test_matches_where_skips_id_string() {
+        // id/base with String condition should be skipped (pushed to SPARQL)
+        let instance = json!({"id": "test://1", "name": "X"});
+        let shape = shape("Test", vec![prop("name", "test://name")]);
+
+        let mut where_clause = HashMap::new();
+        where_clause.insert(
+            "id".to_string(),
+            WhereCondition::String("test://1".to_string()),
+        );
+        // Even with a non-matching id, it should pass because String id is skipped
+        let mut where_clause_wrong = HashMap::new();
+        where_clause_wrong.insert(
+            "id".to_string(),
+            WhereCondition::String("test://wrong".to_string()),
+        );
+        assert!(matches_where(&instance, &where_clause_wrong, &shape));
+    }
+
+    #[test]
+    fn test_matches_where_id_ops_not_skipped() {
+        // id with Ops condition should NOT be skipped
+        let instance = json!({"id": "test://1"});
+        let shape = shape("Test", vec![]);
+
+        let mut where_clause = HashMap::new();
+        where_clause.insert(
+            "id".to_string(),
+            WhereCondition::Ops(WhereOps {
+                contains: Some(Value::String("test".to_string())),
+                ..Default::default()
+            }),
+        );
+        assert!(matches_where(&instance, &where_clause, &shape));
+    }
+
+    #[test]
+    fn test_matches_where_skips_collection_string() {
+        // String condition on a collection property should be skipped (pushed to SPARQL)
+        let instance = json!({"id": "test://1", "tags": ["a", "b"]});
+        let shape = shape("Test", vec![relation("tags", "test://tag")]);
+
+        let mut where_clause = HashMap::new();
+        where_clause.insert(
+            "tags".to_string(),
+            WhereCondition::String("nonexistent".to_string()),
+        );
+        // Skipped, so always passes
+        assert!(matches_where(&instance, &where_clause, &shape));
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_where_filter
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_where_filter_string_condition() {
+        let input = json!({"status": "active"});
+        let result = parse_where_filter(&input).unwrap();
+        assert!(matches!(
+            result.get("status"),
+            Some(WhereCondition::String(s)) if s == "active"
+        ));
+    }
+
+    #[test]
+    fn test_parse_where_filter_number_condition() {
+        let input = json!({"priority": 5.0});
+        let result = parse_where_filter(&input).unwrap();
+        assert!(matches!(
+            result.get("priority"),
+            Some(WhereCondition::Number(n)) if (*n - 5.0).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn test_parse_where_filter_bool_condition() {
+        let input = json!({"isActive": true});
+        let result = parse_where_filter(&input).unwrap();
+        assert!(matches!(
+            result.get("isActive"),
+            Some(WhereCondition::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn test_parse_where_filter_ops_condition() {
+        let input = json!({"age": {"gt": 18.0, "lt": 65.0}});
+        let result = parse_where_filter(&input).unwrap();
+        assert!(matches!(result.get("age"), Some(WhereCondition::Ops(_))));
+    }
+
+    #[test]
+    fn test_parse_where_filter_empty_object() {
+        let input = json!({});
+        assert!(parse_where_filter(&input).is_none());
+    }
+
+    #[test]
+    fn test_parse_where_filter_non_object() {
+        let input = json!("not an object");
+        assert!(parse_where_filter(&input).is_none());
+    }
+
+    #[test]
+    fn test_parse_where_filter_multiple_conditions() {
+        let input = json!({"status": "active", "priority": 5.0});
+        let result = parse_where_filter(&input).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_iri: SPARQL injection prevention
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_iri_valid() {
+        assert!(validate_iri("task://status").is_ok());
+        assert!(validate_iri("literal:string:hello").is_ok());
+        assert!(validate_iri("did:key:z6MkfR").is_ok());
+    }
+
+    #[test]
+    fn test_validate_iri_rejects_injection() {
+        assert!(validate_iri("task://status> . <injected://triple").is_err());
+        assert!(validate_iri("<injected>").is_err());
+        assert!(validate_iri("has spaces").is_err());
+        assert!(validate_iri("has\"quotes").is_err());
+        assert!(validate_iri("has{braces}").is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // sort_instances: additional coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sort_instances_desc() {
+        let mut instances = vec![
+            json!({"name": "A", "score": 10}),
+            json!({"name": "B", "score": 30}),
+            json!({"name": "C", "score": 20}),
+        ];
+        sort_instances(
+            &mut instances,
+            &[("score".to_string(), OrderDirection::DESC)],
+        );
+        assert_eq!(instances[0]["score"], 30);
+        assert_eq!(instances[1]["score"], 20);
+        assert_eq!(instances[2]["score"], 10);
+    }
+
+    #[test]
+    fn test_sort_instances_multi_key() {
+        let mut instances = vec![
+            json!({"group": "B", "name": "Z"}),
+            json!({"group": "A", "name": "Y"}),
+            json!({"group": "A", "name": "X"}),
+        ];
+        sort_instances(
+            &mut instances,
+            &[
+                ("group".to_string(), OrderDirection::ASC),
+                ("name".to_string(), OrderDirection::ASC),
+            ],
+        );
+        assert_eq!(instances[0]["group"], "A");
+        assert_eq!(instances[0]["name"], "X");
+        assert_eq!(instances[1]["group"], "A");
+        assert_eq!(instances[1]["name"], "Y");
+        assert_eq!(instances[2]["group"], "B");
+    }
+
+    #[test]
+    fn test_sort_instances_null_pushed_to_end() {
+        let mut instances = vec![
+            json!({"name": "B"}),
+            json!({"name": null}),
+            json!({"name": "A"}),
+        ];
+        sort_instances(&mut instances, &[("name".to_string(), OrderDirection::ASC)]);
+        assert_eq!(instances[0]["name"], "A");
+        assert_eq!(instances[1]["name"], "B");
+        assert!(instances[2]["name"].is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // compare_values: string comparison
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compare_values_string() {
+        assert_eq!(
+            compare_values(
+                &Value::String("apple".to_string()),
+                &Value::String("banana".to_string())
+            ),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_values(
+                &Value::String("same".to_string()),
+                &Value::String("same".to_string())
+            ),
+            Ordering::Equal
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // hydrate_one: shared-predicate regression tests
     //
     // When multiple @HasMany relations share the same predicate (e.g.
@@ -5034,5 +5643,916 @@ mod integration_tests {
                 inst
             );
         }
+    }
+
+    // ===================================================================
+    // Signed-expression where-clause filtering integration tests
+    //
+    // These reproduce the exact scenarios that failed in CI integration
+    // tests (integration-tests-js, integration-tests-model). The root
+    // cause was that property values are stored as signed expression
+    // envelopes (literal:json:{author,timestamp,data,proof}), and
+    // SPARQL FILTER could not match against them.
+    // ===================================================================
+
+    /// Helper: create a signed expression literal IRI for a string value.
+    fn signed_literal(value: &str) -> String {
+        let signed = serde_json::json!({
+            "author": "did:key:z6MkfR",
+            "timestamp": "1700000000000",
+            "data": value,
+            "proof": {"key": "k", "signature": "s"}
+        });
+        let signed_str = serde_json::to_string(&signed).unwrap();
+        let encoded = urlencoding::encode(&signed_str);
+        format!("literal:json:{}", encoded)
+    }
+
+    /// Helper: create a signed expression literal IRI for a numeric value.
+    fn signed_literal_number(value: f64) -> String {
+        let signed = serde_json::json!({
+            "author": "did:key:z6MkfR",
+            "timestamp": "1700000000000",
+            "data": value,
+            "proof": {"key": "k", "signature": "s"}
+        });
+        let signed_str = serde_json::to_string(&signed).unwrap();
+        let encoded = urlencoding::encode(&signed_str);
+        format!("literal:json:{}", encoded)
+    }
+
+    #[test]
+    fn test_where_filter_signed_expression_string() {
+        // Reproduces the exact CI failure: where clause on a property stored
+        // as literal:json:<signed expression> with string data.
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let board = "test://board1";
+        let task1 = "test://task-active-1";
+        let task2 = "test://task-active-2";
+        let task3 = "test://task-done";
+
+        // Board -> task links
+        store
+            .add_link(&make_link(board, "board://has_task", task1, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(board, "board://has_task", task2, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(board, "board://has_task", task3, ts))
+            .unwrap();
+
+        // Task flags + required properties
+        for task in &[task1, task2, task3] {
+            store
+                .add_link(&make_link(task, "task://type", "task://task", ts))
+                .unwrap();
+            store
+                .add_link(&make_link(
+                    task,
+                    "task://title",
+                    &signed_literal("Title"),
+                    ts,
+                ))
+                .unwrap();
+        }
+
+        // Statuses as signed expressions (the exact format that caused CI failure)
+        store
+            .add_link(&make_link(
+                task1,
+                "task://status",
+                &signed_literal("active"),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                task2,
+                "task://status",
+                &signed_literal("active"),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                task3,
+                "task://status",
+                &signed_literal("done"),
+                ts,
+            ))
+            .unwrap();
+
+        // Use post-getter where filtering (the fix)
+        let getter = "SELECT ?target WHERE { <Base> <board://has_task> ?target . \
+            ?target <task://type> <task://task> . \
+            ?target <task://title> ?_v0 . \
+            ?target <task://status> ?_v1 . }";
+
+        let mut where_filter = HashMap::new();
+        where_filter.insert(
+            "status".to_string(),
+            WhereCondition::String("active".to_string()),
+        );
+        let mut where_predicates = HashMap::new();
+        where_predicates.insert("status".to_string(), "task://status".to_string());
+
+        let shape = ModelShape {
+            target_class: "Board".to_string(),
+            shape_uri: String::new(),
+            properties: vec![ShapeProperty {
+                name: "activeTasks".to_string(),
+                predicate: "board://has_task".to_string(),
+                is_collection: true,
+                is_flag: false,
+                is_required: false,
+                initial_value: None,
+                resolve_language: None,
+                datatype: None,
+                direction: None,
+                is_scalar_relation: false,
+                getter: Some(getter.to_string()),
+                where_filter: Some(where_filter),
+                where_predicates: Some(where_predicates),
+            }],
+            include_relations: vec![],
+        };
+
+        let mut instances = vec![json!({"id": board})];
+        evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+
+        let active = instances[0]["activeTasks"].as_array().unwrap();
+        assert_eq!(
+            active.len(),
+            2,
+            "Should have 2 active tasks, got {:?}",
+            active
+        );
+
+        // Verify correct tasks were returned
+        let ids: Vec<&str> = active.iter().filter_map(|v| v.as_str()).collect();
+        assert!(ids.contains(&task1));
+        assert!(ids.contains(&task2));
+        assert!(!ids.contains(&task3));
+    }
+
+    #[test]
+    fn test_where_filter_signed_expression_no_matches() {
+        // All targets filtered out -> empty array
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let parent = "test://parent";
+        let child = "test://child";
+
+        store
+            .add_link(&make_link(parent, "ns://has_child", child, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(child, "ns://type", "ns://thing", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                child,
+                "ns://status",
+                &signed_literal("done"),
+                ts,
+            ))
+            .unwrap();
+
+        let getter = "SELECT ?target WHERE { <Base> <ns://has_child> ?target . }";
+
+        let mut where_filter = HashMap::new();
+        where_filter.insert(
+            "status".to_string(),
+            WhereCondition::String("active".to_string()),
+        );
+        let mut where_predicates = HashMap::new();
+        where_predicates.insert("status".to_string(), "ns://status".to_string());
+
+        let shape = ModelShape {
+            target_class: "Parent".to_string(),
+            shape_uri: String::new(),
+            properties: vec![ShapeProperty {
+                name: "activeChildren".to_string(),
+                predicate: "ns://has_child".to_string(),
+                is_collection: true,
+                is_flag: false,
+                is_required: false,
+                initial_value: None,
+                resolve_language: None,
+                datatype: None,
+                direction: None,
+                is_scalar_relation: false,
+                getter: Some(getter.to_string()),
+                where_filter: Some(where_filter),
+                where_predicates: Some(where_predicates),
+            }],
+            include_relations: vec![],
+        };
+
+        let mut instances = vec![json!({"id": parent})];
+        evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+
+        let result = instances[0]["activeChildren"].as_array().unwrap();
+        assert_eq!(result.len(), 0, "Should be empty when no matches");
+    }
+
+    #[test]
+    fn test_where_filter_multiple_conditions() {
+        // Multiple where conditions: status=active AND priority > 3
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let board = "test://board";
+        let task_hi = "test://task-hi";
+        let task_lo = "test://task-lo";
+        let task_done = "test://task-done";
+
+        store
+            .add_link(&make_link(board, "ns://has", task_hi, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(board, "ns://has", task_lo, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(board, "ns://has", task_done, ts))
+            .unwrap();
+
+        // task_hi: active, priority 5
+        store
+            .add_link(&make_link(
+                task_hi,
+                "ns://status",
+                &signed_literal("active"),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                task_hi,
+                "ns://priority",
+                &signed_literal_number(5.0),
+                ts,
+            ))
+            .unwrap();
+
+        // task_lo: active, priority 1
+        store
+            .add_link(&make_link(
+                task_lo,
+                "ns://status",
+                &signed_literal("active"),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                task_lo,
+                "ns://priority",
+                &signed_literal_number(1.0),
+                ts,
+            ))
+            .unwrap();
+
+        // task_done: done, priority 5
+        store
+            .add_link(&make_link(
+                task_done,
+                "ns://status",
+                &signed_literal("done"),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                task_done,
+                "ns://priority",
+                &signed_literal_number(5.0),
+                ts,
+            ))
+            .unwrap();
+
+        let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
+
+        let mut where_filter = HashMap::new();
+        where_filter.insert(
+            "status".to_string(),
+            WhereCondition::String("active".to_string()),
+        );
+        where_filter.insert(
+            "priority".to_string(),
+            WhereCondition::Ops(WhereOps {
+                gt: Some(3.0),
+                ..Default::default()
+            }),
+        );
+        let mut where_predicates = HashMap::new();
+        where_predicates.insert("status".to_string(), "ns://status".to_string());
+        where_predicates.insert("priority".to_string(), "ns://priority".to_string());
+
+        let shape = ModelShape {
+            target_class: "Board".to_string(),
+            shape_uri: String::new(),
+            properties: vec![ShapeProperty {
+                name: "highPriActive".to_string(),
+                predicate: "ns://has".to_string(),
+                is_collection: true,
+                is_flag: false,
+                is_required: false,
+                initial_value: None,
+                resolve_language: None,
+                datatype: None,
+                direction: None,
+                is_scalar_relation: false,
+                getter: Some(getter.to_string()),
+                where_filter: Some(where_filter),
+                where_predicates: Some(where_predicates),
+            }],
+            include_relations: vec![],
+        };
+
+        let mut instances = vec![json!({"id": board})];
+        evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+
+        let result = instances[0]["highPriActive"].as_array().unwrap();
+        assert_eq!(result.len(), 1, "Only task_hi should match: {:?}", result);
+        assert_eq!(result[0].as_str().unwrap(), task_hi);
+    }
+
+    #[test]
+    fn test_where_filter_missing_property_on_target() {
+        // Target lacks the property being filtered on -> should not match
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let parent = "test://parent";
+        let child_with = "test://child-with";
+        let child_without = "test://child-without";
+
+        store
+            .add_link(&make_link(parent, "ns://has", child_with, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(parent, "ns://has", child_without, ts))
+            .unwrap();
+
+        // Only child_with has the status property
+        store
+            .add_link(&make_link(
+                child_with,
+                "ns://status",
+                &signed_literal("active"),
+                ts,
+            ))
+            .unwrap();
+        // child_without has no status link at all
+
+        let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
+        let mut where_filter = HashMap::new();
+        where_filter.insert(
+            "status".to_string(),
+            WhereCondition::String("active".to_string()),
+        );
+        let mut where_predicates = HashMap::new();
+        where_predicates.insert("status".to_string(), "ns://status".to_string());
+
+        let shape = ModelShape {
+            target_class: "Parent".to_string(),
+            shape_uri: String::new(),
+            properties: vec![ShapeProperty {
+                name: "active".to_string(),
+                predicate: "ns://has".to_string(),
+                is_collection: true,
+                is_flag: false,
+                is_required: false,
+                initial_value: None,
+                resolve_language: None,
+                datatype: None,
+                direction: None,
+                is_scalar_relation: false,
+                getter: Some(getter.to_string()),
+                where_filter: Some(where_filter),
+                where_predicates: Some(where_predicates),
+            }],
+            include_relations: vec![],
+        };
+
+        let mut instances = vec![json!({"id": parent})];
+        evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+
+        let result = instances[0]["active"].as_array().unwrap();
+        assert_eq!(result.len(), 1, "Only child_with should match");
+        assert_eq!(result[0].as_str().unwrap(), child_with);
+    }
+
+    #[test]
+    fn test_where_filter_plain_literal_string() {
+        // Where clause on literal:string: values (not signed expressions)
+        // This should also work correctly
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let parent = "test://parent";
+        let child1 = "test://child1";
+        let child2 = "test://child2";
+
+        store
+            .add_link(&make_link(parent, "ns://has", child1, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(parent, "ns://has", child2, ts))
+            .unwrap();
+
+        // Plain literal:string values (no signed expression envelope)
+        store
+            .add_link(&make_link(child1, "ns://color", "literal:string:red", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(child2, "ns://color", "literal:string:blue", ts))
+            .unwrap();
+
+        let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
+        let mut where_filter = HashMap::new();
+        where_filter.insert(
+            "color".to_string(),
+            WhereCondition::String("red".to_string()),
+        );
+        let mut where_predicates = HashMap::new();
+        where_predicates.insert("color".to_string(), "ns://color".to_string());
+
+        let shape = ModelShape {
+            target_class: "Parent".to_string(),
+            shape_uri: String::new(),
+            properties: vec![ShapeProperty {
+                name: "redChildren".to_string(),
+                predicate: "ns://has".to_string(),
+                is_collection: true,
+                is_flag: false,
+                is_required: false,
+                initial_value: None,
+                resolve_language: None,
+                datatype: None,
+                direction: None,
+                is_scalar_relation: false,
+                getter: Some(getter.to_string()),
+                where_filter: Some(where_filter),
+                where_predicates: Some(where_predicates),
+            }],
+            include_relations: vec![],
+        };
+
+        let mut instances = vec![json!({"id": parent})];
+        evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+
+        let result = instances[0]["redChildren"].as_array().unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].as_str().unwrap(), child1);
+    }
+
+    #[test]
+    fn test_where_filter_on_multiple_instances() {
+        // Where filter across multiple parent instances
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let board1 = "test://board1";
+        let board2 = "test://board2";
+        let task_a = "test://task-a";
+        let task_b = "test://task-b";
+        let task_c = "test://task-c";
+
+        // board1 -> task_a (active), task_b (done)
+        store
+            .add_link(&make_link(board1, "ns://has", task_a, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(board1, "ns://has", task_b, ts))
+            .unwrap();
+        // board2 -> task_c (active)
+        store
+            .add_link(&make_link(board2, "ns://has", task_c, ts))
+            .unwrap();
+
+        store
+            .add_link(&make_link(
+                task_a,
+                "ns://status",
+                &signed_literal("active"),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                task_b,
+                "ns://status",
+                &signed_literal("done"),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                task_c,
+                "ns://status",
+                &signed_literal("active"),
+                ts,
+            ))
+            .unwrap();
+
+        let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
+        let mut where_filter = HashMap::new();
+        where_filter.insert(
+            "status".to_string(),
+            WhereCondition::String("active".to_string()),
+        );
+        let mut where_predicates = HashMap::new();
+        where_predicates.insert("status".to_string(), "ns://status".to_string());
+
+        let shape = ModelShape {
+            target_class: "Board".to_string(),
+            shape_uri: String::new(),
+            properties: vec![ShapeProperty {
+                name: "activeTasks".to_string(),
+                predicate: "ns://has".to_string(),
+                is_collection: true,
+                is_flag: false,
+                is_required: false,
+                initial_value: None,
+                resolve_language: None,
+                datatype: None,
+                direction: None,
+                is_scalar_relation: false,
+                getter: Some(getter.to_string()),
+                where_filter: Some(where_filter),
+                where_predicates: Some(where_predicates),
+            }],
+            include_relations: vec![],
+        };
+
+        let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
+        evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+
+        let active1 = instances[0]["activeTasks"].as_array().unwrap();
+        assert_eq!(active1.len(), 1, "board1 should have 1 active task");
+        assert_eq!(active1[0].as_str().unwrap(), task_a);
+
+        let active2 = instances[1]["activeTasks"].as_array().unwrap();
+        assert_eq!(active2.len(), 1, "board2 should have 1 active task");
+        assert_eq!(active2[0].as_str().unwrap(), task_c);
+    }
+
+    #[test]
+    fn test_full_model_query_signed_expression_where() {
+        // End-to-end: findAll with where clause on signed expression values
+        // This is what the integration test does via the full pipeline
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let item1 = "test://item1";
+        let item2 = "test://item2";
+        let item3 = "test://item3";
+
+        // All items have the type flag
+        for item in &[item1, item2, item3] {
+            store
+                .add_link(&make_link(item, "ns://type", "ns://item", ts))
+                .unwrap();
+        }
+
+        // Properties as signed expressions
+        store
+            .add_link(&make_link(item1, "ns://name", &signed_literal("Alpha"), ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item1,
+                "ns://status",
+                &signed_literal("active"),
+                ts,
+            ))
+            .unwrap();
+
+        store
+            .add_link(&make_link(item2, "ns://name", &signed_literal("Beta"), ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item2,
+                "ns://status",
+                &signed_literal("active"),
+                ts,
+            ))
+            .unwrap();
+
+        store
+            .add_link(&make_link(item3, "ns://name", &signed_literal("Gamma"), ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item3,
+                "ns://status",
+                &signed_literal("archived"),
+                ts,
+            ))
+            .unwrap();
+
+        let shape_json = r#"{
+            "className": "Item",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://item" },
+                "name": { "predicate": "ns://name", "required": true, "resolveLanguage": "literal" },
+                "status": { "predicate": "ns://status", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // Query WITH where clause on status
+        let mut where_clause = HashMap::new();
+        where_clause.insert(
+            "status".to_string(),
+            WhereCondition::String("active".to_string()),
+        );
+
+        let query = ModelQueryInput {
+            where_clause: Some(where_clause),
+            ..Default::default()
+        };
+
+        let result = execute_model_query(&store, "Item", &query, Some(shape_json)).unwrap();
+        assert_eq!(
+            result.instances.len(),
+            2,
+            "Should find 2 active items, got: {:?}",
+            result.instances
+        );
+
+        // Verify names
+        let names: Vec<&str> = result
+            .instances
+            .iter()
+            .filter_map(|i| i["name"].as_str())
+            .collect();
+        assert!(names.contains(&"Alpha"));
+        assert!(names.contains(&"Beta"));
+        assert!(!names.contains(&"Gamma"));
+    }
+
+    #[test]
+    fn test_full_model_query_signed_expression_numeric_where() {
+        // findAll with numeric where clause on signed expression values
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let item1 = "test://item1";
+        let item2 = "test://item2";
+
+        for item in &[item1, item2] {
+            store
+                .add_link(&make_link(item, "ns://type", "ns://item", ts))
+                .unwrap();
+        }
+
+        store
+            .add_link(&make_link(
+                item1,
+                "ns://score",
+                &signed_literal_number(85.0),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item2,
+                "ns://score",
+                &signed_literal_number(45.0),
+                ts,
+            ))
+            .unwrap();
+
+        let shape_json = r#"{
+            "className": "Item",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://item" },
+                "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // Where: score > 50
+        let mut where_clause = HashMap::new();
+        where_clause.insert(
+            "score".to_string(),
+            WhereCondition::Ops(WhereOps {
+                gt: Some(50.0),
+                ..Default::default()
+            }),
+        );
+
+        let query = ModelQueryInput {
+            where_clause: Some(where_clause),
+            ..Default::default()
+        };
+
+        let result = execute_model_query(&store, "Item", &query, Some(shape_json)).unwrap();
+        assert_eq!(
+            result.instances.len(),
+            1,
+            "Only item1 with score 85 should match"
+        );
+        assert_eq!(result.instances[0]["id"].as_str().unwrap(), item1);
+    }
+
+    #[test]
+    fn test_full_model_query_signed_expression_boolean_where() {
+        // findAll with boolean where clause on signed expression values
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let item1 = "test://item1";
+        let item2 = "test://item2";
+
+        for item in &[item1, item2] {
+            store
+                .add_link(&make_link(item, "ns://type", "ns://thing", ts))
+                .unwrap();
+        }
+
+        // Boolean data in signed expressions
+        let signed_true = serde_json::json!({
+            "author": "did:key:z6MkfR",
+            "timestamp": "1700000000000",
+            "data": true,
+            "proof": {"key": "k", "signature": "s"}
+        });
+        let signed_false = serde_json::json!({
+            "author": "did:key:z6MkfR",
+            "timestamp": "1700000000000",
+            "data": false,
+            "proof": {"key": "k", "signature": "s"}
+        });
+
+        let enc_true = format!(
+            "literal:json:{}",
+            urlencoding::encode(&serde_json::to_string(&signed_true).unwrap())
+        );
+        let enc_false = format!(
+            "literal:json:{}",
+            urlencoding::encode(&serde_json::to_string(&signed_false).unwrap())
+        );
+
+        store
+            .add_link(&make_link(item1, "ns://visible", &enc_true, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(item2, "ns://visible", &enc_false, ts))
+            .unwrap();
+
+        let shape_json = r#"{
+            "className": "Thing",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://thing" },
+                "visible": { "predicate": "ns://visible", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        let mut where_clause = HashMap::new();
+        where_clause.insert("visible".to_string(), WhereCondition::Bool(true));
+
+        let query = ModelQueryInput {
+            where_clause: Some(where_clause),
+            ..Default::default()
+        };
+
+        let result = execute_model_query(&store, "Thing", &query, Some(shape_json)).unwrap();
+        assert_eq!(result.instances.len(), 1);
+        assert_eq!(result.instances[0]["id"].as_str().unwrap(), item1);
+    }
+
+    #[test]
+    fn test_full_model_query_where_string_array_in() {
+        // IN operator: where status IN ["active", "pending"]
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let item1 = "test://i1";
+        let item2 = "test://i2";
+        let item3 = "test://i3";
+
+        for item in &[item1, item2, item3] {
+            store
+                .add_link(&make_link(item, "ns://type", "ns://item", ts))
+                .unwrap();
+        }
+
+        store
+            .add_link(&make_link(
+                item1,
+                "ns://status",
+                &signed_literal("active"),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item2,
+                "ns://status",
+                &signed_literal("pending"),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item3,
+                "ns://status",
+                &signed_literal("done"),
+                ts,
+            ))
+            .unwrap();
+
+        let shape_json = r#"{
+            "className": "Item",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://item" },
+                "status": { "predicate": "ns://status", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        let mut where_clause = HashMap::new();
+        where_clause.insert(
+            "status".to_string(),
+            WhereCondition::StringArray(vec!["active".to_string(), "pending".to_string()]),
+        );
+
+        let query = ModelQueryInput {
+            where_clause: Some(where_clause),
+            ..Default::default()
+        };
+
+        let result = execute_model_query(&store, "Item", &query, Some(shape_json)).unwrap();
+        assert_eq!(result.instances.len(), 2, "active and pending should match");
+    }
+
+    #[test]
+    fn test_full_model_query_where_ops_not() {
+        // NOT operator: where status != "done"
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let item1 = "test://i1";
+        let item2 = "test://i2";
+
+        for item in &[item1, item2] {
+            store
+                .add_link(&make_link(item, "ns://type", "ns://item", ts))
+                .unwrap();
+        }
+
+        store
+            .add_link(&make_link(
+                item1,
+                "ns://status",
+                &signed_literal("active"),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item2,
+                "ns://status",
+                &signed_literal("done"),
+                ts,
+            ))
+            .unwrap();
+
+        let shape_json = r#"{
+            "className": "Item",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://item" },
+                "status": { "predicate": "ns://status", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        let mut where_clause = HashMap::new();
+        where_clause.insert(
+            "status".to_string(),
+            WhereCondition::Ops(WhereOps {
+                not: Some(Value::String("done".to_string())),
+                ..Default::default()
+            }),
+        );
+
+        let query = ModelQueryInput {
+            where_clause: Some(where_clause),
+            ..Default::default()
+        };
+
+        let result = execute_model_query(&store, "Item", &query, Some(shape_json)).unwrap();
+        assert_eq!(result.instances.len(), 1);
+        assert_eq!(result.instances[0]["id"].as_str().unwrap(), item1);
     }
 }
