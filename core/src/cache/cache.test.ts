@@ -28,6 +28,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
             language: { address: 'lang://test' }, proof: { valid: true },
         }));
     },
+    'expression.interact': () => 'ok',
 };
 
 // ===================== MOCK WEBSOCKET =====================
@@ -445,6 +446,19 @@ describe('ExpressionClient Cache', () => {
         ad4m.expression.clearCache();
 
         await ad4m.expression.get('lang://test/Qm-clear');
+        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(2);
+    });
+
+    test('interact() invalidates cache for that URL', async () => {
+        const url = 'lang://test/Qm-interact';
+        await ad4m.expression.get(url);
+        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(1);
+
+        // interact should invalidate cache
+        await ad4m.expression.interact(url, { interactionName: 'modify', parameters: {} } as any);
+
+        // Next get should hit network again (cache invalidated)
+        await ad4m.expression.get(url);
         expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(2);
     });
 });

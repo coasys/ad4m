@@ -173,6 +173,11 @@ export class ExpressionClient {
     }
 
     async interact(url: string, interactionCall: InteractionCall): Promise<string|null> {
-        return this.#apiClient.call<string|null>('expression.interact', { url, interactionCall })
+        const result = await this.#apiClient.call<string|null>('expression.interact', { url, interactionCall });
+        // Interactions can mutate the expression — invalidate cache so next get() fetches fresh
+        this.#memCache.delete(url);
+        this.#inflight.delete(url);
+        this.#persistent.delete(url); // fire-and-forget
+        return result;
     }
 }
