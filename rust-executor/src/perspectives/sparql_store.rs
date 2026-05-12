@@ -2340,4 +2340,582 @@ mod tests {
             all.len()
         );
     }
+
+    // ── Summarisation Pipeline SPARQL Tests ──
+    //
+    // These tests reproduce the exact SPARQL queries used by the Flux
+    // summarisation pipeline against a real Oxigraph store with reifier
+    // storage to catch edge cases that mocked tests miss.
+
+    /// Helper: set up a conversation channel with messages in the store.
+    /// Returns (channel_id, conversation_id, message_ids).
+    fn setup_conversation_channel(
+        svc: &SparqlStore,
+        channel_id: &str,
+        is_conversation: bool,
+        message_count: usize,
+    ) -> (String, String, Vec<String>) {
+        // Channel entry_type flag
+        svc.add_link(&make_link(channel_id, "flux://entry_type", "flux://has_channel"))
+            .unwrap();
+
+        // isConversation property
+        if is_conversation {
+            svc.add_link(&make_link(
+                channel_id,
+                "flux://channel_is_conversation",
+                "true",
+            ))
+            .unwrap();
+        }
+
+        // Conversation entity as child of channel
+        let conv_id = format!("{}-conv", channel_id);
+        svc.add_link(&make_link(
+            channel_id,
+            "ad4m://has_child",
+            &conv_id,
+        ))
+        .unwrap();
+        svc.add_link(&make_link(
+            &conv_id,
+            "flux://entry_type",
+            "flux://conversation",
+        ))
+        .unwrap();
+
+        // Channel creation link (parent -> channel)
+        svc.add_link(&make_link(
+            "ad4m://self",
+            "flux://has_channel",
+            channel_id,
+        ))
+        .unwrap();
+
+        // Messages as children of channel
+        let mut msg_ids = Vec::new();
+        for i in 0..message_count {
+            let msg_id = format!("{}-msg-{}", channel_id, i);
+            let link = make_link_with_ts(
+                channel_id,
+                "ad4m://has_child",
+                &msg_id,
+                &format!("2026-01-15T10:{:02}:00.000Z", i),
+                "did:key:alice",
+            );
+            svc.add_link(&link).unwrap();
+            svc.add_link(&make_link(
+                &msg_id,
+                "flux://entry_type",
+                "flux://has_message",
+            ))
+            .unwrap();
+            svc.add_link(&make_link(
+                &msg_id,
+                "flux://body",
+                &format!("literal:string:Message%20{}", i),
+            ))
+            .unwrap();
+            msg_ids.push(msg_id);
+        }
+
+        (channel_id.to_string(), conv_id, msg_ids)
+    }
+
+    #[test]
+    fn test_recent_conversations_sparql_basic() {
+        // Tests the exact SPARQL query from Channel.recentConversations()
+        // against the real store with reifier storage model.
+        let svc = new_service();
+        setup_conversation_channel(&svc, "flux://ch1", true, 3);
+
+        let query = r#"
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT ?channelId (SAMPLE(?cId) AS ?conversationId) (MAX(?ts) AS ?lastActivity) WHERE {
+                ?channelId <flux://entry_type> <flux://has_channel> .
+                ?channelId <flux://channel_is_conversation> ?_isConv .
+                FILTER(STR(<ad4m://fn/parse_literal>(?_isConv)) = "true")
+                OPTIONAL {
+                    ?channelId <ad4m://has_child> ?cId .
+                    ?cId <flux://entry_type> <flux://conversation> .
+                }
+                OPTIONAL {
+                    ?channelId <ad4m://has_child> ?item .
+                    ?_itemReifier rdf:reifies <<( ?channelId <ad4m://has_child> ?item )>> .
+                    ?_itemReifier <ad4m://ontology/timestamp> ?itemTs .
+                    ?item <flux://entry_type> ?itemType .
+                    FILTER(?itemType IN (<flux://has_message>, <flux://has_post>))
+                }
+                OPTIONAL {
+                    ?_chanReifier rdf:reifies <<( ?_parent <flux://has_channel> ?channelId )>> .
+                    ?_chanReifier <ad4m://ontology/timestamp> ?chanCreatedTs .
+                }
+                BIND(COALESCE(?itemTs, ?chanCreatedTs, "1970-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>) AS ?ts)
+            }
+            GROUP BY ?channelId
+            ORDER BY DESC(?lastActivity)
+            LIMIT 20
+        "#;
+
+        let result = svc.query(query).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(
+            !rows.is_empty(),
+            "recentConversations query returned no results. Raw: {}",
+            result
+        );
+        assert_eq!(
+            rows[0]["channelId"].as_str().unwrap(),
+            "flux://ch1",
+            "Expected channel ID flux://ch1, got: {:?}",
+            rows[0]
+        );
+        assert_eq!(
+            rows[0]["conversationId"].as_str().unwrap(),
+            "flux://ch1-conv",
+            "Expected conversation ID, got: {:?}",
+            rows[0]
+        );
+        // lastActivity should be set (from message timestamps)
+        let last_activity = rows[0]["lastActivity"].as_str().unwrap_or("");
+        assert!(
+            !last_activity.is_empty() && last_activity != "1970-01-01T00:00:00Z",
+            "Expected valid lastActivity timestamp, got: {}",
+            last_activity
+        );
+    }
+
+    #[test]
+    fn test_recent_conversations_non_conversation_channel_excluded() {
+        // A channel without isConversation=true should NOT appear
+        let svc = new_service();
+        setup_conversation_channel(&svc, "flux://ch-space", false, 5);
+        setup_conversation_channel(&svc, "flux://ch-conv", true, 2);
+
+        let query = r#"
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT ?channelId (SAMPLE(?cId) AS ?conversationId) (MAX(?ts) AS ?lastActivity) WHERE {
+                ?channelId <flux://entry_type> <flux://has_channel> .
+                ?channelId <flux://channel_is_conversation> ?_isConv .
+                FILTER(STR(<ad4m://fn/parse_literal>(?_isConv)) = "true")
+                OPTIONAL {
+                    ?channelId <ad4m://has_child> ?cId .
+                    ?cId <flux://entry_type> <flux://conversation> .
+                }
+                OPTIONAL {
+                    ?channelId <ad4m://has_child> ?item .
+                    ?_itemReifier rdf:reifies <<( ?channelId <ad4m://has_child> ?item )>> .
+                    ?_itemReifier <ad4m://ontology/timestamp> ?itemTs .
+                    ?item <flux://entry_type> ?itemType .
+                    FILTER(?itemType IN (<flux://has_message>, <flux://has_post>))
+                }
+                OPTIONAL {
+                    ?_chanReifier rdf:reifies <<( ?_parent <flux://has_channel> ?channelId )>> .
+                    ?_chanReifier <ad4m://ontology/timestamp> ?chanCreatedTs .
+                }
+                BIND(COALESCE(?itemTs, ?chanCreatedTs, "1970-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>) AS ?ts)
+            }
+            GROUP BY ?channelId
+            ORDER BY DESC(?lastActivity)
+            LIMIT 20
+        "#;
+
+        let result = svc.query(query).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        let channel_ids: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r["channelId"].as_str())
+            .collect();
+        assert!(
+            !channel_ids.contains(&"flux://ch-space"),
+            "Non-conversation channel should be excluded. Got: {:?}",
+            channel_ids
+        );
+        assert!(
+            channel_ids.contains(&"flux://ch-conv"),
+            "Conversation channel should be included. Got: {:?}",
+            channel_ids
+        );
+    }
+
+    #[test]
+    fn test_recent_conversations_boolean_literal_prefix() {
+        // Tests that isConversation stored as "literal:boolean:true" also works
+        let svc = new_service();
+        svc.add_link(&make_link(
+            "flux://ch-lit",
+            "flux://entry_type",
+            "flux://has_channel",
+        ))
+        .unwrap();
+        svc.add_link(&make_link(
+            "flux://ch-lit",
+            "flux://channel_is_conversation",
+            "literal:boolean:true",
+        ))
+        .unwrap();
+
+        let query = r#"
+            SELECT ?channelId WHERE {
+                ?channelId <flux://entry_type> <flux://has_channel> .
+                ?channelId <flux://channel_is_conversation> ?_isConv .
+                FILTER(STR(<ad4m://fn/parse_literal>(?_isConv)) = "true")
+            }
+        "#;
+
+        let result = svc.query(query).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(
+            !rows.is_empty(),
+            "literal:boolean:true should pass parse_literal filter. Raw: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_recent_conversations_empty_channel_no_messages() {
+        // Channel with isConversation=true but no messages should still appear
+        // (using channel creation timestamp as fallback)
+        let svc = new_service();
+        setup_conversation_channel(&svc, "flux://ch-empty", true, 0);
+
+        let query = r#"
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT ?channelId (SAMPLE(?cId) AS ?conversationId) (MAX(?ts) AS ?lastActivity) WHERE {
+                ?channelId <flux://entry_type> <flux://has_channel> .
+                ?channelId <flux://channel_is_conversation> ?_isConv .
+                FILTER(STR(<ad4m://fn/parse_literal>(?_isConv)) = "true")
+                OPTIONAL {
+                    ?channelId <ad4m://has_child> ?cId .
+                    ?cId <flux://entry_type> <flux://conversation> .
+                }
+                OPTIONAL {
+                    ?channelId <ad4m://has_child> ?item .
+                    ?_itemReifier rdf:reifies <<( ?channelId <ad4m://has_child> ?item )>> .
+                    ?_itemReifier <ad4m://ontology/timestamp> ?itemTs .
+                    ?item <flux://entry_type> ?itemType .
+                    FILTER(?itemType IN (<flux://has_message>, <flux://has_post>))
+                }
+                OPTIONAL {
+                    ?_chanReifier rdf:reifies <<( ?_parent <flux://has_channel> ?channelId )>> .
+                    ?_chanReifier <ad4m://ontology/timestamp> ?chanCreatedTs .
+                }
+                BIND(COALESCE(?itemTs, ?chanCreatedTs, "1970-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>) AS ?ts)
+            }
+            GROUP BY ?channelId
+            ORDER BY DESC(?lastActivity)
+            LIMIT 20
+        "#;
+
+        let result = svc.query(query).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(
+            !rows.is_empty(),
+            "Empty conversation channel should still appear in results. Raw: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_unprocessed_items_sparql_basic() {
+        // Tests the exact SPARQL queries from Channel.unprocessedItems()
+        let svc = new_service();
+        let (ch_id, _, msg_ids) =
+            setup_conversation_channel(&svc, "flux://ch-unproc", true, 5);
+
+        // Query 1: all items
+        let all_items_query = format!(
+            r#"SELECT ?id WHERE {{
+                <{}> <ad4m://has_child> ?id .
+                ?id <flux://entry_type> ?type .
+                FILTER(?type IN (<flux://has_message>, <flux://has_post>, <flux://has_task>))
+            }}"#,
+            ch_id
+        );
+        let result = svc.query(&all_items_query).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            rows.len(),
+            5,
+            "Expected 5 items, got {}. Raw: {}",
+            rows.len(),
+            result
+        );
+
+        // Mark some as processed (add to subgroup)
+        let sg_id = "flux://ch-unproc-sg-1";
+        svc.add_link(&make_link(sg_id, "flux://entry_type", "flux://conversation_subgroup"))
+            .unwrap();
+        svc.add_link(&make_link(sg_id, "flux://has_item", &msg_ids[0]))
+            .unwrap();
+        svc.add_link(&make_link(sg_id, "flux://has_item", &msg_ids[1]))
+            .unwrap();
+
+        // Query 2: processed items
+        let processed_query = r#"SELECT ?id WHERE {
+            ?sg <flux://has_item> ?id .
+            ?sg <flux://entry_type> <flux://conversation_subgroup> .
+        }"#;
+        let result = svc.query(processed_query).unwrap();
+        let processed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            processed.len(),
+            2,
+            "Expected 2 processed items, got {}",
+            processed.len()
+        );
+    }
+
+    #[test]
+    fn test_unprocessed_items_data_query_with_reifier() {
+        // Tests Query 3 from unprocessedItems — fetching full item data
+        // including reifier metadata (author, timestamp)
+        let svc = new_service();
+        let (ch_id, _, msg_ids) =
+            setup_conversation_channel(&svc, "flux://ch-data", true, 2);
+
+        let values_clause = msg_ids
+            .iter()
+            .map(|id| format!("<{}>", id))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let data_query = format!(
+            r#"PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT ?id ?author ?timestamp ?type ?body WHERE {{
+                VALUES ?id {{ {} }}
+                <{}> <ad4m://has_child> ?id .
+                ?_reifier rdf:reifies <<( <{}> <ad4m://has_child> ?id )>> .
+                ?_reifier <ad4m://ontology/author> ?author .
+                ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+                ?id <flux://entry_type> ?type .
+                FILTER(?type IN (<flux://has_message>, <flux://has_post>, <flux://has_task>))
+                OPTIONAL {{ ?id <flux://body> ?body . }}
+            }}
+            ORDER BY ?timestamp"#,
+            values_clause, ch_id, ch_id
+        );
+
+        let result = svc.query(&data_query).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "Expected 2 data rows, got {}. Raw: {}",
+            rows.len(),
+            result
+        );
+        // Verify author and timestamp are populated from reifier
+        for row in &rows {
+            assert!(
+                row["author"].as_str().is_some() && !row["author"].as_str().unwrap().is_empty(),
+                "Author should be populated from reifier. Row: {:?}",
+                row
+            );
+            assert!(
+                row["timestamp"].as_str().is_some()
+                    && !row["timestamp"].as_str().unwrap().is_empty(),
+                "Timestamp should be populated from reifier. Row: {:?}",
+                row
+            );
+        }
+    }
+
+    #[test]
+    fn test_recent_conversations_multiple_channels_ordering() {
+        // Two conversation channels with different last-activity times.
+        // The one with more recent messages should come first.
+        let svc = new_service();
+
+        // Channel 1: older messages
+        let ch1 = "flux://ch-old";
+        svc.add_link(&make_link(ch1, "flux://entry_type", "flux://has_channel"))
+            .unwrap();
+        svc.add_link(&make_link(ch1, "flux://channel_is_conversation", "true"))
+            .unwrap();
+        let msg1 = make_link_with_ts(
+            ch1,
+            "ad4m://has_child",
+            "flux://ch-old-msg",
+            "2026-01-01T01:00:00.000Z",
+            "did:key:alice",
+        );
+        svc.add_link(&msg1).unwrap();
+        svc.add_link(&make_link("flux://ch-old-msg", "flux://entry_type", "flux://has_message"))
+            .unwrap();
+
+        // Channel 2: newer messages
+        let ch2 = "flux://ch-new";
+        svc.add_link(&make_link(ch2, "flux://entry_type", "flux://has_channel"))
+            .unwrap();
+        svc.add_link(&make_link(ch2, "flux://channel_is_conversation", "true"))
+            .unwrap();
+        let msg2 = make_link_with_ts(
+            ch2,
+            "ad4m://has_child",
+            "flux://ch-new-msg",
+            "2026-01-15T10:00:00.000Z",
+            "did:key:bob",
+        );
+        svc.add_link(&msg2).unwrap();
+        svc.add_link(&make_link("flux://ch-new-msg", "flux://entry_type", "flux://has_message"))
+            .unwrap();
+
+        let query = r#"
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT ?channelId (SAMPLE(?cId) AS ?conversationId) (MAX(?ts) AS ?lastActivity) WHERE {
+                ?channelId <flux://entry_type> <flux://has_channel> .
+                ?channelId <flux://channel_is_conversation> ?_isConv .
+                FILTER(STR(<ad4m://fn/parse_literal>(?_isConv)) = "true")
+                OPTIONAL {
+                    ?channelId <ad4m://has_child> ?cId .
+                    ?cId <flux://entry_type> <flux://conversation> .
+                }
+                OPTIONAL {
+                    ?channelId <ad4m://has_child> ?item .
+                    ?_itemReifier rdf:reifies <<( ?channelId <ad4m://has_child> ?item )>> .
+                    ?_itemReifier <ad4m://ontology/timestamp> ?itemTs .
+                    ?item <flux://entry_type> ?itemType .
+                    FILTER(?itemType IN (<flux://has_message>, <flux://has_post>))
+                }
+                OPTIONAL {
+                    ?_chanReifier rdf:reifies <<( ?_parent <flux://has_channel> ?channelId )>> .
+                    ?_chanReifier <ad4m://ontology/timestamp> ?chanCreatedTs .
+                }
+                BIND(COALESCE(?itemTs, ?chanCreatedTs, "1970-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>) AS ?ts)
+            }
+            GROUP BY ?channelId
+            ORDER BY DESC(?lastActivity)
+            LIMIT 20
+        "#;
+
+        let result = svc.query(query).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(rows.len(), 2, "Expected 2 channels. Raw: {}", result);
+        // Newer channel should come first
+        assert_eq!(
+            rows[0]["channelId"].as_str().unwrap(),
+            "flux://ch-new",
+            "Newer channel should be first. Got: {:?}",
+            rows
+        );
+        assert_eq!(
+            rows[1]["channelId"].as_str().unwrap(),
+            "flux://ch-old",
+            "Older channel should be second. Got: {:?}",
+            rows
+        );
+    }
+
+    #[test]
+    fn test_conversation_has_child_subscription_direct_triple() {
+        // Verify that `<channel> <ad4m://has_child> <msg>` exists as a direct
+        // triple (required for SPARQL subscription matching)
+        let svc = new_service();
+        let link = make_link("flux://ch-sub", "ad4m://has_child", "flux://msg-1");
+        svc.add_link(&link).unwrap();
+
+        let query = r#"SELECT ?id WHERE {
+            <flux://ch-sub> <ad4m://has_child> ?id .
+        }"#;
+        let result = svc.query(query).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"].as_str().unwrap(), "flux://msg-1");
+    }
+
+    #[test]
+    fn test_parse_literal_custom_function_in_sparql() {
+        // Verify the custom function works when called through SPARQL
+        let svc = new_service();
+        svc.add_link(&make_link("flux://test", "flux://prop", "literal:string:hello"))
+            .unwrap();
+
+        let query = r#"SELECT ?val WHERE {
+            <flux://test> <flux://prop> ?raw .
+            BIND(STR(<ad4m://fn/parse_literal>(?raw)) AS ?val)
+        }"#;
+        let result = svc.query(query).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(rows.len(), 1, "Expected 1 result. Raw: {}", result);
+        assert_eq!(
+            rows[0]["val"].as_str().unwrap(),
+            "hello",
+            "parse_literal should strip literal:string: prefix"
+        );
+    }
+
+    #[test]
+    fn test_parse_literal_bare_true_in_filter() {
+        // Verify bare "true" (NamedNode) passes FILTER(STR(parse_literal(...)) = "true")
+        let svc = new_service();
+        svc.add_link(&make_link("flux://item", "flux://flag", "true")).unwrap();
+
+        let query = r#"SELECT ?s WHERE {
+            ?s <flux://flag> ?val .
+            FILTER(STR(<ad4m://fn/parse_literal>(?val)) = "true")
+        }"#;
+        let result = svc.query(query).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "Bare 'true' should pass parse_literal filter. Raw: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_group_by_with_reifier_and_optional() {
+        // Isolated test: GROUP BY + OPTIONAL with reifier pattern.
+        // This is the specific combination used in recentConversations.
+        let svc = new_service();
+
+        // Add two items to one group
+        let link1 = make_link_with_ts(
+            "flux://group1",
+            "flux://has_item",
+            "flux://item1",
+            "2026-01-15T10:00:00.000Z",
+            "did:key:alice",
+        );
+        svc.add_link(&link1).unwrap();
+
+        let link2 = make_link_with_ts(
+            "flux://group1",
+            "flux://has_item",
+            "flux://item2",
+            "2026-01-15T11:00:00.000Z",
+            "did:key:bob",
+        );
+        svc.add_link(&link2).unwrap();
+
+        let query = r#"
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT ?groupId (MAX(?ts) AS ?lastTs) WHERE {
+                ?groupId <flux://has_item> ?item .
+                OPTIONAL {
+                    ?_reifier rdf:reifies <<( ?groupId <flux://has_item> ?item )>> .
+                    ?_reifier <ad4m://ontology/timestamp> ?ts .
+                }
+            }
+            GROUP BY ?groupId
+        "#;
+
+        let result = svc.query(query).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(rows.len(), 1, "Expected 1 group. Raw: {}", result);
+        assert_eq!(
+            rows[0]["groupId"].as_str().unwrap(),
+            "flux://group1",
+            "Group ID mismatch"
+        );
+        // MAX timestamp should be the later one
+        let last_ts = rows[0]["lastTs"].as_str().unwrap_or("");
+        assert!(
+            !last_ts.is_empty(),
+            "MAX timestamp should be present. Raw: {}",
+            result
+        );
+    }
 }
