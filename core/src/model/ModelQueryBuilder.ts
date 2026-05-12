@@ -409,10 +409,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
       subscriptionId,
       (rawResult: any) => {
-        // DEPRECATED: #init# handling retained for backward compat with pre-WS executors.
-        // The single-WebSocket architecture (commit 35140c10) makes the original race condition
-        // impossible — the RPC response is the authoritative initial result.
-        if (rawResult && rawResult.isInit) return;
         try {
           const results = parseResults(rawResult);
           const fp = buildFingerprint(results);
@@ -537,10 +533,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
       subscriptionId,
       (rawResult: any) => {
-        // DEPRECATED: #init# handling retained for backward compat with pre-WS executors.
-        // The single-WebSocket architecture (commit 35140c10) makes the original race condition
-        // impossible — the RPC response is the authoritative initial result.
-        if (rawResult && rawResult.isInit) return;
         try {
           callback(parseCount(rawResult));
         } catch (e) {
@@ -677,10 +669,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
       subscriptionId,
       (rawResult: any) => {
-        // DEPRECATED: #init# handling retained for backward compat with pre-WS executors.
-        // The single-WebSocket architecture (commit 35140c10) makes the original race condition
-        // impossible — the RPC response is the authoritative initial result.
-        if (rawResult && rawResult.isInit) return;
         processResults().catch(e => console.error('Paginate subscription error:', e));
       },
     );

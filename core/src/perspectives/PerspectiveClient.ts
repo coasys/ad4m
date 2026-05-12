@@ -16,17 +16,8 @@ export type UuidCallback = (uuid: string) => null
 export type LinkCallback = (link: LinkExpression) => null
 export type SyncStateChangeCallback = (state: PerspectiveState) => null
 
-// DEPRECATED: #init# handling retained for backward compat with pre-WS executors.
-// The single-WebSocket architecture (commit 35140c10) makes the original race condition
-// impossible — the RPC response is the authoritative initial result.
-function normalizeQueryResult(raw: unknown, errorContext: string): { result: AllInstancesResult; isInit: boolean } {
+function normalizeQueryResult(raw: unknown, errorContext: string): AllInstancesResult {
     let finalResult: unknown = raw
-    let isInit = false
-
-    if (typeof finalResult === 'string' && finalResult.startsWith('#init#')) {
-        finalResult = finalResult.substring(6)
-        isInit = true
-    }
 
     if (typeof finalResult === 'string') {
         try {
@@ -36,11 +27,7 @@ function normalizeQueryResult(raw: unknown, errorContext: string): { result: All
         }
     }
 
-    if (isInit && typeof finalResult === 'object' && finalResult !== null) {
-        (finalResult as Record<string, unknown>).isInit = true
-    }
-
-    return { result: finalResult as AllInstancesResult, isInit }
+    return finalResult as AllInstancesResult
 }
 
 export class PerspectiveClient {
@@ -134,13 +121,13 @@ export class PerspectiveClient {
         return JSON.parse(result)
     }
 
-    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
+    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult }> {
         const response = await this.#apiClient.call<{ subscriptionId: string, result: unknown }>(
             'perspective.subscribeQuery', { uuid, query }
         )
         const { subscriptionId, result } = response
-        const normalized = normalizeQueryResult(result, 'Error parsing subscribeQuery result:')
-        return { subscriptionId, result: normalized.result, isInit: normalized.isInit }
+        const parsed = normalizeQueryResult(result, 'Error parsing subscribeQuery result:')
+        return { subscriptionId, result: parsed }
     }
 
     async perspectiveKeepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
@@ -164,8 +151,8 @@ export class PerspectiveClient {
                 const eventSubscriptionId = event.subscriptionId || event.subscription_id
                 if (eventSubscriptionId !== subscriptionId) return
 
-                const normalized = normalizeQueryResult(event.result, 'Error parsing query subscription:')
-                onData(normalized.result)
+                const parsed = normalizeQueryResult(event.result, 'Error parsing query subscription:')
+                onData(parsed)
             }
         )
         this.#querySubscriptionUnsubscribers.set(subscriptionId, unsub)

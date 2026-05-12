@@ -171,11 +171,6 @@ export class QuerySubscriptionProxy {
                         this.#initReject = undefined;
                     }
 
-                    // DEPRECATED: #init# handling retained for backward compat with pre-WS executors.
-                    // The single-WebSocket architecture (commit 35140c10) makes the original race condition
-                    // impossible — the RPC response is the authoritative initial result.
-                    if (updateResult.isInit && this.#latestResult) return;
-
                     this.#latestResult = updateResult;
                     this.#notifyCallbacks(updateResult);
                 }
