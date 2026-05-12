@@ -11,6 +11,7 @@ use crate::holochain_service::get_holochain_service;
 use crate::runtime_service::RuntimeService;
 use crate::types::Notification;
 use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
+use crate::unyt_service;
 
 use super::types::{
     AddAgentInfosRequest, ExportRequest, FriendSendMessageRequest, FriendsListRequest,
@@ -574,12 +575,110 @@ async fn get_host_rates(_params: Value, _ctx: Arc<RequestContext>) -> Result<Val
     ))
 }
 
-// ── Stubs for unyt endpoints ──
+// ── Unyt / mHOT handlers ──
 
-async fn stub_not_impl(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    Err(WsRpcError::not_implemented(
-        "Not yet implemented on the server",
-    ))
+async fn unyt_agent_key(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let key = unyt_service::get_or_create_agent_key()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::String(key))
+}
+
+async fn unyt_set_membrane_proof(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let proof = params
+        .get("proof")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| WsRpcError::bad_request("Missing 'proof' parameter"))?;
+
+    unyt_service::set_membrane_proof(proof)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    // Kick off DNA installation in the background now that we have a proof
+    tokio::spawn(async {
+        match unyt_service::ensure_installed().await {
+            Ok(()) => log::info!("Unyt alliance DNA installed after membrane proof was set"),
+            Err(e) => log::error!("Failed to install Unyt alliance DNA after setting proof: {}", e),
+        }
+    });
+
+    Ok(serde_json::json!({ "success": true, "message": "Membrane proof stored" }))
+}
+
+async fn unyt_wallet_balance(
+    _params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let ledger = unyt_service::get_ledger()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::String(serde_json::to_string(&ledger).unwrap_or_default()))
+}
+
+async fn unyt_wallet_history(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let page = params.get("page").and_then(|v| v.as_u64());
+    let per_page = params
+        .get("perPage")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50);
+    let history = unyt_service::get_history(page, per_page)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::String(serde_json::to_string(&history).unwrap_or_default()))
+}
+
+async fn unyt_version_info(
+    _params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let (installed, bundled) = unyt_service::version_info();
+    let info = serde_json::json!({
+        "installed": installed,
+        "bundled": bundled,
+    });
+    Ok(Value::String(serde_json::to_string(&info).unwrap_or_default()))
+}
+
+async fn unyt_hot_agent_pubkey(
+    _params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let pubkey = unyt_service::whoami()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::String(pubkey))
+}
+
+async fn unyt_reinstall_dna(
+    _params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    unyt_service::reinstall()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::json!({ "success": true, "message": "Unyt DNA reinstalled" }))
+}
+
+async fn unyt_send_hot(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let recipient = params
+        .get("recipient")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| WsRpcError::bad_request("Missing 'recipient' parameter"))?;
+    let amount = params
+        .get("amount")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| WsRpcError::bad_request("Missing 'amount' parameter"))?;
+
+    let proposal_hash = unyt_service::send_hot(recipient, amount, None)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(serde_json::json!({ "success": true, "message": proposal_hash }))
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -626,13 +725,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("runtime.setFreeHostingEnabled", set_free_hosting_enabled);
     map.register("runtime.hostRates", get_host_rates);
     map.register("runtime.setHostRates", set_host_rates);
-    // Unyt stubs
-    map.register("runtime.unytAgentKey", stub_not_impl);
-    map.register("runtime.unytSendHot", stub_not_impl);
-    map.register("runtime.unytWalletBalance", stub_not_impl);
-    map.register("runtime.unytWalletHistory", stub_not_impl);
-    map.register("runtime.unytVersionInfo", stub_not_impl);
-    map.register("runtime.unytHotAgentPubkey", stub_not_impl);
-    map.register("runtime.unytMembraneProof", stub_not_impl);
-    map.register("runtime.unytReinstallDna", stub_not_impl);
+    // Unyt / mHOT
+    map.register("runtime.unytAgentKey", unyt_agent_key);
+    map.register("runtime.unytSetMembraneProof", unyt_set_membrane_proof);
+    map.register("runtime.unytSendHot", unyt_send_hot);
+    map.register("runtime.unytWalletBalance", unyt_wallet_balance);
+    map.register("runtime.unytWalletHistory", unyt_wallet_history);
+    map.register("runtime.unytVersionInfo", unyt_version_info);
+    map.register("runtime.unytHotAgentPubkey", unyt_hot_agent_pubkey);
+    map.register("runtime.unytReinstallDna", unyt_reinstall_dna);
 }
