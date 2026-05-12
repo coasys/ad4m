@@ -305,9 +305,9 @@ roles:
     dna:
       path: {}
       modifiers:
-        network_seed: "Ga-FM2jL7uq3NDI9QX1Zl"
+        network_seed: "AC-FJfEQ_OKA0wRkCKxp_"
         properties:
-          progenitor_pubkey: "uhCAkdeTV-5BNlhK4pC9tVpVwlUhzcOA8zqn3lEhtkN41qWGo0PWr"
+          progenitor_pubkey: "uhCAkq1TcfLdTaQMoWlRwV1XPXWwBsRxukTa811zIWYzVRUBCSwKD"
           joining_server_signer: "uhCAk_Jbtn_3RR-VCLPtJdhcQvVrpM7Vw5vHGog8_CwW5tO0_Cf37"
 "#,
         dna_path.to_string_lossy()
