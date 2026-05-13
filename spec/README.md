@@ -38,15 +38,6 @@ AD4M has been demonstrated as a protocol (not just an implementation) through th
 - JSON serialization uses camelCase field names throughout.
 - The WIT file (`ad4m-lang.wit`) is the normative source of truth for the Language interface. Where WIT and prose disagree, the WIT wins.
 
-## Key Architecture Facts
-
-- **WebSocket RPC as sole client API transport:** All SDK operations use WebSocket RPC at `/api/v1/ws`; real-time events are multiplexed on `/api/v1/ws/events`.
-- **RDF 1.2 reifier storage model:** Links are stored using RDF 1.2 reifiers in the default graph (Oxigraph 0.5.7). Each link produces 8 quads with deterministic reifier IRIs.
-- **Rust-side model query engine:** All Ad4mModel queries execute server-side in Rust — the SDK is a thin WebSocket client that receives hydrated JSON instances.
-- **SHACL `sh:in` enum constraints:** Properties support enumerated allowed values via the `options` decorator parameter, stored as `sh:in` constraints.
-- **Server-side model subscriptions:** `perspective.modelSubscribe` creates Rust-side trigger SPARQL; on matching link changes, the server re-executes and pushes updated result sets.
-- **SDK is a thin WS client:** The SDK sends query parameters over WS RPC and receives fully-resolved results from the Rust engine.
-
 ## References
 
 - [W3C Decentralized Identifiers (DIDs)](https://www.w3.org/TR/did-core/)
