@@ -1121,32 +1121,29 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
+   * @param _engine - **Deprecated.** Accepted for backward compatibility but ignored.
+   *   All queries now use the Rust SPARQL pipeline.
    * @returns Array of matching models
-   * 
+   *
    * @example
    * ```typescript
-   * // Get all recipes (uses SPARQL by default)
    * const allRecipes = await Recipe.findAll(perspective);
-   * 
-   * // Get recipes with specific criteria (uses SPARQL)
+   *
    * const recipes = await Recipe.findAll(perspective, {
-   *   where: { 
+   *   where: {
    *     name: "Pasta",
    *     rating: { gt: 4 }
    *   },
    *   order: { createdAt: "DESC" },
    *   limit: 10
    * });
-   * 
-   * // Explicitly use Prolog (legacy, for backward compatibility)
-   * const recipesProlog = await Recipe.findAll(perspective, {}, false);
    * ```
    */
   static async findAll<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
     query: Query = {},
+    /** @deprecated Ignored — Prolog engine has been removed. */
     _engine?: 'sparql' | 'prolog' | boolean
   ): Promise<T[]> {
     if (query.properties && query.properties.length === 0) {
@@ -1164,7 +1161,7 @@ export class Ad4mModel {
    *
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSPARQL - Whether to use SPARQL (default: true) or Prolog (legacy)
+   * @param _engine - **Deprecated.** Accepted for backward compatibility but ignored.
    * @returns The first matching instance, or `null`
    *
    * @example
@@ -1181,6 +1178,7 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query: Query = {},
+    /** @deprecated Ignored — Prolog engine has been removed. */
     _engine?: 'sparql' | 'prolog' | boolean,
   ): Promise<T | null> {
     const limitedQuery = { ...query, limit: 1 };
@@ -1193,9 +1191,9 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
+   * @param _engine - **Deprecated.** Accepted for backward compatibility but ignored.
    * @returns Object containing results array and total count
-   * 
+   *
    * @example
    * ```typescript
    * const { results, totalCount } = await Recipe.findAllAndCount(perspective, {
@@ -1203,15 +1201,13 @@ export class Ad4mModel {
    *   limit: 10
    * });
    * console.log(`Showing 10 of ${totalCount} dessert recipes`);
-   * 
-   * // Use Prolog explicitly (legacy)
-   * const { results, totalCount } = await Recipe.findAllAndCount(perspective, {}, false);
    * ```
    */
   static async findAllAndCount<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
     query: Query = {},
+    /** @deprecated Ignored — Prolog engine has been removed. */
     _engine?: 'sparql' | 'prolog' | boolean
   ): Promise<ResultsWithTotalCount<T>> {
     return await this.executeModelQuery(perspective, query);
@@ -1235,11 +1231,12 @@ export class Ad4mModel {
    * ```
    */
   static async paginate<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
-    pageSize: number, 
-    pageNumber: number, 
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    pageSize: number,
+    pageNumber: number,
     query?: Query,
+    /** @deprecated Ignored — Prolog engine has been removed. */
     _engine?: 'sparql' | 'prolog' | boolean
   ): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(query || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
