@@ -4983,6 +4983,225 @@ mod integration_tests {
     }
 
     #[test]
+    fn test_resolve_projections_where_filter_via_target_shape_property() {
+        // Mirrors the WE $totalLikeCount pattern:
+        //   include: {
+        //     $totalLikeCount: { from: 'signals', where: { signalTypeId: 'literal:string:xyz' }, count: true }
+        //   }
+        // where signalTypeId is a property on the Signal target node, resolved
+        // via target_shape so Rust can build the ?t <predicate> ?_pw0 . FILTER pattern.
+        // This test covers the gap: no previous integration test used target_shape: Some(...)
+        // in resolve_projections.
+        let store = SparqlStore::new(None).unwrap();
+
+        let parent_a = "test://parent/a";
+        let like_signal = "test://signal/like";
+        let dislike_signal = "test://signal/dislike";
+        // Signal type IDs are often stored as literal:string: URIs in the WE models.
+        let like_type_id = "literal:string:like_type_id123";
+        let dislike_type_id = "literal:string:dislike_type_id456";
+
+        // Add parent → signal links
+        store
+            .add_link(&make_link(
+                parent_a,
+                "test://has_signal",
+                like_signal,
+                "1000",
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                parent_a,
+                "test://has_signal",
+                dislike_signal,
+                "1001",
+            ))
+            .unwrap();
+
+        // Add signal → signalTypeId property links
+        store
+            .add_link(&make_link(
+                like_signal,
+                "test://signal_type_id",
+                like_type_id,
+                "1002",
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                dislike_signal,
+                "test://signal_type_id",
+                dislike_type_id,
+                "1003",
+            ))
+            .unwrap();
+
+        let shape = make_shape_with_relation("Parent", "signals", "test://has_signal");
+
+        let target_shape = json!({
+            "className": "Signal",
+            "properties": {
+                "signalTypeId": { "predicate": "test://signal_type_id" }
+            },
+            "relations": {}
+        });
+
+        // Filter count to only "like" signals via the target_shape property predicate.
+        let mut wc = HashMap::new();
+        wc.insert(
+            "signalTypeId".to_string(),
+            WhereCondition::String(like_type_id.to_string()),
+        );
+
+        let mut instances = vec![json!({ "id": parent_a })];
+        let mut projections = HashMap::new();
+        projections.insert(
+            "$totalLikeCount".to_string(),
+            ProjectionInput {
+                from: "signals".to_string(),
+                count: true,
+                target_shape: Some(target_shape.clone()),
+                where_clause: Some(wc.clone()),
+                limit: None,
+                order: None,
+            },
+        );
+
+        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+
+        let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
+        assert_eq!(
+            count, 1,
+            "should count only the 'like' signal (1 of 2), got {count}"
+        );
+
+        // Also verify the LIST variant ($myLikeSignal pattern with limit: 1).
+        let mut instances2 = vec![json!({ "id": parent_a })];
+        let mut projections2 = HashMap::new();
+        projections2.insert(
+            "$myLikeSignal".to_string(),
+            ProjectionInput {
+                from: "signals".to_string(),
+                count: false,
+                target_shape: Some(target_shape),
+                where_clause: Some(wc),
+                limit: Some(1),
+                order: None,
+            },
+        );
+
+        resolve_projections(&store, &mut instances2, &projections2, &shape).unwrap();
+
+        let got = &instances2[0]["$myLikeSignal"];
+        assert_eq!(
+            got.as_str().unwrap_or(""),
+            like_signal,
+            "list with limit:1 should return the like signal IRI, got {got}"
+        );
+    }
+
+    /// Regression test for the `signalTypeId` projection filter bug.
+    ///
+    /// When `resolve_property_value` stores a `literal:string:` URI value through
+    /// the "literal" resolveLanguage path it calls `literal_encode(value)` directly,
+    /// producing `literal:string:literal%3Astring%3AX` (double-encoded).
+    ///
+    /// The projection SPARQL filter must match this double-encoded form via its
+    /// second branch:
+    ///   FILTER(STR(?p) = "literal:string:X" || STR(?p) = "literal:string:literal%3Astring%3AX")
+    ///
+    /// This test stores the double-encoded IRI (as `resolve_property_value` would after
+    /// the fix) and verifies the projection count/list still return correct results.
+    #[test]
+    fn test_resolve_projections_where_filter_double_encoded_literal() {
+        let store = SparqlStore::new(None).unwrap();
+
+        let parent_a = "test://parent/dbl";
+        let like_signal = "test://signal/like-dbl";
+        let dislike_signal = "test://signal/dislike-dbl";
+
+        // The "user-facing" signalTypeId IRI (what the caller passes in where: {...})
+        let like_type_user = "literal:string:like_dbl_id";
+        // The stored form produced by literal_encode("literal:string:like_dbl_id")
+        // = "literal:string:literal%3Astring%3Alike_dbl_id"
+        let like_type_stored = "literal:string:literal%3Astring%3Alike_dbl_id";
+        let dislike_type_stored = "literal:string:literal%3Astring%3Adislike_dbl_id";
+
+        store
+            .add_link(&make_link(
+                parent_a,
+                "test://has_signal",
+                like_signal,
+                "2000",
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                parent_a,
+                "test://has_signal",
+                dislike_signal,
+                "2001",
+            ))
+            .unwrap();
+        // Signals store their signalTypeId as the double-encoded form.
+        store
+            .add_link(&make_link(
+                like_signal,
+                "test://signal_type_id",
+                like_type_stored,
+                "2002",
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                dislike_signal,
+                "test://signal_type_id",
+                dislike_type_stored,
+                "2003",
+            ))
+            .unwrap();
+
+        let shape = make_shape_with_relation("Parent", "signals", "test://has_signal");
+        let target_shape = json!({
+            "className": "Signal",
+            "properties": {
+                "signalTypeId": { "predicate": "test://signal_type_id" }
+            },
+            "relations": {}
+        });
+
+        // The caller passes the user-facing value (not the double-encoded stored form).
+        let mut wc = HashMap::new();
+        wc.insert(
+            "signalTypeId".to_string(),
+            WhereCondition::String(like_type_user.to_string()),
+        );
+
+        let mut instances = vec![json!({ "id": parent_a })];
+        let mut projections = HashMap::new();
+        projections.insert(
+            "$totalLikeCount".to_string(),
+            ProjectionInput {
+                from: "signals".to_string(),
+                count: true,
+                target_shape: Some(target_shape.clone()),
+                where_clause: Some(wc.clone()),
+                limit: None,
+                order: None,
+            },
+        );
+
+        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+
+        let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
+        assert_eq!(
+            count, 1,
+            "double-encoded stored URI should match filter second branch; got {count}"
+        );
+    }
+
+    #[test]
     fn test_deep_query_flag_controls_property_getters() {
         // Create a shape with both a property getter and a relation getter
         let shape_json = r#"{

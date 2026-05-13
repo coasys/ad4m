@@ -882,7 +882,40 @@ export class Ad4mModel {
       queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
     }
     if (query.properties) queryInput.properties = query.properties;
-    if (query.include) queryInput.include = query.include;
+    if (query.include) {
+      // Split include keys: $-prefixed / IncludeProjection values → queryInput.projections
+      // All other keys (boolean | RelationSubQuery) → queryInput.include
+      const allRelMeta = getRelationsMetadata(this as any);
+      const normalIncludes: IncludeMap = {};
+      const projections: Record<string, IncludeProjection> = {};
+      for (const [key, val] of Object.entries(query.include)) {
+        if (key.startsWith('$')) {
+          projections[key] = val as IncludeProjection;
+        } else {
+          normalIncludes[key] = val;
+        }
+      }
+      if (Object.keys(normalIncludes).length > 0) {
+        queryInput.include = normalIncludes;
+        enrichShapeForIncludes(metadata, normalIncludes, allRelMeta);
+      }
+      if (Object.keys(projections).length > 0) {
+        // Enrich projections with target shapes so Rust can apply where clause filtering
+        for (const [, proj] of Object.entries(projections)) {
+          const relMeta = allRelMeta[proj.from];
+          if (!proj.targetShape && relMeta?.target) {
+            try {
+              const TargetClass = relMeta.target();
+              const targetMeta = (TargetClass as any).getModelMetadata?.();
+              if (targetMeta) {
+                proj.targetShape = targetMeta;
+              }
+            } catch (_) { /* target class may not be available */ }
+          }
+        }
+        queryInput.projections = projections;
+      }
+    }
     if (query.where) queryInput.where = query.where;
     if (query.order) {
       queryInput.order = Object.entries(query.order).map(([k, v]) => [k, v]);
@@ -891,11 +924,6 @@ export class Ad4mModel {
     if (query.limit !== undefined) queryInput.limit = query.limit;
     if (query.count !== undefined) queryInput.count = query.count;
     queryInput.deepQuery = query.deepQuery ?? true;
-
-    if (query.include) {
-      const allRelMeta = getRelationsMetadata(this as any);
-      enrichShapeForIncludes(metadata, query.include, allRelMeta);
-    }
 
     // Pre-compute conformance getters for Rust-side evaluation.
     // Where clauses are NOT compiled into getter SPARQL because stored
@@ -964,6 +992,56 @@ export class Ad4mModel {
     const arr = data.instances || data;
     if (!Array.isArray(arr)) return [];
     return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
+  }
+
+  /**
+   * Hydrate non-count projection results: Rust returns raw target IRIs for
+   * list/scalar projections ($-prefixed include keys). Batch-fetch all unique
+   * IRIs per projection key and swap raw strings for hydrated model instances.
+   * @internal
+   */
+  static async hydrateProjections<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    instances: T[],
+    include: IncludeMap,
+  ): Promise<void> {
+    const allRelMeta = getRelationsMetadata(this as any);
+    for (const [key, val] of Object.entries(include)) {
+      if (!key.startsWith('$')) continue;
+      const proj = val as IncludeProjection;
+      if (proj.count) continue;
+      const relMeta = allRelMeta[proj.from];
+      if (!relMeta?.target) continue;
+      let TargetClass: any;
+      try { TargetClass = relMeta.target(); } catch (_) { continue; }
+      if (!TargetClass) continue;
+
+      const irisSet = new Set<string>();
+      for (const inst of instances) {
+        const raw = (inst as any)[key];
+        if (typeof raw === 'string') irisSet.add(raw);
+        else if (Array.isArray(raw)) raw.forEach((v: any) => typeof v === 'string' && irisSet.add(v));
+      }
+      if (irisSet.size === 0) continue;
+
+      const iris = Array.from(irisSet);
+      let hydrated: any[];
+      try {
+        hydrated = await TargetClass.findAll(perspective, { where: { id: iris.length === 1 ? iris[0] : iris } });
+      } catch (_) { continue; }
+
+      const byId = new Map<string, any>(hydrated.map((h: any) => [h.id, h]));
+
+      for (const inst of instances) {
+        const raw = (inst as any)[key];
+        if (typeof raw === 'string') {
+          (inst as any)[key] = byId.get(raw) ?? raw;
+        } else if (Array.isArray(raw)) {
+          (inst as any)[key] = raw.map((v: any) => (typeof v === 'string' ? byId.get(v) ?? v : v));
+        }
+      }
+    }
   }
 
   /**
@@ -1176,6 +1254,12 @@ export class Ad4mModel {
     const instances: T[] = result.instances.map((json: any) => {
       return jsonToModelInstance(this, perspective, json, query.include, query.properties);
     });
+
+    // Hydrate non-count projection results: Rust returns raw target IRIs for
+    // list/scalar projections — swap them for hydrated model instances.
+    if (query.include) {
+      await (this as any).hydrateProjections(perspective, instances, query.include);
+    }
 
     // Resolve non-literal expressions (e.g. file languages where the stored
     // value is a content-addressed hash that must be fetched from the language
