@@ -178,7 +178,7 @@ function jsonToModelInstance<T extends Ad4mModel>(
       if (o.resolveLanguage != null && o.resolveLanguage !== 'literal') continue;
       instance[propName] = o.transform(instance[propName]);
     }
-  } catch (_) { /* no metadata available */ }
+  } catch (e) { console.debug('jsonToModelInstance: transform metadata unavailable:', e); }
 
   // Recursively convert included relation values to class instances
   if (include) {
@@ -919,7 +919,7 @@ export class Ad4mModel {
               if (targetMeta) {
                 proj.targetShape = targetMeta;
               }
-            } catch (_) { /* target class may not be available */ }
+            } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for projection:`, e); }
           }
         }
         queryInput.projections = projections;
@@ -977,9 +977,9 @@ export class Ad4mModel {
                   rel.wherePredicates = predicates;
                 }
               }
-            } catch (_) { /* target metadata unavailable */ }
+            } catch (e) { console.debug(`prepareModelQueryParams: target metadata unavailable for relation '${relName}':`, e); }
           }
-        } catch (_) { /* target class may not be available */ }
+        } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for relation '${relName}':`, e); }
       }
     }
 
@@ -1053,7 +1053,7 @@ export class Ad4mModel {
                 try { resolved = JSON.parse(expression.data); } catch { resolved = expression.data; }
                 inst[propName] = applyTransform(resolved);
               }
-            } catch (_) { /* resolution failed — keep raw value */ }
+            } catch (e) { console.debug(`resolveNonLiteralProps: resolution failed for '${propName}':`, e); }
           } else if (val !== null && val !== undefined && typeof val === 'object') {
             // Case 2: already resolved by Rust — apply transform / default decode
             inst[propName] = applyTransform(val);
@@ -1648,7 +1648,7 @@ export class Ad4mModel {
         const TargetClass = meta.target();
         const filter = buildConformanceFilter(meta.predicate, TargetClass);
         if (filter) rel.getter = filter.getter;
-      } catch (_) { /* target class may not be available */ }
+      } catch (e) { console.debug(`evaluateGetters: target class unavailable for relation '${relName}':`, e); }
     }
 
     const shapeJson = JSON.stringify(metadata);
