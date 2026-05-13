@@ -161,7 +161,7 @@ blocks: string[] = [];
 
 ## 10.3 Decorator Metadata Registry
 
-Decorator metadata is stored using **WeakMaps** keyed by class constructor, replacing the old prototype-mutation approach. This avoids issues with inheritance chains sharing mutable state.
+Decorator metadata is stored using **WeakMaps** keyed by class constructor. This avoids issues with inheritance chains sharing mutable state.
 
 Three registries exist:
 - **`propertyRegistry`** — `WeakMap<Function, Record<string, PropertyMetadataEntry>>`
@@ -657,7 +657,7 @@ The `x-ad4m` extension in JSON Schema properties maps to Ad4mModel decorator opt
 |---------|----------|-------|
 | Ad4mModel base class with CRUD | **SHOULD** | Primary developer API |
 | Decorator-based model declaration | **SHOULD** | `@Model`, `@Property`, `@Optional`, `@ReadOnly`, `@Flag`, `@HasMany`, `@HasOne`, `@BelongsToOne`, `@BelongsToMany`, `@Collection` |
-| WeakMap-based metadata registry | **SHOULD** | Replaces prototype-mutation approach |
+| WeakMap-based metadata registry | **SHOULD** | Avoids prototype-mutation issues |
 | Query DSL (where, order, limit, offset, parent, include) | **SHOULD** | Must translate to SPARQL |
 | SPARQL query engine | **MUST** | Required for Ad4mModel query execution |
 | SPARQL custom functions (`fn::parse_literal`, `fn::strip_html`) | **SHOULD** | Required for literal value filtering |

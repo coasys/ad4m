@@ -45,7 +45,7 @@ AD4M has been demonstrated as a protocol (not just an implementation) through th
 - **Rust-side model query engine:** All Ad4mModel queries execute server-side in Rust — the SDK is a thin WebSocket client that receives hydrated JSON instances.
 - **SHACL `sh:in` enum constraints:** Properties support enumerated allowed values via the `options` decorator parameter, stored as `sh:in` constraints.
 - **Server-side model subscriptions:** `perspective.modelSubscribe` creates Rust-side trigger SPARQL; on matching link changes, the server re-executes and pushes updated result sets.
-- **SDK is a thin WS client:** The JavaScript query pipeline is eliminated; the SDK sends query parameters over WS RPC and receives fully-resolved results.
+- **SDK is a thin WS client:** The SDK sends query parameters over WS RPC and receives fully-resolved results from the Rust engine.
 
 ## References
 

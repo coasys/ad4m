@@ -46,7 +46,7 @@ This section defines what an alternative AD4M implementation MUST and SHOULD sup
 - **MUST** implement the `ad4m:host` module (or equivalent) for Language imports.
 - **SHOULD** support the Holochain extension (`holochain-ext`) for Holochain-backed Languages.
 - **SHOULD** support the Storage File I/O extension (`storage-fs-ext`).
-- Implementations MUST NOT use the deprecated `create(context)` factory or `LanguageContext` parameter for new Language loading. The `LanguageContext` is replaced by import functions (`languageAddress()`, `languageSettings()`, `storageGet/Put`, etc.).
+- Implementations MUST NOT use the `create(context)` factory or `LanguageContext` parameter for Language loading. Context is provided via import functions (`languageAddress()`, `languageSettings()`, `storageGet/Put`, etc.).
 
 ### 8.2.6 Neighbourhood Protocol
 
@@ -58,7 +58,7 @@ This section defines what an alternative AD4M implementation MUST and SHOULD sup
 
 - **MUST** parse and generate expression URLs in the format `<language_address>://<expression_address>`.
 - **MUST** handle `literal:` scheme for inline data (v1.0 format: `literal:<type>:<encoded_value>`, no `//`).
-- **MUST** reject the deprecated `literal://` format.
+- **MUST** reject the `literal://` format (invalid; correct format is `literal:`).
 - **MUST** handle `did:` scheme as references to the Agent Language.
 - All AD4M URIs MUST be valid IRIs without requiring `to_iri` / `from_iri` transformation.
 
@@ -138,7 +138,7 @@ Special cases:
 
 ### IRI Compatibility
 
-All AD4M URIs are valid IRIs (Internationalized Resource Identifiers). The v1.0 `literal:` format (without `//`) ensures RFC 3986 compliance. The `to_iri` / `from_iri` conversion functions from earlier versions have been removed — they are no longer necessary.
+All AD4M URIs are valid IRIs (Internationalized Resource Identifiers). The `literal:` format (without `//`) ensures RFC 3986 compliance.
 
 ## 8.6 Conformance Testing
 

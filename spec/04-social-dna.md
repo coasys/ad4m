@@ -52,7 +52,7 @@ Each property shape is a node with links describing the constraint:
 |--------|-----------|--------|---------|
 | `ad4m://self` | `ad4m://has_flow` | `literal:...` | Declares a flow definition |
 
-### Legacy SDNA (Deprecated)
+### Custom SDNA
 
 | Source | Predicate | Target | Purpose |
 |--------|-----------|--------|---------|
@@ -390,7 +390,7 @@ For alternative implementations:
 | Property get/set via link operations | **MUST** | Core CRUD operations |
 | Collection operations | **MUST** | Add/remove/set for multi-value properties |
 | SPARQL query support | **MUST** | Primary query engine (Oxigraph or equivalent) |
-| Prolog inference | **MAY** | Legacy backward compatibility only; not required for new implementations |
+| Prolog inference | **MAY** | Not required for new implementations |
 | SHACL custom rules | **MAY** | For advanced constraint checking and reasoning |
 | Flow support | **MAY** | State machine functionality |
 | `Ad4mModel` / decorator API | **MAY** | Client-side convenience; not required in the executor |

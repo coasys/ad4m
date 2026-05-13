@@ -220,7 +220,7 @@ Handler: `perspectives_ws.rs`
 | `perspective.removeLink` | Remove link |
 | `perspective.removeLinks` | Bulk remove links |
 | `perspective.linkMutations` | Apply link mutations |
-| `perspective.queryProlog` | Prolog query (legacy) |
+| `perspective.queryProlog` | Prolog query |
 | `perspective.querySparql` | SPARQL query |
 | `perspective.addSdna` | Add SDNA |
 | `perspective.executeCommands` | Execute commands |

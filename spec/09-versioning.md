@@ -39,7 +39,7 @@ MAJOR.MINOR.PATCH
 4. New optional imports MAY be added to the runtime services.
 5. The WIT file (`ad4m-lang.wit`) is the canonical interface definition; new versions of the WIT SHOULD follow WIT versioning conventions (package version in the `package` declaration).
 6. Languages that target a specific WIT world (`ad4m-language`, `ad4m-language-holochain`, etc.) declare their extension requirements; runtimes that don't support a required extension refuse to load the Language.
-7. The deprecated `create(context)` factory and adapter-class model from v0.x SHOULD be removed from runtime support in the next MAJOR version.
+7. The `create(context)` factory and adapter-class model MUST NOT be used for Language loading.
 
 ## 9.3 Compatibility Matrix
 
@@ -67,8 +67,8 @@ When a breaking change affects Link Languages:
 
 If the DID method or signing scheme changes:
 1. Agents generate new identity under the new scheme
-2. Entanglement proofs can link old and new identities
-3. Existing expressions signed with the old scheme remain verifiable as long as the old verification code is available
+2. Entanglement proofs can link identities across schemes
+3. Existing expressions remain verifiable as long as the verification code for their signing scheme is available
 
 ## 9.5 Implementation Version Reporting
 

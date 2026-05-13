@@ -47,7 +47,7 @@ Per-instance state therefore lives at module level (JS) or in `thread_local!` / 
    discards the module instance.
 ```
 
-`init()` takes **no arguments**. The old `LanguageContext` object (storage directory, custom settings, language address) is replaced by imports the Language calls during `init()`.
+`init()` takes **no arguments**. The `LanguageContext` object (storage directory, custom settings, language address) is provided via imports the Language calls during `init()`.
 
 ### Required Lifecycle Exports
 
@@ -171,7 +171,7 @@ enum QueryKind {
   ExpressionsAll,        // List all expressions, paginated
   LinkPattern,           // Pattern-match links by source/predicate/target/timestamps
   SPARQL,                // SPARQL 1.1 query string (RECOMMENDED)
-  Prolog,                // Prolog query string (back-compat)
+  Prolog,                // Prolog query string
 }
 ```
 
@@ -181,7 +181,7 @@ enum QueryKind {
 - `sparql` → `sparql-results: string` (SPARQL 1.1 JSON Results format)
 - `prolog` → `prolog-bindings: string` (JSON-encoded list of variable maps)
 
-A Language MUST return an error with code `not-implemented` for any kind it did not advertise via `perspectiveQuerySupportedKinds`. In v1.0 **SPARQL 1.1 is the RECOMMENDED query language**; structured link-pattern queries are first-class; Prolog is supported for backwards compatibility.
+A Language MUST return an error with code `not-implemented` for any kind it did not advertise via `perspectiveQuerySupportedKinds`. **SPARQL 1.1 is the RECOMMENDED query language**; structured link-pattern queries are first-class; Prolog is also supported.
 
 **`perspective-query` does NOT imply the existence of a local replica.** A Language can answer queries against a remote DHT/SPARQL endpoint without replicating state locally.
 
@@ -227,7 +227,7 @@ Incoming signals are delivered via the `handleTelepresenceSignal` event handler 
 
 ## 3.7 Direct Messages (NOT a Capability)
 
-**There is no `direct-message` capability in v1.0.** A DM "inbox" is just a Language exporting `perspective-commit` (for senders to drop messages) plus, for the owner's multi-device case, `perspective-sync` + `peers` (so the owner's other devices pull the backlog).
+**There is no `direct-message` capability.** A DM "inbox" is just a Language exporting `perspective-commit` (for senders to drop messages) plus, for the owner's multi-device case, `perspective-sync` + `peers` (so the owner's other devices pull the backlog).
 
 The recipient DID is baked into the source at template-clone time, so the Language's internal logic enforces per-caller access. This is enforced **inside** the Language, not at the spec level.
 
@@ -292,7 +292,7 @@ The runtime provides these services. JavaScript Languages import them from `@coa
 |--------|---------|
 | `languageAddress()` | `string` (content-address hash of this Language) |
 | `languageSettings()` | `string` (raw JSON of instance-specific settings) |
-| `languageStorageDirectory()` | `string` — **legacy**, kept for backward compatibility. New Languages SHOULD use core KV storage or the optional file I/O extension. |
+| `languageStorageDirectory()` | `string` — Languages SHOULD prefer core KV storage or the optional file I/O extension. |
 
 ### 3.10.3 Persistent Key/Value Storage (Core)
 
@@ -548,10 +548,10 @@ interface InteractionParameter {
 }
 ```
 
-## 3.16 Things Deliberately Omitted from v1.0
+## 3.16 Things Deliberately Omitted
 
 - **Capability flags / manifest files** — capability is determined exclusively by export presence.
 - **Callback registration** — no `addCallback`, no `removeCallback`. Languages emit events via `emit*` imports.
-- **`create(context)` factory** — replaced by per-perspective module instantiation + lazy context fetch via imports.
+- **`create(context)` factory** — not used; per-perspective module instantiation + lazy context fetch via imports is the loading model.
 - **`DirectMessageAdapter`** — DM is a composition pattern over existing capabilities (see §3.7).
 - **`this` pointer in JavaScript** — all exports are top-level functions; state lives in module-level bindings.

@@ -184,7 +184,7 @@ literal:json(%7B%22key%22%3A%22value%22%7D)
 
 The special `literal:` scheme (see §1.8) encodes data inline without requiring a Language. The `did:` scheme is treated as a reference to the Agent Language.
 
-> **All AD4M URIs are valid IRIs.** The v1.0 literal format change (§1.8) ensures that no AD4M URI requires escaping or transformation to be used as an RDF IRI. The `to_iri` / `from_iri` conversion functions from earlier versions have been removed.
+> **All AD4M URIs are valid IRIs.** The literal format (§1.8) ensures that no AD4M URI requires escaping or transformation to be used as an RDF IRI.
 
 ## 1.7 Address
 
@@ -209,14 +209,14 @@ Supported types:
 
 Values are encoded using RFC 3986 percent-encoding via `encodeRFC3986URIComponent()`.
 
-> **v1.0 format change:** The `literal://` format (with double-slash authority component) is no longer supported. The v1.0 format uses `literal:` (no `//`) for RFC 3986 compliance — `literal://` implied an authority component which was semantically incorrect. The `Literal.fromUrl()` constructor MUST reject `literal://` URLs with a clear error message.
+The `literal:` format uses no `//` (authority component) for RFC 3986 compliance. The `Literal.fromUrl()` constructor MUST reject `literal://` URLs with a clear error message.
 
 ```typescript
-// v0.x (DEPRECATED — no longer accepted):
-"literal://string:Hello%20World"
-
-// v1.0:
+// Correct:
 "literal:string:Hello%20World"
+
+// Invalid (MUST be rejected):
+"literal://string:Hello%20World"
 ```
 
 ## 1.9 Link Storage Model (RDF 1.2 Reifiers)

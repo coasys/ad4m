@@ -150,7 +150,7 @@ Signal routing uses the flat Language export model. When a Holochain signal arri
 2. The Language's `handleHolochainSignal` export processes the signal.
 3. The Language calls `emitPerspectiveDiff` / `emitTelepresenceSignal` as appropriate.
 
-This replaces the older adapter callback model. See [Language Interface §3.9](./03-language-interface.md#39-event-handler-exports-runtime--language).
+This is the event-driven model. See [Language Interface §3.9](./03-language-interface.md#39-event-handler-exports-runtime--language).
 
 ### Gossip Protocol
 

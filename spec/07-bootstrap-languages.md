@@ -39,7 +39,7 @@ When an agent updates their profile:
 2. Store it in the Holochain DHT via the Agent Language
 3. Other agents retrieve it by DID
 
-> **v1.0 change:** The Agent Expression no longer contains a `directMessageLanguage` field. See [§2.3](./02-agent-model.md#23-agent-expression).
+> The Agent Expression does not contain a `directMessageLanguage` field. Inbox discovery uses the `ad4m://inbox` predicate. See [§2.3](./02-agent-model.md#23-agent-expression).
 
 ### Neighbourhood Language
 
@@ -63,7 +63,7 @@ A `NeighbourhoodExpression` contains:
 
 ### Direct Message Language
 
-> **Removed in v1.0.** Direct Messages are no longer a bootstrap language. DM functionality is now achieved through the composition of `perspective-commit` + `perspective-sync` + `peers` capabilities, with the recipient DID baked into a template clone. See [Language Interface §3.7](./03-language-interface.md#37-direct-messages-not-a-capability) and [Social Conventions](../docs-src/ad4m-social-conventions.md) for the DM-as-inbox pattern.
+> Direct Messages are not a bootstrap language. DM functionality is achieved through the composition of `perspective-commit` + `perspective-sync` + `peers` capabilities, with the recipient DID baked into a template clone. See [Language Interface §3.7](./03-language-interface.md#37-direct-messages-not-a-capability) and [Social Conventions](../docs-src/ad4m-social-conventions.md) for the DM-as-inbox pattern.
 
 ### File Storage Language
 
@@ -78,7 +78,7 @@ A `NeighbourhoodExpression` contains:
 
 - **Type:** Link Language with `perspective-commit`, `perspective-sync`, `perspective-query`, `peers`, and `telepresence` capabilities
 - **Holochain DNA:** `perspective_diff_sync`
-- **Implementation:** Updated for flat v1.0 exports + ALDK
+- **Implementation:** Flat exports + ALDK
 - **See:** [P-Diff-Sync Protocol](./05-p-diff-sync.md)
 
 This is a **template language** — each Neighbourhood gets its own instance with a unique Holochain DNA. The template is instantiated by applying parameters (primarily the DNA hash).
