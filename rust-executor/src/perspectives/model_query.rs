@@ -2692,6 +2692,10 @@ fn filter_properties(instance: Value, requested: &[String]) -> Value {
 // ---------------------------------------------------------------------------
 
 /// Resolve reverse relations (BelongsToOne/BelongsToMany) for all instances in batch.
+///
+/// Uses a targeted SPARQL query with a VALUES clause to only fetch links
+/// pointing to our specific instance IDs, rather than scanning all links
+/// with the given predicate.
 pub fn resolve_reverse_relations(
     store: &SparqlStore,
     instances: &mut [Value],
@@ -2701,18 +2705,48 @@ pub fn resolve_reverse_relations(
         return Ok(());
     }
 
+    // Build VALUES clause from instance IDs (validated for SPARQL safety)
+    let instance_iris: Vec<String> = instances
+        .iter()
+        .filter_map(|inst| inst["id"].as_str())
+        .filter_map(|id| validate_iri(id).ok().map(|s| s.to_string()))
+        .collect();
+
+    if instance_iris.is_empty() {
+        return Ok(());
+    }
+
+    let values_clause = instance_iris
+        .iter()
+        .map(|id| format!("<{}>", id))
+        .collect::<Vec<_>>()
+        .join(" ");
+
     for (rel_name, predicate, is_single) in relations {
-        // Single batched query per relation: find all links with this predicate
-        // targeting ANY of our instances, then group by target in Rust.
-        let all_links = store.query_links(None, Some(predicate), None, None, None, None)?;
+        let safe_pred = match validate_iri(predicate) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        // Targeted SPARQL: only fetch links whose target is one of our instances
+        let sparql = format!(
+            "SELECT ?source ?target WHERE {{ VALUES ?target {{ {} }} ?source <{safe_pred}> ?target . }}",
+            values_clause
+        );
+        let result_json = store.query(&sparql)?;
+        let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
         // Build target_id → [source_id, ...] map
         let mut target_to_sources: HashMap<String, Vec<String>> = HashMap::new();
-        for link in &all_links {
-            target_to_sources
-                .entry(link.data.target.clone())
-                .or_default()
-                .push(link.data.source.clone());
+        for row in &rows {
+            let source = row["source"].as_str().unwrap_or("");
+            let target = row["target"].as_str().unwrap_or("");
+            if !source.is_empty() && !target.is_empty() {
+                target_to_sources
+                    .entry(target.to_string())
+                    .or_default()
+                    .push(source.to_string());
+            }
         }
 
         for inst in instances.iter_mut() {
@@ -2727,7 +2761,7 @@ pub fn resolve_reverse_relations(
                 .unwrap_or_default();
 
             if *is_single {
-                let val = source_ids.last().cloned().unwrap_or(Value::Null);
+                let val = source_ids.first().cloned().unwrap_or(Value::Null);
                 inst.as_object_mut()
                     .map(|obj| obj.insert(rel_name.clone(), val));
             } else {
