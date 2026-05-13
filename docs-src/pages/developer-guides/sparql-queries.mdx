@@ -1,0 +1,421 @@
+# SPARQL Queries in AD4M
+
+AD4M uses a high-performance SPARQL query engine powered by [Oxigraph](https://github.com/oxigraph/oxigraph), executing entirely server-side in Rust. SPARQL gives you direct access to the RDF graph that underlies every Perspective, enabling powerful queries against link data, metadata, and relationships.
+
+## How It Works
+
+### RDF 1.2 Reifier Storage Model
+
+AD4M stores links using the [RDF 1.2 reifier pattern](https://www.w3.org/TR/rdf12-concepts/). Each link is represented as a reified statement, which means link metadata (author, timestamp, status) is accessible alongside the triple data:
+
+```turtle
+# A link: Alice follows Bob
+<urn:link:abc123> a rdf:Statement ;
+    rdf:subject <user://alice> ;
+    rdf:predicate <follows> ;
+    rdf:object <user://bob> ;
+    ad4m:author "did:key:z6Mk..." ;
+    ad4m:timestamp "2024-06-15T10:30:00Z"^^xsd:dateTime .
+```
+
+This means you can query both the link data (source, predicate, target) and its metadata (who created it, when) in a single SPARQL query.
+
+### Querying with `perspective.querySparql()`
+
+The `querySparql()` method executes a SPARQL SELECT query against the perspective's Oxigraph store and returns the results:
+
+```typescript
+const results = await perspective.querySparql(`
+  SELECT ?s ?p ?o WHERE {
+    ?s ?p ?o .
+  } LIMIT 10
+`);
+```
+
+## Basic Queries
+
+### Get All Links
+
+```typescript
+const allLinks = await perspective.querySparql(`
+  SELECT ?source ?predicate ?target WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?source ;
+          rdf:predicate ?predicate ;
+          rdf:object ?target .
+  }
+`);
+```
+
+### Filter by Predicate
+
+```typescript
+const follows = await perspective.querySparql(`
+  SELECT ?source ?target WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?source ;
+          rdf:predicate <follows> ;
+          rdf:object ?target .
+  }
+`);
+```
+
+### Filter by Source
+
+```typescript
+const aliceLinks = await perspective.querySparql(`
+  SELECT ?predicate ?target WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject <user://alice> ;
+          rdf:predicate ?predicate ;
+          rdf:object ?target .
+  }
+`);
+```
+
+### Filter by Target
+
+```typescript
+const linksToAlice = await perspective.querySparql(`
+  SELECT ?source ?predicate WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?source ;
+          rdf:predicate ?predicate ;
+          rdf:object <user://alice> .
+  }
+`);
+```
+
+## Accessing Metadata
+
+The reifier pattern stores metadata on the link node itself. You can access author, timestamp, and other metadata:
+
+### Links with Author and Timestamp
+
+```typescript
+const linksWithMeta = await perspective.querySparql(`
+  SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?source ;
+          rdf:predicate ?predicate ;
+          rdf:object ?target ;
+          ad4m:author ?author ;
+          ad4m:timestamp ?timestamp .
+  }
+  ORDER BY DESC(?timestamp)
+`);
+```
+
+### Filter by Author
+
+```typescript
+const bobsLinks = await perspective.querySparql(`
+  SELECT ?source ?predicate ?target ?timestamp WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?source ;
+          rdf:predicate ?predicate ;
+          rdf:object ?target ;
+          ad4m:author "did:key:bob" ;
+          ad4m:timestamp ?timestamp .
+  }
+`);
+```
+
+### Filter by Time Range
+
+```typescript
+const recentLinks = await perspective.querySparql(`
+  SELECT ?source ?predicate ?target ?timestamp WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?source ;
+          rdf:predicate ?predicate ;
+          rdf:object ?target ;
+          ad4m:timestamp ?timestamp .
+    FILTER(?timestamp > "2024-01-01T00:00:00Z"^^xsd:dateTime)
+  }
+  ORDER BY DESC(?timestamp)
+`);
+```
+
+## Graph Traversal
+
+SPARQL's graph pattern matching enables powerful multi-hop queries:
+
+### Forward Traversal: Who Does Alice Follow?
+
+```typescript
+const aliceFollows = await perspective.querySparql(`
+  SELECT ?target WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject <user://alice> ;
+          rdf:predicate <follows> ;
+          rdf:object ?target .
+  }
+`);
+```
+
+### Reverse Traversal: Who Follows Alice?
+
+```typescript
+const aliceFollowers = await perspective.querySparql(`
+  SELECT ?source WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?source ;
+          rdf:predicate <follows> ;
+          rdf:object <user://alice> .
+  }
+`);
+```
+
+### Multi-Hop: Friends of Friends
+
+```typescript
+const friendsOfFriends = await perspective.querySparql(`
+  SELECT DISTINCT ?fof WHERE {
+    ?link1 a rdf:Statement ;
+           rdf:subject <user://alice> ;
+           rdf:predicate <follows> ;
+           rdf:object ?friend .
+    ?link2 a rdf:Statement ;
+           rdf:subject ?friend ;
+           rdf:predicate <follows> ;
+           rdf:object ?fof .
+    FILTER(?fof != <user://alice>)
+  }
+`);
+```
+
+### Multi-Hop: Posts by People Alice Follows
+
+```typescript
+const feedPosts = await perspective.querySparql(`
+  SELECT ?post ?author ?timestamp WHERE {
+    ?followLink a rdf:Statement ;
+               rdf:subject <user://alice> ;
+               rdf:predicate <follows> ;
+               rdf:object ?author .
+    ?postLink a rdf:Statement ;
+              rdf:subject ?author ;
+              rdf:predicate <authored> ;
+              rdf:object ?post ;
+              ad4m:timestamp ?timestamp .
+  }
+  ORDER BY DESC(?timestamp)
+  LIMIT 50
+`);
+```
+
+### Child Items with Types
+
+```typescript
+const childTypes = await perspective.querySparql(`
+  SELECT ?child ?type WHERE {
+    ?childLink a rdf:Statement ;
+               rdf:subject <parent://123> ;
+               rdf:predicate <ad4m://has_child> ;
+               rdf:object ?child .
+    ?typeLink a rdf:Statement ;
+              rdf:subject ?child ;
+              rdf:predicate <flux://entry_type> ;
+              rdf:object ?type .
+  }
+`);
+```
+
+## Sorting and Pagination
+
+SPARQL supports `ORDER BY`, `LIMIT`, and `OFFSET` for sorting and pagination:
+
+```typescript
+// First page
+const page1 = await perspective.querySparql(`
+  SELECT ?source ?predicate ?target ?timestamp WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?source ;
+          rdf:predicate ?predicate ;
+          rdf:object ?target ;
+          ad4m:timestamp ?timestamp .
+  }
+  ORDER BY DESC(?timestamp)
+  LIMIT 20
+  OFFSET 0
+`);
+
+// Second page
+const page2 = await perspective.querySparql(`
+  SELECT ?source ?predicate ?target ?timestamp WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?source ;
+          rdf:predicate ?predicate ;
+          rdf:object ?target ;
+          ad4m:timestamp ?timestamp .
+  }
+  ORDER BY DESC(?timestamp)
+  LIMIT 20
+  OFFSET 20
+`);
+```
+
+## Aggregations
+
+```typescript
+// Count links by predicate
+const stats = await perspective.querySparql(`
+  SELECT ?predicate (COUNT(?link) AS ?total) WHERE {
+    ?link a rdf:Statement ;
+          rdf:predicate ?predicate .
+  }
+  GROUP BY ?predicate
+  ORDER BY DESC(?total)
+`);
+
+// Count unique sources
+const uniqueSources = await perspective.querySparql(`
+  SELECT (COUNT(DISTINCT ?source) AS ?count) WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?source .
+  }
+`);
+
+// Count followers per user
+const followerCounts = await perspective.querySparql(`
+  SELECT ?target (COUNT(?link) AS ?followers) WHERE {
+    ?link a rdf:Statement ;
+          rdf:predicate <follows> ;
+          rdf:object ?target .
+  }
+  GROUP BY ?target
+  ORDER BY DESC(?followers)
+`);
+```
+
+## Real-World Examples
+
+### Messages in a Channel
+
+```typescript
+const messages = await perspective.querySparql(`
+  SELECT ?id ?author ?timestamp ?body WHERE {
+    ?childLink a rdf:Statement ;
+               rdf:subject <channel://main> ;
+               rdf:predicate <ad4m://has_child> ;
+               rdf:object ?id ;
+               ad4m:author ?author ;
+               ad4m:timestamp ?timestamp .
+    ?typeLink a rdf:Statement ;
+              rdf:subject ?id ;
+              rdf:predicate <flux://entry_type> ;
+              rdf:object <flux://has_message> .
+    OPTIONAL {
+      ?bodyLink a rdf:Statement ;
+                rdf:subject ?id ;
+                rdf:predicate <flux://body> ;
+                rdf:object ?body .
+    }
+  }
+  ORDER BY ASC(?timestamp)
+`);
+```
+
+### Todo Items with State
+
+```typescript
+const activeTodos = await perspective.querySparql(`
+  SELECT ?todo ?title ?state ?author WHERE {
+    ?stateLink a rdf:Statement ;
+               rdf:subject ?todo ;
+               rdf:predicate <todo://state> ;
+               rdf:object ?state .
+    FILTER(?state != <todo://done>)
+    OPTIONAL {
+      ?titleLink a rdf:Statement ;
+                 rdf:subject ?todo ;
+                 rdf:predicate <todo://has_title> ;
+                 rdf:object ?title .
+    }
+    OPTIONAL {
+      ?authorLink a rdf:Statement ;
+                  rdf:subject ?todo ;
+                  rdf:predicate <todo://state> ;
+                  rdf:object ?state ;
+                  ad4m:author ?author .
+    }
+  }
+`);
+```
+
+### Reactions on a Post
+
+```typescript
+const reactions = await perspective.querySparql(`
+  SELECT ?reaction (COUNT(?link) AS ?count) WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject <post://abc123> ;
+          rdf:predicate <flux://has_reaction> ;
+          rdf:object ?reaction .
+  }
+  GROUP BY ?reaction
+`);
+```
+
+## SPARQL vs. the Model Query Engine
+
+For most application development, you won't write raw SPARQL. The **model query engine** (accessed via `Ad4mModel` or `perspective.modelQuery()`) handles query generation, hydration, filtering, sorting, and pagination automatically:
+
+```typescript
+// These are equivalent:
+// Raw SPARQL
+const results = await perspective.querySparql(`
+  SELECT ?todo WHERE {
+    ?stateLink a rdf:Statement ;
+               rdf:subject ?todo ;
+               rdf:predicate <todo://state> ;
+               rdf:object <todo://done> .
+  }
+`);
+
+// Model query (recommended for application code)
+const doneTodos = await Todo.findAll(perspective, {
+  where: { state: "todo://done" }
+});
+```
+
+**Use raw SPARQL when you need:**
+- Custom aggregations (COUNT, SUM, AVG)
+- Complex multi-hop traversals not expressible via the model query DSL
+- Analytics and reporting queries
+- Direct access to link metadata
+- OPTIONAL patterns and UNION queries
+
+**Use the model query engine when you need:**
+- CRUD operations on model instances
+- Type-safe queries with the fluent builder
+- Automatic hydration of related models
+- Real-time subscriptions
+- Pagination with total count
+
+## Performance Notes
+
+- All SPARQL queries execute **server-side in Rust** via Oxigraph — no data is transferred to JS until results are ready
+- The Oxigraph store maintains indexes on subjects, predicates, and objects for fast lookups
+- Use specific patterns (filter on predicate, source, or target) rather than unbounded `?s ?p ?o` for best performance
+- `LIMIT` and `OFFSET` are handled efficiently by the query engine
+- For paginated model data, prefer `perspective.modelQuery()` which combines SPARQL with server-side hydration
+
+## Security Note
+
+`querySparql()` only allows read-only `SELECT` queries. To modify links, use the standard AD4M methods:
+
+```typescript
+// Adding links
+await perspective.add({ source: "user://alice", predicate: "follows", target: "user://bob" });
+
+// Removing links
+await perspective.remove({ source: "user://alice", predicate: "follows", target: "user://bob" });
+```
+
+## Related Resources
+
+- [Model Classes Guide](/developer-guides/model-classes) — Using Ad4mModel with the SPARQL engine
+- [Perspectives](/perspectives) — Understanding perspectives and links
+- [Social DNA](/social-dna) — Advanced query patterns with SDNA

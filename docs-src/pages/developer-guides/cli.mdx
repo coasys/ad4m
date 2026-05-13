@@ -43,7 +43,7 @@ The executor supports various configuration parameters to customize its behavior
 ```bash
 # Basic configuration
 ad4m-executor run \
-  --gql-port 12000 \           # Main GraphQL API port (default: 4000)
+  --port 12000 \              # API port (default: 12000)
   --admin-credential secret \   # Bypass authentication handshake
   --app-data-path ./data \     # Custom data directory (default: ~/.ad4m)
   --run-dapp-server true       # Run the DApp server (default: false)
@@ -67,13 +67,13 @@ ad4m-executor run
 
 # Second executor (custom ports)
 ad4m-executor run \
-  --gql-port 14000 \           # Different GraphQL port
+  --port 14000 \               # Different API port
   --hc-admin-port 2234 \       # Different Holochain admin port
   --hc-app-port 9888 \         # Different Holochain app port
   --app-data-path ~/.ad4m2     # Separate data directory
 ```
 
-When connecting to the second executor with the client, specify the custom GraphQL port:
+When connecting to the second executor with the client, specify the custom port:
 
 ```bash
 ad4m --executor-url http://localhost:14000 agent me
