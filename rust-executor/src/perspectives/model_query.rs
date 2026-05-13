@@ -192,7 +192,7 @@ pub struct ProjectionInput {
     pub target_shape: Option<Value>,
     /// Optional where filter applied against target instance properties.
     #[serde(default, rename = "where")]
-    pub where_clause: Option<HashMap<String, WhereCondition>>,
+    pub where_clause: Option<BTreeMap<String, WhereCondition>>,
     /// Limit the number of linked results (when 1, value is unwrapped to scalar).
     pub limit: Option<usize>,
     /// Order results before limiting.
@@ -215,7 +215,7 @@ pub struct ModelQueryInput {
     #[serde(default)]
     pub projections: Option<HashMap<String, ProjectionInput>>,
     #[serde(default, rename = "where")]
-    pub where_clause: Option<HashMap<String, WhereCondition>>,
+    pub where_clause: Option<BTreeMap<String, WhereCondition>>,
     #[serde(default, deserialize_with = "deserialize_order_flex")]
     pub order: Option<Vec<(String, OrderDirection)>>,
     #[serde(default)]
@@ -267,7 +267,7 @@ struct ShapeProperty {
     /// FILTER cannot match them.  This filter is applied in Rust after the
     /// getter runs, by fetching the target property values and comparing
     /// the parsed data.
-    where_filter: Option<HashMap<String, WhereCondition>>,
+    where_filter: Option<BTreeMap<String, WhereCondition>>,
     /// Predicate mappings for `where_filter` (property name → predicate IRI).
     where_predicates: Option<HashMap<String, String>>,
 }
@@ -1265,12 +1265,12 @@ fn execute_model_query_inner(
     })
 }
 
-/// Parse a where-filter JSON object into a HashMap<String, WhereCondition>.
+/// Parse a where-filter JSON object into a BTreeMap<String, WhereCondition>.
 /// Used for post-getter relation filtering (property values are signed
 /// expression envelopes and cannot be matched by SPARQL FILTER).
-fn parse_where_filter(val: &Value) -> Option<HashMap<String, WhereCondition>> {
+fn parse_where_filter(val: &Value) -> Option<BTreeMap<String, WhereCondition>> {
     let obj = val.as_object()?;
-    let mut map = HashMap::new();
+    let mut map = BTreeMap::new();
     for (key, cond) in obj {
         if let Ok(wc) = serde_json::from_value::<WhereCondition>(cond.clone()) {
             map.insert(key.clone(), wc);
@@ -1990,7 +1990,7 @@ fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Value> {
 /// Check if an instance matches all where-clause conditions.
 fn matches_where(
     instance: &Value,
-    where_clause: &HashMap<String, WhereCondition>,
+    where_clause: &BTreeMap<String, WhereCondition>,
     shape: &ModelShape,
 ) -> bool {
     for (prop_name, condition) in where_clause {
@@ -2548,7 +2548,7 @@ fn apply_where_filter_to_relation(
     store: &SparqlStore,
     instances: &mut [Value],
     relation_name: &str,
-    where_filter: &HashMap<String, WhereCondition>,
+    where_filter: &BTreeMap<String, WhereCondition>,
     where_predicates: &HashMap<String, String>,
 ) -> Result<(), Error> {
     // Collect all target IDs across all instances for this relation
@@ -2885,7 +2885,7 @@ fn resolve_forward_include(
             .collect();
 
         let resolved = if rel.max_count == Some(1) {
-            items.last().cloned().unwrap_or(Value::Null)
+            items.first().cloned().unwrap_or(Value::Null)
         } else {
             Value::Array(items)
         };
@@ -3017,7 +3017,7 @@ fn resolve_reverse_include(
 
         let resolved = if rel.kind == "belongsToOne" || rel.max_count == Some(1) {
             source_ids
-                .last()
+                .first()
                 .and_then(|id| hydrated.get(id).cloned())
                 .unwrap_or(Value::Null)
         } else {
@@ -3658,7 +3658,7 @@ mod tests {
         );
 
         // Both conditions match
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -3667,7 +3667,7 @@ mod tests {
         assert!(matches_where(&instance, &where_clause, &shape));
 
         // First matches, second doesn't
-        let mut where_clause2 = HashMap::new();
+        let mut where_clause2 = BTreeMap::new();
         where_clause2.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -3682,13 +3682,13 @@ mod tests {
         let instance = json!({"id": "test://1", "name": "X"});
         let shape = shape("Test", vec![prop("name", "test://name")]);
 
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "id".to_string(),
             WhereCondition::String("test://1".to_string()),
         );
         // Even with a non-matching id, it should pass because String id is skipped
-        let mut where_clause_wrong = HashMap::new();
+        let mut where_clause_wrong = BTreeMap::new();
         where_clause_wrong.insert(
             "id".to_string(),
             WhereCondition::String("test://wrong".to_string()),
@@ -3702,7 +3702,7 @@ mod tests {
         let instance = json!({"id": "test://1"});
         let shape = shape("Test", vec![]);
 
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "id".to_string(),
             WhereCondition::Ops(WhereOps {
@@ -3719,7 +3719,7 @@ mod tests {
         let instance = json!({"id": "test://1", "tags": ["a", "b"]});
         let shape = shape("Test", vec![relation("tags", "test://tag")]);
 
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "tags".to_string(),
             WhereCondition::String("nonexistent".to_string()),
@@ -4320,7 +4320,7 @@ mod integration_tests {
         assert_eq!(name_val, &json!("Recipe 1"), "Name should be 'Recipe 1'");
 
         // Query WITH WHERE - should also find 1 instance
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "name".to_string(),
             WhereCondition::String("Recipe 1".to_string()),
@@ -4654,7 +4654,7 @@ mod integration_tests {
 
     #[test]
     fn test_build_projection_where_patterns_id_filter() {
-        let mut wc = HashMap::new();
+        let mut wc = BTreeMap::new();
         wc.insert(
             "id".to_string(),
             WhereCondition::String("signal://abc".to_string()),
@@ -4683,7 +4683,7 @@ mod integration_tests {
             },
             "relations": {}
         });
-        let mut wc = HashMap::new();
+        let mut wc = BTreeMap::new();
         wc.insert(
             "signalTypeId".to_string(),
             WhereCondition::String("like".to_string()),
@@ -4959,7 +4959,7 @@ mod integration_tests {
         let shape = make_shape_with_relation("Parent", "reactions", "test://has_reaction");
 
         // Filter by the plain IRI of the reaction target.
-        let mut wc = HashMap::new();
+        let mut wc = BTreeMap::new();
         wc.insert(
             "id".to_string(),
             WhereCondition::String(like_iri.to_string()),
@@ -5019,7 +5019,7 @@ mod integration_tests {
 
         let shape = make_shape_with_relation("Parent", "signals", "test://has_signal");
 
-        let mut wc = HashMap::new();
+        let mut wc = BTreeMap::new();
         wc.insert(
             "author".to_string(),
             WhereCondition::String(alice.to_string()),
@@ -5277,7 +5277,7 @@ mod integration_tests {
             ?target <task://title> ?_v0 . \
             ?target <task://status> ?_v1 . }";
 
-        let mut where_filter = HashMap::new();
+        let mut where_filter = BTreeMap::new();
         where_filter.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -5851,7 +5851,7 @@ mod integration_tests {
             ?target <task://title> ?_v0 . \
             ?target <task://status> ?_v1 . }";
 
-        let mut where_filter = HashMap::new();
+        let mut where_filter = BTreeMap::new();
         where_filter.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -5924,7 +5924,7 @@ mod integration_tests {
 
         let getter = "SELECT ?target WHERE { <Base> <ns://has_child> ?target . }";
 
-        let mut where_filter = HashMap::new();
+        let mut where_filter = BTreeMap::new();
         where_filter.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -6037,7 +6037,7 @@ mod integration_tests {
 
         let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
 
-        let mut where_filter = HashMap::new();
+        let mut where_filter = BTreeMap::new();
         where_filter.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -6111,7 +6111,7 @@ mod integration_tests {
         // child_without has no status link at all
 
         let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
-        let mut where_filter = HashMap::new();
+        let mut where_filter = BTreeMap::new();
         where_filter.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -6175,7 +6175,7 @@ mod integration_tests {
             .unwrap();
 
         let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
-        let mut where_filter = HashMap::new();
+        let mut where_filter = BTreeMap::new();
         where_filter.insert(
             "color".to_string(),
             WhereCondition::String("red".to_string()),
@@ -6262,7 +6262,7 @@ mod integration_tests {
             .unwrap();
 
         let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
-        let mut where_filter = HashMap::new();
+        let mut where_filter = BTreeMap::new();
         where_filter.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -6369,7 +6369,7 @@ mod integration_tests {
         }"#;
 
         // Query WITH where clause on status
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -6441,7 +6441,7 @@ mod integration_tests {
         }"#;
 
         // Where: score > 50
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "score".to_string(),
             WhereCondition::Ops(WhereOps {
@@ -6518,7 +6518,7 @@ mod integration_tests {
             "relations": {}
         }"#;
 
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert("visible".to_string(), WhereCondition::Bool(true));
 
         let query = ModelQueryInput {
@@ -6581,7 +6581,7 @@ mod integration_tests {
             "relations": {}
         }"#;
 
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "status".to_string(),
             WhereCondition::StringArray(vec!["active".to_string(), "pending".to_string()]),
@@ -6637,7 +6637,7 @@ mod integration_tests {
             "relations": {}
         }"#;
 
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "status".to_string(),
             WhereCondition::Ops(WhereOps {
