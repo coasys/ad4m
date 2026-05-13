@@ -2783,19 +2783,20 @@ fn resolve_forward_include(
     sub_query: &ModelQueryInput,
     depth: u8,
 ) -> Result<(), Error> {
-    // Collect all target IDs across all instances
+    // Collect all target IDs across all instances (deduplicated, order-preserving)
+    let mut seen = std::collections::HashSet::new();
     let mut all_ids: Vec<String> = Vec::new();
     for inst in instances.iter() {
         if let Some(arr) = inst[&rel.name].as_array() {
             for item in arr {
                 if let Some(id) = item.as_str() {
-                    if !all_ids.contains(&id.to_string()) {
+                    if seen.insert(id.to_string()) {
                         all_ids.push(id.to_string());
                     }
                 }
             }
         } else if let Some(id) = inst[&rel.name].as_str() {
-            if !all_ids.contains(&id.to_string()) {
+            if seen.insert(id.to_string()) {
                 all_ids.push(id.to_string());
             }
         }
