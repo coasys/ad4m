@@ -2,6 +2,7 @@
 
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::agent::capabilities::*;
 use crate::agent::AgentContext;
@@ -510,6 +511,9 @@ async fn query_prolog(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(serde_json::to_value(prolog_resolution_to_string(res))?)
 }
 
+/// Server-side timeout for SPARQL queries (seconds).
+const SPARQL_QUERY_TIMEOUT_SECS: u64 = 30;
+
 async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -526,10 +530,29 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 
     match engine.as_str() {
         "sparql" => {
-            let res = perspective
-                .sparql_query(query)
-                .map_err(|e| WsRpcError::internal(e.to_string()))?;
-            Ok(serde_json::to_value(res)?)
+            // Run the synchronous SPARQL query on a blocking thread with a timeout
+            // so it doesn't block the async runtime or hang indefinitely.
+            let result = tokio::time::timeout(
+                Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
+                tokio::task::spawn_blocking(move || perspective.sparql_query(query)),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(Ok(json))) => Ok(serde_json::to_value(json)?),
+                Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
+                Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
+                Err(_) => {
+                    log::warn!("SPARQL query timed out after {}s", SPARQL_QUERY_TIMEOUT_SECS);
+                    Err(WsRpcError {
+                        code: 408,
+                        message: format!(
+                            "SPARQL query timed out after {}s",
+                            SPARQL_QUERY_TIMEOUT_SECS
+                        ),
+                    })
+                }
+            }
         }
         "surreal" => Err(WsRpcError::bad_request(
             "SurrealDB query engine not available. Use 'sparql'.",
