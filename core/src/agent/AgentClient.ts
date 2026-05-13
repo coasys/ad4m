@@ -82,6 +82,13 @@ export class AgentClient {
     const agent = await this.#apiClient.call<Agent>('agent.get');
     let agentObject = new Agent(agent.did, agent.perspective);
     agentObject.directMessageLanguage = agent.directMessageLanguage;
+
+    // Auto-set selfDid so event-driven cache invalidation works
+    // without requiring apps to call setSelfDid() manually
+    if (agentObject.did && !this.#selfDid) {
+      this.#selfDid = agentObject.did;
+    }
+
     return agentObject;
   }
 
@@ -186,6 +193,14 @@ export class AgentClient {
     const a = await this.#apiClient.call<Agent>('agent.updateProfile', { publicPerspective: cleanedPerspective });
     const agent = new Agent(a.did, a.perspective);
     agent.directMessageLanguage = a.directMessageLanguage;
+
+    // Immediately update byDID cache so subsequent byDID() calls
+    // return fresh data without waiting for the subscription event
+    if (agent.did) {
+      this.#memCache.set(agent.did, { promise: Promise.resolve(agent), ts: Date.now() });
+      this.#persistent.put(agent.did, agent); // fire-and-forget
+    }
+
     return agent;
   }
 
@@ -216,6 +231,14 @@ export class AgentClient {
     const a = await this.#apiClient.call<Agent>('agent.updateProfile', { dmLanguage: directMessageLanguage });
     const agent = new Agent(a.did, a.perspective);
     agent.directMessageLanguage = a.directMessageLanguage;
+
+    // Immediately update byDID cache so subsequent byDID() calls
+    // return fresh data without waiting for the subscription event
+    if (agent.did) {
+      this.#memCache.set(agent.did, { promise: Promise.resolve(agent), ts: Date.now() });
+      this.#persistent.put(agent.did, agent); // fire-and-forget
+    }
+
     return agent;
   }
 
