@@ -431,21 +431,37 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       },
     );
 
-    // Set up keepalive with failure tracking
-    let keepaliveFailures = 0;
-    const keepaliveTimer = setInterval(() => {
-      this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId).then(() => {
-        keepaliveFailures = 0;
-      }).catch((e: any) => {
-        keepaliveFailures++;
-        console.warn(`Model subscription keepalive failed (attempt ${keepaliveFailures}) for ${subscriptionId}:`, e);
-      });
-    }, 30000);
+    // Set up keepalive with recovery — uses setTimeout loop so we can
+    // break out and resubscribe when the server evicts the subscription.
+    let disposed = false;
+    let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
+    const keepaliveLoop = async () => {
+      if (disposed) return;
+      try {
+        await this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId);
+      } catch (e: any) {
+        console.warn(`Model subscription keepalive failed for ${subscriptionId}:`, e);
+        if (!disposed) {
+          try {
+            unsubscribe();
+            await this.subscribe(callback);
+          } catch (resubErr) {
+            console.error('Model subscription resubscribe failed:', resubErr);
+          }
+        }
+        return; // new subscription owns its own keepalive loop
+      }
+      if (!disposed) {
+        keepaliveTimer = setTimeout(keepaliveLoop, 30000);
+      }
+    };
+    keepaliveTimer = setTimeout(keepaliveLoop, 30000);
 
     // Store dispose function
     this.currentSubscription = {
       dispose: () => {
-        clearInterval(keepaliveTimer);
+        disposed = true;
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
         unsubscribe();
         this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).catch(() => {});
       },
@@ -551,19 +567,34 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       },
     );
 
-    let keepaliveFailures = 0;
-    const keepaliveTimer = setInterval(() => {
-      this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId).then(() => {
-        keepaliveFailures = 0;
-      }).catch((e: any) => {
-        keepaliveFailures++;
-        console.warn(`Count subscription keepalive failed (attempt ${keepaliveFailures}) for ${subscriptionId}:`, e);
-      });
-    }, 30000);
+    let disposed = false;
+    let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
+    const keepaliveLoop = async () => {
+      if (disposed) return;
+      try {
+        await this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId);
+      } catch (e: any) {
+        console.warn(`Count subscription keepalive failed for ${subscriptionId}:`, e);
+        if (!disposed) {
+          try {
+            unsubscribe();
+            await this.countSubscribe(callback);
+          } catch (resubErr) {
+            console.error('Count subscription resubscribe failed:', resubErr);
+          }
+        }
+        return;
+      }
+      if (!disposed) {
+        keepaliveTimer = setTimeout(keepaliveLoop, 30000);
+      }
+    };
+    keepaliveTimer = setTimeout(keepaliveLoop, 30000);
 
     this.currentSubscription = {
       dispose: () => {
-        clearInterval(keepaliveTimer);
+        disposed = true;
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
         unsubscribe();
         this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).catch(() => {});
       },
@@ -683,19 +714,34 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       },
     );
 
-    let keepaliveFailures = 0;
-    const keepaliveTimer = setInterval(() => {
-      this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId).then(() => {
-        keepaliveFailures = 0;
-      }).catch((e: any) => {
-        keepaliveFailures++;
-        console.warn(`Paginate subscription keepalive failed (attempt ${keepaliveFailures}) for ${subscriptionId}:`, e);
-      });
-    }, 30000);
+    let disposed = false;
+    let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
+    const keepaliveLoop = async () => {
+      if (disposed) return;
+      try {
+        await this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId);
+      } catch (e: any) {
+        console.warn(`Paginate subscription keepalive failed for ${subscriptionId}:`, e);
+        if (!disposed) {
+          try {
+            unsubscribe();
+            await this.paginateSubscribe(pageSize, pageNumber, callback);
+          } catch (resubErr) {
+            console.error('Paginate subscription resubscribe failed:', resubErr);
+          }
+        }
+        return;
+      }
+      if (!disposed) {
+        keepaliveTimer = setTimeout(keepaliveLoop, 30000);
+      }
+    };
+    keepaliveTimer = setTimeout(keepaliveLoop, 30000);
 
     this.currentSubscription = {
       dispose: () => {
-        clearInterval(keepaliveTimer);
+        disposed = true;
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
         unsubscribe();
         this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).catch(() => {});
       },
