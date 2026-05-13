@@ -1410,15 +1410,52 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
 ///
 /// The query pattern:
 /// 1. Conformance: JOIN on required/flag properties to identify valid instances
-/// 2. Data retrieval: Fetch all links for conforming instances with reifier metadata
+/// 2. Data retrieval: Fetch links for conforming instances with reifier metadata
+///
+/// **Predicate projection optimisation:** Only predicates that hydration
+/// actually needs from the main query are included.  Collection properties
+/// that have SPARQL getters (auto-generated conformance filters for typed
+/// `@HasMany` relations) are excluded — they are resolved separately in
+/// `evaluate_getters`.  This avoids scanning large numbers of links (e.g.
+/// 10 000 message children) that would be discarded during hydration.
 fn build_instance_sparql(shape: &ModelShape, query: &ModelQueryInput) -> String {
     let (conformance, where_extra) = build_query_patterns(shape, query);
+
+    // Collect predicates that hydration will actually consume from the main
+    // query results.  Skip collection properties that have a SPARQL getter
+    // because evaluate_getters resolves those with targeted per-relation
+    // queries, and hydrate_one already excludes getter-backed properties
+    // from its pred_to_props map.
+    let needed: Vec<&str> = shape
+        .properties
+        .iter()
+        .filter(|p| !p.predicate.is_empty())
+        .filter(|p| !(p.is_collection && p.getter.is_some()))
+        .map(|p| p.predicate.as_str())
+        .collect();
+
+    // Build a VALUES clause to restrict the predicate scan.
+    // Deduplicate with BTreeSet for deterministic output.
+    let predicate_filter = if needed.is_empty() {
+        // No known predicates — fall back to unrestricted wildcard.
+        // This shouldn't happen for well-decorated models (they always
+        // have at least a @Flag), but keeps the function safe for edge cases.
+        String::new()
+    } else {
+        let unique: std::collections::BTreeSet<&str> = needed.into_iter().collect();
+        let values: String = unique
+            .iter()
+            .map(|p| format!("<{}>", p))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("    VALUES ?predicate {{ {} }}\n", values)
+    };
 
     format!(
         r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
 {where_extra}
-    ?source ?predicate ?target .
+{predicate_filter}    ?source ?predicate ?target .
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
     FILTER(isIRI(?source) && isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
@@ -6554,5 +6591,316 @@ mod integration_tests {
         let result = execute_model_query(&store, "Item", &query, Some(shape_json)).unwrap();
         assert_eq!(result.instances.len(), 1);
         assert_eq!(result.instances[0]["id"].as_str().unwrap(), item1);
+    }
+
+    // -----------------------------------------------------------------------
+    // build_instance_sparql: predicate projection tests
+    //
+    // Verifies that the VALUES ?predicate clause correctly excludes
+    // collection properties that have SPARQL getters (i.e. typed @HasMany
+    // relations resolved by evaluate_getters) while retaining scalar
+    // properties, flags, and raw-predicate collections without getters.
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a minimal ShapeProperty for a scalar property.
+    fn scalar_prop(name: &str, predicate: &str, required: bool, flag: bool) -> ShapeProperty {
+        ShapeProperty {
+            name: name.to_string(),
+            predicate: predicate.to_string(),
+            is_collection: false,
+            is_flag: flag,
+            is_required: required,
+            initial_value: if flag {
+                Some("ns://flag_value".to_string())
+            } else {
+                None
+            },
+            resolve_language: None,
+            datatype: None,
+            direction: None,
+            is_scalar_relation: false,
+            getter: None,
+            where_filter: None,
+            where_predicates: None,
+        }
+    }
+
+    /// Helper: build a ShapeProperty for a collection relation.
+    fn collection_prop(name: &str, predicate: &str, getter: Option<&str>) -> ShapeProperty {
+        ShapeProperty {
+            name: name.to_string(),
+            predicate: predicate.to_string(),
+            is_collection: true,
+            is_flag: false,
+            is_required: false,
+            initial_value: None,
+            resolve_language: None,
+            datatype: None,
+            direction: None,
+            is_scalar_relation: false,
+            getter: getter.map(|s| s.to_string()),
+            where_filter: None,
+            where_predicates: None,
+        }
+    }
+
+    fn make_shape(props: Vec<ShapeProperty>) -> ModelShape {
+        ModelShape {
+            target_class: "TestModel".to_string(),
+            shape_uri: String::new(),
+            properties: props,
+            include_relations: vec![],
+        }
+    }
+
+    #[test]
+    fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
+        // A model with only scalar properties (like ChannelSummary) should
+        // produce a VALUES ?predicate clause listing only those predicates.
+        let shape = make_shape(vec![
+            scalar_prop("type", "flux://entry_type", true, true),
+            scalar_prop("name", "flux://name", false, false),
+            scalar_prop("description", "flux://description", false, false),
+        ]);
+        let query = ModelQueryInput::default();
+        let sparql = build_instance_sparql(&shape, &query);
+
+        assert!(
+            sparql.contains("VALUES ?predicate"),
+            "Should have VALUES clause, got:\n{}",
+            sparql
+        );
+        assert!(sparql.contains("<flux://entry_type>"));
+        assert!(sparql.contains("<flux://name>"));
+        assert!(sparql.contains("<flux://description>"));
+    }
+
+    #[test]
+    fn test_build_instance_sparql_excludes_getter_backed_collections() {
+        // A model like Channel with typed @HasMany relations that have
+        // auto-generated getters.  The getter-backed collections (views,
+        // messages) should be EXCLUDED from the VALUES clause.
+        let shape = make_shape(vec![
+            scalar_prop("type", "flux://entry_type", true, true),
+            scalar_prop("name", "flux://name", false, false),
+            // Typed @HasMany — has a getter (auto-generated conformance filter)
+            collection_prop(
+                "views",
+                "ad4m://has_child",
+                Some("SELECT ?target WHERE { ?source <ad4m://has_child> ?target . ?target <flux://entry_type> <flux://has_app> . }"),
+            ),
+            // Another typed @HasMany with getter — same predicate
+            collection_prop(
+                "messages",
+                "ad4m://has_child",
+                Some("SELECT ?target WHERE { ?source <ad4m://has_child> ?target . ?target <flux://entry_type> <flux://has_message> . }"),
+            ),
+        ]);
+        let query = ModelQueryInput::default();
+        let sparql = build_instance_sparql(&shape, &query);
+
+        assert!(
+            sparql.contains("VALUES ?predicate"),
+            "Should have VALUES clause"
+        );
+        assert!(sparql.contains("<flux://entry_type>"));
+        assert!(sparql.contains("<flux://name>"));
+        // ad4m://has_child should NOT appear because both collections using
+        // it have getters.
+        assert!(
+            !sparql.contains("<ad4m://has_child>"),
+            "Should exclude getter-backed collection predicate, got:\n{}",
+            sparql
+        );
+    }
+
+    #[test]
+    fn test_build_instance_sparql_retains_raw_predicate_collections() {
+        // A collection without a getter (raw predicate like participants)
+        // should be INCLUDED in the VALUES clause because it's resolved
+        // from the main query results, not by evaluate_getters.
+        let shape = make_shape(vec![
+            scalar_prop("type", "flux://entry_type", true, true),
+            // Raw @HasMany — no target class, no getter
+            collection_prop("participants", "flux://has_participant", None),
+            // Typed @HasMany — has getter
+            collection_prop(
+                "messages",
+                "ad4m://has_child",
+                Some("SELECT ?target WHERE { ?source <ad4m://has_child> ?target . }"),
+            ),
+        ]);
+        let query = ModelQueryInput::default();
+        let sparql = build_instance_sparql(&shape, &query);
+
+        assert!(sparql.contains("VALUES ?predicate"));
+        assert!(sparql.contains("<flux://entry_type>"));
+        assert!(
+            sparql.contains("<flux://has_participant>"),
+            "Raw collection predicate should be included"
+        );
+        assert!(
+            !sparql.contains("<ad4m://has_child>"),
+            "Getter-backed collection predicate should be excluded"
+        );
+    }
+
+    #[test]
+    fn test_build_instance_sparql_shared_predicate_mixed_getter() {
+        // Edge case: two collections share the same predicate but only one
+        // has a getter.  The predicate should be INCLUDED because the
+        // getter-less collection needs it from the main query.
+        let shape = make_shape(vec![
+            scalar_prop("type", "flux://entry_type", true, true),
+            // No getter — needs predicate in main query
+            collection_prop("raw_children", "ad4m://has_child", None),
+            // Has getter — doesn't need predicate in main query
+            collection_prop(
+                "typed_children",
+                "ad4m://has_child",
+                Some("SELECT ?target WHERE { ?source <ad4m://has_child> ?target . }"),
+            ),
+        ]);
+        let query = ModelQueryInput::default();
+        let sparql = build_instance_sparql(&shape, &query);
+
+        assert!(sparql.contains("VALUES ?predicate"));
+        // ad4m://has_child should appear because raw_children needs it
+        assert!(
+            sparql.contains("<ad4m://has_child>"),
+            "Predicate should be included when any collection without a getter uses it"
+        );
+    }
+
+    #[test]
+    fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
+        // A shape with no properties at all should fall back to the
+        // unrestricted wildcard (no VALUES clause).
+        let shape = make_shape(vec![]);
+        let query = ModelQueryInput::default();
+        let sparql = build_instance_sparql(&shape, &query);
+
+        assert!(
+            !sparql.contains("VALUES ?predicate"),
+            "Empty shape should produce wildcard (no VALUES clause)"
+        );
+        // Should still have the basic pattern
+        assert!(sparql.contains("?source ?predicate ?target"));
+    }
+
+    #[test]
+    fn test_build_instance_sparql_values_clause_is_deduplicated() {
+        // If multiple scalar properties share the same predicate, the
+        // VALUES clause should contain it only once.
+        let shape = make_shape(vec![
+            scalar_prop("type", "ns://shared_pred", true, true),
+            scalar_prop("alias", "ns://shared_pred", false, false),
+            scalar_prop("name", "ns://name", false, false),
+        ]);
+        let query = ModelQueryInput::default();
+        let sparql = build_instance_sparql(&shape, &query);
+
+        assert!(sparql.contains("VALUES ?predicate"));
+        // Count occurrences of the shared predicate in the VALUES clause
+        let values_line = sparql
+            .lines()
+            .find(|l| l.contains("VALUES ?predicate"))
+            .unwrap();
+        let count = values_line.matches("<ns://shared_pred>").count();
+        assert_eq!(
+            count, 1,
+            "Shared predicate should appear exactly once in VALUES clause"
+        );
+    }
+
+    #[test]
+    fn test_build_instance_sparql_integration_getter_excluded_from_results() {
+        // Full integration test: a Channel-like model with scalar properties
+        // and a getter-backed @HasMany relation.  The main query should NOT
+        // return rows for the getter-backed relation's predicate, so adding
+        // thousands of links with that predicate should not affect the result
+        // count from the main query.
+        let store = SparqlStore::new(None).unwrap();
+
+        let channel_id = "test://channel1";
+
+        // Add flag link
+        store
+            .add_link(&make_link(
+                channel_id,
+                "flux://entry_type",
+                "flux://channel",
+                "1700000000000",
+            ))
+            .unwrap();
+        // Add name link
+        store
+            .add_link(&make_link(
+                channel_id,
+                "flux://name",
+                "literal:string:general",
+                "1700000000001",
+            ))
+            .unwrap();
+
+        // Add 100 message children (simulating a large channel)
+        for i in 0..100 {
+            store
+                .add_link(&make_link(
+                    channel_id,
+                    "ad4m://has_child",
+                    &format!("test://msg{}", i),
+                    &format!("17000000001{:02}", i),
+                ))
+                .unwrap();
+        }
+
+        // Shape: scalar properties + getter-backed collection
+        let shape_json = r#"{
+            "className": "Channel",
+            "properties": {
+                "type": {
+                    "predicate": "flux://entry_type",
+                    "required": true,
+                    "flag": true,
+                    "initial": "flux://channel"
+                },
+                "name": {
+                    "predicate": "flux://name",
+                    "required": false
+                }
+            },
+            "relations": {
+                "messages": {
+                    "predicate": "ad4m://has_child",
+                    "getter": "SELECT ?target WHERE { ?source <ad4m://has_child> ?target . ?target <flux://entry_type> <flux://has_message> . }"
+                }
+            }
+        }"#;
+
+        let query = ModelQueryInput::default();
+        let result = execute_model_query(&store, "Channel", &query, Some(shape_json)).unwrap();
+
+        assert_eq!(result.instances.len(), 1, "Should find exactly 1 channel");
+        assert_eq!(
+            result.instances[0]["name"],
+            json!("general"),
+            "Name should be hydrated"
+        );
+        // The 100 message children should NOT appear in the main hydration
+        // because their predicate (ad4m://has_child) is excluded by the
+        // VALUES clause.  The "messages" relation has a getter, so it would
+        // be resolved by evaluate_getters (not tested here — that's a
+        // separate code path).
+        let messages = result.instances[0].get("messages");
+        // messages should either be absent or empty (getter not run in this test)
+        match messages {
+            None => {} // expected — not hydrated from main query
+            Some(Value::Array(arr)) => assert!(
+                arr.is_empty(),
+                "Messages should not be hydrated from main query"
+            ),
+            other => panic!("Unexpected messages value: {:?}", other),
+        }
     }
 }
