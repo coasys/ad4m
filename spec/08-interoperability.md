@@ -27,11 +27,12 @@ This section defines what an alternative AD4M implementation MUST and SHOULD sup
 - **MUST** normalize Link predicates (empty string → null/omitted).
 - **MUST** validate that Link source and target are valid URIs.
 
-### 8.2.4 GraphQL API
+### 8.2.4 WebSocket RPC API
 
-- **MUST** expose a GraphQL API compatible with the schema in [GraphQL API](./06-graphql-api.md).
-- **MUST** support both HTTP POST and WebSocket (`graphql-transport-ws`) transports.
-- **MUST** implement the core query/mutation/subscription types for perspectives, agents, and neighbourhoods.
+- **MUST** expose WebSocket RPC at `/api/v1/ws` with the JSON-RPC wire format described in [§6.2](./06-websocket-rpc-api.md#62-rpc-protocol).
+- **MUST** expose WebSocket events at `/api/v1/ws/events` with multiplexed event delivery.
+- **MUST** implement the core RPC operations for agent, perspectives, languages, neighbourhoods, and runtime domains.
+- **MUST** authenticate via `token` query parameter on WebSocket upgrade.
 
 ### 8.2.5 Language Interface
 
@@ -68,13 +69,12 @@ This section defines what an alternative AD4M implementation MUST and SHOULD sup
 - **MUST** support SHACL-based SDNA for subject class definitions and instance resolution.
 - **MUST** support SPARQL 1.1 queries over the link graph (via Oxigraph or an equivalent engine).
 - **SHOULD** implement the custom SPARQL functions `fn::parse_literal` and `fn::strip_html` for literal value filtering.
-- **MAY** support Prolog for SHACL inference and backward compatibility.
 - **MAY** support custom SHACL rules (SPARQL-based constraints) for advanced reasoning.
 
 ### 8.3.2 Capability Tokens
 
 - **SHOULD** implement JWT-based capability tokens with the claims structure in [Agent Model §2.5](./02-agent-model.md#25-capability-tokens).
-- **SHOULD** enforce capability checks on all GraphQL operations.
+- **SHOULD** enforce capability checks on all RPC operations.
 
 ### 8.3.3 Holochain Integration
 
@@ -86,7 +86,7 @@ This section defines what an alternative AD4M implementation MUST and SHOULD sup
 ### 8.3.4 Telepresence
 
 - **SHOULD** support telepresence capabilities (`telepresenceSetStatus`, `telepresenceGetAgents`, `telepresenceSendSignal`, `telepresenceSendBroadcast`) for online status and signaling.
-- **SHOULD** support the `neighbourhoodSignal` subscription.
+- **SHOULD** support the `signal` event type for neighbourhood signaling.
 
 ### 8.3.5 Language Templating
 

@@ -219,22 +219,58 @@ Values are encoded using RFC 3986 percent-encoding via `encodeRFC3986URIComponen
 "literal:string:Hello%20World"
 ```
 
-## 1.9 Link Storage Model (Named Graphs)
+## 1.9 Link Storage Model (RDF 1.2 Reifiers)
 
-In the reference implementation, each AD4M link is stored in the SPARQL triple store (Oxigraph) using a **named graph** model:
+Each AD4M link is stored in the SPARQL triple store (Oxigraph 0.5.7) using the **RDF 1.2 reifier** model. Each link produces 8 quads in the **default graph**:
 
-1. The direct triple `(source, predicate, target)` is stored in a **named graph** whose IRI is derived from the SHA-256 hash of the link data + timestamp (e.g., `link:<hash32>`).
-2. Metadata about the link (author, timestamp, proof, status) is stored as additional triples in the **default graph**, keyed by the named graph IRI.
+```turtle
+s p o .                                           # direct triple
+<link:HASH> rdf:reifies <<( s p o )>> .           # reifier binding
+<link:HASH> ad4m://ontology/author ?author .      # metadata
+<link:HASH> ad4m://ontology/timestamp ?ts .
+<link:HASH> ad4m://ontology/source s .
+<link:HASH> ad4m://ontology/predicate p .
+<link:HASH> ad4m://ontology/target o .
+<link:HASH> ad4m://ontology/status ?status .
+```
 
-Metadata ontology URIs:
+### Reifier IRI
+
+The reifier IRI is deterministic: `link:<SHA256(source||predicate||target||timestamp)>`. This ensures the same link always produces the same reifier identifier regardless of which agent stores it.
+
+### Metadata Ontology
 
 | URI | Purpose |
 |-----|---------|
 | `ad4m://ontology/author` | DID of the link author |
 | `ad4m://ontology/timestamp` | ISO 8601 timestamp |
-| `ad4m://ontology/proofKey` | Public key from proof |
-| `ad4m://ontology/proofSignature` | Signature bytes (hex) |
-| `ad4m://ontology/proofValid` | Whether signature verification passed |
+| `ad4m://ontology/source` | Source URI |
+| `ad4m://ontology/predicate` | Predicate URI |
+| `ad4m://ontology/target` | Target URI |
 | `ad4m://ontology/status` | `"Shared"` or `"Local"` |
+| `ad4m://ontology/proofKey` | Public key from proof (optional) |
+| `ad4m://ontology/proofSignature` | Signature bytes, hex-encoded (optional) |
+| `ad4m://ontology/proofValid` | Whether signature verification passed (optional) |
 
-This model enables efficient SPARQL queries over both link data and metadata, supports named graph-scoped operations, and aligns with standard RDF quad storage.
+### Querying
+
+Simple data queries use direct triple patterns in the default graph:
+
+```sparql
+SELECT ?todo WHERE {
+  ?todo <todo://state> <todo://done> .
+}
+```
+
+Queries requiring metadata access use the reifier pattern:
+
+```sparql
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+SELECT ?source ?target ?author ?timestamp WHERE {
+  ?reifier rdf:reifies <<( ?source <todo://state> ?target )>> .
+  ?reifier <ad4m://ontology/author> ?author .
+  ?reifier <ad4m://ontology/timestamp> ?timestamp .
+}
+```
+
+This model enables efficient SPARQL queries over both link data and metadata, stores everything in the default graph (no named graphs required), and aligns with the RDF 1.2 standard for triple annotation.

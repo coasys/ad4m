@@ -9,10 +9,10 @@ MAJOR.MINOR.PATCH
 ```
 
 - **MAJOR** — Breaking changes to core data types, signing scheme, or required interfaces
-- **MINOR** — New optional features, new GraphQL fields/types, new Language adapter interfaces
+- **MINOR** — New optional features, new RPC operations/event types, new Language adapter interfaces
 - **PATCH** — Clarifications, bug fixes in the spec, non-functional changes
 
-**Current version:** 1.0.0 (Draft)
+**Current version:** 1.1.0 (Draft)
 
 ## 9.2 Compatibility Principles
 
@@ -23,13 +23,13 @@ MAJOR.MINOR.PATCH
 3. Implementations MUST ignore unknown fields in received data (forward compatibility).
 4. Implementations MUST NOT rely on field ordering in JSON objects.
 
-### GraphQL Schema Evolution
+### RPC API Evolution
 
-1. New queries, mutations, and subscriptions MAY be added in MINOR versions.
-2. Existing queries/mutations MUST NOT change their required parameters in MINOR versions.
+1. New RPC operations MAY be added in MINOR versions.
+2. Existing RPC operation parameters MUST NOT change in MINOR versions.
 3. New optional parameters MAY be added to existing operations.
-4. Return types MAY gain new optional fields.
-5. Deprecated fields SHOULD be marked with `@deprecated` and maintained for at least one MINOR version.
+4. New event types MAY be added in MINOR versions.
+5. Return types MAY gain new optional fields.
 
 ### Language Interface Evolution
 
@@ -47,12 +47,12 @@ MAJOR.MINOR.PATCH
 |-----------|-----------------|-------|
 | Expression signing | MAJOR | Changes break all signature verification |
 | Link/Expression types | MAJOR | Core data model changes break interop |
-| GraphQL API | MINOR | New fields/operations don't break existing clients |
+| WebSocket RPC API | MINOR | New operations don't break existing clients |
 | SDNA SHACL shapes | MINOR | New shapes are additive |
 | Language interface (WIT) | MINOR | New capabilities are optional exports |
 | P-Diff-Sync DNA | Implementation-defined | DNA changes require new Neighbourhoods |
 | Bootstrap Languages | Implementation-defined | Can be swapped for alternatives |
-| SPARQL store schema | Implementation-defined | Named graph model is stable; query functions may evolve |
+| SPARQL store schema | Implementation-defined | Reifier model is stable; query functions may evolve |
 
 ## 9.4 Migration Strategy
 
@@ -72,13 +72,13 @@ If the DID method or signing scheme changes:
 
 ## 9.5 Implementation Version Reporting
 
-Implementations MUST report their version via the `runtimeInfo` query:
+Implementations MUST report their version via the `runtime.info` RPC operation:
 
-```graphql
-type RuntimeInfo {
-  ad4mExecutorVersion: String!   # Implementation version
-  isInitialized: Boolean!
-  isUnlocked: Boolean!
+```typescript
+interface RuntimeInfo {
+  ad4mExecutorVersion: string;   // Implementation version
+  isInitialized: boolean;
+  isUnlocked: boolean;
 }
 ```
 
@@ -86,8 +86,9 @@ type RuntimeInfo {
 
 ## 9.6 Feature Detection
 
-Since not all implementations will support all features, clients SHOULD use feature detection:
+Since not all implementations support all features, clients SHOULD use feature detection:
 
-1. Check for optional GraphQL fields/types via introspection
-2. Check `neighbourhoodHasTelepresence` before using telepresence features
-3. Handle graceful degradation when optional features are unavailable
+1. Clients SHOULD probe for operation support by calling the operation and handling `501 Not Implemented` errors gracefully.
+2. Check `neighbourhood.hasTelepresence` before using telepresence features.
+3. Handle graceful degradation when optional features are unavailable.
+4. Use `runtime.info` to determine the executor version and infer supported feature sets.

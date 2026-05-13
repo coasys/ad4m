@@ -42,6 +42,7 @@ Declares a scalar property mapped to a link predicate:
   local: false,                     // Store as local-only link (default: false)
   getter: undefined,                // Custom graph traversal expression
   transform: undefined,             // Post-retrieval value transform function
+  options: undefined,               // Enum constraint (sh:in) — array of {value, label?}
 })
 body: string = "";
 ```
@@ -58,6 +59,7 @@ Smart defaults:
 - `initial` — Default value set during instance creation via constructor actions.
 - `readOnly` — If `true`, no setter method is generated. Maps to `ad4m://writable false`.
 - `getter` — Custom graph traversal expression. The expression can reference `Base` which is replaced with the instance's base expression. Example: `"SELECT ?target WHERE { <Base> <flux://has_reply> ?target . } LIMIT 1"`.
+- `options` — Array of `{ value: string, label?: string }` objects defining the allowed values for this property. Generates an `sh:in` constraint on the SHACL property shape.
 
 ### @Optional
 
@@ -238,6 +240,20 @@ await Message.register(perspective);
 
 This generates the SHACL shape from decorator metadata and stores it as SDNA links (see §4.2). Implementations SHOULD cache registration and skip if the shape already exists.
 
+The `options` field on `@Property` decorators generates `sh:in` constraints stored as part of the SHACL property shape:
+
+```typescript
+@Property({
+  through: "task://priority",
+  options: [
+    { value: "low", label: "Low" },
+    { value: "medium", label: "Medium" },
+    { value: "high", label: "High" }
+  ]
+})
+priority: string = "";
+```
+
 ### Creation
 
 ```typescript
@@ -337,7 +353,7 @@ const recent = await Post.findAll(perspective, {
 });
 ```
 
-Supported operators: `gt`, `lt`, `gte`, `lte`, `between`, `contains`, `not`.
+Supported operators: `equals`, `notEquals`, `gt`, `gte`, `lt`, `lte`, `between`, `like`, `in`, `notIn`.
 
 #### Ordering
 
@@ -416,13 +432,13 @@ const results = await Message.query(perspective)
 
 ### Reactive Queries (subscribe)
 
-`Model.query().subscribe()` returns a reactive subscription that re-runs when the perspective changes:
+`Model.query().subscribe()` returns a reactive subscription. Subscriptions execute **server-side in Rust** — the Rust engine builds trigger SPARQL from the model's SHACL shape predicates and re-executes the query when matching links change, pushing updated results to the client:
 
 ```typescript
 const subscription = Message.query(perspective)
   .where({ channel: channelId })
   .subscribe((messages) => {
-    // Called whenever the result set changes
+    // Called whenever the result set changes (pushed from server)
     console.log("Updated messages:", messages);
   });
 
@@ -430,54 +446,148 @@ const subscription = Message.query(perspective)
 subscription.unsubscribe();
 ```
 
-## 10.7 Query Engine — SPARQL
+#### Count Subscriptions
 
-Ad4mModel translates the Query DSL into **SPARQL 1.1** queries against the Oxigraph triple store. This replaces the earlier SurrealDB-based query path.
+```typescript
+const countSub = Message.query(perspective)
+  .where({ channel: channelId })
+  .countSubscribe((count) => {
+    console.log("Message count:", count);
+  });
+```
+
+#### Paginated Subscriptions
+
+```typescript
+const paginatedSub = Message.query(perspective)
+  .where({ channel: channelId })
+  .order({ createdAt: "DESC" })
+  .limit(20)
+  .paginateSubscribe((page) => {
+    // page.results, page.totalCount
+    console.log("Page updated:", page);
+  });
+```
+
+## 10.7 Query Engine — Rust-Side SPARQL
+
+Ad4mModel queries execute **server-side in Rust**. The SDK is a thin WebSocket client that sends query parameters via the `perspective.modelQuery` RPC operation and receives hydrated JSON instances.
+
+### Architecture
+
+```
+Ad4mModel.findAll(perspective, query)
+  → executeModelQuery()
+    → WS RPC: perspective.modelQuery
+      → Rust model_query.rs
+        → SPARQL generation from SHACL shape + query params
+        → Typed literal parsing (parse_literal_value)
+        → Where filtering (equals, notEquals, gt, gte, lt, lte, like, in, notIn, between)
+        → Sorting by any property, ASC/DESC
+        → Pagination via limit/offset
+        → SPARQL COUNT fast path
+        → Include resolution (forward + reverse, recursive, max depth 8)
+        → Getter evaluation server-side
+      → Returns hydrated JSON instances + totalCount
+  → jsonToModelInstance() (constructs class instances from JSON)
+```
 
 ### Storage Model
 
-Each AD4M link is stored as:
-- A direct triple `(source, predicate, target)` in a **named graph** (keyed by SHA-256 hash of the link).
-- Metadata triples (author, timestamp, proof, status) in the **default graph**, keyed by the named graph IRI.
+The query engine operates over the RDF 1.2 reifier storage model (see [§1.9](./01-core-data-model.md#19-link-storage-model-rdf-12-reifiers)). Direct triples live in the default graph; metadata is accessed via reifier patterns:
 
-Ontology URIs for metadata:
-- `ad4m://ontology/author`
-- `ad4m://ontology/timestamp`
-- `ad4m://ontology/proofKey`
-- `ad4m://ontology/proofSignature`
-- `ad4m://ontology/proofValid`
-- `ad4m://ontology/status`
+```sparql
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+SELECT ?s WHERE {
+  ?s <predicate> ?o .
+  ?reifier rdf:reifies <<( ?s <predicate> ?o )>> .
+}
+```
 
-### Query Translation
+### Where Filters
 
-`buildSPARQLQuery()` translates Query DSL clauses to SPARQL:
+ALL comparison operators are SPARQL-pushable — they execute in Rust within the SPARQL engine, not in JavaScript post-hydration:
 
-1. **Base pattern** — `SELECT ?s WHERE { GRAPH ?g { ?s <predicate> ?o } }` for each required/flag property.
-2. **Parent scope** — `GRAPH ?gp { <parentId> <predicate> ?s }` constraining the instance set.
-3. **Where filters** — Equality on link targets pushed down to SPARQL triple patterns; literal-stored values use the custom `fn::parse_literal()` function. Comparison operators (`gt`, `lt`, `gte`, `lte`, `between`, `contains`) on literal properties are evaluated in JavaScript post-hydration.
-4. **Order** — `ORDER BY` on literal values via `fn::parse_literal()`.
-5. **Limit/Offset** — Direct SPARQL `LIMIT`/`OFFSET` when no JS-only filters exist.
+| Operator | Description |
+|----------|-------------|
+| `equals` | Exact value match |
+| `notEquals` | Negation |
+| `gt` | Greater than (numeric/date) |
+| `gte` | Greater than or equal (numeric/date) |
+| `lt` | Less than (numeric/date) |
+| `lte` | Less than or equal (numeric/date) |
+| `like` | Pattern match |
+| `in` | Set membership |
+| `notIn` | Set exclusion |
+| `between` | Range (inclusive) |
 
 ### Custom SPARQL Functions
 
-The Oxigraph store registers two custom functions:
+The Oxigraph store registers custom functions:
 
 | Function | Description |
 |----------|-------------|
 | `fn::parse_literal(term)` | Decodes `literal:string:...` URIs into plain string literals. Handles `string:`, `number:`, `boolean:`, and `json:` types. For JSON literals containing a `data` field (signed expressions), extracts just the data value. |
 | `fn::strip_html(term)` | Strips HTML tags from literal values. |
 
+### Query Translation
+
+The Rust engine generates SPARQL from the SHACL shape and query parameters:
+
+1. **Base pattern** — `SELECT ?s WHERE { ?s <predicate> ?o . }` for each required/flag property (instance conformance).
+2. **Parent scope** — `<parentId> <predicate> ?s .` constraining the instance set.
+3. **Where filters** — Equality and comparison operators pushed into SPARQL FILTER clauses and triple patterns.
+4. **Order** — `ORDER BY` on literal values via `fn::parse_literal()`.
+5. **Limit/Offset** — Direct SPARQL `LIMIT`/`OFFSET`.
+6. **COUNT fast path** — When only a count is needed, generates `SELECT (COUNT(DISTINCT ?s) AS ?count)` avoiding full hydration.
+
+### Include (Eager Loading)
+
+Relations are resolved recursively in Rust with a maximum depth of 8 (`MAX_INCLUDE_DEPTH`). The engine handles:
+
+- **Forward relations** (`@HasMany`, `@HasOne`) — follows links where the instance is the source
+- **Reverse relations** (`@BelongsToOne`, `@BelongsToMany`) — follows links where the instance is the target
+
+Results are grouped and hydrated in a single pass, avoiding N+1 query patterns.
+
+### Server-Side Subscriptions
+
+The `perspective.modelSubscribe` RPC operation creates a server-side subscription:
+
+1. Rust builds trigger SPARQL from the model's SHACL shape predicates
+2. On link changes matching any trigger predicate, Rust re-executes the full model query
+3. Updated results are pushed to the client via the `query-subscription-update` event
+4. The client receives the complete updated result set (not a delta)
+
+```typescript
+// SDK usage
+const sub = await Message.query(perspective)
+  .where({ channel: channelId })
+  .subscribe(callback);
+
+// Under the hood:
+// 1. SDK calls perspective.modelSubscribe RPC
+// 2. Server creates subscription, returns subscriptionId
+// 3. On link changes, server pushes query-subscription-update events
+// 4. SDK deserializes and calls callback with updated instances
+```
+
+### Getter Evaluation
+
+Properties with `@Property({ getter })` expressions execute server-side in Rust via `evaluate_getters_batch()`. This eliminates N × round-trips that would be required if each getter were evaluated client-side:
+
+```typescript
+@Property({
+  getter: "SELECT ?target WHERE { <Base> <flux://has_reply> ?target . } LIMIT 1"
+})
+latestReply?: string;
+```
+
+The `<Base>` placeholder is replaced with each instance's base expression URI, and all getter queries for a batch of instances are executed together.
+
 ### Query Validation
 
 `validate_readonly_query()` ensures user-supplied SPARQL queries are read-only by parsing with Oxigraph's SPARQL parser. Only `SELECT`, `ASK`, `CONSTRUCT`, and `DESCRIBE` are accepted; `INSERT`, `DELETE`, `DROP`, etc. are rejected.
-
-### Batch Queries
-
-`buildBatchSPARQLQuery()` handles eager-loaded relations by constructing batch SPARQL queries that resolve N+1 patterns into single queries. Results are grouped and hydrated via `hydrateBatchResult()`.
-
-### Prolog Fallback
-
-Prolog remains available as a query engine parameter for backward compatibility. It is used primarily for SHACL inference and subject-class resolution (see §4). The Query DSL also supports Prolog-based query building via `buildParentQuery()`, `buildWhereQuery()`, etc.
 
 ## 10.8 Transactions
 
@@ -499,9 +609,10 @@ Ad4mModel decorators automatically generate SHACL shapes. The generation process
 
 1. **Class → NodeShape**: `@Model({ name })` creates a `sh:NodeShape` with `sh:targetClass` set to the class URI.
 2. **Properties → PropertyShapes**: Each `@Property`, `@Optional`, `@Flag`, `@HasMany`, `@HasOne`, etc. generates a `sh:property` entry with appropriate constraints.
-3. **Constructor Actions**: Required properties with `initial` values generate constructor actions that create links on instance creation.
-4. **Destructor Actions**: Generated to clean up all property links on instance deletion.
-5. **Conformance Conditions**: For typed relations, conformance filters are auto-derived from the target model's shape.
+3. **Options → sh:in**: Properties with `options` generate an `sh:in` constraint listing the allowed values.
+4. **Constructor Actions**: Required properties with `initial` values generate constructor actions that create links on instance creation.
+5. **Destructor Actions**: Generated to clean up all property links on instance deletion.
+6. **Conformance Conditions**: For typed relations, conformance filters are auto-derived from the target model's shape.
 
 The SHACL shapes are stored as SDNA links as specified in §4.2. Implementations MUST generate conformant SHACL shapes from decorator metadata. Shapes MUST be interoperable — a model registered by one implementation MUST be readable by another.
 
@@ -550,6 +661,9 @@ The `x-ad4m` extension in JSON Schema properties maps to Ad4mModel decorator opt
 | Query DSL (where, order, limit, offset, parent, include) | **SHOULD** | Must translate to SPARQL |
 | SPARQL query engine | **MUST** | Required for Ad4mModel query execution |
 | SPARQL custom functions (`fn::parse_literal`, `fn::strip_html`) | **SHOULD** | Required for literal value filtering |
+| Rust-side model query engine | **SHOULD** | Server-side execution for performance |
+| Server-side model subscriptions | **SHOULD** | Push-based reactive queries |
+| `sh:in` enum constraint support | **SHOULD** | Enum validation and options metadata |
 | Fluent query builder | **MAY** | Developer convenience |
 | Reactive queries (subscribe) | **MAY** | Delta-based subscription updates |
 | Transactions (batch operations) | **MAY** | Atomic multi-mutation commits |
@@ -557,6 +671,90 @@ The `x-ad4m` extension in JSON Schema properties maps to Ad4mModel decorator opt
 | Dirty tracking and save | **SHOULD** | Efficient link mutation |
 | Eager loading (include) | **SHOULD** | Avoids N+1 query patterns |
 | Conformance filters for typed relations | **SHOULD** | DB-level type filtering |
-| Prolog query fallback | **MAY** | Backward compatibility |
 
-Client-side Ad4mModel implementations (TypeScript/JavaScript) are the primary target. Server-side executors MUST support SPARQL queries over the link graph to enable Ad4mModel query execution.
+Client-side Ad4mModel implementations (TypeScript/JavaScript) are the primary target. Server-side executors MUST support SPARQL queries over the link graph and SHOULD implement the `perspective.modelQuery` RPC operation to enable efficient server-side query execution.
+
+## 10.12 PerspectiveProxy Introspection APIs
+
+The PerspectiveProxy provides introspection methods for working with registered models and their SHACL shapes at runtime:
+
+### listRegisteredClasses()
+
+Returns all registered SHACL class names in the perspective:
+
+```typescript
+const classes = await perspective.listRegisteredClasses();
+// ["Message", "Channel", "Todo", "Block"]
+```
+
+### getClassShape(className)
+
+Returns property metadata for a class including `sh:in` options:
+
+```typescript
+const shape = await perspective.getClassShape("Todo");
+// {
+//   properties: [
+//     { path: "todo://state", datatype: "xsd:string", maxCount: 1, minCount: 1, options: [...] },
+//     { path: "todo://has_title", datatype: "xsd:string", maxCount: 1 }
+//   ]
+// }
+```
+
+### getInstanceClasses(baseExpression)
+
+Returns which registered classes an instance conforms to:
+
+```typescript
+const classes = await perspective.getInstanceClasses("expression://abc123");
+// ["Message", "Post"]  — instance matches both shapes
+```
+
+### getNamedOptions(className)
+
+Returns `sh:in` values grouped by property for a given class:
+
+```typescript
+const options = await perspective.getNamedOptions("Todo");
+// {
+//   state: [
+//     { value: "open", label: "Open" },
+//     { value: "in-progress", label: "In Progress" },
+//     { value: "done", label: "Done" }
+//   ]
+// }
+```
+
+### addNamedOption(className, prop, value, label?)
+
+Dynamically adds an `sh:in` option to an existing property shape:
+
+```typescript
+await perspective.addNamedOption("Todo", "state", "blocked", "Blocked");
+```
+
+### modelQuery(className, queryJson, shapeJson?)
+
+Executes a model query directly via the Rust engine:
+
+```typescript
+const result = await perspective.modelQuery("Todo", {
+  where: { state: "open" },
+  order: { createdAt: "DESC" },
+  limit: 10
+});
+// { instances: [...], totalCount: 42 }
+```
+
+### modelSubscribe(className, queryJson, shapeJson?)
+
+Creates a server-side model subscription:
+
+```typescript
+const sub = await perspective.modelSubscribe("Todo", {
+  where: { state: "open" }
+}, (result) => {
+  // Called when matching links change
+  console.log("Updated todos:", result.instances);
+});
+```

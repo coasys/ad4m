@@ -6,7 +6,7 @@ Social DNA (SDNA) defines data schemas over the link graph in a Perspective. It 
 
 SDNA enables applications to work with typed objects (e.g., "Message", "Post", "Channel") while the underlying storage is always links. The SHACL shapes describe the expected graph structure, property constraints, and cardinality rules.
 
-> **Historical note:** Prior to v0.12.0, subject classes were defined using Prolog rules. SHACL is now the sole normative representation for subject class definitions.
+SHACL is the sole normative representation for subject class definitions.
 
 ## 4.2 SDNA Link Structure
 
@@ -35,6 +35,7 @@ Each property shape is a node with links describing the constraint:
 | `ad4m://sdna_<ClassName>_prop_<N>` | `ad4m://initial` | `<value>` | Default value on creation |
 | `ad4m://sdna_<ClassName>_prop_<N>` | `ad4m://resolveLanguage` | `<language_name>` | Expression language for value resolution |
 | `ad4m://sdna_<ClassName>_prop_<N>` | `ad4m://writable` | `literal:boolean:true` | Property can be updated |
+| `ad4m://sdna_<ClassName>_prop_<N>` | `sh://in` | `literal:string:[...]` | Allowed values (enum constraint) |
 
 ### Cardinality Rules
 
@@ -152,6 +153,7 @@ AD4M extends standard SHACL with custom predicates under the `ad4m://` namespace
 | `ad4m://writable` | Whether the property supports updates | `true` / `false` |
 | `ad4m://sdna_type` | Discriminates SDNA node type | `"subject_class"` |
 | `ad4m://has_sdna` | Links self to an SDNA definition | `ad4m://sdna_Todo` |
+| `sh://in` | Allowed values for the property (enum constraint) | `[{"value":"open","label":"Open"},...]` |
 
 ### Instance Resolution
 
@@ -256,6 +258,24 @@ ingredients: string[] = [];
 
 Generated methods: `addIngredients(value)`, `removeIngredients(value)`, `setCollectionIngredients(values)`.
 
+### @Property with `options` (Enum Constraint)
+
+The `options` parameter generates an `sh:in` constraint, restricting the property to a set of allowed values:
+
+```typescript
+@Property({
+  through: "task://status",
+  options: [
+    { value: "open", label: "Open" },
+    { value: "in-progress", label: "In Progress" },
+    { value: "done", label: "Done" }
+  ]
+})
+status: string = "";
+```
+
+The `options` array is stored as an `sh:in` link on the property shape node. Each option has a `value` (the stored link target) and an optional `label` (human-readable display name). Applications can use `getNamedOptions()` to retrieve the allowed values for UI rendering (e.g., dropdown menus, select inputs).
+
 ### @InstanceQuery
 
 Defines a static query method:
@@ -290,16 +310,15 @@ await perspective.addShacl('Recipe', shape);
 
 ## 4.6 Query Engines
 
-AD4M provides two query engines for working with Social DNA and perspective data:
+### SPARQL
 
-### SPARQL (Primary)
-
-The primary query engine is an in-process **Oxigraph** SPARQL 1.1 engine with disk persistence. Each AD4M link is stored as a named graph triple with metadata in the default graph (see [§1.9](./01-core-data-model.md#19-link-storage-model-named-graphs)).
+The query engine is an in-process **Oxigraph 0.5.7** SPARQL 1.1 engine with disk persistence. Each AD4M link is stored using the RDF 1.2 reifier model in the default graph (see [§1.9](./01-core-data-model.md#19-link-storage-model-rdf-12-reifiers)).
 
 SPARQL is used for:
 - Ad4mModel query execution (all `findAll`, `findOne`, `count`, etc. translate to SPARQL)
-- Direct queries via `perspectiveQuerySurreal` (name retained for backward compatibility; actually executes SPARQL)
+- Direct queries via `perspective.querySparql` RPC operation
 - Custom queries from applications
+- Server-side model subscriptions (trigger matching and result re-computation)
 
 Custom SPARQL functions:
 - `fn::parse_literal(term)` — Decodes `literal:string:...` URIs into plain string literals
@@ -310,26 +329,23 @@ Query validation ensures only read-only queries (SELECT/ASK/CONSTRUCT/DESCRIBE) 
 ```sparql
 # Example: Find all todos in "done" state
 SELECT ?todo WHERE {
-  GRAPH ?g { ?todo <todo://state> <todo://done> }
+  ?todo <todo://state> <todo://done> .
 }
 
 # Example: Find posts by author with literal content
 SELECT ?post ?content WHERE {
-  GRAPH ?g1 { ?post <post://has_content> ?raw }
+  ?post <post://has_content> ?raw .
   BIND(fn:parse_literal(?raw) AS ?content)
 }
+
+# Example: Query with metadata via reifier
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+SELECT ?todo ?author WHERE {
+  ?todo <todo://state> <todo://done> .
+  ?reifier rdf:reifies <<( ?todo <todo://state> <todo://done> )>> .
+  ?reifier <ad4m://ontology/author> ?author .
+}
 ```
-
-### Prolog (Inference Only)
-
-Prolog remains available for SHACL inference and subject-class resolution:
-- `generatePrologFactsFromShacl()` converts SHACL shapes to Prolog facts
-- Subject class conformance checking via open-world subquery patterns
-- Constructor/destructor action resolution
-
-New implementations SHOULD prioritize SPARQL query support for all data operations and use Prolog only for SHACL inference where needed.
-
-> **v1.0 change:** SurrealDB has been completely removed. All query operations that previously used SurrealDB now use SPARQL via Oxigraph. The `perspectiveQuerySurreal` GraphQL operation name is retained for backward compatibility but executes SPARQL queries.
 
 ## 4.7 Flows
 
@@ -369,12 +385,12 @@ For alternative implementations:
 
 | Feature | Priority | Notes |
 |---------|----------|-------|
-| SHACL shape storage/retrieval | **MUST** | Normative representation since v0.12.0 |
+| SHACL shape storage/retrieval | **MUST** | Normative representation |
 | Subject class instance resolution | **MUST** | Match expressions against SHACL shapes |
 | Property get/set via link operations | **MUST** | Core CRUD operations |
 | Collection operations | **MUST** | Add/remove/set for multi-value properties |
 | SPARQL query support | **MUST** | Primary query engine (Oxigraph or equivalent) |
-| Prolog inference | **SHOULD** | For SHACL inference and subject-class resolution |
+| Prolog inference | **MAY** | Legacy backward compatibility only; not required for new implementations |
 | SHACL custom rules | **MAY** | For advanced constraint checking and reasoning |
 | Flow support | **MAY** | State machine functionality |
 | `Ad4mModel` / decorator API | **MAY** | Client-side convenience; not required in the executor |

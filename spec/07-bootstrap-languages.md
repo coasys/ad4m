@@ -98,11 +98,11 @@ This is a **template language** — each Neighbourhood gets its own instance wit
    f. P-Diff-Sync template
 5. Generate agent DID (if first run)
 6. Publish agent expression to Agent Language
-7. Start GraphQL server
+7. Start WebSocket RPC server
 8. Ready for client connections
 ```
 
-> **v1.0 change:** Step 4e (Direct Message Language) has been removed from the bootstrap sequence. The bootstrap flow now has 6 system languages instead of 7. The API surface remains GraphQL (not REST).
+The bootstrap flow has 6 system languages. The API surface is WebSocket RPC (see [§6](./06-websocket-rpc-api.md)).
 
 ## 7.4 Language Installation
 
