@@ -534,14 +534,15 @@ impl HolochainService {
                     .and_then(|db| db.get_setting("unyt_dna_hash").ok().flatten())
             });
         if let Some(dna_hash) = dna_hash_opt {
-            let auth_material = crate::db::Ad4mDb::global_instance()
-                .lock()
-                .ok()
-                .and_then(|guard| {
-                    guard
-                        .as_ref()
-                        .and_then(|db| db.get_setting("unyt_auth_material").ok().flatten())
-                });
+            let auth_material =
+                crate::db::Ad4mDb::global_instance()
+                    .lock()
+                    .ok()
+                    .and_then(|guard| {
+                        guard
+                            .as_ref()
+                            .and_then(|db| db.get_setting("unyt_auth_material").ok().flatten())
+                    });
             info!(
                 "Applying unyt space override for DNA {} (bootstrap={}, signal={}, relay={}, auth_material={})",
                 dna_hash,

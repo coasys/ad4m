@@ -597,7 +597,9 @@ async fn get_host_rates(_params: Value, _ctx: Arc<RequestContext>) -> Result<Val
             })
         })
         .collect();
-    Ok(Value::String(serde_json::to_string(&json_rates).unwrap_or_else(|_| "[]".to_string())))
+    Ok(Value::String(
+        serde_json::to_string(&json_rates).unwrap_or_else(|_| "[]".to_string()),
+    ))
 }
 
 // ── Unyt / mHOT handlers ──
@@ -618,14 +620,16 @@ async fn unyt_set_membrane_proof(
         .and_then(|v| v.as_str())
         .ok_or_else(|| WsRpcError::bad_request("Missing 'proof' parameter"))?;
 
-    unyt_service::set_membrane_proof(proof)
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    unyt_service::set_membrane_proof(proof).map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     // Kick off DNA installation in the background now that we have a proof
     tokio::spawn(async {
         match unyt_service::ensure_installed().await {
             Ok(()) => log::info!("Unyt alliance DNA installed after membrane proof was set"),
-            Err(e) => log::error!("Failed to install Unyt alliance DNA after setting proof: {}", e),
+            Err(e) => log::error!(
+                "Failed to install Unyt alliance DNA after setting proof: {}",
+                e
+            ),
         }
     });
 
@@ -639,7 +643,9 @@ async fn unyt_wallet_balance(
     let ledger = unyt_service::get_ledger()
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    Ok(Value::String(serde_json::to_string(&ledger).unwrap_or_default()))
+    Ok(Value::String(
+        serde_json::to_string(&ledger).unwrap_or_default(),
+    ))
 }
 
 async fn unyt_wallet_history(
@@ -647,26 +653,24 @@ async fn unyt_wallet_history(
     _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     let page = params.get("page").and_then(|v| v.as_u64());
-    let per_page = params
-        .get("perPage")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(50);
+    let per_page = params.get("perPage").and_then(|v| v.as_u64()).unwrap_or(50);
     let history = unyt_service::get_history(page, per_page)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    Ok(Value::String(serde_json::to_string(&history).unwrap_or_default()))
+    Ok(Value::String(
+        serde_json::to_string(&history).unwrap_or_default(),
+    ))
 }
 
-async fn unyt_version_info(
-    _params: Value,
-    _ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
+async fn unyt_version_info(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let (installed, bundled) = unyt_service::version_info();
     let info = serde_json::json!({
         "installed": installed,
         "bundled": bundled,
     });
-    Ok(Value::String(serde_json::to_string(&info).unwrap_or_default()))
+    Ok(Value::String(
+        serde_json::to_string(&info).unwrap_or_default(),
+    ))
 }
 
 async fn unyt_hot_agent_pubkey(
