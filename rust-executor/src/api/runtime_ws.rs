@@ -563,16 +563,41 @@ async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 async fn set_host_rates(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_QUIT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    let _ = params;
-    Err(WsRpcError::not_implemented(
-        "PUT /runtime/host-rates is not yet implemented on the server",
-    ))
+    let rates_json = params
+        .get("ratesJson")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| WsRpcError::bad_request("Missing 'ratesJson' parameter"))?;
+
+    #[derive(serde::Deserialize)]
+    struct Rate {
+        description: String,
+        #[serde(alias = "priceInHOT")]
+        price_in_hot: f64,
+    }
+    let rates: Vec<Rate> = serde_json::from_str(rates_json)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid rates JSON: {}", e)))?;
+    let rate_tuples: Vec<(String, f64)> = rates
+        .into_iter()
+        .map(|r| (r.description, r.price_in_hot))
+        .collect();
+    Ad4mDb::with_global_instance(|db| db.set_host_rates(&rate_tuples))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::Bool(true))
 }
 
 async fn get_host_rates(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    Err(WsRpcError::not_implemented(
-        "GET /runtime/host-rates is not yet implemented on the server",
-    ))
+    let rates = Ad4mDb::with_global_instance(|db| db.get_host_rates())
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let json_rates: Vec<serde_json::Value> = rates
+        .into_iter()
+        .map(|(desc, price)| {
+            serde_json::json!({
+                "description": desc,
+                "priceInHOT": price,
+            })
+        })
+        .collect();
+    Ok(Value::String(serde_json::to_string(&json_rates).unwrap_or_else(|_| "[]".to_string())))
 }
 
 // ── Unyt / mHOT handlers ──
@@ -723,7 +748,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // Hosting flags
     map.register("runtime.freeHostingEnabled", get_free_hosting_enabled);
     map.register("runtime.setFreeHostingEnabled", set_free_hosting_enabled);
-    map.register("runtime.hostRates", get_host_rates);
+    map.register("runtime.getHostRates", get_host_rates);
     map.register("runtime.setHostRates", set_host_rates);
     // Unyt / mHOT
     map.register("runtime.unytAgentKey", unyt_agent_key);
