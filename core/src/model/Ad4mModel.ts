@@ -659,7 +659,8 @@ export class Ad4mModel {
    *     • `null` / empty object — skip ALL relations (used by bare
    *       subscriptions that don't eagerly load relations).
    */
-  private takeSnapshot(includedRelations?: Record<string, any> | null): void {
+  /** @internal */
+  protected takeSnapshot(includedRelations?: Record<string, any> | null): void {
     const ctor = this.constructor as typeof Ad4mModel;
     const metadata = ctor.getModelMetadata();
     const snap: Record<string, any> = {};
