@@ -164,7 +164,7 @@ The `getter` option accepts a SPARQL SELECT expression that returns a single `?v
 averageRating: number = 0;
 ```
 
-Getters are evaluated server-side in Rust via `evaluate_getters_batch()`, so they execute efficiently without round-trips to JavaScript.
+
 
 #### The `transform` option
 
@@ -533,7 +533,7 @@ console.log(recent[0].updatedAt); // 1709136000000
 ### Basic Queries
 
 ```typescript
-// Get all (queries execute server-side in Rust via SPARQL)
+// Get all
 const allRecipes = await Recipe.findAll(perspective);
 
 // With conditions
@@ -685,7 +685,7 @@ const comments = await Comment.query(perspective)
 
 ### Query Engine
 
-`Ad4mModel` uses the **Rust-side SPARQL query engine** for all query operations. Queries are compiled to SPARQL, executed server-side in Oxigraph, and results are hydrated back into model instances — all without round-trips to JavaScript.
+`Ad4mModel` uses the **SPARQL query engine** for all query operations. The executor compiles queries to SPARQL for Oxigraph to execute, then hydrates results back into model instances.
 
 ```typescript
 // All queries execute server-side via SPARQL
