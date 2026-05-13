@@ -4,9 +4,11 @@
 
 The AD4M executor exposes a **WebSocket RPC** API via Axum. This is the sole client interface for all SDK operations and real-time event delivery.
 
-- **RPC endpoint:** `ws://host:port/api/v1/ws` — all SDK operations (request/response)
-- **Events endpoint:** `ws://host:port/api/v1/ws/events` — multiplexed real-time events (server push)
+- **RPC endpoint:** `ws://host:port/api/v1/ws` — all SDK operations (request/response) **and** server-push events on the same connection
+- **Events endpoint:** `ws://host:port/api/v1/ws/events` — standalone event stream for clients that only need event delivery without RPC capabilities
 - **HTTP:** Only `GET /api/v1/health` (health check) and `POST /api/v1/ai/transcription/feed` (binary audio upload) are exposed over HTTP
+
+The RPC endpoint multiplexes both RPC responses and events on a single WebSocket connection. RPC responses are correlated by `id`; messages without an `id` (or with an `id` not matching any pending call) are server-push events. The SDK uses only the `/api/v1/ws` connection for both RPC and events. The `/api/v1/ws/events` endpoint is an alternative for clients that only need event consumption without sending RPC requests.
 
 ### Authentication
 
@@ -290,19 +292,58 @@ Handler: `perspectives_ws.rs`
   "type": "perspective.modelQuery",
   "params": {
     "uuid": "550e8400-e29b-41d4-a716-446655440000",
-    "className": "Todo",
-    "query": { "where": { "state": "done" }, "order": { "createdAt": "DESC" }, "limit": 10 }
+    "class_name": "Todo",
+    "query_json": "{\"where\":{\"state\":\"done\"},\"order\":{\"createdAt\":\"DESC\"},\"limit\":10}",
+    "shape_json": "{\"id\":\"string\",\"state\":\"string\",\"title\":\"string\"}"
   }
 }
 
 // Response
 {
   "id": "req-44",
-  "result": {
-    "instances": [...],
-    "totalCount": 42
+  "result": "{\"instances\":[...],\"totalCount\":42}"
+}
+```
+
+> **Note:** `query_json` and `shape_json` are JSON-serialized **strings**, not objects. The result is also a JSON-serialized string.
+
+**Example — Evaluate getters:**
+
+```json
+// Request
+{
+  "id": "req-45",
+  "type": "perspective.evaluateGetters",
+  "params": {
+    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+    "class_name": "Todo",
+    "shape_json": "{\"id\":\"string\",\"title\":\"string\"}",
+    "instance_ids": ["abc123", "def456"],
+    "property_names": ["title", "state"]
   }
 }
+
+// Response
+{ "id": "req-45", "result": "{...}" }
+```
+
+**Example — Model subscribe:**
+
+```json
+// Request
+{
+  "id": "req-46",
+  "type": "perspective.modelSubscribe",
+  "params": {
+    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+    "class_name": "Todo",
+    "query_json": "{\"where\":{\"state\":\"active\"}}",
+    "shape_json": "{\"id\":\"string\",\"title\":\"string\"}"
+  }
+}
+
+// Response
+{ "id": "req-46", "result": { "subscription_id": "sub-789", "result": "{...}" } }
 ```
 
 ### Runtime
@@ -334,6 +375,8 @@ Handler: `runtime_ws.rs`
 | `runtime.grantNotification` | Grant notification |
 | `runtime.deleteNotification` | Delete notification |
 | `runtime.linkLanguageTemplates` | Get link language templates |
+| `runtime.addLinkLanguageTemplates` | Add link language templates |
+| `runtime.removeLinkLanguageTemplates` | Remove link language templates |
 | `runtime.hcAgentInfos` | Get Holochain agent infos |
 | `runtime.addHcAgentInfos` | Add Holochain agent infos |
 | `runtime.networkMetrics` | Get network metrics |
@@ -362,7 +405,9 @@ Handler: `users_ws.rs`
 
 ## 6.4 Events Protocol
 
-### Endpoint
+Events are delivered as server-push messages on the RPC connection (`/api/v1/ws`) interleaved with RPC responses. A dedicated events-only endpoint is also available for clients that need event delivery without RPC:
+
+### Dedicated Events Endpoint
 
 ```
 ws://host:port/api/v1/ws/events?token=<value>

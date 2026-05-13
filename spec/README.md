@@ -36,6 +36,7 @@ AD4M has been demonstrated as a protocol (not just an implementation) through th
 - Type definitions use TypeScript syntax for readability; Rust equivalents are noted where they diverge.
 - URIs follow [RFC 3986](https://www.rfc-editor.org/rfc/rfc3986). All AD4M URIs are valid IRIs.
 - JSON serialization uses camelCase field names throughout.
+- **RPC parameter naming:** Most operations use camelCase parameter names (consistent with `#[serde(rename_all = "camelCase")]` on request structs). The exceptions are the model operations (`perspective.modelQuery`, `perspective.modelSubscribe`, `perspective.evaluateGetters`) which use snake_case parameters (`class_name`, `query_json`, `shape_json`, `instance_ids`, `property_names`).
 - The WIT file (`ad4m-lang.wit`) is the normative source of truth for the Language interface. Where WIT and prose disagree, the WIT wins.
 
 ## References

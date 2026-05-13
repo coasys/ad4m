@@ -39,7 +39,7 @@ interface Expression<T> {
 }
 
 interface ExpressionProof {
-  key: string;          // Public key of the signer (same as author DID)
+  key: string;          // Verification method ID from DID document (e.g., "did:key:z6Mk...#z6Mk...")
   signature: string;    // Hex-encoded signature bytes
 }
 ```
@@ -224,19 +224,19 @@ The `literal:` format uses no `//` (authority component) for RFC 3986 compliance
 Each AD4M link is stored in the SPARQL triple store (Oxigraph 0.5.7) using the **RDF 1.2 reifier** model. Each link produces 8 quads in the **default graph**:
 
 ```turtle
-s p o .                                           # direct triple
-<link:HASH> rdf:reifies <<( s p o )>> .           # reifier binding
-<link:HASH> ad4m://ontology/author ?author .      # metadata
-<link:HASH> ad4m://ontology/timestamp ?ts .
-<link:HASH> ad4m://ontology/source s .
-<link:HASH> ad4m://ontology/predicate p .
-<link:HASH> ad4m://ontology/target o .
-<link:HASH> ad4m://ontology/status ?status .
+s p o .                                                  # 1. direct triple
+<link:HASH> rdf:reifies <<( s p o )>> .                  # 2. reifier binding
+<link:HASH> ad4m://ontology/author "did:key:..." .       # 3-8. metadata
+<link:HASH> ad4m://ontology/timestamp "2026-..." .
+<link:HASH> ad4m://ontology/proofKey "did:key:...#..." .
+<link:HASH> ad4m://ontology/proofSignature "abcdef..." .
+<link:HASH> ad4m://ontology/proofValid "true" .
+<link:HASH> ad4m://ontology/status "Shared" .
 ```
 
 ### Reifier IRI
 
-The reifier IRI is deterministic: `link:<SHA256(source||predicate||target||timestamp)>`. This ensures the same link always produces the same reifier identifier regardless of which agent stores it.
+The reifier IRI is deterministic: `link:<SHA256(author||source||predicate||target||timestamp)[0:32]>` — the SHA-256 hash of the concatenation of the author DID, source, predicate, target, and timestamp, truncated to the first 32 hex characters (16 bytes). This ensures the same link always produces the same reifier identifier regardless of which agent stores it.
 
 ### Metadata Ontology
 
@@ -244,13 +244,12 @@ The reifier IRI is deterministic: `link:<SHA256(source||predicate||target||times
 |-----|---------|
 | `ad4m://ontology/author` | DID of the link author |
 | `ad4m://ontology/timestamp` | ISO 8601 timestamp |
-| `ad4m://ontology/source` | Source URI |
-| `ad4m://ontology/predicate` | Predicate URI |
-| `ad4m://ontology/target` | Target URI |
+| `ad4m://ontology/proofKey` | Verification method ID from DID document (e.g., `did:key:z6Mk...#z6Mk...`) |
+| `ad4m://ontology/proofSignature` | Signature bytes, hex-encoded |
+| `ad4m://ontology/proofValid` | Whether signature verification passed (`"true"` or `"false"`) |
 | `ad4m://ontology/status` | `"Shared"` or `"Local"` |
-| `ad4m://ontology/proofKey` | Public key from proof (optional) |
-| `ad4m://ontology/proofSignature` | Signature bytes, hex-encoded (optional) |
-| `ad4m://ontology/proofValid` | Whether signature verification passed (optional) |
+
+> **Note:** All six metadata fields (author, timestamp, proofKey, proofSignature, proofValid, status) are always present for every link — none are optional. The source, predicate, and target are represented solely in the direct triple and the reifier binding, not as separate metadata quads.
 
 ### Querying
 
