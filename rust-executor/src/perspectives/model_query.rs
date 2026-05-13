@@ -1642,8 +1642,19 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
         }
     }
 
-    // Fallback: structural matching using known predicates
+    // Fallback: structural matching using known predicates.
+    //
+    // WARNING: This is a broad heuristic — it matches any entity that has at
+    // least one link with ANY of the model's known predicates.  If two model
+    // classes share a predicate (e.g. a generic `ad4m://name`), instances of
+    // class A could appear in queries for class B.  Models should define at
+    // least one `required` property or a `@Flag` to enable precise type
+    // discrimination and avoid this fallback.
     if !has_conformance && conformance_patterns.is_empty() {
+        log::debug!(
+            "Model class uses structural conformance fallback — no required/flag properties found. \
+             This may match instances from other model classes sharing the same predicates."
+        );
         let known_predicates: Vec<String> = shape
             .properties
             .iter()
