@@ -12,7 +12,7 @@ MAJOR.MINOR.PATCH
 - **MINOR** — New optional features, new RPC operations/event types, new Language adapter interfaces
 - **PATCH** — Clarifications, bug fixes in the spec, non-functional changes
 
-**Current version:** 1.1.0 (Draft)
+**Current version:** 1.0.0 (Draft)
 
 ## 9.2 Compatibility Principles
 

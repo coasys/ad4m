@@ -1,6 +1,6 @@
 # AD4M Protocol Specification
 
-**Version:** 1.1.0 (Draft)
+**Version:** 1.0.0 (Draft)
 **Status:** Work in Progress
 **Date:** 2026-05-13
 
@@ -38,7 +38,7 @@ AD4M has been demonstrated as a protocol (not just an implementation) through th
 - JSON serialization uses camelCase field names throughout.
 - The WIT file (`ad4m-lang.wit`) is the normative source of truth for the Language interface. Where WIT and prose disagree, the WIT wins.
 
-## Key Changes in v1.1
+## Key Architecture Facts
 
 - **WebSocket RPC as sole client API transport:** All SDK operations use WebSocket RPC at `/api/v1/ws`; real-time events are multiplexed on `/api/v1/ws/events`.
 - **RDF 1.2 reifier storage model:** Links are stored using RDF 1.2 reifiers in the default graph (Oxigraph 0.5.7). Each link produces 8 quads with deterministic reifier IRIs.
