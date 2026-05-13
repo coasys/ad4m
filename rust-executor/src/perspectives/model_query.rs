@@ -557,8 +557,14 @@ fn get_initial_value(
 
     // Quick check: is there a link from targetClass with this predicate to a fixed value?
     // Look for the "required" flag property pattern
-    let safe_tc = validate_iri(target_class).unwrap_or(target_class);
-    let safe_pred = validate_iri(predicate).unwrap_or(predicate);
+    let safe_tc = match validate_iri(target_class) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    let safe_pred = match validate_iri(predicate) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
     let query = format!(
         r#"
         SELECT ?target WHERE {{
@@ -1531,17 +1537,30 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
     if let Some(ref parent) = query.parent {
         match parent {
             ParentScope::Raw { id, predicate } => {
-                let safe_id = validate_iri(id).unwrap_or(id);
-                let safe_pred = validate_iri(predicate).unwrap_or(predicate);
-                conformance_patterns.push(format!("    <{safe_id}> <{safe_pred}> ?source ."));
+                if let (Ok(safe_id), Ok(safe_pred)) = (validate_iri(id), validate_iri(predicate)) {
+                    conformance_patterns
+                        .push(format!("    <{safe_id}> <{safe_pred}> ?source ."));
+                } else {
+                    log::warn!("Skipping parent scope: invalid IRI in id='{}' or predicate='{}'", id, predicate);
+                }
             }
             ParentScope::Model { id, field, model } => {
-                let safe_id = validate_iri(id).unwrap_or(id);
+                let safe_id = match validate_iri(id) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        log::warn!("Skipping parent scope: invalid IRI in id='{}'", id);
+                        return (String::new(), String::new());
+                    }
+                };
                 // For model-based parent scope, we need to resolve the predicate
                 // The client should send the resolved predicate, but we handle both forms
                 if let Some(ref f) = field {
-                    let safe_f = validate_iri(f).unwrap_or(f);
-                    conformance_patterns.push(format!("    <{safe_id}> <{safe_f}> ?source ."));
+                    if let Ok(safe_f) = validate_iri(f) {
+                        conformance_patterns
+                            .push(format!("    <{safe_id}> <{safe_f}> ?source ."));
+                    } else {
+                        log::warn!("Skipping parent scope: invalid IRI in field='{}'", f);
+                    }
                 } else {
                     // Fallback: use model name as predicate hint
                     let safe_model = escape_sparql_string(model);
@@ -1559,21 +1578,34 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
     let mut has_conformance = false;
     for prop in &shape.properties {
         if prop.is_required {
+            if validate_iri(&prop.predicate).is_err() {
+                continue;
+            }
+            let safe_name = prop.name.replace(|c: char| !c.is_alphanumeric(), "_");
             has_conformance = true;
             if prop.is_flag {
                 if let Some(ref initial) = prop.initial_value {
-                    conformance_patterns
-                        .push(format!("    ?source <{}> <{}> .", prop.predicate, initial));
+                    if validate_iri(initial).is_ok() {
+                        conformance_patterns
+                            .push(format!("    ?source <{}> <{}> .", prop.predicate, initial));
+                    } else {
+                        // Initial value is not a valid IRI (e.g. a literal); use STR() comparison
+                        let escaped = escape_sparql_string(initial);
+                        conformance_patterns.push(format!(
+                            "    ?source <{}> ?cf_{} . FILTER(STR(?cf_{}) = \"{}\")",
+                            prop.predicate, safe_name, safe_name, escaped
+                        ));
+                    }
                 } else {
                     conformance_patterns.push(format!(
                         "    ?source <{}> ?cf_{} .",
-                        prop.predicate, prop.name
+                        prop.predicate, safe_name
                     ));
                 }
             } else {
                 conformance_patterns.push(format!(
                     "    ?source <{}> ?cf_{} .",
-                    prop.predicate, prop.name
+                    prop.predicate, safe_name
                 ));
             }
         }
@@ -1583,14 +1615,26 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
     if !has_conformance {
         for prop in &shape.properties {
             if let Some(ref initial) = prop.initial_value {
+                if validate_iri(&prop.predicate).is_err() {
+                    continue;
+                }
+                let safe_name = prop.name.replace(|c: char| !c.is_alphanumeric(), "_");
                 has_conformance = true;
                 if prop.is_flag {
-                    conformance_patterns
-                        .push(format!("    ?source <{}> <{}> .", prop.predicate, initial));
+                    if validate_iri(initial).is_ok() {
+                        conformance_patterns
+                            .push(format!("    ?source <{}> <{}> .", prop.predicate, initial));
+                    } else {
+                        let escaped = escape_sparql_string(initial);
+                        conformance_patterns.push(format!(
+                            "    ?source <{}> ?cfInit_{} . FILTER(STR(?cfInit_{}) = \"{}\")",
+                            prop.predicate, safe_name, safe_name, escaped
+                        ));
+                    }
                 } else {
                     conformance_patterns.push(format!(
                         "    ?source <{}> ?cfInit_{} .",
-                        prop.predicate, prop.name
+                        prop.predicate, safe_name
                     ));
                 }
                 break;
@@ -1603,7 +1647,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
         let known_predicates: Vec<String> = shape
             .properties
             .iter()
-            .filter(|p| !p.predicate.is_empty())
+            .filter(|p| !p.predicate.is_empty() && validate_iri(&p.predicate).is_ok())
             .map(|p| format!("<{}>", p.predicate))
             .collect();
 
@@ -2861,10 +2905,17 @@ fn resolve_reverse_include(
     // Batch SPARQL: find all (source, target) pairs for this predicate
     let id_list = all_ids
         .iter()
+        .filter(|id| validate_iri(id).is_ok())
         .map(|id| format!("<{}>", id))
         .collect::<Vec<_>>()
         .join(", ");
-    let safe_pred = validate_iri(&rel.predicate).unwrap_or(&rel.predicate);
+    if id_list.is_empty() {
+        return Ok(());
+    }
+    let safe_pred = match validate_iri(&rel.predicate) {
+        Ok(p) => p,
+        Err(_) => return Ok(()),
+    };
     let sparql = format!(
         "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . FILTER(?target IN ({id_list})) }}"
     );
