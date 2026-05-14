@@ -336,8 +336,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async first(): Promise<T | null> {
+    const savedLimit = this.queryParams.limit;
     this.queryParams.limit = 1;
     const results = await this.get();
+    this.queryParams.limit = savedLimit;
     return results[0] ?? null;
   }
 
