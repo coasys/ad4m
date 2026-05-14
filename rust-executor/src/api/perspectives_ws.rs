@@ -543,7 +543,10 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
                 Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
                 Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
                 Err(_) => {
-                    log::warn!("SPARQL query timed out after {}s", SPARQL_QUERY_TIMEOUT_SECS);
+                    log::warn!(
+                        "SPARQL query timed out after {}s",
+                        SPARQL_QUERY_TIMEOUT_SECS
+                    );
                     Err(WsRpcError {
                         code: 408,
                         message: format!(

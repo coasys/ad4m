@@ -242,9 +242,18 @@ pub struct ModelQueryResult {
 
 /// Parameters for SPARQL-side pagination (pushed ORDER BY + LIMIT + OFFSET).
 struct SparqlPagination {
+    sort_key: SortKey,
     direction: OrderDirection,
     offset: Option<usize>,
     limit: Option<usize>,
+}
+
+/// What to sort by when pagination is pushed to SPARQL.
+enum SortKey {
+    /// Sort by reifier timestamp (MIN(?_ts) per source).
+    Timestamp,
+    /// Sort by a property value extracted from its literal IRI.
+    Property(String), // predicate IRI
 }
 
 // ---------------------------------------------------------------------------
@@ -1154,7 +1163,7 @@ fn execute_model_query_inner(
 
     // Determine if we can push pagination to SPARQL.
     // Requirements: all where conditions are SPARQL-pushable, and the sort
-    // key is timestamp (which lives on the reifier and is available in SPARQL).
+    // key is either timestamp (reifier field) or a scalar property.
     let can_push_pagination = all_where_pushable(query_input, &shape) && {
         match &query_input.order {
             None => true, // default is timestamp ASC — pushable
@@ -1162,35 +1171,100 @@ fn execute_model_query_inner(
                 order.len() == 1
                     && (order[0].0 == "timestamp"
                         || order[0].0 == "createdAt"
-                        || order[0].0 == "updatedAt")
+                        || order[0].0 == "updatedAt"
+                        || shape.properties.iter().any(|p| {
+                            p.name == order[0].0 && !p.is_collection && !p.predicate.is_empty()
+                        }))
             }
         }
     };
 
-    let sparql_pagination = if can_push_pagination
-        && (query_input.limit.is_some() || query_input.offset.is_some())
-    {
-        let direction = query_input
-            .order
-            .as_ref()
-            .and_then(|o| o.first())
-            .map(|(_, d)| *d)
-            .unwrap_or(OrderDirection::ASC);
-        Some(SparqlPagination {
-            direction,
-            offset: query_input.offset,
-            limit: query_input.limit,
-        })
-    } else {
-        None
-    };
+    let sparql_pagination =
+        if can_push_pagination && (query_input.limit.is_some() || query_input.offset.is_some()) {
+            let direction = query_input
+                .order
+                .as_ref()
+                .and_then(|o| o.first())
+                .map(|(_, d)| *d)
+                .unwrap_or(OrderDirection::ASC);
+            let sort_key = match &query_input.order {
+                None => SortKey::Timestamp,
+                Some(order) => {
+                    let key = &order[0].0;
+                    if key == "timestamp" || key == "createdAt" || key == "updatedAt" {
+                        SortKey::Timestamp
+                    } else if let Some(prop) = shape
+                        .properties
+                        .iter()
+                        .find(|p| p.name == *key && !p.is_collection && !p.predicate.is_empty())
+                    {
+                        SortKey::Property(prop.predicate.clone())
+                    } else {
+                        SortKey::Timestamp // fallback
+                    }
+                }
+            };
+            Some(SparqlPagination {
+                sort_key,
+                direction,
+                offset: query_input.offset,
+                limit: query_input.limit,
+            })
+        } else {
+            None
+        };
 
     // Build SPARQL to find conforming instances and their property values
-    let sparql = build_instance_sparql(&shape, query_input, sparql_pagination.as_ref());
+    let query_plan = build_instance_sparql(&shape, query_input, sparql_pagination.as_ref());
 
-    // Execute the SPARQL query
-    let result_json = store.query(&sparql)?;
-    let raw_results: Vec<Value> = serde_json::from_str(&result_json)?;
+    // Execute the instance query — either single-phase or two-phase.
+    // Paginated queries use two phases because Oxigraph's query planner
+    // doesn't push nested subqueries with ORDER BY + LIMIT efficiently.
+    let raw_results: Vec<Value> = match query_plan {
+        InstanceQueryPlan::Single(sparql) => {
+            let result_json = store.query(&sparql)?;
+            serde_json::from_str(&result_json)?
+        }
+        InstanceQueryPlan::TwoPhase {
+            pagination_subquery,
+            predicate_filter,
+        } => {
+            // Phase 1: Execute pagination subquery to get source IDs.
+            let page_json = store.query(&pagination_subquery)?;
+            let page_results: Vec<Value> = serde_json::from_str(&page_json)?;
+
+            if page_results.is_empty() {
+                vec![]
+            } else {
+                // Build VALUES ?source { <id1> <id2> ... } from the page results.
+                let source_values: String = page_results
+                    .iter()
+                    .filter_map(|r| r["source"].as_str())
+                    .filter_map(|s| validate_iri(s).ok())
+                    .map(|s| format!("<{}>", s))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                if source_values.is_empty() {
+                    vec![]
+                } else {
+                    // Phase 2: Fetch properties for the page of sources.
+                    let property_sparql = format!(
+                        r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+    VALUES ?source {{ {source_values} }}
+{predicate_filter}    ?source ?predicate ?target .
+    ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+    FILTER(isIRI(?predicate))
+    ?_reifier <ad4m://ontology/author> ?author .
+    ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+}}"#
+                    );
+                    let result_json = store.query(&property_sparql)?;
+                    serde_json::from_str(&result_json)?
+                }
+            }
+        }
+    };
 
     // Group results by source (each instance may have multiple rows)
     let grouped = group_results_by_source(&raw_results, &shape);
@@ -1222,8 +1296,8 @@ fn execute_model_query_inner(
     // When SPARQL pagination was used, we need a separate count query.
     let total_count = if sparql_pagination.is_some() {
         // Run count query to get the true total
-        if let Some(sparql) = build_count_sparql(&shape, query_input) {
-            let result_json = store.query(&sparql)?;
+        if let Some(count_sparql) = build_count_sparql(&shape, query_input) {
+            let result_json = store.query(&count_sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             results
                 .first()
@@ -1243,7 +1317,17 @@ fn execute_model_query_inner(
 
     // Apply ordering and pagination in Rust (only when NOT pushed to SPARQL)
     let mut paginated: Vec<Value> = if sparql_pagination.is_some() {
-        // Already ordered and paginated by SPARQL subquery
+        // SPARQL subquery already selected the correct page of instances,
+        // but hydration via BTreeMap loses the row ordering.
+        // Re-sort in Rust to restore the intended order.
+        if let Some(ref order) = query_input.order {
+            sort_instances(&mut instances, order);
+        } else {
+            sort_instances(
+                &mut instances,
+                &[("timestamp".to_string(), OrderDirection::ASC)],
+            );
+        }
         instances
     } else {
         // Apply ordering
@@ -1270,6 +1354,7 @@ fn execute_model_query_inner(
     // property regardless of instance count.  Runs AFTER pagination so only
     // the current page of results is evaluated, not the entire result set.
     if !paginated.is_empty() {
+
         let deep_query = query_input.deep_query.unwrap_or(true);
         evaluate_getters(
             store,
@@ -1479,11 +1564,97 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
 /// 10 000 message children) that would be discarded during hydration.
 /// When `sparql_pagination` is provided, adds ORDER BY / LIMIT / OFFSET
 /// clauses to the SPARQL query, enabling server-side pagination.
+
+/// Build a targeted reifier timestamp probe for the pagination subquery.
+///
+/// Instead of scanning ALL triples of every matching source with a wildcard
+/// (`?source ?_anyP ?_anyT`) and joining each with reifiers (O(N × P)),
+/// this uses a SPECIFIC conformance triple's reifier for the timestamp
+/// lookup (O(N)).
+///
+/// Tries these probe strategies in order:
+/// 1. @Flag with IRI initial value → `?_r rdf:reifies <<(?source <pred> <initial>)>>`
+/// 2. Any required/flag property → `?_r rdf:reifies <<(?source <pred> ?cf_NAME)>>`
+/// 3. Fallback → wildcard scan (same as before, for models without conformance)
+fn build_timestamp_probe(shape: &ModelShape) -> String {
+    let rdf_reifies = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+    let ont_ts = "ad4m://ontology/timestamp";
+
+    // Strategy 1: @Flag property with a valid IRI initial value.
+    // This gives us a fully concrete triple term: <<(?source <pred> <initial>)>>
+    if let Some(prop) = shape.properties.iter().find(|p| {
+        p.is_flag
+            && p.initial_value
+                .as_ref()
+                .map(|v| validate_iri(v).is_ok())
+                .unwrap_or(false)
+            && validate_iri(&p.predicate).is_ok()
+    }) {
+        let initial = prop.initial_value.as_ref().unwrap();
+        return format!(
+            "?_r <{rdf_reifies}> <<( ?source <{}> <{initial}> )>> . ?_r <{ont_ts}> ?_first_ts .",
+            prop.predicate
+        );
+    }
+
+    // Strategy 2: Any required property whose predicate is a valid IRI.
+    // The conformance pattern already binds ?cf_NAME, so the triple term
+    // uses that variable (bound by join).
+    if let Some(prop) = shape
+        .properties
+        .iter()
+        .find(|p| p.is_required && !p.predicate.is_empty() && validate_iri(&p.predicate).is_ok())
+    {
+        let safe_name = prop.name.replace(|c: char| !c.is_alphanumeric(), "_");
+        return format!(
+            "?_r <{rdf_reifies}> <<( ?source <{}> ?cf_{safe_name} )>> . ?_r <{ont_ts}> ?_first_ts .",
+            prop.predicate
+        );
+    }
+
+    // Strategy 3: Fallback — wildcard scan (same as before, expensive).
+    format!(
+        "?source ?_anyP ?_anyT . ?_r <{rdf_reifies}> <<( ?source ?_anyP ?_anyT )>> . ?_r <{ont_ts}> ?_first_ts ."
+    )
+}
+
+/// Represents the SPARQL execution plan for an instance query.
+/// Paginated queries use a two-phase approach: first execute the pagination
+/// subquery to get source IDs, then build a VALUES-based property query.
+/// Oxigraph's query planner doesn't push nested subqueries with ORDER BY +
+/// LIMIT down efficiently, resulting in O(N × total_triples) scans instead
+/// of O(page_size) lookups.
+enum InstanceQueryPlan {
+    /// Single query — no pagination or non-paginated query.
+    Single(String),
+    /// Two-phase: (pagination_subquery, predicate_filter, conformance, where_extra).
+    /// Phase 1: execute pagination_subquery → get source IRIs.
+    /// Phase 2: build property query with VALUES ?source { ... }.
+    TwoPhase {
+        pagination_subquery: String,
+        predicate_filter: String,
+    },
+}
+
+impl InstanceQueryPlan {
+    /// Extract the SPARQL string for non-paginated queries (Single variant).
+    /// Panics for TwoPhase. Used only in unit tests.
+    #[cfg(test)]
+    fn into_single(self) -> String {
+        match self {
+            InstanceQueryPlan::Single(s) => s,
+            InstanceQueryPlan::TwoPhase { .. } => {
+                panic!("Expected Single query plan, got TwoPhase")
+            }
+        }
+    }
+}
+
 fn build_instance_sparql(
     shape: &ModelShape,
     query: &ModelQueryInput,
     sparql_pagination: Option<&SparqlPagination>,
-) -> String {
+) -> InstanceQueryPlan {
     let (conformance, where_extra) = build_query_patterns(shape, query);
 
     // Collect predicates that hydration will actually consume from the main
@@ -1519,10 +1690,20 @@ fn build_instance_sparql(
     // Build pagination suffix for source subquery
     let pagination_suffix = if let Some(pg) = sparql_pagination {
         let mut suffix = String::new();
-        // Order by timestamp on the earliest reifier per source
-        match pg.direction {
-            OrderDirection::DESC => suffix.push_str("\n    ORDER BY DESC(?_first_ts)"),
-            OrderDirection::ASC => suffix.push_str("\n    ORDER BY ASC(?_first_ts)"),
+        match &pg.sort_key {
+            SortKey::Timestamp => match pg.direction {
+                OrderDirection::DESC => suffix.push_str("\n    ORDER BY DESC(?_first_ts)"),
+                OrderDirection::ASC => suffix.push_str("\n    ORDER BY ASC(?_first_ts)"),
+            },
+            SortKey::Property(_) => {
+                let dir = match pg.direction {
+                    OrderDirection::DESC => "DESC",
+                    OrderDirection::ASC => "ASC",
+                };
+                suffix.push_str(&format!(
+                    "\n    ORDER BY ASC(IF(BOUND(?_sort_str), 0, 1)) {dir}(?_sort_num) {dir}(?_sort_str)"
+                ));
+            }
         }
         if let Some(offset) = pg.offset {
             if offset > 0 {
@@ -1537,30 +1718,40 @@ fn build_instance_sparql(
         String::new()
     };
 
-    if sparql_pagination.is_some() {
-        // Use a subquery to paginate at the instance (source) level,
-        // then join with properties in the outer query.
-        format!(
-            r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
-    {{
-        SELECT DISTINCT ?source (MIN(?_ts) AS ?_first_ts) WHERE {{
+    if let Some(pg) = sparql_pagination {
+        // Two-phase approach: Oxigraph doesn't push nested subqueries with
+        // ORDER BY + LIMIT efficiently. Execute the pagination subquery first
+        // to get source IDs, then use VALUES in the property query.
+        let subquery_body = match &pg.sort_key {
+            SortKey::Timestamp => {
+                // Use a specific conformance triple for the reifier timestamp
+                // lookup instead of scanning all triples with a wildcard.
+                // This avoids O(N×P) reifier joins for N sources × P properties.
+                let ts_probe = build_timestamp_probe(shape);
+                format!(
+                    r#"SELECT DISTINCT ?source ?_first_ts WHERE {{
 {conformance}
 {where_extra}
-            ?source ?_anyP ?_anyT .
-            ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?_anyP ?_anyT )>> .
-            ?_r <ad4m://ontology/timestamp> ?_ts .
-            FILTER(isIRI(?source))
-        }} GROUP BY ?source{pagination_suffix}
-    }}
-{predicate_filter}    ?source ?predicate ?target .
-    ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
-    FILTER(isIRI(?predicate))
-    ?_reifier <ad4m://ontology/author> ?author .
-    ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-}}"#
-        )
+            {ts_probe}
+        }}{pagination_suffix}"#
+                )
+            }
+            SortKey::Property(predicate) => {
+                format!(
+                    r#"SELECT DISTINCT ?source (SAMPLE(?_nv) AS ?_sort_num) (SAMPLE(?_sv) AS ?_sort_str) WHERE {{
+{conformance}
+{where_extra}
+            OPTIONAL {{ ?source <{predicate}> ?_sort_raw . BIND(SUBSTR(STR(?_sort_raw), 16) AS ?_sv) BIND(<http://www.w3.org/2001/XMLSchema#double>(SUBSTR(STR(?_sort_raw), 16)) AS ?_nv) }}
+        }} GROUP BY ?source{pagination_suffix}"#
+                )
+            }
+        };
+        InstanceQueryPlan::TwoPhase {
+            pagination_subquery: subquery_body,
+            predicate_filter,
+        }
     } else {
-        format!(
+        InstanceQueryPlan::Single(format!(
             r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
 {where_extra}
@@ -1570,7 +1761,7 @@ fn build_instance_sparql(
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
 }}"#
-        )
+        ))
     }
 }
 
@@ -1589,8 +1780,6 @@ fn build_count_sparql(shape: &ModelShape, query: &ModelQueryInput) -> Option<Str
         r#"SELECT (COUNT(DISTINCT ?source) AS ?cnt) WHERE {{
 {conformance}
 {where_extra}
-    ?source ?_anyPred ?_anyTarget .
-    FILTER(isIRI(?source))
 }}"#
     ))
 }
@@ -1598,9 +1787,9 @@ fn build_count_sparql(shape: &ModelShape, query: &ModelQueryInput) -> Option<Str
 /// Check whether a query's where clause contains only conditions that can be
 /// pushed entirely to SPARQL.
 ///
-/// With plain literal storage, simple property equality (String, Number, Bool,
-/// StringArray, NumberArray) IS pushable.  Only complex Ops conditions (gt, lt,
-/// contains, between, etc.) need post-hydration Rust-side filtering.
+/// With plain literal storage, all condition types are pushable: simple equality
+/// (String, Number, Bool, StringArray, NumberArray) and Ops (not, gt/gte/lt/lte,
+/// between, contains).
 fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) -> bool {
     let Some(ref wc) = query.where_clause else {
         return true;
@@ -1626,20 +1815,13 @@ fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) -> bool {
             }
             return false;
         }
-        // Property-based where — pushable for simple equality
+        // Property-based where — all condition types are pushable.
         if shape
             .properties
             .iter()
             .any(|p| p.name == *prop_name && !p.is_collection)
         {
-            match condition {
-                WhereCondition::String(_)
-                | WhereCondition::Number(_)
-                | WhereCondition::Bool(_)
-                | WhereCondition::StringArray(_)
-                | WhereCondition::NumberArray(_) => continue,
-                WhereCondition::Ops(_) => return false,
-            }
+            continue;
         }
         // Unknown property — not pushable
         return false;
@@ -1657,10 +1839,13 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
         match parent {
             ParentScope::Raw { id, predicate } => {
                 if let (Ok(safe_id), Ok(safe_pred)) = (validate_iri(id), validate_iri(predicate)) {
-                    conformance_patterns
-                        .push(format!("    <{safe_id}> <{safe_pred}> ?source ."));
+                    conformance_patterns.push(format!("    <{safe_id}> <{safe_pred}> ?source ."));
                 } else {
-                    log::warn!("Skipping parent scope: invalid IRI in id='{}' or predicate='{}'", id, predicate);
+                    log::warn!(
+                        "Skipping parent scope: invalid IRI in id='{}' or predicate='{}'",
+                        id,
+                        predicate
+                    );
                 }
             }
             ParentScope::Model { id, field, model } => {
@@ -1675,8 +1860,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                 // The client should send the resolved predicate, but we handle both forms
                 if let Some(ref f) = field {
                     if let Ok(safe_f) = validate_iri(f) {
-                        conformance_patterns
-                            .push(format!("    <{safe_id}> <{safe_f}> ?source ."));
+                        conformance_patterns.push(format!("    <{safe_id}> <{safe_f}> ?source ."));
                     } else {
                         log::warn!("Skipping parent scope: invalid IRI in field='{}'", f);
                     }
@@ -1793,25 +1977,44 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
     //
     // With plain literal storage, property equality CAN be pushed to SPARQL.
     // Values are stored as `literal:string:X`, `literal:number:X`, etc.
-    // Only complex Ops (gt/lt/contains/between) need post-hydration filtering.
+    // Direct IRI matching (`?source <pred> <value>`) is used instead of
+    // `FILTER(STR(?var) = "value")` for O(log n) indexed lookups.
     let mut where_patterns = Vec::new();
     if let Some(ref wc) = query.where_clause {
         for (prop_name, condition) in wc {
             if prop_name == "base" || prop_name == "id" {
                 match condition {
                     WhereCondition::String(val) => {
-                        where_patterns.push(format!(
-                            "    FILTER(STR(?source) = \"{}\")",
-                            escape_sparql_string(val)
-                        ));
+                        if validate_iri(val).is_ok() {
+                            where_patterns.push(format!("    FILTER(?source = <{}>)", val));
+                        } else {
+                            where_patterns.push(format!(
+                                "    FILTER(STR(?source) = \"{}\")",
+                                escape_sparql_string(val)
+                            ));
+                        }
                     }
                     WhereCondition::StringArray(vals) => {
-                        let ids = vals
+                        let valid: Vec<&str> = vals
                             .iter()
-                            .map(|v| format!("\"{}\"", escape_sparql_string(v)))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        where_patterns.push(format!("    FILTER(STR(?source) IN ({}))", ids));
+                            .filter(|v| validate_iri(v).is_ok())
+                            .map(|v| v.as_str())
+                            .collect();
+                        if valid.len() == vals.len() {
+                            let iris = valid
+                                .iter()
+                                .map(|v| format!("<{}>", v))
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            where_patterns.push(format!("    VALUES ?source {{ {} }}", iris));
+                        } else {
+                            let ids = vals
+                                .iter()
+                                .map(|v| format!("\"{}\"", escape_sparql_string(v)))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            where_patterns.push(format!("    FILTER(STR(?source) IN ({}))", ids));
+                        }
                     }
                     _ => {} // complex id ops handled post-hydration
                 }
@@ -1819,44 +2022,76 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
             }
 
             // Relation-based where: link targets are plain URIs.
+            // Use direct IRI matching for indexed lookups.
             if let Some(prop) = shape
                 .properties
                 .iter()
                 .find(|p| &p.name == prop_name && p.is_collection)
             {
                 let direction = prop.direction.as_deref().unwrap_or("forward");
-                let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
                 match condition {
                     WhereCondition::String(val) => {
-                        let escaped = escape_sparql_string(val);
-                        if direction == "reverse" {
-                            where_patterns.push(format!(
-                                "    ?_rv_{} <{}> ?source . FILTER(STR(?_rv_{}) = \"{}\")",
-                                safe_name, prop.predicate, safe_name, escaped
-                            ));
+                        if validate_iri(val).is_ok() {
+                            if direction == "reverse" {
+                                where_patterns
+                                    .push(format!("    <{}> <{}> ?source .", val, prop.predicate));
+                            } else {
+                                where_patterns
+                                    .push(format!("    ?source <{}> <{}> .", prop.predicate, val));
+                            }
                         } else {
-                            where_patterns.push(format!(
-                                "    ?source <{}> ?_ft_{} . FILTER(STR(?_ft_{}) = \"{}\")",
-                                prop.predicate, safe_name, safe_name, escaped
-                            ));
+                            let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
+                            let escaped = escape_sparql_string(val);
+                            if direction == "reverse" {
+                                where_patterns.push(format!(
+                                    "    ?_rv_{} <{}> ?source . FILTER(STR(?_rv_{}) = \"{}\")",
+                                    safe_name, prop.predicate, safe_name, escaped
+                                ));
+                            } else {
+                                where_patterns.push(format!(
+                                    "    ?source <{}> ?_ft_{} . FILTER(STR(?_ft_{}) = \"{}\")",
+                                    prop.predicate, safe_name, safe_name, escaped
+                                ));
+                            }
                         }
                     }
                     WhereCondition::StringArray(vals) => {
-                        let str_list = vals
-                            .iter()
-                            .map(|v| format!("\"{}\"", escape_sparql_string(v)))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        if direction == "reverse" {
-                            where_patterns.push(format!(
-                                "    ?_rv_{} <{}> ?source . FILTER(STR(?_rv_{}) IN ({}))",
-                                safe_name, prop.predicate, safe_name, str_list
-                            ));
+                        let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
+                        let all_valid = vals.iter().all(|v| validate_iri(v).is_ok());
+                        if all_valid {
+                            let iris = vals
+                                .iter()
+                                .map(|v| format!("<{}>", v))
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            if direction == "reverse" {
+                                where_patterns.push(format!(
+                                    "    VALUES ?_rv_{} {{ {} }}\n    ?_rv_{} <{}> ?source .",
+                                    safe_name, iris, safe_name, prop.predicate
+                                ));
+                            } else {
+                                where_patterns.push(format!(
+                                    "    VALUES ?_ft_{} {{ {} }}\n    ?source <{}> ?_ft_{} .",
+                                    safe_name, iris, prop.predicate, safe_name
+                                ));
+                            }
                         } else {
-                            where_patterns.push(format!(
-                                "    ?source <{}> ?_ft_{} . FILTER(STR(?_ft_{}) IN ({}))",
-                                prop.predicate, safe_name, safe_name, str_list
-                            ));
+                            let str_list = vals
+                                .iter()
+                                .map(|v| format!("\"{}\"", escape_sparql_string(v)))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            if direction == "reverse" {
+                                where_patterns.push(format!(
+                                    "    ?_rv_{} <{}> ?source . FILTER(STR(?_rv_{}) IN ({}))",
+                                    safe_name, prop.predicate, safe_name, str_list
+                                ));
+                            } else {
+                                where_patterns.push(format!(
+                                    "    ?source <{}> ?_ft_{} . FILTER(STR(?_ft_{}) IN ({}))",
+                                    prop.predicate, safe_name, safe_name, str_list
+                                ));
+                            }
                         }
                     }
                     _ => {} // complex ops handled post-hydration
@@ -1864,7 +2099,8 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                 continue;
             }
 
-            // Property-based where: values are plain literals.
+            // Property-based where: values are plain literal IRIs.
+            // Use direct IRI matching for indexed lookups.
             if let Some(prop) = shape
                 .properties
                 .iter()
@@ -1876,60 +2112,173 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                 let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
                 match condition {
                     WhereCondition::String(val) => {
-                        let literal_iri = format!(
-                            "literal:string:{}",
-                            urlencoding::encode(val)
-                        );
+                        let literal_iri = format!("literal:string:{}", urlencoding::encode(val));
                         where_patterns.push(format!(
-                            "    ?source <{}> ?_pw_{} . FILTER(STR(?_pw_{}) = \"{}\")",
-                            prop.predicate, safe_name, safe_name,
-                            escape_sparql_string(&literal_iri)
+                            "    ?source <{}> <{}> .",
+                            prop.predicate, literal_iri
                         ));
                     }
                     WhereCondition::Number(n) => {
                         let literal_iri = format!("literal:number:{}", n);
                         where_patterns.push(format!(
-                            "    ?source <{}> ?_pw_{} . FILTER(STR(?_pw_{}) = \"{}\")",
-                            prop.predicate, safe_name, safe_name,
-                            escape_sparql_string(&literal_iri)
+                            "    ?source <{}> <{}> .",
+                            prop.predicate, literal_iri
                         ));
                     }
                     WhereCondition::Bool(b) => {
                         let literal_iri = format!("literal:boolean:{}", b);
                         where_patterns.push(format!(
-                            "    ?source <{}> ?_pw_{} . FILTER(STR(?_pw_{}) = \"{}\")",
-                            prop.predicate, safe_name, safe_name, literal_iri
+                            "    ?source <{}> <{}> .",
+                            prop.predicate, literal_iri
                         ));
                     }
                     WhereCondition::StringArray(vals) => {
-                        let str_list = vals
+                        let iris = vals
                             .iter()
-                            .map(|v| {
-                                format!(
-                                    "\"literal:string:{}\"",
-                                    escape_sparql_string(&urlencoding::encode(v))
-                                )
-                            })
+                            .map(|v| format!("<literal:string:{}>", urlencoding::encode(v)))
                             .collect::<Vec<_>>()
-                            .join(", ");
+                            .join(" ");
                         where_patterns.push(format!(
-                            "    ?source <{}> ?_pw_{} . FILTER(STR(?_pw_{}) IN ({}))",
-                            prop.predicate, safe_name, safe_name, str_list
+                            "    VALUES ?_pw_{} {{ {} }}\n    ?source <{}> ?_pw_{} .",
+                            safe_name, iris, prop.predicate, safe_name
                         ));
                     }
                     WhereCondition::NumberArray(vals) => {
-                        let num_list = vals
+                        let iris = vals
                             .iter()
-                            .map(|n| format!("\"literal:number:{}\"", n))
+                            .map(|n| format!("<literal:number:{}>", n))
                             .collect::<Vec<_>>()
-                            .join(", ");
+                            .join(" ");
                         where_patterns.push(format!(
-                            "    ?source <{}> ?_pw_{} . FILTER(STR(?_pw_{}) IN ({}))",
-                            prop.predicate, safe_name, safe_name, num_list
+                            "    VALUES ?_pw_{} {{ {} }}\n    ?source <{}> ?_pw_{} .",
+                            safe_name, iris, prop.predicate, safe_name
                         ));
                     }
-                    WhereCondition::Ops(_) => {
-                        // Complex ops (gt/lt/contains/between) handled post-hydration
+                    WhereCondition::Ops(ops) => {
+                        // Generate SPARQL FILTER for all ops:
+                        // not, gt/gte/lt/lte, between, and contains.
+                        let var = format!("?_pw_{}", safe_name);
+                        where_patterns.push(format!("    ?source <{}> {} .", prop.predicate, var));
+
+                        let mut filters = Vec::new();
+
+                        // NOT operator
+                        if let Some(ref not_val) = ops.not {
+                            match not_val {
+                                Value::String(s) => {
+                                    let literal_iri =
+                                        format!("literal:string:{}", urlencoding::encode(s));
+                                    filters.push(format!(
+                                        "STR({}) != \"{}\"",
+                                        var,
+                                        escape_sparql_string(&literal_iri)
+                                    ));
+                                }
+                                Value::Number(n) => {
+                                    let n_f64 = n.as_f64().unwrap_or(0.0);
+                                    let literal_iri = if n_f64.fract() == 0.0 {
+                                        format!("literal:number:{}", n_f64 as i64)
+                                    } else {
+                                        format!("literal:number:{}", n_f64)
+                                    };
+                                    filters.push(format!(
+                                        "STR({}) != \"{}\"",
+                                        var,
+                                        escape_sparql_string(&literal_iri)
+                                    ));
+                                }
+                                Value::Bool(b) => {
+                                    let literal_iri = format!("literal:boolean:{}", b);
+                                    filters.push(format!("STR({}) != \"{}\"", var, literal_iri));
+                                }
+                                Value::Array(arr) => {
+                                    let items: Vec<String> = arr
+                                        .iter()
+                                        .filter_map(|item| match item {
+                                            Value::String(s) => Some(format!(
+                                                "\"literal:string:{}\"",
+                                                escape_sparql_string(&urlencoding::encode(s))
+                                            )),
+                                            Value::Number(n) => {
+                                                let f = n.as_f64().unwrap_or(0.0);
+                                                let iri = if f.fract() == 0.0 {
+                                                    format!("literal:number:{}", f as i64)
+                                                } else {
+                                                    format!("literal:number:{}", f)
+                                                };
+                                                Some(format!("\"{}\"", iri))
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    if !items.is_empty() {
+                                        filters.push(format!(
+                                            "STR({}) NOT IN ({})",
+                                            var,
+                                            items.join(", ")
+                                        ));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // Numeric comparisons: extract number from literal IRI.
+                        // "literal:number:" and "literal:string:" are both 15 chars,
+                        // so SUBSTR(STR(?var), 16) extracts the value for either prefix.
+                        // Double cast succeeds for number literals and numeric
+                        // strings; fails safely (unbound → filter false) for non-numeric.
+                        let has_numeric = ops.gt.is_some()
+                            || ops.gte.is_some()
+                            || ops.lt.is_some()
+                            || ops.lte.is_some()
+                            || ops.between.is_some();
+
+                        if has_numeric {
+                            let num_var = format!("?_pw_{}_num", safe_name);
+                            where_patterns.push(format!(
+                                "    BIND(<http://www.w3.org/2001/XMLSchema#double>(SUBSTR(STR({}), 16)) AS {})",
+                                var, num_var
+                            ));
+                            if let Some(gt) = ops.gt {
+                                filters.push(format!("{} > {}", num_var, gt));
+                            }
+                            if let Some(gte) = ops.gte {
+                                filters.push(format!("{} >= {}", num_var, gte));
+                            }
+                            if let Some(lt) = ops.lt {
+                                filters.push(format!("{} < {}", num_var, lt));
+                            }
+                            if let Some(lte) = ops.lte {
+                                filters.push(format!("{} <= {}", num_var, lte));
+                            }
+                            if let Some((lo, hi)) = ops.between {
+                                filters.push(format!(
+                                    "{} >= {} && {} <= {}",
+                                    num_var, lo, num_var, hi
+                                ));
+                            }
+                        }
+
+                        // Contains: case-insensitive substring match.
+                        // Both stored value and needle are percent-encoded, so
+                        // CONTAINS on the encoded forms is equivalent to matching
+                        // the original strings.  LCASE handles ASCII case-folding.
+                        if let Some(ref contains_val) = ops.contains {
+                            let needle = match contains_val {
+                                Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            filters.push(format!(
+                                "CONTAINS(LCASE(SUBSTR(STR({}), 16)), LCASE(ENCODE_FOR_URI(\"{}\")))",
+                                var,
+                                escape_sparql_string(&needle)
+                            ));
+                        }
+
+                        if !filters.is_empty() {
+                            where_patterns.push(format!("    FILTER({})", filters.join(" && ")));
+                        }
                     }
                 }
                 continue;
@@ -4516,10 +4865,7 @@ mod integration_tests {
             .unwrap();
 
         // Channel name
-        let name_target = format!(
-            "literal:string:{}",
-            urlencoding::encode("General")
-        );
+        let name_target = format!("literal:string:{}", urlencoding::encode("General"));
         store
             .add_link(&make_link(
                 channel_base,
@@ -4547,10 +4893,7 @@ mod integration_tests {
                 "1700000000003",
             ))
             .unwrap();
-        let app_name_target = format!(
-            "literal:string:{}",
-            urlencoding::encode("Chat")
-        );
+        let app_name_target = format!("literal:string:{}", urlencoding::encode("Chat"));
         store
             .add_link(&make_link(
                 app_base,
@@ -6829,7 +7172,7 @@ mod integration_tests {
             scalar_prop("description", "flux://description", false, false),
         ]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query, None);
+        let sparql = build_instance_sparql(&shape, &query, None).into_single();
 
         assert!(
             sparql.contains("VALUES ?predicate"),
@@ -6863,7 +7206,7 @@ mod integration_tests {
             ),
         ]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query, None);
+        let sparql = build_instance_sparql(&shape, &query, None).into_single();
 
         assert!(
             sparql.contains("VALUES ?predicate"),
@@ -6897,7 +7240,7 @@ mod integration_tests {
             ),
         ]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query, None);
+        let sparql = build_instance_sparql(&shape, &query, None).into_single();
 
         assert!(sparql.contains("VALUES ?predicate"));
         assert!(sparql.contains("<flux://entry_type>"));
@@ -6928,7 +7271,7 @@ mod integration_tests {
             ),
         ]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query, None);
+        let sparql = build_instance_sparql(&shape, &query, None).into_single();
 
         assert!(sparql.contains("VALUES ?predicate"));
         // ad4m://has_child should appear because raw_children needs it
@@ -6944,7 +7287,7 @@ mod integration_tests {
         // unrestricted wildcard (no VALUES clause).
         let shape = make_shape(vec![]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query, None);
+        let sparql = build_instance_sparql(&shape, &query, None).into_single();
 
         assert!(
             !sparql.contains("VALUES ?predicate"),
@@ -6964,7 +7307,7 @@ mod integration_tests {
             scalar_prop("name", "ns://name", false, false),
         ]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query, None);
+        let sparql = build_instance_sparql(&shape, &query, None).into_single();
 
         assert!(sparql.contains("VALUES ?predicate"));
         // Count occurrences of the shared predicate in the VALUES clause
@@ -7068,5 +7411,898 @@ mod integration_tests {
             ),
             other => panic!("Unexpected messages value: {:?}", other),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Ops-based SPARQL push tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_full_model_query_ops_gt_lt_sparql_push() {
+        // Verify gt/lt numeric ops are pushed to SPARQL and return correct results
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let items: Vec<String> = (0..5).map(|i| format!("test://item-{}", i)).collect();
+        let scores = [10.0, 30.0, 50.0, 70.0, 90.0];
+
+        for (item, &score) in items.iter().zip(&scores) {
+            store
+                .add_link(&make_link(item, "ns://type", "ns://scored", ts))
+                .unwrap();
+            store
+                .add_link(&make_link(
+                    item,
+                    "ns://score",
+                    &signed_literal_number(score),
+                    ts,
+                ))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Scored",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+                "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // gt: 50 → items with 70, 90
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "score".to_string(),
+            WhereCondition::Ops(WhereOps {
+                gt: Some(50.0),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 2, "gt:50 should match 70 and 90");
+
+        // lt: 50 → items with 10, 30
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "score".to_string(),
+            WhereCondition::Ops(WhereOps {
+                lt: Some(50.0),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 2, "lt:50 should match 10 and 30");
+
+        // between: [30, 70] → items with 30, 50, 70
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "score".to_string(),
+            WhereCondition::Ops(WhereOps {
+                between: Some((30.0, 70.0)),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(
+            result.instances.len(),
+            3,
+            "between:[30,70] should match 30, 50, 70"
+        );
+    }
+
+    #[test]
+    fn test_full_model_query_ops_gte_lte_sparql_push() {
+        // Verify gte/lte numeric ops via SPARQL
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        for (i, score) in [10.0, 50.0, 90.0].iter().enumerate() {
+            let item = format!("test://item-{}", i);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://scored", ts))
+                .unwrap();
+            store
+                .add_link(&make_link(
+                    &item,
+                    "ns://val",
+                    &signed_literal_number(*score),
+                    ts,
+                ))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Scored",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+                "val": { "predicate": "ns://val", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // gte: 50 → 50, 90
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "val".to_string(),
+            WhereCondition::Ops(WhereOps {
+                gte: Some(50.0),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 2, "gte:50 should match 50 and 90");
+
+        // lte: 50 → 10, 50
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "val".to_string(),
+            WhereCondition::Ops(WhereOps {
+                lte: Some(50.0),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 2, "lte:50 should match 10 and 50");
+    }
+
+    #[test]
+    fn test_full_model_query_ops_not_string_sparql_push() {
+        // NOT operator with string should be pushed to SPARQL
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        for (i, status) in ["active", "done", "active"].iter().enumerate() {
+            let item = format!("test://item-{}", i);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://task", ts))
+                .unwrap();
+            store
+                .add_link(&make_link(
+                    &item,
+                    "ns://status",
+                    &signed_literal(status),
+                    ts,
+                ))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Task",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://task" },
+                "status": { "predicate": "ns://status", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "status".to_string(),
+            WhereCondition::Ops(WhereOps {
+                not: Some(Value::String("done".to_string())),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Task",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 2, "NOT done → 2 active tasks");
+    }
+
+    #[test]
+    fn test_full_model_query_ops_not_array_sparql_push() {
+        // NOT IN (array) should be pushed to SPARQL
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        for (i, status) in ["alpha", "beta", "gamma", "delta"].iter().enumerate() {
+            let item = format!("test://item-{}", i);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://thing", ts))
+                .unwrap();
+            store
+                .add_link(&make_link(&item, "ns://phase", &signed_literal(status), ts))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Thing",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://thing" },
+                "phase": { "predicate": "ns://phase", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "phase".to_string(),
+            WhereCondition::Ops(WhereOps {
+                not: Some(Value::Array(vec![
+                    Value::String("alpha".to_string()),
+                    Value::String("gamma".to_string()),
+                ])),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Thing",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(
+            result.instances.len(),
+            2,
+            "NOT IN [alpha, gamma] → beta, delta"
+        );
+    }
+
+    #[test]
+    fn test_full_model_query_ops_with_pagination_pushed() {
+        // Ops + pagination should both be pushed to SPARQL (no contains)
+        let store = SparqlStore::new(None).unwrap();
+
+        for i in 0..10 {
+            let item = format!("test://item-{}", i);
+            let ts = format!("{}", 1700000000000i64 + i);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://scored", &ts))
+                .unwrap();
+            store
+                .add_link(&make_link(
+                    &item,
+                    "ns://score",
+                    &signed_literal_number(i as f64 * 10.0),
+                    &ts,
+                ))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Scored",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+                "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // score >= 30 (items 3-9 = 7 items), paginate: offset 2, limit 3
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "score".to_string(),
+            WhereCondition::Ops(WhereOps {
+                gte: Some(30.0),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                limit: Some(3),
+                offset: Some(2),
+                order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 3, "Should get 3 items in page");
+        assert_eq!(result.total_count, 7, "Total matching items: score >= 30");
+    }
+
+    #[test]
+    fn test_full_model_query_ops_contains_sparql_push() {
+        // `contains` in Ops should be pushed to SPARQL via CONTAINS+ENCODE_FOR_URI
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        for (i, name) in ["Alice Smith", "Bob Jones", "Alice Cooper"]
+            .iter()
+            .enumerate()
+        {
+            let item = format!("test://item-{}", i);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://person", ts))
+                .unwrap();
+            store
+                .add_link(&make_link(&item, "ns://name", &signed_literal(name), ts))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Person",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://person" },
+                "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "name".to_string(),
+            WhereCondition::Ops(WhereOps {
+                contains: Some(Value::String("alice".to_string())),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Person",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(
+            result.instances.len(),
+            2,
+            "Case-insensitive contains 'alice' → Alice Smith, Alice Cooper"
+        );
+    }
+
+    #[test]
+    fn test_full_model_query_ops_contains_with_pagination() {
+        // `contains` + pagination should both be pushed to SPARQL
+        let store = SparqlStore::new(None).unwrap();
+        let ts_base = 1700000000000i64;
+
+        let names = [
+            "Alice Adams",
+            "Bob Baker",
+            "Alice Brown",
+            "Charlie Clark",
+            "Alice Chen",
+            "Dave Davis",
+        ];
+        for (i, name) in names.iter().enumerate() {
+            let item = format!("test://item-{}", i);
+            let ts = format!("{}", ts_base + i as i64);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://person", &ts))
+                .unwrap();
+            store
+                .add_link(&make_link(&item, "ns://name", &signed_literal(name), &ts))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Person",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://person" },
+                "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // contains "alice" → 3 matches (Alice Adams, Alice Brown, Alice Chen)
+        // paginate: offset 1, limit 1
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "name".to_string(),
+            WhereCondition::Ops(WhereOps {
+                contains: Some(Value::String("alice".to_string())),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Person",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                limit: Some(1),
+                offset: Some(1),
+                order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 1, "Should get 1 item in page");
+        assert_eq!(result.total_count, 3, "Total matching: 3 Alices");
+        assert_eq!(
+            result.instances[0]["name"].as_str().unwrap(),
+            "Alice Brown",
+            "Second Alice by timestamp ASC"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Performance / scale tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_perf_large_dataset_paginated_query() {
+        // Simulate Flux-like scenario: many messages across channels.
+        // Verifies that paginated queries complete in a reasonable time.
+        let store = SparqlStore::new(None).unwrap();
+        let ts_base = 1700000000000i64;
+        let num_channels = 3;
+        let msgs_per_channel = 1000;
+
+        for ch in 0..num_channels {
+            let channel = format!("test://channel-{}", ch);
+            for i in 0..(msgs_per_channel as i64) {
+                let msg = format!("test://msg-{}-{}", ch, i);
+                let ts = format!("{}", ts_base + ch as i64 * 100000 + i);
+                store
+                    .add_link(&make_link(&msg, "flux://type", "flux://message", &ts))
+                    .unwrap();
+                store
+                    .add_link(&make_link(&msg, "flux://channel", &channel, &ts))
+                    .unwrap();
+                store
+                    .add_link(&make_link(
+                        &msg,
+                        "flux://body",
+                        &signed_literal(&format!("Message {} in channel {}", i, ch)),
+                        &ts,
+                    ))
+                    .unwrap();
+            }
+        }
+
+        let shape_json = r#"{
+            "className": "Message",
+            "properties": {
+                "type": { "predicate": "flux://type", "required": true, "flag": true, "initial": "flux://message" },
+                "body": { "predicate": "flux://body", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {
+                "channel": { "predicate": "flux://channel", "kind": "belongsToOne", "direction": "forward" }
+            }
+        }"#;
+
+        // Query messages in channel-1 with pagination (typical Flux query)
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "channel".to_string(),
+            WhereCondition::String("test://channel-1".to_string()),
+        );
+
+        let start = std::time::Instant::now();
+        let result = execute_model_query(
+            &store,
+            "Message",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                limit: Some(50),
+                offset: Some(0),
+                order: Some(vec![("timestamp".to_string(), OrderDirection::DESC)]),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(result.instances.len(), 50, "Should get 50 messages");
+        assert_eq!(
+            result.total_count, msgs_per_channel,
+            "Total count should be messages in one channel"
+        );
+        eprintln!(
+            "Paginated query over {} total messages ({} matching): {:?}",
+            num_channels * msgs_per_channel,
+            msgs_per_channel,
+            elapsed
+        );
+        assert!(
+            elapsed.as_secs() < 5,
+            "Query took {:?} — too slow for {} messages",
+            elapsed,
+            num_channels * msgs_per_channel
+        );
+    }
+
+    #[test]
+    fn test_perf_flux_message_parent_scope_paginated() {
+        // Simulates the exact Flux chat-view query:
+        //   useLiveQuery(Message, perspective, {
+        //     parent: { model: Channel, id: source },
+        //     query: { order: { createdAt: 'DESC' } },
+        //     pageSize: 30,
+        //   })
+        //
+        // Message model shape:
+        //   @Flag({ through: 'flux://entry_type', value: 'flux://has_message' })
+        //   @Property({ through: 'flux://body' })
+        //   @HasMany({ through: 'flux://has_reaction' })  — collection, no getter
+        //   @Property({ through: 'flux://has_reply', getter: "SELECT ?target WHERE { ... }" }) — getter
+        //   @Property({ through: 'flux://is_popular', getter: "ASK WHERE { ... }" }) — getter
+        //   @HasMany({ through: 'flux://has_thread_message' }) — collection
+        //   @HasMany({ through: 'flux://has_reply' }) — collection
+        //
+        // Parent scope: channel -> ad4m://has_child -> message
+        let store = SparqlStore::new(None).unwrap();
+        let ts_base = 1700000000000i64;
+        let num_channels = 5;
+        let msgs_per_channel = 2000;
+
+        for ch in 0..num_channels {
+            let channel = format!("test://channel-{}", ch);
+            for i in 0..(msgs_per_channel as i64) {
+                let msg = format!("test://msg-{}-{}", ch, i);
+                let ts = format!("{}", ts_base + ch as i64 * 1000000 + i * 100);
+                // Parent link: channel -> has_child -> message
+                store
+                    .add_link(&make_link(&channel, "ad4m://has_child", &msg, &ts))
+                    .unwrap();
+                // Flag: entry_type = has_message
+                store
+                    .add_link(&make_link(&msg, "flux://entry_type", "flux://has_message", &ts))
+                    .unwrap();
+                // Body property
+                store
+                    .add_link(&make_link(
+                        &msg,
+                        "flux://body",
+                        &signed_literal(&format!("Message {} in channel {}", i, ch)),
+                        &ts,
+                    ))
+                    .unwrap();
+            }
+        }
+
+        let shape_json = r#"{
+            "className": "Message",
+            "properties": {
+                "type": { "predicate": "flux://entry_type", "required": true, "flag": true, "initial": "flux://has_message" },
+                "body": { "predicate": "flux://body", "required": false, "resolveLanguage": "literal" },
+                "transcriptStartedAt": { "predicate": "flux://transcript_started_at", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {
+                "reactions": { "predicate": "flux://has_reaction", "kind": "hasMany", "direction": "forward" },
+                "replyingTo": { "predicate": "flux://has_reply", "kind": "hasOne", "direction": "forward", "getter": "SELECT ?target WHERE { ?target <flux://has_reply> ?source . } LIMIT 1" },
+                "isPopular": { "predicate": "flux://is_popular", "kind": "hasOne", "direction": "forward", "getter": "ASK WHERE { SELECT (COUNT(DISTINCT ?reactor) AS ?count) WHERE { ?reactor <flux://has_reaction> ?source . FILTER(?reactor = <emoji://1f44d>) } HAVING(?count > 5) }" },
+                "thread": { "predicate": "flux://has_thread_message", "kind": "hasMany", "direction": "forward" },
+                "replies": { "predicate": "flux://has_reply", "kind": "hasMany", "direction": "forward" }
+            }
+        }"#;
+
+        // Query: get 30 most recent messages from channel-2 (ORDER BY createdAt DESC)
+        let start = std::time::Instant::now();
+        let result = execute_model_query(
+            &store,
+            "Message",
+            &ModelQueryInput {
+                parent: Some(ParentScope::Raw {
+                    id: "test://channel-2".to_string(),
+                    predicate: "ad4m://has_child".to_string(),
+                }),
+                limit: Some(30),
+                offset: Some(0),
+                order: Some(vec![("createdAt".to_string(), OrderDirection::DESC)]),
+                count: Some(true),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(result.instances.len(), 30, "Should get 30 messages");
+        assert_eq!(
+            result.total_count, msgs_per_channel,
+            "Total count should be {} messages in channel-2",
+            msgs_per_channel
+        );
+
+        // Verify ordering: DESC by createdAt
+        for i in 1..result.instances.len() {
+            let prev_ts = result.instances[i - 1]["createdAt"].as_str().unwrap_or("");
+            let curr_ts = result.instances[i]["createdAt"].as_str().unwrap_or("");
+            assert!(
+                prev_ts >= curr_ts,
+                "Messages should be ordered DESC by createdAt: {} < {}",
+                prev_ts,
+                curr_ts
+            );
+        }
+
+        eprintln!(
+            "Flux Message query (parent scope, 30 of {}, {} total, with getters): {:?}",
+            msgs_per_channel,
+            num_channels * msgs_per_channel,
+            elapsed
+        );
+        assert!(
+            elapsed.as_secs() < 5,
+            "Query took {:?} — too slow for {} messages with parent scope",
+            elapsed,
+            num_channels * msgs_per_channel
+        );
+
+        // --- Raw SPARQL comparison: flag-reifier vs parent-reifier vs no ORDER ---
+        // Test 1: No ORDER BY (just the conformance)
+        let t_no_order = std::time::Instant::now();
+        let q_no_order = r#"SELECT DISTINCT ?source WHERE {
+            <test://channel-2> <ad4m://has_child> ?source .
+            ?source <flux://entry_type> <flux://has_message> .
+        } LIMIT 30"#;
+        let _r = store.query(q_no_order).unwrap();
+        eprintln!("[RAW] no ORDER BY: {:?}", t_no_order.elapsed());
+
+        // Test 2: Flag-reifier probe (what we currently generate)
+        let t_flag = std::time::Instant::now();
+        let q_flag = r#"SELECT DISTINCT ?source ?_first_ts WHERE {
+            <test://channel-2> <ad4m://has_child> ?source .
+            ?source <flux://entry_type> <flux://has_message> .
+            ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <flux://entry_type> <flux://has_message> )>> .
+            ?_r <ad4m://ontology/timestamp> ?_first_ts .
+        } ORDER BY DESC(?_first_ts) LIMIT 30"#;
+        let _r = store.query(q_flag).unwrap();
+        eprintln!("[RAW] flag-reifier ORDER BY: {:?}", t_flag.elapsed());
+
+        // Test 3: Parent-reifier probe (uses the fully-bound parent IRI)
+        let t_parent = std::time::Instant::now();
+        let q_parent = r#"SELECT DISTINCT ?source ?_first_ts WHERE {
+            <test://channel-2> <ad4m://has_child> ?source .
+            ?source <flux://entry_type> <flux://has_message> .
+            ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <test://channel-2> <ad4m://has_child> ?source )>> .
+            ?_r <ad4m://ontology/timestamp> ?_first_ts .
+        } ORDER BY DESC(?_first_ts) LIMIT 30"#;
+        let _r = store.query(q_parent).unwrap();
+        eprintln!("[RAW] parent-reifier ORDER BY: {:?}", t_parent.elapsed());
+
+        // Test 4: Wildcard reifier (the old expensive pattern)
+        let t_wild = std::time::Instant::now();
+        let q_wild = r#"SELECT DISTINCT ?source ?_first_ts WHERE {
+            <test://channel-2> <ad4m://has_child> ?source .
+            ?source <flux://entry_type> <flux://has_message> .
+            ?source ?_anyP ?_anyT .
+            ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?_anyP ?_anyT )>> .
+            ?_r <ad4m://ontology/timestamp> ?_first_ts .
+        } ORDER BY DESC(?_first_ts) LIMIT 30"#;
+        let _r = store.query(q_wild).unwrap();
+        eprintln!("[RAW] wildcard-reifier ORDER BY: {:?}", t_wild.elapsed());
+
+        // Test 5: Full outer query (the actual generated pattern)
+        let t_full = std::time::Instant::now();
+        let q_full = r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
+            {
+                SELECT DISTINCT ?source ?_first_ts WHERE {
+                    <test://channel-2> <ad4m://has_child> ?source .
+                    ?source <flux://entry_type> <flux://has_message> .
+                    ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <flux://entry_type> <flux://has_message> )>> .
+                    ?_r <ad4m://ontology/timestamp> ?_first_ts .
+                } ORDER BY DESC(?_first_ts) LIMIT 30
+            }
+            VALUES ?predicate { <flux://body> <flux://entry_type> <flux://has_reaction> <flux://has_reply> <flux://has_thread_message> <flux://transcript_started_at> }
+            ?source ?predicate ?target .
+            ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+            FILTER(isIRI(?predicate))
+            ?_reifier <ad4m://ontology/author> ?author .
+            ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+        }"#;
+        let r_full: Vec<Value> = serde_json::from_str(&store.query(q_full).unwrap()).unwrap();
+        eprintln!("[RAW] full outer query: {:?} ({} rows)", t_full.elapsed(), r_full.len());
+
+        // Test 6: Outer query without subquery (pre-materialized sources via VALUES)
+        // Get the 30 source IDs first, then query their properties
+        let q_ids = r#"SELECT DISTINCT ?source WHERE {
+            <test://channel-2> <ad4m://has_child> ?source .
+            ?source <flux://entry_type> <flux://has_message> .
+            ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <flux://entry_type> <flux://has_message> )>> .
+            ?_r <ad4m://ontology/timestamp> ?_first_ts .
+        } ORDER BY DESC(?_first_ts) LIMIT 30"#;
+        let ids_json: Vec<Value> = serde_json::from_str(&store.query(q_ids).unwrap()).unwrap();
+        let source_values: String = ids_json.iter()
+            .filter_map(|r| r["source"].as_str())
+            .map(|s| format!("<{}>", s))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let t_outer = std::time::Instant::now();
+        let q_outer = format!(r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+            VALUES ?source {{ {} }}
+            VALUES ?predicate {{ <flux://body> <flux://entry_type> <flux://has_reaction> <flux://has_reply> <flux://has_thread_message> <flux://transcript_started_at> }}
+            ?source ?predicate ?target .
+            ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+            FILTER(isIRI(?predicate))
+            ?_reifier <ad4m://ontology/author> ?author .
+            ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+        }}"#, source_values);
+        let r_outer: Vec<Value> = serde_json::from_str(&store.query(&q_outer).unwrap()).unwrap();
+        eprintln!("[RAW] pre-materialized VALUES outer: {:?} ({} rows)", t_outer.elapsed(), r_outer.len());
+    }
+
+    // -----------------------------------------------------------------------
+    // Property-key sort push tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_full_model_query_order_by_property_string() {
+        // ORDER BY a string property should be pushed to SPARQL
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let names = ["Charlie", "Alice", "Bob"];
+        for (i, name) in names.iter().enumerate() {
+            let item = format!("test://item-{}", i);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://person", ts))
+                .unwrap();
+            store
+                .add_link(&make_link(&item, "ns://name", &signed_literal(name), ts))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Person",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://person" },
+                "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // ORDER BY name ASC with limit (triggers SPARQL pagination)
+        let result = execute_model_query(
+            &store,
+            "Person",
+            &ModelQueryInput {
+                limit: Some(2),
+                order: Some(vec![("name".to_string(), OrderDirection::ASC)]),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 2);
+        assert_eq!(result.total_count, 3);
+        // First 2 alphabetically: Alice, Bob
+        assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Alice");
+        assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
+
+        // ORDER BY name DESC with limit
+        let result = execute_model_query(
+            &store,
+            "Person",
+            &ModelQueryInput {
+                limit: Some(2),
+                order: Some(vec![("name".to_string(), OrderDirection::DESC)]),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 2);
+        // First 2 reverse alphabetically: Charlie, Bob
+        assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Charlie");
+        assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
+    }
+
+    #[test]
+    fn test_full_model_query_order_by_property_number() {
+        // ORDER BY a numeric property
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let scores = [100.0, 5.0, 42.0, 1.0, 999.0];
+        for (i, &score) in scores.iter().enumerate() {
+            let item = format!("test://item-{}", i);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://scored", ts))
+                .unwrap();
+            store
+                .add_link(&make_link(
+                    &item,
+                    "ns://score",
+                    &signed_literal_number(score),
+                    ts,
+                ))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Scored",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+                "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // ORDER BY score ASC, limit 3 → should get 1, 5, 42
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                limit: Some(3),
+                order: Some(vec![("score".to_string(), OrderDirection::ASC)]),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 3);
+        assert_eq!(result.total_count, 5);
+        let got_scores: Vec<f64> = result
+            .instances
+            .iter()
+            .map(|i| i["score"].as_f64().unwrap())
+            .collect();
+        assert_eq!(got_scores, vec![1.0, 5.0, 42.0], "ASC numeric sort");
+
+        // ORDER BY score DESC, limit 2 → should get 999, 100
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                limit: Some(2),
+                order: Some(vec![("score".to_string(), OrderDirection::DESC)]),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        let got_scores: Vec<f64> = result
+            .instances
+            .iter()
+            .map(|i| i["score"].as_f64().unwrap())
+            .collect();
+        assert_eq!(got_scores, vec![999.0, 100.0], "DESC numeric sort");
     }
 }
