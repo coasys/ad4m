@@ -4364,7 +4364,10 @@ impl PerspectiveInstance {
                         .await
                     {
                         Ok(result) => prolog_resolution_to_string(result),
-                        Err(_) => return None,
+                        Err(e) => {
+                            log::error!("Prolog subscription query failed: {}", e);
+                            return None;
+                        }
                     }
                 };
                 Some((id, result_string))
