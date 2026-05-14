@@ -4770,30 +4770,6 @@ mod tests {
         instance
     }
 
-    async fn create_perspective() -> PerspectiveInstance {
-        let uuid = Uuid::new_v4().to_string();
-
-        let instance = PerspectiveInstance::new(
-            PerspectiveHandle {
-                uuid,
-                name: Some("Test Perspective".to_string()),
-                shared_url: None,
-                neighbourhood: None,
-                state: PerspectiveState::Private,
-                owners: None,
-            },
-            None,
-        );
-
-        // Ensure prolog engine pool is initialized
-        instance
-            .ensure_prolog_engine_pool()
-            .await
-            .expect("Failed to initialize prolog engine pool");
-
-        instance
-    }
-
     pub fn create_link() -> Link {
         Link {
             source: format!("https://{}.com", Faker.fake::<String>()),
@@ -5412,7 +5388,7 @@ mod tests {
     fn test_predicate_filtering_empty_sub_always_matches() {
         // Empty sub predicates (variable predicate query) should always match
         let sub_predicates: HashSet<String> = HashSet::new();
-        let changed: HashSet<String> = ["flux://has_reaction".to_string()].into();
+        let _changed: HashSet<String> = ["flux://has_reaction".to_string()].into();
         // Empty set is disjoint with everything, but our code checks !sub_predicates.is_empty() first
         assert!(sub_predicates.is_empty()); // so this subscription would NOT be skipped
     }
