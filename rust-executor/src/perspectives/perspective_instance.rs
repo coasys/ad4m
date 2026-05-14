@@ -4320,6 +4320,10 @@ impl PerspectiveInstance {
             if !sub_predicates.is_empty() {
                 if let ChangedPredicates::Specific(ref changed) = changed_predicates {
                     if sub_predicates.is_disjoint(changed) {
+                        log::debug!(
+                            "⏭️ Skipping subscription {} — predicates {:?} disjoint from changed {:?}",
+                            id, sub_predicates, changed
+                        );
                         continue; // No overlap — skip this subscription
                     }
                 } else if matches!(changed_predicates, ChangedPredicates::NoneRecorded) {
@@ -4387,9 +4391,24 @@ impl PerspectiveInstance {
             for result in results.into_iter().flatten() {
                 let (id, result_string) = result;
                 if let Some(stored_query) = queries.get_mut(&id) {
-                    if result_string != stored_query.last_result {
+                    let changed = result_string != stored_query.last_result;
+                    if changed {
+                        let old_len = stored_query.last_result.len();
+                        let new_len = result_string.len();
+                        log::debug!(
+                            "📤 Subscription {} result changed (old_len={}, new_len={})",
+                            id,
+                            old_len,
+                            new_len
+                        );
                         stored_query.last_result = result_string.clone();
                         updates_to_send.push((id, result_string));
+                    } else {
+                        log::trace!(
+                            "📭 Subscription {} result unchanged (len={})",
+                            id,
+                            result_string.len()
+                        );
                     }
                 }
             }
@@ -4454,6 +4473,11 @@ impl PerspectiveInstance {
                     ChangedPredicates::NoneRecorded,
                 );
 
+                log::debug!(
+                    "🔔 Subscription check triggered for perspective {} with changed_preds: {:?}",
+                    self.uuid,
+                    changed_preds
+                );
                 self.check_subscribed_queries(changed_preds).await;
             }
 

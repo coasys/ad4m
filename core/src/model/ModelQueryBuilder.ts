@@ -419,9 +419,15 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       subscriptionId,
       (rawResult: any) => {
         try {
-          resolveAndReturn(parseResults(rawResult)).then((results) => {
+          const parsed = parseResults(rawResult);
+          console.debug(`[ModelQueryBuilder.subscribe] Update received for ${subscriptionId}: ${parsed.length} instances`);
+          resolveAndReturn(parsed).then((results) => {
             const fp = buildFingerprint(results);
-            if (fp === lastResultFingerprint) return;
+            if (fp === lastResultFingerprint) {
+              console.debug(`[ModelQueryBuilder.subscribe] Fingerprint unchanged, skipping callback`);
+              return;
+            }
+            console.debug(`[ModelQueryBuilder.subscribe] Fingerprint changed, calling callback with ${results.length} results`);
             lastResultFingerprint = fp;
             callback(results);
           }).catch((e) => {
@@ -730,6 +736,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
       subscriptionId,
       (rawResult: any) => {
+        console.debug(`[ModelQueryBuilder.paginateSubscribe] Update received for ${subscriptionId}, re-fetching paginated data...`);
         processResults().catch(e => console.error('Paginate subscription error:', e));
       },
     );
