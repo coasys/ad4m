@@ -846,16 +846,13 @@ export class PerspectiveProxy {
     async removeListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
         if (type === 'link-added') {
             const index = this.#perspectiveLinkAddedCallbacks.indexOf(cb);
-
-            this.#perspectiveLinkAddedCallbacks.splice(index, 1);
+            if (index >= 0) this.#perspectiveLinkAddedCallbacks.splice(index, 1);
         } else if (type === 'link-removed') {
             const index = this.#perspectiveLinkRemovedCallbacks.indexOf(cb);
-
-            this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
+            if (index >= 0) this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
         } else if (type === 'link-updated') {
             const index = this.#perspectiveLinkUpdatedCallbacks.indexOf(cb);
-
-            this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
+            if (index >= 0) this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
         }
     }
 
