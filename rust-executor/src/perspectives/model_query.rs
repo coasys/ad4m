@@ -1354,7 +1354,6 @@ fn execute_model_query_inner(
     // property regardless of instance count.  Runs AFTER pagination so only
     // the current page of results is evaluated, not the entire result set.
     if !paginated.is_empty() {
-
         let deep_query = query_input.deep_query.unwrap_or(true);
         evaluate_getters(
             store,
@@ -7992,7 +7991,12 @@ mod integration_tests {
                     .unwrap();
                 // Flag: entry_type = has_message
                 store
-                    .add_link(&make_link(&msg, "flux://entry_type", "flux://has_message", &ts))
+                    .add_link(&make_link(
+                        &msg,
+                        "flux://entry_type",
+                        "flux://has_message",
+                        &ts,
+                    ))
                     .unwrap();
                 // Body property
                 store
@@ -8138,7 +8142,11 @@ mod integration_tests {
             ?_reifier <ad4m://ontology/timestamp> ?timestamp .
         }"#;
         let r_full: Vec<Value> = serde_json::from_str(&store.query(q_full).unwrap()).unwrap();
-        eprintln!("[RAW] full outer query: {:?} ({} rows)", t_full.elapsed(), r_full.len());
+        eprintln!(
+            "[RAW] full outer query: {:?} ({} rows)",
+            t_full.elapsed(),
+            r_full.len()
+        );
 
         // Test 6: Outer query without subquery (pre-materialized sources via VALUES)
         // Get the 30 source IDs first, then query their properties
@@ -8149,13 +8157,15 @@ mod integration_tests {
             ?_r <ad4m://ontology/timestamp> ?_first_ts .
         } ORDER BY DESC(?_first_ts) LIMIT 30"#;
         let ids_json: Vec<Value> = serde_json::from_str(&store.query(q_ids).unwrap()).unwrap();
-        let source_values: String = ids_json.iter()
+        let source_values: String = ids_json
+            .iter()
             .filter_map(|r| r["source"].as_str())
             .map(|s| format!("<{}>", s))
             .collect::<Vec<_>>()
             .join(" ");
         let t_outer = std::time::Instant::now();
-        let q_outer = format!(r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+        let q_outer = format!(
+            r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
             VALUES ?source {{ {} }}
             VALUES ?predicate {{ <flux://body> <flux://entry_type> <flux://has_reaction> <flux://has_reply> <flux://has_thread_message> <flux://transcript_started_at> }}
             ?source ?predicate ?target .
@@ -8163,9 +8173,15 @@ mod integration_tests {
             FILTER(isIRI(?predicate))
             ?_reifier <ad4m://ontology/author> ?author .
             ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-        }}"#, source_values);
+        }}"#,
+            source_values
+        );
         let r_outer: Vec<Value> = serde_json::from_str(&store.query(&q_outer).unwrap()).unwrap();
-        eprintln!("[RAW] pre-materialized VALUES outer: {:?} ({} rows)", t_outer.elapsed(), r_outer.len());
+        eprintln!(
+            "[RAW] pre-materialized VALUES outer: {:?} ({} rows)",
+            t_outer.elapsed(),
+            r_outer.len()
+        );
     }
 
     // -----------------------------------------------------------------------
