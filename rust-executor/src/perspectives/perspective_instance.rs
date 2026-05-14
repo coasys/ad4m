@@ -629,13 +629,11 @@ impl PerspectiveInstance {
         let mut before = self.notification_trigger_snapshot().await;
         while !self.is_teardown.load(Ordering::Acquire) {
             interval.tick().await;
-            let changed = self.trigger_notification_check.load(Ordering::Acquire);
+            let changed = self.trigger_notification_check.swap(false, Ordering::AcqRel);
 
             if changed {
                 //log::debug!("Notification check loop triggered for perspective {}", uuid);
                 //let start = std::time::Instant::now();
-                self.trigger_notification_check
-                    .store(false, Ordering::Release);
                 //let snapshot_start = std::time::Instant::now();
 
                 let after = self.notification_trigger_snapshot().await;
@@ -4435,9 +4433,10 @@ impl PerspectiveInstance {
                 // Batch debounce: wait a short window for more changes to accumulate
                 sleep(Duration::from_millis(BATCH_WINDOW_MS)).await;
 
-                // Reset trigger and take the accumulated changed predicates
+                // Atomically reset trigger AFTER the sleep, so we catch any
+                // triggers that arrived during the debounce window.
                 self.trigger_prolog_subscription_check
-                    .store(false, Ordering::Release);
+                    .swap(false, Ordering::AcqRel);
                 let changed_preds = std::mem::replace(
                     &mut *self.changed_predicates.lock().await,
                     ChangedPredicates::NoneRecorded,
