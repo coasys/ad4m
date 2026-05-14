@@ -2032,9 +2032,7 @@ mod tests {
             .expect("VAD to build");
 
         // Low-level white noise — not speech, should be rejected
-        let noise: Vec<f32> = (0..8000)
-            .map(|i| (i as f32 * 17.3).sin() * 0.01)
-            .collect();
+        let noise: Vec<f32> = (0..8000).map(|i| (i as f32 * 17.3).sin() * 0.01).collect();
         let ratio = compute_speech_ratio(&mut vad, &noise);
         assert!(
             ratio < 0.33,

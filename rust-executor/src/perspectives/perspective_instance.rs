@@ -636,7 +636,9 @@ impl PerspectiveInstance {
         let mut before = self.notification_trigger_snapshot().await;
         while !self.is_teardown.load(Ordering::Acquire) {
             interval.tick().await;
-            let changed = self.trigger_notification_check.swap(false, Ordering::AcqRel);
+            let changed = self
+                .trigger_notification_check
+                .swap(false, Ordering::AcqRel);
 
             if changed {
                 //log::debug!("Notification check loop triggered for perspective {}", uuid);

@@ -304,7 +304,10 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     if let Err(e) = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE) {
-        log::warn!("Credit deduction failed (operation already committed): {}", e);
+        log::warn!(
+            "Credit deduction failed (operation already committed): {}",
+            e
+        );
     }
     Ok(serde_json::to_value(result)?)
 }
@@ -339,7 +342,10 @@ async fn add_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let count = diff.additions.len();
     if count > 0 {
         if let Err(e) = reserve_credits(&ctx.user_email, count as f64 * DEFAULT_LINK_WRITE) {
-            log::warn!("Credit deduction failed for bulk add (operation already committed): {}", e);
+            log::warn!(
+                "Credit deduction failed for bulk add (operation already committed): {}",
+                e
+            );
         }
     }
 
@@ -413,7 +419,10 @@ async fn link_mutations(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let total = diff.additions.len() + diff.removals.len();
     if total > 0 {
         if let Err(e) = reserve_credits(&ctx.user_email, total as f64 * DEFAULT_LINK_WRITE) {
-            log::warn!("Credit deduction failed for mutations (operation already committed): {}", e);
+            log::warn!(
+                "Credit deduction failed for mutations (operation already committed): {}",
+                e
+            );
         }
     }
 
@@ -446,7 +455,10 @@ async fn add_link_expression(params: Value, ctx: Arc<RequestContext>) -> Result<
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     if let Err(e) = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE) {
-        log::warn!("Credit deduction failed (operation already committed): {}", e);
+        log::warn!(
+            "Credit deduction failed (operation already committed): {}",
+            e
+        );
     }
     Ok(serde_json::to_value(result)?)
 }
@@ -905,16 +917,10 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
         Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
         Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
         Err(_) => {
-            log::warn!(
-                "Model query timed out after {}s",
-                SPARQL_QUERY_TIMEOUT_SECS
-            );
+            log::warn!("Model query timed out after {}s", SPARQL_QUERY_TIMEOUT_SECS);
             Err(WsRpcError {
                 code: 408,
-                message: format!(
-                    "Model query timed out after {}s",
-                    SPARQL_QUERY_TIMEOUT_SECS
-                ),
+                message: format!("Model query timed out after {}s", SPARQL_QUERY_TIMEOUT_SECS),
             })
         }
     }

@@ -350,7 +350,10 @@ impl ModelShape {
 
 /// Load a shape from the store by class name.
 /// Public wrapper for use by subscription infrastructure.
-pub(crate) fn load_shape_from_store(store: &SparqlStore, class_name: &str) -> Result<ModelShape, Error> {
+pub(crate) fn load_shape_from_store(
+    store: &SparqlStore,
+    class_name: &str,
+) -> Result<ModelShape, Error> {
     load_shape(store, class_name)
 }
 
