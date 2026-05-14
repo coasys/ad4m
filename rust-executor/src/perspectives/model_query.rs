@@ -2119,13 +2119,30 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                     continue;
                 }
                 let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
+                let is_literal_prop = prop.resolve_language.is_some();
                 match condition {
                     WhereCondition::String(val) => {
-                        let literal_iri = format!("literal:string:{}", literal_percent_encode(val));
-                        where_patterns.push(format!(
-                            "    ?source <{}> <{}> .",
-                            prop.predicate, literal_iri
-                        ));
+                        let target_iri = if is_literal_prop {
+                            format!("literal:string:{}", literal_percent_encode(val))
+                        } else {
+                            val.to_string()
+                        };
+                        if validate_iri(&target_iri).is_ok() {
+                            where_patterns.push(format!(
+                                "    ?source <{}> <{}> .",
+                                prop.predicate, target_iri
+                            ));
+                        } else {
+                            // Fallback to FILTER for non-IRI values on raw-URI properties
+                            let var = format!("?_pw_{}", safe_name);
+                            where_patterns
+                                .push(format!("    ?source <{}> {} .", prop.predicate, var));
+                            where_patterns.push(format!(
+                                "    FILTER(STR({}) = \"{}\")",
+                                var,
+                                escape_sparql_string(val)
+                            ));
+                        }
                     }
                     WhereCondition::Number(n) => {
                         let literal_iri = format!("literal:number:{}", n);
@@ -2144,7 +2161,13 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                     WhereCondition::StringArray(vals) => {
                         let iris = vals
                             .iter()
-                            .map(|v| format!("<literal:string:{}>", literal_percent_encode(v)))
+                            .map(|v| {
+                                if is_literal_prop {
+                                    format!("<literal:string:{}>", literal_percent_encode(v))
+                                } else {
+                                    format!("<{}>", v)
+                                }
+                            })
                             .collect::<Vec<_>>()
                             .join(" ");
                         where_patterns.push(format!(
@@ -2175,12 +2198,15 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                         if let Some(ref not_val) = ops.not {
                             match not_val {
                                 Value::String(s) => {
-                                    let literal_iri =
-                                        format!("literal:string:{}", literal_percent_encode(s));
+                                    let target = if is_literal_prop {
+                                        format!("literal:string:{}", literal_percent_encode(s))
+                                    } else {
+                                        s.to_string()
+                                    };
                                     filters.push(format!(
                                         "STR({}) != \"{}\"",
                                         var,
-                                        escape_sparql_string(&literal_iri)
+                                        escape_sparql_string(&target)
                                     ));
                                 }
                                 Value::Number(n) => {
@@ -2204,10 +2230,20 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                                     let items: Vec<String> = arr
                                         .iter()
                                         .filter_map(|item| match item {
-                                            Value::String(s) => Some(format!(
-                                                "\"literal:string:{}\"",
-                                                escape_sparql_string(&literal_percent_encode(s))
-                                            )),
+                                            Value::String(s) => {
+                                                let target = if is_literal_prop {
+                                                    format!(
+                                                        "literal:string:{}",
+                                                        literal_percent_encode(s)
+                                                    )
+                                                } else {
+                                                    s.to_string()
+                                                };
+                                                Some(format!(
+                                                    "\"{}\"",
+                                                    escape_sparql_string(&target)
+                                                ))
+                                            }
                                             Value::Number(n) => {
                                                 let f = n.as_f64().unwrap_or(0.0);
                                                 let iri = if f.fract() == 0.0 {
@@ -4843,6 +4879,70 @@ mod integration_tests {
             1,
             "WHERE name='Recipe 1' should match 1 recipe"
         );
+    }
+
+    #[test]
+    fn test_where_clause_raw_uri_property() {
+        // Properties without resolve_language store raw URIs as targets.
+        // The where clause must match the raw URI, not wrap it in literal:string:...
+        let store = SparqlStore::new(None).unwrap();
+
+        let base1 = "literal:string:todo1";
+
+        // Flag link
+        store
+            .add_link(&make_link(
+                base1,
+                "ad4m://type",
+                "ad4m://todo",
+                "1700000000000",
+            ))
+            .unwrap();
+
+        // State property — raw URI target (no resolveLanguage)
+        store
+            .add_link(&make_link(
+                base1,
+                "todo://state",
+                "todo://ready",
+                "1700000000001",
+            ))
+            .unwrap();
+
+        let shape_json = r#"{
+            "className": "Todo",
+            "properties": {
+                "type": {
+                    "predicate": "ad4m://type",
+                    "required": true,
+                    "flag": true,
+                    "initial": "ad4m://todo"
+                },
+                "state": {
+                    "predicate": "todo://state",
+                    "required": true
+                }
+            },
+            "relations": {}
+        }"#;
+
+        // Where clause matching raw URI
+        let mut where_clause = BTreeMap::new();
+        where_clause.insert(
+            "state".to_string(),
+            WhereCondition::String("todo://ready".to_string()),
+        );
+        let query = ModelQueryInput {
+            where_clause: Some(where_clause),
+            ..Default::default()
+        };
+        let result = execute_model_query(&store, "Todo", &query, Some(shape_json)).unwrap();
+        assert_eq!(
+            result.instances.len(),
+            1,
+            "WHERE state='todo://ready' should match raw URI target"
+        );
+        assert_eq!(result.instances[0]["state"], json!("todo://ready"));
     }
 
     // -----------------------------------------------------------------------
