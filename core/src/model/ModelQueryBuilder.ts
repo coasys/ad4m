@@ -435,19 +435,28 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     // break out and resubscribe when the server evicts the subscription.
     let disposed = false;
     let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
+    let resubscribeAttempts = 0;
+    const MAX_RESUBSCRIBE_ATTEMPTS = 5;
     const keepaliveLoop = async () => {
       if (disposed) return;
       try {
         await this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId);
+        resubscribeAttempts = 0; // Reset on success
       } catch (e: any) {
         console.warn(`Model subscription keepalive failed for ${subscriptionId}:`, e);
-        if (!disposed) {
+        if (!disposed && resubscribeAttempts < MAX_RESUBSCRIBE_ATTEMPTS) {
+          resubscribeAttempts++;
+          const backoffMs = Math.min(1000 * Math.pow(2, resubscribeAttempts), 60000);
+          console.warn(`Resubscribing (attempt ${resubscribeAttempts}/${MAX_RESUBSCRIBE_ATTEMPTS}, backoff ${backoffMs}ms)...`);
+          await new Promise(r => setTimeout(r, backoffMs));
           try {
             unsubscribe();
             await this.subscribe(callback);
           } catch (resubErr) {
             console.error('Model subscription resubscribe failed:', resubErr);
           }
+        } else if (resubscribeAttempts >= MAX_RESUBSCRIBE_ATTEMPTS) {
+          console.error(`Model subscription ${subscriptionId}: max resubscribe attempts reached, giving up.`);
         }
         return; // new subscription owns its own keepalive loop
       }
@@ -569,19 +578,28 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
     let disposed = false;
     let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
+    let resubscribeAttempts = 0;
+    const MAX_RESUBSCRIBE_ATTEMPTS = 5;
     const keepaliveLoop = async () => {
       if (disposed) return;
       try {
         await this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId);
+        resubscribeAttempts = 0;
       } catch (e: any) {
         console.warn(`Count subscription keepalive failed for ${subscriptionId}:`, e);
-        if (!disposed) {
+        if (!disposed && resubscribeAttempts < MAX_RESUBSCRIBE_ATTEMPTS) {
+          resubscribeAttempts++;
+          const backoffMs = Math.min(1000 * Math.pow(2, resubscribeAttempts), 60000);
+          console.warn(`Count resubscribing (attempt ${resubscribeAttempts}/${MAX_RESUBSCRIBE_ATTEMPTS}, backoff ${backoffMs}ms)...`);
+          await new Promise(r => setTimeout(r, backoffMs));
           try {
             unsubscribe();
             await this.countSubscribe(callback);
           } catch (resubErr) {
             console.error('Count subscription resubscribe failed:', resubErr);
           }
+        } else if (resubscribeAttempts >= MAX_RESUBSCRIBE_ATTEMPTS) {
+          console.error(`Count subscription ${subscriptionId}: max resubscribe attempts reached, giving up.`);
         }
         return;
       }
@@ -716,19 +734,28 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
     let disposed = false;
     let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
+    let resubscribeAttempts = 0;
+    const MAX_RESUBSCRIBE_ATTEMPTS = 5;
     const keepaliveLoop = async () => {
       if (disposed) return;
       try {
         await this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId);
+        resubscribeAttempts = 0;
       } catch (e: any) {
         console.warn(`Paginate subscription keepalive failed for ${subscriptionId}:`, e);
-        if (!disposed) {
+        if (!disposed && resubscribeAttempts < MAX_RESUBSCRIBE_ATTEMPTS) {
+          resubscribeAttempts++;
+          const backoffMs = Math.min(1000 * Math.pow(2, resubscribeAttempts), 60000);
+          console.warn(`Paginate resubscribing (attempt ${resubscribeAttempts}/${MAX_RESUBSCRIBE_ATTEMPTS}, backoff ${backoffMs}ms)...`);
+          await new Promise(r => setTimeout(r, backoffMs));
           try {
             unsubscribe();
             await this.paginateSubscribe(pageSize, pageNumber, callback);
           } catch (resubErr) {
             console.error('Paginate subscription resubscribe failed:', resubErr);
           }
+        } else if (resubscribeAttempts >= MAX_RESUBSCRIBE_ATTEMPTS) {
+          console.error(`Paginate subscription ${subscriptionId}: max resubscribe attempts reached, giving up.`);
         }
         return;
       }
