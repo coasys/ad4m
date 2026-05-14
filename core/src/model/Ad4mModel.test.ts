@@ -1567,8 +1567,8 @@ describe("ModelQueryBuilder keepalive recovery", () => {
     await jest.advanceTimersByTimeAsync(30_000);
     expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(2);
 
-    // Allow microtask queue to settle (resubscribe is async)
-    await jest.advanceTimersByTimeAsync(0);
+    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
+    await jest.advanceTimersByTimeAsync(2500);
 
     // A second modelSubscribe call means recovery happened
     expect(getSubscribeCount()).toBe(2);
@@ -1597,7 +1597,8 @@ describe("ModelQueryBuilder keepalive recovery", () => {
 
     // First keepalive at 30s — fails immediately → should trigger resubscribe
     await jest.advanceTimersByTimeAsync(30_000);
-    await jest.advanceTimersByTimeAsync(0);
+    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
+    await jest.advanceTimersByTimeAsync(2500);
 
     expect(getSubscribeCount()).toBe(2);
 
@@ -1623,7 +1624,8 @@ describe("ModelQueryBuilder keepalive recovery", () => {
     expect(getSubscribeCount()).toBe(1);
 
     await jest.advanceTimersByTimeAsync(30_000);
-    await jest.advanceTimersByTimeAsync(0);
+    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
+    await jest.advanceTimersByTimeAsync(2500);
 
     expect(getSubscribeCount()).toBe(2);
 
