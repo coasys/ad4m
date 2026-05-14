@@ -11,6 +11,7 @@
 //! 6. Returns JSON instances + totalCount
 
 use deno_core::anyhow::{anyhow, Error};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
@@ -21,6 +22,15 @@ use super::sparql_store::SparqlStore;
 // ---------------------------------------------------------------------------
 // SPARQL injection prevention helpers
 // ---------------------------------------------------------------------------
+
+/// Encode a string for use in a `literal:string:…` IRI.
+///
+/// Uses `NON_ALPHANUMERIC` percent-encoding, matching `literal_encode` in
+/// `languages/literal.rs`.  `urlencoding::encode` uses RFC 3986 unreserved
+/// chars (keeps `.-_~`), which diverges from the storage encoding.
+fn literal_percent_encode(s: &str) -> String {
+    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+}
 
 /// Escape a string value for use inside a SPARQL string literal (double-quoted).
 fn escape_sparql_string(s: &str) -> String {
@@ -192,7 +202,7 @@ pub struct ProjectionInput {
     pub target_shape: Option<Value>,
     /// Optional where filter applied against target instance properties.
     #[serde(default, rename = "where")]
-    pub where_clause: Option<HashMap<String, WhereCondition>>,
+    pub where_clause: Option<BTreeMap<String, WhereCondition>>,
     /// Limit the number of linked results (when 1, value is unwrapped to scalar).
     pub limit: Option<usize>,
     /// Order results before limiting.
@@ -215,7 +225,7 @@ pub struct ModelQueryInput {
     #[serde(default)]
     pub projections: Option<HashMap<String, ProjectionInput>>,
     #[serde(default, rename = "where")]
-    pub where_clause: Option<HashMap<String, WhereCondition>>,
+    pub where_clause: Option<BTreeMap<String, WhereCondition>>,
     #[serde(default, deserialize_with = "deserialize_order_flex")]
     pub order: Option<Vec<(String, OrderDirection)>>,
     #[serde(default)]
@@ -240,6 +250,22 @@ pub struct ModelQueryResult {
     pub total_count: usize,
 }
 
+/// Parameters for SPARQL-side pagination (pushed ORDER BY + LIMIT + OFFSET).
+struct SparqlPagination {
+    sort_key: SortKey,
+    direction: OrderDirection,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+/// What to sort by when pagination is pushed to SPARQL.
+enum SortKey {
+    /// Sort by reifier timestamp (MIN(?_ts) per source).
+    Timestamp,
+    /// Sort by a property value extracted from its literal IRI.
+    Property(String), // predicate IRI
+}
+
 // ---------------------------------------------------------------------------
 // Internal shape info (derived from SHACL links in the store)
 // ---------------------------------------------------------------------------
@@ -262,12 +288,10 @@ struct ShapeProperty {
     /// For properties: returns a scalar value.
     /// For relations: returns target IDs (conformance-filtered).
     getter: Option<String>,
-    /// Post-getter where-clause filter for relations.  Property values are
-    /// stored as signed expression envelopes (`literal:json:...`), so SPARQL
-    /// FILTER cannot match them.  This filter is applied in Rust after the
-    /// getter runs, by fetching the target property values and comparing
-    /// the parsed data.
-    where_filter: Option<HashMap<String, WhereCondition>>,
+    /// Post-getter where-clause filter for relations.  Used to apply
+    /// where conditions on related instances after the getter runs,
+    /// by fetching the target property values and comparing the parsed data.
+    where_filter: Option<BTreeMap<String, WhereCondition>>,
     /// Predicate mappings for `where_filter` (property name → predicate IRI).
     where_predicates: Option<HashMap<String, String>>,
 }
@@ -330,6 +354,10 @@ pub fn load_shape_from_store(store: &SparqlStore, class_name: &str) -> Result<Mo
 
 /// Parse a `literal:` URI into a typed JSON value.
 /// Returns the raw string as Value::String if not a literal: URI.
+///
+/// Since the signed-envelope migration (v3), all literal values are stored
+/// as plain `literal:string:X`, `literal:number:X`, `literal:boolean:X`,
+/// or `literal:json:X` (for non-envelope JSON objects/arrays).
 fn parse_literal_value(uri: &str) -> Value {
     let body = if let Some(rest) = uri.strip_prefix("literal:") {
         rest
@@ -339,15 +367,6 @@ fn parse_literal_value(uri: &str) -> Value {
 
     if let Some(rest) = body.strip_prefix("string:") {
         let decoded = urlencoding::decode(rest).unwrap_or_else(|_| rest.into());
-        // Check if it's a signed expression JSON
-        if let Ok(json_val) = serde_json::from_str::<Value>(&decoded) {
-            if let Some(data) = json_val.get("data") {
-                return match data {
-                    Value::String(s) => Value::String(s.clone()),
-                    _ => data.clone(),
-                };
-            }
-        }
         Value::String(decoded.into_owned())
     } else if let Some(rest) = body.strip_prefix("number:") {
         if let Ok(n) = rest.parse::<i64>() {
@@ -368,12 +387,6 @@ fn parse_literal_value(uri: &str) -> Value {
     } else if let Some(rest) = body.strip_prefix("json:") {
         let decoded = urlencoding::decode(rest).unwrap_or_else(|_| rest.into());
         if let Ok(json_val) = serde_json::from_str::<Value>(&decoded) {
-            if let Some(data) = json_val.get("data") {
-                return match data {
-                    Value::String(s) => Value::String(s.clone()),
-                    _ => data.clone(),
-                };
-            }
             json_val
         } else {
             Value::String(decoded.into_owned())
@@ -557,8 +570,14 @@ fn get_initial_value(
 
     // Quick check: is there a link from targetClass with this predicate to a fixed value?
     // Look for the "required" flag property pattern
-    let safe_tc = validate_iri(target_class).unwrap_or(target_class);
-    let safe_pred = validate_iri(predicate).unwrap_or(predicate);
+    let safe_tc = match validate_iri(target_class) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    let safe_pred = match validate_iri(predicate) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
     let query = format!(
         r#"
         SELECT ?target WHERE {{
@@ -794,12 +813,10 @@ fn resolve_projections(
 /// reification node, not on `?t`.  See `build_projection_reifier_patterns`
 /// which emits the required `rdf:reifies` join and FILTER for those fields.
 ///
-/// **Limitation:** Values stored as `literal:json:` signed-expression blobs
-/// (as used for `@Property` values in Flux models) cannot be matched here.
-/// `STR(?v)` returns the opaque blob URI — the encoded payload is invisible
-/// to SPARQL-side filtering.  `parse_literal_value` can decode the blob in
-/// Rust, but only after fetching all rows first; supporting this case requires
-/// a full post-fetch filter pass and is deferred until concretely needed.
+/// **Note:** Plain literal values (`literal:string:X`, `literal:number:X`,
+/// `literal:boolean:X`) are matched via `STR(?v) = "literal:string:X"` FILTER.
+/// Complex JSON objects stored as `literal:json:` may require post-fetch
+/// filtering in Rust if the caller needs deep property matching.
 fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
     let Some(ref wc) = proj.where_clause else {
         return String::new();
@@ -884,7 +901,7 @@ fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
                     var,
                     escaped,
                     var,
-                    urlencoding::encode(val),
+                    literal_percent_encode(val),
                 ));
             }
             WhereCondition::Bool(b) => {
@@ -907,7 +924,7 @@ fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
                     .iter()
                     .flat_map(|v| {
                         let r = escape_sparql_string(v);
-                        let e = urlencoding::encode(v).to_string();
+                        let e = literal_percent_encode(v);
                         vec![format!("\"{}\"", r), format!("\"literal:string:{}\"", e)]
                     })
                     .collect::<Vec<_>>()
@@ -1153,12 +1170,111 @@ fn execute_model_query_inner(
     }
 
     // ── Full pipeline ────────────────────────────────────────────────────
-    // Build SPARQL to find conforming instances and their property values
-    let sparql = build_instance_sparql(&shape, query_input);
 
-    // Execute the SPARQL query
-    let result_json = store.query(&sparql)?;
-    let raw_results: Vec<Value> = serde_json::from_str(&result_json)?;
+    // Determine if we can push pagination to SPARQL.
+    // Requirements: all where conditions are SPARQL-pushable, and the sort
+    // key is either timestamp (reifier field) or a scalar property.
+    let can_push_pagination = all_where_pushable(query_input, &shape) && {
+        match &query_input.order {
+            None => true, // default is timestamp ASC — pushable
+            Some(order) => {
+                order.len() == 1
+                    && (order[0].0 == "timestamp"
+                        || order[0].0 == "createdAt"
+                        || order[0].0 == "updatedAt"
+                        || shape.properties.iter().any(|p| {
+                            p.name == order[0].0 && !p.is_collection && !p.predicate.is_empty()
+                        }))
+            }
+        }
+    };
+
+    let sparql_pagination =
+        if can_push_pagination && (query_input.limit.is_some() || query_input.offset.is_some()) {
+            let direction = query_input
+                .order
+                .as_ref()
+                .and_then(|o| o.first())
+                .map(|(_, d)| *d)
+                .unwrap_or(OrderDirection::ASC);
+            let sort_key = match &query_input.order {
+                None => SortKey::Timestamp,
+                Some(order) => {
+                    let key = &order[0].0;
+                    if key == "timestamp" || key == "createdAt" || key == "updatedAt" {
+                        SortKey::Timestamp
+                    } else if let Some(prop) = shape
+                        .properties
+                        .iter()
+                        .find(|p| p.name == *key && !p.is_collection && !p.predicate.is_empty())
+                    {
+                        SortKey::Property(prop.predicate.clone())
+                    } else {
+                        SortKey::Timestamp // fallback
+                    }
+                }
+            };
+            Some(SparqlPagination {
+                sort_key,
+                direction,
+                offset: query_input.offset,
+                limit: query_input.limit,
+            })
+        } else {
+            None
+        };
+
+    // Build SPARQL to find conforming instances and their property values
+    let query_plan = build_instance_sparql(&shape, query_input, sparql_pagination.as_ref());
+
+    // Execute the instance query — either single-phase or two-phase.
+    // Paginated queries use two phases because Oxigraph's query planner
+    // doesn't push nested subqueries with ORDER BY + LIMIT efficiently.
+    let raw_results: Vec<Value> = match query_plan {
+        InstanceQueryPlan::Single(sparql) => {
+            let result_json = store.query(&sparql)?;
+            serde_json::from_str(&result_json)?
+        }
+        InstanceQueryPlan::TwoPhase {
+            pagination_subquery,
+            predicate_filter,
+        } => {
+            // Phase 1: Execute pagination subquery to get source IDs.
+            let page_json = store.query(&pagination_subquery)?;
+            let page_results: Vec<Value> = serde_json::from_str(&page_json)?;
+
+            if page_results.is_empty() {
+                vec![]
+            } else {
+                // Build VALUES ?source { <id1> <id2> ... } from the page results.
+                let source_values: String = page_results
+                    .iter()
+                    .filter_map(|r| r["source"].as_str())
+                    .filter_map(|s| validate_iri(s).ok())
+                    .map(|s| format!("<{}>", s))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                if source_values.is_empty() {
+                    vec![]
+                } else {
+                    // Phase 2: Fetch properties for the page of sources.
+                    let property_sparql = format!(
+                        r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+    VALUES ?source {{ {source_values} }}
+{predicate_filter}    ?source ?predicate ?target .
+    ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+    FILTER(isIRI(?predicate))
+    ?_reifier <ad4m://ontology/author> ?author .
+    ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+}}"#
+                    );
+                    let result_json = store.query(&property_sparql)?;
+                    serde_json::from_str(&result_json)?
+                }
+            }
+        }
+    };
 
     // Group results by source (each instance may have multiple rows)
     let grouped = group_results_by_source(&raw_results, &shape);
@@ -1178,32 +1294,69 @@ fn execute_model_query_inner(
         resolve_reverse_relations(store, &mut instances, &reverse_rels)?;
     }
 
-    // Apply where-clause filters (before getters — property equality is handled
-    // via post-hydration comparison, not getter values).
+    // Apply post-hydration where-clause filters.
+    // Skip when all conditions were already pushed to SPARQL (the common case).
     if let Some(ref where_clause) = query_input.where_clause {
-        instances.retain(|inst| matches_where(inst, where_clause, &shape));
+        if !all_where_pushable(query_input, &shape) {
+            instances.retain(|inst| matches_where(inst, where_clause, &shape));
+        }
     }
 
-    // Calculate total count before pagination
-    let total_count = instances.len();
-
-    // Apply ordering
-    if let Some(ref order) = query_input.order {
-        sort_instances(&mut instances, order);
-    } else if query_input.limit.is_some() || query_input.offset.is_some() {
-        // Default: order by timestamp ASC when paginating
-        sort_instances(
-            &mut instances,
-            &[("timestamp".to_string(), OrderDirection::ASC)],
-        );
-    }
-
-    // Apply pagination
-    let offset = query_input.offset.unwrap_or(0);
-    let mut paginated: Vec<Value> = if let Some(limit) = query_input.limit {
-        instances.into_iter().skip(offset).take(limit).collect()
+    // Calculate total count.
+    // When SPARQL pagination was used, we need a separate count query.
+    let total_count = if sparql_pagination.is_some() {
+        // Run count query to get the true total
+        if let Some(count_sparql) = build_count_sparql(&shape, query_input) {
+            let result_json = store.query(&count_sparql)?;
+            let results: Vec<Value> = serde_json::from_str(&result_json)?;
+            results
+                .first()
+                .and_then(|r| {
+                    r["cnt"]
+                        .as_str()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .or_else(|| r["cnt"].as_u64().map(|n| n as usize))
+                })
+                .unwrap_or(instances.len())
+        } else {
+            instances.len()
+        }
     } else {
-        instances.into_iter().skip(offset).collect()
+        instances.len()
+    };
+
+    // Apply ordering and pagination in Rust (only when NOT pushed to SPARQL)
+    let mut paginated: Vec<Value> = if sparql_pagination.is_some() {
+        // SPARQL subquery already selected the correct page of instances,
+        // but hydration via BTreeMap loses the row ordering.
+        // Re-sort in Rust to restore the intended order.
+        if let Some(ref order) = query_input.order {
+            sort_instances(&mut instances, order);
+        } else {
+            sort_instances(
+                &mut instances,
+                &[("timestamp".to_string(), OrderDirection::ASC)],
+            );
+        }
+        instances
+    } else {
+        // Apply ordering
+        if let Some(ref order) = query_input.order {
+            sort_instances(&mut instances, order);
+        } else if query_input.limit.is_some() || query_input.offset.is_some() {
+            sort_instances(
+                &mut instances,
+                &[("timestamp".to_string(), OrderDirection::ASC)],
+            );
+        }
+
+        // Apply pagination
+        let offset = query_input.offset.unwrap_or(0);
+        if let Some(limit) = query_input.limit {
+            instances.into_iter().skip(offset).take(limit).collect()
+        } else {
+            instances.into_iter().skip(offset).collect()
+        }
     };
 
     // ── Evaluate property/relation getters (post-pagination) ─────────────
@@ -1259,12 +1412,12 @@ fn execute_model_query_inner(
     })
 }
 
-/// Parse a where-filter JSON object into a HashMap<String, WhereCondition>.
+/// Parse a where-filter JSON object into a BTreeMap<String, WhereCondition>.
 /// Used for post-getter relation filtering (property values are signed
 /// expression envelopes and cannot be matched by SPARQL FILTER).
-fn parse_where_filter(val: &Value) -> Option<HashMap<String, WhereCondition>> {
+fn parse_where_filter(val: &Value) -> Option<BTreeMap<String, WhereCondition>> {
     let obj = val.as_object()?;
-    let mut map = HashMap::new();
+    let mut map = BTreeMap::new();
     for (key, cond) in obj {
         if let Ok(wc) = serde_json::from_value::<WhereCondition>(cond.clone()) {
             map.insert(key.clone(), wc);
@@ -1418,7 +1571,99 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
 /// `@HasMany` relations) are excluded — they are resolved separately in
 /// `evaluate_getters`.  This avoids scanning large numbers of links (e.g.
 /// 10 000 message children) that would be discarded during hydration.
-fn build_instance_sparql(shape: &ModelShape, query: &ModelQueryInput) -> String {
+/// When `sparql_pagination` is provided, adds ORDER BY / LIMIT / OFFSET
+/// clauses to the SPARQL query, enabling server-side pagination.
+
+/// Build a targeted reifier timestamp probe for the pagination subquery.
+///
+/// Instead of scanning ALL triples of every matching source with a wildcard
+/// (`?source ?_anyP ?_anyT`) and joining each with reifiers (O(N × P)),
+/// this uses a SPECIFIC conformance triple's reifier for the timestamp
+/// lookup (O(N)).
+///
+/// Tries these probe strategies in order:
+/// 1. @Flag with IRI initial value → `?_r rdf:reifies <<(?source <pred> <initial>)>>`
+/// 2. Any required/flag property → `?_r rdf:reifies <<(?source <pred> ?cf_NAME)>>`
+/// 3. Fallback → wildcard scan (same as before, for models without conformance)
+fn build_timestamp_probe(shape: &ModelShape) -> String {
+    let rdf_reifies = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+    let ont_ts = "ad4m://ontology/timestamp";
+
+    // Strategy 1: @Flag property with a valid IRI initial value.
+    // This gives us a fully concrete triple term: <<(?source <pred> <initial>)>>
+    if let Some(prop) = shape.properties.iter().find(|p| {
+        p.is_flag
+            && p.initial_value
+                .as_ref()
+                .map(|v| validate_iri(v).is_ok())
+                .unwrap_or(false)
+            && validate_iri(&p.predicate).is_ok()
+    }) {
+        let initial = prop.initial_value.as_ref().unwrap();
+        return format!(
+            "?_r <{rdf_reifies}> <<( ?source <{}> <{initial}> )>> . ?_r <{ont_ts}> ?_first_ts .",
+            prop.predicate
+        );
+    }
+
+    // Strategy 2: Any required property whose predicate is a valid IRI.
+    // The conformance pattern already binds ?cf_NAME, so the triple term
+    // uses that variable (bound by join).
+    if let Some(prop) = shape
+        .properties
+        .iter()
+        .find(|p| p.is_required && !p.predicate.is_empty() && validate_iri(&p.predicate).is_ok())
+    {
+        let safe_name = prop.name.replace(|c: char| !c.is_alphanumeric(), "_");
+        return format!(
+            "?_r <{rdf_reifies}> <<( ?source <{}> ?cf_{safe_name} )>> . ?_r <{ont_ts}> ?_first_ts .",
+            prop.predicate
+        );
+    }
+
+    // Strategy 3: Fallback — wildcard scan (same as before, expensive).
+    format!(
+        "?source ?_anyP ?_anyT . ?_r <{rdf_reifies}> <<( ?source ?_anyP ?_anyT )>> . ?_r <{ont_ts}> ?_first_ts ."
+    )
+}
+
+/// Represents the SPARQL execution plan for an instance query.
+/// Paginated queries use a two-phase approach: first execute the pagination
+/// subquery to get source IDs, then build a VALUES-based property query.
+/// Oxigraph's query planner doesn't push nested subqueries with ORDER BY +
+/// LIMIT down efficiently, resulting in O(N × total_triples) scans instead
+/// of O(page_size) lookups.
+enum InstanceQueryPlan {
+    /// Single query — no pagination or non-paginated query.
+    Single(String),
+    /// Two-phase: (pagination_subquery, predicate_filter, conformance, where_extra).
+    /// Phase 1: execute pagination_subquery → get source IRIs.
+    /// Phase 2: build property query with VALUES ?source { ... }.
+    TwoPhase {
+        pagination_subquery: String,
+        predicate_filter: String,
+    },
+}
+
+impl InstanceQueryPlan {
+    /// Extract the SPARQL string for non-paginated queries (Single variant).
+    /// Panics for TwoPhase. Used only in unit tests.
+    #[cfg(test)]
+    fn into_single(self) -> String {
+        match self {
+            InstanceQueryPlan::Single(s) => s,
+            InstanceQueryPlan::TwoPhase { .. } => {
+                panic!("Expected Single query plan, got TwoPhase")
+            }
+        }
+    }
+}
+
+fn build_instance_sparql(
+    shape: &ModelShape,
+    query: &ModelQueryInput,
+    sparql_pagination: Option<&SparqlPagination>,
+) -> InstanceQueryPlan {
     let (conformance, where_extra) = build_query_patterns(shape, query);
 
     // Collect predicates that hydration will actually consume from the main
@@ -1451,8 +1696,72 @@ fn build_instance_sparql(shape: &ModelShape, query: &ModelQueryInput) -> String 
         format!("    VALUES ?predicate {{ {} }}\n", values)
     };
 
-    format!(
-        r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+    // Build pagination suffix for source subquery
+    let pagination_suffix = if let Some(pg) = sparql_pagination {
+        let mut suffix = String::new();
+        match &pg.sort_key {
+            SortKey::Timestamp => match pg.direction {
+                OrderDirection::DESC => suffix.push_str("\n    ORDER BY DESC(?_first_ts)"),
+                OrderDirection::ASC => suffix.push_str("\n    ORDER BY ASC(?_first_ts)"),
+            },
+            SortKey::Property(_) => {
+                let dir = match pg.direction {
+                    OrderDirection::DESC => "DESC",
+                    OrderDirection::ASC => "ASC",
+                };
+                suffix.push_str(&format!(
+                    "\n    ORDER BY ASC(IF(BOUND(?_sort_str), 0, 1)) {dir}(?_sort_num) {dir}(?_sort_str)"
+                ));
+            }
+        }
+        if let Some(offset) = pg.offset {
+            if offset > 0 {
+                suffix.push_str(&format!("\n    OFFSET {}", offset));
+            }
+        }
+        if let Some(limit) = pg.limit {
+            suffix.push_str(&format!("\n    LIMIT {}", limit));
+        }
+        suffix
+    } else {
+        String::new()
+    };
+
+    if let Some(pg) = sparql_pagination {
+        // Two-phase approach: Oxigraph doesn't push nested subqueries with
+        // ORDER BY + LIMIT efficiently. Execute the pagination subquery first
+        // to get source IDs, then use VALUES in the property query.
+        let subquery_body = match &pg.sort_key {
+            SortKey::Timestamp => {
+                // Use a specific conformance triple for the reifier timestamp
+                // lookup instead of scanning all triples with a wildcard.
+                // This avoids O(N×P) reifier joins for N sources × P properties.
+                let ts_probe = build_timestamp_probe(shape);
+                format!(
+                    r#"SELECT DISTINCT ?source ?_first_ts WHERE {{
+{conformance}
+{where_extra}
+            {ts_probe}
+        }}{pagination_suffix}"#
+                )
+            }
+            SortKey::Property(predicate) => {
+                format!(
+                    r#"SELECT DISTINCT ?source (SAMPLE(?_nv) AS ?_sort_num) (SAMPLE(?_sv) AS ?_sort_str) WHERE {{
+{conformance}
+{where_extra}
+            OPTIONAL {{ ?source <{predicate}> ?_sort_raw . BIND(SUBSTR(STR(?_sort_raw), 16) AS ?_sv) BIND(<http://www.w3.org/2001/XMLSchema#double>(SUBSTR(STR(?_sort_raw), 16)) AS ?_nv) }}
+        }} GROUP BY ?source{pagination_suffix}"#
+                )
+            }
+        };
+        InstanceQueryPlan::TwoPhase {
+            pagination_subquery: subquery_body,
+            predicate_filter,
+        }
+    } else {
+        InstanceQueryPlan::Single(format!(
+            r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
 {where_extra}
 {predicate_filter}    ?source ?predicate ?target .
@@ -1461,7 +1770,8 @@ fn build_instance_sparql(shape: &ModelShape, query: &ModelQueryInput) -> String 
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
 }}"#
-    )
+        ))
+    }
 }
 
 /// Build a COUNT SPARQL query that returns the number of conforming instances.
@@ -1479,18 +1789,16 @@ fn build_count_sparql(shape: &ModelShape, query: &ModelQueryInput) -> Option<Str
         r#"SELECT (COUNT(DISTINCT ?source) AS ?cnt) WHERE {{
 {conformance}
 {where_extra}
-    ?source ?_anyPred ?_anyTarget .
-    FILTER(isIRI(?source))
 }}"#
     ))
 }
 
 /// Check whether a query's where clause contains only conditions that can be
-/// pushed entirely to SPARQL.  If true, a COUNT query can skip hydration.
+/// pushed entirely to SPARQL.
 ///
-/// Only id/base filters and relation-based where (which match plain URIs, not
-/// signed envelopes) are SPARQL-pushable.  Property equality is NOT pushable
-/// because stored values are signed JSON envelopes.
+/// With plain literal storage, all condition types are pushable: simple equality
+/// (String, Number, Bool, StringArray, NumberArray) and Ops (not, gt/gte/lt/lte,
+/// between, contains).
 fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) -> bool {
     let Some(ref wc) = query.where_clause else {
         return true;
@@ -1502,7 +1810,7 @@ fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) -> bool {
                 _ => return false,
             }
         }
-        // Relation-based where (forward or reverse) can be pushed
+        // Relation-based where (forward or reverse) — pushable for simple values
         if shape
             .properties
             .iter()
@@ -1516,7 +1824,15 @@ fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) -> bool {
             }
             return false;
         }
-        // All other conditions (property values, metadata, ops) need post-hydration
+        // Property-based where — all condition types are pushable.
+        if shape
+            .properties
+            .iter()
+            .any(|p| p.name == *prop_name && !p.is_collection)
+        {
+            continue;
+        }
+        // Unknown property — not pushable
         return false;
     }
     true
@@ -1531,17 +1847,32 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
     if let Some(ref parent) = query.parent {
         match parent {
             ParentScope::Raw { id, predicate } => {
-                let safe_id = validate_iri(id).unwrap_or(id);
-                let safe_pred = validate_iri(predicate).unwrap_or(predicate);
-                conformance_patterns.push(format!("    <{safe_id}> <{safe_pred}> ?source ."));
+                if let (Ok(safe_id), Ok(safe_pred)) = (validate_iri(id), validate_iri(predicate)) {
+                    conformance_patterns.push(format!("    <{safe_id}> <{safe_pred}> ?source ."));
+                } else {
+                    log::warn!(
+                        "Skipping parent scope: invalid IRI in id='{}' or predicate='{}'",
+                        id,
+                        predicate
+                    );
+                }
             }
             ParentScope::Model { id, field, model } => {
-                let safe_id = validate_iri(id).unwrap_or(id);
+                let safe_id = match validate_iri(id) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        log::warn!("Skipping parent scope: invalid IRI in id='{}'", id);
+                        return (String::new(), String::new());
+                    }
+                };
                 // For model-based parent scope, we need to resolve the predicate
                 // The client should send the resolved predicate, but we handle both forms
                 if let Some(ref f) = field {
-                    let safe_f = validate_iri(f).unwrap_or(f);
-                    conformance_patterns.push(format!("    <{safe_id}> <{safe_f}> ?source ."));
+                    if let Ok(safe_f) = validate_iri(f) {
+                        conformance_patterns.push(format!("    <{safe_id}> <{safe_f}> ?source ."));
+                    } else {
+                        log::warn!("Skipping parent scope: invalid IRI in field='{}'", f);
+                    }
                 } else {
                     // Fallback: use model name as predicate hint
                     let safe_model = escape_sparql_string(model);
@@ -1559,21 +1890,34 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
     let mut has_conformance = false;
     for prop in &shape.properties {
         if prop.is_required {
+            if validate_iri(&prop.predicate).is_err() {
+                continue;
+            }
+            let safe_name = prop.name.replace(|c: char| !c.is_alphanumeric(), "_");
             has_conformance = true;
             if prop.is_flag {
                 if let Some(ref initial) = prop.initial_value {
-                    conformance_patterns
-                        .push(format!("    ?source <{}> <{}> .", prop.predicate, initial));
+                    if validate_iri(initial).is_ok() {
+                        conformance_patterns
+                            .push(format!("    ?source <{}> <{}> .", prop.predicate, initial));
+                    } else {
+                        // Initial value is not a valid IRI (e.g. a literal); use STR() comparison
+                        let escaped = escape_sparql_string(initial);
+                        conformance_patterns.push(format!(
+                            "    ?source <{}> ?cf_{} . FILTER(STR(?cf_{}) = \"{}\")",
+                            prop.predicate, safe_name, safe_name, escaped
+                        ));
+                    }
                 } else {
                     conformance_patterns.push(format!(
                         "    ?source <{}> ?cf_{} .",
-                        prop.predicate, prop.name
+                        prop.predicate, safe_name
                     ));
                 }
             } else {
                 conformance_patterns.push(format!(
                     "    ?source <{}> ?cf_{} .",
-                    prop.predicate, prop.name
+                    prop.predicate, safe_name
                 ));
             }
         }
@@ -1583,14 +1927,26 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
     if !has_conformance {
         for prop in &shape.properties {
             if let Some(ref initial) = prop.initial_value {
+                if validate_iri(&prop.predicate).is_err() {
+                    continue;
+                }
+                let safe_name = prop.name.replace(|c: char| !c.is_alphanumeric(), "_");
                 has_conformance = true;
                 if prop.is_flag {
-                    conformance_patterns
-                        .push(format!("    ?source <{}> <{}> .", prop.predicate, initial));
+                    if validate_iri(initial).is_ok() {
+                        conformance_patterns
+                            .push(format!("    ?source <{}> <{}> .", prop.predicate, initial));
+                    } else {
+                        let escaped = escape_sparql_string(initial);
+                        conformance_patterns.push(format!(
+                            "    ?source <{}> ?cfInit_{} . FILTER(STR(?cfInit_{}) = \"{}\")",
+                            prop.predicate, safe_name, safe_name, escaped
+                        ));
+                    }
                 } else {
                     conformance_patterns.push(format!(
                         "    ?source <{}> ?cfInit_{} .",
-                        prop.predicate, prop.name
+                        prop.predicate, safe_name
                     ));
                 }
                 break;
@@ -1598,12 +1954,23 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
         }
     }
 
-    // Fallback: structural matching using known predicates
+    // Fallback: structural matching using known predicates.
+    //
+    // WARNING: This is a broad heuristic — it matches any entity that has at
+    // least one link with ANY of the model's known predicates.  If two model
+    // classes share a predicate (e.g. a generic `ad4m://name`), instances of
+    // class A could appear in queries for class B.  Models should define at
+    // least one `required` property or a `@Flag` to enable precise type
+    // discrimination and avoid this fallback.
     if !has_conformance && conformance_patterns.is_empty() {
+        log::debug!(
+            "Model class uses structural conformance fallback — no required/flag properties found. \
+             This may match instances from other model classes sharing the same predicates."
+        );
         let known_predicates: Vec<String> = shape
             .properties
             .iter()
-            .filter(|p| !p.predicate.is_empty())
+            .filter(|p| !p.predicate.is_empty() && validate_iri(&p.predicate).is_ok())
             .map(|p| format!("<{}>", p.predicate))
             .collect();
 
@@ -1617,80 +1984,123 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
 
     // WHERE clause filters that can be pushed to SPARQL.
     //
-    // Property equality CANNOT be pushed because stored values are signed JSON
-    // envelopes (`literal:json:{author,timestamp,data,proof}`), not plain
-    // `literal:string:X`.  Only id/base and relation-based where can be pushed.
+    // With plain literal storage, property equality CAN be pushed to SPARQL.
+    // Values are stored as `literal:string:X`, `literal:number:X`, etc.
+    // Direct IRI matching (`?source <pred> <value>`) is used instead of
+    // `FILTER(STR(?var) = "value")` for O(log n) indexed lookups.
     let mut where_patterns = Vec::new();
     if let Some(ref wc) = query.where_clause {
         for (prop_name, condition) in wc {
             if prop_name == "base" || prop_name == "id" {
                 match condition {
                     WhereCondition::String(val) => {
-                        // Use STR() comparison to avoid IRI parsing issues with
-                        // literal:json URIs that contain encoded special chars
-                        where_patterns.push(format!(
-                            "    FILTER(STR(?source) = \"{}\")",
-                            val.replace('\\', "\\\\").replace('"', "\\\"")
-                        ));
+                        if validate_iri(val).is_ok() {
+                            where_patterns.push(format!("    FILTER(?source = <{}>)", val));
+                        } else {
+                            where_patterns.push(format!(
+                                "    FILTER(STR(?source) = \"{}\")",
+                                escape_sparql_string(val)
+                            ));
+                        }
                     }
                     WhereCondition::StringArray(vals) => {
-                        let ids = vals
+                        let valid: Vec<&str> = vals
                             .iter()
-                            .map(|v| {
-                                format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        where_patterns.push(format!("    FILTER(STR(?source) IN ({}))", ids));
+                            .filter(|v| validate_iri(v).is_ok())
+                            .map(|v| v.as_str())
+                            .collect();
+                        if valid.len() == vals.len() {
+                            let iris = valid
+                                .iter()
+                                .map(|v| format!("<{}>", v))
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            where_patterns.push(format!("    VALUES ?source {{ {} }}", iris));
+                        } else {
+                            let ids = vals
+                                .iter()
+                                .map(|v| format!("\"{}\"", escape_sparql_string(v)))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            where_patterns.push(format!("    FILTER(STR(?source) IN ({}))", ids));
+                        }
                     }
                     _ => {} // complex id ops handled post-hydration
                 }
                 continue;
             }
 
-            // Relation-based where: link targets are plain URIs (not signed),
-            // so we CAN push these to SPARQL.  Use STR() comparison to avoid
-            // IRI parsing failures with literal:json URIs.
+            // Relation-based where: link targets are plain URIs.
+            // Use direct IRI matching for indexed lookups.
             if let Some(prop) = shape
                 .properties
                 .iter()
                 .find(|p| &p.name == prop_name && p.is_collection)
             {
                 let direction = prop.direction.as_deref().unwrap_or("forward");
-                let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
                 match condition {
                     WhereCondition::String(val) => {
-                        let escaped = val.replace('\\', "\\\\").replace('"', "\\\"");
-                        if direction == "reverse" {
-                            where_patterns.push(format!(
-                                "    ?_rv_{} <{}> ?source . FILTER(STR(?_rv_{}) = \"{}\")",
-                                safe_name, prop.predicate, safe_name, escaped
-                            ));
+                        if validate_iri(val).is_ok() {
+                            if direction == "reverse" {
+                                where_patterns
+                                    .push(format!("    <{}> <{}> ?source .", val, prop.predicate));
+                            } else {
+                                where_patterns
+                                    .push(format!("    ?source <{}> <{}> .", prop.predicate, val));
+                            }
                         } else {
-                            where_patterns.push(format!(
-                                "    ?source <{}> ?_ft_{} . FILTER(STR(?_ft_{}) = \"{}\")",
-                                prop.predicate, safe_name, safe_name, escaped
-                            ));
+                            let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
+                            let escaped = escape_sparql_string(val);
+                            if direction == "reverse" {
+                                where_patterns.push(format!(
+                                    "    ?_rv_{} <{}> ?source . FILTER(STR(?_rv_{}) = \"{}\")",
+                                    safe_name, prop.predicate, safe_name, escaped
+                                ));
+                            } else {
+                                where_patterns.push(format!(
+                                    "    ?source <{}> ?_ft_{} . FILTER(STR(?_ft_{}) = \"{}\")",
+                                    prop.predicate, safe_name, safe_name, escaped
+                                ));
+                            }
                         }
                     }
                     WhereCondition::StringArray(vals) => {
-                        let str_list = vals
-                            .iter()
-                            .map(|v| {
-                                format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        if direction == "reverse" {
-                            where_patterns.push(format!(
-                                "    ?_rv_{} <{}> ?source . FILTER(STR(?_rv_{}) IN ({}))",
-                                safe_name, prop.predicate, safe_name, str_list
-                            ));
+                        let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
+                        let all_valid = vals.iter().all(|v| validate_iri(v).is_ok());
+                        if all_valid {
+                            let iris = vals
+                                .iter()
+                                .map(|v| format!("<{}>", v))
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            if direction == "reverse" {
+                                where_patterns.push(format!(
+                                    "    VALUES ?_rv_{} {{ {} }}\n    ?_rv_{} <{}> ?source .",
+                                    safe_name, iris, safe_name, prop.predicate
+                                ));
+                            } else {
+                                where_patterns.push(format!(
+                                    "    VALUES ?_ft_{} {{ {} }}\n    ?source <{}> ?_ft_{} .",
+                                    safe_name, iris, prop.predicate, safe_name
+                                ));
+                            }
                         } else {
-                            where_patterns.push(format!(
-                                "    ?source <{}> ?_ft_{} . FILTER(STR(?_ft_{}) IN ({}))",
-                                prop.predicate, safe_name, safe_name, str_list
-                            ));
+                            let str_list = vals
+                                .iter()
+                                .map(|v| format!("\"{}\"", escape_sparql_string(v)))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            if direction == "reverse" {
+                                where_patterns.push(format!(
+                                    "    ?_rv_{} <{}> ?source . FILTER(STR(?_rv_{}) IN ({}))",
+                                    safe_name, prop.predicate, safe_name, str_list
+                                ));
+                            } else {
+                                where_patterns.push(format!(
+                                    "    ?source <{}> ?_ft_{} . FILTER(STR(?_ft_{}) IN ({}))",
+                                    prop.predicate, safe_name, safe_name, str_list
+                                ));
+                            }
                         }
                     }
                     _ => {} // complex ops handled post-hydration
@@ -1698,8 +2108,273 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                 continue;
             }
 
-            // All other conditions (property values, metadata, ops) are
-            // handled post-hydration in matches_where().
+            // Property-based where: values are plain literal IRIs.
+            // Use direct IRI matching for indexed lookups.
+            if let Some(prop) = shape
+                .properties
+                .iter()
+                .find(|p| &p.name == prop_name && !p.is_collection && !p.predicate.is_empty())
+            {
+                if validate_iri(&prop.predicate).is_err() {
+                    continue;
+                }
+                let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
+                let is_literal_prop = prop.resolve_language.is_some();
+                match condition {
+                    WhereCondition::String(val) => {
+                        // Values may be stored as raw URIs (from constructor initial
+                        // values) or as literal:string:… IRIs (from setters through
+                        // resolveLanguage). When resolveLanguage is set and the value
+                        // looks like a URI, match both forms.
+                        if is_literal_prop {
+                            let literal_iri =
+                                format!("literal:string:{}", literal_percent_encode(val));
+                            let val_is_uri = val
+                                .find(':')
+                                .map(|i| i > 0 && val[..i].chars().all(|c| c.is_alphanumeric()))
+                                .unwrap_or(false);
+                            if val_is_uri {
+                                // Could be stored as raw URI or literal — match both
+                                let var = format!("?_pw_{}", safe_name);
+                                where_patterns
+                                    .push(format!("    ?source <{}> {} .", prop.predicate, var));
+                                where_patterns.push(format!(
+                                    "    FILTER(STR({}) = \"{}\" || STR({}) = \"{}\")",
+                                    var,
+                                    escape_sparql_string(val),
+                                    var,
+                                    escape_sparql_string(&literal_iri)
+                                ));
+                            } else if validate_iri(&literal_iri).is_ok() {
+                                where_patterns.push(format!(
+                                    "    ?source <{}> <{}> .",
+                                    prop.predicate, literal_iri
+                                ));
+                            } else {
+                                let var = format!("?_pw_{}", safe_name);
+                                where_patterns
+                                    .push(format!("    ?source <{}> {} .", prop.predicate, var));
+                                where_patterns.push(format!(
+                                    "    FILTER(STR({}) = \"{}\")",
+                                    var,
+                                    escape_sparql_string(&literal_iri)
+                                ));
+                            }
+                        } else if validate_iri(val).is_ok() {
+                            where_patterns
+                                .push(format!("    ?source <{}> <{}> .", prop.predicate, val));
+                        } else {
+                            // Fallback to FILTER for non-IRI values on raw-URI properties
+                            let var = format!("?_pw_{}", safe_name);
+                            where_patterns
+                                .push(format!("    ?source <{}> {} .", prop.predicate, var));
+                            where_patterns.push(format!(
+                                "    FILTER(STR({}) = \"{}\")",
+                                var,
+                                escape_sparql_string(val)
+                            ));
+                        }
+                    }
+                    WhereCondition::Number(n) => {
+                        let literal_iri = format!("literal:number:{}", n);
+                        where_patterns.push(format!(
+                            "    ?source <{}> <{}> .",
+                            prop.predicate, literal_iri
+                        ));
+                    }
+                    WhereCondition::Bool(b) => {
+                        let literal_iri = format!("literal:boolean:{}", b);
+                        where_patterns.push(format!(
+                            "    ?source <{}> <{}> .",
+                            prop.predicate, literal_iri
+                        ));
+                    }
+                    WhereCondition::StringArray(vals) => {
+                        // For literal props, include both raw and literal forms
+                        // in VALUES to handle both constructor-stored and setter-stored values.
+                        let iris = vals
+                            .iter()
+                            .flat_map(|v| {
+                                if is_literal_prop {
+                                    let literal =
+                                        format!("<literal:string:{}>", literal_percent_encode(v));
+                                    let val_is_uri = v
+                                        .find(':')
+                                        .map(|i| {
+                                            i > 0 && v[..i].chars().all(|c| c.is_alphanumeric())
+                                        })
+                                        .unwrap_or(false);
+                                    if val_is_uri {
+                                        vec![format!("<{}>", v), literal]
+                                    } else {
+                                        vec![literal]
+                                    }
+                                } else {
+                                    vec![format!("<{}>", v)]
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        where_patterns.push(format!(
+                            "    VALUES ?_pw_{} {{ {} }}\n    ?source <{}> ?_pw_{} .",
+                            safe_name, iris, prop.predicate, safe_name
+                        ));
+                    }
+                    WhereCondition::NumberArray(vals) => {
+                        let iris = vals
+                            .iter()
+                            .map(|n| format!("<literal:number:{}>", n))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        where_patterns.push(format!(
+                            "    VALUES ?_pw_{} {{ {} }}\n    ?source <{}> ?_pw_{} .",
+                            safe_name, iris, prop.predicate, safe_name
+                        ));
+                    }
+                    WhereCondition::Ops(ops) => {
+                        // Generate SPARQL FILTER for all ops:
+                        // not, gt/gte/lt/lte, between, and contains.
+                        let var = format!("?_pw_{}", safe_name);
+                        where_patterns.push(format!("    ?source <{}> {} .", prop.predicate, var));
+
+                        let mut filters = Vec::new();
+
+                        // NOT operator
+                        if let Some(ref not_val) = ops.not {
+                            match not_val {
+                                Value::String(s) => {
+                                    let target = if is_literal_prop {
+                                        format!("literal:string:{}", literal_percent_encode(s))
+                                    } else {
+                                        s.to_string()
+                                    };
+                                    filters.push(format!(
+                                        "STR({}) != \"{}\"",
+                                        var,
+                                        escape_sparql_string(&target)
+                                    ));
+                                }
+                                Value::Number(n) => {
+                                    let n_f64 = n.as_f64().unwrap_or(0.0);
+                                    let literal_iri = if n_f64.fract() == 0.0 {
+                                        format!("literal:number:{}", n_f64 as i64)
+                                    } else {
+                                        format!("literal:number:{}", n_f64)
+                                    };
+                                    filters.push(format!(
+                                        "STR({}) != \"{}\"",
+                                        var,
+                                        escape_sparql_string(&literal_iri)
+                                    ));
+                                }
+                                Value::Bool(b) => {
+                                    let literal_iri = format!("literal:boolean:{}", b);
+                                    filters.push(format!("STR({}) != \"{}\"", var, literal_iri));
+                                }
+                                Value::Array(arr) => {
+                                    let items: Vec<String> = arr
+                                        .iter()
+                                        .filter_map(|item| match item {
+                                            Value::String(s) => {
+                                                let target = if is_literal_prop {
+                                                    format!(
+                                                        "literal:string:{}",
+                                                        literal_percent_encode(s)
+                                                    )
+                                                } else {
+                                                    s.to_string()
+                                                };
+                                                Some(format!(
+                                                    "\"{}\"",
+                                                    escape_sparql_string(&target)
+                                                ))
+                                            }
+                                            Value::Number(n) => {
+                                                let f = n.as_f64().unwrap_or(0.0);
+                                                let iri = if f.fract() == 0.0 {
+                                                    format!("literal:number:{}", f as i64)
+                                                } else {
+                                                    format!("literal:number:{}", f)
+                                                };
+                                                Some(format!("\"{}\"", iri))
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    if !items.is_empty() {
+                                        filters.push(format!(
+                                            "STR({}) NOT IN ({})",
+                                            var,
+                                            items.join(", ")
+                                        ));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // Numeric comparisons: extract number from literal IRI.
+                        // "literal:number:" and "literal:string:" are both 15 chars,
+                        // so SUBSTR(STR(?var), 16) extracts the value for either prefix.
+                        // Double cast succeeds for number literals and numeric
+                        // strings; fails safely (unbound → filter false) for non-numeric.
+                        let has_numeric = ops.gt.is_some()
+                            || ops.gte.is_some()
+                            || ops.lt.is_some()
+                            || ops.lte.is_some()
+                            || ops.between.is_some();
+
+                        if has_numeric {
+                            let num_var = format!("?_pw_{}_num", safe_name);
+                            where_patterns.push(format!(
+                                "    BIND(<http://www.w3.org/2001/XMLSchema#double>(SUBSTR(STR({}), 16)) AS {})",
+                                var, num_var
+                            ));
+                            if let Some(gt) = ops.gt {
+                                filters.push(format!("{} > {}", num_var, gt));
+                            }
+                            if let Some(gte) = ops.gte {
+                                filters.push(format!("{} >= {}", num_var, gte));
+                            }
+                            if let Some(lt) = ops.lt {
+                                filters.push(format!("{} < {}", num_var, lt));
+                            }
+                            if let Some(lte) = ops.lte {
+                                filters.push(format!("{} <= {}", num_var, lte));
+                            }
+                            if let Some((lo, hi)) = ops.between {
+                                filters.push(format!(
+                                    "{} >= {} && {} <= {}",
+                                    num_var, lo, num_var, hi
+                                ));
+                            }
+                        }
+
+                        // Contains: case-insensitive substring match.
+                        // Both stored value and needle are percent-encoded, so
+                        // CONTAINS on the encoded forms is equivalent to matching
+                        // the original strings.  LCASE handles ASCII case-folding.
+                        if let Some(ref contains_val) = ops.contains {
+                            let needle = match contains_val {
+                                Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            filters.push(format!(
+                                "CONTAINS(LCASE(SUBSTR(STR({}), 16)), LCASE(ENCODE_FOR_URI(\"{}\")))",
+                                var,
+                                escape_sparql_string(&needle)
+                            ));
+                        }
+
+                        if !filters.is_empty() {
+                            where_patterns.push(format!("    FILTER({})", filters.join(" && ")));
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Unknown property — handled post-hydration in matches_where()
         }
     }
 
@@ -1707,18 +2382,6 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
     let where_extra = where_patterns.join("\n");
 
     (conformance, where_extra)
-}
-
-/// Convert a JS value to its literal: IRI form, matching how the Rust executor
-/// stores property values.
-#[allow(dead_code)]
-fn value_to_literal_iri_string(s: &str) -> String {
-    // If it already looks like a URI, use as-is
-    if s.contains("://") || s.starts_with("literal:") {
-        return s.to_string();
-    }
-    // Wrap as literal:string:
-    format!("literal:string:{}", urlencoding::encode(s))
 }
 
 // ---------------------------------------------------------------------------
@@ -1935,7 +2598,7 @@ fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Value> {
 /// Check if an instance matches all where-clause conditions.
 fn matches_where(
     instance: &Value,
-    where_clause: &HashMap<String, WhereCondition>,
+    where_clause: &BTreeMap<String, WhereCondition>,
     shape: &ModelShape,
 ) -> bool {
     for (prop_name, condition) in where_clause {
@@ -2470,9 +3133,9 @@ fn evaluate_getters(
 
     // ── Post-getter where-clause filtering ─────────────────────────────
     // For relations with where_filter, fetch the target property values
-    // and filter out non-matching targets.  This is necessary because
-    // stored property values are signed expression envelopes
-    // (literal:json:...) that cannot be matched by SPARQL FILTER.
+    // Post-getter where filtering: for collection relations, we need
+    // to resolve the target instances' property values in Rust
+    // and filter out non-matching targets.
     for prop in &getter_props {
         let (wf, wp) = match (&prop.where_filter, &prop.where_predicates) {
             (Some(wf), Some(wp)) => (wf, wp),
@@ -2493,7 +3156,7 @@ fn apply_where_filter_to_relation(
     store: &SparqlStore,
     instances: &mut [Value],
     relation_name: &str,
-    where_filter: &HashMap<String, WhereCondition>,
+    where_filter: &BTreeMap<String, WhereCondition>,
     where_predicates: &HashMap<String, String>,
 ) -> Result<(), Error> {
     // Collect all target IDs across all instances for this relation
@@ -2637,6 +3300,10 @@ fn filter_properties(instance: Value, requested: &[String]) -> Value {
 // ---------------------------------------------------------------------------
 
 /// Resolve reverse relations (BelongsToOne/BelongsToMany) for all instances in batch.
+///
+/// Uses a targeted SPARQL query with a VALUES clause to only fetch links
+/// pointing to our specific instance IDs, rather than scanning all links
+/// with the given predicate.
 pub fn resolve_reverse_relations(
     store: &SparqlStore,
     instances: &mut [Value],
@@ -2646,18 +3313,48 @@ pub fn resolve_reverse_relations(
         return Ok(());
     }
 
+    // Build VALUES clause from instance IDs (validated for SPARQL safety)
+    let instance_iris: Vec<String> = instances
+        .iter()
+        .filter_map(|inst| inst["id"].as_str())
+        .filter_map(|id| validate_iri(id).ok().map(|s| s.to_string()))
+        .collect();
+
+    if instance_iris.is_empty() {
+        return Ok(());
+    }
+
+    let values_clause = instance_iris
+        .iter()
+        .map(|id| format!("<{}>", id))
+        .collect::<Vec<_>>()
+        .join(" ");
+
     for (rel_name, predicate, is_single) in relations {
-        // Single batched query per relation: find all links with this predicate
-        // targeting ANY of our instances, then group by target in Rust.
-        let all_links = store.query_links(None, Some(predicate), None, None, None, None)?;
+        let safe_pred = match validate_iri(predicate) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        // Targeted SPARQL: only fetch links whose target is one of our instances
+        let sparql = format!(
+            "SELECT ?source ?target WHERE {{ VALUES ?target {{ {} }} ?source <{safe_pred}> ?target . }}",
+            values_clause
+        );
+        let result_json = store.query(&sparql)?;
+        let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
         // Build target_id → [source_id, ...] map
         let mut target_to_sources: HashMap<String, Vec<String>> = HashMap::new();
-        for link in &all_links {
-            target_to_sources
-                .entry(link.data.target.clone())
-                .or_default()
-                .push(link.data.source.clone());
+        for row in &rows {
+            let source = row["source"].as_str().unwrap_or("");
+            let target = row["target"].as_str().unwrap_or("");
+            if !source.is_empty() && !target.is_empty() {
+                target_to_sources
+                    .entry(target.to_string())
+                    .or_default()
+                    .push(source.to_string());
+            }
         }
 
         for inst in instances.iter_mut() {
@@ -2672,7 +3369,7 @@ pub fn resolve_reverse_relations(
                 .unwrap_or_default();
 
             if *is_single {
-                let val = source_ids.last().cloned().unwrap_or(Value::Null);
+                let val = source_ids.first().cloned().unwrap_or(Value::Null);
                 inst.as_object_mut()
                     .map(|obj| obj.insert(rel_name.clone(), val));
             } else {
@@ -2739,19 +3436,20 @@ fn resolve_forward_include(
     sub_query: &ModelQueryInput,
     depth: u8,
 ) -> Result<(), Error> {
-    // Collect all target IDs across all instances
+    // Collect all target IDs across all instances (deduplicated, order-preserving)
+    let mut seen = std::collections::HashSet::new();
     let mut all_ids: Vec<String> = Vec::new();
     for inst in instances.iter() {
         if let Some(arr) = inst[&rel.name].as_array() {
             for item in arr {
                 if let Some(id) = item.as_str() {
-                    if !all_ids.contains(&id.to_string()) {
+                    if seen.insert(id.to_string()) {
                         all_ids.push(id.to_string());
                     }
                 }
             }
         } else if let Some(id) = inst[&rel.name].as_str() {
-            if !all_ids.contains(&id.to_string()) {
+            if seen.insert(id.to_string()) {
                 all_ids.push(id.to_string());
             }
         }
@@ -2829,7 +3527,7 @@ fn resolve_forward_include(
             .collect();
 
         let resolved = if rel.max_count == Some(1) {
-            items.last().cloned().unwrap_or(Value::Null)
+            items.first().cloned().unwrap_or(Value::Null)
         } else {
             Value::Array(items)
         };
@@ -2861,10 +3559,17 @@ fn resolve_reverse_include(
     // Batch SPARQL: find all (source, target) pairs for this predicate
     let id_list = all_ids
         .iter()
+        .filter(|id| validate_iri(id).is_ok())
         .map(|id| format!("<{}>", id))
         .collect::<Vec<_>>()
         .join(", ");
-    let safe_pred = validate_iri(&rel.predicate).unwrap_or(&rel.predicate);
+    if id_list.is_empty() {
+        return Ok(());
+    }
+    let safe_pred = match validate_iri(&rel.predicate) {
+        Ok(p) => p,
+        Err(_) => return Ok(()),
+    };
     let sparql = format!(
         "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . FILTER(?target IN ({id_list})) }}"
     );
@@ -2954,7 +3659,7 @@ fn resolve_reverse_include(
 
         let resolved = if rel.kind == "belongsToOne" || rel.max_count == Some(1) {
             source_ids
-                .last()
+                .first()
                 .and_then(|id| hydrated.get(id).cloned())
                 .unwrap_or(Value::Null)
         } else {
@@ -3213,71 +3918,35 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // parse_literal_value: signed expression envelopes
+    // parse_literal_value: plain literal format (post-migration)
     //
-    // The #1 integration test failure was caused by property values stored as
-    // signed expression envelopes: literal:json:<percent_encoded_signed_JSON>.
-    // These tests cover the full decoding path that was silently failing.
+    // After the signed-envelope removal, all literal values are stored as
+    // plain `literal:string:X`, `literal:number:X`, `literal:boolean:X`,
+    // or `literal:json:X` (for non-envelope JSON objects/arrays).
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_parse_literal_value_json_signed_expression() {
-        // This is the exact format stored by createExpression("active", "literal"):
-        // literal:json:<percent_encoded({"author":"...","timestamp":"...","data":"active","proof":{...}})>
-        let signed = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": "active",
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_str = serde_json::to_string(&signed).unwrap();
-        let encoded = urlencoding::encode(&signed_str);
-        let iri = format!("literal:json:{}", encoded);
-
+    fn test_parse_literal_value_plain_string() {
+        let iri = format!("literal:string:{}", literal_percent_encode("active"));
         let parsed = parse_literal_value(&iri);
-        assert_eq!(
-            parsed,
-            Value::String("active".to_string()),
-            "literal:json with signed expression should extract data field"
-        );
+        assert_eq!(parsed, Value::String("active".to_string()));
     }
 
     #[test]
-    fn test_parse_literal_value_json_signed_expression_numeric_data() {
-        // data field is a number, not a string
-        let signed = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": 42,
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_str = serde_json::to_string(&signed).unwrap();
-        let encoded = urlencoding::encode(&signed_str);
-        let iri = format!("literal:json:{}", encoded);
-
-        let parsed = parse_literal_value(&iri);
-        assert_eq!(parsed, json!(42), "Should extract numeric data field");
+    fn test_parse_literal_value_plain_number() {
+        let parsed = parse_literal_value("literal:number:42");
+        assert_eq!(parsed, json!(42));
     }
 
     #[test]
-    fn test_parse_literal_value_json_signed_expression_object_data() {
-        // data field is a JSON object
-        let signed = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": {"name": "Test", "count": 5},
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_str = serde_json::to_string(&signed).unwrap();
-        let encoded = urlencoding::encode(&signed_str);
+    fn test_parse_literal_value_plain_json_object() {
+        let obj = serde_json::json!({"name": "Test", "count": 5});
+        let obj_str = serde_json::to_string(&obj).unwrap();
+        let encoded = literal_percent_encode(&obj_str);
         let iri = format!("literal:json:{}", encoded);
 
         let parsed = parse_literal_value(&iri);
-        assert_eq!(
-            parsed,
-            json!({"name": "Test", "count": 5}),
-            "Should extract object data field"
-        );
+        assert_eq!(parsed, json!({"name": "Test", "count": 5}));
     }
 
     #[test]
@@ -3285,7 +3954,7 @@ mod tests {
         // literal:json with valid JSON but no "data" field -> returns whole object
         let obj = serde_json::json!({"name": "Test", "value": 123});
         let obj_str = serde_json::to_string(&obj).unwrap();
-        let encoded = urlencoding::encode(&obj_str);
+        let encoded = literal_percent_encode(&obj_str);
         let iri = format!("literal:json:{}", encoded);
 
         let parsed = parse_literal_value(&iri);
@@ -3301,23 +3970,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_literal_value_string_signed_expression() {
-        // literal:string: with a JSON signed expression as content
-        let signed = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": "hello",
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_str = serde_json::to_string(&signed).unwrap();
-        let encoded = urlencoding::encode(&signed_str);
-        let iri = format!("literal:string:{}", encoded);
-
+    fn test_parse_literal_value_string_with_spaces() {
+        // literal:string: with percent-encoded content should decode properly
+        let iri = format!("literal:string:{}", literal_percent_encode("hello world"));
         let parsed = parse_literal_value(&iri);
         assert_eq!(
             parsed,
-            Value::String("hello".to_string()),
-            "literal:string with signed expression JSON should extract data"
+            Value::String("hello world".to_string()),
+            "literal:string should decode percent-encoded content"
         );
     }
 
@@ -3595,7 +4255,7 @@ mod tests {
         );
 
         // Both conditions match
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -3604,7 +4264,7 @@ mod tests {
         assert!(matches_where(&instance, &where_clause, &shape));
 
         // First matches, second doesn't
-        let mut where_clause2 = HashMap::new();
+        let mut where_clause2 = BTreeMap::new();
         where_clause2.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -3619,13 +4279,13 @@ mod tests {
         let instance = json!({"id": "test://1", "name": "X"});
         let shape = shape("Test", vec![prop("name", "test://name")]);
 
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "id".to_string(),
             WhereCondition::String("test://1".to_string()),
         );
         // Even with a non-matching id, it should pass because String id is skipped
-        let mut where_clause_wrong = HashMap::new();
+        let mut where_clause_wrong = BTreeMap::new();
         where_clause_wrong.insert(
             "id".to_string(),
             WhereCondition::String("test://wrong".to_string()),
@@ -3639,7 +4299,7 @@ mod tests {
         let instance = json!({"id": "test://1"});
         let shape = shape("Test", vec![]);
 
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "id".to_string(),
             WhereCondition::Ops(WhereOps {
@@ -3656,7 +4316,7 @@ mod tests {
         let instance = json!({"id": "test://1", "tags": ["a", "b"]});
         let shape = shape("Test", vec![relation("tags", "test://tag")]);
 
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "tags".to_string(),
             WhereCondition::String("nonexistent".to_string()),
@@ -4200,20 +4860,11 @@ mod integration_tests {
 
         // Simulate a Recipe with:
         //   - Flag: <ad4m://type> → <ad4m://recipe>
-        //   - Name: <recipe://name> → literal:json:{signed expression with data="Recipe 1"}
+        //   - Name: <recipe://name> → literal:string:Recipe%201
 
         let base1 = "literal:string:recipe1base";
 
-        // Signed expression for name "Recipe 1"
-        let signed_name = serde_json::json!({
-            "author": "did:key:test123",
-            "timestamp": "1700000000000",
-            "data": "Recipe 1",
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_name_str = serde_json::to_string(&signed_name).unwrap();
-        let name_encoded = urlencoding::encode(&signed_name_str);
-        let name_target = format!("literal:json:{}", name_encoded);
+        let name_target = format!("literal:string:{}", literal_percent_encode("Recipe 1"));
 
         // Add the type flag link
         let flag_link = make_link(base1, "ad4m://type", "ad4m://recipe", "1700000000000");
@@ -4257,7 +4908,7 @@ mod integration_tests {
         assert_eq!(name_val, &json!("Recipe 1"), "Name should be 'Recipe 1'");
 
         // Query WITH WHERE - should also find 1 instance
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "name".to_string(),
             WhereCondition::String("Recipe 1".to_string()),
@@ -4272,6 +4923,135 @@ mod integration_tests {
             result2.instances.len(),
             1,
             "WHERE name='Recipe 1' should match 1 recipe"
+        );
+    }
+
+    #[test]
+    fn test_where_clause_raw_uri_property() {
+        // Properties without resolve_language store raw URIs as targets.
+        // The where clause must match the raw URI, not wrap it in literal:string:...
+        let store = SparqlStore::new(None).unwrap();
+
+        let base1 = "literal:string:todo1";
+
+        // Flag link
+        store
+            .add_link(&make_link(
+                base1,
+                "ad4m://type",
+                "ad4m://todo",
+                "1700000000000",
+            ))
+            .unwrap();
+
+        // State property — raw URI target (no resolveLanguage)
+        store
+            .add_link(&make_link(
+                base1,
+                "todo://state",
+                "todo://ready",
+                "1700000000001",
+            ))
+            .unwrap();
+
+        let shape_json = r#"{
+            "className": "Todo",
+            "properties": {
+                "type": {
+                    "predicate": "ad4m://type",
+                    "required": true,
+                    "flag": true,
+                    "initial": "ad4m://todo"
+                },
+                "state": {
+                    "predicate": "todo://state",
+                    "required": true
+                }
+            },
+            "relations": {}
+        }"#;
+
+        // Where clause matching raw URI
+        let mut where_clause = BTreeMap::new();
+        where_clause.insert(
+            "state".to_string(),
+            WhereCondition::String("todo://ready".to_string()),
+        );
+        let query = ModelQueryInput {
+            where_clause: Some(where_clause),
+            ..Default::default()
+        };
+        let result = execute_model_query(&store, "Todo", &query, Some(shape_json)).unwrap();
+        assert_eq!(
+            result.instances.len(),
+            1,
+            "WHERE state='todo://ready' should match raw URI target"
+        );
+        assert_eq!(result.instances[0]["state"], json!("todo://ready"));
+    }
+
+    #[test]
+    fn test_where_clause_literal_prop_with_raw_uri_value() {
+        // @Property defaults resolveLanguage to "literal", but constructor
+        // initial values are stored as raw URIs. The where clause must match
+        // both literal-encoded and raw URI forms.
+        let store = SparqlStore::new(None).unwrap();
+
+        let base1 = "literal:string:todo1";
+
+        store
+            .add_link(&make_link(
+                base1,
+                "ad4m://type",
+                "ad4m://todo",
+                "1700000000000",
+            ))
+            .unwrap();
+
+        // Raw URI target — set by constructor action, NOT literal-encoded
+        store
+            .add_link(&make_link(
+                base1,
+                "todo://state",
+                "todo://ready",
+                "1700000000001",
+            ))
+            .unwrap();
+
+        // Shape has resolveLanguage: "literal" (the @Property default)
+        let shape_json = r#"{
+            "className": "Todo",
+            "properties": {
+                "type": {
+                    "predicate": "ad4m://type",
+                    "required": true,
+                    "flag": true,
+                    "initial": "ad4m://todo"
+                },
+                "state": {
+                    "predicate": "todo://state",
+                    "required": true,
+                    "resolveLanguage": "literal"
+                }
+            },
+            "relations": {}
+        }"#;
+
+        // Where clause should match even though the value is a URI stored raw
+        let mut where_clause = BTreeMap::new();
+        where_clause.insert(
+            "state".to_string(),
+            WhereCondition::String("todo://ready".to_string()),
+        );
+        let query = ModelQueryInput {
+            where_clause: Some(where_clause),
+            ..Default::default()
+        };
+        let result = execute_model_query(&store, "Todo", &query, Some(shape_json)).unwrap();
+        assert_eq!(
+            result.instances.len(),
+            1,
+            "WHERE state='todo://ready' should match raw URI even with resolveLanguage: literal"
         );
     }
 
@@ -4304,16 +5084,7 @@ mod integration_tests {
             .unwrap();
 
         // Channel name
-        let signed_name = json!({
-            "author": "did:key:test123",
-            "timestamp": "1700000000000",
-            "data": "General",
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let name_target = format!(
-            "literal:json:{}",
-            urlencoding::encode(&serde_json::to_string(&signed_name).unwrap())
-        );
+        let name_target = format!("literal:string:{}", literal_percent_encode("General"));
         store
             .add_link(&make_link(
                 channel_base,
@@ -4341,16 +5112,7 @@ mod integration_tests {
                 "1700000000003",
             ))
             .unwrap();
-        let app_name = json!({
-            "author": "did:key:test123",
-            "timestamp": "1700000000003",
-            "data": "Chat",
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let app_name_target = format!(
-            "literal:json:{}",
-            urlencoding::encode(&serde_json::to_string(&app_name).unwrap())
-        );
+        let app_name_target = format!("literal:string:{}", literal_percent_encode("Chat"));
         store
             .add_link(&make_link(
                 app_base,
@@ -4591,7 +5353,7 @@ mod integration_tests {
 
     #[test]
     fn test_build_projection_where_patterns_id_filter() {
-        let mut wc = HashMap::new();
+        let mut wc = BTreeMap::new();
         wc.insert(
             "id".to_string(),
             WhereCondition::String("signal://abc".to_string()),
@@ -4620,7 +5382,7 @@ mod integration_tests {
             },
             "relations": {}
         });
-        let mut wc = HashMap::new();
+        let mut wc = BTreeMap::new();
         wc.insert(
             "signalTypeId".to_string(),
             WhereCondition::String("like".to_string()),
@@ -4896,7 +5658,7 @@ mod integration_tests {
         let shape = make_shape_with_relation("Parent", "reactions", "test://has_reaction");
 
         // Filter by the plain IRI of the reaction target.
-        let mut wc = HashMap::new();
+        let mut wc = BTreeMap::new();
         wc.insert(
             "id".to_string(),
             WhereCondition::String(like_iri.to_string()),
@@ -4956,7 +5718,7 @@ mod integration_tests {
 
         let shape = make_shape_with_relation("Parent", "signals", "test://has_signal");
 
-        let mut wc = HashMap::new();
+        let mut wc = BTreeMap::new();
         wc.insert(
             "author".to_string(),
             WhereCondition::String(alice.to_string()),
@@ -5433,7 +6195,7 @@ mod integration_tests {
             ?target <task://title> ?_v0 . \
             ?target <task://status> ?_v1 . }";
 
-        let mut where_filter = HashMap::new();
+        let mut where_filter = BTreeMap::new();
         where_filter.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -5902,45 +6664,31 @@ mod integration_tests {
     }
 
     // ===================================================================
-    // Signed-expression where-clause filtering integration tests
+    // Where-clause filtering integration tests
     //
-    // These reproduce the exact scenarios that failed in CI integration
-    // tests (integration-tests-js, integration-tests-model). The root
-    // cause was that property values are stored as signed expression
-    // envelopes (literal:json:{author,timestamp,data,proof}), and
-    // SPARQL FILTER could not match against them.
+    // These test property where-clause filtering with plain literal values.
+    // Property values are stored as `literal:string:X`, `literal:number:X`,
+    // etc. and can be matched by SPARQL FILTER or Rust post-hydration.
     // ===================================================================
 
-    /// Helper: create a signed expression literal IRI for a string value.
+    /// Helper: create a plain literal IRI for a string value.
     fn signed_literal(value: &str) -> String {
-        let signed = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": value,
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_str = serde_json::to_string(&signed).unwrap();
-        let encoded = urlencoding::encode(&signed_str);
-        format!("literal:json:{}", encoded)
+        format!("literal:string:{}", literal_percent_encode(value))
     }
 
-    /// Helper: create a signed expression literal IRI for a numeric value.
+    /// Helper: create a plain literal IRI for a numeric value.
     fn signed_literal_number(value: f64) -> String {
-        let signed = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": value,
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_str = serde_json::to_string(&signed).unwrap();
-        let encoded = urlencoding::encode(&signed_str);
-        format!("literal:json:{}", encoded)
+        if value.fract() == 0.0 {
+            format!("literal:number:{}", value as i64)
+        } else {
+            format!("literal:number:{}", value)
+        }
     }
 
     #[test]
     fn test_where_filter_signed_expression_string() {
         // Reproduces the exact CI failure: where clause on a property stored
-        // as literal:json:<signed expression> with string data.
+        // Where clause on a property stored as literal:string:<value>.
         let store = SparqlStore::new(None).unwrap();
         let ts = "1700000000000";
 
@@ -6007,7 +6755,7 @@ mod integration_tests {
             ?target <task://title> ?_v0 . \
             ?target <task://status> ?_v1 . }";
 
-        let mut where_filter = HashMap::new();
+        let mut where_filter = BTreeMap::new();
         where_filter.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -6080,7 +6828,7 @@ mod integration_tests {
 
         let getter = "SELECT ?target WHERE { <Base> <ns://has_child> ?target . }";
 
-        let mut where_filter = HashMap::new();
+        let mut where_filter = BTreeMap::new();
         where_filter.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -6193,7 +6941,7 @@ mod integration_tests {
 
         let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
 
-        let mut where_filter = HashMap::new();
+        let mut where_filter = BTreeMap::new();
         where_filter.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -6267,7 +7015,7 @@ mod integration_tests {
         // child_without has no status link at all
 
         let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
-        let mut where_filter = HashMap::new();
+        let mut where_filter = BTreeMap::new();
         where_filter.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -6331,7 +7079,7 @@ mod integration_tests {
             .unwrap();
 
         let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
-        let mut where_filter = HashMap::new();
+        let mut where_filter = BTreeMap::new();
         where_filter.insert(
             "color".to_string(),
             WhereCondition::String("red".to_string()),
@@ -6418,7 +7166,7 @@ mod integration_tests {
             .unwrap();
 
         let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
-        let mut where_filter = HashMap::new();
+        let mut where_filter = BTreeMap::new();
         where_filter.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -6525,7 +7273,7 @@ mod integration_tests {
         }"#;
 
         // Query WITH where clause on status
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "status".to_string(),
             WhereCondition::String("active".to_string()),
@@ -6597,7 +7345,7 @@ mod integration_tests {
         }"#;
 
         // Where: score > 50
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "score".to_string(),
             WhereCondition::Ops(WhereOps {
@@ -6622,7 +7370,7 @@ mod integration_tests {
 
     #[test]
     fn test_full_model_query_signed_expression_boolean_where() {
-        // findAll with boolean where clause on signed expression values
+        // findAll with boolean where clause on plain literal boolean values
         let store = SparqlStore::new(None).unwrap();
         let ts = "1700000000000";
 
@@ -6635,34 +7383,14 @@ mod integration_tests {
                 .unwrap();
         }
 
-        // Boolean data in signed expressions
-        let signed_true = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": true,
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_false = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": false,
-            "proof": {"key": "k", "signature": "s"}
-        });
-
-        let enc_true = format!(
-            "literal:json:{}",
-            urlencoding::encode(&serde_json::to_string(&signed_true).unwrap())
-        );
-        let enc_false = format!(
-            "literal:json:{}",
-            urlencoding::encode(&serde_json::to_string(&signed_false).unwrap())
-        );
+        let enc_true = "literal:boolean:true";
+        let enc_false = "literal:boolean:false";
 
         store
-            .add_link(&make_link(item1, "ns://visible", &enc_true, ts))
+            .add_link(&make_link(item1, "ns://visible", enc_true, ts))
             .unwrap();
         store
-            .add_link(&make_link(item2, "ns://visible", &enc_false, ts))
+            .add_link(&make_link(item2, "ns://visible", enc_false, ts))
             .unwrap();
 
         let shape_json = r#"{
@@ -6674,7 +7402,7 @@ mod integration_tests {
             "relations": {}
         }"#;
 
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert("visible".to_string(), WhereCondition::Bool(true));
 
         let query = ModelQueryInput {
@@ -6737,7 +7465,7 @@ mod integration_tests {
             "relations": {}
         }"#;
 
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "status".to_string(),
             WhereCondition::StringArray(vec!["active".to_string(), "pending".to_string()]),
@@ -6793,7 +7521,7 @@ mod integration_tests {
             "relations": {}
         }"#;
 
-        let mut where_clause = HashMap::new();
+        let mut where_clause = BTreeMap::new();
         where_clause.insert(
             "status".to_string(),
             WhereCondition::Ops(WhereOps {
@@ -6882,7 +7610,7 @@ mod integration_tests {
             scalar_prop("description", "flux://description", false, false),
         ]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query);
+        let sparql = build_instance_sparql(&shape, &query, None).into_single();
 
         assert!(
             sparql.contains("VALUES ?predicate"),
@@ -6916,7 +7644,7 @@ mod integration_tests {
             ),
         ]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query);
+        let sparql = build_instance_sparql(&shape, &query, None).into_single();
 
         assert!(
             sparql.contains("VALUES ?predicate"),
@@ -6950,7 +7678,7 @@ mod integration_tests {
             ),
         ]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query);
+        let sparql = build_instance_sparql(&shape, &query, None).into_single();
 
         assert!(sparql.contains("VALUES ?predicate"));
         assert!(sparql.contains("<flux://entry_type>"));
@@ -6981,7 +7709,7 @@ mod integration_tests {
             ),
         ]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query);
+        let sparql = build_instance_sparql(&shape, &query, None).into_single();
 
         assert!(sparql.contains("VALUES ?predicate"));
         // ad4m://has_child should appear because raw_children needs it
@@ -6997,7 +7725,7 @@ mod integration_tests {
         // unrestricted wildcard (no VALUES clause).
         let shape = make_shape(vec![]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query);
+        let sparql = build_instance_sparql(&shape, &query, None).into_single();
 
         assert!(
             !sparql.contains("VALUES ?predicate"),
@@ -7017,7 +7745,7 @@ mod integration_tests {
             scalar_prop("name", "ns://name", false, false),
         ]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query);
+        let sparql = build_instance_sparql(&shape, &query, None).into_single();
 
         assert!(sparql.contains("VALUES ?predicate"));
         // Count occurrences of the shared predicate in the VALUES clause
@@ -7121,5 +7849,915 @@ mod integration_tests {
             ),
             other => panic!("Unexpected messages value: {:?}", other),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Ops-based SPARQL push tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_full_model_query_ops_gt_lt_sparql_push() {
+        // Verify gt/lt numeric ops are pushed to SPARQL and return correct results
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let items: Vec<String> = (0..5).map(|i| format!("test://item-{}", i)).collect();
+        let scores = [10.0, 30.0, 50.0, 70.0, 90.0];
+
+        for (item, &score) in items.iter().zip(&scores) {
+            store
+                .add_link(&make_link(item, "ns://type", "ns://scored", ts))
+                .unwrap();
+            store
+                .add_link(&make_link(
+                    item,
+                    "ns://score",
+                    &signed_literal_number(score),
+                    ts,
+                ))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Scored",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+                "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // gt: 50 → items with 70, 90
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "score".to_string(),
+            WhereCondition::Ops(WhereOps {
+                gt: Some(50.0),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 2, "gt:50 should match 70 and 90");
+
+        // lt: 50 → items with 10, 30
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "score".to_string(),
+            WhereCondition::Ops(WhereOps {
+                lt: Some(50.0),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 2, "lt:50 should match 10 and 30");
+
+        // between: [30, 70] → items with 30, 50, 70
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "score".to_string(),
+            WhereCondition::Ops(WhereOps {
+                between: Some((30.0, 70.0)),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(
+            result.instances.len(),
+            3,
+            "between:[30,70] should match 30, 50, 70"
+        );
+    }
+
+    #[test]
+    fn test_full_model_query_ops_gte_lte_sparql_push() {
+        // Verify gte/lte numeric ops via SPARQL
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        for (i, score) in [10.0, 50.0, 90.0].iter().enumerate() {
+            let item = format!("test://item-{}", i);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://scored", ts))
+                .unwrap();
+            store
+                .add_link(&make_link(
+                    &item,
+                    "ns://val",
+                    &signed_literal_number(*score),
+                    ts,
+                ))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Scored",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+                "val": { "predicate": "ns://val", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // gte: 50 → 50, 90
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "val".to_string(),
+            WhereCondition::Ops(WhereOps {
+                gte: Some(50.0),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 2, "gte:50 should match 50 and 90");
+
+        // lte: 50 → 10, 50
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "val".to_string(),
+            WhereCondition::Ops(WhereOps {
+                lte: Some(50.0),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 2, "lte:50 should match 10 and 50");
+    }
+
+    #[test]
+    fn test_full_model_query_ops_not_string_sparql_push() {
+        // NOT operator with string should be pushed to SPARQL
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        for (i, status) in ["active", "done", "active"].iter().enumerate() {
+            let item = format!("test://item-{}", i);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://task", ts))
+                .unwrap();
+            store
+                .add_link(&make_link(
+                    &item,
+                    "ns://status",
+                    &signed_literal(status),
+                    ts,
+                ))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Task",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://task" },
+                "status": { "predicate": "ns://status", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "status".to_string(),
+            WhereCondition::Ops(WhereOps {
+                not: Some(Value::String("done".to_string())),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Task",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 2, "NOT done → 2 active tasks");
+    }
+
+    #[test]
+    fn test_full_model_query_ops_not_array_sparql_push() {
+        // NOT IN (array) should be pushed to SPARQL
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        for (i, status) in ["alpha", "beta", "gamma", "delta"].iter().enumerate() {
+            let item = format!("test://item-{}", i);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://thing", ts))
+                .unwrap();
+            store
+                .add_link(&make_link(&item, "ns://phase", &signed_literal(status), ts))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Thing",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://thing" },
+                "phase": { "predicate": "ns://phase", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "phase".to_string(),
+            WhereCondition::Ops(WhereOps {
+                not: Some(Value::Array(vec![
+                    Value::String("alpha".to_string()),
+                    Value::String("gamma".to_string()),
+                ])),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Thing",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(
+            result.instances.len(),
+            2,
+            "NOT IN [alpha, gamma] → beta, delta"
+        );
+    }
+
+    #[test]
+    fn test_full_model_query_ops_with_pagination_pushed() {
+        // Ops + pagination should both be pushed to SPARQL (no contains)
+        let store = SparqlStore::new(None).unwrap();
+
+        for i in 0..10 {
+            let item = format!("test://item-{}", i);
+            let ts = format!("{}", 1700000000000i64 + i);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://scored", &ts))
+                .unwrap();
+            store
+                .add_link(&make_link(
+                    &item,
+                    "ns://score",
+                    &signed_literal_number(i as f64 * 10.0),
+                    &ts,
+                ))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Scored",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+                "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // score >= 30 (items 3-9 = 7 items), paginate: offset 2, limit 3
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "score".to_string(),
+            WhereCondition::Ops(WhereOps {
+                gte: Some(30.0),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                limit: Some(3),
+                offset: Some(2),
+                order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 3, "Should get 3 items in page");
+        assert_eq!(result.total_count, 7, "Total matching items: score >= 30");
+    }
+
+    #[test]
+    fn test_full_model_query_ops_contains_sparql_push() {
+        // `contains` in Ops should be pushed to SPARQL via CONTAINS+ENCODE_FOR_URI
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        for (i, name) in ["Alice Smith", "Bob Jones", "Alice Cooper"]
+            .iter()
+            .enumerate()
+        {
+            let item = format!("test://item-{}", i);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://person", ts))
+                .unwrap();
+            store
+                .add_link(&make_link(&item, "ns://name", &signed_literal(name), ts))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Person",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://person" },
+                "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "name".to_string(),
+            WhereCondition::Ops(WhereOps {
+                contains: Some(Value::String("alice".to_string())),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Person",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(
+            result.instances.len(),
+            2,
+            "Case-insensitive contains 'alice' → Alice Smith, Alice Cooper"
+        );
+    }
+
+    #[test]
+    fn test_full_model_query_ops_contains_with_pagination() {
+        // `contains` + pagination should both be pushed to SPARQL
+        let store = SparqlStore::new(None).unwrap();
+        let ts_base = 1700000000000i64;
+
+        let names = [
+            "Alice Adams",
+            "Bob Baker",
+            "Alice Brown",
+            "Charlie Clark",
+            "Alice Chen",
+            "Dave Davis",
+        ];
+        for (i, name) in names.iter().enumerate() {
+            let item = format!("test://item-{}", i);
+            let ts = format!("{}", ts_base + i as i64);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://person", &ts))
+                .unwrap();
+            store
+                .add_link(&make_link(&item, "ns://name", &signed_literal(name), &ts))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Person",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://person" },
+                "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // contains "alice" → 3 matches (Alice Adams, Alice Brown, Alice Chen)
+        // paginate: offset 1, limit 1
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "name".to_string(),
+            WhereCondition::Ops(WhereOps {
+                contains: Some(Value::String("alice".to_string())),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Person",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                limit: Some(1),
+                offset: Some(1),
+                order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 1, "Should get 1 item in page");
+        assert_eq!(result.total_count, 3, "Total matching: 3 Alices");
+        assert_eq!(
+            result.instances[0]["name"].as_str().unwrap(),
+            "Alice Brown",
+            "Second Alice by timestamp ASC"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Performance / scale tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_perf_large_dataset_paginated_query() {
+        // Simulate Flux-like scenario: many messages across channels.
+        // Verifies that paginated queries complete in a reasonable time.
+        let store = SparqlStore::new(None).unwrap();
+        let ts_base = 1700000000000i64;
+        let num_channels = 3;
+        let msgs_per_channel = 1000;
+
+        for ch in 0..num_channels {
+            let channel = format!("test://channel-{}", ch);
+            for i in 0..(msgs_per_channel as i64) {
+                let msg = format!("test://msg-{}-{}", ch, i);
+                let ts = format!("{}", ts_base + ch as i64 * 100000 + i);
+                store
+                    .add_link(&make_link(&msg, "flux://type", "flux://message", &ts))
+                    .unwrap();
+                store
+                    .add_link(&make_link(&msg, "flux://channel", &channel, &ts))
+                    .unwrap();
+                store
+                    .add_link(&make_link(
+                        &msg,
+                        "flux://body",
+                        &signed_literal(&format!("Message {} in channel {}", i, ch)),
+                        &ts,
+                    ))
+                    .unwrap();
+            }
+        }
+
+        let shape_json = r#"{
+            "className": "Message",
+            "properties": {
+                "type": { "predicate": "flux://type", "required": true, "flag": true, "initial": "flux://message" },
+                "body": { "predicate": "flux://body", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {
+                "channel": { "predicate": "flux://channel", "kind": "belongsToOne", "direction": "forward" }
+            }
+        }"#;
+
+        // Query messages in channel-1 with pagination (typical Flux query)
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "channel".to_string(),
+            WhereCondition::String("test://channel-1".to_string()),
+        );
+
+        let start = std::time::Instant::now();
+        let result = execute_model_query(
+            &store,
+            "Message",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                limit: Some(50),
+                offset: Some(0),
+                order: Some(vec![("timestamp".to_string(), OrderDirection::DESC)]),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(result.instances.len(), 50, "Should get 50 messages");
+        assert_eq!(
+            result.total_count, msgs_per_channel,
+            "Total count should be messages in one channel"
+        );
+        eprintln!(
+            "Paginated query over {} total messages ({} matching): {:?}",
+            num_channels * msgs_per_channel,
+            msgs_per_channel,
+            elapsed
+        );
+        assert!(
+            elapsed.as_secs() < 5,
+            "Query took {:?} — too slow for {} messages",
+            elapsed,
+            num_channels * msgs_per_channel
+        );
+    }
+
+    #[test]
+    fn test_perf_flux_message_parent_scope_paginated() {
+        // Simulates the exact Flux chat-view query:
+        //   useLiveQuery(Message, perspective, {
+        //     parent: { model: Channel, id: source },
+        //     query: { order: { createdAt: 'DESC' } },
+        //     pageSize: 30,
+        //   })
+        //
+        // Message model shape:
+        //   @Flag({ through: 'flux://entry_type', value: 'flux://has_message' })
+        //   @Property({ through: 'flux://body' })
+        //   @HasMany({ through: 'flux://has_reaction' })  — collection, no getter
+        //   @Property({ through: 'flux://has_reply', getter: "SELECT ?target WHERE { ... }" }) — getter
+        //   @Property({ through: 'flux://is_popular', getter: "ASK WHERE { ... }" }) — getter
+        //   @HasMany({ through: 'flux://has_thread_message' }) — collection
+        //   @HasMany({ through: 'flux://has_reply' }) — collection
+        //
+        // Parent scope: channel -> ad4m://has_child -> message
+        let store = SparqlStore::new(None).unwrap();
+        let ts_base = 1700000000000i64;
+        let num_channels = 5;
+        let msgs_per_channel = 2000;
+
+        for ch in 0..num_channels {
+            let channel = format!("test://channel-{}", ch);
+            for i in 0..(msgs_per_channel as i64) {
+                let msg = format!("test://msg-{}-{}", ch, i);
+                let ts = format!("{}", ts_base + ch as i64 * 1000000 + i * 100);
+                // Parent link: channel -> has_child -> message
+                store
+                    .add_link(&make_link(&channel, "ad4m://has_child", &msg, &ts))
+                    .unwrap();
+                // Flag: entry_type = has_message
+                store
+                    .add_link(&make_link(
+                        &msg,
+                        "flux://entry_type",
+                        "flux://has_message",
+                        &ts,
+                    ))
+                    .unwrap();
+                // Body property
+                store
+                    .add_link(&make_link(
+                        &msg,
+                        "flux://body",
+                        &signed_literal(&format!("Message {} in channel {}", i, ch)),
+                        &ts,
+                    ))
+                    .unwrap();
+            }
+        }
+
+        let shape_json = r#"{
+            "className": "Message",
+            "properties": {
+                "type": { "predicate": "flux://entry_type", "required": true, "flag": true, "initial": "flux://has_message" },
+                "body": { "predicate": "flux://body", "required": false, "resolveLanguage": "literal" },
+                "transcriptStartedAt": { "predicate": "flux://transcript_started_at", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {
+                "reactions": { "predicate": "flux://has_reaction", "kind": "hasMany", "direction": "forward" },
+                "replyingTo": { "predicate": "flux://has_reply", "kind": "hasOne", "direction": "forward", "getter": "SELECT ?target WHERE { ?target <flux://has_reply> ?source . } LIMIT 1" },
+                "isPopular": { "predicate": "flux://is_popular", "kind": "hasOne", "direction": "forward", "getter": "ASK WHERE { SELECT (COUNT(DISTINCT ?reactor) AS ?count) WHERE { ?reactor <flux://has_reaction> ?source . FILTER(?reactor = <emoji://1f44d>) } HAVING(?count > 5) }" },
+                "thread": { "predicate": "flux://has_thread_message", "kind": "hasMany", "direction": "forward" },
+                "replies": { "predicate": "flux://has_reply", "kind": "hasMany", "direction": "forward" }
+            }
+        }"#;
+
+        // Query: get 30 most recent messages from channel-2 (ORDER BY createdAt DESC)
+        let start = std::time::Instant::now();
+        let result = execute_model_query(
+            &store,
+            "Message",
+            &ModelQueryInput {
+                parent: Some(ParentScope::Raw {
+                    id: "test://channel-2".to_string(),
+                    predicate: "ad4m://has_child".to_string(),
+                }),
+                limit: Some(30),
+                offset: Some(0),
+                order: Some(vec![("createdAt".to_string(), OrderDirection::DESC)]),
+                count: Some(true),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(result.instances.len(), 30, "Should get 30 messages");
+        assert_eq!(
+            result.total_count, msgs_per_channel,
+            "Total count should be {} messages in channel-2",
+            msgs_per_channel
+        );
+
+        // Verify ordering: DESC by createdAt
+        for i in 1..result.instances.len() {
+            let prev_ts = result.instances[i - 1]["createdAt"].as_str().unwrap_or("");
+            let curr_ts = result.instances[i]["createdAt"].as_str().unwrap_or("");
+            assert!(
+                prev_ts >= curr_ts,
+                "Messages should be ordered DESC by createdAt: {} < {}",
+                prev_ts,
+                curr_ts
+            );
+        }
+
+        eprintln!(
+            "Flux Message query (parent scope, 30 of {}, {} total, with getters): {:?}",
+            msgs_per_channel,
+            num_channels * msgs_per_channel,
+            elapsed
+        );
+        assert!(
+            elapsed.as_secs() < 5,
+            "Query took {:?} — too slow for {} messages with parent scope",
+            elapsed,
+            num_channels * msgs_per_channel
+        );
+
+        // --- Raw SPARQL comparison: flag-reifier vs parent-reifier vs no ORDER ---
+        // Test 1: No ORDER BY (just the conformance)
+        let t_no_order = std::time::Instant::now();
+        let q_no_order = r#"SELECT DISTINCT ?source WHERE {
+            <test://channel-2> <ad4m://has_child> ?source .
+            ?source <flux://entry_type> <flux://has_message> .
+        } LIMIT 30"#;
+        let _r = store.query(q_no_order).unwrap();
+        eprintln!("[RAW] no ORDER BY: {:?}", t_no_order.elapsed());
+
+        // Test 2: Flag-reifier probe (what we currently generate)
+        let t_flag = std::time::Instant::now();
+        let q_flag = r#"SELECT DISTINCT ?source ?_first_ts WHERE {
+            <test://channel-2> <ad4m://has_child> ?source .
+            ?source <flux://entry_type> <flux://has_message> .
+            ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <flux://entry_type> <flux://has_message> )>> .
+            ?_r <ad4m://ontology/timestamp> ?_first_ts .
+        } ORDER BY DESC(?_first_ts) LIMIT 30"#;
+        let _r = store.query(q_flag).unwrap();
+        eprintln!("[RAW] flag-reifier ORDER BY: {:?}", t_flag.elapsed());
+
+        // Test 3: Parent-reifier probe (uses the fully-bound parent IRI)
+        let t_parent = std::time::Instant::now();
+        let q_parent = r#"SELECT DISTINCT ?source ?_first_ts WHERE {
+            <test://channel-2> <ad4m://has_child> ?source .
+            ?source <flux://entry_type> <flux://has_message> .
+            ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <test://channel-2> <ad4m://has_child> ?source )>> .
+            ?_r <ad4m://ontology/timestamp> ?_first_ts .
+        } ORDER BY DESC(?_first_ts) LIMIT 30"#;
+        let _r = store.query(q_parent).unwrap();
+        eprintln!("[RAW] parent-reifier ORDER BY: {:?}", t_parent.elapsed());
+
+        // Test 4: Wildcard reifier (the old expensive pattern)
+        let t_wild = std::time::Instant::now();
+        let q_wild = r#"SELECT DISTINCT ?source ?_first_ts WHERE {
+            <test://channel-2> <ad4m://has_child> ?source .
+            ?source <flux://entry_type> <flux://has_message> .
+            ?source ?_anyP ?_anyT .
+            ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?_anyP ?_anyT )>> .
+            ?_r <ad4m://ontology/timestamp> ?_first_ts .
+        } ORDER BY DESC(?_first_ts) LIMIT 30"#;
+        let _r = store.query(q_wild).unwrap();
+        eprintln!("[RAW] wildcard-reifier ORDER BY: {:?}", t_wild.elapsed());
+
+        // Test 5: Full outer query (the actual generated pattern)
+        let t_full = std::time::Instant::now();
+        let q_full = r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
+            {
+                SELECT DISTINCT ?source ?_first_ts WHERE {
+                    <test://channel-2> <ad4m://has_child> ?source .
+                    ?source <flux://entry_type> <flux://has_message> .
+                    ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <flux://entry_type> <flux://has_message> )>> .
+                    ?_r <ad4m://ontology/timestamp> ?_first_ts .
+                } ORDER BY DESC(?_first_ts) LIMIT 30
+            }
+            VALUES ?predicate { <flux://body> <flux://entry_type> <flux://has_reaction> <flux://has_reply> <flux://has_thread_message> <flux://transcript_started_at> }
+            ?source ?predicate ?target .
+            ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+            FILTER(isIRI(?predicate))
+            ?_reifier <ad4m://ontology/author> ?author .
+            ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+        }"#;
+        let r_full: Vec<Value> = serde_json::from_str(&store.query(q_full).unwrap()).unwrap();
+        eprintln!(
+            "[RAW] full outer query: {:?} ({} rows)",
+            t_full.elapsed(),
+            r_full.len()
+        );
+
+        // Test 6: Outer query without subquery (pre-materialized sources via VALUES)
+        // Get the 30 source IDs first, then query their properties
+        let q_ids = r#"SELECT DISTINCT ?source WHERE {
+            <test://channel-2> <ad4m://has_child> ?source .
+            ?source <flux://entry_type> <flux://has_message> .
+            ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <flux://entry_type> <flux://has_message> )>> .
+            ?_r <ad4m://ontology/timestamp> ?_first_ts .
+        } ORDER BY DESC(?_first_ts) LIMIT 30"#;
+        let ids_json: Vec<Value> = serde_json::from_str(&store.query(q_ids).unwrap()).unwrap();
+        let source_values: String = ids_json
+            .iter()
+            .filter_map(|r| r["source"].as_str())
+            .map(|s| format!("<{}>", s))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let t_outer = std::time::Instant::now();
+        let q_outer = format!(
+            r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+            VALUES ?source {{ {} }}
+            VALUES ?predicate {{ <flux://body> <flux://entry_type> <flux://has_reaction> <flux://has_reply> <flux://has_thread_message> <flux://transcript_started_at> }}
+            ?source ?predicate ?target .
+            ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+            FILTER(isIRI(?predicate))
+            ?_reifier <ad4m://ontology/author> ?author .
+            ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+        }}"#,
+            source_values
+        );
+        let r_outer: Vec<Value> = serde_json::from_str(&store.query(&q_outer).unwrap()).unwrap();
+        eprintln!(
+            "[RAW] pre-materialized VALUES outer: {:?} ({} rows)",
+            t_outer.elapsed(),
+            r_outer.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Property-key sort push tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_full_model_query_order_by_property_string() {
+        // ORDER BY a string property should be pushed to SPARQL
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let names = ["Charlie", "Alice", "Bob"];
+        for (i, name) in names.iter().enumerate() {
+            let item = format!("test://item-{}", i);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://person", ts))
+                .unwrap();
+            store
+                .add_link(&make_link(&item, "ns://name", &signed_literal(name), ts))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Person",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://person" },
+                "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // ORDER BY name ASC with limit (triggers SPARQL pagination)
+        let result = execute_model_query(
+            &store,
+            "Person",
+            &ModelQueryInput {
+                limit: Some(2),
+                order: Some(vec![("name".to_string(), OrderDirection::ASC)]),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 2);
+        assert_eq!(result.total_count, 3);
+        // First 2 alphabetically: Alice, Bob
+        assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Alice");
+        assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
+
+        // ORDER BY name DESC with limit
+        let result = execute_model_query(
+            &store,
+            "Person",
+            &ModelQueryInput {
+                limit: Some(2),
+                order: Some(vec![("name".to_string(), OrderDirection::DESC)]),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 2);
+        // First 2 reverse alphabetically: Charlie, Bob
+        assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Charlie");
+        assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
+    }
+
+    #[test]
+    fn test_full_model_query_order_by_property_number() {
+        // ORDER BY a numeric property
+        let store = SparqlStore::new(None).unwrap();
+        let ts = "1700000000000";
+
+        let scores = [100.0, 5.0, 42.0, 1.0, 999.0];
+        for (i, &score) in scores.iter().enumerate() {
+            let item = format!("test://item-{}", i);
+            store
+                .add_link(&make_link(&item, "ns://type", "ns://scored", ts))
+                .unwrap();
+            store
+                .add_link(&make_link(
+                    &item,
+                    "ns://score",
+                    &signed_literal_number(score),
+                    ts,
+                ))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Scored",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+                "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // ORDER BY score ASC, limit 3 → should get 1, 5, 42
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                limit: Some(3),
+                order: Some(vec![("score".to_string(), OrderDirection::ASC)]),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        assert_eq!(result.instances.len(), 3);
+        assert_eq!(result.total_count, 5);
+        let got_scores: Vec<f64> = result
+            .instances
+            .iter()
+            .map(|i| i["score"].as_f64().unwrap())
+            .collect();
+        assert_eq!(got_scores, vec![1.0, 5.0, 42.0], "ASC numeric sort");
+
+        // ORDER BY score DESC, limit 2 → should get 999, 100
+        let result = execute_model_query(
+            &store,
+            "Scored",
+            &ModelQueryInput {
+                limit: Some(2),
+                order: Some(vec![("score".to_string(), OrderDirection::DESC)]),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+        let got_scores: Vec<f64> = result
+            .instances
+            .iter()
+            .map(|i| i["score"].as_f64().unwrap())
+            .collect();
+        assert_eq!(got_scores, vec![999.0, 100.0], "DESC numeric sort");
     }
 }

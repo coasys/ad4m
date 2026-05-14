@@ -2551,21 +2551,11 @@ impl LanguageController {
         content: JsonValue,
         agent_context: &AgentContext,
     ) -> Result<String, LanguageError> {
-        // Handle literal language
+        // Handle literal language — encode raw value directly.
+        // Provenance (author, timestamp, proof) is stored on the link's
+        // RDF 1.2 reifier, so the value itself doesn't need signing.
         if lang_address == "literal" {
-            let signed_expr = crate::agent::create_signed_expression(content, agent_context)
-                .map_err(|e| LanguageError::RuntimeError {
-                    address: "literal".to_string(),
-                    message: format!("Failed to create signed expression: {}", e),
-                })?;
-
-            let signed_expr_json = serde_json::to_value(&signed_expr).map_err(|e| {
-                LanguageError::SerializationError {
-                    message: format!("Failed to serialize signed expression: {}", e),
-                }
-            })?;
-
-            let expression_part = literal_encode(&signed_expr_json);
+            let expression_part = literal_encode(&content);
             return Ok(format!("literal:{}", expression_part));
         }
 
