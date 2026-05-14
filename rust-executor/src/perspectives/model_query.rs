@@ -240,6 +240,13 @@ pub struct ModelQueryResult {
     pub total_count: usize,
 }
 
+/// Parameters for SPARQL-side pagination (pushed ORDER BY + LIMIT + OFFSET).
+struct SparqlPagination {
+    direction: OrderDirection,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
 // ---------------------------------------------------------------------------
 // Internal shape info (derived from SHACL links in the store)
 // ---------------------------------------------------------------------------
@@ -262,11 +269,9 @@ struct ShapeProperty {
     /// For properties: returns a scalar value.
     /// For relations: returns target IDs (conformance-filtered).
     getter: Option<String>,
-    /// Post-getter where-clause filter for relations.  Property values are
-    /// stored as signed expression envelopes (`literal:json:...`), so SPARQL
-    /// FILTER cannot match them.  This filter is applied in Rust after the
-    /// getter runs, by fetching the target property values and comparing
-    /// the parsed data.
+    /// Post-getter where-clause filter for relations.  Used to apply
+    /// where conditions on related instances after the getter runs,
+    /// by fetching the target property values and comparing the parsed data.
     where_filter: Option<BTreeMap<String, WhereCondition>>,
     /// Predicate mappings for `where_filter` (property name → predicate IRI).
     where_predicates: Option<HashMap<String, String>>,
@@ -330,6 +335,10 @@ pub fn load_shape_from_store(store: &SparqlStore, class_name: &str) -> Result<Mo
 
 /// Parse a `literal:` URI into a typed JSON value.
 /// Returns the raw string as Value::String if not a literal: URI.
+///
+/// Since the signed-envelope migration (v3), all literal values are stored
+/// as plain `literal:string:X`, `literal:number:X`, `literal:boolean:X`,
+/// or `literal:json:X` (for non-envelope JSON objects/arrays).
 fn parse_literal_value(uri: &str) -> Value {
     let body = if let Some(rest) = uri.strip_prefix("literal:") {
         rest
@@ -339,15 +348,6 @@ fn parse_literal_value(uri: &str) -> Value {
 
     if let Some(rest) = body.strip_prefix("string:") {
         let decoded = urlencoding::decode(rest).unwrap_or_else(|_| rest.into());
-        // Check if it's a signed expression JSON
-        if let Ok(json_val) = serde_json::from_str::<Value>(&decoded) {
-            if let Some(data) = json_val.get("data") {
-                return match data {
-                    Value::String(s) => Value::String(s.clone()),
-                    _ => data.clone(),
-                };
-            }
-        }
         Value::String(decoded.into_owned())
     } else if let Some(rest) = body.strip_prefix("number:") {
         if let Ok(n) = rest.parse::<i64>() {
@@ -368,12 +368,6 @@ fn parse_literal_value(uri: &str) -> Value {
     } else if let Some(rest) = body.strip_prefix("json:") {
         let decoded = urlencoding::decode(rest).unwrap_or_else(|_| rest.into());
         if let Ok(json_val) = serde_json::from_str::<Value>(&decoded) {
-            if let Some(data) = json_val.get("data") {
-                return match data {
-                    Value::String(s) => Value::String(s.clone()),
-                    _ => data.clone(),
-                };
-            }
             json_val
         } else {
             Value::String(decoded.into_owned())
@@ -800,12 +794,10 @@ fn resolve_projections(
 /// reification node, not on `?t`.  See `build_projection_reifier_patterns`
 /// which emits the required `rdf:reifies` join and FILTER for those fields.
 ///
-/// **Limitation:** Values stored as `literal:json:` signed-expression blobs
-/// (as used for `@Property` values in Flux models) cannot be matched here.
-/// `STR(?v)` returns the opaque blob URI — the encoded payload is invisible
-/// to SPARQL-side filtering.  `parse_literal_value` can decode the blob in
-/// Rust, but only after fetching all rows first; supporting this case requires
-/// a full post-fetch filter pass and is deferred until concretely needed.
+/// **Note:** Plain literal values (`literal:string:X`, `literal:number:X`,
+/// `literal:boolean:X`) are matched via `STR(?v) = "literal:string:X"` FILTER.
+/// Complex JSON objects stored as `literal:json:` may require post-fetch
+/// filtering in Rust if the caller needs deep property matching.
 fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
     let Some(ref wc) = proj.where_clause else {
         return String::new();
@@ -1159,8 +1151,42 @@ fn execute_model_query_inner(
     }
 
     // ── Full pipeline ────────────────────────────────────────────────────
+
+    // Determine if we can push pagination to SPARQL.
+    // Requirements: all where conditions are SPARQL-pushable, and the sort
+    // key is timestamp (which lives on the reifier and is available in SPARQL).
+    let can_push_pagination = all_where_pushable(query_input, &shape) && {
+        match &query_input.order {
+            None => true, // default is timestamp ASC — pushable
+            Some(order) => {
+                order.len() == 1
+                    && (order[0].0 == "timestamp"
+                        || order[0].0 == "createdAt"
+                        || order[0].0 == "updatedAt")
+            }
+        }
+    };
+
+    let sparql_pagination = if can_push_pagination
+        && (query_input.limit.is_some() || query_input.offset.is_some())
+    {
+        let direction = query_input
+            .order
+            .as_ref()
+            .and_then(|o| o.first())
+            .map(|(_, d)| *d)
+            .unwrap_or(OrderDirection::ASC);
+        Some(SparqlPagination {
+            direction,
+            offset: query_input.offset,
+            limit: query_input.limit,
+        })
+    } else {
+        None
+    };
+
     // Build SPARQL to find conforming instances and their property values
-    let sparql = build_instance_sparql(&shape, query_input);
+    let sparql = build_instance_sparql(&shape, query_input, sparql_pagination.as_ref());
 
     // Execute the SPARQL query
     let result_json = store.query(&sparql)?;
@@ -1184,32 +1210,59 @@ fn execute_model_query_inner(
         resolve_reverse_relations(store, &mut instances, &reverse_rels)?;
     }
 
-    // Apply where-clause filters (before getters — property equality is handled
-    // via post-hydration comparison, not getter values).
+    // Apply post-hydration where-clause filters.
+    // When all conditions were pushed to SPARQL, this is a no-op (all
+    // instances already match). When Ops conditions exist, this filters
+    // the remaining non-pushable conditions in Rust.
     if let Some(ref where_clause) = query_input.where_clause {
         instances.retain(|inst| matches_where(inst, where_clause, &shape));
     }
 
-    // Calculate total count before pagination
-    let total_count = instances.len();
-
-    // Apply ordering
-    if let Some(ref order) = query_input.order {
-        sort_instances(&mut instances, order);
-    } else if query_input.limit.is_some() || query_input.offset.is_some() {
-        // Default: order by timestamp ASC when paginating
-        sort_instances(
-            &mut instances,
-            &[("timestamp".to_string(), OrderDirection::ASC)],
-        );
-    }
-
-    // Apply pagination
-    let offset = query_input.offset.unwrap_or(0);
-    let mut paginated: Vec<Value> = if let Some(limit) = query_input.limit {
-        instances.into_iter().skip(offset).take(limit).collect()
+    // Calculate total count.
+    // When SPARQL pagination was used, we need a separate count query.
+    let total_count = if sparql_pagination.is_some() {
+        // Run count query to get the true total
+        if let Some(sparql) = build_count_sparql(&shape, query_input) {
+            let result_json = store.query(&sparql)?;
+            let results: Vec<Value> = serde_json::from_str(&result_json)?;
+            results
+                .first()
+                .and_then(|r| {
+                    r["cnt"]
+                        .as_str()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .or_else(|| r["cnt"].as_u64().map(|n| n as usize))
+                })
+                .unwrap_or(instances.len())
+        } else {
+            instances.len()
+        }
     } else {
-        instances.into_iter().skip(offset).collect()
+        instances.len()
+    };
+
+    // Apply ordering and pagination in Rust (only when NOT pushed to SPARQL)
+    let mut paginated: Vec<Value> = if sparql_pagination.is_some() {
+        // Already ordered and paginated by SPARQL subquery
+        instances
+    } else {
+        // Apply ordering
+        if let Some(ref order) = query_input.order {
+            sort_instances(&mut instances, order);
+        } else if query_input.limit.is_some() || query_input.offset.is_some() {
+            sort_instances(
+                &mut instances,
+                &[("timestamp".to_string(), OrderDirection::ASC)],
+            );
+        }
+
+        // Apply pagination
+        let offset = query_input.offset.unwrap_or(0);
+        if let Some(limit) = query_input.limit {
+            instances.into_iter().skip(offset).take(limit).collect()
+        } else {
+            instances.into_iter().skip(offset).collect()
+        }
     };
 
     // ── Evaluate property/relation getters (post-pagination) ─────────────
@@ -1424,7 +1477,13 @@ fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Err
 /// `@HasMany` relations) are excluded — they are resolved separately in
 /// `evaluate_getters`.  This avoids scanning large numbers of links (e.g.
 /// 10 000 message children) that would be discarded during hydration.
-fn build_instance_sparql(shape: &ModelShape, query: &ModelQueryInput) -> String {
+/// When `sparql_pagination` is provided, adds ORDER BY / LIMIT / OFFSET
+/// clauses to the SPARQL query, enabling server-side pagination.
+fn build_instance_sparql(
+    shape: &ModelShape,
+    query: &ModelQueryInput,
+    sparql_pagination: Option<&SparqlPagination>,
+) -> String {
     let (conformance, where_extra) = build_query_patterns(shape, query);
 
     // Collect predicates that hydration will actually consume from the main
@@ -1457,8 +1516,52 @@ fn build_instance_sparql(shape: &ModelShape, query: &ModelQueryInput) -> String 
         format!("    VALUES ?predicate {{ {} }}\n", values)
     };
 
-    format!(
-        r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+    // Build pagination suffix for source subquery
+    let pagination_suffix = if let Some(pg) = sparql_pagination {
+        let mut suffix = String::new();
+        // Order by timestamp on the earliest reifier per source
+        match pg.direction {
+            OrderDirection::DESC => suffix.push_str("\n    ORDER BY DESC(?_first_ts)"),
+            OrderDirection::ASC => suffix.push_str("\n    ORDER BY ASC(?_first_ts)"),
+        }
+        if let Some(offset) = pg.offset {
+            if offset > 0 {
+                suffix.push_str(&format!("\n    OFFSET {}", offset));
+            }
+        }
+        if let Some(limit) = pg.limit {
+            suffix.push_str(&format!("\n    LIMIT {}", limit));
+        }
+        suffix
+    } else {
+        String::new()
+    };
+
+    if sparql_pagination.is_some() {
+        // Use a subquery to paginate at the instance (source) level,
+        // then join with properties in the outer query.
+        format!(
+            r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+    {{
+        SELECT DISTINCT ?source (MIN(?_ts) AS ?_first_ts) WHERE {{
+{conformance}
+{where_extra}
+            ?source ?_anyP ?_anyT .
+            ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?_anyP ?_anyT )>> .
+            ?_r <ad4m://ontology/timestamp> ?_ts .
+            FILTER(isIRI(?source))
+        }} GROUP BY ?source{pagination_suffix}
+    }}
+{predicate_filter}    ?source ?predicate ?target .
+    ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+    FILTER(isIRI(?predicate))
+    ?_reifier <ad4m://ontology/author> ?author .
+    ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+}}"#
+        )
+    } else {
+        format!(
+            r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
 {where_extra}
 {predicate_filter}    ?source ?predicate ?target .
@@ -1467,7 +1570,8 @@ fn build_instance_sparql(shape: &ModelShape, query: &ModelQueryInput) -> String 
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
 }}"#
-    )
+        )
+    }
 }
 
 /// Build a COUNT SPARQL query that returns the number of conforming instances.
@@ -1492,11 +1596,11 @@ fn build_count_sparql(shape: &ModelShape, query: &ModelQueryInput) -> Option<Str
 }
 
 /// Check whether a query's where clause contains only conditions that can be
-/// pushed entirely to SPARQL.  If true, a COUNT query can skip hydration.
+/// pushed entirely to SPARQL.
 ///
-/// Only id/base filters and relation-based where (which match plain URIs, not
-/// signed envelopes) are SPARQL-pushable.  Property equality is NOT pushable
-/// because stored values are signed JSON envelopes.
+/// With plain literal storage, simple property equality (String, Number, Bool,
+/// StringArray, NumberArray) IS pushable.  Only complex Ops conditions (gt, lt,
+/// contains, between, etc.) need post-hydration Rust-side filtering.
 fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) -> bool {
     let Some(ref wc) = query.where_clause else {
         return true;
@@ -1508,7 +1612,7 @@ fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) -> bool {
                 _ => return false,
             }
         }
-        // Relation-based where (forward or reverse) can be pushed
+        // Relation-based where (forward or reverse) — pushable for simple values
         if shape
             .properties
             .iter()
@@ -1522,7 +1626,22 @@ fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) -> bool {
             }
             return false;
         }
-        // All other conditions (property values, metadata, ops) need post-hydration
+        // Property-based where — pushable for simple equality
+        if shape
+            .properties
+            .iter()
+            .any(|p| p.name == *prop_name && !p.is_collection)
+        {
+            match condition {
+                WhereCondition::String(_)
+                | WhereCondition::Number(_)
+                | WhereCondition::Bool(_)
+                | WhereCondition::StringArray(_)
+                | WhereCondition::NumberArray(_) => continue,
+                WhereCondition::Ops(_) => return false,
+            }
+        }
+        // Unknown property — not pushable
         return false;
     }
     true
@@ -1672,28 +1791,24 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
 
     // WHERE clause filters that can be pushed to SPARQL.
     //
-    // Property equality CANNOT be pushed because stored values are signed JSON
-    // envelopes (`literal:json:{author,timestamp,data,proof}`), not plain
-    // `literal:string:X`.  Only id/base and relation-based where can be pushed.
+    // With plain literal storage, property equality CAN be pushed to SPARQL.
+    // Values are stored as `literal:string:X`, `literal:number:X`, etc.
+    // Only complex Ops (gt/lt/contains/between) need post-hydration filtering.
     let mut where_patterns = Vec::new();
     if let Some(ref wc) = query.where_clause {
         for (prop_name, condition) in wc {
             if prop_name == "base" || prop_name == "id" {
                 match condition {
                     WhereCondition::String(val) => {
-                        // Use STR() comparison to avoid IRI parsing issues with
-                        // literal:json URIs that contain encoded special chars
                         where_patterns.push(format!(
                             "    FILTER(STR(?source) = \"{}\")",
-                            val.replace('\\', "\\\\").replace('"', "\\\"")
+                            escape_sparql_string(val)
                         ));
                     }
                     WhereCondition::StringArray(vals) => {
                         let ids = vals
                             .iter()
-                            .map(|v| {
-                                format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
-                            })
+                            .map(|v| format!("\"{}\"", escape_sparql_string(v)))
                             .collect::<Vec<_>>()
                             .join(", ");
                         where_patterns.push(format!("    FILTER(STR(?source) IN ({}))", ids));
@@ -1703,9 +1818,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                 continue;
             }
 
-            // Relation-based where: link targets are plain URIs (not signed),
-            // so we CAN push these to SPARQL.  Use STR() comparison to avoid
-            // IRI parsing failures with literal:json URIs.
+            // Relation-based where: link targets are plain URIs.
             if let Some(prop) = shape
                 .properties
                 .iter()
@@ -1715,7 +1828,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                 let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
                 match condition {
                     WhereCondition::String(val) => {
-                        let escaped = val.replace('\\', "\\\\").replace('"', "\\\"");
+                        let escaped = escape_sparql_string(val);
                         if direction == "reverse" {
                             where_patterns.push(format!(
                                 "    ?_rv_{} <{}> ?source . FILTER(STR(?_rv_{}) = \"{}\")",
@@ -1731,9 +1844,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                     WhereCondition::StringArray(vals) => {
                         let str_list = vals
                             .iter()
-                            .map(|v| {
-                                format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
-                            })
+                            .map(|v| format!("\"{}\"", escape_sparql_string(v)))
                             .collect::<Vec<_>>()
                             .join(", ");
                         if direction == "reverse" {
@@ -1753,8 +1864,78 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                 continue;
             }
 
-            // All other conditions (property values, metadata, ops) are
-            // handled post-hydration in matches_where().
+            // Property-based where: values are plain literals.
+            if let Some(prop) = shape
+                .properties
+                .iter()
+                .find(|p| &p.name == prop_name && !p.is_collection && !p.predicate.is_empty())
+            {
+                if validate_iri(&prop.predicate).is_err() {
+                    continue;
+                }
+                let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
+                match condition {
+                    WhereCondition::String(val) => {
+                        let literal_iri = format!(
+                            "literal:string:{}",
+                            urlencoding::encode(val)
+                        );
+                        where_patterns.push(format!(
+                            "    ?source <{}> ?_pw_{} . FILTER(STR(?_pw_{}) = \"{}\")",
+                            prop.predicate, safe_name, safe_name,
+                            escape_sparql_string(&literal_iri)
+                        ));
+                    }
+                    WhereCondition::Number(n) => {
+                        let literal_iri = format!("literal:number:{}", n);
+                        where_patterns.push(format!(
+                            "    ?source <{}> ?_pw_{} . FILTER(STR(?_pw_{}) = \"{}\")",
+                            prop.predicate, safe_name, safe_name,
+                            escape_sparql_string(&literal_iri)
+                        ));
+                    }
+                    WhereCondition::Bool(b) => {
+                        let literal_iri = format!("literal:boolean:{}", b);
+                        where_patterns.push(format!(
+                            "    ?source <{}> ?_pw_{} . FILTER(STR(?_pw_{}) = \"{}\")",
+                            prop.predicate, safe_name, safe_name, literal_iri
+                        ));
+                    }
+                    WhereCondition::StringArray(vals) => {
+                        let str_list = vals
+                            .iter()
+                            .map(|v| {
+                                format!(
+                                    "\"literal:string:{}\"",
+                                    escape_sparql_string(&urlencoding::encode(v))
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        where_patterns.push(format!(
+                            "    ?source <{}> ?_pw_{} . FILTER(STR(?_pw_{}) IN ({}))",
+                            prop.predicate, safe_name, safe_name, str_list
+                        ));
+                    }
+                    WhereCondition::NumberArray(vals) => {
+                        let num_list = vals
+                            .iter()
+                            .map(|n| format!("\"literal:number:{}\"", n))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        where_patterns.push(format!(
+                            "    ?source <{}> ?_pw_{} . FILTER(STR(?_pw_{}) IN ({}))",
+                            prop.predicate, safe_name, safe_name, num_list
+                        ));
+                    }
+                    WhereCondition::Ops(_) => {
+                        // Complex ops (gt/lt/contains/between) handled post-hydration
+                    }
+                }
+                continue;
+            }
+
+            // Unknown property — handled post-hydration in matches_where()
         }
     }
 
@@ -1762,18 +1943,6 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
     let where_extra = where_patterns.join("\n");
 
     (conformance, where_extra)
-}
-
-/// Convert a JS value to its literal: IRI form, matching how the Rust executor
-/// stores property values.
-#[allow(dead_code)]
-fn value_to_literal_iri_string(s: &str) -> String {
-    // If it already looks like a URI, use as-is
-    if s.contains("://") || s.starts_with("literal:") {
-        return s.to_string();
-    }
-    // Wrap as literal:string:
-    format!("literal:string:{}", urlencoding::encode(s))
 }
 
 // ---------------------------------------------------------------------------
@@ -2525,9 +2694,9 @@ fn evaluate_getters(
 
     // ── Post-getter where-clause filtering ─────────────────────────────
     // For relations with where_filter, fetch the target property values
-    // and filter out non-matching targets.  This is necessary because
-    // stored property values are signed expression envelopes
-    // (literal:json:...) that cannot be matched by SPARQL FILTER.
+    // Post-getter where filtering: for collection relations, we need
+    // to resolve the target instances' property values in Rust
+    // and filter out non-matching targets.
     for prop in &getter_props {
         let (wf, wp) = match (&prop.where_filter, &prop.where_predicates) {
             (Some(wf), Some(wp)) => (wf, wp),
@@ -3310,71 +3479,35 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // parse_literal_value: signed expression envelopes
+    // parse_literal_value: plain literal format (post-migration)
     //
-    // The #1 integration test failure was caused by property values stored as
-    // signed expression envelopes: literal:json:<percent_encoded_signed_JSON>.
-    // These tests cover the full decoding path that was silently failing.
+    // After the signed-envelope removal, all literal values are stored as
+    // plain `literal:string:X`, `literal:number:X`, `literal:boolean:X`,
+    // or `literal:json:X` (for non-envelope JSON objects/arrays).
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_parse_literal_value_json_signed_expression() {
-        // This is the exact format stored by createExpression("active", "literal"):
-        // literal:json:<percent_encoded({"author":"...","timestamp":"...","data":"active","proof":{...}})>
-        let signed = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": "active",
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_str = serde_json::to_string(&signed).unwrap();
-        let encoded = urlencoding::encode(&signed_str);
-        let iri = format!("literal:json:{}", encoded);
-
+    fn test_parse_literal_value_plain_string() {
+        let iri = format!("literal:string:{}", urlencoding::encode("active"));
         let parsed = parse_literal_value(&iri);
-        assert_eq!(
-            parsed,
-            Value::String("active".to_string()),
-            "literal:json with signed expression should extract data field"
-        );
+        assert_eq!(parsed, Value::String("active".to_string()));
     }
 
     #[test]
-    fn test_parse_literal_value_json_signed_expression_numeric_data() {
-        // data field is a number, not a string
-        let signed = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": 42,
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_str = serde_json::to_string(&signed).unwrap();
-        let encoded = urlencoding::encode(&signed_str);
-        let iri = format!("literal:json:{}", encoded);
-
-        let parsed = parse_literal_value(&iri);
-        assert_eq!(parsed, json!(42), "Should extract numeric data field");
+    fn test_parse_literal_value_plain_number() {
+        let parsed = parse_literal_value("literal:number:42");
+        assert_eq!(parsed, json!(42));
     }
 
     #[test]
-    fn test_parse_literal_value_json_signed_expression_object_data() {
-        // data field is a JSON object
-        let signed = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": {"name": "Test", "count": 5},
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_str = serde_json::to_string(&signed).unwrap();
-        let encoded = urlencoding::encode(&signed_str);
+    fn test_parse_literal_value_plain_json_object() {
+        let obj = serde_json::json!({"name": "Test", "count": 5});
+        let obj_str = serde_json::to_string(&obj).unwrap();
+        let encoded = urlencoding::encode(&obj_str);
         let iri = format!("literal:json:{}", encoded);
 
         let parsed = parse_literal_value(&iri);
-        assert_eq!(
-            parsed,
-            json!({"name": "Test", "count": 5}),
-            "Should extract object data field"
-        );
+        assert_eq!(parsed, json!({"name": "Test", "count": 5}));
     }
 
     #[test]
@@ -3398,23 +3531,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_literal_value_string_signed_expression() {
-        // literal:string: with a JSON signed expression as content
-        let signed = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": "hello",
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_str = serde_json::to_string(&signed).unwrap();
-        let encoded = urlencoding::encode(&signed_str);
-        let iri = format!("literal:string:{}", encoded);
-
+    fn test_parse_literal_value_string_with_spaces() {
+        // literal:string: with percent-encoded content should decode properly
+        let iri = format!("literal:string:{}", urlencoding::encode("hello world"));
         let parsed = parse_literal_value(&iri);
         assert_eq!(
             parsed,
-            Value::String("hello".to_string()),
-            "literal:string with signed expression JSON should extract data"
+            Value::String("hello world".to_string()),
+            "literal:string should decode percent-encoded content"
         );
     }
 
@@ -4297,20 +4421,11 @@ mod integration_tests {
 
         // Simulate a Recipe with:
         //   - Flag: <ad4m://type> → <ad4m://recipe>
-        //   - Name: <recipe://name> → literal:json:{signed expression with data="Recipe 1"}
+        //   - Name: <recipe://name> → literal:string:Recipe%201
 
         let base1 = "literal:string:recipe1base";
 
-        // Signed expression for name "Recipe 1"
-        let signed_name = serde_json::json!({
-            "author": "did:key:test123",
-            "timestamp": "1700000000000",
-            "data": "Recipe 1",
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_name_str = serde_json::to_string(&signed_name).unwrap();
-        let name_encoded = urlencoding::encode(&signed_name_str);
-        let name_target = format!("literal:json:{}", name_encoded);
+        let name_target = format!("literal:string:{}", urlencoding::encode("Recipe 1"));
 
         // Add the type flag link
         let flag_link = make_link(base1, "ad4m://type", "ad4m://recipe", "1700000000000");
@@ -4401,15 +4516,9 @@ mod integration_tests {
             .unwrap();
 
         // Channel name
-        let signed_name = json!({
-            "author": "did:key:test123",
-            "timestamp": "1700000000000",
-            "data": "General",
-            "proof": {"key": "k", "signature": "s"}
-        });
         let name_target = format!(
-            "literal:json:{}",
-            urlencoding::encode(&serde_json::to_string(&signed_name).unwrap())
+            "literal:string:{}",
+            urlencoding::encode("General")
         );
         store
             .add_link(&make_link(
@@ -4438,15 +4547,9 @@ mod integration_tests {
                 "1700000000003",
             ))
             .unwrap();
-        let app_name = json!({
-            "author": "did:key:test123",
-            "timestamp": "1700000000003",
-            "data": "Chat",
-            "proof": {"key": "k", "signature": "s"}
-        });
         let app_name_target = format!(
-            "literal:json:{}",
-            urlencoding::encode(&serde_json::to_string(&app_name).unwrap())
+            "literal:string:{}",
+            urlencoding::encode("Chat")
         );
         store
             .add_link(&make_link(
@@ -5780,45 +5883,31 @@ mod integration_tests {
     }
 
     // ===================================================================
-    // Signed-expression where-clause filtering integration tests
+    // Where-clause filtering integration tests
     //
-    // These reproduce the exact scenarios that failed in CI integration
-    // tests (integration-tests-js, integration-tests-model). The root
-    // cause was that property values are stored as signed expression
-    // envelopes (literal:json:{author,timestamp,data,proof}), and
-    // SPARQL FILTER could not match against them.
+    // These test property where-clause filtering with plain literal values.
+    // Property values are stored as `literal:string:X`, `literal:number:X`,
+    // etc. and can be matched by SPARQL FILTER or Rust post-hydration.
     // ===================================================================
 
-    /// Helper: create a signed expression literal IRI for a string value.
+    /// Helper: create a plain literal IRI for a string value.
     fn signed_literal(value: &str) -> String {
-        let signed = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": value,
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_str = serde_json::to_string(&signed).unwrap();
-        let encoded = urlencoding::encode(&signed_str);
-        format!("literal:json:{}", encoded)
+        format!("literal:string:{}", urlencoding::encode(value))
     }
 
-    /// Helper: create a signed expression literal IRI for a numeric value.
+    /// Helper: create a plain literal IRI for a numeric value.
     fn signed_literal_number(value: f64) -> String {
-        let signed = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": value,
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_str = serde_json::to_string(&signed).unwrap();
-        let encoded = urlencoding::encode(&signed_str);
-        format!("literal:json:{}", encoded)
+        if value.fract() == 0.0 {
+            format!("literal:number:{}", value as i64)
+        } else {
+            format!("literal:number:{}", value)
+        }
     }
 
     #[test]
     fn test_where_filter_signed_expression_string() {
         // Reproduces the exact CI failure: where clause on a property stored
-        // as literal:json:<signed expression> with string data.
+        // Where clause on a property stored as literal:string:<value>.
         let store = SparqlStore::new(None).unwrap();
         let ts = "1700000000000";
 
@@ -6500,7 +6589,7 @@ mod integration_tests {
 
     #[test]
     fn test_full_model_query_signed_expression_boolean_where() {
-        // findAll with boolean where clause on signed expression values
+        // findAll with boolean where clause on plain literal boolean values
         let store = SparqlStore::new(None).unwrap();
         let ts = "1700000000000";
 
@@ -6513,34 +6602,14 @@ mod integration_tests {
                 .unwrap();
         }
 
-        // Boolean data in signed expressions
-        let signed_true = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": true,
-            "proof": {"key": "k", "signature": "s"}
-        });
-        let signed_false = serde_json::json!({
-            "author": "did:key:z6MkfR",
-            "timestamp": "1700000000000",
-            "data": false,
-            "proof": {"key": "k", "signature": "s"}
-        });
-
-        let enc_true = format!(
-            "literal:json:{}",
-            urlencoding::encode(&serde_json::to_string(&signed_true).unwrap())
-        );
-        let enc_false = format!(
-            "literal:json:{}",
-            urlencoding::encode(&serde_json::to_string(&signed_false).unwrap())
-        );
+        let enc_true = "literal:boolean:true";
+        let enc_false = "literal:boolean:false";
 
         store
-            .add_link(&make_link(item1, "ns://visible", &enc_true, ts))
+            .add_link(&make_link(item1, "ns://visible", enc_true, ts))
             .unwrap();
         store
-            .add_link(&make_link(item2, "ns://visible", &enc_false, ts))
+            .add_link(&make_link(item2, "ns://visible", enc_false, ts))
             .unwrap();
 
         let shape_json = r#"{
@@ -6760,7 +6829,7 @@ mod integration_tests {
             scalar_prop("description", "flux://description", false, false),
         ]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query);
+        let sparql = build_instance_sparql(&shape, &query, None);
 
         assert!(
             sparql.contains("VALUES ?predicate"),
@@ -6794,7 +6863,7 @@ mod integration_tests {
             ),
         ]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query);
+        let sparql = build_instance_sparql(&shape, &query, None);
 
         assert!(
             sparql.contains("VALUES ?predicate"),
@@ -6828,7 +6897,7 @@ mod integration_tests {
             ),
         ]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query);
+        let sparql = build_instance_sparql(&shape, &query, None);
 
         assert!(sparql.contains("VALUES ?predicate"));
         assert!(sparql.contains("<flux://entry_type>"));
@@ -6859,7 +6928,7 @@ mod integration_tests {
             ),
         ]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query);
+        let sparql = build_instance_sparql(&shape, &query, None);
 
         assert!(sparql.contains("VALUES ?predicate"));
         // ad4m://has_child should appear because raw_children needs it
@@ -6875,7 +6944,7 @@ mod integration_tests {
         // unrestricted wildcard (no VALUES clause).
         let shape = make_shape(vec![]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query);
+        let sparql = build_instance_sparql(&shape, &query, None);
 
         assert!(
             !sparql.contains("VALUES ?predicate"),
@@ -6895,7 +6964,7 @@ mod integration_tests {
             scalar_prop("name", "ns://name", false, false),
         ]);
         let query = ModelQueryInput::default();
-        let sparql = build_instance_sparql(&shape, &query);
+        let sparql = build_instance_sparql(&shape, &query, None);
 
         assert!(sparql.contains("VALUES ?predicate"));
         // Count occurrences of the shared predicate in the VALUES clause

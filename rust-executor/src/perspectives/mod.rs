@@ -118,6 +118,19 @@ pub fn initialize_from_db() {
                 Err(e) => log::warn!("Reifier migration for {}: {}", handle_clone.uuid, e),
             }
 
+            // Run signed-envelope → plain-literal migration (idempotent)
+            match p.sparql_store.migrate_signed_envelopes_to_plain_literals() {
+                Ok(count) if count > 0 => {
+                    log::info!(
+                        "🔄 Plain literal migration for {}: {} envelopes converted",
+                        handle_clone.uuid,
+                        count
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("Plain literal migration for {}: {}", handle_clone.uuid, e),
+            }
+
             // Rebuild SPARQL index from existing links
             // Skip SPARQL rebuild if persistent store already has data
             if p.sparql_store.has_data() {
