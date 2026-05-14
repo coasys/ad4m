@@ -28,6 +28,7 @@ struct RpcMessage {
 
 #[derive(Deserialize)]
 struct RpcResponse {
+    #[allow(dead_code)] // Present in JSON wire format but matched via PendingMap key
     id: Option<String>,
     result: Option<Value>,
     error: Option<RpcError>,
