@@ -1007,13 +1007,21 @@ describe("Multi-User Simple integration tests", () => {
             console.log("Expression 1:", JSON.stringify(expr1, null, 2));
             console.log("Expression 2:", JSON.stringify(expr2, null, 2));
 
-            // Literal expressions use plain URL encoding — provenance (author, proof)
-            // is stored on the link's RDF 1.2 reifier, not in the expression itself.
-            // So the envelope returned by expression.get() has author "<unknown>".
-            expect(expr1).to.not.be.null;
-            expect(expr2).to.not.be.null;
-            expect(expr1?.data).to.include("Hello from User 1");
-            expect(expr2?.data).to.include("Hello from User 2");
+            // The expressions should be authored by the respective users, not the main agent
+            expect(expr1?.author).to.equal(user1Agent.did);
+            expect(expr2?.author).to.equal(user2Agent.did);
+
+            // Verify expressions have signatures (literal expressions don't get verified automatically)
+            if (expr1) {
+                console.log("Expression 1 proof:", expr1.proof);
+                expect(expr1.proof.signature).to.not.be.empty;
+                expect(expr1.proof.key).to.not.be.empty;
+            }
+            if (expr2) {
+                console.log("Expression 2 proof:", expr2.proof);
+                expect(expr2.proof.signature).to.not.be.empty;
+                expect(expr2.proof.key).to.not.be.empty;
+            }
 
             console.log("✅ Expression authoring uses correct user context");
         });

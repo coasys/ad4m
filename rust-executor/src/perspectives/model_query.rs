@@ -387,6 +387,12 @@ fn parse_literal_value(uri: &str) -> Value {
     } else if let Some(rest) = body.strip_prefix("json:") {
         let decoded = urlencoding::decode(rest).unwrap_or_else(|_| rest.into());
         if let Ok(json_val) = serde_json::from_str::<Value>(&decoded) {
+            // For signed expression envelopes, extract .data
+            if let Some(data) = json_val.get("data") {
+                if json_val.get("author").is_some() && json_val.get("proof").is_some() {
+                    return data.clone();
+                }
+            }
             json_val
         } else {
             Value::String(decoded.into_owned())
@@ -897,40 +903,36 @@ fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
                 let escaped = escape_sparql_string(val);
                 patterns.push(format!("    ?t <{}> ?{} .\n", pred, var));
                 patterns.push(format!(
-                    "    FILTER(STR(?{}) = \"{}\" || STR(?{}) = \"literal:string:{}\")\n",
-                    var,
-                    escaped,
-                    var,
-                    literal_percent_encode(val),
+                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{})) = \"{}\")\n",
+                    var, escaped,
                 ));
             }
             WhereCondition::Bool(b) => {
                 let bval = if *b { "true" } else { "false" };
                 patterns.push(format!("    ?t <{}> ?{} .\n", pred, var));
                 patterns.push(format!(
-                    "    FILTER(STR(?{}) = \"{}\" || STR(?{}) = \"literal:boolean:{}\")\n",
-                    var, bval, var, bval,
+                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{})) = \"{}\")\n",
+                    var, bval,
                 ));
             }
             WhereCondition::Number(n) => {
                 patterns.push(format!("    ?t <{}> ?{} .\n", pred, var));
                 patterns.push(format!(
-                    "    FILTER(STR(?{}) = \"{}\" || STR(?{}) = \"literal:number:{}\")\n",
-                    var, n, var, n,
+                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{})) = \"{}\")\n",
+                    var, n,
                 ));
             }
             WhereCondition::StringArray(vals) => {
                 let list = vals
                     .iter()
-                    .flat_map(|v| {
-                        let r = escape_sparql_string(v);
-                        let e = literal_percent_encode(v);
-                        vec![format!("\"{}\"", r), format!("\"literal:string:{}\"", e)]
-                    })
+                    .map(|v| format!("\"{}\"", escape_sparql_string(v)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 patterns.push(format!("    ?t <{}> ?{} .\n", pred, var));
-                patterns.push(format!("    FILTER(STR(?{}) IN ({}))\n", var, list));
+                patterns.push(format!(
+                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{})) IN ({}))\n",
+                    var, list,
+                ));
             }
             _ => {} // Ops not supported for projection where clauses
         }
@@ -2108,8 +2110,11 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                 continue;
             }
 
-            // Property-based where: values are plain literal IRIs.
-            // Use direct IRI matching for indexed lookups.
+            // Property-based where: use fn/parse_literal custom SPARQL function
+            // to extract the inner data value from literal IRIs (including signed
+            // expression envelopes) at query time. This keeps WHERE clauses
+            // format-agnostic — they work for literal:string:X, literal:json:{signed},
+            // and raw URIs alike.
             if let Some(prop) = shape
                 .properties
                 .iter()
@@ -2122,44 +2127,16 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                 let is_literal_prop = prop.resolve_language.is_some();
                 match condition {
                     WhereCondition::String(val) => {
-                        // Values may be stored as raw URIs (from constructor initial
-                        // values) or as literal:string:… IRIs (from setters through
-                        // resolveLanguage). When resolveLanguage is set and the value
-                        // looks like a URI, match both forms.
                         if is_literal_prop {
-                            let literal_iri =
-                                format!("literal:string:{}", literal_percent_encode(val));
-                            let val_is_uri = val
-                                .find(':')
-                                .map(|i| i > 0 && val[..i].chars().all(|c| c.is_alphanumeric()))
-                                .unwrap_or(false);
-                            if val_is_uri {
-                                // Could be stored as raw URI or literal — match both
-                                let var = format!("?_pw_{}", safe_name);
-                                where_patterns
-                                    .push(format!("    ?source <{}> {} .", prop.predicate, var));
-                                where_patterns.push(format!(
-                                    "    FILTER(STR({}) = \"{}\" || STR({}) = \"{}\")",
-                                    var,
-                                    escape_sparql_string(val),
-                                    var,
-                                    escape_sparql_string(&literal_iri)
-                                ));
-                            } else if validate_iri(&literal_iri).is_ok() {
-                                where_patterns.push(format!(
-                                    "    ?source <{}> <{}> .",
-                                    prop.predicate, literal_iri
-                                ));
-                            } else {
-                                let var = format!("?_pw_{}", safe_name);
-                                where_patterns
-                                    .push(format!("    ?source <{}> {} .", prop.predicate, var));
-                                where_patterns.push(format!(
-                                    "    FILTER(STR({}) = \"{}\")",
-                                    var,
-                                    escape_sparql_string(&literal_iri)
-                                ));
-                            }
+                            // Use fn/parse_literal to extract inner value from signed envelopes
+                            let var = format!("?_pw_{}", safe_name);
+                            where_patterns
+                                .push(format!("    ?source <{}> {} .", prop.predicate, var));
+                            where_patterns.push(format!(
+                                "    FILTER(STR(<ad4m://fn/parse_literal>({})) = \"{}\")",
+                                var,
+                                escape_sparql_string(val)
+                            ));
                         } else if validate_iri(val).is_ok() {
                             where_patterns
                                 .push(format!("    ?source <{}> <{}> .", prop.predicate, val));
@@ -2169,73 +2146,72 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                             where_patterns
                                 .push(format!("    ?source <{}> {} .", prop.predicate, var));
                             where_patterns.push(format!(
-                                "    FILTER(STR({}) = \"{}\")",
+                                "    FILTER(STR(<ad4m://fn/parse_literal>({})) = \"{}\")",
                                 var,
                                 escape_sparql_string(val)
                             ));
                         }
                     }
                     WhereCondition::Number(n) => {
-                        let literal_iri = format!("literal:number:{}", n);
+                        let var = format!("?_pw_{}", safe_name);
+                        where_patterns
+                            .push(format!("    ?source <{}> {} .", prop.predicate, var));
                         where_patterns.push(format!(
-                            "    ?source <{}> <{}> .",
-                            prop.predicate, literal_iri
+                            "    FILTER(STR(<ad4m://fn/parse_literal>({})) = \"{}\")",
+                            var, n
                         ));
                     }
                     WhereCondition::Bool(b) => {
-                        let literal_iri = format!("literal:boolean:{}", b);
+                        let var = format!("?_pw_{}", safe_name);
+                        where_patterns
+                            .push(format!("    ?source <{}> {} .", prop.predicate, var));
                         where_patterns.push(format!(
-                            "    ?source <{}> <{}> .",
-                            prop.predicate, literal_iri
+                            "    FILTER(STR(<ad4m://fn/parse_literal>({})) = \"{}\")",
+                            var, b
                         ));
                     }
                     WhereCondition::StringArray(vals) => {
-                        // For literal props, include both raw and literal forms
-                        // in VALUES to handle both constructor-stored and setter-stored values.
-                        let iris = vals
+                        let values_list = vals
                             .iter()
-                            .flat_map(|v| {
-                                if is_literal_prop {
-                                    let literal =
-                                        format!("<literal:string:{}>", literal_percent_encode(v));
-                                    let val_is_uri = v
-                                        .find(':')
-                                        .map(|i| {
-                                            i > 0 && v[..i].chars().all(|c| c.is_alphanumeric())
-                                        })
-                                        .unwrap_or(false);
-                                    if val_is_uri {
-                                        vec![format!("<{}>", v), literal]
-                                    } else {
-                                        vec![literal]
-                                    }
-                                } else {
-                                    vec![format!("<{}>", v)]
-                                }
-                            })
+                            .map(|v| format!("\"{}\"", escape_sparql_string(v)))
                             .collect::<Vec<_>>()
-                            .join(" ");
+                            .join(", ");
+                        let var = format!("?_pw_{}", safe_name);
                         where_patterns.push(format!(
-                            "    VALUES ?_pw_{} {{ {} }}\n    ?source <{}> ?_pw_{} .",
-                            safe_name, iris, prop.predicate, safe_name
+                            "    ?source <{}> {} .",
+                            prop.predicate, var
+                        ));
+                        where_patterns.push(format!(
+                            "    FILTER(STR(<ad4m://fn/parse_literal>({})) IN ({}))",
+                            var, values_list
                         ));
                     }
                     WhereCondition::NumberArray(vals) => {
-                        let iris = vals
+                        let values_list = vals
                             .iter()
-                            .map(|n| format!("<literal:number:{}>", n))
+                            .map(|n| format!("\"{}\"", n))
                             .collect::<Vec<_>>()
-                            .join(" ");
+                            .join(", ");
+                        let var = format!("?_pw_{}", safe_name);
                         where_patterns.push(format!(
-                            "    VALUES ?_pw_{} {{ {} }}\n    ?source <{}> ?_pw_{} .",
-                            safe_name, iris, prop.predicate, safe_name
+                            "    ?source <{}> {} .",
+                            prop.predicate, var
+                        ));
+                        where_patterns.push(format!(
+                            "    FILTER(STR(<ad4m://fn/parse_literal>({})) IN ({}))",
+                            var, values_list
                         ));
                     }
                     WhereCondition::Ops(ops) => {
-                        // Generate SPARQL FILTER for all ops:
-                        // not, gt/gte/lt/lte, between, and contains.
+                        // Bind parsed literal value, then FILTER on it.
                         let var = format!("?_pw_{}", safe_name);
-                        where_patterns.push(format!("    ?source <{}> {} .", prop.predicate, var));
+                        let val_var = format!("?_pw_{}_v", safe_name);
+                        where_patterns
+                            .push(format!("    ?source <{}> {} .", prop.predicate, var));
+                        where_patterns.push(format!(
+                            "    BIND(STR(<ad4m://fn/parse_literal>({})) AS {})",
+                            var, val_var
+                        ));
 
                         let mut filters = Vec::new();
 
@@ -2243,68 +2219,56 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                         if let Some(ref not_val) = ops.not {
                             match not_val {
                                 Value::String(s) => {
-                                    let target = if is_literal_prop {
-                                        format!("literal:string:{}", literal_percent_encode(s))
-                                    } else {
-                                        s.to_string()
-                                    };
                                     filters.push(format!(
-                                        "STR({}) != \"{}\"",
-                                        var,
-                                        escape_sparql_string(&target)
+                                        "{} != \"{}\"",
+                                        val_var,
+                                        escape_sparql_string(s)
                                     ));
                                 }
                                 Value::Number(n) => {
                                     let n_f64 = n.as_f64().unwrap_or(0.0);
-                                    let literal_iri = if n_f64.fract() == 0.0 {
-                                        format!("literal:number:{}", n_f64 as i64)
+                                    let n_str = if n_f64.fract() == 0.0 {
+                                        format!("{}", n_f64 as i64)
                                     } else {
-                                        format!("literal:number:{}", n_f64)
+                                        format!("{}", n_f64)
                                     };
                                     filters.push(format!(
-                                        "STR({}) != \"{}\"",
-                                        var,
-                                        escape_sparql_string(&literal_iri)
+                                        "{} != \"{}\"",
+                                        val_var, n_str
                                     ));
                                 }
                                 Value::Bool(b) => {
-                                    let literal_iri = format!("literal:boolean:{}", b);
-                                    filters.push(format!("STR({}) != \"{}\"", var, literal_iri));
+                                    filters.push(format!(
+                                        "{} != \"{}\"",
+                                        val_var, b
+                                    ));
                                 }
                                 Value::Array(arr) => {
                                     let items: Vec<String> = arr
                                         .iter()
                                         .filter_map(|item| match item {
                                             Value::String(s) => {
-                                                let target = if is_literal_prop {
-                                                    format!(
-                                                        "literal:string:{}",
-                                                        literal_percent_encode(s)
-                                                    )
-                                                } else {
-                                                    s.to_string()
-                                                };
                                                 Some(format!(
                                                     "\"{}\"",
-                                                    escape_sparql_string(&target)
+                                                    escape_sparql_string(s)
                                                 ))
                                             }
                                             Value::Number(n) => {
                                                 let f = n.as_f64().unwrap_or(0.0);
-                                                let iri = if f.fract() == 0.0 {
-                                                    format!("literal:number:{}", f as i64)
+                                                let s = if f.fract() == 0.0 {
+                                                    format!("{}", f as i64)
                                                 } else {
-                                                    format!("literal:number:{}", f)
+                                                    format!("{}", f)
                                                 };
-                                                Some(format!("\"{}\"", iri))
+                                                Some(format!("\"{}\"", s))
                                             }
                                             _ => None,
                                         })
                                         .collect();
                                     if !items.is_empty() {
                                         filters.push(format!(
-                                            "STR({}) NOT IN ({})",
-                                            var,
+                                            "{} NOT IN ({})",
+                                            val_var,
                                             items.join(", ")
                                         ));
                                     }
@@ -2313,11 +2277,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                             }
                         }
 
-                        // Numeric comparisons: extract number from literal IRI.
-                        // "literal:number:" and "literal:string:" are both 15 chars,
-                        // so SUBSTR(STR(?var), 16) extracts the value for either prefix.
-                        // Double cast succeeds for number literals and numeric
-                        // strings; fails safely (unbound → filter false) for non-numeric.
+                        // Numeric comparisons: cast the parsed string to double.
                         let has_numeric = ops.gt.is_some()
                             || ops.gte.is_some()
                             || ops.lt.is_some()
@@ -2327,8 +2287,8 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                         if has_numeric {
                             let num_var = format!("?_pw_{}_num", safe_name);
                             where_patterns.push(format!(
-                                "    BIND(<http://www.w3.org/2001/XMLSchema#double>(SUBSTR(STR({}), 16)) AS {})",
-                                var, num_var
+                                "    BIND(<http://www.w3.org/2001/XMLSchema#double>({}) AS {})",
+                                val_var, num_var
                             ));
                             if let Some(gt) = ops.gt {
                                 filters.push(format!("{} > {}", num_var, gt));
@@ -2350,18 +2310,15 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                             }
                         }
 
-                        // Contains: case-insensitive substring match.
-                        // Both stored value and needle are percent-encoded, so
-                        // CONTAINS on the encoded forms is equivalent to matching
-                        // the original strings.  LCASE handles ASCII case-folding.
+                        // Contains: case-insensitive substring match on parsed value.
                         if let Some(ref contains_val) = ops.contains {
                             let needle = match contains_val {
                                 Value::String(s) => s.clone(),
                                 other => other.to_string(),
                             };
                             filters.push(format!(
-                                "CONTAINS(LCASE(SUBSTR(STR({}), 16)), LCASE(ENCODE_FOR_URI(\"{}\")))",
-                                var,
+                                "CONTAINS(LCASE({}), LCASE(\"{}\"))",
+                                val_var,
                                 escape_sparql_string(&needle)
                             ));
                         }
@@ -5401,8 +5358,8 @@ mod integration_tests {
             "expected triple pattern for signal://type, got: {patterns}"
         );
         assert!(
-            patterns.contains("FILTER(STR(?"),
-            "expected FILTER, got: {patterns}"
+            patterns.contains("FILTER"),
+            "expected FILTER with fn/parse_literal, got: {patterns}"
         );
     }
 
