@@ -1,6 +1,6 @@
-import { buildSPARQLOrderLimitOffset, buildSPARQLQuery, buildPaginationSubquery, hasJsOnlyWhereFilters } from './query-sparql';
+import { buildSPARQLQuery, buildPaginationSubquery, hasJsOnlyWhereFilters } from './query-sparql';
 
-// Minimal stubs for ModelMetadata — buildSPARQLOrderLimitOffset only uses the query arg
+// Minimal stubs for ModelMetadata
 const emptyMetadata: any = { properties: {}, relations: {} };
 
 // Metadata with a required (non-literal) property and a literal-stored property
@@ -87,19 +87,6 @@ describe('buildSPARQLQuery — SPARQL-level pagination via subquery', () => {
   });
 });
 
-describe('buildSPARQLOrderLimitOffset', () => {
-  it('always returns empty string (pagination uses subquery pattern instead)', () => {
-    expect(buildSPARQLOrderLimitOffset(emptyMetadata, {})).toBe('');
-    expect(buildSPARQLOrderLimitOffset(emptyMetadata, { limit: 50 })).toBe('');
-    expect(buildSPARQLOrderLimitOffset(emptyMetadata, { limit: 50, offset: 100 })).toBe('');
-    expect(buildSPARQLOrderLimitOffset(emptyMetadata, { order: { timestamp: 'DESC' } })).toBe('');
-    expect(buildSPARQLOrderLimitOffset(emptyMetadata, {
-      order: { timestamp: 'DESC' },
-      limit: 50,
-      offset: 100,
-    })).toBe('');
-  });
-});
 
 describe('buildSPARQLQuery — parse_literal push-down filters', () => {
   const modelClass: any = {};

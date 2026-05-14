@@ -305,21 +305,7 @@ export function buildSPARQLQuery(
       ?_reifier <ad4m://ontology/timestamp> ?timestamp .
       ${filterClause}
     }
-    ${buildSPARQLOrderLimitOffset(metadata, query)}
   `.trim();
-}
-
-/**
- * Build ORDER BY / LIMIT / OFFSET clauses for the SPARQL query.
- *
- * NOTE: The outer SELECT returns multiple rows per instance (one per link),
- * so LIMIT/OFFSET at the outer level would cut off links mid-instance.
- * This function is kept for backward compatibility and always returns "".
- * SPARQL-level pagination is handled via a subquery in buildSPARQLQuery
- * using buildPaginationSubquery().
- */
-export function buildSPARQLOrderLimitOffset(_metadata: ModelMetadata, query: Query): string {
-  return "";
 }
 
 /**
