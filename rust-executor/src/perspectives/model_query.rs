@@ -5875,18 +5875,19 @@ mod integration_tests {
         );
     }
 
-    /// Regression test for the `signalTypeId` projection filter bug.
+    /// Regression test for the `signalTypeId` double-encoded literal filter.
     ///
-    /// When `resolve_property_value` stores a `literal:string:` URI value through
-    /// the "literal" resolveLanguage path it calls `literal_encode(value)` directly,
-    /// producing `literal:string:literal%3Astring%3AX` (double-encoded).
+    /// When `resolve_property_value` stores a value via `resolveLanguage: "literal"`,
+    /// it calls `literal_encode(value)` directly.  If the value is itself a
+    /// `literal:string:X` URI (as SignalType IDs are in WE), the result is double-encoded:
+    ///   `literal:string:literal%3Astring%3AX`
     ///
-    /// The projection SPARQL filter must match this double-encoded form via its
-    /// second branch:
-    ///   FILTER(STR(?p) = "literal:string:X" || STR(?p) = "literal:string:literal%3Astring%3AX")
+    /// The `fn/parse_literal` custom SPARQL function URL-decodes the stored IRI at
+    /// query time, so the FILTER compares the decoded value against the user-supplied
+    /// filter string (`"literal:string:X"` in this case) — matching correctly.
     ///
-    /// This test stores the double-encoded IRI (as `resolve_property_value` would after
-    /// the fix) and verifies the projection count/list still return correct results.
+    /// This test stores the double-encoded IRI and verifies the projection count
+    /// returns 1 when filtering by the original (non-encoded) IRI string.
     #[test]
     fn test_resolve_projections_where_filter_double_encoded_literal() {
         let store = SparqlStore::new(None).unwrap();
@@ -5972,7 +5973,7 @@ mod integration_tests {
         let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
         assert_eq!(
             count, 1,
-            "double-encoded stored URI should match filter second branch; got {count}"
+            "double-encoded stored URI should be decoded by parse_literal and match filter; got {count}"
         );
     }
 
