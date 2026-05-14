@@ -5875,19 +5875,17 @@ mod integration_tests {
         );
     }
 
-    /// Regression test for the `signalTypeId` double-encoded literal filter.
+    /// Tests `fn/parse_literal` filter matching against a double-encoded literal URI.
     ///
-    /// When `resolve_property_value` stores a value via `resolveLanguage: "literal"`,
-    /// it calls `literal_encode(value)` directly.  If the value is itself a
-    /// `literal:string:X` URI (as SignalType IDs are in WE), the result is double-encoded:
-    ///   `literal:string:literal%3Astring%3AX`
+    /// Some storage paths produce a `literal:string:X` URI and then encode that URI
+    /// *again* as a literal, yielding `literal:string:literal%3Astring%3AX`.
     ///
-    /// The `fn/parse_literal` custom SPARQL function URL-decodes the stored IRI at
-    /// query time, so the FILTER compares the decoded value against the user-supplied
-    /// filter string (`"literal:string:X"` in this case) — matching correctly.
+    /// `fn/parse_literal` URL-decodes the `string:` payload, returning
+    /// `"literal:string:X"` as the decoded value.  The FILTER then compares that
+    /// against the caller-supplied string `"literal:string:X"` — matching correctly.
     ///
     /// This test stores the double-encoded IRI and verifies the projection count
-    /// returns 1 when filtering by the original (non-encoded) IRI string.
+    /// returns 1 when filtering by the original `literal:string:X` form.
     #[test]
     fn test_resolve_projections_where_filter_double_encoded_literal() {
         let store = SparqlStore::new(None).unwrap();

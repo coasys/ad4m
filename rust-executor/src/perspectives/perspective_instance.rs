@@ -3688,19 +3688,6 @@ impl PerspectiveInstance {
             .await?;
 
         if let Some(resolve_language) = resolve_language {
-            // For the "literal" built-in language, encode the value directly as a
-            // deterministic literal URI (e.g. `literal:string:ENCODED`) rather than
-            // wrapping it in a signed expression JSON object (`literal:json:...`).
-            //
-            // Using expression_create("literal", ...) would produce a signed-expression
-            // envelope whose IRI includes dynamic fields (author, timestamp, proof),
-            // making the resulting IRI non-deterministic and impossible to match via
-            // SPARQL FILTER patterns in projection queries.  Direct literal_encode gives
-            // a stable, matchable IRI while still conforming to the literal URI scheme.
-            if resolve_language == "literal" {
-                let encoded = crate::languages::literal_encode(value);
-                return Ok(format!("literal:{}", encoded));
-            }
             // Create an expression for the value
             let controller = crate::languages::LanguageController::global_instance();
             let agent_context = context.clone();

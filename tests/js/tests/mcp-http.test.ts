@@ -1086,7 +1086,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             expect(result.success).to.be.true;
 
-            // Verify the stored link target uses literal:string: (deterministic literal URI)
+            // Verify the stored link target uses literal:json: (signed expression)
             var links = await callMcpTool(MCP_BASE_URL,'query_links', {
                 perspective_id: perspectiveUuid,
                 source: resolveTestChannelAddr,
