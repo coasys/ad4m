@@ -5758,20 +5758,21 @@ mod integration_tests {
     fn test_resolve_projections_where_filter_via_target_shape_property() {
         // Mirrors the WE $totalLikeCount pattern:
         //   include: {
-        //     $totalLikeCount: { from: 'signals', where: { signalTypeId: 'literal:string:xyz' }, count: true }
+        //     $totalLikeCount: { from: 'signals', where: { signalTypeId: 'like_type_id123' }, count: true }
         //   }
         // where signalTypeId is a property on the Signal target node, resolved
         // via target_shape so Rust can build the ?t <predicate> ?_pw0 . FILTER pattern.
-        // This test covers the gap: no previous integration test used target_shape: Some(...)
-        // in resolve_projections.
+        // Under the fn/parse_literal scheme, stored values are literal:string:... IRIs
+        // and WHERE filter values are the decoded plain forms (what the TS caller passes).
         let store = SparqlStore::new(None).unwrap();
 
         let parent_a = "test://parent/a";
         let like_signal = "test://signal/like";
         let dislike_signal = "test://signal/dislike";
-        // Signal type IDs are often stored as literal:string: URIs in the WE models.
-        let like_type_id = "literal:string:like_type_id123";
-        let dislike_type_id = "literal:string:dislike_type_id456";
+        // Signal type IDs stored as literal:string: URIs; WHERE filter uses decoded plain value.
+        let like_type_id_stored = "literal:string:like_type_id123";
+        let dislike_type_id_stored = "literal:string:dislike_type_id456";
+        let like_type_id_filter = "like_type_id123"; // decoded value — what the caller passes
 
         // Add parent → signal links
         store
@@ -5791,12 +5792,12 @@ mod integration_tests {
             ))
             .unwrap();
 
-        // Add signal → signalTypeId property links
+        // Add signal → signalTypeId property links (stored as literal:string: IRIs)
         store
             .add_link(&make_link(
                 like_signal,
                 "test://signal_type_id",
-                like_type_id,
+                like_type_id_stored,
                 "1002",
             ))
             .unwrap();
@@ -5804,7 +5805,7 @@ mod integration_tests {
             .add_link(&make_link(
                 dislike_signal,
                 "test://signal_type_id",
-                dislike_type_id,
+                dislike_type_id_stored,
                 "1003",
             ))
             .unwrap();
@@ -5819,11 +5820,12 @@ mod integration_tests {
             "relations": {}
         });
 
-        // Filter count to only "like" signals via the target_shape property predicate.
+        // Filter uses the decoded plain value — parse_literal decodes the stored
+        // literal:string:like_type_id123 IRI to "like_type_id123" for comparison.
         let mut wc = BTreeMap::new();
         wc.insert(
             "signalTypeId".to_string(),
-            WhereCondition::String(like_type_id.to_string()),
+            WhereCondition::String(like_type_id_filter.to_string()),
         );
 
         let mut instances = vec![json!({ "id": parent_a })];
