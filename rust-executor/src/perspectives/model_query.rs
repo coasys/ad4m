@@ -613,11 +613,16 @@ fn get_initial_value(
 /// - `count: true` → attaches an integer (0 when no links exist).
 /// - `limit: Some(1)` → attaches the first linked ID as a string, or `null`.
 /// - otherwise → attaches an array of linked IDs.
+///
+/// When `proj.target_shape` is set, raw target IRIs are replaced with fully
+/// hydrated model instances via a recursive `execute_model_query_inner` call
+/// (one batch per projection key, eliminating TS-side round-trips).
 fn resolve_projections(
     store: &SparqlStore,
     instances: &mut Vec<Value>,
     projections: &HashMap<String, ProjectionInput>,
     shape: &ModelShape,
+    depth: u8,
 ) -> Result<(), Error> {
     if instances.is_empty() || projections.is_empty() {
         return Ok(());
@@ -766,6 +771,72 @@ fn resolve_projections(
                         .map(|s| Value::String(s.to_string()))
                         .unwrap_or(Value::Null);
                     list_map.entry(parent.to_string()).or_default().push(t);
+                }
+            }
+
+            // ------------------------------------------------------------------
+            // 4. If a target shape is available, hydrate raw IRIs → full model
+            //    instances in-process — no TS round-trip required.
+            // ------------------------------------------------------------------
+            if let Some(ref target_shape) = proj.target_shape {
+                if !proj.count {
+                    if let Some(target_class) = target_shape["className"].as_str() {
+                        if !target_class.is_empty() {
+                            // Collect all unique raw IRI strings.
+                            let mut seen = std::collections::HashSet::new();
+                            let mut all_ids: Vec<String> = Vec::new();
+                            for vals in list_map.values() {
+                                for v in vals {
+                                    if let Some(s) = v.as_str() {
+                                        if seen.insert(s.to_string()) {
+                                            all_ids.push(s.to_string());
+                                        }
+                                    }
+                                }
+                            }
+
+                            if !all_ids.is_empty() {
+                                let target_shape_json =
+                                    serde_json::to_string(target_shape).unwrap_or_default();
+                                let mut sub_where = BTreeMap::new();
+                                sub_where
+                                    .insert("id".to_string(), WhereCondition::StringArray(all_ids));
+                                let sub_query = ModelQueryInput {
+                                    where_clause: Some(sub_where),
+                                    deep_query: Some(true),
+                                    ..ModelQueryInput::default()
+                                };
+
+                                if let Ok(result) = execute_model_query_inner(
+                                    store,
+                                    target_class,
+                                    &sub_query,
+                                    Some(&target_shape_json),
+                                    depth + 1,
+                                ) {
+                                    let hydrated: HashMap<String, Value> = result
+                                        .instances
+                                        .into_iter()
+                                        .filter_map(|inst| {
+                                            let id = inst["id"].as_str()?.to_string();
+                                            Some((id, inst))
+                                        })
+                                        .collect();
+
+                                    // Replace raw IRI strings with hydrated objects.
+                                    for vals in list_map.values_mut() {
+                                        for v in vals.iter_mut() {
+                                            if let Some(id) = v.as_str() {
+                                                if let Some(obj) = hydrated.get(id) {
+                                                    *v = obj.clone();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1403,7 +1474,7 @@ fn execute_model_query_inner(
     // ── Attach projection results ($-prefixed aggregations / lists) ──────
     // Issued as one grouped VALUES SPARQL per key — O(projections) total.
     if let Some(ref projections) = query_input.projections {
-        resolve_projections(store, &mut final_instances, projections, &shape)?;
+        resolve_projections(store, &mut final_instances, projections, &shape, depth)?;
     }
 
     Ok(ModelQueryResult {
@@ -5504,7 +5575,7 @@ mod integration_tests {
             },
         );
 
-        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
 
         let count_a = instances[0]["$itemCount"].as_u64().unwrap_or(999);
         let count_b = instances[1]["$itemCount"].as_u64().unwrap_or(999);
@@ -5545,7 +5616,7 @@ mod integration_tests {
             },
         );
 
-        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
 
         let items = instances[0]["$items"]
             .as_array()
@@ -5585,7 +5656,7 @@ mod integration_tests {
             },
         );
 
-        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
 
         let val = &instances[0]["$firstItem"];
         assert_eq!(
@@ -5617,7 +5688,7 @@ mod integration_tests {
             },
         );
 
-        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
 
         let count = instances[0]["$itemCount"].as_u64().unwrap_or(999);
         assert_eq!(
@@ -5679,7 +5750,7 @@ mod integration_tests {
             },
         );
 
-        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
 
         let count = instances[0]["$likeCount"].as_u64().unwrap_or(999);
         assert_eq!(
@@ -5738,7 +5809,7 @@ mod integration_tests {
             },
         );
 
-        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
 
         let count = instances[0]["$mySignalCount"].as_u64().unwrap_or(999);
         assert_eq!(count, 2, "should count only alice's 2 signals, got {count}");
@@ -5810,7 +5881,7 @@ mod integration_tests {
         });
 
         // Filter count to only "like" signals via the target_shape property predicate.
-        let mut wc = HashMap::new();
+        let mut wc = BTreeMap::new();
         wc.insert(
             "signalTypeId".to_string(),
             WhereCondition::String(like_type_id.to_string()),
@@ -5830,7 +5901,7 @@ mod integration_tests {
             },
         );
 
-        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
 
         let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
         assert_eq!(
@@ -5853,13 +5924,13 @@ mod integration_tests {
             },
         );
 
-        resolve_projections(&store, &mut instances2, &projections2, &shape).unwrap();
+        resolve_projections(&store, &mut instances2, &projections2, &shape, 0).unwrap();
 
         let got = &instances2[0]["$myLikeSignal"];
         assert_eq!(
-            got.as_str().unwrap_or(""),
+            got["id"].as_str().unwrap_or(""),
             like_signal,
-            "list with limit:1 should return the like signal IRI, got {got}"
+            "list with limit:1 should return the hydrated like signal id, got {got}"
         );
     }
 
@@ -5885,10 +5956,11 @@ mod integration_tests {
 
         // The "user-facing" signalTypeId IRI (what the caller passes in where: {...})
         let like_type_user = "literal:string:like_dbl_id";
-        // The stored form produced by literal_encode("literal:string:like_dbl_id")
-        // = "literal:string:literal%3Astring%3Alike_dbl_id"
-        let like_type_stored = "literal:string:literal%3Astring%3Alike_dbl_id";
-        let dislike_type_stored = "literal:string:literal%3Astring%3Adislike_dbl_id";
+        // The stored form produced by literal_encode("literal:string:like_dbl_id").
+        // literal_percent_encode uses NON_ALPHANUMERIC which encodes _ as %5F.
+        // = "literal:string:literal%3Astring%3Alike%5Fdbl%5Fid"
+        let like_type_stored = "literal:string:literal%3Astring%3Alike%5Fdbl%5Fid";
+        let dislike_type_stored = "literal:string:literal%3Astring%3Adislike%5Fdbl%5Fid";
 
         store
             .add_link(&make_link(
@@ -5934,7 +6006,7 @@ mod integration_tests {
         });
 
         // The caller passes the user-facing value (not the double-encoded stored form).
-        let mut wc = HashMap::new();
+        let mut wc = BTreeMap::new();
         wc.insert(
             "signalTypeId".to_string(),
             WhereCondition::String(like_type_user.to_string()),
@@ -5954,7 +6026,7 @@ mod integration_tests {
             },
         );
 
-        resolve_projections(&store, &mut instances, &projections, &shape).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
 
         let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
         assert_eq!(

@@ -1011,56 +1011,6 @@ export class Ad4mModel {
   }
 
   /**
-   * Hydrate non-count projection results: Rust returns raw target IRIs for
-   * list/scalar projections ($-prefixed include keys). Batch-fetch all unique
-   * IRIs per projection key and swap raw strings for hydrated model instances.
-   * @internal
-   */
-  static async hydrateProjections<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T),
-    perspective: PerspectiveProxy,
-    instances: T[],
-    include: IncludeMap,
-  ): Promise<void> {
-    const allRelMeta = getRelationsMetadata(this as any);
-    for (const [key, val] of Object.entries(include)) {
-      if (!key.startsWith('$')) continue;
-      const proj = val as IncludeProjection;
-      if (proj.count) continue;
-      const relMeta = allRelMeta[proj.from];
-      if (!relMeta?.target) continue;
-      let TargetClass: any;
-      try { TargetClass = relMeta.target(); } catch (_) { continue; }
-      if (!TargetClass) continue;
-
-      const irisSet = new Set<string>();
-      for (const inst of instances) {
-        const raw = (inst as any)[key];
-        if (typeof raw === 'string') irisSet.add(raw);
-        else if (Array.isArray(raw)) raw.forEach((v: any) => typeof v === 'string' && irisSet.add(v));
-      }
-      if (irisSet.size === 0) continue;
-
-      const iris = Array.from(irisSet);
-      let hydrated: any[];
-      try {
-        hydrated = await TargetClass.findAll(perspective, { where: { id: iris.length === 1 ? iris[0] : iris } });
-      } catch (_) { continue; }
-
-      const byId = new Map<string, any>(hydrated.map((h: any) => [h.id, h]));
-
-      for (const inst of instances) {
-        const raw = (inst as any)[key];
-        if (typeof raw === 'string') {
-          (inst as any)[key] = byId.get(raw) ?? raw;
-        } else if (Array.isArray(raw)) {
-          (inst as any)[key] = raw.map((v: any) => (typeof v === 'string' ? byId.get(v) ?? v : v));
-        }
-      }
-    }
-  }
-
-  /**
    * Resolve non-literal (file-language) properties on an array of already-constructed
    * model instances.  Handles two cases:
    *
@@ -1143,12 +1093,6 @@ export class Ad4mModel {
     const instances: T[] = result.instances.map((json: any) => {
       return jsonToModelInstance(this, perspective, json, query.include, query.properties);
     });
-
-    // Hydrate non-count projection results: Rust returns raw target IRIs for
-    // list/scalar projections — swap them for hydrated model instances.
-    if (query.include) {
-      await (this as any).hydrateProjections(perspective, instances, query.include);
-    }
 
     // Resolve non-literal expressions (e.g. file languages where the stored
     // value is a content-addressed hash that must be fetched from the language

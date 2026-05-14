@@ -393,11 +393,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
     // Resolve non-literal (file-language) properties — handles both raw URI strings
     // and already-resolved FileData objects returned by the Rust executor.
-    // Also hydrates non-count projection results ($-prefixed include keys).
     const resolveAndReturn = async (instances: T[]): Promise<T[]> => {
-      if (this.queryParams.include) {
-        await (ctor as any).hydrateProjections(this.perspective, instances, this.queryParams.include);
-      }
       await (ctor as any).resolveNonLiteralProps(this.perspective, instances);
       return instances;
     };
