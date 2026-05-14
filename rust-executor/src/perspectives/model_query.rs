@@ -2154,8 +2154,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                     }
                     WhereCondition::Number(n) => {
                         let var = format!("?_pw_{}", safe_name);
-                        where_patterns
-                            .push(format!("    ?source <{}> {} .", prop.predicate, var));
+                        where_patterns.push(format!("    ?source <{}> {} .", prop.predicate, var));
                         where_patterns.push(format!(
                             "    FILTER(STR(<ad4m://fn/parse_literal>({})) = \"{}\")",
                             var, n
@@ -2163,8 +2162,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                     }
                     WhereCondition::Bool(b) => {
                         let var = format!("?_pw_{}", safe_name);
-                        where_patterns
-                            .push(format!("    ?source <{}> {} .", prop.predicate, var));
+                        where_patterns.push(format!("    ?source <{}> {} .", prop.predicate, var));
                         where_patterns.push(format!(
                             "    FILTER(STR(<ad4m://fn/parse_literal>({})) = \"{}\")",
                             var, b
@@ -2177,10 +2175,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                             .collect::<Vec<_>>()
                             .join(", ");
                         let var = format!("?_pw_{}", safe_name);
-                        where_patterns.push(format!(
-                            "    ?source <{}> {} .",
-                            prop.predicate, var
-                        ));
+                        where_patterns.push(format!("    ?source <{}> {} .", prop.predicate, var));
                         where_patterns.push(format!(
                             "    FILTER(STR(<ad4m://fn/parse_literal>({})) IN ({}))",
                             var, values_list
@@ -2193,10 +2188,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                             .collect::<Vec<_>>()
                             .join(", ");
                         let var = format!("?_pw_{}", safe_name);
-                        where_patterns.push(format!(
-                            "    ?source <{}> {} .",
-                            prop.predicate, var
-                        ));
+                        where_patterns.push(format!("    ?source <{}> {} .", prop.predicate, var));
                         where_patterns.push(format!(
                             "    FILTER(STR(<ad4m://fn/parse_literal>({})) IN ({}))",
                             var, values_list
@@ -2206,8 +2198,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                         // Bind parsed literal value, then FILTER on it.
                         let var = format!("?_pw_{}", safe_name);
                         let val_var = format!("?_pw_{}_v", safe_name);
-                        where_patterns
-                            .push(format!("    ?source <{}> {} .", prop.predicate, var));
+                        where_patterns.push(format!("    ?source <{}> {} .", prop.predicate, var));
                         where_patterns.push(format!(
                             "    BIND(STR(<ad4m://fn/parse_literal>({})) AS {})",
                             var, val_var
@@ -2232,26 +2223,17 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                                     } else {
                                         format!("{}", n_f64)
                                     };
-                                    filters.push(format!(
-                                        "{} != \"{}\"",
-                                        val_var, n_str
-                                    ));
+                                    filters.push(format!("{} != \"{}\"", val_var, n_str));
                                 }
                                 Value::Bool(b) => {
-                                    filters.push(format!(
-                                        "{} != \"{}\"",
-                                        val_var, b
-                                    ));
+                                    filters.push(format!("{} != \"{}\"", val_var, b));
                                 }
                                 Value::Array(arr) => {
                                     let items: Vec<String> = arr
                                         .iter()
                                         .filter_map(|item| match item {
                                             Value::String(s) => {
-                                                Some(format!(
-                                                    "\"{}\"",
-                                                    escape_sparql_string(s)
-                                                ))
+                                                Some(format!("\"{}\"", escape_sparql_string(s)))
                                             }
                                             Value::Number(n) => {
                                                 let f = n.as_f64().unwrap_or(0.0);
