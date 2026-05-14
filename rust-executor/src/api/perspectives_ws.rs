@@ -602,7 +602,7 @@ async fn add_sdna(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
             .await
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-        Ok(serde_json::to_value(results).unwrap())
+        Ok(serde_json::to_value(results)?)
     } else {
         // Single-entry mode (backward compatible)
         let body: AddSdnaRequest = serde_json::from_value(params.clone())
@@ -750,6 +750,12 @@ async fn subscribe_surreal_query(
 
 async fn keep_alive_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
     let body: KeepAliveQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -764,6 +770,12 @@ async fn keep_alive_query(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 
 async fn dispose_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
     let body: DisposeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
