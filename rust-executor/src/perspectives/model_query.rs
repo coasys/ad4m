@@ -8027,6 +8027,248 @@ mod integration_tests {
         );
     }
 
+    /// Helper: create a signed-envelope literal IRI (mimics what expression.create("literal", value)
+    /// produces in production). The signed envelope is JSON with {author, timestamp, data, proof}.
+    fn signed_envelope_literal(value: &str) -> String {
+        let envelope = serde_json::json!({
+            "author": "did:key:zQ3shTestAgent",
+            "timestamp": "2024-01-01T00:00:00.000Z",
+            "data": value,
+            "proof": {
+                "key": "#zQ3shTestAgent",
+                "signature": "fake-sig",
+                "valid": true,
+                "invalid": false
+            }
+        });
+        let json_str = serde_json::to_string(&envelope).unwrap();
+        format!("literal:json:{}", literal_percent_encode(&json_str))
+    }
+
+    /// Regression test for signed-envelope literals with fn/parse_literal WHERE clauses.
+    /// Exercises the exact pattern used by paginateSubscribe: model query with WHERE
+    /// filtering on a literal property, pagination (limit/offset), and count=true,
+    /// where stored values are signed expression envelopes (literal:json:{signed}).
+    #[test]
+    fn test_signed_envelope_where_paginate_count() {
+        let store = SparqlStore::new(None).unwrap();
+        let ts_base = 1700000000000i64;
+
+        // Insert 4 items: 3 active, 1 inactive — all using signed envelope format
+        let items = vec![
+            ("test://item-1", "active", "Alpha"),
+            ("test://item-2", "active", "Beta"),
+            ("test://item-3", "inactive", "Gamma"),
+            ("test://item-4", "active", "Delta"),
+        ];
+        for (i, (uri, status, name)) in items.iter().enumerate() {
+            let ts = format!("{}", ts_base + i as i64);
+            store
+                .add_link(&make_link(uri, "ns://type", "ns://task", &ts))
+                .unwrap();
+            store
+                .add_link(&make_link(
+                    uri,
+                    "ns://status",
+                    &signed_envelope_literal(status),
+                    &ts,
+                ))
+                .unwrap();
+            store
+                .add_link(&make_link(
+                    uri,
+                    "ns://name",
+                    &signed_envelope_literal(name),
+                    &ts,
+                ))
+                .unwrap();
+        }
+
+        let shape_json = r#"{
+            "className": "Task",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://task" },
+                "status": { "predicate": "ns://status", "required": false, "resolveLanguage": "literal" },
+                "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // Query: WHERE status = "active", paginated (limit 2, offset 0), ordered by timestamp ASC
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "status".to_string(),
+            WhereCondition::String("active".to_string()),
+        );
+        let result = execute_model_query(
+            &store,
+            "Task",
+            &ModelQueryInput {
+                where_clause: Some(wc.clone()),
+                limit: Some(2),
+                offset: Some(0),
+                order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+                count: Some(true),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+
+        // Should return 2 items in page, total_count = 3 (all active items)
+        assert_eq!(result.instances.len(), 2, "Page should have 2 items");
+        assert_eq!(result.total_count, 3, "Total active items should be 3");
+        assert_eq!(
+            result.instances[0]["name"].as_str().unwrap(),
+            "Alpha",
+            "First item by timestamp"
+        );
+        assert_eq!(
+            result.instances[1]["name"].as_str().unwrap(),
+            "Beta",
+            "Second item by timestamp"
+        );
+
+        // Verify hydration: name should be the unwrapped data, not the full signed envelope
+        assert_eq!(
+            result.instances[0]["status"].as_str().unwrap(),
+            "active",
+            "Status should be unwrapped from signed envelope"
+        );
+
+        // Page 2: offset 2
+        let result2 = execute_model_query(
+            &store,
+            "Task",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                limit: Some(2),
+                offset: Some(2),
+                order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+                count: Some(true),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result2.instances.len(),
+            1,
+            "Page 2 should have 1 remaining item"
+        );
+        assert_eq!(result2.total_count, 3, "Total count unchanged");
+        assert_eq!(
+            result2.instances[0]["name"].as_str().unwrap(),
+            "Delta",
+            "Third active item"
+        );
+    }
+
+    /// Regression: mixed literal formats (plain + signed envelope) coexist in the same query.
+    /// This can happen during migration or when different code paths create links.
+    #[test]
+    fn test_mixed_plain_and_signed_envelope_where() {
+        let store = SparqlStore::new(None).unwrap();
+        let ts_base = 1700000000000i64;
+
+        // Item 1: plain literal (old format)
+        store
+            .add_link(&make_link(
+                "test://old",
+                "ns://type",
+                "ns://msg",
+                &format!("{}", ts_base),
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                "test://old",
+                "ns://body",
+                &signed_literal("hello plain"),
+                &format!("{}", ts_base),
+            ))
+            .unwrap();
+
+        // Item 2: signed envelope (new format)
+        store
+            .add_link(&make_link(
+                "test://new",
+                "ns://type",
+                "ns://msg",
+                &format!("{}", ts_base + 1),
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                "test://new",
+                "ns://body",
+                &signed_envelope_literal("hello signed"),
+                &format!("{}", ts_base + 1),
+            ))
+            .unwrap();
+
+        let shape_json = r#"{
+            "className": "Msg",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://msg" },
+                "body": { "predicate": "ns://body", "required": false, "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#;
+
+        // Query with contains "hello" — should match both formats
+        let mut wc = BTreeMap::new();
+        wc.insert(
+            "body".to_string(),
+            WhereCondition::Ops(WhereOps {
+                contains: Some(Value::String("hello".to_string())),
+                ..Default::default()
+            }),
+        );
+        let result = execute_model_query(
+            &store,
+            "Msg",
+            &ModelQueryInput {
+                where_clause: Some(wc),
+                order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+
+        assert_eq!(result.instances.len(), 2, "Both formats should match");
+        assert_eq!(result.instances[0]["body"].as_str().unwrap(), "hello plain");
+        assert_eq!(
+            result.instances[1]["body"].as_str().unwrap(),
+            "hello signed"
+        );
+
+        // Exact match on signed envelope value
+        let mut wc2 = BTreeMap::new();
+        wc2.insert(
+            "body".to_string(),
+            WhereCondition::String("hello signed".to_string()),
+        );
+        let result2 = execute_model_query(
+            &store,
+            "Msg",
+            &ModelQueryInput {
+                where_clause: Some(wc2),
+                ..Default::default()
+            },
+            Some(shape_json),
+        )
+        .unwrap();
+
+        assert_eq!(result2.instances.len(), 1, "Exact match on signed envelope");
+        assert_eq!(
+            result2.instances[0]["body"].as_str().unwrap(),
+            "hello signed"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Performance / scale tests
     // -----------------------------------------------------------------------
