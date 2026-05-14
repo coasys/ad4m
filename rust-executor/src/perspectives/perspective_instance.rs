@@ -37,7 +37,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Instant};
@@ -212,32 +212,39 @@ struct ModelSubscriptionParams {
 /// Also returns an empty set if a `GRAPH` pattern uses a variable predicate
 /// (e.g. `GRAPH ?g { ?source ?predicate ?target }`). Such patterns match links
 /// with ANY predicate, so we cannot narrow the subscription to a fixed set.
+/// Compiled regexes for SPARQL predicate extraction — compiled once, reused on every call.
+static RE_GRAPH_VAR_PRED: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"GRAPH\s+\?\w+\s*\{[^}]*(?:\?\w+|<[^>]+>)\s+(\?\w+)\s+(?:\?\w+|<[^>]+>)[^}]*\}",
+    )
+    .unwrap()
+});
+static RE_VAR_PRED: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?:\?\w+|<[^>]+>)\s+\?\w+\s+(?:\?\w+|<[^>]+>)\s*\.").unwrap()
+});
+static RE_IRI_PRED: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?:\?\w+|<[^>]+>)\s+(<[^>]+>)\s+(?:\?\w+|<[^>]+>)").unwrap()
+});
+
 fn extract_predicates_from_sparql(query: &str) -> HashSet<String> {
     // Detect variable predicate inside GRAPH patterns:
     // GRAPH ?var { ... ?var1 ?varPred ?var2 ... }
     // This is the pattern our model queries use for fetching all links.
-    let graph_var_pred = regex::Regex::new(
-        r"GRAPH\s+\?\w+\s*\{[^}]*(?:\?\w+|<[^>]+>)\s+(\?\w+)\s+(?:\?\w+|<[^>]+>)[^}]*\}",
-    )
-    .unwrap();
-    if graph_var_pred.is_match(query) {
+    if RE_GRAPH_VAR_PRED.is_match(query) {
         return HashSet::new();
     }
 
     // Detect variable predicate in regular triple patterns (e.g. ?source ?predicate ?target)
     // When a query uses a variable predicate, it can match any predicate,
     // so we must always re-check.
-    let var_pred =
-        regex::Regex::new(r"(?:\?\w+|<[^>]+>)\s+\?\w+\s+(?:\?\w+|<[^>]+>)\s*\.").unwrap();
-    if var_pred.is_match(query) {
+    if RE_VAR_PRED.is_match(query) {
         return HashSet::new();
     }
 
     let mut predicates = HashSet::new();
     // Match triple patterns: (var|uri) <uri> (var|uri)
     // The middle <uri> is the predicate
-    let re = regex::Regex::new(r"(?:\?\w+|<[^>]+>)\s+(<[^>]+>)\s+(?:\?\w+|<[^>]+>)").unwrap();
-    for cap in re.captures_iter(query) {
+    for cap in RE_IRI_PRED.captures_iter(query) {
         let pred = cap[1].trim_matches(|c| c == '<' || c == '>');
         predicates.insert(pred.to_string());
     }
