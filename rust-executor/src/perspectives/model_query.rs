@@ -11,6 +11,7 @@
 //! 6. Returns JSON instances + totalCount
 
 use deno_core::anyhow::{anyhow, Error};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
@@ -21,6 +22,15 @@ use super::sparql_store::SparqlStore;
 // ---------------------------------------------------------------------------
 // SPARQL injection prevention helpers
 // ---------------------------------------------------------------------------
+
+/// Encode a string for use in a `literal:string:…` IRI.
+///
+/// Uses `NON_ALPHANUMERIC` percent-encoding, matching `literal_encode` in
+/// `languages/literal.rs`.  `urlencoding::encode` uses RFC 3986 unreserved
+/// chars (keeps `.-_~`), which diverges from the storage encoding.
+fn literal_percent_encode(s: &str) -> String {
+    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+}
 
 /// Escape a string value for use inside a SPARQL string literal (double-quoted).
 fn escape_sparql_string(s: &str) -> String {
@@ -891,7 +901,7 @@ fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
                     var,
                     escaped,
                     var,
-                    urlencoding::encode(val),
+                    literal_percent_encode(val),
                 ));
             }
             WhereCondition::Bool(b) => {
@@ -914,7 +924,7 @@ fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
                     .iter()
                     .flat_map(|v| {
                         let r = escape_sparql_string(v);
-                        let e = urlencoding::encode(v).to_string();
+                        let e = literal_percent_encode(v);
                         vec![format!("\"{}\"", r), format!("\"literal:string:{}\"", e)]
                     })
                     .collect::<Vec<_>>()
@@ -2111,7 +2121,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                 let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
                 match condition {
                     WhereCondition::String(val) => {
-                        let literal_iri = format!("literal:string:{}", urlencoding::encode(val));
+                        let literal_iri = format!("literal:string:{}", literal_percent_encode(val));
                         where_patterns.push(format!(
                             "    ?source <{}> <{}> .",
                             prop.predicate, literal_iri
@@ -2134,7 +2144,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                     WhereCondition::StringArray(vals) => {
                         let iris = vals
                             .iter()
-                            .map(|v| format!("<literal:string:{}>", urlencoding::encode(v)))
+                            .map(|v| format!("<literal:string:{}>", literal_percent_encode(v)))
                             .collect::<Vec<_>>()
                             .join(" ");
                         where_patterns.push(format!(
@@ -2166,7 +2176,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                             match not_val {
                                 Value::String(s) => {
                                     let literal_iri =
-                                        format!("literal:string:{}", urlencoding::encode(s));
+                                        format!("literal:string:{}", literal_percent_encode(s));
                                     filters.push(format!(
                                         "STR({}) != \"{}\"",
                                         var,
@@ -2196,7 +2206,7 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                                         .filter_map(|item| match item {
                                             Value::String(s) => Some(format!(
                                                 "\"literal:string:{}\"",
-                                                escape_sparql_string(&urlencoding::encode(s))
+                                                escape_sparql_string(&literal_percent_encode(s))
                                             )),
                                             Value::Number(n) => {
                                                 let f = n.as_f64().unwrap_or(0.0);
@@ -3836,7 +3846,7 @@ mod tests {
 
     #[test]
     fn test_parse_literal_value_plain_string() {
-        let iri = format!("literal:string:{}", urlencoding::encode("active"));
+        let iri = format!("literal:string:{}", literal_percent_encode("active"));
         let parsed = parse_literal_value(&iri);
         assert_eq!(parsed, Value::String("active".to_string()));
     }
@@ -3851,7 +3861,7 @@ mod tests {
     fn test_parse_literal_value_plain_json_object() {
         let obj = serde_json::json!({"name": "Test", "count": 5});
         let obj_str = serde_json::to_string(&obj).unwrap();
-        let encoded = urlencoding::encode(&obj_str);
+        let encoded = literal_percent_encode(&obj_str);
         let iri = format!("literal:json:{}", encoded);
 
         let parsed = parse_literal_value(&iri);
@@ -3863,7 +3873,7 @@ mod tests {
         // literal:json with valid JSON but no "data" field -> returns whole object
         let obj = serde_json::json!({"name": "Test", "value": 123});
         let obj_str = serde_json::to_string(&obj).unwrap();
-        let encoded = urlencoding::encode(&obj_str);
+        let encoded = literal_percent_encode(&obj_str);
         let iri = format!("literal:json:{}", encoded);
 
         let parsed = parse_literal_value(&iri);
@@ -3881,7 +3891,7 @@ mod tests {
     #[test]
     fn test_parse_literal_value_string_with_spaces() {
         // literal:string: with percent-encoded content should decode properly
-        let iri = format!("literal:string:{}", urlencoding::encode("hello world"));
+        let iri = format!("literal:string:{}", literal_percent_encode("hello world"));
         let parsed = parse_literal_value(&iri);
         assert_eq!(
             parsed,
@@ -4773,7 +4783,7 @@ mod integration_tests {
 
         let base1 = "literal:string:recipe1base";
 
-        let name_target = format!("literal:string:{}", urlencoding::encode("Recipe 1"));
+        let name_target = format!("literal:string:{}", literal_percent_encode("Recipe 1"));
 
         // Add the type flag link
         let flag_link = make_link(base1, "ad4m://type", "ad4m://recipe", "1700000000000");
@@ -4864,7 +4874,7 @@ mod integration_tests {
             .unwrap();
 
         // Channel name
-        let name_target = format!("literal:string:{}", urlencoding::encode("General"));
+        let name_target = format!("literal:string:{}", literal_percent_encode("General"));
         store
             .add_link(&make_link(
                 channel_base,
@@ -4892,7 +4902,7 @@ mod integration_tests {
                 "1700000000003",
             ))
             .unwrap();
-        let app_name_target = format!("literal:string:{}", urlencoding::encode("Chat"));
+        let app_name_target = format!("literal:string:{}", literal_percent_encode("Chat"));
         store
             .add_link(&make_link(
                 app_base,
@@ -6234,7 +6244,7 @@ mod integration_tests {
 
     /// Helper: create a plain literal IRI for a string value.
     fn signed_literal(value: &str) -> String {
-        format!("literal:string:{}", urlencoding::encode(value))
+        format!("literal:string:{}", literal_percent_encode(value))
     }
 
     /// Helper: create a plain literal IRI for a numeric value.
