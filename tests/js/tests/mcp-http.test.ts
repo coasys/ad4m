@@ -1019,7 +1019,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             console.log("channel_create with booleans:", resultStr);
         });
 
-        it("should store boolean properties as plain literal:boolean: expressions", async function() {
+        it("should store boolean properties as literal:json: expressions, not literal:string:", async function() {
             // Query the raw links to verify the encoding format
             var links = await callMcpTool(MCP_BASE_URL,'query_links', {
                 perspective_id: perspectiveUuid,
@@ -1028,15 +1028,17 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             console.log("isConversation links:", JSON.stringify(links));
 
-            // With plain literal storage, booleans are stored as literal:boolean:X
+            // The target should be a literal:json: expression (signed expression),
+            // NOT literal:string:false
             var linksArr = Array.isArray(links) ? links : (links.links || []);
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("isConversation target:", target);
-            expect(target).to.include("literal:boolean:");
+            expect(target).to.not.include("literal:string:false");
+            expect(target).to.include("literal:json:");
         });
 
-        it("should store string properties as literal:string: expressions with plain literal format", async function() {
+        it("should store string properties as literal:json: expressions when resolve_language is set", async function() {
             var links = await callMcpTool(MCP_BASE_URL,'query_links', {
                 perspective_id: perspectiveUuid,
                 source: resolveTestChannelAddr,
@@ -1048,8 +1050,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("name target:", target);
-            // With plain literal storage, strings are stored as literal:string:
-            expect(target).to.include("literal:string:");
+            // Should be a signed expression (literal:json:) not a raw string literal
+            expect(target).to.include("literal:json:");
         });
 
         it("should resolve boolean values via channel_set_isconversation", async function() {
@@ -1070,7 +1072,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("Updated isConversation target:", target);
-            expect(target).to.include("literal:boolean:");
+            expect(target).to.not.include("literal:string:true");
+            expect(target).to.include("literal:json:");
         });
 
         it("should resolve string values via set_subject_property with resolve_language", async function() {
@@ -1093,7 +1096,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("description target:", target);
-            expect(target).to.include("literal:string:");
+            expect(target).to.include("literal:json:");
         });
 
         it("should resolve boolean values via channel_update (dynamic update)", async function() {
@@ -1113,7 +1116,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("Updated isPinned target:", target);
-            expect(target).to.include("literal:boolean:");
+            expect(target).to.not.include("literal:string:false");
+            expect(target).to.include("literal:json:");
         });
     });
 

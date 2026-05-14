@@ -136,18 +136,17 @@ export default function expressionTests(testContext: TestContext) {
                 const exprRef = parseExprUrl(addr)
                 expect(exprRef.language.address).to.be.equal("literal")
 
-                // Literal.fromUrl().get() returns the raw value (no envelope)
                 const expr = Literal.fromUrl(addr).get()
-                expect(expr).to.be.equal(TEST_DATA)
 
-                // expression.getRaw() returns the full expression envelope
+                expect(expr.data).to.be.equal(TEST_DATA)
+
                 const expr2Raw = await ad4mClient.expression.getRaw(addr)
                 const expr2 = JSON.parse(expr2Raw)
                 console.log(expr2)
 
-                expect(expr2.data).to.be.equal(TEST_DATA)
-                expect(expr2.author).to.exist
-                expect(expr2.proof).to.exist
+                expr.proof.valid = true
+                expr.proof.invalid = false
+                expect(expr2).to.be.eql(expr)
             })
         })
     }
