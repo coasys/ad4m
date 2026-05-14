@@ -303,7 +303,9 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let _ = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE);
+    if let Err(e) = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE) {
+        log::warn!("Credit deduction failed (operation already committed): {}", e);
+    }
     Ok(serde_json::to_value(result)?)
 }
 
@@ -336,7 +338,9 @@ async fn add_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     let count = diff.additions.len();
     if count > 0 {
-        let _ = reserve_credits(&ctx.user_email, count as f64 * DEFAULT_LINK_WRITE);
+        if let Err(e) = reserve_credits(&ctx.user_email, count as f64 * DEFAULT_LINK_WRITE) {
+            log::warn!("Credit deduction failed for bulk add (operation already committed): {}", e);
+        }
     }
 
     Ok(serde_json::to_value(diff.additions)?)
@@ -408,7 +412,9 @@ async fn link_mutations(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     let total = diff.additions.len() + diff.removals.len();
     if total > 0 {
-        let _ = reserve_credits(&ctx.user_email, total as f64 * DEFAULT_LINK_WRITE);
+        if let Err(e) = reserve_credits(&ctx.user_email, total as f64 * DEFAULT_LINK_WRITE) {
+            log::warn!("Credit deduction failed for mutations (operation already committed): {}", e);
+        }
     }
 
     Ok(serde_json::to_value(LinkMutationResponse {
@@ -439,7 +445,9 @@ async fn add_link_expression(params: Value, ctx: Arc<RequestContext>) -> Result<
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let _ = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE);
+    if let Err(e) = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE) {
+        log::warn!("Credit deduction failed (operation already committed): {}", e);
+    }
     Ok(serde_json::to_value(result)?)
 }
 
