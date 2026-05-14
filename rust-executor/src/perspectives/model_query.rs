@@ -1285,11 +1285,11 @@ fn execute_model_query_inner(
     }
 
     // Apply post-hydration where-clause filters.
-    // When all conditions were pushed to SPARQL, this is a no-op (all
-    // instances already match). When Ops conditions exist, this filters
-    // the remaining non-pushable conditions in Rust.
+    // Skip when all conditions were already pushed to SPARQL (the common case).
     if let Some(ref where_clause) = query_input.where_clause {
-        instances.retain(|inst| matches_where(inst, where_clause, &shape));
+        if !all_where_pushable(query_input, &shape) {
+            instances.retain(|inst| matches_where(inst, where_clause, &shape));
+        }
     }
 
     // Calculate total count.
