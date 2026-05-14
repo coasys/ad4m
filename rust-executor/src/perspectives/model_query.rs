@@ -2122,16 +2122,47 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                 let is_literal_prop = prop.resolve_language.is_some();
                 match condition {
                     WhereCondition::String(val) => {
-                        let target_iri = if is_literal_prop {
-                            format!("literal:string:{}", literal_percent_encode(val))
-                        } else {
-                            val.to_string()
-                        };
-                        if validate_iri(&target_iri).is_ok() {
-                            where_patterns.push(format!(
-                                "    ?source <{}> <{}> .",
-                                prop.predicate, target_iri
-                            ));
+                        // Values may be stored as raw URIs (from constructor initial
+                        // values) or as literal:string:… IRIs (from setters through
+                        // resolveLanguage). When resolveLanguage is set and the value
+                        // looks like a URI, match both forms.
+                        if is_literal_prop {
+                            let literal_iri =
+                                format!("literal:string:{}", literal_percent_encode(val));
+                            let val_is_uri = val
+                                .find(':')
+                                .map(|i| i > 0 && val[..i].chars().all(|c| c.is_alphanumeric()))
+                                .unwrap_or(false);
+                            if val_is_uri {
+                                // Could be stored as raw URI or literal — match both
+                                let var = format!("?_pw_{}", safe_name);
+                                where_patterns
+                                    .push(format!("    ?source <{}> {} .", prop.predicate, var));
+                                where_patterns.push(format!(
+                                    "    FILTER(STR({}) = \"{}\" || STR({}) = \"{}\")",
+                                    var,
+                                    escape_sparql_string(val),
+                                    var,
+                                    escape_sparql_string(&literal_iri)
+                                ));
+                            } else if validate_iri(&literal_iri).is_ok() {
+                                where_patterns.push(format!(
+                                    "    ?source <{}> <{}> .",
+                                    prop.predicate, literal_iri
+                                ));
+                            } else {
+                                let var = format!("?_pw_{}", safe_name);
+                                where_patterns
+                                    .push(format!("    ?source <{}> {} .", prop.predicate, var));
+                                where_patterns.push(format!(
+                                    "    FILTER(STR({}) = \"{}\")",
+                                    var,
+                                    escape_sparql_string(&literal_iri)
+                                ));
+                            }
+                        } else if validate_iri(val).is_ok() {
+                            where_patterns
+                                .push(format!("    ?source <{}> <{}> .", prop.predicate, val));
                         } else {
                             // Fallback to FILTER for non-IRI values on raw-URI properties
                             let var = format!("?_pw_{}", safe_name);
@@ -2159,13 +2190,27 @@ fn build_query_patterns(shape: &ModelShape, query: &ModelQueryInput) -> (String,
                         ));
                     }
                     WhereCondition::StringArray(vals) => {
+                        // For literal props, include both raw and literal forms
+                        // in VALUES to handle both constructor-stored and setter-stored values.
                         let iris = vals
                             .iter()
-                            .map(|v| {
+                            .flat_map(|v| {
                                 if is_literal_prop {
-                                    format!("<literal:string:{}>", literal_percent_encode(v))
+                                    let literal =
+                                        format!("<literal:string:{}>", literal_percent_encode(v));
+                                    let val_is_uri = v
+                                        .find(':')
+                                        .map(|i| {
+                                            i > 0 && v[..i].chars().all(|c| c.is_alphanumeric())
+                                        })
+                                        .unwrap_or(false);
+                                    if val_is_uri {
+                                        vec![format!("<{}>", v), literal]
+                                    } else {
+                                        vec![literal]
+                                    }
                                 } else {
-                                    format!("<{}>", v)
+                                    vec![format!("<{}>", v)]
                                 }
                             })
                             .collect::<Vec<_>>()
@@ -4943,6 +4988,71 @@ mod integration_tests {
             "WHERE state='todo://ready' should match raw URI target"
         );
         assert_eq!(result.instances[0]["state"], json!("todo://ready"));
+    }
+
+    #[test]
+    fn test_where_clause_literal_prop_with_raw_uri_value() {
+        // @Property defaults resolveLanguage to "literal", but constructor
+        // initial values are stored as raw URIs. The where clause must match
+        // both literal-encoded and raw URI forms.
+        let store = SparqlStore::new(None).unwrap();
+
+        let base1 = "literal:string:todo1";
+
+        store
+            .add_link(&make_link(
+                base1,
+                "ad4m://type",
+                "ad4m://todo",
+                "1700000000000",
+            ))
+            .unwrap();
+
+        // Raw URI target — set by constructor action, NOT literal-encoded
+        store
+            .add_link(&make_link(
+                base1,
+                "todo://state",
+                "todo://ready",
+                "1700000000001",
+            ))
+            .unwrap();
+
+        // Shape has resolveLanguage: "literal" (the @Property default)
+        let shape_json = r#"{
+            "className": "Todo",
+            "properties": {
+                "type": {
+                    "predicate": "ad4m://type",
+                    "required": true,
+                    "flag": true,
+                    "initial": "ad4m://todo"
+                },
+                "state": {
+                    "predicate": "todo://state",
+                    "required": true,
+                    "resolveLanguage": "literal"
+                }
+            },
+            "relations": {}
+        }"#;
+
+        // Where clause should match even though the value is a URI stored raw
+        let mut where_clause = BTreeMap::new();
+        where_clause.insert(
+            "state".to_string(),
+            WhereCondition::String("todo://ready".to_string()),
+        );
+        let query = ModelQueryInput {
+            where_clause: Some(where_clause),
+            ..Default::default()
+        };
+        let result = execute_model_query(&store, "Todo", &query, Some(shape_json)).unwrap();
+        assert_eq!(
+            result.instances.len(),
+            1,
+            "WHERE state='todo://ready' should match raw URI even with resolveLanguage: literal"
+        );
     }
 
     // -----------------------------------------------------------------------
