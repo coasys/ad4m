@@ -52,6 +52,38 @@ describe('PerspectiveProxy.removeListener', () => {
   });
 });
 
+describe('PerspectiveProxy.dispose', () => {
+  it('calls removeAllListeners on the client and clears local callbacks', async () => {
+    const mockClient = {
+      ...createMockPerspectiveClient(),
+      removeAllListeners: jest.fn(),
+    };
+    const proxy = createProxy(mockClient);
+
+    const cb1 = jest.fn();
+    const cb2 = jest.fn();
+    await proxy.addListener('link-added', cb1);
+    await proxy.addListener('link-removed', cb2);
+
+    proxy.dispose();
+
+    expect(mockClient.removeAllListeners).toHaveBeenCalledWith('test-uuid');
+  });
+
+  it('is safe to call dispose() multiple times', () => {
+    const mockClient = {
+      ...createMockPerspectiveClient(),
+      removeAllListeners: jest.fn(),
+    };
+    const proxy = createProxy(mockClient);
+
+    proxy.dispose();
+    proxy.dispose(); // should not throw
+
+    expect(mockClient.removeAllListeners).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('QuerySubscriptionProxy', () => {
   it('treats the initial subscribeQuery() result as a completed initialization', async () => {
     const initialResult = [
