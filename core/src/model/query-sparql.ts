@@ -363,7 +363,7 @@ export function buildPaginationSubquery(
       { SELECT DISTINCT ?source${tsSelect} WHERE {${innerJoin}${orderJoinPatterns.join('')}${tsPattern}
         FILTER(isIRI(?source))
         ${innerFilter}
-      } GROUP BY ?source ${orderByClause} ${limitClause} ${offsetClause} }\n`;
+      } ${orderByClause} ${limitClause} ${offsetClause} }\n`;
 }
 
 /**
