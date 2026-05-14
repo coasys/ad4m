@@ -11,6 +11,7 @@
 //! 6. Returns JSON instances + totalCount
 
 use deno_core::anyhow::{anyhow, Error};
+#[cfg(test)]
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
@@ -28,6 +29,7 @@ use super::sparql_store::SparqlStore;
 /// Uses `NON_ALPHANUMERIC` percent-encoding, matching `literal_encode` in
 /// `languages/literal.rs`.  `urlencoding::encode` uses RFC 3986 unreserved
 /// chars (keeps `.-_~`), which diverges from the storage encoding.
+#[cfg(test)]
 fn literal_percent_encode(s: &str) -> String {
     utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
 }
@@ -344,7 +346,7 @@ impl ModelShape {
 
 /// Load a shape from the store by class name.
 /// Public wrapper for use by subscription infrastructure.
-pub fn load_shape_from_store(store: &SparqlStore, class_name: &str) -> Result<ModelShape, Error> {
+pub(crate) fn load_shape_from_store(store: &SparqlStore, class_name: &str) -> Result<ModelShape, Error> {
     load_shape(store, class_name)
 }
 

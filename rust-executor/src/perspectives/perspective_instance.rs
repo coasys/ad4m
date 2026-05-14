@@ -874,7 +874,6 @@ impl PerspectiveInstance {
     }
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) -> Result<(), AnyError> {
-        let uuid = self.uuid.clone();
         // Deduplicate by (author, timestamp, source, predicate, target)
         // Use structured keys to avoid delimiter collision issues
         let mut seen_add: std::collections::HashSet<String> = std::collections::HashSet::new();
