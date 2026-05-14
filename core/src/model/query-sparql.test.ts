@@ -161,13 +161,42 @@ describe('buildSPARQLQuery — structural correctness', () => {
     expect(sparql).toContain('SELECT DISTINCT ?source');
   });
 
-  it('does not allow injection through where clause IRI values', () => {
+  it('rejects injection attempts through where clause IRI values', () => {
     const query = {
       where: { category: 'some://uri"> . } UNION { SELECT * WHERE { ?s ?p ?o' },
     };
-    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
-    // Value should be wrapped in angle brackets as an IRI
-    expect(sparql).toContain('<some://uri');
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('Invalid IRI component');
+  });
+
+  it('rejects angle brackets in IRI values', () => {
+    const query = { where: { category: 'foo<bar>' } };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('Invalid IRI component');
+  });
+
+  it('rejects curly braces in IRI values', () => {
+    const query = { where: { category: 'foo{bar}' } };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('Invalid IRI component');
+  });
+
+  it('rejects spaces in IRI values', () => {
+    const query = { where: { category: 'foo bar' } };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('Invalid IRI component');
+  });
+
+  it('rejects double quotes in IRI values', () => {
+    const query = { where: { category: 'foo"bar' } };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('Invalid IRI component');
+  });
+
+  it('allows valid URIs through iri()', () => {
+    const query = { where: { category: 'https://example.com/category/food' } };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .not.toThrow();
   });
 });
 

@@ -36,7 +36,11 @@ fn literal_percent_encode(s: &str) -> String {
 
 /// Escape a string value for use inside a SPARQL string literal (double-quoted).
 fn escape_sparql_string(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 /// Validate a value for use inside an IRI `<…>`.  Rejects characters that
