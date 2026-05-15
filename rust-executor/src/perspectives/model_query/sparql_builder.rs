@@ -92,10 +92,10 @@ pub(super) fn build_instance_sparql(
         let unique: std::collections::BTreeSet<&str> = needed.into_iter().collect();
         let values: String = unique
             .iter()
-            .map(|p| format!("<{}>", p))
+            .map(|p| format!("<{p}>"))
             .collect::<Vec<_>>()
             .join(" ");
-        format!("    VALUES ?predicate {{ {} }}\n", values)
+        format!("    VALUES ?predicate {{ {values} }}\n")
     };
 
     let pagination_suffix = if let Some(pg) = sparql_pagination {
@@ -117,11 +117,11 @@ pub(super) fn build_instance_sparql(
         }
         if let Some(offset) = pg.offset {
             if offset > 0 {
-                suffix.push_str(&format!("\n    OFFSET {}", offset));
+                suffix.push_str(&format!("\n    OFFSET {offset}"));
             }
         }
         if let Some(limit) = pg.limit {
-            suffix.push_str(&format!("\n    LIMIT {}", limit));
+            suffix.push_str(&format!("\n    LIMIT {limit}"));
         }
         suffix
     } else {
@@ -278,7 +278,7 @@ pub(super) fn build_query_patterns(
                     }
                 } else {
                     let safe_model = escape_sparql_string(model);
-                    let hash_model = format!("#{}", safe_model);
+                    let hash_model = format!("#{safe_model}");
                     conformance_patterns.push(format!("    <{safe_id}> ?_parentPred ?source ."));
                     conformance_patterns.push(format!(
                         "    FILTER(STRENDS(STR(?_parentPred), \"/{safe_model}\") || STRENDS(STR(?_parentPred), \"{hash_model}\"))",
@@ -301,24 +301,24 @@ pub(super) fn build_query_patterns(
                 if let Some(ref initial) = prop.initial_value {
                     if validate_iri(initial).is_ok() {
                         conformance_patterns
-                            .push(format!("    ?source <{}> <{}> .", prop.predicate, initial));
+                            .push(format!("    ?source <{}> <{initial}> .", prop.predicate));
                     } else {
                         let escaped = escape_sparql_string(initial);
                         conformance_patterns.push(format!(
-                            "    ?source <{}> ?cf_{} . FILTER(STR(?cf_{}) = \"{}\")",
-                            prop.predicate, safe_name, safe_name, escaped
+                            "    ?source <{}> ?cf_{safe_name} . FILTER(STR(?cf_{safe_name}) = \"{escaped}\")",
+                            prop.predicate
                         ));
                     }
                 } else {
                     conformance_patterns.push(format!(
-                        "    ?source <{}> ?cf_{} .",
-                        prop.predicate, safe_name
+                        "    ?source <{}> ?cf_{safe_name} .",
+                        prop.predicate
                     ));
                 }
             } else {
                 conformance_patterns.push(format!(
-                    "    ?source <{}> ?cf_{} .",
-                    prop.predicate, safe_name
+                    "    ?source <{}> ?cf_{safe_name} .",
+                    prop.predicate
                 ));
             }
         }
@@ -336,18 +336,18 @@ pub(super) fn build_query_patterns(
                 if prop.is_flag {
                     if validate_iri(initial).is_ok() {
                         conformance_patterns
-                            .push(format!("    ?source <{}> <{}> .", prop.predicate, initial));
+                            .push(format!("    ?source <{}> <{initial}> .", prop.predicate));
                     } else {
                         let escaped = escape_sparql_string(initial);
                         conformance_patterns.push(format!(
-                            "    ?source <{}> ?cfInit_{} . FILTER(STR(?cfInit_{}) = \"{}\")",
-                            prop.predicate, safe_name, safe_name, escaped
+                            "    ?source <{}> ?cfInit_{safe_name} . FILTER(STR(?cfInit_{safe_name}) = \"{escaped}\")",
+                            prop.predicate
                         ));
                     }
                 } else {
                     conformance_patterns.push(format!(
-                        "    ?source <{}> ?cfInit_{} .",
-                        prop.predicate, safe_name
+                        "    ?source <{}> ?cfInit_{safe_name} .",
+                        prop.predicate
                     ));
                 }
                 break;
@@ -384,7 +384,7 @@ pub(super) fn build_query_patterns(
                 match condition {
                     WhereCondition::String(val) => {
                         if validate_iri(val).is_ok() {
-                            where_patterns.push(format!("    FILTER(?source = <{}>)", val));
+                            where_patterns.push(format!("    FILTER(?source = <{val}>)"));
                         } else {
                             where_patterns.push(format!(
                                 "    FILTER(STR(?source) = \"{}\")",
@@ -401,17 +401,17 @@ pub(super) fn build_query_patterns(
                         if valid.len() == vals.len() {
                             let iris = valid
                                 .iter()
-                                .map(|v| format!("<{}>", v))
+                                .map(|v| format!("<{v}>"))
                                 .collect::<Vec<_>>()
                                 .join(" ");
-                            where_patterns.push(format!("    VALUES ?source {{ {} }}", iris));
+                            where_patterns.push(format!("    VALUES ?source {{ {iris} }}"));
                         } else {
                             let ids = vals
                                 .iter()
                                 .map(|v| format!("\"{}\"", escape_sparql_string(v)))
                                 .collect::<Vec<_>>()
                                 .join(", ");
-                            where_patterns.push(format!("    FILTER(STR(?source) IN ({}))", ids));
+                            where_patterns.push(format!("    FILTER(STR(?source) IN ({ids}))"));
                         }
                     }
                     _ => {}
@@ -431,23 +431,23 @@ pub(super) fn build_query_patterns(
                         if validate_iri(val).is_ok() {
                             if direction == "reverse" {
                                 where_patterns
-                                    .push(format!("    <{}> <{}> ?source .", val, prop.predicate));
+                                    .push(format!("    <{val}> <{}> ?source .", prop.predicate));
                             } else {
                                 where_patterns
-                                    .push(format!("    ?source <{}> <{}> .", prop.predicate, val));
+                                    .push(format!("    ?source <{}> <{val}> .", prop.predicate));
                             }
                         } else {
                             let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
                             let escaped = escape_sparql_string(val);
                             if direction == "reverse" {
                                 where_patterns.push(format!(
-                                    "    ?_rv_{} <{}> ?source . FILTER(STR(?_rv_{}) = \"{}\")",
-                                    safe_name, prop.predicate, safe_name, escaped
+                                    "    ?_rv_{safe_name} <{}> ?source . FILTER(STR(?_rv_{safe_name}) = \"{escaped}\")",
+                                    prop.predicate
                                 ));
                             } else {
                                 where_patterns.push(format!(
-                                    "    ?source <{}> ?_ft_{} . FILTER(STR(?_ft_{}) = \"{}\")",
-                                    prop.predicate, safe_name, safe_name, escaped
+                                    "    ?source <{}> ?_ft_{safe_name} . FILTER(STR(?_ft_{safe_name}) = \"{escaped}\")",
+                                    prop.predicate
                                 ));
                             }
                         }
@@ -458,18 +458,18 @@ pub(super) fn build_query_patterns(
                         if all_valid {
                             let iris = vals
                                 .iter()
-                                .map(|v| format!("<{}>", v))
+                                .map(|v| format!("<{v}>"))
                                 .collect::<Vec<_>>()
                                 .join(" ");
                             if direction == "reverse" {
                                 where_patterns.push(format!(
-                                    "    VALUES ?_rv_{} {{ {} }}\n    ?_rv_{} <{}> ?source .",
-                                    safe_name, iris, safe_name, prop.predicate
+                                    "    VALUES ?_rv_{safe_name} {{ {iris} }}\n    ?_rv_{safe_name} <{}> ?source .",
+                                    prop.predicate
                                 ));
                             } else {
                                 where_patterns.push(format!(
-                                    "    VALUES ?_ft_{} {{ {} }}\n    ?source <{}> ?_ft_{} .",
-                                    safe_name, iris, prop.predicate, safe_name
+                                    "    VALUES ?_ft_{safe_name} {{ {iris} }}\n    ?source <{}> ?_ft_{safe_name} .",
+                                    prop.predicate
                                 ));
                             }
                         } else {
@@ -480,13 +480,13 @@ pub(super) fn build_query_patterns(
                                 .join(", ");
                             if direction == "reverse" {
                                 where_patterns.push(format!(
-                                    "    ?_rv_{} <{}> ?source . FILTER(STR(?_rv_{}) IN ({}))",
-                                    safe_name, prop.predicate, safe_name, str_list
+                                    "    ?_rv_{safe_name} <{}> ?source . FILTER(STR(?_rv_{safe_name}) IN ({str_list}))",
+                                    prop.predicate
                                 ));
                             } else {
                                 where_patterns.push(format!(
-                                    "    ?source <{}> ?_ft_{} . FILTER(STR(?_ft_{}) IN ({}))",
-                                    prop.predicate, safe_name, safe_name, str_list
+                                    "    ?source <{}> ?_ft_{safe_name} . FILTER(STR(?_ft_{safe_name}) IN ({str_list}))",
+                                    prop.predicate
                                 ));
                             }
                         }
@@ -510,42 +510,38 @@ pub(super) fn build_query_patterns(
                 match condition {
                     WhereCondition::String(val) => {
                         if is_literal_prop {
-                            let var = format!("?_pw_{}", safe_name);
+                            let var = format!("?_pw_{safe_name}");
                             where_patterns
-                                .push(format!("    ?source <{}> {} .", prop.predicate, var));
+                                .push(format!("    ?source <{}> {var} .", prop.predicate));
                             where_patterns.push(format!(
-                                "    FILTER(STR(<ad4m://fn/parse_literal>({})) = \"{}\")",
-                                var,
+                                "    FILTER(STR(<ad4m://fn/parse_literal>({var})) = \"{}\")",
                                 escape_sparql_string(val)
                             ));
                         } else if validate_iri(val).is_ok() {
                             where_patterns
-                                .push(format!("    ?source <{}> <{}> .", prop.predicate, val));
+                                .push(format!("    ?source <{}> <{val}> .", prop.predicate));
                         } else {
-                            let var = format!("?_pw_{}", safe_name);
+                            let var = format!("?_pw_{safe_name}");
                             where_patterns
-                                .push(format!("    ?source <{}> {} .", prop.predicate, var));
+                                .push(format!("    ?source <{}> {var} .", prop.predicate));
                             where_patterns.push(format!(
-                                "    FILTER(STR(<ad4m://fn/parse_literal>({})) = \"{}\")",
-                                var,
+                                "    FILTER(STR(<ad4m://fn/parse_literal>({var})) = \"{}\")",
                                 escape_sparql_string(val)
                             ));
                         }
                     }
                     WhereCondition::Number(n) => {
-                        let var = format!("?_pw_{}", safe_name);
-                        where_patterns.push(format!("    ?source <{}> {} .", prop.predicate, var));
+                        let var = format!("?_pw_{safe_name}");
+                        where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
                         where_patterns.push(format!(
-                            "    FILTER(STR(<ad4m://fn/parse_literal>({})) = \"{}\")",
-                            var, n
+                            "    FILTER(STR(<ad4m://fn/parse_literal>({var})) = \"{n}\")"
                         ));
                     }
                     WhereCondition::Bool(b) => {
-                        let var = format!("?_pw_{}", safe_name);
-                        where_patterns.push(format!("    ?source <{}> {} .", prop.predicate, var));
+                        let var = format!("?_pw_{safe_name}");
+                        where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
                         where_patterns.push(format!(
-                            "    FILTER(STR(<ad4m://fn/parse_literal>({})) = \"{}\")",
-                            var, b
+                            "    FILTER(STR(<ad4m://fn/parse_literal>({var})) = \"{b}\")"
                         ));
                     }
                     WhereCondition::StringArray(vals) => {
@@ -554,33 +550,30 @@ pub(super) fn build_query_patterns(
                             .map(|v| format!("\"{}\"", escape_sparql_string(v)))
                             .collect::<Vec<_>>()
                             .join(", ");
-                        let var = format!("?_pw_{}", safe_name);
-                        where_patterns.push(format!("    ?source <{}> {} .", prop.predicate, var));
+                        let var = format!("?_pw_{safe_name}");
+                        where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
                         where_patterns.push(format!(
-                            "    FILTER(STR(<ad4m://fn/parse_literal>({})) IN ({}))",
-                            var, values_list
+                            "    FILTER(STR(<ad4m://fn/parse_literal>({var})) IN ({values_list}))"
                         ));
                     }
                     WhereCondition::NumberArray(vals) => {
                         let values_list = vals
                             .iter()
-                            .map(|n| format!("\"{}\"", n))
+                            .map(|n| format!("\"{n}\""))
                             .collect::<Vec<_>>()
                             .join(", ");
-                        let var = format!("?_pw_{}", safe_name);
-                        where_patterns.push(format!("    ?source <{}> {} .", prop.predicate, var));
+                        let var = format!("?_pw_{safe_name}");
+                        where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
                         where_patterns.push(format!(
-                            "    FILTER(STR(<ad4m://fn/parse_literal>({})) IN ({}))",
-                            var, values_list
+                            "    FILTER(STR(<ad4m://fn/parse_literal>({var})) IN ({values_list}))"
                         ));
                     }
                     WhereCondition::Ops(ops) => {
-                        let var = format!("?_pw_{}", safe_name);
-                        let val_var = format!("?_pw_{}_v", safe_name);
-                        where_patterns.push(format!("    ?source <{}> {} .", prop.predicate, var));
+                        let var = format!("?_pw_{safe_name}");
+                        let val_var = format!("?_pw_{safe_name}_v");
+                        where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
                         where_patterns.push(format!(
-                            "    BIND(STR(<ad4m://fn/parse_literal>({})) AS {})",
-                            var, val_var
+                            "    BIND(STR(<ad4m://fn/parse_literal>({var})) AS {val_var})"
                         ));
 
                         let mut filters = Vec::new();
@@ -589,8 +582,7 @@ pub(super) fn build_query_patterns(
                             match not_val {
                                 Value::String(s) => {
                                     filters.push(format!(
-                                        "{} != \"{}\"",
-                                        val_var,
+                                        "{val_var} != \"{}\"",
                                         escape_sparql_string(s)
                                     ));
                                 }
@@ -599,12 +591,12 @@ pub(super) fn build_query_patterns(
                                     let n_str = if n_f64.fract() == 0.0 {
                                         format!("{}", n_f64 as i64)
                                     } else {
-                                        format!("{}", n_f64)
+                                        format!("{n_f64}")
                                     };
-                                    filters.push(format!("{} != \"{}\"", val_var, n_str));
+                                    filters.push(format!("{val_var} != \"{n_str}\""));
                                 }
                                 Value::Bool(b) => {
-                                    filters.push(format!("{} != \"{}\"", val_var, b));
+                                    filters.push(format!("{val_var} != \"{b}\""));
                                 }
                                 Value::Array(arr) => {
                                     let items: Vec<String> = arr
@@ -618,17 +610,16 @@ pub(super) fn build_query_patterns(
                                                 let s = if f.fract() == 0.0 {
                                                     format!("{}", f as i64)
                                                 } else {
-                                                    format!("{}", f)
+                                                    format!("{f}")
                                                 };
-                                                Some(format!("\"{}\"", s))
+                                                Some(format!("\"{s}\""))
                                             }
                                             _ => None,
                                         })
                                         .collect();
                                     if !items.is_empty() {
                                         filters.push(format!(
-                                            "{} NOT IN ({})",
-                                            val_var,
+                                            "{val_var} NOT IN ({})",
                                             items.join(", ")
                                         ));
                                     }
@@ -644,28 +635,24 @@ pub(super) fn build_query_patterns(
                             || ops.between.is_some();
 
                         if has_numeric {
-                            let num_var = format!("?_pw_{}_num", safe_name);
+                            let num_var = format!("?_pw_{safe_name}_num");
                             where_patterns.push(format!(
-                                "    BIND(<http://www.w3.org/2001/XMLSchema#double>({}) AS {})",
-                                val_var, num_var
+                                "    BIND(<http://www.w3.org/2001/XMLSchema#double>({val_var}) AS {num_var})"
                             ));
                             if let Some(gt) = ops.gt {
-                                filters.push(format!("{} > {}", num_var, gt));
+                                filters.push(format!("{num_var} > {gt}"));
                             }
                             if let Some(gte) = ops.gte {
-                                filters.push(format!("{} >= {}", num_var, gte));
+                                filters.push(format!("{num_var} >= {gte}"));
                             }
                             if let Some(lt) = ops.lt {
-                                filters.push(format!("{} < {}", num_var, lt));
+                                filters.push(format!("{num_var} < {lt}"));
                             }
                             if let Some(lte) = ops.lte {
-                                filters.push(format!("{} <= {}", num_var, lte));
+                                filters.push(format!("{num_var} <= {lte}"));
                             }
                             if let Some((lo, hi)) = ops.between {
-                                filters.push(format!(
-                                    "{} >= {} && {} <= {}",
-                                    num_var, lo, num_var, hi
-                                ));
+                                filters.push(format!("{num_var} >= {lo} && {num_var} <= {hi}"));
                             }
                         }
 
@@ -675,8 +662,7 @@ pub(super) fn build_query_patterns(
                                 other => other.to_string(),
                             };
                             filters.push(format!(
-                                "CONTAINS(LCASE({}), LCASE(\"{}\"))",
-                                val_var,
+                                "CONTAINS(LCASE({val_var}), LCASE(\"{}\"))",
                                 escape_sparql_string(&needle)
                             ));
                         }

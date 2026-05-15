@@ -48,7 +48,7 @@ pub(super) fn resolve_projections(
 
     let values_clause = parent_ids
         .iter()
-        .map(|id| format!("<{}>", id))
+        .map(|id| format!("<{id}>"))
         .collect::<Vec<_>>()
         .join(" ");
 
@@ -239,7 +239,7 @@ pub(super) fn build_projection_where_patterns(proj: &ProjectionInput) -> String 
             match condition {
                 WhereCondition::String(val) => {
                     let escaped = escape_sparql_string(val);
-                    patterns.push(format!("    FILTER(STR(?t) = \"{}\")\n", escaped));
+                    patterns.push(format!("    FILTER(STR(?t) = \"{escaped}\")\n"));
                 }
                 WhereCondition::StringArray(vals) => {
                     let list = vals
@@ -247,7 +247,7 @@ pub(super) fn build_projection_where_patterns(proj: &ProjectionInput) -> String 
                         .map(|v| format!("\"{}\"", escape_sparql_string(v)))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    patterns.push(format!("    FILTER(STR(?t) IN ({}))\n", list));
+                    patterns.push(format!("    FILTER(STR(?t) IN ({list}))\n"));
                 }
                 _ => {}
             }
@@ -267,31 +267,28 @@ pub(super) fn build_projection_where_patterns(proj: &ProjectionInput) -> String 
             continue;
         }
 
-        let var = format!("_pw{}", filter_idx);
+        let var = format!("_pw{filter_idx}");
         filter_idx += 1;
 
         match condition {
             WhereCondition::String(val) => {
                 let escaped = escape_sparql_string(val);
-                patterns.push(format!("    ?t <{}> ?{} .\n", pred, var));
+                patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                 patterns.push(format!(
-                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{})) = \"{}\")\n",
-                    var, escaped,
+                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{var})) = \"{escaped}\")\n",
                 ));
             }
             WhereCondition::Bool(b) => {
                 let bval = if *b { "true" } else { "false" };
-                patterns.push(format!("    ?t <{}> ?{} .\n", pred, var));
+                patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                 patterns.push(format!(
-                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{})) = \"{}\")\n",
-                    var, bval,
+                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{var})) = \"{bval}\")\n",
                 ));
             }
             WhereCondition::Number(n) => {
-                patterns.push(format!("    ?t <{}> ?{} .\n", pred, var));
+                patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                 patterns.push(format!(
-                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{})) = \"{}\")\n",
-                    var, n,
+                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{var})) = \"{n}\")\n",
                 ));
             }
             WhereCondition::StringArray(vals) => {
@@ -300,10 +297,9 @@ pub(super) fn build_projection_where_patterns(proj: &ProjectionInput) -> String 
                     .map(|v| format!("\"{}\"", escape_sparql_string(v)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                patterns.push(format!("    ?t <{}> ?{} .\n", pred, var));
+                patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                 patterns.push(format!(
-                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{})) IN ({}))\n",
-                    var, list,
+                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{var})) IN ({list}))\n",
                 ));
             }
             _ => {}
@@ -338,7 +334,8 @@ pub(super) fn build_projection_order_clause(proj: &ProjectionInput) -> String {
     if terms.is_empty() {
         String::new()
     } else {
-        format!("\nORDER BY {}", terms.join(" "))
+        let joined = terms.join(" ");
+        format!("\nORDER BY {joined}")
     }
 }
 

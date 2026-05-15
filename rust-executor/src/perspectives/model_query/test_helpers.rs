@@ -61,7 +61,7 @@ pub fn flag(name: &str, predicate: &str, initial: &str) -> ShapeProperty {
 pub fn shape(class: &str, properties: Vec<ShapeProperty>) -> ModelShape {
     ModelShape {
         target_class: class.to_string(),
-        shape_uri: format!("{}Shape", class),
+        shape_uri: format!("{class}Shape"),
         properties,
         include_relations: Vec::new(),
     }
@@ -79,7 +79,7 @@ pub fn inst_links(source: &str, links: Vec<(&str, &str)>) -> InstanceLinks {
                     pred.to_string(),
                     tgt.to_string(),
                     "did:key:testauthor".to_string(),
-                    format!("2026-01-01T00:00:{:02}.000Z", i),
+                    format!("2026-01-01T00:00:{i:02}.000Z"),
                 )
             })
             .collect(),

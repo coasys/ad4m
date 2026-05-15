@@ -166,7 +166,7 @@ pub(super) fn execute_model_query_inner(
                     .iter()
                     .filter_map(|r| r["source"].as_str())
                     .filter_map(|s| validate_iri(s).ok())
-                    .map(|s| format!("<{}>", s))
+                    .map(|s| format!("<{s}>"))
                     .collect::<Vec<_>>()
                     .join(" ");
 

@@ -186,7 +186,7 @@ mod tests {
         let obj = json!({"name": "Test", "count": 5});
         let obj_str = serde_json::to_string(&obj).unwrap();
         let encoded = literal_percent_encode(&obj_str);
-        let iri = format!("literal:json:{}", encoded);
+        let iri = format!("literal:json:{encoded}");
         let parsed = parse_literal_value(&iri);
         assert_eq!(parsed, json!({"name": "Test", "count": 5}));
     }
@@ -196,7 +196,7 @@ mod tests {
         let obj = json!({"name": "Test", "value": 123});
         let obj_str = serde_json::to_string(&obj).unwrap();
         let encoded = literal_percent_encode(&obj_str);
-        let iri = format!("literal:json:{}", encoded);
+        let iri = format!("literal:json:{encoded}");
         let parsed = parse_literal_value(&iri);
         assert_eq!(parsed, obj, "Should return full JSON when no data field");
     }

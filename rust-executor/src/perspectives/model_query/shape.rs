@@ -48,7 +48,7 @@ pub(super) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     // Step 1: Find the shape URI and target class via SPARQL
     // Use exact suffix matching (/{name} or #{name}) to avoid "Recipe" matching "MyRecipe"
     // Build hash suffix separately to avoid `#` confusing `format!`
-    let hash_suffix = format!("#{}", safe_name);
+    let hash_suffix = format!("#{safe_name}");
     let query = format!(
         r#"
         SELECT ?shapeUri ?targetClass WHERE {{
@@ -356,7 +356,7 @@ pub(super) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
     }
 
     // Build a shape URI from the className
-    let shape_uri = format!("{}Shape", target_class);
+    let shape_uri = format!("{target_class}Shape");
 
     Ok(ModelShape {
         target_class,

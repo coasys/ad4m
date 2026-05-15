@@ -50,7 +50,7 @@ pub fn resolve_reverse_relations(
 
     let values_clause = instance_iris
         .iter()
-        .map(|id| format!("<{}>", id))
+        .map(|id| format!("<{id}>"))
         .collect::<Vec<_>>()
         .join(" ");
 
@@ -274,7 +274,7 @@ fn resolve_reverse_include(
     let id_list = all_ids
         .iter()
         .filter(|id| validate_iri(id).is_ok())
-        .map(|id| format!("<{}>", id))
+        .map(|id| format!("<{id}>"))
         .collect::<Vec<_>>()
         .join(", ");
     if id_list.is_empty() {

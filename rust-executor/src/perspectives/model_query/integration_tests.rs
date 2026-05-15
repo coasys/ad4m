@@ -626,7 +626,7 @@ fn test_build_projection_order_clause_by_id() {
 fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> ModelShape {
     ModelShape {
         target_class: class.to_string(),
-        shape_uri: format!("{}Shape", class),
+        shape_uri: format!("{class}Shape"),
         properties: vec![ShapeProperty {
             name: rel_name.to_string(),
             predicate: predicate.to_string(),
@@ -1567,7 +1567,7 @@ fn test_getters_run_after_pagination() {
     let store = SparqlStore::new(None).unwrap();
 
     for i in 0..5 {
-        let base = format!("test://msg-{}", i);
+        let base = format!("test://msg-{i}");
         store
             .add_link(&make_link(
                 &base,
@@ -1580,7 +1580,7 @@ fn test_getters_run_after_pagination() {
             .add_link(&make_link(
                 &base,
                 "flux://has_reply",
-                &format!("test://reply-{}", i),
+                &format!("test://reply-{i}"),
                 &format!("{}", 2000 + i),
             ))
             .unwrap();
@@ -1640,7 +1640,7 @@ fn signed_literal_number(value: f64) -> String {
     if value.fract() == 0.0 {
         format!("literal:number:{}", value as i64)
     } else {
-        format!("literal:number:{}", value)
+        format!("literal:number:{value}")
     }
 }
 
@@ -2755,8 +2755,8 @@ fn test_build_instance_sparql_integration_getter_excluded_from_results() {
             .add_link(&make_link(
                 channel_id,
                 "ad4m://has_child",
-                &format!("test://msg{}", i),
-                &format!("17000000001{:02}", i),
+                &format!("test://msg{i}"),
+                &format!("17000000001{i:02}"),
             ))
             .unwrap();
     }
@@ -2820,7 +2820,7 @@ fn test_full_model_query_ops_gt_lt_sparql_push() {
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
 
-    let items: Vec<String> = (0..5).map(|i| format!("test://item-{}", i)).collect();
+    let items: Vec<String> = (0..5).map(|i| format!("test://item-{i}")).collect();
     let scores = [10.0, 30.0, 50.0, 70.0, 90.0];
 
     for (item, &score) in items.iter().zip(&scores) {
@@ -2921,7 +2921,7 @@ fn test_full_model_query_ops_gte_lte_sparql_push() {
     let ts = "1700000000000";
 
     for (i, score) in [10.0, 50.0, 90.0].iter().enumerate() {
-        let item = format!("test://item-{}", i);
+        let item = format!("test://item-{i}");
         store
             .add_link(&make_link(&item, "ns://type", "ns://scored", ts))
             .unwrap();
@@ -2994,7 +2994,7 @@ fn test_full_model_query_ops_not_string_sparql_push() {
     let ts = "1700000000000";
 
     for (i, status) in ["active", "done", "active"].iter().enumerate() {
-        let item = format!("test://item-{}", i);
+        let item = format!("test://item-{i}");
         store
             .add_link(&make_link(&item, "ns://type", "ns://task", ts))
             .unwrap();
@@ -3045,7 +3045,7 @@ fn test_full_model_query_ops_not_array_sparql_push() {
     let ts = "1700000000000";
 
     for (i, status) in ["alpha", "beta", "gamma", "delta"].iter().enumerate() {
-        let item = format!("test://item-{}", i);
+        let item = format!("test://item-{i}");
         store
             .add_link(&make_link(&item, "ns://type", "ns://thing", ts))
             .unwrap();
@@ -3097,7 +3097,7 @@ fn test_full_model_query_ops_with_pagination_pushed() {
     let store = SparqlStore::new(None).unwrap();
 
     for i in 0..10 {
-        let item = format!("test://item-{}", i);
+        let item = format!("test://item-{i}");
         let ts = format!("{}", 1700000000000i64 + i);
         store
             .add_link(&make_link(&item, "ns://type", "ns://scored", &ts))
@@ -3157,7 +3157,7 @@ fn test_full_model_query_ops_contains_sparql_push() {
         .iter()
         .enumerate()
     {
-        let item = format!("test://item-{}", i);
+        let item = format!("test://item-{i}");
         store
             .add_link(&make_link(&item, "ns://type", "ns://person", ts))
             .unwrap();
@@ -3215,7 +3215,7 @@ fn test_full_model_query_ops_contains_with_pagination() {
         "Dave Davis",
     ];
     for (i, name) in names.iter().enumerate() {
-        let item = format!("test://item-{}", i);
+        let item = format!("test://item-{i}");
         let ts = format!("{}", ts_base + i as i64);
         store
             .add_link(&make_link(&item, "ns://type", "ns://person", &ts))
@@ -3417,7 +3417,7 @@ fn test_mixed_plain_and_signed_envelope_where() {
             "test://old",
             "ns://type",
             "ns://msg",
-            &format!("{}", ts_base),
+            &format!("{ts_base}"),
         ))
         .unwrap();
     store
@@ -3425,7 +3425,7 @@ fn test_mixed_plain_and_signed_envelope_where() {
             "test://old",
             "ns://body",
             &signed_literal("hello plain"),
-            &format!("{}", ts_base),
+            &format!("{ts_base}"),
         ))
         .unwrap();
 
@@ -3522,9 +3522,9 @@ fn test_perf_large_dataset_paginated_query() {
     let msgs_per_channel = 1000;
 
     for ch in 0..num_channels {
-        let channel = format!("test://channel-{}", ch);
+        let channel = format!("test://channel-{ch}");
         for i in 0..(msgs_per_channel as i64) {
-            let msg = format!("test://msg-{}-{}", ch, i);
+            let msg = format!("test://msg-{ch}-{i}");
             let ts = format!("{}", ts_base + ch as i64 * 100000 + i);
             store
                 .add_link(&make_link(&msg, "flux://type", "flux://message", &ts))
@@ -3536,7 +3536,7 @@ fn test_perf_large_dataset_paginated_query() {
                 .add_link(&make_link(
                     &msg,
                     "flux://body",
-                    &signed_literal(&format!("Message {} in channel {}", i, ch)),
+                    &signed_literal(&format!("Message {i} in channel {ch}")),
                     &ts,
                 ))
                 .unwrap();
@@ -3621,9 +3621,9 @@ fn test_perf_flux_message_parent_scope_paginated() {
     let msgs_per_channel = 2000;
 
     for ch in 0..num_channels {
-        let channel = format!("test://channel-{}", ch);
+        let channel = format!("test://channel-{ch}");
         for i in 0..(msgs_per_channel as i64) {
-            let msg = format!("test://msg-{}-{}", ch, i);
+            let msg = format!("test://msg-{ch}-{i}");
             let ts = format!("{}", ts_base + ch as i64 * 1000000 + i * 100);
             // Parent link: channel -> has_child -> message
             store
@@ -3643,7 +3643,7 @@ fn test_perf_flux_message_parent_scope_paginated() {
                 .add_link(&make_link(
                     &msg,
                     "flux://body",
-                    &signed_literal(&format!("Message {} in channel {}", i, ch)),
+                    &signed_literal(&format!("Message {i} in channel {ch}")),
                     &ts,
                 ))
                 .unwrap();
@@ -3800,21 +3800,20 @@ fn test_perf_flux_message_parent_scope_paginated() {
     let source_values: String = ids_json
         .iter()
         .filter_map(|r| r["source"].as_str())
-        .map(|s| format!("<{}>", s))
+        .map(|s| format!("<{s}>"))
         .collect::<Vec<_>>()
         .join(" ");
     let t_outer = std::time::Instant::now();
     let q_outer = format!(
         r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
-        VALUES ?source {{ {} }}
+        VALUES ?source {{ {source_values} }}
         VALUES ?predicate {{ <flux://body> <flux://entry_type> <flux://has_reaction> <flux://has_reply> <flux://has_thread_message> <flux://transcript_started_at> }}
         ?source ?predicate ?target .
         ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
         FILTER(isIRI(?predicate))
         ?_reifier <ad4m://ontology/author> ?author .
         ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-    }}"#,
-        source_values
+    }}"#
     );
     let r_outer: Vec<Value> = serde_json::from_str(&store.query(&q_outer).unwrap()).unwrap();
     eprintln!(
@@ -3836,7 +3835,7 @@ fn test_full_model_query_order_by_property_string() {
 
     let names = ["Charlie", "Alice", "Bob"];
     for (i, name) in names.iter().enumerate() {
-        let item = format!("test://item-{}", i);
+        let item = format!("test://item-{i}");
         store
             .add_link(&make_link(&item, "ns://type", "ns://person", ts))
             .unwrap();
@@ -3898,7 +3897,7 @@ fn test_full_model_query_order_by_property_number() {
 
     let scores = [100.0, 5.0, 42.0, 1.0, 999.0];
     for (i, &score) in scores.iter().enumerate() {
-        let item = format!("test://item-{}", i);
+        let item = format!("test://item-{i}");
         store
             .add_link(&make_link(&item, "ns://type", "ns://scored", ts))
             .unwrap();

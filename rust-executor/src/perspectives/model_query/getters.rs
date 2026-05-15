@@ -158,7 +158,7 @@ pub(super) fn inject_values_into_select(select: &str, values_clause: &str) -> St
     }
 
     if let Some(brace_pos) = query.find('{') {
-        let insert = format!(" VALUES ?source {{ {} }}", values_clause);
+        let insert = format!(" VALUES ?source {{ {values_clause} }}");
         query.insert_str(brace_pos + 1, &insert);
     }
 
@@ -203,7 +203,7 @@ pub(super) fn evaluate_getters(
 
     let values_clause = instance_iris
         .iter()
-        .map(|id| format!("<{}>", id))
+        .map(|id| format!("<{id}>"))
         .collect::<Vec<_>>()
         .join(" ");
 
@@ -369,7 +369,7 @@ pub(super) fn apply_where_filter_to_relation(
     let values_clause = unique_targets
         .iter()
         .filter_map(|id| validate_iri(id).ok())
-        .map(|id| format!("<{}>", id))
+        .map(|id| format!("<{id}>"))
         .collect::<Vec<_>>()
         .join(" ");
 
