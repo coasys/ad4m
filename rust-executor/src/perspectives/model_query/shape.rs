@@ -1,3 +1,22 @@
+//! Model shape resolution from SHACL triples or client JSON metadata.
+//!
+//! A "shape" describes the structure of a model class: its properties,
+//! predicates, relations, flags, initial values, getters, and target shapes
+//! for eager-loaded relations.  Shapes are needed at the start of every
+//! query to generate correct conformance patterns and hydrate results.
+//!
+//! Two resolution paths are supported:
+//!
+//! - **From the store** ([`load_shape`] / [`load_shape_from_store`]) — reads
+//!   SHACL triple patterns that were written by `addSdna()` when the model
+//!   class was registered.  This is used when no client-side metadata is
+//!   available (e.g. for ad-hoc queries).
+//!
+//! - **From client JSON** ([`parse_shape_from_json`]) — parses the metadata
+//!   that the TypeScript client sends alongside the query.  This is more
+//!   reliable because it carries decorator information (flags, getters,
+//!   relation kinds, target shapes) that SHACL triples don't fully capture.
+
 use super::types::{ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
 use super::utils::{escape_sparql_string, validate_iri};
 use crate::perspectives::sparql_store::SparqlStore;
@@ -5,6 +24,9 @@ use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
+/// Public (crate-level) entry point for loading a shape from the SHACL store.
+///
+/// Delegates to [`load_shape`].
 pub(crate) fn load_shape_from_store(
     store: &SparqlStore,
     class_name: &str,
@@ -193,6 +215,10 @@ fn get_initial_value(
     Ok(None)
 }
 
+/// Parse a JSON object into a where-clause filter map.
+///
+/// Each key-value pair is deserialized as a [`WhereCondition`].  Returns
+/// `None` if the input is not an object or produces an empty map.
 pub(super) fn parse_where_filter(val: &Value) -> Option<BTreeMap<String, WhereCondition>> {
     let obj = val.as_object()?;
     let mut map = BTreeMap::new();
@@ -208,9 +234,12 @@ pub(super) fn parse_where_filter(val: &Value) -> Option<BTreeMap<String, WhereCo
     }
 }
 
-/// Parse shape metadata from JSON sent by the TS client.
-/// This is more reliable than reading from the store because the TS client
-/// has the definitive decorator metadata (flags, required, initial values, etc.).
+/// Parse shape metadata from the JSON sent by the TypeScript client.
+///
+/// This is the preferred resolution path because the client has access to
+/// the definitive decorator metadata (flags, required, initial values,
+/// getters, relation kinds, target shapes for includes, etc.) that the
+/// SHACL store doesn't fully capture.
 pub(super) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Error> {
     let meta: Value =
         serde_json::from_str(json).map_err(|e| anyhow!("Failed to parse shape JSON: {}", e))?;

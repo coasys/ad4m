@@ -1,10 +1,29 @@
+//! Hydration: converting raw SPARQL result rows into typed JSON instances.
+//!
+//! The Oxigraph store returns flat rows with `?source ?predicate ?target
+//! ?author ?timestamp` bindings.  This module groups those rows by source
+//! IRI ([`group_results_by_source`]) and then builds fully typed JSON
+//! objects ([`hydrate_instances`] / [`hydrate_one`]) by:
+//!
+//! - Parsing `literal:` URIs into native JSON types (string, number, boolean)
+//! - Collecting collection (relation) values into arrays
+//! - Selecting the latest value for scalar properties (last-write-wins by
+//!   timestamp)
+//! - Attaching computed metadata: `createdAt`, `updatedAt`, `author`,
+//!   `timestamp`
+//!
+//! [`filter_properties`] strips unrequested properties from the final output.
+
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 
 use super::types::{InstanceLinks, ModelShape, ShapeProperty};
 use super::utils::parse_literal_value;
 
-/// Group SPARQL result rows by `?source` to collect all links per instance.
+/// Group raw SPARQL result rows by `?source` IRI.
+///
+/// Returns one [`InstanceLinks`] per unique source, preserving insertion
+/// order (via `BTreeMap`) so that results are deterministic.
 pub(super) fn group_results_by_source(rows: &[Value], _shape: &ModelShape) -> Vec<InstanceLinks> {
     let mut map: BTreeMap<String, Vec<(String, String, String, String)>> = BTreeMap::new();
 
@@ -28,7 +47,9 @@ pub(super) fn group_results_by_source(rows: &[Value], _shape: &ModelShape) -> Ve
         .collect()
 }
 
-/// Hydrate instances from grouped link data.
+/// Hydrate all grouped link sets into JSON instance objects.
+///
+/// Delegates to [`hydrate_one`] for each group and collects the results.
 pub(super) fn hydrate_instances(shape: &ModelShape, grouped: &[InstanceLinks]) -> Vec<Value> {
     grouped
         .iter()
@@ -36,7 +57,19 @@ pub(super) fn hydrate_instances(shape: &ModelShape, grouped: &[InstanceLinks]) -
         .collect()
 }
 
-/// Hydrate a single instance from its links.
+/// Hydrate a single instance from its collected links.
+///
+/// For each link `(predicate, target, author, timestamp)`:
+/// - If the predicate maps to a **scalar property** (or flag), the latest
+///   value by timestamp wins (`parse_literal_value` for typed conversion).
+/// - If the predicate maps to a **collection relation**, the target is
+///   appended to an array (sorted by timestamp).
+/// - If multiple shape properties share the same predicate (e.g. several
+///   `@HasMany` relations with `ad4m://has_child`), each gets a copy of
+///   the targets.
+///
+/// The output includes synthetic fields: `id`, `baseExpression`, `createdAt`,
+/// `updatedAt`, `author`, `timestamp`.
 pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Value> {
     let mut obj = Map::new();
 
@@ -157,7 +190,10 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
     Some(Value::Object(obj))
 }
 
-/// Filter an instance to only include requested properties.
+/// Strip an instance down to only the requested properties.
+///
+/// `id` and `baseExpression` are always preserved.  Included relation
+/// names are added to the keep-list by the caller.
 pub(super) fn filter_properties(instance: Value, requested: &[String]) -> Value {
     if let Value::Object(mut obj) = instance {
         let always_keep = ["id", "baseExpression"];

@@ -1,3 +1,19 @@
+//! Relation resolution: reverse relations and recursive `include` eager-loading.
+//!
+//! This module handles two concerns:
+//!
+//! 1. **Reverse relations** ([`resolve_reverse_relations`]) — For `@BelongsTo`
+//!    relations where the triple direction is `target → source` (the *other*
+//!    instance points *at* this one), we query for `?source <pred> ?target`
+//!    where `?target` is our instance ID, and collect the `?source` values.
+//!
+//! 2. **Recursive eager-loading** ([`resolve_includes_recursive`]) — When the
+//!    query includes `include: { comments: true }`, we collect all target IDs
+//!    from the relation, run a recursive sub-query via
+//!    [`execute_model_query_inner`], and replace the raw ID arrays with fully
+//!    hydrated child instances.  This supports arbitrary nesting depth
+//!    (bounded by [`MAX_INCLUDE_DEPTH`](super::utils::MAX_INCLUDE_DEPTH)).
+
 use deno_core::anyhow::Error;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -7,7 +23,12 @@ use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, Whe
 use super::utils::validate_iri;
 use crate::perspectives::sparql_store::SparqlStore;
 
-/// Resolve reverse relations (BelongsToOne/BelongsToMany) for all instances in batch.
+/// Resolve reverse relations (`@BelongsTo`) for all instances in a batch.
+///
+/// For each `(name, predicate, is_single)` relation, executes a single
+/// batched SPARQL query: `?source <pred> ?target` with `VALUES ?target { ... }`
+/// containing all instance IDs.  The results are attached to each instance
+/// as either a scalar (for `belongsToOne`) or an array (for `belongsToMany`).
 pub fn resolve_reverse_relations(
     store: &SparqlStore,
     instances: &mut [Value],
@@ -83,8 +104,12 @@ pub fn resolve_reverse_relations(
     Ok(())
 }
 
-/// Resolve all included relations for a set of instances, recursively handling
-/// nested includes.
+/// Resolve all `include`d relations for a set of instances.
+///
+/// Iterates over the `include` map and, for each relation with enriched
+/// metadata in the shape, delegates to either [`resolve_forward_include`]
+/// or [`resolve_reverse_include`].  Sub-queries within `IncludeValue::SubQuery`
+/// are passed through to the recursive call.
 pub(super) fn resolve_includes_recursive(
     store: &SparqlStore,
     instances: &mut [Value],
@@ -118,7 +143,11 @@ pub(super) fn resolve_includes_recursive(
     Ok(())
 }
 
-/// Resolve a forward relation (hasMany / hasOne) for all instances.
+/// Resolve a forward relation (`@HasMany` / `@HasOne`) for all instances.
+///
+/// Collects all unique target IDs from the relation arrays, runs a sub-query
+/// to hydrate them, and replaces the raw ID arrays with hydrated JSON objects.
+/// If the sub-query specifies an `order`, the result order is preserved.
 fn resolve_forward_include(
     store: &SparqlStore,
     instances: &mut [Value],
@@ -221,7 +250,12 @@ fn resolve_forward_include(
     Ok(())
 }
 
-/// Resolve a reverse relation (belongsToOne / belongsToMany) for all instances.
+/// Resolve a reverse include relation (`@BelongsTo`) for all instances.
+///
+/// Queries for `?source <pred> ?target` where targets are the current
+/// instance IDs, collects all source IDs, hydrates them via a sub-query,
+/// and attaches the results (scalar for `belongsToOne`, array for
+/// `belongsToMany`).
 fn resolve_reverse_include(
     store: &SparqlStore,
     instances: &mut [Value],

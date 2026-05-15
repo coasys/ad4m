@@ -1,3 +1,18 @@
+//! SPARQL query construction for the model query pipeline.
+//!
+//! This module generates the SPARQL strings that find conforming model
+//! instances and apply where-clause filters.  It produces two kinds of output:
+//!
+//! - **Conformance patterns** — triple patterns that identify instances
+//!   belonging to a particular model class (based on required/flag properties).
+//! - **Where-clause patterns** — `FILTER` and `VALUES` clauses that push
+//!   client-specified conditions into the SPARQL query for server-side
+//!   evaluation.
+//!
+//! The main entry points are [`build_instance_sparql`] (full row query) and
+//! [`build_count_sparql`] (lightweight `COUNT`).  Both delegate to
+//! [`build_query_patterns`] for the shared conformance + where logic.
+
 use serde_json::Value;
 
 use super::types::{
@@ -6,7 +21,13 @@ use super::types::{
 };
 use super::utils::{escape_sparql_string, validate_iri};
 
-/// Build a targeted reifier timestamp probe for the pagination subquery.
+/// Build a targeted reifier timestamp probe for the pagination sub-query.
+///
+/// The timestamp probe finds the earliest reifier timestamp for each source
+/// instance so that `ORDER BY ?_first_ts` can sort by creation time.  The
+/// probe tries to use a specific conformance predicate (flag or required
+/// property) for efficiency, falling back to a generic `?source ?_anyP ?_anyT`
+/// pattern if no specific predicate is available.
 pub(super) fn build_timestamp_probe(shape: &ModelShape) -> String {
     let rdf_reifies = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
     let ont_ts = "ad4m://ontology/timestamp";
@@ -43,6 +64,13 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape) -> String {
     )
 }
 
+/// Build the SPARQL query (or two-phase plan) that retrieves instance rows.
+///
+/// Returns an [`InstanceQueryPlan`]:
+/// - [`Single`](InstanceQueryPlan::Single) when no pagination is needed.
+/// - [`TwoPhase`](InstanceQueryPlan::TwoPhase) when `sparql_pagination` is
+///   provided, splitting the work into a lightweight pagination sub-query
+///   and a `VALUES`-based property fetch.
 pub(super) fn build_instance_sparql(
     shape: &ModelShape,
     query: &ModelQueryInput,
@@ -157,8 +185,12 @@ pub(super) fn build_count_sparql(shape: &ModelShape, query: &ModelQueryInput) ->
     ))
 }
 
-/// Check whether a query's where clause contains only conditions that can be
-/// pushed entirely to SPARQL.
+/// Check whether **all** where-clause conditions can be pushed into SPARQL.
+///
+/// Returns `true` when every condition targets either `id`/`base` (with
+/// simple string values), a collection relation (with string/array values),
+/// or a known scalar property.  When this returns `false`, post-hydration
+/// Rust-side filtering is required for the remaining conditions.
 pub(super) fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) -> bool {
     let Some(ref wc) = query.where_clause else {
         return true;
@@ -195,8 +227,21 @@ pub(super) fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) ->
     true
 }
 
-/// Build conformance + where patterns shared by both the instance query and
-/// the COUNT query.
+/// Build the conformance and where-clause SPARQL pattern strings.
+///
+/// Returns `(conformance, where_extra)` — two SPARQL fragments that are
+/// interpolated into both the instance query and the `COUNT` query.
+///
+/// **Conformance patterns** ensure only instances of the target model class
+/// are matched.  They are derived from the shape's required and flag
+/// properties, with multiple fallback tiers:
+/// 1. Required properties → `?source <pred> ?cf_name .`
+/// 2. Flag properties with initial values → `?source <pred> <initial> .`
+/// 3. Any property with an initial value (first match)
+/// 4. Structural fallback using known predicates via `FILTER(?_structPred IN (...))`
+///
+/// **Where patterns** translate the query's `where` clause into SPARQL
+/// `FILTER`/`VALUES` expressions for server-side evaluation.
 pub(super) fn build_query_patterns(
     shape: &ModelShape,
     query: &ModelQueryInput,

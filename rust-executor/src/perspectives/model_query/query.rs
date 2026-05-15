@@ -1,3 +1,11 @@
+//! Top-level query orchestrator.
+//!
+//! [`execute_model_query`] is the single public entry point that external code
+//! (e.g. `perspective_instance.rs`) calls.  It wires together shape resolution,
+//! SPARQL construction, store execution, hydration, filtering, getter
+//! evaluation, relation resolution, and projection attachment — producing a
+//! [`ModelQueryResult`] with hydrated JSON instances and a total count.
+
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
 use super::hydration::{filter_properties, group_results_by_source, hydrate_instances};
@@ -15,7 +23,16 @@ use serde_json::Value;
 
 /// Execute a model query against the Oxigraph store.
 ///
-/// This is the main entry point that replaces the TS SPARQL-build -> hydrate -> filter pipeline.
+/// This is the main public entry point.  It delegates to
+/// [`execute_model_query_inner`] with an initial recursion depth of 0.
+///
+/// # Arguments
+///
+/// * `store` — The Oxigraph SPARQL store to query against.
+/// * `class_name` — Name of the model class (e.g. `"Recipe"`, `"Message"`).
+/// * `query_input` — The deserialized query object from the TS client.
+/// * `shape_json` — Optional JSON metadata describing the model's shape.
+///   When `None`, the shape is loaded from SHACL triples in the store.
 pub fn execute_model_query(
     store: &SparqlStore,
     class_name: &str,
@@ -25,7 +42,11 @@ pub fn execute_model_query(
     execute_model_query_inner(store, class_name, query_input, shape_json, 0)
 }
 
-/// Inner implementation with depth tracking for cycle detection.
+/// Inner implementation with recursion depth tracking.
+///
+/// The `depth` parameter prevents infinite cycles when resolving nested
+/// `include` relations (e.g. A includes B which includes A).  If depth
+/// exceeds [`MAX_INCLUDE_DEPTH`], an empty result is returned.
 pub(super) fn execute_model_query_inner(
     store: &SparqlStore,
     class_name: &str,

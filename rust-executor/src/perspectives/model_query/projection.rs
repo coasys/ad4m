@@ -1,3 +1,19 @@
+//! Projection resolution for lightweight relation aggregations.
+//!
+//! Projections (keys prefixed with `$` in the TS query) compute per-instance
+//! counts or filtered lists over a relation predicate without fully hydrating
+//! the related instances.  Each projection produces a single grouped SPARQL
+//! query that runs against the store and attaches results to the parent
+//! instances.
+//!
+//! Two modes are supported:
+//! - **Count** (`count: true`) — attaches an integer count per parent.
+//! - **List** (`count: false`) — attaches an array of target IRIs per parent,
+//!   optionally ordered and limited.
+//!
+//! Projections can also filter by target properties (via `where`) and by
+//! reifier metadata (author/timestamp).
+
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -5,6 +21,11 @@ use super::types::{ModelShape, OrderDirection, ProjectionInput, WhereCondition};
 use super::utils::{escape_sparql_string, validate_iri};
 use crate::perspectives::sparql_store::SparqlStore;
 
+/// Resolve all projections for a set of parent instances.
+///
+/// For each projection key, builds and executes a single grouped SPARQL
+/// query that collects either counts or target IRI lists, then merges the
+/// results into the instance objects.
 pub(super) fn resolve_projections(
     store: &SparqlStore,
     instances: &mut Vec<Value>,
@@ -173,6 +194,13 @@ pub(super) fn resolve_projections(
     Ok(())
 }
 
+/// Build SPARQL where-clause patterns for a projection's `where` filter.
+///
+/// Translates property-level conditions (string, number, bool, array) into
+/// `FILTER` expressions that constrain which targets are counted/listed.
+/// Conditions on `id`/`base` filter on `?t` directly; conditions on
+/// `author`/`timestamp` are handled by [`build_projection_reifier_patterns`]
+/// instead.
 pub(super) fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
     let Some(ref wc) = proj.where_clause else {
         return String::new();
@@ -285,6 +313,11 @@ pub(super) fn build_projection_where_patterns(proj: &ProjectionInput) -> String 
     patterns.join("")
 }
 
+/// Build an `ORDER BY` clause for a projection query.
+///
+/// Only `id`/`base` ordering is supported (ordering by `?t`).  Other
+/// property-level ordering would require joining additional triples and
+/// is not implemented for projections.
 pub(super) fn build_projection_order_clause(proj: &ProjectionInput) -> String {
     let Some(ref order) = proj.order else {
         return String::new();
@@ -309,6 +342,11 @@ pub(super) fn build_projection_order_clause(proj: &ProjectionInput) -> String {
     }
 }
 
+/// Build SPARQL patterns that filter projection targets by reifier metadata.
+///
+/// When the projection's where clause includes `author` or `timestamp`
+/// conditions, this generates triple patterns that join against the RDF 1.2
+/// reifier (the statement that records who created the link and when).
 pub(super) fn build_projection_reifier_patterns(proj: &ProjectionInput, safe_pred: &str) -> String {
     let Some(ref wc) = proj.where_clause else {
         return String::new();

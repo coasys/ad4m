@@ -1,3 +1,24 @@
+//! SPARQL getter evaluation for properties and relations.
+//!
+//! Some model properties and relations are not stored as simple triples but
+//! are instead defined by custom SPARQL expressions (the `getter` field in
+//! the shape metadata, corresponding to the `@Property({ getter: "..." })`
+//! or `@HasMany({ getter: "..." })` decorators in TypeScript).
+//!
+//! This module evaluates those getters efficiently using **batched `VALUES`
+//! queries** — a single SPARQL query handles all instances at once by
+//! injecting `VALUES ?source { <id1> <id2> ... }`.
+//!
+//! Two getter forms are supported:
+//! - **`ASK`** — Converted to a `SELECT ?source` that returns which sources
+//!   match, producing a boolean per instance.
+//! - **`SELECT`** — Augmented with a `VALUES ?source` clause, producing
+//!   string values (scalar or array) per instance.
+//!
+//! After getter evaluation, optional post-getter where-clause filters
+//! ([`apply_where_filter_to_relation`]) can further narrow down relation
+//! results based on target instance properties.
+
 use deno_core::anyhow::Error;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -8,7 +29,12 @@ use super::types::{IncludeValue, ModelShape, ShapeProperty};
 use super::utils::{parse_literal_value, validate_iri};
 use crate::perspectives::sparql_store::SparqlStore;
 
-/// Evaluate property getters for a batch of instances identified by ID.
+/// Evaluate property getters for a batch of instances, returning only the
+/// getter-computed properties.
+///
+/// This is the public entry point used by `perspective_instance.rs` when
+/// the client requests a targeted getter evaluation (as opposed to the
+/// full query pipeline).  Returns a map of `instance_id → { prop: value }`.
 pub fn evaluate_getters_batch(
     store: &SparqlStore,
     class_name: &str,
@@ -75,6 +101,10 @@ pub fn evaluate_getters_batch(
 }
 
 /// Strip a trailing top-level `LIMIT N` clause from a SPARQL query string.
+///
+/// Getter expressions may include their own `LIMIT 1` for scalar results.
+/// When batching, we need to remove this limit because the batched query
+/// returns results for multiple sources.
 pub(super) fn strip_trailing_limit(query: &str) -> String {
     let trimmed = query.trim_end();
     let upper = trimmed.to_uppercase();
@@ -87,7 +117,10 @@ pub(super) fn strip_trailing_limit(query: &str) -> String {
     trimmed.to_string()
 }
 
-/// Convert an ASK getter to a batched SELECT returning matching source IRIs.
+/// Convert an `ASK` getter to a batched `SELECT` returning matching source IRIs.
+///
+/// Replaces `<Base>` with `?source`, extracts the body between `{ }`, and
+/// wraps it in `SELECT ?source WHERE { VALUES ?source { ... } <body> }`.
 pub(super) fn convert_ask_to_batched_select(ask: &str, values_clause: &str) -> String {
     let normalized = ask.replace("<Base>", "?source");
     if let (Some(open), Some(close)) = (normalized.find('{'), normalized.rfind('}')) {
@@ -102,7 +135,13 @@ pub(super) fn convert_ask_to_batched_select(ask: &str, values_clause: &str) -> S
     }
 }
 
-/// Inject a VALUES ?source clause into a SELECT getter.
+/// Inject a `VALUES ?source` clause into a `SELECT` getter for batching.
+///
+/// Performs three transformations:
+/// 1. Replaces `<Base>` with `?source`.
+/// 2. Strips any trailing `LIMIT N` (see [`strip_trailing_limit`]).
+/// 3. Ensures `?source` is in the projection and adds `VALUES ?source { ... }`
+///    inside the first `{`.
 pub(super) fn inject_values_into_select(select: &str, values_clause: &str) -> String {
     let mut query = select.replace("<Base>", "?source");
 
@@ -126,7 +165,15 @@ pub(super) fn inject_values_into_select(select: &str, values_clause: &str) -> St
     query
 }
 
-/// Evaluate SPARQL getters on all instances using batched VALUES queries.
+/// Evaluate SPARQL getters on all instances using batched `VALUES` queries.
+///
+/// For each property/relation with a `getter` expression:
+/// - `ASK` getters are converted to batched `SELECT`s → boolean result.
+/// - `SELECT` getters are injected with `VALUES ?source` → string result(s).
+///
+/// When `deep_query` is `false`, only relation conformance getters (collections
+/// and scalar relations) are evaluated, skipping pure-property getters for
+/// performance.
 pub(super) fn evaluate_getters(
     store: &SparqlStore,
     instances: &mut [Value],
@@ -279,7 +326,12 @@ pub(super) fn evaluate_getters(
     Ok(())
 }
 
-/// Apply a where-clause filter to a relation property across all instances.
+/// Apply a post-getter where-clause filter to a relation across all instances.
+///
+/// After a getter populates a relation's target IDs, this function fetches
+/// the target instances' property values (via batched `VALUES` queries) and
+/// filters out targets that don't match the where conditions.  The relation
+/// arrays on each parent instance are updated in-place.
 pub(super) fn apply_where_filter_to_relation(
     store: &SparqlStore,
     instances: &mut [Value],

@@ -1,9 +1,24 @@
+//! Post-hydration where-clause filtering and multi-key instance sorting.
+//!
+//! Some where-clause conditions cannot be pushed into SPARQL (e.g. `Ops`
+//! conditions on getter-computed properties, or complex numeric comparisons).
+//! After hydration and getter evaluation, [`matches_where`] is used to
+//! evaluate those remaining conditions in Rust.
+//!
+//! [`sort_instances`] provides multi-key sorting with type-aware comparison
+//! (numeric before string, nulls pushed to end).
+
 use super::types::{ModelShape, OrderDirection, WhereCondition, WhereOps};
 use super::utils::to_f64;
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
+/// Test whether an instance passes all conditions in a where clause.
+///
+/// Conditions that are known to have been pushed to SPARQL (e.g. simple
+/// string equality on `id`, or string/array conditions on collection
+/// relations) are skipped here to avoid redundant work.
 pub(super) fn matches_where(
     instance: &Value,
     where_clause: &BTreeMap<String, WhereCondition>,
@@ -54,7 +69,11 @@ pub(super) fn matches_where(
     true
 }
 
-/// Check if a single value matches a where condition.
+/// Check whether a single JSON value matches a where condition.
+///
+/// Handles all [`WhereCondition`] variants: exact match (string, number,
+/// bool), set membership (string/number arrays), and operator-based
+/// comparisons ([`WhereOps`]).
 pub(super) fn matches_condition(val: &Value, condition: &WhereCondition) -> bool {
     match condition {
         WhereCondition::String(expected) => match val {
@@ -87,7 +106,13 @@ pub(super) fn matches_condition(val: &Value, condition: &WhereCondition) -> bool
     }
 }
 
-/// Check if a value matches operator conditions.
+/// Evaluate a value against operator-based conditions (`not`, `gt`, `lt`,
+/// `gte`, `lte`, `between`, `contains`).
+///
+/// Numeric operators attempt `f64` coercion (including ISO-8601 timestamp
+/// parsing).  Non-numeric strings fail numeric comparisons.  `contains`
+/// does case-insensitive substring matching on strings and element-in-array
+/// matching on arrays.
 pub(super) fn matches_ops(val: &Value, ops: &WhereOps) -> bool {
     // NOT
     if let Some(ref not_val) = ops.not {
@@ -256,7 +281,10 @@ pub(super) fn matches_ops(val: &Value, ops: &WhereOps) -> bool {
 // Sorting
 // ---------------------------------------------------------------------------
 
-/// Sort instances by the given order specification.
+/// Sort instances in-place by the given multi-key order specification.
+///
+/// Each key is evaluated in order; ties on the first key fall through to
+/// the second, and so on.  Uses [`compare_values`] for type-aware comparison.
 pub(super) fn sort_instances(instances: &mut [Value], order: &[(String, OrderDirection)]) {
     instances.sort_by(|a, b| {
         for (prop, dir) in order {
@@ -277,7 +305,12 @@ pub(super) fn sort_instances(instances: &mut [Value], order: &[(String, OrderDir
     });
 }
 
-/// Compare two JSON values with type-aware logic.
+/// Compare two JSON values with type-aware ordering.
+///
+/// Ordering rules:
+/// 1. `Null` values are pushed to the end (greater than any non-null).
+/// 2. If both values can be coerced to `f64`, numeric comparison is used.
+/// 3. Otherwise, values are compared as strings (lexicographic).
 pub(super) fn compare_values(a: &Value, b: &Value) -> Ordering {
     // Handle nulls — push to end
     match (a.is_null(), b.is_null()) {

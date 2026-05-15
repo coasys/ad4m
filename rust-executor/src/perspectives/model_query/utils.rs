@@ -1,3 +1,10 @@
+//! Low-level utilities shared across the model query module.
+//!
+//! This module provides SPARQL injection prevention helpers
+//! ([`escape_sparql_string`], [`validate_iri`]), typed parsing of AD4M's
+//! `literal:` URI scheme ([`parse_literal_value`]), and numeric/timestamp
+//! coercion helpers used by the filtering engine.
+
 use deno_core::anyhow::{anyhow, Error};
 #[cfg(test)]
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};

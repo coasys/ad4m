@@ -1,3 +1,11 @@
+//! Data types for the model query DSL and internal query execution.
+//!
+//! This module mirrors the TypeScript query types (`Query`, `WhereCondition`,
+//! `IncludeProjection`, etc.) as Rust structs with serde deserialization.  It
+//! also defines the internal shape metadata types ([`ModelShape`],
+//! [`ShapeProperty`], [`ShapeRelation`]) and the query execution plan
+//! ([`InstanceQueryPlan`]).
+
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -6,7 +14,11 @@ use std::collections::{BTreeMap, HashMap};
 // Query DSL types (mirrors TS types.ts)
 // ---------------------------------------------------------------------------
 
-/// Comparison operators for where conditions.
+/// Comparison operators for where-clause conditions.
+///
+/// Used inside [`WhereCondition::Ops`] to express range queries, negation,
+/// and substring matching.  Multiple fields can be combined (e.g. `gt` + `lt`
+/// for an open range).
 #[derive(Debug, Clone, Deserialize)]
 pub struct WhereOps {
     #[serde(default)]
@@ -39,7 +51,16 @@ impl Default for WhereOps {
     }
 }
 
-/// A single where condition: simple value or operator object.
+/// A single where-clause condition.
+///
+/// Deserialized from JSON with `#[serde(untagged)]` — the variant is inferred
+/// from the JSON value's type:
+/// - `"active"` → [`String`](WhereCondition::String)
+/// - `42.0` → [`Number`](WhereCondition::Number)
+/// - `true` → [`Bool`](WhereCondition::Bool)
+/// - `["a","b"]` → [`StringArray`](WhereCondition::StringArray) (IN operator)
+/// - `[1,2,3]` → [`NumberArray`](WhereCondition::NumberArray) (IN operator)
+/// - `{"gt": 5, "lt": 10}` → [`Ops`](WhereCondition::Ops)
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum WhereCondition {
@@ -51,16 +72,21 @@ pub enum WhereCondition {
     Ops(WhereOps),
 }
 
-/// Order direction.
+/// Sort direction for ORDER BY clauses.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
 pub enum OrderDirection {
     ASC,
     DESC,
 }
 
-/// Deserialize `order` from either `[["key","ASC"]]` (tuple array) or
-/// `{"key":"ASC"}` (object map).  Sub-query includes send the object form
-/// while the top-level query converts to tuples in TS.
+/// Custom serde deserializer for the `order` field.
+///
+/// Accepts two JSON shapes that the TS client may send:
+/// - Tuple array: `[["name", "ASC"], ["age", "DESC"]]`
+/// - Object map: `{"name": "ASC", "age": "DESC"}`
+///
+/// Top-level queries typically send the tuple form; sub-queries inside
+/// `include` may send the object form.
 fn deserialize_order_flex<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<(String, OrderDirection)>>, D::Error>
@@ -127,6 +153,10 @@ where
 }
 
 /// Parent scope for scoped queries.
+///
+/// When a query targets instances that are children of a specific parent
+/// (e.g. "all Messages belonging to Channel X"), the parent scope constrains
+/// the SPARQL query with an additional triple pattern.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum ParentScope {
@@ -141,7 +171,11 @@ pub enum ParentScope {
     },
 }
 
-/// Include map for eager-loading relations.
+/// Value in the `include` map for eager-loading relations.
+///
+/// - `Bool(true)` — include with default sub-query
+/// - `SubQuery(...)` — include with a custom nested query (supports where,
+///   order, limit, and further nested includes)
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum IncludeValue {
@@ -149,7 +183,11 @@ pub enum IncludeValue {
     SubQuery(Box<ModelQueryInput>),
 }
 
-/// Input for a single projection key (mirrors TS IncludeProjection).
+/// Configuration for a single projection key (mirrors TS `IncludeProjection`).
+///
+/// Projections are lightweight aggregations that begin with `$` in the query
+/// object.  They compute either a count or a filtered list of related IRIs
+/// using a single grouped SPARQL query per key.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectionInput {
@@ -171,7 +209,12 @@ pub struct ProjectionInput {
     pub order: Option<Vec<(String, OrderDirection)>>,
 }
 
-/// The structured query input (mirrors TS Query type).
+/// The structured query input (mirrors the TS `Query<T>` type).
+///
+/// This is the top-level request object deserialized from the JSON that
+/// the TypeScript client sends.  It supports filtering (`where`), sorting
+/// (`order`), pagination (`limit`/`offset`), eager-loading (`include`),
+/// projections, and property selection.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelQueryInput {
@@ -228,10 +271,14 @@ pub(super) enum SortKey {
 }
 
 // ---------------------------------------------------------------------------
-// Internal shape info (derived from SHACL links in the store)
+// Internal shape metadata (derived from SHACL links or client JSON)
 // ---------------------------------------------------------------------------
 
-/// A property discovered from SHACL links.
+/// A single property or relation declared in a model class's shape.
+///
+/// Constructed either by reading SHACL triples from the store
+/// ([`super::shape::load_shape`]) or by parsing the JSON metadata sent
+/// alongside the query ([`super::shape::parse_shape_from_json`]).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub(super) struct ShapeProperty {
@@ -270,7 +317,11 @@ pub(super) struct ShapeRelation {
     pub(super) target_shape_json: String, // Serialised ModelMetadata JSON for recursive queries
 }
 
-/// A model shape reconstructed from SHACL links in the store.
+/// Complete shape of a model class — the set of all properties, relations,
+/// and include metadata needed to query, hydrate, and enrich instances.
+///
+/// This is the central metadata object threaded through the entire query
+/// pipeline.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) struct ModelShape {
@@ -303,12 +354,17 @@ impl ModelShape {
     }
 }
 
-/// Represents the SPARQL execution plan for an instance query.
-/// Paginated queries use a two-phase approach: first execute the pagination
-/// subquery to get source IDs, then build a VALUES-based property query.
-/// Oxigraph's query planner doesn't push nested subqueries with ORDER BY +
-/// LIMIT down efficiently, resulting in O(N * total_triples) scans instead
-/// of O(page_size) lookups.
+/// SPARQL execution plan for an instance query.
+///
+/// For non-paginated queries, a single SPARQL `SELECT` fetches all matching
+/// rows.  For paginated queries we use a **two-phase** approach because
+/// Oxigraph's query planner doesn't push nested sub-queries with `ORDER BY`
+/// + `LIMIT` down efficiently (O(N * total_triples) vs O(page_size) lookups):
+///
+/// 1. **Phase 1** — A lightweight pagination sub-query retrieves just the
+///    source IRIs in sorted/limited order.
+/// 2. **Phase 2** — A `VALUES ?source { ... }` property query fetches all
+///    triples for those specific instances.
 pub(super) enum InstanceQueryPlan {
     /// Single query -- no pagination or non-paginated query.
     Single(String),
@@ -335,7 +391,11 @@ impl InstanceQueryPlan {
     }
 }
 
-/// An intermediate representation of all links belonging to one instance.
+/// Intermediate representation of all RDF links belonging to one instance.
+///
+/// Produced by [`super::hydration::group_results_by_source`] from raw SPARQL
+/// result rows, then consumed by [`super::hydration::hydrate_one`] to build
+/// a fully typed JSON object.
 #[derive(Debug)]
 pub(super) struct InstanceLinks {
     pub(super) source: String,
