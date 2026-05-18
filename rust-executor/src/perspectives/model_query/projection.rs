@@ -17,7 +17,7 @@
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
-use super::types::{ModelShape, ModelQueryInput, OrderDirection, ProjectionInput, WhereCondition};
+use super::types::{ModelQueryInput, ModelShape, OrderDirection, ProjectionInput, WhereCondition};
 use super::utils::{escape_sparql_string, validate_iri};
 use crate::perspectives::sparql_store::SparqlStore;
 

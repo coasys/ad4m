@@ -4181,4 +4181,3 @@ fn test_resolve_projections_where_filter_double_encoded_literal() {
         "double-encoded stored URI should be decoded by parse_literal and match filter; got {count}"
     );
 }
-
