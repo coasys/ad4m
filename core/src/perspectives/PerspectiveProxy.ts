@@ -846,23 +846,31 @@ export class PerspectiveProxy {
     async removeListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
         if (type === 'link-added') {
             const index = this.#perspectiveLinkAddedCallbacks.indexOf(cb);
-
-            this.#perspectiveLinkAddedCallbacks.splice(index, 1);
+            if (index >= 0) this.#perspectiveLinkAddedCallbacks.splice(index, 1);
         } else if (type === 'link-removed') {
             const index = this.#perspectiveLinkRemovedCallbacks.indexOf(cb);
-
-            this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
+            if (index >= 0) this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
         } else if (type === 'link-updated') {
             const index = this.#perspectiveLinkUpdatedCallbacks.indexOf(cb);
-
-            this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
+            if (index >= 0) this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
         }
+    }
+
+    /** Clean up all subscriptions registered by this proxy.
+     *  Call this when the proxy is no longer needed to prevent subscription leaks.
+     *  After calling dispose(), the proxy should not be used. */
+    dispose(): void {
+        this.#client.removeAllListeners(this.#handle.uuid)
+        this.#perspectiveLinkAddedCallbacks.length = 0
+        this.#perspectiveLinkRemovedCallbacks.length = 0
+        this.#perspectiveLinkUpdatedCallbacks.length = 0
+        this.#perspectiveSyncStateChangeCallbacks.length = 0
     }
 
     /**
      * Creates a snapshot of the current perspective state.
      * Useful for backup or sharing.
-     * 
+     *
      * @returns Perspective object containing all links
      */
     async snapshot(): Promise<Perspective> {

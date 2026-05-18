@@ -422,6 +422,18 @@ export class PerspectiveClient {
         await this.#apiClient.waitForSubscription()
     }
 
+    /** Unsubscribe all link/sync-state listeners registered for the given perspective UUID.
+     *  Called by PerspectiveProxy.dispose() to prevent subscription leaks. */
+    removeAllListeners(uuid: string): void {
+        const unsubs = this.#linkUnsubscribers.get(uuid)
+        if (unsubs) {
+            for (const fn of unsubs) {
+                try { fn() } catch {}
+            }
+            this.#linkUnsubscribers.delete(uuid)
+        }
+    }
+
     getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {
         return new NeighbourhoodProxy(this.#neighbourhoodClient!, uuid)
     }

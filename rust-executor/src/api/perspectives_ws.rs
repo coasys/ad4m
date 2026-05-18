@@ -303,7 +303,12 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let _ = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE);
+    if let Err(e) = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE) {
+        log::warn!(
+            "Credit deduction failed (operation already committed): {}",
+            e
+        );
+    }
     Ok(serde_json::to_value(result)?)
 }
 
@@ -336,7 +341,12 @@ async fn add_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     let count = diff.additions.len();
     if count > 0 {
-        let _ = reserve_credits(&ctx.user_email, count as f64 * DEFAULT_LINK_WRITE);
+        if let Err(e) = reserve_credits(&ctx.user_email, count as f64 * DEFAULT_LINK_WRITE) {
+            log::warn!(
+                "Credit deduction failed for bulk add (operation already committed): {}",
+                e
+            );
+        }
     }
 
     Ok(serde_json::to_value(diff.additions)?)
@@ -408,7 +418,12 @@ async fn link_mutations(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     let total = diff.additions.len() + diff.removals.len();
     if total > 0 {
-        let _ = reserve_credits(&ctx.user_email, total as f64 * DEFAULT_LINK_WRITE);
+        if let Err(e) = reserve_credits(&ctx.user_email, total as f64 * DEFAULT_LINK_WRITE) {
+            log::warn!(
+                "Credit deduction failed for mutations (operation already committed): {}",
+                e
+            );
+        }
     }
 
     Ok(serde_json::to_value(LinkMutationResponse {
@@ -439,7 +454,12 @@ async fn add_link_expression(params: Value, ctx: Arc<RequestContext>) -> Result<
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let _ = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE);
+    if let Err(e) = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE) {
+        log::warn!(
+            "Credit deduction failed (operation already committed): {}",
+            e
+        );
+    }
     Ok(serde_json::to_value(result)?)
 }
 
@@ -602,7 +622,7 @@ async fn add_sdna(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
             .await
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-        Ok(serde_json::to_value(results).unwrap())
+        Ok(serde_json::to_value(results)?)
     } else {
         // Single-entry mode (backward compatible)
         let body: AddSdnaRequest = serde_json::from_value(params.clone())
@@ -750,6 +770,12 @@ async fn subscribe_surreal_query(
 
 async fn keep_alive_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
     let body: KeepAliveQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -764,6 +790,12 @@ async fn keep_alive_query(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 
 async fn dispose_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
     let body: DisposeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -869,11 +901,29 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     let shape_json = params.opt_str("shape_json");
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let result = perspective
-        .model_query(&class_name, &query_json, shape_json.as_deref())
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    Ok(Value::String(result))
+    // Run synchronous SPARQL-backed model query on a blocking thread with timeout
+    // to avoid blocking the async runtime (same pattern as query_sparql handler).
+    let result = tokio::time::timeout(
+        Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
+        tokio::task::spawn_blocking(move || {
+            perspective.model_query(&class_name, &query_json, shape_json.as_deref())
+        }),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(Ok(json))) => Ok(Value::String(json)),
+        Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
+        Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
+        Err(_) => {
+            log::warn!("Model query timed out after {}s", SPARQL_QUERY_TIMEOUT_SECS);
+            Err(WsRpcError {
+                code: 408,
+                message: format!("Model query timed out after {}s", SPARQL_QUERY_TIMEOUT_SECS),
+            })
+        }
+    }
 }
 
 async fn evaluate_getters_handler(
@@ -912,16 +962,40 @@ async fn evaluate_getters_handler(
         });
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let result = perspective
-        .evaluate_getters(
-            &class_name,
-            &instance_ids,
-            property_names.as_deref(),
-            shape_json.as_deref(),
-        )
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    Ok(Value::String(result))
+    // Run synchronous getter evaluation on a blocking thread with timeout
+    // to avoid blocking the async runtime.
+    let result = tokio::time::timeout(
+        Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
+        tokio::task::spawn_blocking(move || {
+            perspective.evaluate_getters(
+                &class_name,
+                &instance_ids,
+                property_names.as_deref(),
+                shape_json.as_deref(),
+            )
+        }),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(Ok(json))) => Ok(Value::String(json)),
+        Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
+        Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
+        Err(_) => {
+            log::warn!(
+                "Getter evaluation timed out after {}s",
+                SPARQL_QUERY_TIMEOUT_SECS
+            );
+            Err(WsRpcError {
+                code: 408,
+                message: format!(
+                    "Getter evaluation timed out after {}s",
+                    SPARQL_QUERY_TIMEOUT_SECS
+                ),
+            })
+        }
+    }
 }
 
 async fn model_subscribe_handler(
