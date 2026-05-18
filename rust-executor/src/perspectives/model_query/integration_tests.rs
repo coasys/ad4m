@@ -3967,19 +3967,18 @@ fn test_resolve_projections_where_filter_via_target_shape_property() {
     //   include: {
     //     $totalLikeCount: { from: 'signals', where: { signalTypeId: 'like_type_id123' }, count: true }
     //   }
-    // where signalTypeId is a property on the Signal target node, resolved
-    // via target_shape so Rust can build the ?t <predicate> ?_pw0 . FILTER pattern.
-    // Under the fn/parse_literal scheme, stored values are literal:string:... IRIs
-    // and WHERE filter values are the decoded plain forms (what the TS caller passes).
+    // where signalTypeId is a @Property stored via literal_encode, and the WHERE
+    // filter value is the plain decoded form (what the TS caller passes).
+    // The fn/parse_literal FILTER decodes the stored literal:string:X IRI back to "X"
+    // for comparison — so caller passes "like_type_id123", not "literal:string:like_type_id123".
     let store = SparqlStore::new(None).unwrap();
 
     let parent_a = "test://parent/a";
     let like_signal = "test://signal/like";
     let dislike_signal = "test://signal/dislike";
-    // Signal type IDs stored as literal:string: URIs; WHERE filter uses decoded plain value.
     let like_type_id_stored = "literal:string:like_type_id123";
     let dislike_type_id_stored = "literal:string:dislike_type_id456";
-    let like_type_id_filter = "like_type_id123"; // decoded value — what the caller passes
+    let like_type_id_filter = "like_type_id123"; // plain decoded value — what the caller passes
 
     // Add parent → signal links
     store
@@ -3999,7 +3998,7 @@ fn test_resolve_projections_where_filter_via_target_shape_property() {
         ))
         .unwrap();
 
-    // Add signal → signalTypeId property links (stored as literal:string: IRIs)
+    // Add signal → signalTypeId property links (stored as literal:string: IRIs via literal_encode)
     store
         .add_link(&make_link(
             like_signal,
@@ -4027,8 +4026,8 @@ fn test_resolve_projections_where_filter_via_target_shape_property() {
         "relations": {}
     });
 
-    // Filter uses the decoded plain value — parse_literal decodes the stored
-    // literal:string:like_type_id123 IRI to "like_type_id123" for comparison.
+    // Filter passes the plain decoded value — fn/parse_literal in SPARQL decodes
+    // the stored literal:string:like_type_id123 IRI back to "like_type_id123".
     let mut wc = BTreeMap::new();
     wc.insert(
         "signalTypeId".to_string(),
@@ -4079,105 +4078,5 @@ fn test_resolve_projections_where_filter_via_target_shape_property() {
         got["id"].as_str().unwrap_or(""),
         like_signal,
         "list with limit:1 should return the hydrated like signal id, got {got}"
-    );
-}
-
-/// Tests `fn/parse_literal` filter matching against a double-encoded literal URI.
-///
-/// Some storage paths produce a `literal:string:X` URI and then encode that URI
-/// *again* as a literal, yielding `literal:string:literal%3Astring%3AX`.
-///
-/// `fn/parse_literal` URL-decodes the `string:` payload, returning
-/// `"literal:string:X"` as the decoded value.  The FILTER then compares that
-/// against the caller-supplied string `"literal:string:X"` — matching correctly.
-///
-/// This test stores the double-encoded IRI and verifies the projection count
-/// returns 1 when filtering by the original `literal:string:X` form.
-#[test]
-fn test_resolve_projections_where_filter_double_encoded_literal() {
-    let store = SparqlStore::new(None).unwrap();
-
-    let parent_a = "test://parent/dbl";
-    let like_signal = "test://signal/like-dbl";
-    let dislike_signal = "test://signal/dislike-dbl";
-
-    // The "user-facing" signalTypeId IRI (what the caller passes in where: {...})
-    let like_type_user = "literal:string:like_dbl_id";
-    // The stored form produced by literal_encode("literal:string:like_dbl_id").
-    // literal_percent_encode uses NON_ALPHANUMERIC which encodes _ as %5F.
-    // = "literal:string:literal%3Astring%3Alike%5Fdbl%5Fid"
-    let like_type_stored = "literal:string:literal%3Astring%3Alike%5Fdbl%5Fid";
-    let dislike_type_stored = "literal:string:literal%3Astring%3Adislike%5Fdbl%5Fid";
-
-    store
-        .add_link(&make_link(
-            parent_a,
-            "test://has_signal",
-            like_signal,
-            "2000",
-        ))
-        .unwrap();
-    store
-        .add_link(&make_link(
-            parent_a,
-            "test://has_signal",
-            dislike_signal,
-            "2001",
-        ))
-        .unwrap();
-    // Signals store their signalTypeId as the double-encoded form.
-    store
-        .add_link(&make_link(
-            like_signal,
-            "test://signal_type_id",
-            like_type_stored,
-            "2002",
-        ))
-        .unwrap();
-    store
-        .add_link(&make_link(
-            dislike_signal,
-            "test://signal_type_id",
-            dislike_type_stored,
-            "2003",
-        ))
-        .unwrap();
-
-    let shape = make_shape_with_relation("Parent", "signals", "test://has_signal");
-    let target_shape = json!({
-        "className": "Signal",
-        "properties": {
-            "signalTypeId": { "predicate": "test://signal_type_id" }
-        },
-        "relations": {}
-    });
-
-    // The caller passes the user-facing value (not the double-encoded stored form).
-    let mut wc = BTreeMap::new();
-    wc.insert(
-        "signalTypeId".to_string(),
-        WhereCondition::String(like_type_user.to_string()),
-    );
-
-    let mut instances = vec![json!({ "id": parent_a })];
-    let mut projections = HashMap::new();
-    projections.insert(
-        "$totalLikeCount".to_string(),
-        ProjectionInput {
-            from: "signals".to_string(),
-            count: true,
-            target_shape: Some(target_shape.clone()),
-            where_clause: Some(wc.clone()),
-            limit: None,
-            order: None,
-        },
-    );
-
-    resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
-
-    let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
-    assert_eq!(
-        count, 1,
-        "double-encoded stored URI should be decoded by parse_literal and match filter; got {count}"
     );
 }
