@@ -279,6 +279,26 @@ export interface PropertyOptions {
      * The function takes the raw value as input and returns the transformed value.
      */
     transform?: (value: any) => any;
+
+    /**
+     * Allowed values for this property (enum constraint).
+     * Maps to SHACL `sh:in`. Each entry has a `value` (the stored RDF term)
+     * and an optional `label` (human-readable display name).
+     *
+     * @example
+     * ```typescript
+     * @Property({
+     *   through: "task://status",
+     *   options: [
+     *     { value: "task://todo", label: "To Do" },
+     *     { value: "task://doing", label: "Doing" },
+     *     { value: "task://done", label: "Done" },
+     *   ]
+     * })
+     * status: string = "task://todo";
+     * ```
+     */
+    options?: Array<{ value: string; label?: string }>;
 }
 
 

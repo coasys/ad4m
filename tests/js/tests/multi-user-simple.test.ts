@@ -9,7 +9,7 @@ import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.j
 import { ChildProcess } from 'node:child_process';
 import { LinkQuery } from "@coasys/ad4m";
 import { v4 as uuidv4 } from 'uuid';
-import { NotificationInput, TriggeredNotification } from '@coasys/ad4m/lib/src/runtime/RuntimeResolver';
+import { NotificationInput, TriggeredNotification } from '@coasys/ad4m';
 import sinon from 'sinon';
 
 const expect = chai.expect;

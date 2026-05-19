@@ -2,7 +2,6 @@ import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
 import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE,
-    Subject,
     Ad4mModel,
     Flag,
     Property,
@@ -1680,12 +1679,15 @@ describe("Prolog + Literals", () => {
                     await newRecipe.save();
 
                     // Wait for subscription update with proper condition checking
-                    // Use longer timeout for CI environments which may be slower
+                    // Use longer timeout for CI environments which may be slower.
+                    // The subscription may fire multiple times (once per link-added event)
+                    // before the re-query reflects the new recipe, so wait until
+                    // totalCount reaches the expected value.
                     await waitForCondition(
-                        () => lastResult !== null,
+                        () => lastResult !== null && lastResult.totalCount === 11,
                         {
                             timeoutMs: 15000,
-                            errorMessage: 'Paginate subscription did not update after recipe save'
+                            errorMessage: 'Paginate subscription did not update totalCount to 11 after recipe save'
                         }
                     );
 

@@ -2551,7 +2551,8 @@ impl LanguageController {
         content: JsonValue,
         agent_context: &AgentContext,
     ) -> Result<String, LanguageError> {
-        // Handle literal language
+        // Handle literal language — create a signed expression envelope so
+        // provenance (author, timestamp, proof) is embedded in the URL.
         if lang_address == "literal" {
             let signed_expr = crate::agent::create_signed_expression(content, agent_context)
                 .map_err(|e| LanguageError::RuntimeError {

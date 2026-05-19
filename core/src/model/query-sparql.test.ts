@@ -1,6 +1,6 @@
-import { buildSPARQLOrderLimitOffset, buildSPARQLQuery, hasJsOnlyWhereFilters } from './query-sparql';
+import { buildSPARQLQuery, buildPaginationSubquery, hasJsOnlyWhereFilters } from './query-sparql';
 
-// Minimal stubs for ModelMetadata — buildSPARQLOrderLimitOffset only uses the query arg
+// Minimal stubs for ModelMetadata
 const emptyMetadata: any = { properties: {}, relations: {} };
 
 // Metadata with a required (non-literal) property and a literal-stored property
@@ -64,40 +64,29 @@ describe('hasJsOnlyWhereFilters', () => {
   });
 });
 
-describe('buildSPARQLQuery — pagination handled in JS, not SPARQL', () => {
+describe('buildSPARQLQuery — SPARQL-level pagination via subquery', () => {
   const modelClass: any = {};
 
-  it('does NOT include LIMIT/OFFSET in SPARQL even when query has them', () => {
+  it('includes LIMIT/OFFSET in a pagination subquery when query has them and no JS-only filters', () => {
     const query = { limit: 10, offset: 0, where: { category: 'some://uri' } };
     const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
-    // SPARQL should NOT contain LIMIT/OFFSET — pagination is done in JS
-    expect(sparql).not.toContain('LIMIT');
-    expect(sparql).not.toContain('OFFSET');
+    // SPARQL should contain LIMIT inside the pagination subquery
+    expect(sparql).toContain('LIMIT 10');
     // The outer query should still exist
     expect(sparql).toContain('SELECT ?source ?predicate ?target');
+    // Should have a subquery pattern
+    expect(sparql).toContain('SELECT DISTINCT ?source');
   });
 
-  it('does NOT include LIMIT/OFFSET even with JS-only where filters', () => {
-    const query = { limit: 10, offset: 0, where: { name: 'Pasta' } };
+  it('does NOT include LIMIT/OFFSET when JS-only where filters exist', () => {
+    // author is a JS-only filter
+    const query = { limit: 10, offset: 0, where: { author: 'did:key:abc' } };
     const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
     expect(sparql).not.toContain('LIMIT');
     expect(sparql).not.toContain('OFFSET');
   });
 });
 
-describe('buildSPARQLOrderLimitOffset', () => {
-  it('always returns empty string (pagination is handled in JS)', () => {
-    expect(buildSPARQLOrderLimitOffset(emptyMetadata, {})).toBe('');
-    expect(buildSPARQLOrderLimitOffset(emptyMetadata, { limit: 50 })).toBe('');
-    expect(buildSPARQLOrderLimitOffset(emptyMetadata, { limit: 50, offset: 100 })).toBe('');
-    expect(buildSPARQLOrderLimitOffset(emptyMetadata, { order: { timestamp: 'DESC' } })).toBe('');
-    expect(buildSPARQLOrderLimitOffset(emptyMetadata, {
-      order: { timestamp: 'DESC' },
-      limit: 50,
-      offset: 100,
-    })).toBe('');
-  });
-});
 
 describe('buildSPARQLQuery — parse_literal push-down filters', () => {
   const modelClass: any = {};
@@ -154,17 +143,47 @@ describe('buildSPARQLQuery — structural correctness', () => {
     };
     const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
     expect(sparql).toContain('<flux://channel-123>');
-    // No SPARQL-level pagination
-    expect(sparql).not.toContain('LIMIT');
+    // SPARQL-level pagination via subquery
+    expect(sparql).toContain('LIMIT 50');
+    expect(sparql).toContain('SELECT DISTINCT ?source');
   });
 
-  it('does not allow injection through where clause IRI values', () => {
+  it('rejects injection attempts through where clause IRI values', () => {
     const query = {
       where: { category: 'some://uri"> . } UNION { SELECT * WHERE { ?s ?p ?o' },
     };
-    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
-    // Value should be wrapped in angle brackets as an IRI
-    expect(sparql).toContain('<some://uri');
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('Invalid IRI component');
+  });
+
+  it('rejects angle brackets in IRI values', () => {
+    const query = { where: { category: 'foo<bar>' } };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('Invalid IRI component');
+  });
+
+  it('rejects curly braces in IRI values', () => {
+    const query = { where: { category: 'foo{bar}' } };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('Invalid IRI component');
+  });
+
+  it('rejects spaces in IRI values', () => {
+    const query = { where: { category: 'foo bar' } };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('Invalid IRI component');
+  });
+
+  it('rejects double quotes in IRI values', () => {
+    const query = { where: { category: 'foo"bar' } };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('Invalid IRI component');
+  });
+
+  it('allows valid URIs through iri()', () => {
+    const query = { where: { category: 'https://example.com/category/food' } };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .not.toThrow();
   });
 });
 
@@ -241,6 +260,77 @@ describe('buildSPARQLQuery — IRI correctness', () => {
   });
 });
 
+// ──────────────────────────────────────────────────────────
+// SPARQL-level pagination (LIMIT/OFFSET in generated queries)
+// ──────────────────────────────────────────────────────────
+
+describe('SPARQL-level pagination', () => {
+  const modelClass: any = {};
+
+  it('includes LIMIT in SPARQL when query specifies limit', () => {
+    const query = { limit: 30 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('LIMIT 30');
+    expect(sparql).toContain('SELECT DISTINCT ?source');
+  });
+
+  it('includes OFFSET in SPARQL when query specifies offset > 0', () => {
+    const query = { limit: 20, offset: 40 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('LIMIT 20');
+    expect(sparql).toContain('OFFSET 40');
+  });
+
+  it('does NOT include OFFSET when offset is 0', () => {
+    const query = { limit: 10, offset: 0 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('LIMIT 10');
+    expect(sparql).not.toContain('OFFSET');
+  });
+
+  it('includes ORDER BY in subquery when query.order is specified', () => {
+    const query = { limit: 10, order: { name: 'DESC' as const } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('ORDER BY DESC(');
+    expect(sparql).toContain('LIMIT 10');
+  });
+
+  it('does NOT default to ORDER BY timestamp when paginating without explicit order', () => {
+    const query = { limit: 30 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('ORDER BY');
+    expect(sparql).not.toContain('pg_minTs');
+  });
+
+  it('does NOT push pagination to SPARQL when JS-only where filters exist (author)', () => {
+    const query = { limit: 10, where: { author: 'did:key:abc' } };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('LIMIT');
+    expect(sparql).not.toContain('OFFSET');
+  });
+
+  it('does NOT push pagination to SPARQL when JS-only where filters exist (gt operator)', () => {
+    const meta: any = {
+      properties: {
+        rating: { name: 'rating', predicate: 'flux://rating', required: true, resolveLanguage: 'literal' },
+      },
+      relations: {},
+    };
+    const query = { limit: 10, where: { rating: { gt: 5 } } };
+    const sparql = buildSPARQLQuery(meta, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('LIMIT');
+  });
+
+  it('wraps pagination in a subquery (outer SELECT fetches all links for the page)', () => {
+    const query = { limit: 5, offset: 10 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('SELECT ?source ?predicate ?target ?author ?timestamp');
+    expect(sparql).toContain('SELECT DISTINCT ?source');
+    expect(sparql).toContain('LIMIT 5');
+    expect(sparql).toContain('OFFSET 10');
+  });
+});
+
 describe('buildSPARQLQuery — set-difference patterns', () => {
   const modelClass: any = {};
 
@@ -261,4 +351,26 @@ describe('buildSPARQLQuery — set-difference patterns', () => {
     expect(sparql).not.toContain('flux://has_child');
     expect(sparql).toContain('SELECT ?source ?predicate ?target');
   });
+});
+
+describe('buildSPARQLQuery — RDF 1.2 reifier patterns', () => {
+  const modelClass: any = {};
+
+  it('uses rdf:reifies instead of GRAPH for link metadata', () => {
+    const query = { limit: 10 };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>');
+    expect(sparql).toContain('<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<(');
+    expect(sparql).toContain('?_reifier');
+    expect(sparql).not.toContain('GRAPH');
+    expect(sparql).not.toContain('?linkGraph');
+  });
+
+  it('binds author and timestamp on the reifier node', () => {
+    const query = {};
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('?_reifier <ad4m://ontology/author> ?author');
+    expect(sparql).toContain('?_reifier <ad4m://ontology/timestamp> ?timestamp');
+  });
+
 });

@@ -1,4 +1,5 @@
 pub mod migration;
+pub mod model_query;
 pub mod perspective_instance;
 pub mod sdna;
 pub mod shacl_parser;
@@ -102,6 +103,19 @@ pub fn initialize_from_db() {
                 }
                 Ok(_) => {} // Already migrated or nothing to migrate
                 Err(e) => log::warn!("Migration check for {}: {}", handle_clone.uuid, e),
+            }
+
+            // Run named-graph → reifier migration (idempotent)
+            match p.sparql_store.migrate_named_graphs_to_reifiers() {
+                Ok(count) if count > 0 => {
+                    log::info!(
+                        "🔄 Reifier migration for {}: {} links migrated",
+                        handle_clone.uuid,
+                        count
+                    );
+                }
+                Ok(_) => {} // Already migrated or nothing to migrate
+                Err(e) => log::warn!("Reifier migration for {}: {}", handle_clone.uuid, e),
             }
 
             // Rebuild SPARQL index from existing links
@@ -455,6 +469,11 @@ pub async fn handle_perspective_diff_from_link_language_impl(
                 e
             );
         }
+    } else {
+        log::warn!(
+            "DIFF-FROM-LINK-LANG [{}]: No perspective found for this link language!",
+            language_address
+        );
     }
 }
 
@@ -680,7 +699,7 @@ mod tests {
         uuid: &String,
     ) -> Option<PerspectiveInstance> {
         for p in all_perspectives {
-            if p.persisted.lock().await.uuid == *uuid {
+            if p.uuid == *uuid {
                 return Some(p.clone());
             }
         }

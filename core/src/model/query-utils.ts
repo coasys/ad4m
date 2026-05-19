@@ -53,7 +53,7 @@ export function formatQueryValue(value: any): string {
 export function buildWhereCondition(
     predicate: string,
     condition: WhereCondition,
-    opts?: { resolveLanguage?: string },
+    opts?: { resolveLanguage?: string; varIndex?: number },
 ): string {
     const escapedPredicate = escapeQueryString(predicate);
     // For literal-resolved properties, we match against the raw IRI (which is a literal: URI)
@@ -61,6 +61,8 @@ export function buildWhereCondition(
     // For literal-resolved properties, values are stored as IRIs like <literal:string:VALUE>
     // For language-resolved properties, values are plain URIs
     const isLiteral = !opts?.resolveLanguage || opts.resolveLanguage === 'literal';
+
+    const varSuffix = opts?.varIndex ?? 0;
 
     function formatValue(v: any): string {
         if (typeof v === 'string') {
@@ -72,8 +74,45 @@ export function buildWhereCondition(
         return `<literal:string:${v}>`;
     }
 
+    /**
+     * For literal properties, generate a FILTER-based match that handles both
+     * the raw value and the literal-encoded value. This mirrors the Rust
+     * `build_projection_where_patterns` approach which uses:
+     *   FILTER(STR(?var) = "value" || STR(?var) = "literal:string:encodedValue")
+     * This is more robust than exact IRI matching because it handles edge cases
+     * where the stored format might vary.
+     */
+    function formatLiteralFilter(varName: string, v: any): string {
+        const raw = escapeQueryString(String(v));
+        const encoded = encodeURIComponent(String(v))
+            .replace(/!/g, '%21')
+            .replace(/'/g, '%27')
+            .replace(/\(/g, '%28')
+            .replace(/\)/g, '%29')
+            .replace(/\*/g, '%2A');
+        if (typeof v === 'string') {
+            return `FILTER(STR(${varName}) = "${raw}" || STR(${varName}) = "literal:string:${encoded}")`;
+        } else if (typeof v === 'number') {
+            return `FILTER(STR(${varName}) = "${v}" || STR(${varName}) = "literal:number:${v}")`;
+        } else if (typeof v === 'boolean') {
+            return `FILTER(STR(${varName}) = "${v}" || STR(${varName}) = "literal:boolean:${v}")`;
+        }
+        return `FILTER(STR(${varName}) = "${raw}")`;
+    }
+
     if (Array.isArray(condition)) {
         // Array values → FILTER IN
+        if (isLiteral) {
+            const varName = `?_wc${varSuffix}`;
+            const inValues = (condition as any[]).flatMap(v => {
+                const raw = escapeQueryString(String(v));
+                const encoded = encodeURIComponent(String(v))
+                    .replace(/!/g, '%21').replace(/'/g, '%27')
+                    .replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/\*/g, '%2A');
+                return [`"${raw}"`, `"literal:string:${encoded}"`];
+            }).join(', ');
+            return `?target <${escapedPredicate}> ${varName} . FILTER(STR(${varName}) IN (${inValues}))`;
+        }
         const formattedValues = (condition as any[]).map(formatValue).join(', ');
         return `FILTER EXISTS { ?target <${escapedPredicate}> ?_val . FILTER(?_val IN (${formattedValues})) }`;
     } else if (typeof condition === 'object' && condition !== null) {
@@ -112,6 +151,12 @@ export function buildWhereCondition(
         return parts.join(' ');
     } else {
         // Simple equality
+        if (isLiteral) {
+            // Use FILTER matching (mirrors Rust build_projection_where_patterns)
+            // to handle both raw values and literal-encoded IRIs robustly.
+            const varName = `?_wc${varSuffix}`;
+            return `?target <${escapedPredicate}> ${varName} . ${formatLiteralFilter(varName, condition)}`;
+        }
         return `?target <${escapedPredicate}> ${formatValue(condition)} .`;
     }
 }
@@ -154,7 +199,7 @@ export function compileWhereClause(
             predicate = propertyName;
         }
 
-        const cond = buildWhereCondition(predicate, condition, { resolveLanguage });
+        const cond = buildWhereCondition(predicate, condition, { resolveLanguage, varIndex: conditions.length });
         if (cond) {
             conditions.push(cond);
         }

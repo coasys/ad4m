@@ -144,13 +144,14 @@ export class ApiClient {
             this._wsReady = null
 
             // Reject all pending calls
+            const hadPendingCalls = this._pendingCalls.size > 0
             for (const [id, pending] of this._pendingCalls) {
                 clearTimeout(pending.timer)
                 pending.reject(new RpcError(503, 'WebSocket connection closed'))
             }
             this._pendingCalls.clear()
 
-            if (!this._wsClosed && (this._wsCallbacks.size > 0 || this._pendingCalls.size > 0)) {
+            if (!this._wsClosed && (this._wsCallbacks.size > 0 || hadPendingCalls)) {
                 this._scheduleReconnect()
             }
         }

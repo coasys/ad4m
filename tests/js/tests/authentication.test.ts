@@ -7,7 +7,7 @@ import chaiAsPromised from "chai-as-promised";
 import { baseUrl, sleep, startExecutor, quitExecutor } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
-import { ExceptionInfo } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
+import { ExceptionInfo } from "@coasys/ad4m";
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);

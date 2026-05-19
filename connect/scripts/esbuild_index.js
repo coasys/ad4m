@@ -1,11 +1,13 @@
 const esbuild = require("esbuild");
 
+const isDev = process.env.NODE_ENV !== "production";
+
 const buildOptions = {
   entryPoints: ["./src/index.ts"],
   bundle: true,
   format: "esm",
-  minify: true,
-  sourcemap: false,
+  minify: !isDev,
+  sourcemap: isDev,
   outfile: "dist/index.js",
 };
 
