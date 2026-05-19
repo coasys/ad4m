@@ -279,6 +279,12 @@ export class PerspectiveClient {
         )
     }
 
+    async addSdnaBatch(uuid: string, entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[]): Promise<boolean[]> {
+        return this.#apiClient.call<boolean[]>(
+            'perspective.addSdna', { uuid, entries: entries.map(e => ({ ...e, sdnaCode: e.sdnaCode || "" })) }
+        )
+    }
+
     async executeCommands(uuid: string, commands: string, expression: string, parameters: string, batchId?: string): Promise<boolean> {
         return this.#apiClient.call<boolean>(
             'perspective.executeCommands', { uuid, commands, expression, parameters, batchId }
@@ -414,6 +420,18 @@ export class PerspectiveClient {
         existing.push(unsub)
         this.#linkUnsubscribers.set(uuid as string, existing)
         await this.#apiClient.waitForSubscription()
+    }
+
+    /** Unsubscribe all link/sync-state listeners registered for the given perspective UUID.
+     *  Called by PerspectiveProxy.dispose() to prevent subscription leaks. */
+    removeAllListeners(uuid: string): void {
+        const unsubs = this.#linkUnsubscribers.get(uuid)
+        if (unsubs) {
+            for (const fn of unsubs) {
+                try { fn() } catch {}
+            }
+            this.#linkUnsubscribers.delete(uuid)
+        }
     }
 
     getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {

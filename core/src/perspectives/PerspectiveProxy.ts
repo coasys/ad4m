@@ -846,23 +846,31 @@ export class PerspectiveProxy {
     async removeListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
         if (type === 'link-added') {
             const index = this.#perspectiveLinkAddedCallbacks.indexOf(cb);
-
-            this.#perspectiveLinkAddedCallbacks.splice(index, 1);
+            if (index >= 0) this.#perspectiveLinkAddedCallbacks.splice(index, 1);
         } else if (type === 'link-removed') {
             const index = this.#perspectiveLinkRemovedCallbacks.indexOf(cb);
-
-            this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
+            if (index >= 0) this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
         } else if (type === 'link-updated') {
             const index = this.#perspectiveLinkUpdatedCallbacks.indexOf(cb);
-
-            this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
+            if (index >= 0) this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
         }
+    }
+
+    /** Clean up all subscriptions registered by this proxy.
+     *  Call this when the proxy is no longer needed to prevent subscription leaks.
+     *  After calling dispose(), the proxy should not be used. */
+    dispose(): void {
+        this.#client.removeAllListeners(this.#handle.uuid)
+        this.#perspectiveLinkAddedCallbacks.length = 0
+        this.#perspectiveLinkRemovedCallbacks.length = 0
+        this.#perspectiveLinkUpdatedCallbacks.length = 0
+        this.#perspectiveSyncStateChangeCallbacks.length = 0
     }
 
     /**
      * Creates a snapshot of the current perspective state.
      * Useful for backup or sharing.
-     * 
+     *
      * @returns Perspective object containing all links
      */
     async snapshot(): Promise<Perspective> {
@@ -1160,6 +1168,43 @@ export class PerspectiveProxy {
      */
     async addSdna(name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string) {
         return this.#client.addSdna(this.#handle.uuid, name, sdnaCode, sdnaType, shaclJson)
+    }
+
+    /**
+     * Batch variant of addSdna — registers multiple SDNA entries in a single RPC call.
+     * Acquires the Rust-side mutex once for the entire batch.
+     */
+    async addSdnaAll(entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[]): Promise<boolean[]> {
+        return this.#client.addSdnaBatch(this.#handle.uuid, entries)
+    }
+
+    /**
+     * Batch-registers multiple model classes as SHACL subject classes in a single RPC call.
+     * Skips classes already registered on this perspective instance.
+     */
+    async ensureSubjectClasses(jsClasses: any[]): Promise<void> {
+        const entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[] = [];
+        for (const jsClass of jsClasses) {
+            const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
+            if (this.#ensuredSubjectClasses.has(className)) continue;
+
+            if (!jsClass.generateSHACL) {
+                throw new Error(`Class ${jsClass.name} must have generateSHACL(). Use @Model decorator.`);
+            }
+
+            const { shape } = jsClass.generateSHACL();
+            entries.push({
+                name: className,
+                sdnaType: 'subject_class',
+                shaclJson: JSON.stringify(shape.toJSON()),
+            });
+        }
+        if (entries.length === 0) return;
+
+        await this.addSdnaAll(entries);
+        for (const entry of entries) {
+            this.#ensuredSubjectClasses.add(entry.name);
+        }
     }
 
     /**
