@@ -6,6 +6,7 @@ import { RuntimeClient } from './runtime/RuntimeClient'
 import { ExpressionClient } from './expression/ExpressionClient'
 import { AIClient } from './ai/AIClient'
 import { ApiClient } from './apiClient'
+import { Ad4mModel } from './model/Ad4mModel'
 
 /**
  * Client for the Ad4m interface wrapping WebSocket RPC calls
@@ -42,6 +43,15 @@ export class Ad4mClient {
         this.#perspectiveClient.setNeighbourhoodClient(this.#neighbourhoodClient)
         this.#perspectiveClient.setAIClient(this.#aiClient)
         this.#runtimeClient = new RuntimeClient(baseUrl, token, subscribe, this.#apiClient)
+
+        // Register with AD4M DevTools if the bridge is installed (e.g. browser extension)
+        try {
+            const dt = (globalThis as any).__AD4M_DEVTOOLS__;
+            if (dt) {
+                dt._client = this;
+                dt._Ad4mModel = Ad4mModel;
+            }
+        } catch {}
     }
 
     get agent(): AgentClient {
@@ -80,8 +90,9 @@ export class Ad4mClient {
         this.#agentClient.subscribeAppsChanged()
     }
 
-    /** Close all event connections */
+    /** Close all event connections and clear in-memory caches */
     close(): void {
+        this.#agentClient.clearByDidCache()
         this.#apiClient.closeAll()
     }
 }

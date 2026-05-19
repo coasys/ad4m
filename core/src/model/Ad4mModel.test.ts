@@ -1,5 +1,6 @@
 import { Ad4mModel } from "./Ad4mModel";
-import { Model, Property, Optional, ReadOnly, HasMany, Flag } from "./decorators";
+import { isIncludeProjection } from "./types";
+import { Model, Property, Optional, ReadOnly, HasMany, HasOne, Flag } from "./decorators";
 
 describe("Ad4mModel.getModelMetadata()", () => {
   it("should extract basic model metadata with className", () => {
@@ -606,17 +607,18 @@ describe("Ad4mModel.queryToSPARQL()", () => {
 
   // ---- ORDER BY, LIMIT, OFFSET are JS post-processed ----
 
-  it("should NOT include ORDER BY/LIMIT/OFFSET in SPARQL (pagination is JS-only)", async () => {
+  it("should include ORDER BY/LIMIT/OFFSET in SPARQL pagination subquery", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { order: { name: "ASC" }, limit: 10, offset: 5 });
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
-    // Pagination is handled in JS, not SPARQL
-    expect(norm).not.toContain("ORDER BY");
-    expect(norm).not.toContain("LIMIT");
-    expect(norm).not.toContain("OFFSET");
+    // SPARQL-level pagination via subquery
+    expect(norm).toContain("ORDER BY");
+    expect(norm).toContain("LIMIT 10");
+    expect(norm).toContain("OFFSET 5");
+    expect(norm).toContain("SELECT DISTINCT ?source");
   });
 });
-describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
+describe("Ad4mModel query methods (modelQuery integration)", () => {
   // Test Recipe model
   @Model({ name: "Recipe" })
   class Recipe extends Ad4mModel {
@@ -630,9 +632,10 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
     ingredients: string[] = [];
   }
 
-  // Mock perspective with both querySparql and infer methods
+  // Mock perspective with querySparql, modelQuery, and infer methods
   const mockPerspective = {
     querySparql: jest.fn(),
+    modelQuery: jest.fn(),
     infer: jest.fn(),
     uuid: 'test-perspective-uuid',
     stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue('Recipe')
@@ -642,307 +645,166 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
     jest.clearAllMocks();
   });
 
-  it("should convert empty query results correctly", async () => {
-    const result = await Recipe.instancesFromQueryResult(mockPerspective, {}, []);
-    
-    expect(result.results).toEqual([]);
-    expect(result.totalCount).toBe(0);
-  });
-
-  it("should convert query results to model instances", async () => {
-    const queryResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal:recipe1",
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "tomato", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "cheese", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      },
-      {
-        source: "node:def456",
-        source_uri: "literal:recipe2",
-        links: [
-          { predicate: "recipe://name", target: "Pizza", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
-          { predicate: "recipe://rating", target: "4", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "dough", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "cheese", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "tomato", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" }
-        ]
-      }
-    ];
-
-    const result = await Recipe.instancesFromQueryResult(mockPerspective, {}, queryResults);
-
-    expect(result.results).toHaveLength(2);
-    expect(result.totalCount).toBe(2);
-
-    const recipe1 = result.results[0];
-    expect(recipe1).toBeInstanceOf(Recipe);
-    expect(recipe1.name).toBe("Pasta");
-    expect(recipe1.rating).toBe(5);
-    expect(recipe1.ingredients).toEqual(["pasta", "tomato", "cheese"]);
-
-    const recipe2 = result.results[1];
-    expect(recipe2).toBeInstanceOf(Recipe);
-    expect(recipe2.name).toBe("Pizza");
-    expect(recipe2.rating).toBe(4);
-  });
-
-  it("should filter properties when query specifies properties", async () => {
-    const queryResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal:recipe1",
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "tomato", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      }
-    ];
-
-    const result = await Recipe.instancesFromQueryResult(
-      mockPerspective,
-      { properties: ["name"] },
-      queryResults
-    );
-
-    expect(result.results).toHaveLength(1);
-    const recipe = result.results[0];
-    expect(recipe.name).toBe("Pasta");
-    // rating and ingredients should be removed since only "name" was requested
-    expect(recipe.rating).toBeUndefined();
-    expect(recipe.ingredients).toBeUndefined();
-    // author, createdAt, updatedAt are also stripped unless explicitly requested
-    expect(recipe.author).toBeUndefined();
-    expect(recipe.timestamp).toBeUndefined();
-  });
-
-  it("should filter properties when query specifies properties", async () => {
-    const queryResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal:recipe1",
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "tomato", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      }
-    ];
-
-    const result = await Recipe.instancesFromQueryResult(
-      mockPerspective,
-      { properties: ["name"] },
-      queryResults
-    );
-
-    expect(result.results).toHaveLength(1);
-    const recipe = result.results[0];
-    expect(recipe.name).toBe("Pasta");
-    // rating and ingredients should be removed since only "name" was requested
-    expect(recipe.rating).toBeUndefined();
-  });
-
-  it("should handle results missing base field", async () => {
-    const queryResults = [
-      {
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-        // Missing source field
-      } as any
-    ];
-
-    const result = await Recipe.instancesFromQueryResult(mockPerspective, {}, queryResults);
-
-    // Should filter out the invalid result (or handle gracefully)
-    expect(result.results).toHaveLength(0);
-    expect(result.totalCount).toBe(0);
-  });
-
   it("should use SPARQL when engine is 'sparql' in findAll()", async () => {
-    // Raw SPARQL rows (flat) — groupSPARQLResults will group them
-    const queryResults = [
-      { source: "literal:recipe1", predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-    ];
-
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+    // modelQuery returns already-hydrated instances from the Rust executor
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
+      ],
+      totalCount: 1
+    });
 
     const results = await Recipe.findAll(mockPerspective, {}, 'sparql');
 
-    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
     expect(results[0].name).toBe("Pasta");
   });
 
-  it("should use Prolog when engine is prolog in findAll()", async () => {
-    const prologResults = [{
-      AllInstances: [
-        ["literal:recipe1", [["name", "Pasta"]], [["ingredients", ["pasta"]]], "2023-01-01T00:00:00Z", "did:key:alice"]
+  it("should route through modelQuery when engine is 'prolog' in findAll() (prolog is now no-op)", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
       ],
-      TotalCount: 1
-    }];
-
-    mockPerspective.infer.mockResolvedValue(prologResults);
+      totalCount: 1
+    });
 
     const results = await Recipe.findAll(mockPerspective, {}, false);
     
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySparql).not.toHaveBeenCalled();
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
   });
 
   it("should use SPARQL when engine is 'sparql' in findAllAndCount()", async () => {
-    const queryResults = [
-      { source: "literal:recipe1", predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-    ];
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
+      ],
+      totalCount: 1
+    });
 
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+    const { results, totalCount } = await Recipe.findAllAndCount(mockPerspective, {});
 
-    const { results, totalCount } = await Recipe.findAllAndCount(mockPerspective, {}, 'sparql');
-
-    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
     expect(totalCount).toBe(1);
   });
 
   it("should use SPARQL when engine is 'sparql' in paginate()", async () => {
-    const queryResults = [
-      { source: "literal:recipe1", predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-    ];
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
+      ],
+      totalCount: 1
+    });
 
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+    const page = await Recipe.paginate(mockPerspective, 10, 1, {});
 
-    const page = await Recipe.paginate(mockPerspective, 10, 1, {}, 'sparql');
-
-    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(page.results).toHaveLength(1);
     expect(page.pageSize).toBe(10);
     expect(page.pageNumber).toBe(1);
+    expect(page.totalCount).toBe(1);
   });
 
-  it("should use SPARQL when engine is 'sparql' in count()", async () => {
-    // Since count() uses result.length and GROUP BY returns one row per source,
-    // mock 5 recipe sources
-    const queryResults = [
-      ...Array.from({ length: 5 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]).flat()
-    ];
+  it("should use SPARQL in count()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 5
+    });
 
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+    const count = await Recipe.count(mockPerspective, {});
 
-    const count = await Recipe.count(mockPerspective, {}, 'sparql');
-
-    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(count).toBe(5);
   });
 
-  it("should use Prolog when engine is prolog in count()", async () => {
-    const prologResults = [{ TotalCount: 10 }];
-    mockPerspective.infer.mockResolvedValue(prologResults);
+  it("should return count from modelQuery", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 10
+    });
 
-    const count = await Recipe.count(mockPerspective, {}, false);
+    const count = await Recipe.count(mockPerspective, {});
     
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.querySparql).not.toHaveBeenCalled();
     expect(count).toBe(10);
   });
 
   it("should use SPARQL when engine is 'sparql' in ModelQueryBuilder.get()", async () => {
-    const queryResults = [
-      { source: "literal:recipe1", predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-    ];
-
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
+      ],
+      totalCount: 1
+    });
 
     const results = await Recipe.query(mockPerspective)
       .where({ name: "Pasta" })
       .engine('sparql')
       .get();
 
-    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
     expect(results[0].name).toBe("Pasta");
   });
 
-  it("should use Prolog when.engine('prolog') in ModelQueryBuilder.get()", async () => {
-    const prologResults = [{
-      AllInstances: [
-        ["literal:recipe1", [["name", "Pasta"]], [["ingredients", ["pasta"]]], "2023-01-01T00:00:00Z", "did:key:alice"]
+  it("should use modelQuery when .engine('prolog') is called (engine is now a no-op)", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
       ],
-      TotalCount: 1
-    }];
-
-    mockPerspective.infer.mockResolvedValue(prologResults);
+      totalCount: 1
+    });
 
     const results = await Recipe.query(mockPerspective)
       .where({ name: "Pasta" })
       .engine('prolog')
       .get();
     
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySparql).not.toHaveBeenCalled();
+    // engine('prolog') is now a no-op — everything goes through modelQuery
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
   });
 
   it("should use SPARQL when engine is 'sparql' in ModelQueryBuilder.count()", async () => {
-    // count() counts the number of rows returned by the query (one row per source)
-    const queryResults = [
-      ...Array.from({ length: 3 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]).flat()
-    ];
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 3
+    });
 
     const count = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 4 } })
       .engine('sparql')
       .count();
 
-    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(count).toBe(3);
   });
 
   it("should use SPARQL when engine is 'sparql' in ModelQueryBuilder.paginate()", async () => {
-    const queryResults = [
-      { source: "literal:recipe1", predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-      { source: "literal:recipe1", predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-    ];
-
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
+      ],
+      totalCount: 1
+    });
 
     const page = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 3 } })
       .engine('sparql')
       .paginate(10, 1);
 
-    expect(mockPerspective.querySparql).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(page.results).toHaveLength(1);
     expect(page.pageSize).toBe(10);
@@ -967,6 +829,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
   // Mock perspective
   const mockPerspective = {
     querySparql: jest.fn(),
+    modelQuery: jest.fn(),
     infer: jest.fn(),
     uuid: 'test-perspective-uuid',
     stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue('Recipe')
@@ -976,132 +839,80 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     jest.clearAllMocks();
   });
 
-  it("should apply JS-level filtering for gt operator on properties in SPARQL count()", async () => {
-    // Mock query results: 5 recipes with ratings 1, 2, 3, 4, 5
-    const queryResults = [
-      ...Array.from({ length: 5 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]).flat()
-    ];
-    
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+  it("should apply filtering for gt operator on properties in SPARQL count()", async () => {
+    // With the new modelQuery endpoint, filtering happens server-side in Rust
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 2
+    });
 
     // Count recipes with rating > 3 (should match 2 recipes: rating 4 and 5)
-    const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 3 } } }, 'sparql');
-    
-    // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { rating: { gt: 3 } } }, 'sparql');
+    const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 3 } } });
     
     expect(count).toBe(2);
-    expect(count).toBe(findAllResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering for between operator on properties in SPARQL count()", async () => {
-    // Mock query results: 5 recipes with ratings 1, 2, 3, 4, 5
-    const queryResults = [
-      ...Array.from({ length: 5 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]).flat()
-    ];
-    
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+  it("should apply filtering for between operator on properties in SPARQL count()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 3
+    });
 
     // Count recipes with rating between 2 and 4 (should match 3 recipes: rating 2, 3, 4)
-    const count = await Recipe.count(mockPerspective, { where: { rating: { between: [2, 4] } } }, 'sparql');
-    
-    // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { rating: { between: [2, 4] } } }, 'sparql');
+    const count = await Recipe.count(mockPerspective, { where: { rating: { between: [2, 4] } } });
     
     expect(count).toBe(3);
-    expect(count).toBe(findAllResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering for timestamp gt operator in SPARQL count()", async () => {
-    // Mock query results: 5 recipes with different timestamps
-    const queryResults = [
-      ...Array.from({ length: 5 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
-      ]).flat()
-    ];
-    
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+  it("should apply filtering for timestamp gt operator in SPARQL count()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 2
+    });
 
-    // Count recipes with timestamp > 2023-01-03 (should match 2 recipes: 2023-01-04 and 2023-01-05)
     const targetTimestamp = new Date("2023-01-03T00:00:00Z").getTime();
-    const count = await Recipe.count(mockPerspective, { where: { timestamp: { gt: targetTimestamp } } }, 'sparql');
-    
-    // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { timestamp: { gt: targetTimestamp } } }, 'sparql');
+    const count = await Recipe.count(mockPerspective, { where: { timestamp: { gt: targetTimestamp } } });
     
     expect(count).toBe(2);
-    expect(count).toBe(findAllResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering for timestamp between operator in SPARQL count()", async () => {
-    // Mock query results: 5 recipes with different timestamps
-    const queryResults = [
-      ...Array.from({ length: 5 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
-      ]).flat()
-    ];
-    
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+  it("should apply filtering for timestamp between operator in SPARQL count()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 3
+    });
 
-    // Count recipes with timestamp between 2023-01-02 and 2023-01-04
     const startTimestamp = new Date("2023-01-02T00:00:00Z").getTime();
     const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
     const count = await Recipe.count(mockPerspective, { 
       where: { timestamp: { between: [startTimestamp, endTimestamp] } } 
-    }, 'sparql');
-    
-    // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { 
-      where: { timestamp: { between: [startTimestamp, endTimestamp] } } 
-    }, 'sparql');
+    });
     
     expect(count).toBe(3);
-    expect(count).toBe(findAllResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering for author filtering in SPARQL count()", async () => {
-    // Mock query results: 3 recipes by Alice and 2 by Bob
-    const queryResults = [
-      ...Array.from({ length: 3 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]).flat(),
-      ...Array.from({ length: 2 }, (_, i) => [
-        { source: `literal:recipe${i+4}`, predicate: "recipe://name", target: `Recipe ${i+4}`, author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
-        { source: `literal:recipe${i+4}`, predicate: "recipe://rating", target: "5", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" }
-      ]).flat()
-    ];
-    
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+  it("should apply filtering for author filtering in SPARQL count()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 3
+    });
 
     // Count recipes by Alice (should match 3 recipes)
-    const count = await Recipe.count(mockPerspective, { where: { author: "did:key:alice" } }, 'sparql');
-    
-    // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { author: "did:key:alice" } }, 'sparql');
+    const count = await Recipe.count(mockPerspective, { where: { author: "did:key:alice" } });
     
     expect(count).toBe(3);
-    expect(count).toBe(findAllResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering in ModelQueryBuilder.count() with gt operator", async () => {
-    // Mock query results: 5 recipes with ratings 1, 2, 3, 4, 5
-    const queryResults = [
-      ...Array.from({ length: 5 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]).flat()
-    ];
-    
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+  it("should apply filtering in ModelQueryBuilder.count() with gt operator", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 2
+    });
 
     // Count recipes with rating > 3 using ModelQueryBuilder
     const count = await Recipe.query(mockPerspective)
@@ -1109,26 +920,15 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
       .engine('sparql')
       .count();
     
-    // Verify count matches the number of instances that would be returned by get()
-    const getResults = await Recipe.query(mockPerspective)
-      .where({ rating: { gt: 3 } })
-      .engine('sparql')
-      .get();
-    
     expect(count).toBe(2);
-    expect(count).toBe(getResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering in ModelQueryBuilder.count() with timestamp between", async () => {
-    // Mock query results: 5 recipes with different timestamps
-    const queryResults = [
-      ...Array.from({ length: 5 }, (_, i) => [
-        { source: `literal:recipe${i+1}`, predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
-        { source: `literal:recipe${i+1}`, predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
-      ]).flat()
-    ];
-    
-    mockPerspective.querySparql.mockResolvedValue(queryResults);
+  it("should apply filtering in ModelQueryBuilder.count() with timestamp between", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 3
+    });
 
     const startTimestamp = new Date("2023-01-02T00:00:00Z").getTime();
     const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
@@ -1139,113 +939,12 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
       .engine('sparql')
       .count();
     
-    // Verify count matches the number of instances that would be returned by get()
-    const getResults = await Recipe.query(mockPerspective)
-      .where({ timestamp: { between: [startTimestamp, endTimestamp] } })
-      .engine('sparql')
-      .get();
-    
     expect(count).toBe(3);
-    expect(count).toBe(getResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should handle count() with Prolog for gt operator (legacy)", async () => {
-    const prologResults = [{ TotalCount: 2 }];
-    mockPerspective.infer.mockResolvedValue(prologResults);
-
-    const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 3 } } }, false);
-    
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySparql).not.toHaveBeenCalled();
-    expect(count).toBe(2);
-  });
-
-  it("should handle count() with Prolog for timestamp between (legacy)", async () => {
-    const prologResults = [{ TotalCount: 3 }];
-    mockPerspective.infer.mockResolvedValue(prologResults);
-
-    const startTimestamp = new Date("2023-01-02T00:00:00Z").getTime();
-    const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
-    
-    const count = await Recipe.count(
-      mockPerspective, 
-      { where: { timestamp: { between: [startTimestamp, endTimestamp] } } }, 
-      false
-    );
-    
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySparql).not.toHaveBeenCalled();
-    expect(count).toBe(3);
-  });
 });
 
-
-// ──────────────────────────────────────────────────────────
-// Batch SPARQL query builder tests
-// ──────────────────────────────────────────────────────────
-
-import { buildBatchSPARQLQuery } from "./query-sparql-batch";
-
-describe("buildBatchSPARQLQuery", () => {
-  @Model({ name: "Author" })
-  class Author extends Ad4mModel {
-    @Property({ through: "author://name", required: true })
-    name!: string;
-  }
-
-  @Model({ name: "Book" })
-  class Book extends Ad4mModel {
-    @Property({ through: "book://title", required: true })
-    title!: string;
-
-    @HasMany(() => Author, { through: "book://author" })
-    authors!: Author[];
-  }
-
-  it("should generate UNION branches for depth 0 and depth 1 includes", () => {
-    const metadata = Book.getModelMetadata();
-    const query = { include: { authors: true } };
-    const sparql = buildBatchSPARQLQuery(metadata, query, Book);
-
-    expect(sparql).toContain("?depth");
-    expect(sparql).toContain("?parentBase");
-    expect(sparql).toContain("?relationName");
-    expect(sparql).toContain("UNION");
-    expect(sparql).toContain("BIND(\"0\" AS ?depth)");
-    expect(sparql).toContain("BIND(\"1\" AS ?depth)");
-    expect(sparql).toContain("book://author");
-  });
-
-  it("should include parent filter when query.parent is specified", () => {
-    const metadata = Book.getModelMetadata();
-    const query = {
-      parent: { id: "flux://library1", predicate: "library://books" },
-      include: { authors: true },
-    };
-    const sparql = buildBatchSPARQLQuery(metadata, query, Book);
-
-    expect(sparql).toContain("flux://library1");
-    expect(sparql).toContain("library://books");
-  });
-
-  it("should include where filter for simple equality", () => {
-    const metadata = Book.getModelMetadata();
-    const query = {
-      where: { title: "My Book" },
-      include: { authors: true },
-    };
-    const sparql = buildBatchSPARQLQuery(metadata, query, Book);
-
-    // For literal-stored properties, SPARQL only has a JOIN (no FILTER value) — filtering in JS
-    expect(sparql).toContain("book://title");
-    expect(sparql).toContain("root_wTarget_eq_title");
-  });
-
-  it("should throw when include is empty", () => {
-    const metadata = Book.getModelMetadata();
-    expect(() => buildBatchSPARQLQuery(metadata, {}, Book)).toThrow("requires query.include");
-  });
-});
 
 describe("SPARQL comparison filters", () => {
   @Model({ name: "Item" })
@@ -1283,7 +982,8 @@ describe("SPARQL comparison filters", () => {
 // SPARQL Direct Triple Pattern & IRI Tests
 // ──────────────────────────────────────────────────────────
 
-import { buildSPARQLQuery, groupSPARQLResults, formatSPARQLValue, buildSPARQLGetDataQuery } from "./query-sparql";
+import { buildSPARQLQuery, formatSPARQLValue } from "./query-sparql";
+import { SHACLShape } from "../shacl/SHACLShape";
 
 describe("SPARQL direct triple pattern generation", () => {
   @Model({ name: "Channel" })
@@ -1323,17 +1023,14 @@ describe("SPARQL direct triple pattern generation", () => {
     expect(query).toMatch(/\?source\s+<flux:\/\/name>\s+\?cfTarget_name/);
   });
 
-  it("uses GRAPH ?linkGraph pattern for author/timestamp", async () => {
+  it("uses RDF 1.2 reifier pattern for author/timestamp", async () => {
     const query = await (Channel as any).queryToSPARQL(mockPersp, {});
-    expect(query).toContain("GRAPH ?linkGraph { ?source ?predicate ?target . }");
-    expect(query).toContain("?linkGraph <ad4m://ontology/author> ?author");
-    expect(query).toContain("?linkGraph <ad4m://ontology/timestamp> ?timestamp");
-  });
-
-  it("does NOT contain RDF-star BIND(<< >> AS ?ann) pattern", async () => {
-    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
-    expect(query).not.toContain("BIND(<<");
-    expect(query).not.toContain("?ann ");
+    expect(query).toContain("<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>");
+    expect(query).toContain("?source ?predicate ?target .");
+    expect(query).toContain("?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>>");
+    expect(query).toContain("?_reifier <ad4m://ontology/author> ?author");
+    expect(query).toContain("?_reifier <ad4m://ontology/timestamp> ?timestamp");
+    expect(query).not.toContain("GRAPH");
   });
 
   it("uses FILTER(isIRI(?source)) to exclude non-IRI subjects", async () => {
@@ -1342,60 +1039,7 @@ describe("SPARQL direct triple pattern generation", () => {
   });
 });
 
-describe("SPARQL IRI formatting", () => {
-  it("wraps AD4M URIs in angle brackets", () => {
-    const query = buildSPARQLGetDataQuery("ad4m://test123");
-    expect(query).toContain("<ad4m://test123>");
-  });
 
-  it("wraps literal: URIs in angle brackets", () => {
-    const query = buildSPARQLGetDataQuery("literal:string:foo");
-    expect(query).toContain("<literal:string:foo>");
-  });
-
-  it("wraps flux:// URIs in angle brackets", () => {
-    const query = buildSPARQLGetDataQuery("flux://has_channel");
-    expect(query).toContain("<flux://has_channel>");
-  });
-
-  it("wraps did:key URIs in angle brackets", () => {
-    const query = buildSPARQLGetDataQuery("did:key:z6MkhaXg");
-    expect(query).toContain("<did:key:z6MkhaXg>");
-  });
-});
-
-describe("groupSPARQLResults", () => {
-  it("groups flat rows by source URI", () => {
-    const rows = [
-      { source: "ad4m://a", predicate: "p1", target: "t1", author: "auth1", timestamp: "ts1" },
-      { source: "ad4m://a", predicate: "p2", target: "t2", author: "auth1", timestamp: "ts1" },
-      { source: "ad4m://b", predicate: "p1", target: "t3", author: "auth2", timestamp: "ts2" },
-    ];
-    const grouped = groupSPARQLResults(rows);
-    expect(grouped).toHaveLength(2);
-
-    const aGroup = grouped.find(g => g.source_uri === "ad4m://a");
-    expect(aGroup).toBeDefined();
-    expect(aGroup!.links).toHaveLength(2);
-
-    const bGroup = grouped.find(g => g.source_uri === "ad4m://b");
-    expect(bGroup).toBeDefined();
-    expect(bGroup!.links).toHaveLength(1);
-  });
-
-  it("returns empty array for empty input", () => {
-    expect(groupSPARQLResults([])).toEqual([]);
-  });
-
-  it("preserves metadata in grouped links", () => {
-    const rows = [
-      { source: "x", predicate: "p", target: "t", author: "did:key:z6Mk", timestamp: "2024-01-01T00:00:00Z" },
-    ];
-    const grouped = groupSPARQLResults(rows);
-    expect(grouped[0].links[0].author).toBe("did:key:z6Mk");
-    expect(grouped[0].links[0].timestamp).toBe("2024-01-01T00:00:00Z");
-  });
-});
 
 describe("formatSPARQLValue", () => {
   it("wraps strings in double quotes", () => {
@@ -1415,7 +1059,6 @@ describe("formatSPARQLValue", () => {
 //  Comprehensive SPARQL migration unit tests
 // ──────────────────────────────────────────────────────────
 
-import { matchesCondition, hydrateFromLinks } from "./hydration";
 import { Literal } from "../Literal";
 
 // Helper: create literal URLs using JSON encoding (which handles all types including booleans)
@@ -1424,301 +1067,6 @@ function literalUrl(value: any): string {
   // Use JSON encoding for numbers and booleans since Literal.get() doesn't handle boolean: prefix
   return `literal:json:${encodeURIComponent(JSON.stringify(value))}`;
 }
-
-describe("matchesCondition()", () => {
-  // Simple equality
-  it("simple string equality — match", () => {
-    expect(matchesCondition("hello", "hello")).toBe(true);
-  });
-  it("simple string equality — mismatch", () => {
-    expect(matchesCondition("hello", "world")).toBe(false);
-  });
-  it("simple boolean equality — true", () => {
-    expect(matchesCondition(true, true)).toBe(true);
-  });
-  it("simple boolean equality — false", () => {
-    expect(matchesCondition(false, false)).toBe(true);
-  });
-  it("boolean mismatch", () => {
-    expect(matchesCondition(true, false)).toBe(false);
-  });
-  it("simple number equality", () => {
-    expect(matchesCondition(42, 42)).toBe(true);
-  });
-  it("number mismatch", () => {
-    expect(matchesCondition(42, 99)).toBe(false);
-  });
-
-  // Array IN clause
-  it("array IN clause — value present", () => {
-    expect(matchesCondition("a", ["a", "b", "c"])).toBe(true);
-  });
-  it("array IN clause — value absent", () => {
-    expect(matchesCondition("d", ["a", "b", "c"])).toBe(false);
-  });
-
-  // NOT operator
-  it("not operator with string", () => {
-    expect(matchesCondition("bob", { not: "alice" })).toBe(true);
-    expect(matchesCondition("alice", { not: "alice" })).toBe(false);
-  });
-  it("not operator with array (NOT IN)", () => {
-    expect(matchesCondition("a", { not: ["b", "c"] })).toBe(true);
-    expect(matchesCondition("b", { not: ["b", "c"] })).toBe(false);
-  });
-
-  // Comparison operators
-  it("gt", () => {
-    expect(matchesCondition(10, { gt: 5 })).toBe(true);
-    expect(matchesCondition(5, { gt: 5 })).toBe(false);
-  });
-  it("gte", () => {
-    expect(matchesCondition(5, { gte: 5 })).toBe(true);
-    expect(matchesCondition(4, { gte: 5 })).toBe(false);
-  });
-  it("lt", () => {
-    expect(matchesCondition(3, { lt: 5 })).toBe(true);
-    expect(matchesCondition(5, { lt: 5 })).toBe(false);
-  });
-  it("lte", () => {
-    expect(matchesCondition(5, { lte: 5 })).toBe(true);
-    expect(matchesCondition(6, { lte: 5 })).toBe(false);
-  });
-  it("combined gt + lt (range)", () => {
-    expect(matchesCondition(5, { gt: 3, lt: 7 })).toBe(true);
-    expect(matchesCondition(3, { gt: 3, lt: 7 })).toBe(false);
-    expect(matchesCondition(7, { gt: 3, lt: 7 })).toBe(false);
-  });
-
-  // Between
-  it("between — inclusive range", () => {
-    expect(matchesCondition(5, { between: [3, 7] })).toBe(true);
-    expect(matchesCondition(3, { between: [3, 7] })).toBe(true);
-    expect(matchesCondition(7, { between: [3, 7] })).toBe(true);
-    expect(matchesCondition(2, { between: [3, 7] })).toBe(false);
-    expect(matchesCondition(8, { between: [3, 7] })).toBe(false);
-  });
-
-  // Contains
-  it("contains with string", () => {
-    expect(matchesCondition("hello world", { contains: "world" })).toBe(true);
-    expect(matchesCondition("hello world", { contains: "xyz" })).toBe(false);
-  });
-  it("contains with array", () => {
-    expect(matchesCondition(["a", "b", "c"], { contains: "b" })).toBe(true);
-    expect(matchesCondition(["a", "b", "c"], { contains: "d" })).toBe(false);
-  });
-
-  // Edge cases
-  it("returns false for undefined value with equality check", () => {
-    expect(matchesCondition(undefined, "hello")).toBe(false);
-  });
-  it("returns false for empty string when condition is non-empty", () => {
-    expect(matchesCondition("", "Recipe 2")).toBe(false);
-  });
-  it("returns true for undefined with not operator", () => {
-    expect(matchesCondition(undefined, { not: "hello" })).toBe(true);
-  });
-});
-
-describe("hydrateFromLinks()", () => {
-  // Create a mock perspective that won't be called for literal properties
-  const mockPerspective = {} as any;
-
-  @Model({ name: "HydrationTest" })
-  class HydrationTest extends Ad4mModel {
-    @Property({ through: "test://name", resolveLanguage: "literal" })
-    name: string = "";
-
-    @Property({ through: "test://score", resolveLanguage: "literal" })
-    score: number = 0;
-
-    @Property({ through: "test://active", resolveLanguage: "literal" })
-    active: boolean = false;
-  }
-
-  const metadata = HydrationTest.getModelMetadata();
-
-  it("hydrates all properties when requestedProperties is undefined", async () => {
-    const instance = new HydrationTest(mockPerspective) as any;
-    const links = [
-      { predicate: "test://name", target: literalUrl("Alice"), author: "did:test", timestamp: "1000" },
-      { predicate: "test://score", target: literalUrl(42), author: "did:test", timestamp: "1000" },
-      { predicate: "test://active", target: literalUrl(true), author: "did:test", timestamp: "1000" },
-    ];
-    await hydrateFromLinks(instance, links, metadata, mockPerspective, undefined);
-    expect(instance.name).toBe("Alice");
-    expect(instance.score).toBe(42);
-    expect(instance.active).toBe(true);
-  });
-
-  it("hydrates only requested properties when requestedProperties is provided", async () => {
-    const instance = new HydrationTest(mockPerspective) as any;
-    const links = [
-      { predicate: "test://name", target: literalUrl("Alice"), author: "did:test", timestamp: "1000" },
-      { predicate: "test://score", target: literalUrl(42), author: "did:test", timestamp: "1000" },
-      { predicate: "test://active", target: literalUrl(true), author: "did:test", timestamp: "1000" },
-    ];
-    await hydrateFromLinks(instance, links, metadata, mockPerspective, ["name"]);
-    expect(instance.name).toBe("Alice");
-    // score and active should remain at defaults since not requested
-    expect(instance.score).toBe(0);
-    expect(instance.active).toBe(false);
-  });
-
-  it("hydrates where-clause + projection properties when both are in requestedProperties", async () => {
-    const instance = new HydrationTest(mockPerspective) as any;
-    const links = [
-      { predicate: "test://name", target: literalUrl("Recipe 2"), author: "did:test", timestamp: "1000" },
-      { predicate: "test://active", target: literalUrl(true), author: "did:test", timestamp: "1000" },
-    ];
-    // Simulate merged hydration props: projection ["active"] + where clause props ["name"]
-    await hydrateFromLinks(instance, links, metadata, mockPerspective, ["active", "name"]);
-    expect(instance.name).toBe("Recipe 2");
-    expect(instance.active).toBe(true);
-  });
-
-  it("sets author and timestamps from links", async () => {
-    const instance = new HydrationTest(mockPerspective) as any;
-    const links = [
-      { predicate: "test://name", target: literalUrl("Bob"), author: "did:author1", timestamp: "1000" },
-      { predicate: "test://score", target: literalUrl(10), author: "did:author2", timestamp: "2000" },
-    ];
-    await hydrateFromLinks(instance, links, metadata, mockPerspective);
-    expect(instance.author).toBe("did:author1");
-    expect(instance.createdAt).toBe(1000);
-    expect(instance.updatedAt).toBe(2000);
-  });
-
-  it("handles empty links array", async () => {
-    const instance = new HydrationTest(mockPerspective) as any;
-    await hydrateFromLinks(instance, [], metadata, mockPerspective);
-    expect(instance.name).toBe("");
-    expect(instance.score).toBe(0);
-  });
-});
-
-describe("instancesFromQueryResult — where + properties interaction", () => {
-  const mockPerspective = {
-    get: jest.fn().mockResolvedValue([]),
-    querySparql: jest.fn().mockResolvedValue([]),
-    getExpression: jest.fn().mockResolvedValue(null),
-  } as any;
-
-  @Model({ name: "Recipe" })
-  class Recipe extends Ad4mModel {
-    @Property({ through: "recipe://name", resolveLanguage: "literal", required: true })
-    name: string = "";
-
-    @Property({ through: "recipe://booleanTest", resolveLanguage: "literal" })
-    booleanTest: boolean = false;
-
-    @Property({ through: "recipe://score", resolveLanguage: "literal" })
-    score: number = 0;
-  }
-
-  it("should filter by where clause property even when not in properties projection", async () => {
-    // Simulate SPARQL result with two recipes
-    const grouped = [
-      {
-        source_uri: "expr:recipe1",
-        links: [
-          { predicate: "recipe://name", target: literalUrl("Recipe 1"), author: "did:test", timestamp: "1000" },
-          { predicate: "recipe://booleanTest", target: literalUrl(true), author: "did:test", timestamp: "1000" },
-        ],
-      },
-      {
-        source_uri: "expr:recipe2",
-        links: [
-          { predicate: "recipe://name", target: literalUrl("Recipe 2"), author: "did:test", timestamp: "1000" },
-          { predicate: "recipe://booleanTest", target: literalUrl(false), author: "did:test", timestamp: "1000" },
-        ],
-      },
-    ];
-
-    const query = { where: { name: "Recipe 2" }, properties: ["booleanTest"] };
-    const { results } = await Recipe.instancesFromQueryResult(mockPerspective, query, grouped);
-
-    expect(results.length).toBe(1);
-    expect((results[0] as any).booleanTest).toBe(false);
-    // name should be deleted after filtering since it wasn't in properties projection
-    expect((results[0] as any).name).toBeUndefined();
-  });
-
-  it("should delete unrequested properties AFTER where-filtering", async () => {
-    const grouped = [
-      {
-        source_uri: "expr:recipe1",
-        links: [
-          { predicate: "recipe://name", target: literalUrl("Recipe 1"), author: "did:test", timestamp: "1000" },
-          { predicate: "recipe://score", target: literalUrl(99), author: "did:test", timestamp: "1000" },
-        ],
-      },
-    ];
-
-    const query = { where: { name: "Recipe 1" }, properties: ["score"] };
-    const { results } = await Recipe.instancesFromQueryResult(mockPerspective, query, grouped);
-
-    expect(results.length).toBe(1);
-    expect((results[0] as any).score).toBe(99);
-    // name was used for filtering but should be deleted from final result
-    expect((results[0] as any).name).toBeUndefined();
-  });
-
-  it("should return all properties when no projection is specified", async () => {
-    const grouped = [
-      {
-        source_uri: "expr:recipe1",
-        links: [
-          { predicate: "recipe://name", target: literalUrl("Test"), author: "did:test", timestamp: "1000" },
-          { predicate: "recipe://booleanTest", target: literalUrl(true), author: "did:test", timestamp: "1000" },
-          { predicate: "recipe://score", target: literalUrl(50), author: "did:test", timestamp: "1000" },
-        ],
-      },
-    ];
-
-    const query = { where: { name: "Test" } };
-    const { results } = await Recipe.instancesFromQueryResult(mockPerspective, query, grouped);
-
-    expect(results.length).toBe(1);
-    expect((results[0] as any).name).toBe("Test");
-    expect((results[0] as any).booleanTest).toBe(true);
-    expect((results[0] as any).score).toBe(50);
-  });
-});
-
-describe("groupSPARQLResults()", () => {
-  it("groups rows by source", () => {
-    const rows = [
-      { source: "a", predicate: "p1", target: "t1", author: "auth", timestamp: "ts1" },
-      { source: "a", predicate: "p2", target: "t2", author: "auth", timestamp: "ts2" },
-      { source: "b", predicate: "p1", target: "t3", author: "auth", timestamp: "ts3" },
-    ];
-    const grouped = groupSPARQLResults(rows);
-    expect(grouped.length).toBe(2);
-    const groupA = grouped.find(g => g.source_uri === "a")!;
-    const groupB = grouped.find(g => g.source_uri === "b")!;
-    expect(groupA.links.length).toBe(2);
-    expect(groupB.links.length).toBe(1);
-  });
-
-  it("handles empty input", () => {
-    expect(groupSPARQLResults([])).toEqual([]);
-  });
-
-  it("preserves link metadata", () => {
-    const rows = [
-      { source: "x", predicate: "pred", target: "tgt", author: "did:auth", timestamp: "2024-01-01" },
-    ];
-    const grouped = groupSPARQLResults(rows);
-    expect(grouped[0].links[0]).toEqual({
-      predicate: "pred",
-      target: "tgt",
-      author: "did:auth",
-      timestamp: "2024-01-01",
-    });
-  });
-});
 
 describe("buildSPARQLQuery edge cases", () => {
   @Model({ name: "FlagModel" })
@@ -1770,81 +1118,6 @@ describe("buildSPARQLQuery edge cases", () => {
     const sparql = buildSPARQLQuery(metadata, allRelsMeta, { where: { id: "expr:123" } as any }, FlagModel);
     // Should filter by source
     expect(sparql).toContain("expr:123");
-  });
-});
-
-describe("sparse fieldset property deletion timing", () => {
-  const mockPerspective = {
-    get: jest.fn().mockResolvedValue([]),
-    querySparql: jest.fn().mockResolvedValue([]),
-    getExpression: jest.fn().mockResolvedValue(null),
-  } as any;
-
-  @Model({ name: "TimingTest" })
-  class TimingTest extends Ad4mModel {
-    @Property({ through: "timing://a", resolveLanguage: "literal" })
-    a: string = "";
-
-    @Property({ through: "timing://b", resolveLanguage: "literal" })
-    b: string = "";
-
-    @Property({ through: "timing://c", resolveLanguage: "literal" })
-    c: string = "";
-  }
-
-  it("where-clause properties are available during filtering but deleted after", async () => {
-    const grouped = [
-      {
-        source_uri: "expr:1",
-        links: [
-          { predicate: "timing://a", target: literalUrl("match"), author: "did:test", timestamp: "1000" },
-          { predicate: "timing://b", target: literalUrl("keep"), author: "did:test", timestamp: "1000" },
-          { predicate: "timing://c", target: literalUrl("ignore"), author: "did:test", timestamp: "1000" },
-        ],
-      },
-      {
-        source_uri: "expr:2",
-        links: [
-          { predicate: "timing://a", target: literalUrl("no-match"), author: "did:test", timestamp: "1000" },
-          { predicate: "timing://b", target: literalUrl("skip"), author: "did:test", timestamp: "1000" },
-          { predicate: "timing://c", target: literalUrl("skip"), author: "did:test", timestamp: "1000" },
-        ],
-      },
-    ];
-
-    // properties projection asks for "b" only, where clause filters on "a"
-    const query = { where: { a: "match" }, properties: ["b"] };
-    const { results } = await TimingTest.instancesFromQueryResult(mockPerspective, query, grouped);
-
-    // Only the matching instance should survive
-    expect(results.length).toBe(1);
-    // "b" was requested — should be present
-    expect((results[0] as any).b).toBe("keep");
-    // "a" was used for filtering but not in projection — should be deleted
-    expect((results[0] as any).a).toBeUndefined();
-    // "c" was not requested — should be deleted
-    expect((results[0] as any).c).toBeUndefined();
-  });
-
-  it("properties not in projection are undefined after instancesFromQueryResult", async () => {
-    const grouped = [
-      {
-        source_uri: "expr:1",
-        links: [
-          { predicate: "timing://a", target: literalUrl("val-a"), author: "did:test", timestamp: "1000" },
-          { predicate: "timing://b", target: literalUrl("val-b"), author: "did:test", timestamp: "1000" },
-          { predicate: "timing://c", target: literalUrl("val-c"), author: "did:test", timestamp: "1000" },
-        ],
-      },
-    ];
-
-    const query = { properties: ["a"] };
-    const { results } = await TimingTest.instancesFromQueryResult(mockPerspective, query, grouped);
-
-    expect(results.length).toBe(1);
-    expect((results[0] as any).a).toBe("val-a");
-    expect((results[0] as any).b).toBeUndefined();
-    expect((results[0] as any).c).toBeUndefined();
   });
 });
 
@@ -2030,208 +1303,38 @@ describe("Lightweight fingerprint optimization", () => {
   });
 });
 
-// ── Native SPARQL getter evaluation ──────────────────────────────────────────
-describe("Native SPARQL getter evaluation", () => {
-  const { evaluateCustomGettersForInstance } = require("./hydration");
 
-  const mockPerspective = {
-    getLinks: jest.fn().mockResolvedValue([]),
-    querySparql: jest.fn(),
-    get: jest.fn().mockResolvedValue([]),
-  };
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
-
-  it("should execute SELECT getter directly via querySparql", async () => {
-    const metadata = {
-      properties: {
-        replyingTo: {
-          predicate: "flux://has_reply",
-          getter: 'SELECT ?target WHERE { ?target <flux://has_reply> ?source . } LIMIT 1',
-          type: "string",
-        }
-      },
-      relations: {},
-    };
-
-    mockPerspective.querySparql.mockResolvedValue([
-      { target: { value: "literal:string:msg123" } }
-    ]);
-
-    const instance = { id: "test://msg1", replyingTo: undefined };
-    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
-
-    expect(mockPerspective.querySparql).toHaveBeenCalledWith(
-      expect.stringContaining("SELECT ?target WHERE")
-    );
-    expect(instance.replyingTo).toBe("literal:string:msg123");
-  });
-
-  it("should execute ASK getter and return boolean", async () => {
-    const metadata = {
-      properties: {
-        isPopular: {
-          predicate: "flux://is_popular",
-          getter: 'ASK WHERE { SELECT (COUNT(DISTINCT ?reactor) AS ?count) WHERE { ?reactor <flux://reaction> ?source . } HAVING(?count > 5) }',
-          type: "boolean",
-          readOnly: true,
-        }
-      },
-      relations: {},
-    };
-
-    mockPerspective.querySparql.mockResolvedValue(true);
-
-    const instance = { id: "test://msg1", isPopular: false };
-    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
-
-    expect(mockPerspective.querySparql).toHaveBeenCalledWith(
-      expect.stringContaining("ASK WHERE")
-    );
-    expect(instance.isPopular).toBe(true);
-  });
-
-  it("should replace ?source with instance ID in SPARQL getter", async () => {
-    const metadata = {
-      properties: {
-        author: {
-          predicate: "test://author",
-          getter: 'SELECT ?target WHERE { ?source <test://author> ?target . }',
-          type: "string",
-        }
-      },
-      relations: {},
-    };
-
-    mockPerspective.querySparql.mockResolvedValue([
-      { target: { value: "did:key:abc123" } }
-    ]);
-
-    const instance = { id: "test://post1", author: undefined };
-    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
-
-    expect(mockPerspective.querySparql).toHaveBeenCalledWith(
-      expect.stringContaining("<test://post1>")
-    );
-    expect(mockPerspective.querySparql).not.toHaveBeenCalledWith(
-      expect.stringContaining("?source")
-    );
-  });
-
-  it("should handle empty SPARQL results gracefully", async () => {
-    const metadata = {
-      properties: {
-        replyingTo: {
-          predicate: "flux://has_reply",
-          getter: 'SELECT ?target WHERE { ?target <flux://has_reply> ?source . } LIMIT 1',
-          type: "string",
-        }
-      },
-      relations: {},
-    };
-
-    mockPerspective.querySparql.mockResolvedValue([]);
-
-    const instance = { id: "test://msg1", replyingTo: "original" };
-    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
-
-    // Should not overwrite with undefined
-    expect(instance.replyingTo).toBe("original");
-  });
-
-  it("should handle SPARQL getter errors without crashing", async () => {
-    const metadata = {
-      properties: {
-        broken: {
-          predicate: "test://broken",
-          getter: 'SELECT ?target WHERE { INVALID SPARQL }',
-          type: "string",
-        }
-      },
-      relations: {},
-    };
-
-    mockPerspective.querySparql.mockRejectedValue(new Error("SPARQL parse error"));
-
-    const instance = { id: "test://msg1", broken: undefined };
-    const consoleSpy = jest.spyOn(console, "warn").mockImplementation();
-    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
-    consoleSpy.mockRestore();
-
-    // Should not throw, should warn
-    expect(instance.broken).toBeUndefined();
-  });
-
-  it("should execute SPARQL getter for relations", async () => {
-    const metadata = {
-      properties: {},
-      relations: {
-        tags: {
-          predicate: "test://has_tag",
-          getter: 'SELECT ?target WHERE { ?source <test://has_tag> ?target . }',
-          direction: "forward",
-        }
-      },
-    };
-
-    mockPerspective.querySparql.mockResolvedValue([
-      { target: { value: "tag:a" } },
-      { target: { value: "tag:b" } },
-    ]);
-
-    const instance = { id: "test://post1", tags: [] };
-    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
-
-    expect(instance.tags).toEqual(["tag:a", "tag:b"]);
-  });
-
-  it("should warn for legacy SurrealDB-style getter syntax instead of converting", async () => {
-    const metadata = {
-      properties: {
-        legacy: {
-          predicate: "test://legacy",
-          getter: "(<-link[WHERE predicate = 'test://legacy'].in.uri)[0]",
-          type: "string",
-        }
-      },
-      relations: {},
-    };
-
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-
-    const instance = { id: "test://msg1", legacy: undefined };
-    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
-    
-    // Should NOT call querySparql — legacy getters are no longer converted
-    expect(mockPerspective.querySparql).not.toHaveBeenCalled();
-    // Should warn about unsupported syntax
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Unsupported legacy getter syntax")
-    );
-    // Value should remain undefined
-    expect(instance.legacy).toBeUndefined();
-
-    warnSpy.mockRestore();
-  });
-});
 
 // ── Subscribe callback timing ──────────────────────────────────────────
 describe("ModelQueryBuilder subscribe callback timing", () => {
   it("subscribe should not invoke callback synchronously before Promise resolves", async () => {
-    // This test verifies that the initial callback from subscribe() is deferred
-    // via queueMicrotask, preventing Preact/React hook lifecycle violations
-    // when subscribe() is called from useEffect.
+    // This test verifies that subscribe() uses the Rust model subscription endpoint
+    // and properly handles the subscription lifecycle.
     
-    const mockPerspective = {
-      getLinks: jest.fn().mockResolvedValue([]),
-      subscribeQuery: jest.fn().mockResolvedValue({
-        result: '[]',
-        onResult: jest.fn(),
-        dispose: jest.fn(),
+    const mockSubscriptionId = "test-sub-123";
+    let updateCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
       }),
-      querySparql: jest.fn().mockResolvedValue('[]'),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        updateCallback = cb;
+        return () => {}; // unsubscribe function
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string, shapeJson?: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson, shapeJson);
+      }),
+      getLinks: jest.fn().mockResolvedValue([]),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
     } as any;
 
     const { Ad4mModel, Model, Property, Flag } = require("./index");
@@ -2258,12 +1361,300 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
     // The callback should NOT have fired synchronously
     expect(callbackInvokedBeforeResolve).toBe(false);
 
-    await promise;
+    const initialResults = await promise;
     promiseResolved = true;
 
-    // After the microtask queue drains, the callback should fire
-    await new Promise(r => setTimeout(r, 10));
-    // The callback was deferred — it fires after the Promise resolves
+    expect(initialResults).toEqual([]);
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalled();
+  });
+});
+
+describe("ModelQueryBuilder paginateSubscribe", () => {
+  it("paginateSubscribe should use a single query with count: true", async () => {
+    const mockSubscriptionId = "paginate-sub-123";
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, _cb: any) => {
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string, shapeJson?: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson, shapeJson);
+      }),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [{ id: "item1", type: "test://paginate" }], totalCount: 42 }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "PaginateTest" })
+    class PaginateTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://paginate" })
+      type: string = "test://paginate";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const builder = PaginateTest.query(mockPerspective);
+    const result = await builder.paginateSubscribe(10, 1, () => {});
+
+    // Should return paginated result structure
+    expect(result).toHaveProperty("results");
+    expect(result).toHaveProperty("totalCount");
+    expect(result).toHaveProperty("pageSize", 10);
+    expect(result).toHaveProperty("pageNumber", 1);
+
+    // modelQuery should be called exactly once (not twice — no separate count query)
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+
+    // The query should have count: true
+    const callArgs = mockPerspective.modelQuery.mock.calls[0];
+    const queryJson = JSON.parse(callArgs[1]);
+    expect(queryJson.count).toBe(true);
+    expect(queryJson.limit).toBe(10);
+    expect(queryJson.offset).toBe(0);
+  });
+
+  it("paginateSubscribe should re-fetch on real subscription updates", async () => {
+    const mockSubscriptionId = "paginate-update-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    let modelQueryCallCount = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string, shapeJson?: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson, shapeJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(async () => {
+        modelQueryCallCount++;
+        return { instances: [{ id: "new-item", type: "test://update" }], totalCount: 1 };
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "UpdateTest" })
+    class UpdateTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://update" })
+      type: string = "test://update";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = UpdateTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    const initialCallCount = modelQueryCallCount;
+
+    // Simulate a subscription update
+    capturedCallback!({ instances: [{ id: "new-item" }], totalCount: 1 });
+
+    // Wait for async processing
+    await new Promise(r => setTimeout(r, 100));
+
+    // modelQuery should have been called again for the re-fetch
+    expect(modelQueryCallCount).toBeGreaterThan(initialCallCount);
+    // User callback should have been invoked with paginated results
+    expect(userCallback).toHaveBeenCalled();
+    const callArg = userCallback.mock.calls[0][0];
+    expect(callArg).toHaveProperty("totalCount");
+    expect(callArg).toHaveProperty("pageSize", 10);
+    expect(callArg).toHaveProperty("pageNumber", 1);
+  });
+});
+
+// ============================================================================
+// Subscription keepalive recovery tests
+// ============================================================================
+
+describe("ModelQueryBuilder keepalive recovery", () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  /**
+   * Helper: build a mock perspective whose keepAliveQuery rejects after
+   * `failAfter` successful calls, simulating a server-side subscription
+   * eviction (returns "Subscription not found").  On resubscribe (a second
+   * modelSubscribe call) it returns a *new* subscription ID.
+   */
+  function buildMocks(failAfter = 0) {
+    let keepaliveCallCount = 0;
+    let modelSubscribeCallCount = 0;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockImplementation(async () => {
+        modelSubscribeCallCount++;
+        return {
+          subscriptionId: `sub-${modelSubscribeCallCount}`,
+          result: { instances: [], totalCount: 0 },
+        };
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, _cb: any) => {
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockImplementation(async () => {
+        keepaliveCallCount++;
+        if (keepaliveCallCount > failAfter) {
+          throw new Error("RPC error 500: Subscription not found");
+        }
+        return true;
+      }),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(
+        async (className: string, queryJson: string, shapeJson?: string) =>
+          mockClient.modelSubscribe("test-uuid", className, queryJson, shapeJson)
+      ),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
+      getLinks: jest.fn().mockResolvedValue([]),
+    } as any;
+
+    return { mockClient, mockPerspective, getKeepaliveCount: () => keepaliveCallCount, getSubscribeCount: () => modelSubscribeCallCount };
+  }
+
+  it("subscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
+    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(/* failAfter */ 1);
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "KeepaliveRecoveryTest" })
+    class KeepaliveRecoveryTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://ka" })
+      type: string = "test://ka";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const builder = KeepaliveRecoveryTest.query(mockPerspective);
+    await builder.subscribe(() => {});
+
+    // Initial subscription
+    expect(getSubscribeCount()).toBe(1);
+
+    // First keepalive at 30s — succeeds (failAfter=1)
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(1);
+
+    // Second keepalive at 60s — fails → should trigger resubscribe
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(2);
+
+    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
+    await jest.advanceTimersByTimeAsync(2500);
+
+    // A second modelSubscribe call means recovery happened
+    expect(getSubscribeCount()).toBe(2);
+
+    // Clean up
+    builder.dispose();
+  });
+
+  it("countSubscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
+    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(0); // fail immediately
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "CountKeepaliveTest" })
+    class CountKeepaliveTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://cka" })
+      type: string = "test://cka";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const builder = CountKeepaliveTest.query(mockPerspective);
+    await builder.countSubscribe(() => {});
+
+    expect(getSubscribeCount()).toBe(1);
+
+    // First keepalive at 30s — fails immediately → should trigger resubscribe
+    await jest.advanceTimersByTimeAsync(30_000);
+    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
+    await jest.advanceTimersByTimeAsync(2500);
+
+    expect(getSubscribeCount()).toBe(2);
+
+    builder.dispose();
+  });
+
+  it("paginateSubscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
+    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(0);
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "PaginateKeepaliveTest" })
+    class PaginateKeepaliveTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://pka" })
+      type: string = "test://pka";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const builder = PaginateKeepaliveTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, () => {});
+
+    expect(getSubscribeCount()).toBe(1);
+
+    await jest.advanceTimersByTimeAsync(30_000);
+    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
+    await jest.advanceTimersByTimeAsync(2500);
+
+    expect(getSubscribeCount()).toBe(2);
+
+    builder.dispose();
+  });
+
+  it("subscribe: stops retrying after dispose()", async () => {
+    const { mockClient, mockPerspective } = buildMocks(Infinity); // keepalive always succeeds
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "DisposeTest" })
+    class DisposeTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://disp" })
+      type: string = "test://disp";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const builder = DisposeTest.query(mockPerspective);
+    await builder.subscribe(() => {});
+
+    builder.dispose();
+
+    // Advance well past multiple keepalive intervals
+    await jest.advanceTimersByTimeAsync(120_000);
+
+    // No keepalive calls should have happened after dispose
+    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(0);
   });
 });
 
@@ -2272,7 +1663,6 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
 // ============================================================================
 
 import { getCachedResult, setCachedResult, clearQueryCache, queryCacheSize } from "./query-cache";
-import { clearSubscriptionPool, subscriptionPoolSize } from "./subscription-pool";
 import { getPropertiesMetadata, getRelationsMetadata, getMemoizedSHACL } from "./decorators";
 
 describe("QueryCache", () => {
@@ -2396,5 +1786,515 @@ describe("Lazy Conformance Filters", () => {
     expect(shacl).toBeDefined();
     expect(shacl.shape).toBeDefined();
     expect(shacl.name).toBe("LazyParent2");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// deepQuery — getter evaluation on collection queries
+// ──────────────────────────────────────────────────────────
+
+describe("deepQuery — getter evaluation", () => {
+  @Model({ name: "DeepQueryTestMessage" })
+  class DeepQueryTestMessage extends Ad4mModel {
+    @Flag({ through: "flux://entry_type", value: "flux://message" })
+    type: string = "";
+
+    @Property({ through: "flux://body", resolveLanguage: "literal" })
+    body: string = "";
+
+    @Property({
+      through: "flux://has_reply",
+      getter: `SELECT ?target WHERE { ?source <flux://has_reply> ?target . } LIMIT 1`,
+    })
+    replyingTo?: string;
+
+    @ReadOnly({
+      through: "flux://is_popular",
+      getter: `ASK WHERE { ?source <flux://is_popular> "true" . }`,
+    })
+    isPopular: boolean = false;
+
+    @HasMany({ through: "flux://reaction" })
+    reactions: string[] = [];
+  }
+
+  let sparqlCalls: string[];
+  const mockPerspective: any = {
+    uuid: "test-uuid",
+    modelQuery: jest.fn(async (className: string, queryJson: string, shapeJson: string) => {
+      // Return a basic result for the single-instance getData() path
+      const query = JSON.parse(queryJson);
+      const id = query?.where?.id;
+      if (id) {
+        return {
+          instances: [{ id, body: "Hello" }],
+          totalCount: 1,
+        };
+      }
+      return { instances: [], totalCount: 0 };
+    }),
+    evaluateGetters: jest.fn(async (className: string, instanceIds: string[], shapeJson: string, propertyNames?: string[]) => {
+      // Return empty results by default — tests can override this mock
+      const result: Record<string, Record<string, any>> = {};
+      return result;
+    }),
+    querySparql: jest.fn(async (q: string) => {
+      sparqlCalls.push(q);
+      return [];
+    }),
+    get: jest.fn().mockResolvedValue([]),
+    getExpression: jest.fn().mockResolvedValue(null),
+    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("DeepQueryTestMessage"),
+  };
+
+  beforeEach(() => {
+    sparqlCalls = [];
+    mockPerspective.querySparql.mockClear();
+    mockPerspective.evaluateGetters.mockClear();
+    mockPerspective.modelQuery.mockClear();
+    mockPerspective.get.mockClear();
+  });
+
+  function makeInstances(count: number): InstanceType<typeof DeepQueryTestMessage>[] {
+    return Array.from({ length: count }, (_, i) =>
+      new DeepQueryTestMessage(mockPerspective, `flux://msg-${i}`)
+    );
+  }
+
+  it("single-instance get() delegates getter evaluation to Rust (no JS-side SPARQL)", async () => {
+    const instance = new DeepQueryTestMessage(mockPerspective, "flux://msg-single");
+    mockPerspective.querySparql.mockImplementation(async (q: string) => {
+      sparqlCalls.push(q);
+      if (q.includes("flux://msg-single") && !q.includes("flux://has_reply") && !q.includes("flux://is_popular")) {
+        return [
+          { source: "flux://msg-single", predicate: "flux://entry_type", target: "flux://message", author: "did:key:a", timestamp: "3000" },
+          { source: "flux://msg-single", predicate: "flux://body", target: "literal:string:Hello", author: "did:key:a", timestamp: "3000" },
+        ];
+      }
+      return [];
+    });
+
+    await instance.get();
+    // Getter evaluation now happens Rust-side via evaluate_getters() — no JS SPARQL calls
+    const getterCalls = sparqlCalls.filter(
+      (q) => q.includes("flux://has_reply") || q.includes("flux://is_popular")
+    );
+    expect(getterCalls.length).toBe(0);
+  });
+
+  describe("Ad4mModel.evaluateGetters()", () => {
+    it("resolves getters for a batch of instances via single RPC", async () => {
+      const instances = makeInstances(4);
+
+      await DeepQueryTestMessage.evaluateGetters(instances.slice(0, 2), mockPerspective, ["replyingTo"]);
+
+      // Should make exactly 1 RPC call via perspective.evaluateGetters
+      expect(mockPerspective.evaluateGetters).toHaveBeenCalledTimes(1);
+      const [className, instanceIds, shapeJson, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
+      expect(className).toBe("DeepQueryTestMessage");
+      expect(instanceIds).toEqual(["flux://msg-0", "flux://msg-1"]);
+      expect(propertyNames).toEqual(["replyingTo"]);
+      // No querySparql calls — all done in-process
+      expect(sparqlCalls.length).toBe(0);
+    });
+
+    it("evaluates all getters when propertyNames is omitted", async () => {
+      const instances = makeInstances(2);
+
+      await DeepQueryTestMessage.evaluateGetters(instances, mockPerspective);
+
+      expect(mockPerspective.evaluateGetters).toHaveBeenCalledTimes(1);
+      const [className, instanceIds, shapeJson, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
+      expect(className).toBe("DeepQueryTestMessage");
+      expect(instanceIds).toEqual(["flux://msg-0", "flux://msg-1"]);
+      expect(propertyNames).toBeUndefined();
+    });
+
+    it("applies results to instances and syncs snapshots", async () => {
+      const instances = makeInstances(2);
+      // Simulate Rust returning getter results
+      mockPerspective.evaluateGetters.mockResolvedValueOnce({
+        "flux://msg-0": { replyingTo: "flux://msg-99" },
+        "flux://msg-1": { replyingTo: "flux://msg-88" },
+      });
+
+      await DeepQueryTestMessage.evaluateGetters(instances, mockPerspective, ["replyingTo"]);
+
+      expect((instances[0] as any).replyingTo).toBe("flux://msg-99");
+      expect((instances[1] as any).replyingTo).toBe("flux://msg-88");
+    });
+
+    it("handles empty array gracefully", async () => {
+      await DeepQueryTestMessage.evaluateGetters([], mockPerspective);
+      expect(mockPerspective.evaluateGetters).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("deepQuery via ModelQueryBuilder", () => {
+    it("deepQuery() method sets deepQuery flag on queryParams", () => {
+      const builder = DeepQueryTestMessage.query(mockPerspective);
+      (builder as any).deepQuery();
+      expect((builder as any).queryParams.deepQuery).toBe(true);
+    });
+
+    it("deepQuery defaults to true when not explicitly set", async () => {
+      mockPerspective.modelQuery.mockResolvedValueOnce({ instances: [], totalCount: 0 });
+      await DeepQueryTestMessage.query(mockPerspective).get();
+
+      expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+      const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+      const qi = JSON.parse(queryJson);
+      expect(qi.deepQuery).toBe(true);
+    });
+
+    it("deepQuery can be explicitly set to false", async () => {
+      mockPerspective.modelQuery.mockResolvedValueOnce({ instances: [], totalCount: 0 });
+      await DeepQueryTestMessage.query(mockPerspective).deepQuery(false).get();
+
+      expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+      const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+      const qi = JSON.parse(queryJson);
+      expect(qi.deepQuery).toBe(false);
+    });
+  });
+});
+
+// ─── Ad4mModel.fromSHACL() ───────────────────────────────────────────────────
+
+describe("Ad4mModel.fromSHACL()", () => {
+  function makeShape(targetClass: string, props: Array<import("../shacl/SHACLShape").SHACLPropertyShape>) {
+    const shape = new SHACLShape(targetClass);
+    for (const p of props) shape.addProperty(p);
+    return shape;
+  }
+
+  it("assigns the given name as className", () => {
+    const shape = makeShape("flux://Channel", []);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    expect((Cls as any).className).toBe("Channel");
+    expect((new (Cls as any)({}, "flux://1")).className).toBe("Channel");
+  });
+
+  it("registers scalar property (maxCount=1) via setPropertyRegistryEntry", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "title", path: "flux://has_title", maxCount: 1, writable: true },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["title"]).toBeDefined();
+    expect(meta.properties["title"].predicate).toBe("flux://has_title");
+    expect(meta.properties["title"].readOnly).toBe(false);
+  });
+
+  it("registers collection property (no maxCount) as hasMany relation", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "messages", path: "flux://has_message" },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.relations["messages"]).toBeDefined();
+    expect(meta.relations["messages"].predicate).toBe("flux://has_message");
+    expect(meta.relations["messages"].direction).toBe("forward");
+  });
+
+  it("registers collection property (maxCount=5) as hasMany relation", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "participants", path: "flux://participant", maxCount: 5 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.relations["participants"]).toBeDefined();
+    expect(meta.relations["participants"].direction).toBe("forward");
+  });
+
+  it("propagates resolveLanguage onto scalar properties", () => {
+    const shape = makeShape("flux://Post", [
+      { name: "body", path: "flux://body", maxCount: 1, resolveLanguage: "literal" },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Post");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["body"].resolveLanguage).toBe("literal");
+  });
+
+  it("defaults writable to true when not specified", () => {
+    const shape = makeShape("flux://Post", [
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Post");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["body"].readOnly).toBe(false);
+  });
+
+  it("respects writable:false", () => {
+    const shape = makeShape("flux://Post", [
+      { name: "id", path: "flux://id", maxCount: 1, writable: false },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Post");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["id"].readOnly).toBe(true);
+  });
+
+  it("registers flag properties (hasValue) as type-discrimination entries", () => {
+    const shape = makeShape("flux://Message", [
+      { name: "type", path: "flux://entry_type", hasValue: "flux://message" },
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Message");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["type"]).toBeDefined();
+    expect(meta.properties["type"].predicate).toBe("flux://entry_type");
+    expect(meta.properties["type"].flag).toBe(true);
+    expect(meta.properties["type"].required).toBe(true);
+    expect(meta.properties["type"].initial).toBe("flux://message");
+    expect(meta.properties["body"]).toBeDefined();
+  });
+
+  it("flag property from fromSHACL produces SPARQL type-discriminator triple", () => {
+    const shape = makeShape("flux://Message", [
+      { name: "type", path: "flux://entry_type", hasValue: "flux://message" },
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Message");
+    const meta = Cls.getModelMetadata();
+    const allRelsMeta = {} as any;
+    const sparql = buildSPARQLQuery(meta, allRelsMeta, {}, Cls);
+    expect(sparql).toContain("<flux://entry_type>");
+    expect(sparql).toContain("<flux://message>");
+  });
+
+  it("recovers flag value from constructor_actions (backward-compat for old shapes)", () => {
+    const shape = new SHACLShape("flux://Channel");
+    // An old shape: property has NO hasValue, but constructor_actions carries it
+    shape.addProperty({ name: "type", path: "flux://entry_type", maxCount: 1 });
+    shape.addProperty({ name: "name", path: "flux://name", maxCount: 1 });
+    shape.constructor_actions = [
+      { action: "addLink", source: "this", predicate: "flux://entry_type", target: "flux://channel" },
+    ];
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["type"]).toBeDefined();
+    expect(meta.properties["type"].flag).toBe(true);
+    expect(meta.properties["type"].initial).toBe("flux://channel");
+  });
+
+  it("skips properties without a name field", () => {
+    const shape = makeShape("flux://Message", [
+      { path: "flux://anonymous" } as any,
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Message");
+    const meta = Cls.getModelMetadata();
+    expect(Object.keys(meta.properties)).toEqual(["body"]);
+  });
+
+  it("propagates local flag onto relations", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "drafts", path: "flux://draft", local: true },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.relations["drafts"].local).toBe(true);
+  });
+
+  it("applies Model decorator so generateSHACL and generateSDNA are available", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "title", path: "flux://has_title", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    expect(typeof (Cls as any).generateSDNA).toBe("function");
+    expect(typeof (Cls as any).generateSHACL).toBe("function");
+  });
+
+  it("handles shapes with no properties", () => {
+    const shape = makeShape("flux://Empty", []);
+    const Cls = Ad4mModel.fromSHACL(shape, "Empty");
+    const meta = Cls.getModelMetadata();
+    expect(Object.keys(meta.properties)).toHaveLength(0);
+    expect(Object.keys(meta.relations)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IncludeProjection — key splitting and query routing
+// ---------------------------------------------------------------------------
+
+describe("IncludeProjection type guard and key splitting", () => {
+  // Shared test models
+  @Model({ name: "Signal" })
+  class Signal extends Ad4mModel {
+    @Property({ through: "signal://type" })
+    signalTypeId: string = "";
+
+    @Property({ through: "signal://author" })
+    author: string = "";
+  }
+
+  @Model({ name: "Post" })
+  class Post extends Ad4mModel {
+    @Property({ through: "post://title" })
+    title: string = "";
+
+    @HasMany({ through: "post://signal", target: () => Signal })
+    signals: Signal[] = [];
+
+    @HasMany({ through: "post://comment" })
+    comments: string[] = [];
+  }
+
+  const mockPerspective = {
+    querySparql: jest.fn(),
+    modelQuery: jest.fn(),
+    infer: jest.fn(),
+    uuid: "test-perspective-uuid",
+    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("Post"),
+  } as any;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [{ id: "post://1", title: "Hello", $signalCount: 3 }],
+      totalCount: 1,
+    });
+  });
+
+  // --- isIncludeProjection type guard ---
+
+  it("isIncludeProjection returns true for objects with a 'from' field", () => {
+    expect(isIncludeProjection({ from: "signals", count: true })).toBe(true);
+    expect(isIncludeProjection({ from: "comments", limit: 1 })).toBe(true);
+  });
+
+  it("isIncludeProjection returns false for non-projection values", () => {
+    expect(isIncludeProjection(true)).toBe(false);
+    expect(isIncludeProjection(false)).toBe(false);
+    expect(isIncludeProjection(null)).toBe(false);
+    expect(isIncludeProjection(undefined)).toBe(false);
+    expect(isIncludeProjection(42)).toBe(false);
+    // RelationSubQuery (has no 'from' key)
+    expect(isIncludeProjection({ limit: 5, order: { timestamp: "DESC" } })).toBe(false);
+  });
+
+  // --- $-key splitting ---
+
+  it("routes $-prefixed keys to queryInput.projections, not queryInput.include", async () => {
+    await Post.findAll(mockPerspective, {
+      include: {
+        $signalCount: { from: "signals", count: true },
+        comments: true,
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    // Normal relation goes to include
+    expect(qi.include?.comments).toBe(true);
+    expect(qi.include?.$signalCount).toBeUndefined();
+
+    // Projection goes to projections
+    expect(qi.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    expect(qi.projections?.comments).toBeUndefined();
+  });
+
+  it("routes $-prefixed IncludeProjection values to projections ($ prefix required)", async () => {
+    await Post.findAll(mockPerspective, {
+      include: {
+        $mySignals: { from: "signals", limit: 1 },
+        comments: true,
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    expect(qi.projections?.$mySignals).toMatchObject({ from: "signals", limit: 1 });
+    expect(qi.include?.comments).toBe(true);
+  });
+
+  it("does NOT route non-$ keys to projections even if value has 'from' shape", async () => {
+    // $ prefix is required — a key without it goes to include, not projections
+    await Post.findAll(mockPerspective, {
+      include: {
+        mySignals: { from: "signals", limit: 1 } as any,
+        comments: true,
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    // Without $ prefix it stays in include (behaviour is undefined/broken but not silently rerouted)
+    expect(qi.projections?.mySignals).toBeUndefined();
+    expect(qi.include?.mySignals).toBeDefined();
+  });
+
+  it("omits queryInput.include when all keys are projections", async () => {
+    await Post.findAll(mockPerspective, {
+      include: {
+        $count: { from: "signals", count: true },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    expect(qi.include).toBeUndefined();
+    expect(qi.projections?.$count).toMatchObject({ from: "signals", count: true });
+  });
+
+  it("omits queryInput.projections when all keys are normal includes", async () => {
+    await Post.findAll(mockPerspective, {
+      include: { comments: true },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    expect(qi.projections).toBeUndefined();
+    expect(qi.include?.comments).toBe(true);
+  });
+
+  it("enriches projection with targetShape when relation target is registered", async () => {
+    await Post.findAll(mockPerspective, {
+      include: {
+        $signalCount: { from: "signals", count: true },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    // targetShape should have been injected from the Signal model
+    // ($ prefix is required for projection enrichment to apply)
+    expect(qi.projections?.$signalCount?.targetShape?.className).toBe("Signal");
+  });
+
+  it("leaves targetShape absent when relation has no target decorator", async () => {
+    await Post.findAll(mockPerspective, {
+      include: {
+        $commentCount: { from: "comments", count: true },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    // 'comments' HasMany has no target() thunk → no targetShape
+    expect(qi.projections?.$commentCount?.targetShape).toBeUndefined();
+  });
+
+  // --- result passthrough ---
+
+  it("returns $-keyed projection values attached by Rust on instances", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [{ id: "post://1", title: "Hello", $signalCount: 7 }],
+      totalCount: 1,
+    });
+
+    const results = await Post.findAll(mockPerspective, {
+      include: { $signalCount: { from: "signals", count: true } },
+    });
+
+    expect((results[0] as any).$signalCount).toBe(7);
   });
 });

@@ -9,10 +9,8 @@ import type { Ad4mModel } from "./Ad4mModel";
 import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import type {
   Where, Order, IncludeMap, Query,
-  AllInstancesResult, ResultsWithTotalCount, PaginationResult,
+  ResultsWithTotalCount, PaginationResult,
 } from "./types";
-import { groupSPARQLResults } from "./query-sparql";
-import { pooledSubscribe } from "./subscription-pool";
 
 /** Query builder for Ad4mModel queries.
  * Allows building queries with a fluent interface and either running them once
@@ -40,7 +38,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   private modelClassName: string | null = null;
   private ctor: typeof Ad4mModel;
   private currentSubscription?: any;
-  private engineFlag: 'sparql' | 'prolog' = 'sparql';
 
   constructor(perspective: PerspectiveProxy, ctor: typeof Ad4mModel, query?: Query) {
     this.perspective = perspective;
@@ -227,6 +224,29 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
+   * Controls whether SPARQL property getters are evaluated during hydration.
+   *
+   * By default, collection queries evaluate property getters (deepQuery=true).
+   * Call `.deepQuery(false)` to skip getter evaluation for performance.
+   *
+   * @param enabled - Whether to evaluate property getters (default: true)
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * const messages = await Message.query(perspective)
+   *   .parent(channel)
+   *   .deepQuery(false)  // skip property getters for performance
+   *   .limit(30)
+   *   .get();
+   * ```
+   */
+  deepQuery(enabled: boolean = true): ModelQueryBuilder<T> {
+    this.queryParams.deepQuery = enabled;
+    return this;
+  }
+
+  /**
    * Specifies which relations to eager-load (hydrate into model instances).
    *
    * Without `include`, relation fields contain raw expression URIs (strings).
@@ -264,9 +284,9 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Sets the query engine to use.
+   * @deprecated Prolog engine has been removed. All queries use SPARQL/Rust.
    */
-  engine(eng: 'sparql' | 'prolog'): ModelQueryBuilder<T> {
-    this.engineFlag = eng;
+  engine(_eng: 'sparql' | 'prolog'): ModelQueryBuilder<T> {
     return this;
   }
 
@@ -283,16 +303,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async get(): Promise<T[]> {
-    let results: T[];
-    if (this.engineFlag === 'sparql') {
-      results = await this.executeSparqlQuery();
-    } else {
-      const query = await this.ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
-      const result = await this.perspective.infer(query);
-      ({ results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result) as { results: T[] });
-    }
-
-    return results;
+    return await this.executeSparqlQuery();
   }
 
   /**
@@ -303,22 +314,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
-   * Shared SPARQL query execution logic used by both get() and getSparql().
+   * Shared query execution logic — routes through the executor-side modelQuery endpoint.
    */
   private async executeSparqlQuery(): Promise<T[]> {
-    const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
-    const rawResult = await this.perspective.querySparql(sparqlQuery);
-    const { results } = await this.processSparqlResult(rawResult);
+    const { results } = await (this.ctor as any).executeModelQuery(this.perspective, this.queryParams, this.modelClassName);
     return results;
-  }
-
-  /**
-   * Groups raw SPARQL results and hydrates them into model instances.
-   * Centralises the repeated groupSPARQLResults → instancesFromQueryResult pipeline.
-   */
-  private async processSparqlResult(rawResult: any, queryOverride?: Query): Promise<{ results: T[], totalCount: number }> {
-    const grouped = groupSPARQLResults(Array.isArray(rawResult) ? rawResult : []);
-    return await this.ctor.instancesFromQueryResult(this.perspective, queryOverride || this.queryParams, grouped) as { results: T[], totalCount: number };
   }
 
   /**
@@ -336,8 +336,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async first(): Promise<T | null> {
+    const savedLimit = this.queryParams.limit;
     this.queryParams.limit = 1;
     const results = await this.get();
+    this.queryParams.limit = savedLimit;
     return results[0] ?? null;
   }
 
@@ -368,9 +370,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * builder.dispose();
    * ```
    *
-   * @remarks
-   * By default, this uses SPARQL live queries for real-time updates.
-   * Prolog subscriptions remain available via `.useSPARQL(false)`.
    */
   async subscribe(callback: (results: T[]) => void): Promise<T[]> {
     // Clean up any existing subscription
@@ -378,83 +377,127 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
     const ctor = this.ctor;
 
-    if (this.engineFlag === 'sparql') {
-        const sparqlQuery = await ctor.queryToSPARQL(this.perspective, this.queryParams);
+    // Build the model query params (className, queryJson, shapeJson)
+    const { className, queryJson, shapeJson } = (ctor as any).prepareModelQueryParams(
+      this.queryParams, this.modelClassName
+    );
 
-        // Track last emitted result fingerprint to suppress duplicate callbacks
-        let lastResultFingerprint: string | null = null;
+    // Register model subscription via Rust — this builds trigger SPARQL internally,
+    // registers the subscription, and runs the initial query in one call.
+    const { subscriptionId, result: initialModelResult } = await this.perspective.modelSubscribe(
+      className, queryJson, shapeJson
+    );
 
-        const buildFingerprint = (results: any[]) => {
-            if (results.length === 0) return '0:';
-            // Must include relation data (e.g. tags) — not just id/timestamp.
-            // Otherwise @HasMany changes on existing instances are suppressed as duplicates.
-            return JSON.stringify(results, (_, v) =>
-                typeof v === 'function' ? undefined : v
-            );
-        };
+    // Convert JSON instances to model class instances
+    const parseResults = (raw: any): T[] => {
+      return (ctor as any).parseModelResult(this.perspective, raw, this.queryParams.include, this.queryParams.properties);
+    };
 
-        const hydrate = async (rawResult: any) => {
-            const { results } = await this.processSparqlResult(rawResult);
-            return results;
-        };
+    // Resolve non-literal (file-language) properties — handles both raw URI strings
+    // and already-resolved FileData objects returned by the Rust executor.
+    const resolveAndReturn = async (instances: T[]): Promise<T[]> => {
+      await (ctor as any).resolveNonLiteralProps(this.perspective, instances);
+      return instances;
+    };
 
-        const pooled = await pooledSubscribe(
-            this.perspective,
-            sparqlQuery,
-            hydrate,
-            (hydratedResults: T[]) => {
-                const fp = buildFingerprint(hydratedResults);
-                if (fp === lastResultFingerprint) return;
-                lastResultFingerprint = fp;
-                callback(hydratedResults);
-            },
-        );
+    // Parse initial results (with non-literal resolution)
+    const initialResults = await resolveAndReturn(parseResults(initialModelResult));
 
-        // Store dispose function as subscription
-        this.currentSubscription = { dispose: pooled.dispose };
+    // Track last emitted result fingerprint to suppress duplicate callbacks
+    let lastResultFingerprint: string | null = null;
+    const buildFingerprint = (results: any[]) => {
+      if (results.length === 0) return '0:';
+      return JSON.stringify(results, (_, v) =>
+        typeof v === 'function' ? undefined : v
+      );
+    };
+    lastResultFingerprint = buildFingerprint(initialResults);
 
-        const initialResults = pooled.initialResult as T[];
-        lastResultFingerprint = buildFingerprint(initialResults);
-        return initialResults;
-    } else {
-        const query = await ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
-        this.currentSubscription = await this.perspective.subscribeInfer(query);
+    // Listen for subscription updates via the same GraphQL subscription channel.
+    // When Rust re-runs the model query and finds changed results, it pushes them.
+    const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
+      subscriptionId,
+      (rawResult: any) => {
+        try {
+          const parsed = parseResults(rawResult);
+          console.debug(`[ModelQueryBuilder.subscribe] Update received for ${subscriptionId}: ${parsed.length} instances`);
+          resolveAndReturn(parsed).then((results) => {
+            const fp = buildFingerprint(results);
+            if (fp === lastResultFingerprint) {
+              console.debug(`[ModelQueryBuilder.subscribe] Fingerprint unchanged, skipping callback`);
+              return;
+            }
+            console.debug(`[ModelQueryBuilder.subscribe] Fingerprint changed, calling callback with ${results.length} results`);
+            lastResultFingerprint = fp;
+            callback(results);
+          }).catch((e) => {
+            console.error('Model subscription update resolve error:', e);
+          });
+        } catch (e) {
+          console.error('Model subscription update parse error:', e);
+        }
+      },
+    );
 
-        const processResults = async (result: AllInstancesResult) => {
-            const { results } = await ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
-            callback(results as T[]);
-        };
+    // Set up keepalive with recovery — uses setTimeout loop so we can
+    // break out and resubscribe when the server evicts the subscription.
+    let disposed = false;
+    let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
+    let resubscribeAttempts = 0;
+    const MAX_RESUBSCRIBE_ATTEMPTS = 5;
+    const keepaliveLoop = async () => {
+      if (disposed) return;
+      try {
+        await this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId);
+        resubscribeAttempts = 0; // Reset on success
+      } catch (e: any) {
+        console.warn(`Model subscription keepalive failed for ${subscriptionId}:`, e);
+        if (!disposed && resubscribeAttempts < MAX_RESUBSCRIBE_ATTEMPTS) {
+          resubscribeAttempts++;
+          const backoffMs = Math.min(1000 * Math.pow(2, resubscribeAttempts), 60000);
+          console.warn(`Resubscribing (attempt ${resubscribeAttempts}/${MAX_RESUBSCRIBE_ATTEMPTS}, backoff ${backoffMs}ms)...`);
+          await new Promise(r => setTimeout(r, backoffMs));
+          try {
+            unsubscribe();
+            await this.subscribe(callback);
+          } catch (resubErr) {
+            console.error('Model subscription resubscribe failed:', resubErr);
+          }
+        } else if (resubscribeAttempts >= MAX_RESUBSCRIBE_ATTEMPTS) {
+          console.error(`Model subscription ${subscriptionId}: max resubscribe attempts reached, giving up.`);
+        }
+        return; // new subscription owns its own keepalive loop
+      }
+      if (!disposed) {
+        keepaliveTimer = setTimeout(keepaliveLoop, 30000);
+      }
+    };
+    keepaliveTimer = setTimeout(keepaliveLoop, 30000);
 
-        this.currentSubscription.onResult(processResults);
-        const { results } = await ctor.instancesFromPrologResult(
-            this.perspective,
-            this.queryParams,
-            this.currentSubscription.result
-        );
-        // Initial results returned via Promise only — callback is for subsequent updates
-        return results as T[];
+    // Store dispose function
+    this.currentSubscription = {
+      dispose: () => {
+        disposed = true;
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
+        unsubscribe();
+        this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).catch(() => {});
+      },
+    };
+
+    // Take snapshots for dirty tracking
+    for (const inst of initialResults) {
+      (inst as any).takeSnapshot?.(this.queryParams.include);
     }
+
+    return initialResults;
   }
 
   /**
    * Subscribes to the query and receives updates using SPARQL.
+   * @deprecated Use subscribe() instead — now routes through Rust model subscription.
    */
   async subscribeSparql(callback: (results: T[]) => void): Promise<T[]> {
-    this.dispose();
-
-    const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
-    this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
-
-    const processResults = async (result: any) => {
-      const { results } = await this.processSparqlResult(result);
-      callback(results as T[]);
-    };
-
-    this.currentSubscription.onResult(processResults);
-
-    const { results } = await this.processSparqlResult(this.currentSubscription.result);
-    // Initial results returned via Promise only — callback is for subsequent updates
-    return results as T[];
+    return this.subscribe(callback);
   }
 
   /**
@@ -470,30 +513,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async count(): Promise<number> {
-    if (this.engineFlag === 'sparql') {
-      const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
-      const rawResult = await this.perspective.querySparql(sparqlQuery);
-      const { totalCount } = await this.processSparqlResult(rawResult);
-      return totalCount;
-    } else {
-      const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
-      const result = await this.perspective.infer(query);
-      return result?.[0]?.TotalCount || 0;
-    }
+    const { totalCount } = await (this.ctor as any).executeModelQuery(this.perspective, { ...this.queryParams, limit: 0 }, this.modelClassName);
+    return totalCount;
   }
 
   /**
    * Gets the total count of matching entities using SPARQL.
-   * Delegates to count() with SPARQL engine forced.
+   * Delegates to count().
    */
   async countSparql(): Promise<number> {
-    const prev = this.engineFlag;
-    this.engineFlag = 'sparql';
-    try {
-      return await this.count();
-    } finally {
-      this.engineFlag = prev;
-    }
+    return await this.count();
   }
 
   /**
@@ -523,61 +552,89 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * builder.dispose();
    * ```
    *
-   * @remarks
-   * By default, this uses SPARQL live queries for real-time updates.
-   * Prolog subscriptions remain available via `.useSPARQL(false)`.
    */
   async countSubscribe(callback: (count: number) => void): Promise<number> {
     // Clean up any existing subscription
     this.dispose();
 
-    if (this.engineFlag === 'sparql') {
-      const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
-      this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
+    const countParams = { ...this.queryParams, limit: 0 };
+    const { className, queryJson, shapeJson } = (this.ctor as any).prepareModelQueryParams(
+      countParams, this.modelClassName
+    );
 
-      const processResults = async (result: any) => {
-        const { totalCount } = await this.processSparqlResult(result);
-        callback(totalCount);
-      };
+    const { subscriptionId, result: initialModelResult } = await this.perspective.modelSubscribe(
+      className, queryJson, shapeJson
+    );
 
-      this.currentSubscription.onResult(processResults);
-      const { totalCount } = await this.processSparqlResult(this.currentSubscription.result);
-      // Initial count returned via Promise — callback for updates only
-      return totalCount;
-    } else {
-      const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
-      this.currentSubscription = await this.perspective.subscribeInfer(query);
+    const parseCount = (raw: any): number => {
+      const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      return data.totalCount ?? 0;
+    };
 
-      const processResults = async (result: any) => {
-        const newCount = result?.[0]?.TotalCount || 0;
-        callback(newCount);
-      };
+    const initialCount = parseCount(initialModelResult);
 
-      this.currentSubscription.onResult(processResults);
-      const initialCount = this.currentSubscription.result?.[0]?.TotalCount || 0;
-      // Initial count returned via Promise — callback for subsequent updates only
-      return initialCount;
-    }
+    const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
+      subscriptionId,
+      (rawResult: any) => {
+        try {
+          callback(parseCount(rawResult));
+        } catch (e) {
+          console.error('Count subscription update parse error:', e);
+        }
+      },
+    );
+
+    let disposed = false;
+    let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
+    let resubscribeAttempts = 0;
+    const MAX_RESUBSCRIBE_ATTEMPTS = 5;
+    const keepaliveLoop = async () => {
+      if (disposed) return;
+      try {
+        await this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId);
+        resubscribeAttempts = 0;
+      } catch (e: any) {
+        console.warn(`Count subscription keepalive failed for ${subscriptionId}:`, e);
+        if (!disposed && resubscribeAttempts < MAX_RESUBSCRIBE_ATTEMPTS) {
+          resubscribeAttempts++;
+          const backoffMs = Math.min(1000 * Math.pow(2, resubscribeAttempts), 60000);
+          console.warn(`Count resubscribing (attempt ${resubscribeAttempts}/${MAX_RESUBSCRIBE_ATTEMPTS}, backoff ${backoffMs}ms)...`);
+          await new Promise(r => setTimeout(r, backoffMs));
+          try {
+            unsubscribe();
+            await this.countSubscribe(callback);
+          } catch (resubErr) {
+            console.error('Count subscription resubscribe failed:', resubErr);
+          }
+        } else if (resubscribeAttempts >= MAX_RESUBSCRIBE_ATTEMPTS) {
+          console.error(`Count subscription ${subscriptionId}: max resubscribe attempts reached, giving up.`);
+        }
+        return;
+      }
+      if (!disposed) {
+        keepaliveTimer = setTimeout(keepaliveLoop, 30000);
+      }
+    };
+    keepaliveTimer = setTimeout(keepaliveLoop, 30000);
+
+    this.currentSubscription = {
+      dispose: () => {
+        disposed = true;
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
+        unsubscribe();
+        this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).catch(() => {});
+      },
+    };
+
+    return initialCount;
   }
 
   /**
    * Subscribes to count updates using SPARQL.
+   * @deprecated Use countSubscribe() instead — now routes through Rust model subscription.
    */
   async countSubscribeSparql(callback: (count: number) => void): Promise<number> {
-    this.dispose();
-
-    const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
-    this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
-
-    const processResults = async (result: any) => {
-      const { totalCount } = await this.processSparqlResult(result);
-      callback(totalCount);
-    };
-
-    this.currentSubscription.onResult(processResults);
-    const { totalCount } = await this.processSparqlResult(this.currentSubscription.result);
-    // Initial count returned via Promise — callback for updates only
-    return totalCount;
+    return this.countSubscribe(callback);
   }
 
   /**
@@ -597,31 +654,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    if (this.engineFlag === 'sparql') {
-      const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, paginationQuery);
-      const result = await this.perspective.querySparql(sparqlQuery);
-      const { results, totalCount } = await this.processSparqlResult(result, paginationQuery) as ResultsWithTotalCount<T>;
-      return { results, totalCount, pageSize, pageNumber };
-    } else {
-      const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
-      const result = await this.perspective.infer(prologQuery);
-      const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, result)) as ResultsWithTotalCount<T>;
-      return { results, totalCount, pageSize, pageNumber };
-    }
+    const { results, totalCount } = await (this.ctor as any).executeModelQuery(this.perspective, paginationQuery, this.modelClassName);
+    return { results, totalCount, pageSize, pageNumber };
   }
 
   /**
    * Gets a page of results using SPARQL.
-   * Delegates to paginate() with SPARQL engine forced.
+   * Delegates to paginate().
    */
   async paginateSparql(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
-    const prev = this.engineFlag;
-    this.engineFlag = 'sparql';
-    try {
-      return await this.paginate(pageSize, pageNumber);
-    } finally {
-      this.engineFlag = prev;
-    }
+    return await this.paginate(pageSize, pageNumber);
   }
 
   /**
@@ -653,9 +695,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * builder.dispose();
    * ```
    *
-   * @remarks
-   * By default, this uses SPARQL live queries for real-time updates.
-   * Prolog subscriptions remain available via `.useSPARQL(false)`.
    */
   async paginateSubscribe(
     pageSize: number, 
@@ -665,54 +704,99 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     // Clean up any existing subscription
     this.dispose();
 
-    const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
+    const ctor = this.ctor;
 
-    if (this.engineFlag === 'sparql') {
-      const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, paginationQuery);
-      this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
+    // Subscribe to the full result set (no limit/offset) so the subscription
+    // detects changes anywhere in the dataset. Rust builds trigger SPARQL
+    // from the shape predicates.
+    const subscriptionParams = { ...(this.queryParams || {}) };
+    delete subscriptionParams.limit;
+    delete subscriptionParams.offset;
+    const { className, queryJson, shapeJson } = (ctor as any).prepareModelQueryParams(
+      subscriptionParams, this.modelClassName
+    );
 
-      const processResults = async (result: any) => {
-        const { results, totalCount } = await this.processSparqlResult(result, paginationQuery) as ResultsWithTotalCount<T>;
-        callback({ results, totalCount, pageSize, pageNumber });
-      };
+    const { subscriptionId } = await this.perspective.modelSubscribe(
+      className, queryJson, shapeJson
+    );
 
-      this.currentSubscription.onResult(processResults);
-      const { results, totalCount } = await this.processSparqlResult(this.currentSubscription.result, paginationQuery) as ResultsWithTotalCount<T>;
-      const initialPage = { results, totalCount, pageSize, pageNumber };
-      // Initial page returned via Promise — callback for subsequent updates only
-      return initialPage;
-    } else {
-      const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
-      this.currentSubscription = await this.perspective.subscribeInfer(prologQuery);
+    // Build the paginated query for Rust endpoint (count: true fetches both results and totalCount in one call)
+    const paginatedQuery = {
+      ...(this.queryParams || {}),
+      limit: pageSize,
+      offset: pageSize * (pageNumber - 1),
+      count: true,
+    };
 
-      const processResults = async (r: AllInstancesResult) => {
-        const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, r)) as ResultsWithTotalCount<T>;
-        callback({ results, totalCount, pageSize, pageNumber });
-      };
+    const processResults = async () => {
+      const { results, totalCount } = await (ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
+      callback({ results, totalCount, pageSize, pageNumber });
+    };
 
-      this.currentSubscription.onResult(processResults);
-      const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, this.currentSubscription.result)) as ResultsWithTotalCount<T>;
-      const initialPrologPage = { results, totalCount, pageSize, pageNumber };
-      // Initial page returned via Promise — callback for subsequent updates only
-      return initialPrologPage;
-    }
+    const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
+      subscriptionId,
+      (rawResult: any) => {
+        console.debug(`[ModelQueryBuilder.paginateSubscribe] Update received for ${subscriptionId}, re-fetching paginated data...`);
+        processResults().catch(e => console.error('Paginate subscription error:', e));
+      },
+    );
+
+    let disposed = false;
+    let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
+    let resubscribeAttempts = 0;
+    const MAX_RESUBSCRIBE_ATTEMPTS = 5;
+    const keepaliveLoop = async () => {
+      if (disposed) return;
+      try {
+        await this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId);
+        resubscribeAttempts = 0;
+      } catch (e: any) {
+        console.warn(`Paginate subscription keepalive failed for ${subscriptionId}:`, e);
+        if (!disposed && resubscribeAttempts < MAX_RESUBSCRIBE_ATTEMPTS) {
+          resubscribeAttempts++;
+          const backoffMs = Math.min(1000 * Math.pow(2, resubscribeAttempts), 60000);
+          console.warn(`Paginate resubscribing (attempt ${resubscribeAttempts}/${MAX_RESUBSCRIBE_ATTEMPTS}, backoff ${backoffMs}ms)...`);
+          await new Promise(r => setTimeout(r, backoffMs));
+          try {
+            unsubscribe();
+            await this.paginateSubscribe(pageSize, pageNumber, callback);
+          } catch (resubErr) {
+            console.error('Paginate subscription resubscribe failed:', resubErr);
+          }
+        } else if (resubscribeAttempts >= MAX_RESUBSCRIBE_ATTEMPTS) {
+          console.error(`Paginate subscription ${subscriptionId}: max resubscribe attempts reached, giving up.`);
+        }
+        return;
+      }
+      if (!disposed) {
+        keepaliveTimer = setTimeout(keepaliveLoop, 30000);
+      }
+    };
+    keepaliveTimer = setTimeout(keepaliveLoop, 30000);
+
+    this.currentSubscription = {
+      dispose: () => {
+        disposed = true;
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
+        unsubscribe();
+        this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).catch(() => {});
+      },
+    };
+
+    // Initial fetch (single call with count: true)
+    const { results, totalCount } = await (ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
+    return { results, totalCount, pageSize, pageNumber };
   }
 
   /**
    * Subscribes to paginated results updates using SPARQL.
-   * Delegates to paginateSubscribe() with SPARQL engine forced.
+   * Delegates to paginateSubscribe().
    */
   async paginateSubscribeSparql(
     pageSize: number,
     pageNumber: number,
     callback: (results: PaginationResult<T>) => void
   ): Promise<PaginationResult<T>> {
-    const prev = this.engineFlag;
-    this.engineFlag = 'sparql';
-    try {
-      return await this.paginateSubscribe(pageSize, pageNumber, callback);
-    } finally {
-      this.engineFlag = prev;
-    }
+    return await this.paginateSubscribe(pageSize, pageNumber, callback);
   }
 }

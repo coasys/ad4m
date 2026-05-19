@@ -174,6 +174,11 @@ export interface SHACLPropertyShape {
    *  Set automatically when a relation has a `target` model. Enables typed construction
    *  on the Rust/MCP side by referencing the full target shape. */
   class?: string;
+
+  /** sh:in — allowed values for this property (enum constraint).
+   *  Each entry has a `value` (the RDF term) and an optional `label` (human-readable name).
+   *  Standard SHACL `sh:in` only defines values; labels are an AD4M extension. */
+  in?: Array<{ value: string; label?: string }>;
 }
 
 /**
@@ -545,6 +550,14 @@ export class SHACLShape {
           target: prop.class
         });
       }
+
+      if (prop.in && prop.in.length > 0) {
+        links.push({
+          source: propShapeId,
+          predicate: "sh://in",
+          target: `literal:string:${JSON.stringify(prop.in)}`
+        });
+      }
     }
 
     return links;
@@ -775,6 +788,18 @@ export class SHACLShape {
         prop.class = classLink.target;
       }
 
+      const inLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "sh://in"
+      );
+      if (inLink) {
+        try {
+          const jsonStr = inLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
+          prop.in = JSON.parse(jsonStr);
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+
       shape.addProperty(prop);
     }
     
@@ -812,6 +837,7 @@ export class SHACLShape {
         getter: p.getter,
         conformance_conditions: p.conformanceConditions,
         class: p.class,
+        in: p.in,
       })),
       constructor_actions: this.constructor_actions,
       destructor_actions: this.destructor_actions,
@@ -847,6 +873,7 @@ export class SHACLShape {
         getter: p.getter,
         conformanceConditions: p.conformance_conditions,
         class: p.class,
+        in: p.in,
       });
     }
     
