@@ -2,7 +2,7 @@
 
 ## 3.1 Overview
 
-A **Language** in AD4M is a plugin that implements one or more *capabilities* via a **flat export model**. Languages are modules — JavaScript/TypeScript running under Deno, or Rust compiled to `wasm32-unknown-unknown` — that export named functions at the module level. There are no adapter classes, no `create()` factory, no context parameter, and no callback registration.
+A **Language** in AD4M is a plugin that implements one or more *capabilities* via a **flat export model**. Languages are modules — JavaScript/TypeScript running under Deno, or Rust compiled to `wasm32-unknown-unknown` — that export named functions at the module level.
 
 Languages are the core extensibility mechanism — they define how data is stored, retrieved, and shared. Every piece of content in AD4M (including agents, neighbourhoods, and other languages) is accessed through a Language.
 

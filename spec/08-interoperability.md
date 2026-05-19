@@ -68,7 +68,7 @@ This section defines what an alternative AD4M implementation MUST and SHOULD sup
 
 - **MUST** support SHACL-based SDNA for subject class definitions and instance resolution.
 - **MUST** support SPARQL 1.1 queries over the link graph (via Oxigraph or an equivalent engine).
-- **SHOULD** implement the custom SPARQL functions `fn::parse_literal` and `fn::strip_html` for literal value filtering.
+- **SHOULD** implement the custom SPARQL functions using full AD4M IRIs: `<ad4m://fn/parse_literal>` and `<ad4m://fn/strip_html>` for literal value filtering.
 - **MAY** support custom SHACL rules (SPARQL-based constraints) for advanced reasoning.
 
 ### 8.3.2 Capability Tokens
@@ -124,7 +124,7 @@ All JSON MUST use camelCase field names. Key serialization rules:
 
 ### Expression URL Format
 
-```
+```text
 <language_address>://<expression_address>
 ```
 

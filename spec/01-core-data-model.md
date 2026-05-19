@@ -48,7 +48,7 @@ interface ExpressionProof {
 
 Expressions are signed as follows:
 
-1. Serialize `data` to JSON using `serde_json` canonical serialization (sorted keys in structs, but order-preserving for already-defined struct fields).
+1. Serialize `data` to JSON using canonical JSON (RFC 8785) for deterministic serialization: lexicographic key ordering by Unicode code point, no insignificant whitespace, and consistent number formatting. This ensures the same Expression always produces the same signature.
 2. Serialize `timestamp` to RFC 3339 with millisecond precision and UTC timezone: `YYYY-MM-DDTHH:MM:SS.mmmZ`
 3. Compute SHA-256 hash: `SHA256(json_bytes(data) || timestamp_string_bytes)`
 4. Sign the 32-byte hash with the agent's Ed25519 private key (from `did:key` method).
@@ -237,6 +237,8 @@ s p o .                                                  # 1. direct triple
 ### Reifier IRI
 
 The reifier IRI is deterministic: `link:<SHA256(author||source||predicate||target||timestamp)[0:32]>` — the SHA-256 hash of the concatenation of the author DID, source, predicate, target, and timestamp, truncated to the first 32 hex characters (16 bytes). This ensures the same link always produces the same reifier identifier regardless of which agent stores it.
+
+**Predicate Normalization:** When a link's predicate is normalized to `null`/`None` (i.e., empty string predicates), the literal ASCII string `"null"` is substituted in the concatenation. For example, if a link has an empty predicate, the hash input becomes: `author||source||"null"||target||timestamp`. This ensures all implementations compute identical reifier IRIs.
 
 ### Metadata Ontology
 

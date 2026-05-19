@@ -179,7 +179,7 @@ Signals can be:
 struct RoutedSignalPayload {
     recipient_did: String,
     author: String,
-    data: Perspective,
+    data: serde_json::Value,  // Generic JSON payload for arbitrary signal types
     timestamp: DateTime<Utc>,
     proof: ExpressionProof,
 }

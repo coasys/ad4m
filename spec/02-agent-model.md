@@ -18,8 +18,7 @@ The executor maintains a **Wallet** — an encrypted keystore containing Ed25519
 
 ### Key Storage
 
-- Keys are stored encrypted using **Argon2id** key derivation + **XSalsa20-Poly1305** (via NaCl's `crypto_box`).
-- The passphrase is used both for key derivation and as the encryption key.
+- Keys are stored encrypted using **Argon2id** to derive an encryption key from the passphrase, then encrypting with **XSalsa20-Poly1305** (via NaCl's `crypto_box`). The derived key (not the raw passphrase) is used as input to XSalsa20-Poly1305.
 - A "main" key is created during agent initialization; additional keys can be created for multi-user mode.
 
 ### Signing

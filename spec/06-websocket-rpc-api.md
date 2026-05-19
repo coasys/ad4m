@@ -643,7 +643,7 @@ enum ExceptionType {
 
 interface OnlineAgent {
   did: string;
-  status: Perspective;
+  status: Perspective;  // Contains only the data portion of a PerspectiveExpression, not the full expression with author/timestamp/proof
 }
 
 interface Apps {

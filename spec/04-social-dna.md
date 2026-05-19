@@ -126,7 +126,7 @@ class Todo extends Ad4mModel {
 ```
 
 **Stored as Links:**
-```
+```text
 (ad4m://self) --ad4m://has_sdna--> (ad4m://sdna_Todo)
 (ad4m://sdna_Todo) --ad4m://sdna_type--> (literal:string:subject_class)
 (ad4m://sdna_Todo) --sh:targetClass--> (todo://Todo)
@@ -321,8 +321,8 @@ SPARQL is used for:
 - Server-side model subscriptions (trigger matching and result re-computation)
 
 Custom SPARQL functions:
-- `fn::parse_literal(term)` — Decodes `literal:string:...` URIs into plain string literals
-- `fn::strip_html(term)` — Strips HTML tags from literal values
+- `<ad4m://fn/parse_literal>(term)` — Decodes `literal:string:...` URIs into plain string literals
+- `<ad4m://fn/strip_html>(term)` — Strips HTML tags from literal values
 
 Query validation ensures only read-only queries (SELECT/ASK/CONSTRUCT/DESCRIBE) are accepted from user-facing APIs.
 
@@ -335,7 +335,7 @@ SELECT ?todo WHERE {
 # Example: Find posts by author with literal content
 SELECT ?post ?content WHERE {
   ?post <post://has_content> ?raw .
-  BIND(fn:parse_literal(?raw) AS ?content)
+  BIND(<ad4m://fn/parse_literal>(?raw) AS ?content)
 }
 
 # Example: Query with metadata via reifier

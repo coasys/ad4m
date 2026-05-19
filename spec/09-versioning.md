@@ -4,7 +4,7 @@
 
 The AD4M protocol uses **semantic versioning** (SemVer):
 
-```
+```text
 MAJOR.MINOR.PATCH
 ```
 

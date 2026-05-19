@@ -53,7 +53,7 @@ Smart defaults:
 - `resolveLanguage` → `"literal"`
 - `initial` → `undefined` (no link created until a value is explicitly set); when `required: true` and no `initial` is provided, defaults to `"literal:string:uninitialized"` as a sentinel.
 
-- `through` — The predicate URI used in the link triple `(instance, through, value)`. REQUIRED unless `getter` or `prologGetter` is provided.
+- `through` — The predicate URI used in the link triple `(instance, through, value)`. REQUIRED unless `getter` is provided.
 - `resolveLanguage` — If set, the target expression is dereferenced through the named Language. Default: `"literal"`.
 - `required` — If `true`, generates `sh:minCount 1` and includes a sentinel initial value. Instances without this property will not match the Subject Class shape.
 - `initial` — Default value set during instance creation via constructor actions.
@@ -475,7 +475,7 @@ Ad4mModel queries execute **server-side in Rust**. The SDK is a thin WebSocket c
 
 ### Architecture
 
-```
+```text
 Ad4mModel.findAll(perspective, query)
   → executeModelQuery()
     → WS RPC: perspective.modelQuery
@@ -665,7 +665,7 @@ The `x-ad4m` extension in JSON Schema properties maps to Ad4mModel decorator opt
 | Server-side model subscriptions | **SHOULD** | Push-based reactive queries |
 | `sh:in` enum constraint support | **SHOULD** | Enum validation and options metadata |
 | Fluent query builder | **MAY** | Developer convenience |
-| Reactive queries (subscribe) | **MAY** | Delta-based subscription updates |
+| Reactive queries (subscribe) | **SHOULD** | Server-side perspective.modelSubscribe subscriptions; polling/basic queries sufficient for minimal implementations |
 | Transactions (batch operations) | **MAY** | Atomic multi-mutation commits |
 | JSON Schema integration | **MAY** | Dynamic model creation |
 | Dirty tracking and save | **SHOULD** | Efficient link mutation |
