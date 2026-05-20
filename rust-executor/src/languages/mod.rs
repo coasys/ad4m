@@ -98,7 +98,9 @@ pub struct LanguageController {
 
 impl LanguageController {
     pub fn init_global_instance() {
-        let mut instance = LANGUAGE_CONTROLLER_INSTANCE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut instance = LANGUAGE_CONTROLLER_INSTANCE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *instance = Some(LanguageController::new());
     }
 
