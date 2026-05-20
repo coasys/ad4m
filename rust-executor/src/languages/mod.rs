@@ -98,22 +98,16 @@ pub struct LanguageController {
 
 impl LanguageController {
     pub fn init_global_instance() {
-        let mut instance = LANGUAGE_CONTROLLER_INSTANCE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut instance = LANGUAGE_CONTROLLER_INSTANCE.lock().unwrap();
         *instance = Some(LanguageController::new());
     }
 
     pub fn global_instance() -> LanguageController {
-        let mut instance = LANGUAGE_CONTROLLER_INSTANCE
+        LANGUAGE_CONTROLLER_INSTANCE
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if instance.is_none() {
-            *instance = Some(LanguageController::new());
-        }
-        instance
+            .unwrap()
             .as_ref()
-            .expect("LanguageController initialization failed")
+            .expect("LanguageController not initialized")
             .clone()
     }
 
