@@ -338,40 +338,40 @@ async fn resolve_language_transforms(
 
     for instance in instances.iter_mut() {
         for prop in &resolve_props {
-            if let Some(uri) = instance[&prop.name].as_str() {
-                // Skip literal: URIs (they've already been hydrated)
-                if !uri.starts_with("literal:") {
-                    if let Ok((lang, expr_addr)) =
-                        crate::languages::LanguageController::parse_expr_url(uri)
-                    {
-                        if let Ok(Some(expr_json)) =
-                            controller.get_expression(&lang, &expr_addr).await
-                        {
-                            // Extract the resolved data from the expression
-                            let resolved: Value = expr_json
-                                .get("data")
-                                .cloned()
-                                .unwrap_or_else(|| Value::Null);
-
-                            // Parse string data if needed
-                            let resolved = match &resolved {
-                                Value::String(s) => serde_json::from_str(s).unwrap_or(resolved),
-                                other => other.clone(),
-                            };
-
-                            // Apply the transform expression (or default file decode)
-                            let default_transform = super::types::default_file_decode();
-                            let transform = prop.transform.as_ref().unwrap_or(&default_transform);
-                            instance[&prop.name] = eval_transform(transform, &resolved, &resolved);
+            // Compute the "resolved" focus value for the transform:
+            //   - String that parses as a language expression URL → fetch via controller
+            //   - Anything else (already-decoded literal string, object, etc.) → use as-is
+            let current = instance[&prop.name].clone();
+            let resolved: Option<Value> = match &current {
+                Value::String(uri) if !uri.starts_with("literal:") => {
+                    match crate::languages::LanguageController::parse_expr_url(uri) {
+                        Ok((lang, expr_addr)) => {
+                            match controller.get_expression(&lang, &expr_addr).await {
+                                Ok(Some(expr_json)) => {
+                                    let data =
+                                        expr_json.get("data").cloned().unwrap_or(Value::Null);
+                                    Some(match &data {
+                                        Value::String(s) => serde_json::from_str(s).unwrap_or(data),
+                                        _ => data,
+                                    })
+                                }
+                                // Not a fetchable expression — fall back to the raw value
+                                _ => Some(current.clone()),
+                            }
                         }
+                        Err(_) => Some(current.clone()),
                     }
                 }
-            } else if instance[&prop.name].is_object() {
-                // For literal objects (already-hydrated from literal: URIs), apply the transform
-                let obj = instance[&prop.name].clone();
+                Value::Object(_) => Some(current.clone()),
+                Value::String(_) => Some(current.clone()),
+                Value::Null => None,
+                _ => Some(current.clone()),
+            };
+
+            if let Some(resolved) = resolved {
                 let default_transform = super::types::default_file_decode();
                 let transform = prop.transform.as_ref().unwrap_or(&default_transform);
-                instance[&prop.name] = eval_transform(transform, &obj, &obj);
+                instance[&prop.name] = eval_transform(transform, &resolved, &resolved);
             }
         }
     }

@@ -10,6 +10,9 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     Model,
     Optional,
     PropertyOptions,
+    concat,
+    literal,
+    focus,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
 import { startExecutor, baseUrl, quitExecutor } from "../utils/utils";
@@ -2005,8 +2008,8 @@ describe("Prolog + Literals", () => {
                         @Property({
                             through: "image://data",
                             resolveLanguage: "literal",
-                            transform: (data: any) => data ? `data:image/png;base64,${data}` : undefined,
-                        } as PropertyOptions)
+                            transform: concat(literal("data:image/png;base64,"), focus()),
+                        })
                         image: string = "";
                         //TODO: having json objects as properties in our new queries breaks the JSON
                         // construction of Prolog query results.
