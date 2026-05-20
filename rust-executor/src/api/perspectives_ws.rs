@@ -532,7 +532,7 @@ async fn query_prolog(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 /// Server-side timeout for SPARQL queries (seconds).
-const SPARQL_QUERY_TIMEOUT_SECS: u64 = 30;
+const SPARQL_QUERY_TIMEOUT_SECS: u64 = 60;
 
 async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
