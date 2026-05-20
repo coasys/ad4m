@@ -178,7 +178,7 @@ function jsonToModelInstance<T extends Ad4mModel>(
       if (o.resolveLanguage != null && o.resolveLanguage !== 'literal') continue;
       instance[propName] = o.transform(instance[propName]);
     }
-  } catch (_) { /* no metadata available */ }
+  } catch (e) { console.debug('jsonToModelInstance: transform metadata unavailable:', e); }
 
   // Recursively convert included relation values to class instances
   if (include) {
@@ -659,7 +659,8 @@ export class Ad4mModel {
    *     • `null` / empty object — skip ALL relations (used by bare
    *       subscriptions that don't eagerly load relations).
    */
-  private takeSnapshot(includedRelations?: Record<string, any> | null): void {
+  /** @internal */
+  protected takeSnapshot(includedRelations?: Record<string, any> | null): void {
     const ctor = this.constructor as typeof Ad4mModel;
     const metadata = ctor.getModelMetadata();
     const snap: Record<string, any> = {};
@@ -872,9 +873,21 @@ export class Ad4mModel {
   static prepareModelQueryParams(
     query: Query = {},
     classNameOverride?: string | null,
-  ): { className: string; queryJson: string; shapeJson: string } {
+  ): { className: string; queryJson: string; shapeJson: string; metadata: ModelMetadata } {
     const metadata = this.getModelMetadata();
     const className = classNameOverride || metadata.className;
+
+    // Expand includeAll: true to a full IncludeMap covering every forward relation.
+    if (query.includeAll) {
+      const allRelMeta = getRelationsMetadata(this as any);
+      const expanded: IncludeMap = {};
+      for (const [relName, relMeta] of Object.entries(allRelMeta)) {
+        if ((relMeta as any).direction !== 'reverse') {
+          expanded[relName] = true;
+        }
+      }
+      query = { ...query, include: { ...expanded, ...query.include } };
+    }
 
     const queryInput: any = {};
     if (query.parent) {
@@ -882,7 +895,37 @@ export class Ad4mModel {
       queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
     }
     if (query.properties) queryInput.properties = query.properties;
-    if (query.include) queryInput.include = query.include;
+    if (query.include) {
+      // Split include keys: $-prefixed / IncludeProjection values → queryInput.projections
+      // All other keys (boolean | RelationSubQuery) → queryInput.include
+      const normalIncludes: IncludeMap = {};
+      const projections: Record<string, IncludeProjection> = {};
+      for (const [key, val] of Object.entries(query.include)) {
+        if (key.startsWith('$')) {
+          projections[key] = val as IncludeProjection;
+        } else {
+          normalIncludes[key] = val;
+        }
+      }
+      if (Object.keys(normalIncludes).length > 0) queryInput.include = normalIncludes;
+      if (Object.keys(projections).length > 0) {
+        // Enrich projections with target shapes so Rust can apply where clause filtering
+        const allRelMeta = getRelationsMetadata(this as any);
+        for (const [, proj] of Object.entries(projections)) {
+          const relMeta = allRelMeta[proj.from];
+          if (!proj.targetShape && relMeta?.target) {
+            try {
+              const TargetClass = relMeta.target();
+              const targetMeta = (TargetClass as any).getModelMetadata?.();
+              if (targetMeta) {
+                proj.targetShape = targetMeta;
+              }
+            } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for projection:`, e); }
+          }
+        }
+        queryInput.projections = projections;
+      }
+    }
     if (query.where) queryInput.where = query.where;
     if (query.order) {
       queryInput.order = Object.entries(query.order).map(([k, v]) => [k, v]);
@@ -892,9 +935,9 @@ export class Ad4mModel {
     if (query.count !== undefined) queryInput.count = query.count;
     queryInput.deepQuery = query.deepQuery ?? true;
 
-    if (query.include) {
+    if (queryInput.include) {
       const allRelMeta = getRelationsMetadata(this as any);
-      enrichShapeForIncludes(metadata, query.include, allRelMeta);
+      enrichShapeForIncludes(metadata, queryInput.include, allRelMeta);
     }
 
     // Pre-compute conformance getters for Rust-side evaluation.
@@ -935,9 +978,9 @@ export class Ad4mModel {
                   rel.wherePredicates = predicates;
                 }
               }
-            } catch (_) {}
+            } catch (e) { console.debug(`prepareModelQueryParams: target metadata unavailable for relation '${relName}':`, e); }
           }
-        } catch (_) {}
+        } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for relation '${relName}':`, e); }
       }
     }
 
@@ -945,6 +988,7 @@ export class Ad4mModel {
       className,
       queryJson: JSON.stringify(queryInput),
       shapeJson: JSON.stringify(metadata),
+      metadata,
     };
   }
 
@@ -1010,7 +1054,7 @@ export class Ad4mModel {
                 try { resolved = JSON.parse(expression.data); } catch { resolved = expression.data; }
                 inst[propName] = applyTransform(resolved);
               }
-            } catch (_) { /* resolution failed — keep raw value */ }
+            } catch (e) { console.debug(`resolveNonLiteralProps: resolution failed for '${propName}':`, e); }
           } else if (val !== null && val !== undefined && typeof val === 'object') {
             // Case 2: already resolved by Rust — apply transform / default decode
             inst[propName] = applyTransform(val);
@@ -1036,138 +1080,11 @@ export class Ad4mModel {
     query: Query = {},
     classNameOverride?: string | null,
   ): Promise<ResultsWithTotalCount<T>> {
-    const metadata = this.getModelMetadata();
-    const className = classNameOverride || metadata.className;
-
-    // Expand includeAll: true to a full IncludeMap covering every forward relation.
-    // Done before queryInput is built so all downstream uses of query.include see the expansion.
-    if (query.includeAll) {
-      const allRelMeta = getRelationsMetadata(this as any);
-      const expanded: IncludeMap = {};
-      for (const [relName, relMeta] of Object.entries(allRelMeta)) {
-        if ((relMeta as any).direction !== 'reverse') {
-          expanded[relName] = true;
-        }
-      }
-      // Explicit include entries take precedence over the expansion
-      query = { ...query, include: { ...expanded, ...query.include } };
-    }
-
-    // Build the query input that the Rust endpoint expects.
-    // Convert the TS Query type to the executor's ModelQueryInput format.
-    const queryInput: any = {};
-    if (query.parent) {
-      const parentPredicate = resolveParentPredicate(query.parent, this);
-      queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
-    }
-    if (query.properties) queryInput.properties = query.properties;
-    if (query.include) {
-      // Split include keys: $-prefixed / IncludeProjection values → queryInput.projections
-      // All other keys (boolean | RelationSubQuery) → queryInput.include
-      const normalIncludes: IncludeMap = {};
-      const projections: Record<string, IncludeProjection> = {};
-      for (const [key, val] of Object.entries(query.include)) {
-        if (key.startsWith('$')) {
-          projections[key] = val as IncludeProjection;
-        } else {
-          normalIncludes[key] = val;
-        }
-      }
-      if (Object.keys(normalIncludes).length > 0) queryInput.include = normalIncludes;
-      if (Object.keys(projections).length > 0) {
-        // Enrich projections with target shapes so Rust can apply where clause filtering
-        const allRelMeta = getRelationsMetadata(this as any);
-        for (const [, proj] of Object.entries(projections)) {
-          const relMeta = allRelMeta[proj.from];
-          if (!proj.targetShape && relMeta?.target) {
-            try {
-              const TargetClass = relMeta.target();
-              const targetMeta = (TargetClass as any).getModelMetadata?.();
-              if (targetMeta) {
-                proj.targetShape = targetMeta;
-              }
-            } catch (_) { /* target class may not be available */ }
-          }
-        }
-        queryInput.projections = projections;
-      }
-    }
-    if (query.where) queryInput.where = query.where;
-    if (query.order) {
-      // Convert { propName: 'ASC' | 'DESC' } to [[propName, 'ASC'|'DESC'], ...]
-      queryInput.order = Object.entries(query.order).map(([k, v]) => [k, v]);
-    }
-    if (query.offset !== undefined) queryInput.offset = query.offset;
-    if (query.limit !== undefined) queryInput.limit = query.limit;
-    if (query.count !== undefined) queryInput.count = query.count;
-    queryInput.deepQuery = query.deepQuery ?? true;
-
-    // Enrich relation metadata with target class shapes for Rust-side
-    // include resolution. This eliminates per-relation GraphQL round-trips
-    // by letting the Rust endpoint resolve includes in-process.
-    if (queryInput.include) {
-      const allRelMeta = getRelationsMetadata(this as any);
-      enrichShapeForIncludes(metadata, queryInput.include, allRelMeta);
-    }
-
-    // ── Pre-compute conformance getters for Rust-side evaluation ──────
-    // For each relation with a target class and filter !== false, compute
-    // the conformance getter SPARQL so Rust can evaluate it in-process
-    // (eliminating N × querySparql round-trips per instance).
-    // When a relation has a `where` clause, compile the where conditions
-    // into the getter SPARQL so Rust applies them during evaluation.
-    {
-      const allRelMeta = getRelationsMetadata(this as any);
-      for (const [relName, relMeta] of Object.entries(metadata.relations)) {
-        const rel = relMeta as any;
-        if (rel.getter) continue; // explicit getter already set
-        if (rel.direction === 'reverse') continue; // reverse relations use reverse link lookup
-        if (rel.filter === false) continue; // opt-out of conformance filtering
-
-        const meta = allRelMeta[relName];
-        if (!meta?.target) continue;
-
-        try {
-          const TargetClass = meta.target();
-          const filter = buildConformanceFilter(meta.predicate, TargetClass);
-
-          if (filter) {
-            rel.getter = filter.getter;
-          }
-
-          // Attach where-clause metadata for Rust-side post-getter filtering.
-          // Property values are signed expression envelopes (literal:json:...)
-          // and cannot be matched by SPARQL FILTER on the raw IRI.
-          if (rel.where) {
-            try {
-              const targetMetadata = (TargetClass as any).getModelMetadata?.() ?? null;
-              if (targetMetadata) {
-                const predicates: Record<string, string> = {};
-                for (const propName of Object.keys(rel.where)) {
-                  if (['id', 'author', 'timestamp'].includes(propName)) continue;
-                  const propMeta = targetMetadata.properties[propName];
-                  if (propMeta?.predicate) {
-                    predicates[propName] = propMeta.predicate;
-                  }
-                }
-                if (Object.keys(predicates).length > 0) {
-                  rel.whereFilter = rel.where;
-                  rel.wherePredicates = predicates;
-                }
-              }
-            } catch (_) { /* target metadata unavailable */ }
-          }
-        } catch (e) {
-          // Target class may not be available; skip silently
-        }
-      }
-    }
-
-    // Send shape metadata to the executor so it knows the model structure.
-    // This is more reliable than reading SHACL from the store because
-    // the TS decorators are the definitive source of truth.
-    const shapeJson = JSON.stringify(metadata);
-    const queryJson = JSON.stringify(queryInput);
+    // Delegate all query input building, shape enrichment, and getter
+    // pre-computation to the shared prepareModelQueryParams helper.
+    const { className, queryJson, shapeJson } = this.prepareModelQueryParams(
+      query, classNameOverride,
+    );
 
     const result = await perspective.modelQuery(className, queryJson, shapeJson);
 
@@ -1183,10 +1100,14 @@ export class Ad4mModel {
     // or an already-resolved FileData object — both cases are handled here.
     await (this as any).resolveNonLiteralProps(perspective, instances);
 
-    // Take snapshots for dirty tracking
-    const snapshotRelations = queryInput.include;
+    // Take snapshots for dirty tracking (exclude $-prefixed projection keys)
+    const snapshotRelations = query.include
+      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
+      : undefined;
     for (const inst of instances) {
-      (inst as Ad4mModel).takeSnapshot(snapshotRelations);
+      (inst as Ad4mModel).takeSnapshot(
+        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
+      );
     }
 
     return {
@@ -1200,32 +1121,29 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
+   * @param _engine - **Deprecated.** Accepted for backward compatibility but ignored.
+   *   All queries now use the Rust SPARQL pipeline.
    * @returns Array of matching models
-   * 
+   *
    * @example
    * ```typescript
-   * // Get all recipes (uses SPARQL by default)
    * const allRecipes = await Recipe.findAll(perspective);
-   * 
-   * // Get recipes with specific criteria (uses SPARQL)
+   *
    * const recipes = await Recipe.findAll(perspective, {
-   *   where: { 
+   *   where: {
    *     name: "Pasta",
    *     rating: { gt: 4 }
    *   },
    *   order: { createdAt: "DESC" },
    *   limit: 10
    * });
-   * 
-   * // Explicitly use Prolog (legacy, for backward compatibility)
-   * const recipesProlog = await Recipe.findAll(perspective, {}, false);
    * ```
    */
   static async findAll<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
     query: Query = {},
+    /** @deprecated Ignored — Prolog engine has been removed. */
     _engine?: 'sparql' | 'prolog' | boolean
   ): Promise<T[]> {
     if (query.properties && query.properties.length === 0) {
@@ -1243,7 +1161,7 @@ export class Ad4mModel {
    *
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSPARQL - Whether to use SPARQL (default: true) or Prolog (legacy)
+   * @param _engine - **Deprecated.** Accepted for backward compatibility but ignored.
    * @returns The first matching instance, or `null`
    *
    * @example
@@ -1260,6 +1178,7 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query: Query = {},
+    /** @deprecated Ignored — Prolog engine has been removed. */
     _engine?: 'sparql' | 'prolog' | boolean,
   ): Promise<T | null> {
     const limitedQuery = { ...query, limit: 1 };
@@ -1272,9 +1191,9 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
+   * @param _engine - **Deprecated.** Accepted for backward compatibility but ignored.
    * @returns Object containing results array and total count
-   * 
+   *
    * @example
    * ```typescript
    * const { results, totalCount } = await Recipe.findAllAndCount(perspective, {
@@ -1282,15 +1201,13 @@ export class Ad4mModel {
    *   limit: 10
    * });
    * console.log(`Showing 10 of ${totalCount} dessert recipes`);
-   * 
-   * // Use Prolog explicitly (legacy)
-   * const { results, totalCount } = await Recipe.findAllAndCount(perspective, {}, false);
    * ```
    */
   static async findAllAndCount<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
     query: Query = {},
+    /** @deprecated Ignored — Prolog engine has been removed. */
     _engine?: 'sparql' | 'prolog' | boolean
   ): Promise<ResultsWithTotalCount<T>> {
     return await this.executeModelQuery(perspective, query);
@@ -1314,11 +1231,12 @@ export class Ad4mModel {
    * ```
    */
   static async paginate<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
-    pageSize: number, 
-    pageNumber: number, 
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    pageSize: number,
+    pageNumber: number,
     query?: Query,
+    /** @deprecated Ignored — Prolog engine has been removed. */
     _engine?: 'sparql' | 'prolog' | boolean
   ): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(query || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
@@ -1728,7 +1646,7 @@ export class Ad4mModel {
         const TargetClass = meta.target();
         const filter = buildConformanceFilter(meta.predicate, TargetClass);
         if (filter) rel.getter = filter.getter;
-      } catch (_) { /* target class may not be available */ }
+      } catch (e) { console.debug(`evaluateGetters: target class unavailable for relation '${relName}':`, e); }
     }
 
     const shapeJson = JSON.stringify(metadata);
