@@ -1,4 +1,5 @@
 import { Link } from "../links/Links";
+import type { NodeExpression } from "./NodeExpression";
 
 /**
  * Extract namespace from a URI
@@ -179,6 +180,11 @@ export interface SHACLPropertyShape {
    *  Each entry has a `value` (the RDF term) and an optional `label` (human-readable name).
    *  Standard SHACL `sh:in` only defines values; labels are an AD4M extension. */
   in?: Array<{ value: string; label?: string }>;
+
+  /** AD4M-specific: Transform expression (SHACL-AF Node Expression).
+   *  Applied to resolved property values in the Rust model query engine.
+   *  Only used for properties with resolveLanguage set. */
+  transform?: NodeExpression;
 }
 
 /**
@@ -838,6 +844,7 @@ export class SHACLShape {
         conformance_conditions: p.conformanceConditions,
         class: p.class,
         in: p.in,
+        transform: p.transform,
       })),
       constructor_actions: this.constructor_actions,
       destructor_actions: this.destructor_actions,
@@ -874,6 +881,7 @@ export class SHACLShape {
         conformanceConditions: p.conformance_conditions,
         class: p.class,
         in: p.in,
+        transform: p.transform,
       });
     }
     

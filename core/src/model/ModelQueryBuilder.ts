@@ -393,15 +393,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       return (ctor as any).parseModelResult(this.perspective, raw, this.queryParams.include, this.queryParams.properties);
     };
 
-    // Resolve non-literal (file-language) properties — handles both raw URI strings
-    // and already-resolved FileData objects returned by the Rust executor.
-    const resolveAndReturn = async (instances: T[]): Promise<T[]> => {
-      await (ctor as any).resolveNonLiteralProps(this.perspective, instances);
-      return instances;
-    };
-
-    // Parse initial results (with non-literal resolution)
-    const initialResults = await resolveAndReturn(parseResults(initialModelResult));
+    // Transforms are now applied by the Rust executor during hydration
+    const initialResults = parseResults(initialModelResult);
 
     // Track last emitted result fingerprint to suppress duplicate callbacks
     let lastResultFingerprint: string | null = null;
@@ -419,20 +412,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       subscriptionId,
       (rawResult: any) => {
         try {
-          const parsed = parseResults(rawResult);
-          console.debug(`[ModelQueryBuilder.subscribe] Update received for ${subscriptionId}: ${parsed.length} instances`);
-          resolveAndReturn(parsed).then((results) => {
-            const fp = buildFingerprint(results);
-            if (fp === lastResultFingerprint) {
-              console.debug(`[ModelQueryBuilder.subscribe] Fingerprint unchanged, skipping callback`);
-              return;
-            }
-            console.debug(`[ModelQueryBuilder.subscribe] Fingerprint changed, calling callback with ${results.length} results`);
-            lastResultFingerprint = fp;
-            callback(results);
-          }).catch((e) => {
-            console.error('Model subscription update resolve error:', e);
-          });
+          const results = parseResults(rawResult);
+          console.debug(`[ModelQueryBuilder.subscribe] Update received for ${subscriptionId}: ${results.length} instances`);
+          const fp = buildFingerprint(results);
+          if (fp === lastResultFingerprint) {
+            console.debug(`[ModelQueryBuilder.subscribe] Fingerprint unchanged, skipping callback`);
+            return;
+          }
+          console.debug(`[ModelQueryBuilder.subscribe] Fingerprint changed, calling callback with ${results.length} results`);
+          lastResultFingerprint = fp;
+          callback(results);
         } catch (e) {
           console.error('Model subscription update parse error:', e);
         }

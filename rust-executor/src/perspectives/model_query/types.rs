@@ -274,6 +274,76 @@ pub(super) enum SortKey {
 // Internal shape metadata (derived from SHACL links or client JSON)
 // ---------------------------------------------------------------------------
 
+/// Transform expression for property values (SHACL-AF Node Expression).
+/// Applied in the Rust executor during hydration for resolveLanguage properties.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub(crate) enum TransformExpression {
+    Focus,
+    Literal {
+        value: serde_json::Value,
+    },
+    Path {
+        predicate: String,
+    },
+    Exists {
+        expr: Box<TransformExpression>,
+    },
+    If {
+        cond: Box<TransformExpression>,
+        then: Box<TransformExpression>,
+        #[serde(rename = "else")]
+        else_expr: Option<Box<TransformExpression>>,
+    },
+    Concat {
+        args: Vec<TransformExpression>,
+    },
+    Coalesce {
+        args: Vec<TransformExpression>,
+    },
+    Function {
+        iri: String,
+        args: Vec<TransformExpression>,
+    },
+}
+
+/// Default file decode transform: converts FileData objects to data: URIs.
+///
+/// Represents: `if (exists(path('data_base64'))) then concat(...) else focus()`
+pub(crate) fn default_file_decode() -> TransformExpression {
+    TransformExpression::If {
+        cond: Box::new(TransformExpression::Exists {
+            expr: Box::new(TransformExpression::Path {
+                predicate: "data_base64".to_string(),
+            }),
+        }),
+        then: Box::new(TransformExpression::Concat {
+            args: vec![
+                TransformExpression::Literal {
+                    value: Value::String("data:".to_string()),
+                },
+                TransformExpression::Coalesce {
+                    args: vec![
+                        TransformExpression::Path {
+                            predicate: "file_type".to_string(),
+                        },
+                        TransformExpression::Literal {
+                            value: Value::String("image/png".to_string()),
+                        },
+                    ],
+                },
+                TransformExpression::Literal {
+                    value: Value::String(";base64,".to_string()),
+                },
+                TransformExpression::Path {
+                    predicate: "data_base64".to_string(),
+                },
+            ],
+        }),
+        else_expr: Some(Box::new(TransformExpression::Focus)),
+    }
+}
+
 /// A single property or relation declared in a model class's shape.
 ///
 /// Constructed either by reading SHACL triples from the store
@@ -302,6 +372,9 @@ pub(super) struct ShapeProperty {
     pub(super) where_filter: Option<BTreeMap<String, WhereCondition>>,
     /// Predicate mappings for `where_filter` (property name → predicate IRI).
     pub(super) where_predicates: Option<HashMap<String, String>>,
+    /// Transform expression (SHACL-AF Node Expression).
+    /// Applied in hydration for resolveLanguage properties.
+    pub(super) transform: Option<TransformExpression>,
 }
 
 /// Enriched relation metadata for include (eager-loading) resolution.

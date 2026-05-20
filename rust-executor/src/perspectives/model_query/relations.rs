@@ -110,7 +110,7 @@ pub fn resolve_reverse_relations(
 /// metadata in the shape, delegates to either [`resolve_forward_include`]
 /// or [`resolve_reverse_include`].  Sub-queries within `IncludeValue::SubQuery`
 /// are passed through to the recursive call.
-pub(super) fn resolve_includes_recursive(
+pub(super) async fn resolve_includes_recursive(
     store: &SparqlStore,
     instances: &mut [Value],
     include: &HashMap<String, IncludeValue>,
@@ -135,9 +135,9 @@ pub(super) fn resolve_includes_recursive(
         };
 
         if rel.direction == "reverse" {
-            resolve_reverse_include(store, instances, rel, &sub_query, depth)?;
+            resolve_reverse_include(store, instances, rel, &sub_query, depth).await?;
         } else {
-            resolve_forward_include(store, instances, rel, &sub_query, depth)?;
+            resolve_forward_include(store, instances, rel, &sub_query, depth).await?;
         }
     }
     Ok(())
@@ -148,7 +148,7 @@ pub(super) fn resolve_includes_recursive(
 /// Collects all unique target IDs from the relation arrays, runs a sub-query
 /// to hydrate them, and replaces the raw ID arrays with hydrated JSON objects.
 /// If the sub-query specifies an `order`, the result order is preserved.
-fn resolve_forward_include(
+async fn resolve_forward_include(
     store: &SparqlStore,
     instances: &mut [Value],
     rel: &ShapeRelation,
@@ -192,13 +192,14 @@ fn resolve_forward_include(
 
     let has_sub_order = sub_query.order.is_some();
 
-    let result = execute_model_query_inner(
+    let result = Box::pin(execute_model_query_inner(
         store,
         &rel.target_class_name,
         &query,
         Some(&rel.target_shape_json),
         depth + 1,
-    )?;
+    ))
+    .await?;
 
     let mut hydrated: HashMap<String, Value> = HashMap::new();
     let ordered_ids: Vec<String> = result
@@ -256,7 +257,7 @@ fn resolve_forward_include(
 /// instance IDs, collects all source IDs, hydrates them via a sub-query,
 /// and attaches the results (scalar for `belongsToOne`, array for
 /// `belongsToMany`).
-fn resolve_reverse_include(
+async fn resolve_reverse_include(
     store: &SparqlStore,
     instances: &mut [Value],
     rel: &ShapeRelation,
@@ -340,13 +341,14 @@ fn resolve_reverse_include(
         }
         query.where_clause = Some(wc);
 
-        let result = execute_model_query_inner(
+        let result = Box::pin(execute_model_query_inner(
             store,
             &rel.target_class_name,
             &query,
             Some(&rel.target_shape_json),
             depth + 1,
-        )?;
+        ))
+        .await?;
 
         ordered_result_ids = result
             .instances

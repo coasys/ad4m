@@ -146,6 +146,11 @@ export function buildSHACL(
             propShape.resolveLanguage = propMeta.resolveLanguage;
         }
 
+        // Serializable transform expression (SHACL-AF Node Expression)
+        if (propMeta.transform) {
+            propShape.transform = propMeta.transform;
+        }
+
         // ── Setter actions ──────────────────────────────────────────────
         if (propMeta.prologSetter) {
             console.warn(

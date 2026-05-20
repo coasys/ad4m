@@ -17,7 +17,7 @@
 //!   reliable because it carries decorator information (flags, getters,
 //!   relation kinds, target shapes) that SHACL triples don't fully capture.
 
-use super::types::{ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
+use super::types::{ModelShape, ShapeProperty, ShapeRelation, TransformExpression, WhereCondition};
 use super::utils::{escape_sparql_string, validate_iri};
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::{anyhow, Error};
@@ -157,6 +157,7 @@ pub(super) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             getter: None, // SHACL shapes don't carry getter metadata; JSON path does
             where_filter: None,
             where_predicates: None,
+            transform: None,
         });
     }
 
@@ -264,6 +265,10 @@ pub(super) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
             let datatype = prop_meta["datatype"].as_str().map(|s| s.to_string());
             let getter = prop_meta["getter"].as_str().map(|s| s.to_string());
 
+            let transform = prop_meta
+                .get("transform")
+                .and_then(|v| serde_json::from_value::<TransformExpression>(v.clone()).ok());
+
             properties.push(ShapeProperty {
                 name: name.clone(),
                 predicate,
@@ -278,6 +283,7 @@ pub(super) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 getter,
                 where_filter: None,
                 where_predicates: None,
+                transform,
             });
         }
     }
@@ -325,6 +331,7 @@ pub(super) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 getter,
                 where_filter,
                 where_predicates,
+                transform: None,
             });
 
             // Parse enriched relation metadata (target shapes for include resolution)

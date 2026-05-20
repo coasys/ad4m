@@ -33,6 +33,9 @@ export * from "./runtime/RuntimeTypes"
 export { Model as AIModel, ModelApi, TokenizerSource, LocalModel, ModelType, ModelApiInput, TokenizerSourceInput, LocalModelInput, ModelInput, VoiceActivityParamsInput } from "./ai/AITypes"
 export * from './shacl/SHACLShape'
 export { SHACLFlow, FlowState, FlowTransition, LinkPattern, FlowableCondition } from './shacl/SHACLFlow'
+export * from './shacl/NodeExpression'
+export * from './shacl/builders'
+export { fileToDataUri } from './shacl/index'
 export * from "./generated/api";
 export { RpcError } from "./apiClient";
 /** @deprecated Use `RpcError` instead. */

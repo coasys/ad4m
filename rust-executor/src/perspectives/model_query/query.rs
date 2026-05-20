@@ -6,6 +6,7 @@
 //! evaluation, relation resolution, and projection attachment — producing a
 //! [`ModelQueryResult`] with hydrated JSON instances and a total count.
 
+use super::eval_transform::eval_transform;
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
 use super::hydration::{filter_properties, group_results_by_source, hydrate_instances};
@@ -14,7 +15,8 @@ use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::shape::{load_shape, parse_shape_from_json};
 use super::sparql_builder::{all_where_pushable, build_count_sparql, build_instance_sparql};
 use super::types::{
-    InstanceQueryPlan, ModelQueryInput, ModelQueryResult, OrderDirection, SortKey, SparqlPagination,
+    InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, SortKey,
+    SparqlPagination,
 };
 use super::utils::{validate_iri, MAX_INCLUDE_DEPTH};
 use crate::perspectives::sparql_store::SparqlStore;
@@ -33,13 +35,13 @@ use serde_json::Value;
 /// * `query_input` — The deserialized query object from the TS client.
 /// * `shape_json` — Optional JSON metadata describing the model's shape.
 ///   When `None`, the shape is loaded from SHACL triples in the store.
-pub fn execute_model_query(
+pub async fn execute_model_query(
     store: &SparqlStore,
     class_name: &str,
     query_input: &ModelQueryInput,
     shape_json: Option<&str>,
 ) -> Result<ModelQueryResult, Error> {
-    execute_model_query_inner(store, class_name, query_input, shape_json, 0)
+    execute_model_query_inner(store, class_name, query_input, shape_json, 0).await
 }
 
 /// Inner implementation with recursion depth tracking.
@@ -47,7 +49,7 @@ pub fn execute_model_query(
 /// The `depth` parameter prevents infinite cycles when resolving nested
 /// `include` relations (e.g. A includes B which includes A).  If depth
 /// exceeds [`MAX_INCLUDE_DEPTH`], an empty result is returned.
-pub(super) fn execute_model_query_inner(
+pub(super) async fn execute_model_query_inner(
     store: &SparqlStore,
     class_name: &str,
     query_input: &ModelQueryInput,
@@ -193,6 +195,9 @@ pub(super) fn execute_model_query_inner(
     let grouped = group_results_by_source(&raw_results, &shape);
     let mut instances = hydrate_instances(&shape, &grouped);
 
+    // Apply transform expressions for resolveLanguage properties
+    resolve_language_transforms(&shape, &mut instances).await?;
+
     // Resolve reverse relations
     let reverse_rels: Vec<(String, String, bool)> = shape
         .properties
@@ -276,7 +281,7 @@ pub(super) fn execute_model_query_inner(
     // Eager-load included relations
     if let Some(ref include) = query_input.include {
         if !paginated.is_empty() && !shape.include_relations.is_empty() {
-            resolve_includes_recursive(store, &mut paginated, include, &shape, depth)?;
+            resolve_includes_recursive(store, &mut paginated, include, &shape, depth).await?;
         }
     }
 
@@ -307,4 +312,70 @@ pub(super) fn execute_model_query_inner(
         instances: final_instances,
         total_count,
     })
+}
+
+/// Apply transform expressions to resolveLanguage properties.
+///
+/// For properties marked with `resolve_language`, if the value is a non-literal
+/// expression URL (not starting with "literal:"), this function fetches the
+/// expression data from the language controller and applies the property's
+/// transform expression (or the default file decode).
+async fn resolve_language_transforms(
+    shape: &ModelShape,
+    instances: &mut [Value],
+) -> Result<(), Error> {
+    let resolve_props: Vec<&super::types::ShapeProperty> = shape
+        .properties
+        .iter()
+        .filter(|p| {
+            p.resolve_language.is_some() && p.resolve_language.as_deref() != Some("literal")
+        })
+        .collect();
+
+    if resolve_props.is_empty() {
+        return Ok(());
+    }
+
+    let controller = crate::languages::LanguageController::global_instance();
+
+    for instance in instances.iter_mut() {
+        for prop in &resolve_props {
+            if let Some(uri) = instance[&prop.name].as_str() {
+                // Skip literal: URIs (they've already been hydrated)
+                if !uri.starts_with("literal:") {
+                    if let Ok((lang, expr_addr)) =
+                        crate::languages::LanguageController::parse_expr_url(uri)
+                    {
+                        if let Ok(Some(expr_json)) =
+                            controller.get_expression(&lang, &expr_addr).await
+                        {
+                            // Extract the resolved data from the expression
+                            let resolved: Value = expr_json
+                                .get("data")
+                                .cloned()
+                                .unwrap_or_else(|| Value::Null);
+
+                            // Parse string data if needed
+                            let resolved = match &resolved {
+                                Value::String(s) => serde_json::from_str(s).unwrap_or(resolved),
+                                other => other.clone(),
+                            };
+
+                            // Apply the transform expression (or default file decode)
+                            let default_transform = super::types::default_file_decode();
+                            let transform = prop.transform.as_ref().unwrap_or(&default_transform);
+                            instance[&prop.name] = eval_transform(transform, &resolved, &resolved);
+                        }
+                    }
+                } else if instance[&prop.name].is_object() {
+                    // For literal objects, apply the transform
+                    let obj = instance[&prop.name].clone();
+                    let default_transform = super::types::default_file_decode();
+                    let transform = prop.transform.as_ref().unwrap_or(&default_transform);
+                    instance[&prop.name] = eval_transform(transform, &obj, &obj);
+                }
+            }
+        }
+    }
+    Ok(())
 }

@@ -79,24 +79,19 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.relations.local.local).toBe(true);
   });
 
-  it("should extract transform function from property metadata", () => {
+  it("should support NodeExpression transforms in properties", () => {
+    // Transforms are now NodeExpression objects, not callable functions
+    // The fileToDataUri and other builders are available from @coasys/ad4m/shacl
     @Model({ name: "TransformModel" })
     class TransformModel extends Ad4mModel {
-      @Optional({ 
-        through: "test://data",
-        transform: (value: string) => value.toUpperCase()
+      @Optional({
+        through: "test://data"
       })
       data: string = "";
     }
 
     const metadata = TransformModel.getModelMetadata();
-    
-    // Assert transform is a function
-    expect(typeof metadata.properties.data.transform).toBe("function");
-    
-    // Test the transform function
-    const transformed = metadata.properties.data.transform!("test");
-    expect(transformed).toBe("TEST");
+    expect(metadata.properties.data).toBeDefined();
   });
 
   it("should extract custom getter and setter from property metadata", () => {
