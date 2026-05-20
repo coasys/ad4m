@@ -891,6 +891,14 @@ export class SHACLShape {
       : new SHACLShape(json.target_class);
     
     for (const p of json.properties || []) {
+      // Validate transform if present
+      if (p.transform && !isNodeExpression(p.transform)) {
+        throw new Error(
+          `Invalid transform for property ${p.name}: ` +
+          `payload is not a valid NodeExpression. Received: ${JSON.stringify(p.transform)}`
+        );
+      }
+
       shape.addProperty({
         path: p.path,
         name: p.name,
@@ -912,14 +920,7 @@ export class SHACLShape {
         conformanceConditions: p.conformance_conditions,
         class: p.class,
         in: p.in,
-        transform: p.transform && !isNodeExpression(p.transform)
-          ? (() => {
-              throw new Error(
-                `Invalid transform for property ${p.name}: ` +
-                `payload is not a valid NodeExpression. Received: ${JSON.stringify(p.transform)}`
-              );
-            })()
-          : p.transform,
+        transform: p.transform,
       });
     }
     
