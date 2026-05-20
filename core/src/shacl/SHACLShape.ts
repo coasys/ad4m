@@ -819,11 +819,22 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "ad4m://transform"
       );
       if (transformLink) {
+        const jsonStr = transformLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
         try {
-          const jsonStr = transformLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
           const parsed = JSON.parse(jsonStr);
-          if (isNodeExpression(parsed)) prop.transform = parsed;
-        } catch (_) {}
+          if (!isNodeExpression(parsed)) {
+            throw new Error(
+              `Invalid transform for property ${propShapeId}: ` +
+              `payload is not a valid NodeExpression. Received: ${jsonStr}`
+            );
+          }
+          prop.transform = parsed;
+        } catch (e) {
+          throw new Error(
+            `Failed to deserialize transform for property ${propShapeId}: ` +
+            `${e instanceof Error ? e.message : String(e)}. Payload: ${jsonStr}`
+          );
+        }
       }
 
       shape.addProperty(prop);
@@ -901,7 +912,14 @@ export class SHACLShape {
         conformanceConditions: p.conformance_conditions,
         class: p.class,
         in: p.in,
-        transform: isNodeExpression(p.transform) ? p.transform : undefined,
+        transform: p.transform && !isNodeExpression(p.transform)
+          ? (() => {
+              throw new Error(
+                `Invalid transform for property ${p.name}: ` +
+                `payload is not a valid NodeExpression. Received: ${JSON.stringify(p.transform)}`
+              );
+            })()
+          : p.transform,
       });
     }
     
