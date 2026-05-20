@@ -78,7 +78,7 @@ pub(super) async fn execute_model_query_inner(
     let is_count_only = query_input.limit == Some(0);
     if is_count_only && all_where_pushable(query_input, &shape) {
         if let Some(sparql) = build_count_sparql(&shape, query_input) {
-            let result_json = store.query(&sparql)?;
+            let result_json = store.query_async(&sparql).await?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             let count = results
                 .first()
@@ -151,14 +151,14 @@ pub(super) async fn execute_model_query_inner(
 
     let raw_results: Vec<Value> = match query_plan {
         InstanceQueryPlan::Single(sparql) => {
-            let result_json = store.query(&sparql)?;
+            let result_json = store.query_async(&sparql).await?;
             serde_json::from_str(&result_json)?
         }
         InstanceQueryPlan::TwoPhase {
             pagination_subquery,
             predicate_filter,
         } => {
-            let page_json = store.query(&pagination_subquery)?;
+            let page_json = store.query_async(&pagination_subquery).await?;
             let page_results: Vec<Value> = serde_json::from_str(&page_json)?;
 
             if page_results.is_empty() {
@@ -185,7 +185,7 @@ pub(super) async fn execute_model_query_inner(
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
 }}"#
                     );
-                    let result_json = store.query(&property_sparql)?;
+                    let result_json = store.query_async(&property_sparql).await?;
                     serde_json::from_str(&result_json)?
                 }
             }
@@ -219,7 +219,7 @@ pub(super) async fn execute_model_query_inner(
     // Calculate total count
     let total_count = if sparql_pagination.is_some() {
         if let Some(count_sparql) = build_count_sparql(&shape, query_input) {
-            let result_json = store.query(&count_sparql)?;
+            let result_json = store.query_async(&count_sparql).await?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             results
                 .first()
@@ -327,9 +327,7 @@ async fn resolve_language_transforms(
     let resolve_props: Vec<&super::types::ShapeProperty> = shape
         .properties
         .iter()
-        .filter(|p| {
-            p.resolve_language.is_some() && p.resolve_language.as_deref() != Some("literal")
-        })
+        .filter(|p| p.resolve_language.is_some())
         .collect();
 
     if resolve_props.is_empty() {
@@ -367,13 +365,13 @@ async fn resolve_language_transforms(
                             instance[&prop.name] = eval_transform(transform, &resolved, &resolved);
                         }
                     }
-                } else if instance[&prop.name].is_object() {
-                    // For literal objects, apply the transform
-                    let obj = instance[&prop.name].clone();
-                    let default_transform = super::types::default_file_decode();
-                    let transform = prop.transform.as_ref().unwrap_or(&default_transform);
-                    instance[&prop.name] = eval_transform(transform, &obj, &obj);
                 }
+            } else if instance[&prop.name].is_object() {
+                // For literal objects (already-hydrated from literal: URIs), apply the transform
+                let obj = instance[&prop.name].clone();
+                let default_transform = super::types::default_file_decode();
+                let transform = prop.transform.as_ref().unwrap_or(&default_transform);
+                instance[&prop.name] = eval_transform(transform, &obj, &obj);
             }
         }
     }

@@ -23,8 +23,10 @@ pub(super) fn eval_transform(expr: &TransformExpression, value: &Value, obj: &Va
         TransformExpression::Literal { value: lit } => lit.clone(),
 
         TransformExpression::Path { predicate } => {
-            // Extract local name from predicate (after last '/' or '://')
-            let key = if let Some(idx) = predicate.rfind('/') {
+            // Extract local name from predicate (after last '#', then '/', then '://')
+            let key = if let Some(idx) = predicate.rfind('#') {
+                &predicate[idx + 1..]
+            } else if let Some(idx) = predicate.rfind('/') {
                 &predicate[idx + 1..]
             } else if let Some(idx) = predicate.rfind("://") {
                 &predicate[idx + 3..]
@@ -92,11 +94,14 @@ pub(super) fn eval_transform(expr: &TransformExpression, value: &Value, obj: &Va
             .find(|v| !matches!(v, Value::Null))
             .unwrap_or(Value::Null),
 
-        TransformExpression::Function { iri, args: _ } => {
+        TransformExpression::Function { iri, args } => {
             match iri.as_str() {
                 "ad4m://fn/defaultFileDecode" => {
                     // Apply the default file decode logic
-                    default_file_decode(value)
+                    let arg_val = args.first()
+                        .map(|a| eval_transform(a, value, obj))
+                        .unwrap_or_else(|| value.clone());
+                    default_file_decode(&arg_val)
                 }
                 _ => {
                     // Unknown function: passthrough

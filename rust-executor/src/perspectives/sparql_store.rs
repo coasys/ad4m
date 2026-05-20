@@ -713,6 +713,16 @@ impl SparqlStore {
         }
     }
 
+    /// Async wrapper around `query()` that runs the blocking SPARQL operation
+    /// on a dedicated thread pool to avoid blocking the tokio runtime.
+    pub async fn query_async(&self, query_string: &str) -> Result<String, Error> {
+        let store = self.clone();
+        let query = query_string.to_string();
+        tokio::task::spawn_blocking(move || store.query(&query))
+            .await
+            .map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
+    }
+
     /// Remove all triples from the store.
     pub fn clear(&self) -> Result<(), Error> {
         self.store.clear()?;

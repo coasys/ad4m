@@ -1,5 +1,6 @@
 import { Link } from "../links/Links";
 import type { NodeExpression } from "./NodeExpression";
+import { isNodeExpression } from "./NodeExpression";
 
 /**
  * Extract namespace from a URI
@@ -564,6 +565,14 @@ export class SHACLShape {
           target: `literal:string:${JSON.stringify(prop.in)}`
         });
       }
+
+      if (prop.transform) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://transform",
+          target: `literal:string:${JSON.stringify(prop.transform)}`
+        });
+      }
     }
 
     return links;
@@ -806,6 +815,17 @@ export class SHACLShape {
         }
       }
 
+      const transformLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://transform"
+      );
+      if (transformLink) {
+        try {
+          const jsonStr = transformLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
+          const parsed = JSON.parse(jsonStr);
+          if (isNodeExpression(parsed)) prop.transform = parsed;
+        } catch (_) {}
+      }
+
       shape.addProperty(prop);
     }
     
@@ -881,7 +901,7 @@ export class SHACLShape {
         conformanceConditions: p.conformance_conditions,
         class: p.class,
         in: p.in,
-        transform: p.transform,
+        transform: isNodeExpression(p.transform) ? p.transform : undefined,
       });
     }
     

@@ -276,7 +276,7 @@ export interface PropertyOptions {
     /**
      * Optional transform expression to modify the property value.
      * This is a SHACL-AF Node Expression that runs in the Rust model query engine.
-     * Examples: `fileToDataUri`, `concat('prefix_', focus())`, etc.
+     * Examples: `fileToDataUri`, `concat(literal('prefix_'), focus())`, etc.
      * See `@coasys/ad4m/shacl` for builder functions.
      */
     transform?: import('../shacl/NodeExpression').NodeExpression;

@@ -14,7 +14,7 @@
     "./shacl": {
       "import": "./lib/shacl/index.js",
       "require": "./lib/shacl/index.cjs",
-      "types": "./lib/shacl/index.d.ts"
+      "types": "./lib/src/shacl/index.d.ts"
     }
   },
   "scripts": {

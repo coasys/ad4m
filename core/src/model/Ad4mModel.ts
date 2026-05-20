@@ -390,7 +390,8 @@ export class Ad4mModel {
         ...(options.getter !== undefined && { getter: options.getter }),
         ...(options.prologSetter !== undefined && { prologSetter: options.prologSetter }),
         ...(options.local !== undefined && { local: options.local }),
-        ...(options.flag !== undefined && { flag: options.flag })
+        ...(options.flag !== undefined && { flag: options.flag }),
+        ...(options.transform !== undefined && { transform: options.transform })
       };
     }
     

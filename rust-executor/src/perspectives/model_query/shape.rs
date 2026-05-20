@@ -267,7 +267,13 @@ pub(super) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
 
             let transform = prop_meta
                 .get("transform")
-                .and_then(|v| serde_json::from_value::<TransformExpression>(v.clone()).ok());
+                .map(|v| {
+                    serde_json::from_value::<TransformExpression>(v.clone())
+                        .map_err(|e| deno_core::anyhow::anyhow!(
+                            "Failed to parse transform for property '{}': {}", name, e
+                        ))
+                })
+                .transpose()?;
 
             properties.push(ShapeProperty {
                 name: name.clone(),
