@@ -139,33 +139,7 @@ const recentLinks = await perspective.querySparql(`
 
 ## Graph Traversal
 
-SPARQL's graph pattern matching enables powerful multi-hop queries:
-
-### Forward Traversal: Who Does Alice Follow?
-
-```typescript
-const aliceFollows = await perspective.querySparql(`
-  SELECT ?target WHERE {
-    ?link a rdf:Statement ;
-          rdf:subject <user://alice> ;
-          rdf:predicate <follows> ;
-          rdf:object ?target .
-  }
-`);
-```
-
-### Reverse Traversal: Who Follows Alice?
-
-```typescript
-const aliceFollowers = await perspective.querySparql(`
-  SELECT ?source WHERE {
-    ?link a rdf:Statement ;
-          rdf:subject ?source ;
-          rdf:predicate <follows> ;
-          rdf:object <user://alice> .
-  }
-`);
-```
+Single-hop traversal is just a basic filter — combine the source/target/predicate patterns shown above. SPARQL's real strength is chaining graph patterns to express multi-hop queries:
 
 ### Multi-Hop: Friends of Friends
 

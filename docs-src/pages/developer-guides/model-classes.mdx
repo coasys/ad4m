@@ -7,7 +7,7 @@ Model classes in AD4M provide a way to define, store, and query structured data 
 
 ## Quick Start
 
-There are two ways to create model classes in AD4M:
+There are three ways to create model classes in AD4M:
 
 ### Option 1: Using Decorators (Recommended)
 
@@ -43,7 +43,27 @@ const cake = await Recipe.create(perspective, {
 });
 ```
 
-### Option 2: From JSON Schema (Dynamic)
+### Option 2: From a SHACL Shape (Dynamic)
+
+When a perspective already carries a SHACL shape — for example, a shape installed by another app or recovered via `perspective.getClassShape()` / `perspective.getAllShacl()` — you can hydrate a working model class straight from it. No predicate inference is needed: every property's URI is read directly from the shape.
+
+```typescript
+import { Ad4mModel } from '@coasys/ad4m';
+
+// Fetch the SHACL shape from a perspective that already has it registered
+const { shape } = (await perspective.getAllShacl())
+  .find(s => s.name === "Recipe")!;
+
+// Synthesise a fully functional model class from the shape
+const Recipe = Ad4mModel.fromSHACL(shape, "Recipe");
+
+// Use exactly like decorator-based models
+const recipes = await Recipe.findAll(perspective);
+```
+
+This is how AD4M tooling (the MCP server, the CLI, the management UI) discovers models at runtime without ever importing application code.
+
+### Option 3: From JSON Schema (Dynamic)
 
 Perfect for integrating with external systems or when you have existing JSON Schema definitions:
 
@@ -690,11 +710,6 @@ const comments = await Comment.query(perspective)
 ```typescript
 // All queries execute server-side via SPARQL
 const recipes = await Recipe.findAll(perspective, { where: { rating: { gt: 4 } } });
-
-// Prolog is still available for backward compatibility
-const recipesProlog = await Recipe.findAll(perspective, {
-  where: { rating: { gt: 4 } }
-}, false);
 ```
 
 For advanced graph traversal and direct SPARQL access, see the [SPARQL Queries Guide](/developer-guides/sparql-queries).
