@@ -98,7 +98,8 @@ pub(super) fn eval_transform(expr: &TransformExpression, value: &Value, obj: &Va
             match iri.as_str() {
                 "ad4m://fn/defaultFileDecode" => {
                     // Apply the default file decode logic
-                    let arg_val = args.first()
+                    let arg_val = args
+                        .first()
                         .map(|a| eval_transform(a, value, obj))
                         .unwrap_or_else(|| value.clone());
                     default_file_decode(&arg_val)
