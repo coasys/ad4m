@@ -24,7 +24,6 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 
 use super::filtering::matches_condition;
-use super::shape::parse_shape_from_json;
 use super::types::{IncludeValue, ModelShape, ShapeProperty};
 use super::utils::{parse_literal_value, validate_iri};
 use crate::perspectives::sparql_store::SparqlStore;
@@ -37,22 +36,13 @@ use crate::perspectives::sparql_store::SparqlStore;
 /// full query pipeline).  Returns a map of `instance_id → { prop: value }`.
 pub fn evaluate_getters_batch(
     store: &SparqlStore,
-    class_name: &str,
+    shape: &ModelShape,
     instance_ids: &[String],
     property_names: Option<&[String]>,
-    shape_json: Option<&str>,
 ) -> Result<Value, Error> {
     if instance_ids.is_empty() {
         return Ok(Value::Object(Map::new()));
     }
-
-    let shape = if let Some(json) = shape_json {
-        parse_shape_from_json(json, class_name)?
-    } else {
-        return Err(deno_core::anyhow::anyhow!(
-            "shape_json is required for evaluate_getters_batch"
-        ));
-    };
 
     let getter_props: Vec<&ShapeProperty> = shape
         .properties
@@ -78,7 +68,7 @@ pub fn evaluate_getters_batch(
         })
         .collect();
 
-    evaluate_getters(store, &mut instances, &shape, None, true)?;
+    evaluate_getters(store, &mut instances, shape, None, true)?;
 
     let mut result = Map::new();
     for inst in &instances {

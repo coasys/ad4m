@@ -196,9 +196,11 @@ pub struct ProjectionInput {
     /// When true, attach a count (integer) instead of a list.
     #[serde(default)]
     pub count: bool,
-    /// Optional target class shape for resolving where-clause predicates.
+    /// Bare class name of the projection target.  The executor resolves the
+    /// target shape from this through its in-memory cache when projection
+    /// where-clauses reference target properties by name.
     #[serde(default)]
-    pub target_shape: Option<Value>,
+    pub target_class_name: Option<String>,
     /// Optional where filter applied against target instance properties.
     #[serde(default, rename = "where")]
     pub where_clause: Option<BTreeMap<String, WhereCondition>>,
@@ -276,62 +278,62 @@ pub(super) enum SortKey {
 
 /// A single property or relation declared in a model class's shape.
 ///
-/// Constructed either by reading SHACL triples from the store
-/// ([`super::shape::load_shape`]) or by parsing the JSON metadata sent
-/// alongside the query ([`super::shape::parse_shape_from_json`]).
+/// Constructed by reading SHACL triples from the store
+/// ([`super::shape::load_shape`]).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub(super) struct ShapeProperty {
-    pub(super) name: String,
-    pub(super) predicate: String,
-    pub(super) is_collection: bool,
-    pub(super) is_flag: bool,
-    pub(super) is_required: bool,
-    pub(super) initial_value: Option<String>,
-    pub(super) resolve_language: Option<String>,
-    pub(super) datatype: Option<String>,
-    pub(super) direction: Option<String>, // "forward" or "reverse" for relation properties
-    pub(super) is_scalar_relation: bool, // true for hasOne/belongsToOne (render as scalar, not array)
+pub struct ShapeProperty {
+    pub(crate) name: String,
+    pub(crate) predicate: String,
+    pub(crate) is_collection: bool,
+    pub(crate) is_flag: bool,
+    pub(crate) is_required: bool,
+    pub(crate) initial_value: Option<String>,
+    pub(crate) resolve_language: Option<String>,
+    pub(crate) datatype: Option<String>,
+    pub(crate) direction: Option<String>, // "forward" or "reverse" for relation properties
+    pub(crate) is_scalar_relation: bool, // true for hasOne/belongsToOne (render as scalar, not array)
     /// SPARQL getter expression (e.g. `SELECT ?value WHERE { ... }` or `ASK WHERE { ... }`).
     /// For properties: returns a scalar value.
     /// For relations: returns target IDs (conformance-filtered).
-    pub(super) getter: Option<String>,
+    pub(crate) getter: Option<String>,
     /// Post-getter where-clause filter for relations.  Used to apply
     /// where conditions on related instances after the getter runs,
     /// by fetching the target property values and comparing the parsed data.
-    pub(super) where_filter: Option<BTreeMap<String, WhereCondition>>,
+    pub(crate) where_filter: Option<BTreeMap<String, WhereCondition>>,
     /// Predicate mappings for `where_filter` (property name → predicate IRI).
-    pub(super) where_predicates: Option<HashMap<String, String>>,
+    pub(crate) where_predicates: Option<HashMap<String, String>>,
 }
 
 /// Enriched relation metadata for include (eager-loading) resolution.
-/// Populated when the TS client sends target class shapes alongside the query.
+/// Target shapes are resolved at recursion time through a [`ShapeResolver`]
+/// against the perspective's in-memory shape cache.
 #[derive(Debug, Clone)]
-pub(super) struct ShapeRelation {
-    pub(super) name: String,
-    pub(super) predicate: String,
-    pub(super) direction: String, // "forward" or "reverse"
-    pub(super) kind: String,      // "hasMany", "hasOne", "belongsToOne", "belongsToMany"
-    pub(super) max_count: Option<usize>,
-    pub(super) target_class_name: String,
-    pub(super) target_shape_json: String, // Serialised ModelMetadata JSON for recursive queries
+pub struct ShapeRelation {
+    pub(crate) name: String,
+    pub(crate) predicate: String,
+    pub(crate) direction: String, // "forward" or "reverse"
+    pub(crate) kind: String,      // "hasMany", "hasOne", "belongsToOne", "belongsToMany"
+    pub(crate) max_count: Option<usize>,
+    pub(crate) target_class_name: String,
 }
 
 /// Complete shape of a model class — the set of all properties, relations,
 /// and include metadata needed to query, hydrate, and enrich instances.
 ///
 /// This is the central metadata object threaded through the entire query
-/// pipeline.
-#[derive(Debug)]
+/// pipeline.  Built once from SHACL triples in the perspective's store and
+/// memoized in `PerspectiveInstance::shape_cache`.
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub(crate) struct ModelShape {
-    pub(super) target_class: String,
+pub struct ModelShape {
+    pub(crate) target_class: String,
     #[allow(dead_code)]
-    pub(super) shape_uri: String,
-    pub(super) properties: Vec<ShapeProperty>,
-    /// Enriched relation metadata for include resolution (only populated
-    /// when the TS client sends target shapes for included relations).
-    pub(super) include_relations: Vec<ShapeRelation>,
+    pub(crate) shape_uri: String,
+    pub(crate) properties: Vec<ShapeProperty>,
+    /// Enriched relation metadata for include resolution, populated
+    /// directly from the perspective's SHACL triples.
+    pub(crate) include_relations: Vec<ShapeRelation>,
 }
 
 impl ModelShape {
@@ -352,6 +354,21 @@ impl ModelShape {
         preds.dedup();
         preds
     }
+}
+
+/// Resolves shapes by class name.  Implementations memoize results so that
+/// repeated lookups (including recursive include traversal across the same
+/// class) parse SHACL at most once per process lifetime.
+///
+/// The concrete production implementation lives on `PerspectiveInstance`
+/// and reads from the perspective's `shape_cache` + SHACL store.  Tests
+/// typically supply a static implementation pre-populated with `ModelShape`
+/// instances.
+pub trait ShapeResolver: Send + Sync {
+    fn get_shape(
+        &self,
+        class_name: &str,
+    ) -> Result<std::sync::Arc<ModelShape>, deno_core::anyhow::Error>;
 }
 
 /// SPARQL execution plan for an instance query.

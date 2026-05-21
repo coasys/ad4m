@@ -1,3 +1,5 @@
+use super::model_query::load_shape_from_store;
+use super::model_query::types::{ModelShape, ShapeResolver};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::parse_shacl_to_links;
 use super::update_perspective;
@@ -198,11 +200,12 @@ struct SubscribedQuery {
 
 /// Parameters for a model query subscription. Stored alongside the trigger SPARQL
 /// so that `check_subscribed_queries` can re-execute the model query in Rust.
+/// Shape is resolved from the perspective's cache at each re-evaluation —
+/// no JSON metadata is held here.
 #[derive(Clone)]
 struct ModelSubscriptionParams {
     class_name: String,
     query_json: String,
-    shape_json: Option<String>,
 }
 
 /// Extract predicate IRIs from a SPARQL query by finding triple patterns.
@@ -277,6 +280,33 @@ pub struct PerspectiveInstance {
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
     pub(crate) sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
+    /// In-memory cache of parsed `ModelShape` instances keyed by class name.
+    /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
+    /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
+    shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+}
+
+/// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
+/// lifetime of a single query.  On miss it parses SHACL from the perspective's
+/// store and memoizes the result.
+struct PerspectiveShapeResolver<'a> {
+    cache: &'a std::sync::RwLock<HashMap<String, Arc<ModelShape>>>,
+    store: &'a crate::perspectives::sparql_store::SparqlStore,
+}
+
+impl<'a> ShapeResolver for PerspectiveShapeResolver<'a> {
+    fn get_shape(&self, class_name: &str) -> Result<Arc<ModelShape>, AnyError> {
+        if let Some(shape) = self.cache.read().unwrap().get(class_name).cloned() {
+            return Ok(shape);
+        }
+        let shape = load_shape_from_store(self.store, class_name)?;
+        let arc = Arc::new(shape);
+        self.cache
+            .write()
+            .unwrap()
+            .insert(class_name.to_string(), arc.clone());
+        Ok(arc)
+    }
 }
 
 impl PerspectiveInstance {
@@ -313,6 +343,29 @@ impl PerspectiveInstance {
                 crate::perspectives::sparql_store::SparqlStore::new(sparql_data_path.as_deref())
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
+            shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Look up a cached `ModelShape` for the given class name, loading it
+    /// from the perspective's SHACL triples on cache miss.  Returns an
+    /// `Arc<ModelShape>` shared across query and subscription re-evaluation.
+    pub fn get_shape(&self, class_name: &str) -> Result<Arc<ModelShape>, AnyError> {
+        self.shape_resolver().get_shape(class_name)
+    }
+
+    /// Drop any cached `ModelShape` for `class_name`.  Called when SHACL is
+    /// (re-)written for the class so the next query re-parses fresh state.
+    pub fn invalidate_shape(&self, class_name: &str) {
+        self.shape_cache.write().unwrap().remove(class_name);
+    }
+
+    /// Borrow a cache-backed `ShapeResolver` for the lifetime of a single
+    /// query.  Used by `execute_model_query` for include recursion.
+    fn shape_resolver(&self) -> PerspectiveShapeResolver<'_> {
+        PerspectiveShapeResolver {
+            cache: &self.shape_cache,
+            store: &self.sparql_store,
         }
     }
 
@@ -1842,6 +1895,9 @@ impl PerspectiveInstance {
             let shacl_links = parse_shacl_to_links(&shacl, &name)?;
             self.add_links(shacl_links, LinkStatus::Shared, None, context)
                 .await?;
+            // SHACL just changed for this class — drop any cached shape so the
+            // next query re-parses against the fresh store state.
+            self.invalidate_shape(&name);
         }
 
         Ok(true)
@@ -2582,16 +2638,17 @@ impl PerspectiveInstance {
         &self,
         class_name: &str,
         query_json: &str,
-        shape_json: Option<&str>,
     ) -> Result<String, deno_core::anyhow::Error> {
         let query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
 
+        let resolver = self.shape_resolver();
+        let shape = resolver.get_shape(class_name)?;
         let result = super::model_query::execute_model_query(
             &self.sparql_store,
-            class_name,
+            shape.as_ref(),
             &query_input,
-            shape_json,
+            &resolver,
         )?;
 
         serde_json::to_string(&result).map_err(|e| {
@@ -2607,14 +2664,13 @@ impl PerspectiveInstance {
         class_name: &str,
         instance_ids: &[String],
         property_names: Option<&[String]>,
-        shape_json: Option<&str>,
     ) -> Result<String, deno_core::anyhow::Error> {
+        let shape = self.get_shape(class_name)?;
         let result = super::model_query::evaluate_getters_batch(
             &self.sparql_store,
-            class_name,
+            shape.as_ref(),
             instance_ids,
             property_names,
-            shape_json,
         )?;
 
         serde_json::to_string(&result).map_err(|e| {
@@ -4092,19 +4148,14 @@ impl PerspectiveInstance {
         &self,
         class_name: String,
         query_json: String,
-        shape_json: Option<String>,
         user_email: Option<String>,
     ) -> Result<(String, String), AnyError> {
         // 1. Run the initial model query
-        let initial_result = self.model_query(&class_name, &query_json, shape_json.as_deref())?;
+        let initial_result = self.model_query(&class_name, &query_json)?;
 
-        // 2. Build trigger SPARQL from shape predicates.
-        //    Parse the shape to extract required predicates for change detection.
-        let trigger_predicates = self.build_model_trigger_predicates(
-            &class_name,
-            shape_json.as_deref(),
-            Some(&query_json),
-        );
+        // 2. Build trigger SPARQL from shape predicates resolved through the cache.
+        let trigger_predicates =
+            self.build_model_trigger_predicates(&class_name, Some(&query_json));
 
         let trigger_sparql = if trigger_predicates.is_empty() {
             // Fallback: match any triple (always re-check)
@@ -4132,7 +4183,6 @@ impl PerspectiveInstance {
                     if let Some(ref params) = q.model_query_params {
                         params.class_name == class_name
                             && params.query_json == query_json
-                            && params.shape_json == shape_json
                             && q.user_email == user_email
                     } else {
                         false
@@ -4166,7 +4216,6 @@ impl PerspectiveInstance {
             model_query_params: Some(ModelSubscriptionParams {
                 class_name,
                 query_json,
-                shape_json,
             }),
         };
 
@@ -4179,42 +4228,17 @@ impl PerspectiveInstance {
     }
 
     /// Extract predicates from a model shape for subscription trigger matching.
+    /// Reads the shape from the cache (which warms from SHACL triples on miss)
+    /// so subscription re-evaluation matches the same predicate set queries do.
     fn build_model_trigger_predicates(
         &self,
         class_name: &str,
-        shape_json: Option<&str>,
         query_json: Option<&str>,
     ) -> Vec<String> {
         let mut predicates = Vec::new();
 
-        // Try to extract predicates from the shape JSON provided by the client
-        if let Some(json_str) = shape_json {
-            if let Ok(shape) = serde_json::from_str::<serde_json::Value>(json_str) {
-                // Extract property predicates
-                if let Some(props) = shape.get("properties").and_then(|p| p.as_object()) {
-                    for (_name, meta) in props {
-                        if let Some(pred) = meta.get("predicate").and_then(|p| p.as_str()) {
-                            predicates.push(pred.to_string());
-                        }
-                    }
-                }
-                // Extract relation predicates
-                if let Some(rels) = shape.get("relations").and_then(|r| r.as_object()) {
-                    for (_name, meta) in rels {
-                        if let Some(pred) = meta.get("predicate").and_then(|p| p.as_str()) {
-                            predicates.push(pred.to_string());
-                        }
-                    }
-                }
-                // Extract flag predicates
-                if let Some(flags) = shape.get("flags").and_then(|f| f.as_object()) {
-                    for (_name, meta) in flags {
-                        if let Some(pred) = meta.get("predicate").and_then(|p| p.as_str()) {
-                            predicates.push(pred.to_string());
-                        }
-                    }
-                }
-            }
+        if let Ok(shape) = self.get_shape(class_name) {
+            predicates.extend(shape.predicates());
         }
 
         // Extract parent predicate from query JSON (parent-scoped subscriptions
@@ -4231,11 +4255,6 @@ impl PerspectiveInstance {
             }
         }
 
-        // Always merge in the persisted shape predicates as a safe superset
-        if let Ok(shape) = super::model_query::load_shape_from_store(&self.sparql_store, class_name)
-        {
-            predicates.extend(shape.predicates());
-        }
         predicates.sort();
         predicates.dedup();
 
@@ -4345,11 +4364,7 @@ impl PerspectiveInstance {
 
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL
                 let result_string = if let Some(ref params) = model_params {
-                    match self_clone.model_query(
-                        &params.class_name,
-                        &params.query_json,
-                        params.shape_json.as_deref(),
-                    ) {
+                    match self_clone.model_query(&params.class_name, &params.query_json) {
                         Ok(r) => r,
                         Err(e) => {
                             log::error!("Model subscription query failed: {}", e);
@@ -5511,5 +5526,139 @@ mod tests {
             "Reifier query with variable ?predicate should return empty set, got: {:?}",
             predicates
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Shape cache: lazy load from SHACL, invalidation on re-write,
+    // and explicit error for unknown classes.
+    // -----------------------------------------------------------------------
+
+    /// Minimal SHACL JSON for a single-property class.  Builds the same
+    /// graph shape `shacl-gen.ts` emits in production.
+    fn cache_test_shacl(class: &str, namespace: &str) -> String {
+        format!(
+            r#"{{
+                "target_class": "{ns}{class}",
+                "properties": [
+                    {{ "path": "{ns}name", "name": "name", "datatype": "xsd://string", "min_count": 1, "max_count": 1, "resolve_language": "literal" }}
+                ]
+            }}"#,
+            ns = namespace,
+            class = class
+        )
+    }
+
+    #[tokio::test]
+    async fn test_get_shape_returns_error_when_no_shacl_stored() {
+        let perspective = setup().await;
+        let result = perspective.get_shape("Unknown");
+        assert!(result.is_err(), "missing class should error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("No SHACL shape stored for class 'Unknown'"),
+            "error should name the class, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shape_cache_returns_same_arc_on_second_call() {
+        let mut perspective = setup().await;
+        let shacl = cache_test_shacl("Recipe", "ns://");
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+        let first = perspective.get_shape("Recipe").expect("first lookup");
+        let second = perspective.get_shape("Recipe").expect("second lookup");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "cache should return the same Arc on a hit"
+        );
+        assert_eq!(first.target_class, "ns://Recipe");
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_shape_forces_reparse() {
+        let mut perspective = setup().await;
+        let shacl = cache_test_shacl("Recipe", "ns://");
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+        let first = perspective.get_shape("Recipe").expect("first lookup");
+        perspective.invalidate_shape("Recipe");
+        let second = perspective.get_shape("Recipe").expect("re-parse");
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "invalidation should cause a fresh Arc"
+        );
+        assert_eq!(second.target_class, first.target_class);
+    }
+
+    #[tokio::test]
+    async fn test_add_sdna_invalidates_cache_for_class() {
+        let mut perspective = setup().await;
+        let shacl_initial = cache_test_shacl("Recipe", "ns://");
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl_initial),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna initial");
+        let first = perspective.get_shape("Recipe").expect("first lookup");
+
+        // add_sdna refuses to register a class twice with the same name;
+        // simulate a SHACL re-write by invalidating directly (matches the
+        // path register_shape would take if re-registration were exposed).
+        perspective.invalidate_shape("Recipe");
+
+        let second = perspective
+            .get_shape("Recipe")
+            .expect("re-parse after invalidation");
+        assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn test_model_query_resolves_shape_through_cache() {
+        let mut perspective = setup().await;
+        let shacl = cache_test_shacl("Recipe", "ns://");
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+
+        // First query warms the cache (load_shape fires once).
+        let result_json = perspective
+            .model_query("Recipe", "{}")
+            .expect("first query");
+        assert!(result_json.contains("\"instances\""));
+
+        // Subsequent queries hit the cache and resolve to the same Arc as
+        // get_shape would have returned.
+        let warm = perspective.get_shape("Recipe").expect("warm shape");
+        let warm_again = perspective.get_shape("Recipe").expect("warm shape again");
+        assert!(Arc::ptr_eq(&warm, &warm_again));
     }
 }

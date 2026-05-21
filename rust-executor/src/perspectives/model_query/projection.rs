@@ -17,7 +17,7 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
-use super::types::{ModelShape, OrderDirection, ProjectionInput, WhereCondition};
+use super::types::{ModelShape, OrderDirection, ProjectionInput, ShapeResolver, WhereCondition};
 use super::utils::{escape_sparql_string, validate_iri};
 use crate::perspectives::sparql_store::SparqlStore;
 
@@ -31,6 +31,7 @@ pub(super) fn resolve_projections(
     instances: &mut Vec<Value>,
     projections: &HashMap<String, ProjectionInput>,
     shape: &ModelShape,
+    resolver: &dyn ShapeResolver,
 ) -> Result<(), deno_core::anyhow::Error> {
     if instances.is_empty() || projections.is_empty() {
         return Ok(());
@@ -85,7 +86,7 @@ pub(super) fn resolve_projections(
             }
         };
 
-        let where_patterns = build_projection_where_patterns(proj);
+        let where_patterns = build_projection_where_patterns(proj, resolver);
         let reifier_patterns = build_projection_reifier_patterns(proj, &safe_pred);
 
         if proj.count {
@@ -201,32 +202,35 @@ pub(super) fn resolve_projections(
 /// Conditions on `id`/`base` filter on `?t` directly; conditions on
 /// `author`/`timestamp` are handled by [`build_projection_reifier_patterns`]
 /// instead.
-pub(super) fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
+pub(super) fn build_projection_where_patterns(
+    proj: &ProjectionInput,
+    resolver: &dyn ShapeResolver,
+) -> String {
     let Some(ref wc) = proj.where_clause else {
         return String::new();
     };
 
-    let pred_lookup: HashMap<String, String> = if let Some(ref ts) = proj.target_shape {
-        let mut map = HashMap::new();
-        if let Some(props) = ts["properties"].as_object() {
-            for (name, pm) in props {
-                if let Some(pred) = pm["predicate"].as_str() {
-                    if !pred.is_empty() {
-                        map.insert(name.clone(), pred.to_string());
-                    }
+    // Resolve the target class's shape through the perspective cache so we
+    // can translate property names in the projection's where-clause into the
+    // predicate IRIs they map to in the store.
+    let pred_lookup: HashMap<String, String> = if let Some(ref target_name) = proj.target_class_name
+    {
+        if let Ok(target_shape) = resolver.get_shape(target_name) {
+            let mut map = HashMap::new();
+            for p in &target_shape.properties {
+                if !p.predicate.is_empty() {
+                    map.insert(p.name.clone(), p.predicate.clone());
                 }
             }
-        }
-        if let Some(rels) = ts["relations"].as_object() {
-            for (name, rm) in rels {
-                if let Some(pred) = rm["predicate"].as_str() {
-                    if !pred.is_empty() {
-                        map.insert(name.clone(), pred.to_string());
-                    }
+            for r in &target_shape.include_relations {
+                if !r.predicate.is_empty() {
+                    map.insert(r.name.clone(), r.predicate.clone());
                 }
             }
+            map
+        } else {
+            HashMap::new()
         }
-        map
     } else {
         HashMap::new()
     };

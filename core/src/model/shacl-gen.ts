@@ -41,9 +41,6 @@ export function buildSHACL(
 
     // ── Determine namespace from first property or relation ─────────────
     let namespace = "ad4m://";
-    const relations = Object.fromEntries(
-        Object.entries(allRelationsMeta).filter(([, r]) => r.kind === 'hasMany' || r.kind === 'belongsToMany')
-    );
 
     // Try properties first
     if (Object.keys(properties).length > 0) {
@@ -56,8 +53,8 @@ export function buildSHACL(
         }
     }
     // Fall back to relations if no properties
-    else if (Object.keys(relations).length > 0) {
-        const firstRel = relations[Object.keys(relations)[0]];
+    else if (Object.keys(allRelationsMeta).length > 0) {
+        const firstRel = allRelationsMeta[Object.keys(allRelationsMeta)[0]];
         if (firstRel.predicate) {
             const match = firstRel.predicate.match(/^([^:]+:\/\/)/);
             if (match) {
@@ -190,8 +187,8 @@ export function buildSHACL(
     }
 
     // ── Convert relations to SHACL property shapes ─────────────────────
-    for (const relName in relations) {
-        const relMeta = relations[relName];
+    for (const relName in allRelationsMeta) {
+        const relMeta = allRelationsMeta[relName];
 
         if (!relMeta.predicate) continue;
 
@@ -202,6 +199,22 @@ export function buildSHACL(
 
         // Relations typically contain IRIs
         relShape.nodeKind = 'IRI';
+
+        // Encode relation kind so the executor can derive direction and
+        // scalar-vs-collection rendering without consulting the JS class.
+        relShape.relationKind = relMeta.kind;
+
+        // Scalar relations cap at 1.
+        if (relMeta.kind === 'hasOne' || relMeta.kind === 'belongsToOne') {
+            relShape.maxCount = 1;
+        } else if (relMeta.maxCount !== undefined) {
+            relShape.maxCount = relMeta.maxCount;
+        }
+
+        // Encode opt-out of type filtering (default true; only emit when false).
+        if (relMeta.filter === false) {
+            relShape.filter = false;
+        }
 
         // AD4M-specific metadata
         if (relMeta.local !== undefined) {
@@ -292,6 +305,8 @@ export function buildSHACL(
         }
 
         // ── sh:class — target shape reference ───────────────────────────
+        // Also emit ad4m:targetClassName so the executor can look up the
+        // target class shape through its in-memory cache by bare name.
         if (relMeta.target) {
             try {
                 const TargetClass = relMeta.target();
@@ -299,8 +314,44 @@ export function buildSHACL(
                 if (targetSHACL?.shape?.nodeShapeUri) {
                     relShape.class = targetSHACL.shape.nodeShapeUri;
                 }
+                if (targetSHACL?.name) {
+                    relShape.targetClassName = targetSHACL.name;
+                } else {
+                    const targetProto = (TargetClass as any).prototype;
+                    if (targetProto?.className) {
+                        relShape.targetClassName = targetProto.className;
+                    }
+                }
             } catch (e) {
                 // Target class may not be available yet
+            }
+        }
+
+        // ── Where-clause metadata for post-getter filtering ─────────────
+        // The executor uses these to apply where conditions against the
+        // target class without needing the target's ModelMetadata at query time.
+        if (relMeta.where) {
+            relShape.whereFilter = relMeta.where;
+            try {
+                const TargetClass = relMeta.target?.();
+                const targetMetadata = TargetClass
+                    ? (TargetClass as any).getModelMetadata?.() ?? null
+                    : null;
+                if (targetMetadata?.properties) {
+                    const predicates: Record<string, string> = {};
+                    for (const propName of Object.keys(relMeta.where)) {
+                        if (['id', 'author', 'timestamp'].includes(propName)) continue;
+                        const propMeta = targetMetadata.properties[propName];
+                        if (propMeta?.predicate) {
+                            predicates[propName] = propMeta.predicate;
+                        }
+                    }
+                    if (Object.keys(predicates).length > 0) {
+                        relShape.wherePredicates = predicates;
+                    }
+                }
+            } catch (e) {
+                // Target metadata may not be available yet
             }
         }
 

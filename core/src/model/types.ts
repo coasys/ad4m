@@ -90,11 +90,12 @@ export interface IncludeProjection {
   /** When true, attaches an integer count instead of a list. */
   count?: true;
   /**
-   * Serialised target class shape.  Set automatically by `executeModelQuery`
-   * when a `where` clause is present and the target class is resolvable.
+   * Bare class name of the projection target.  Set automatically by
+   * `prepareModelQueryParams`; the executor resolves the target's shape
+   * through its in-memory cache when applying projection where filters.
    * @internal
    */
-  targetShape?: ModelMetadata;
+  targetClassName?: string;
   /** Post-hydration where clause applied to the target instances. */
   where?: Where;
   /** Limit results (when 1, the attached value is unwrapped to a scalar). */

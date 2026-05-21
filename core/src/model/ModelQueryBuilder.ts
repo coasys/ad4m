@@ -377,15 +377,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
     const ctor = this.ctor;
 
-    // Build the model query params (className, queryJson, shapeJson)
-    const { className, queryJson, shapeJson } = (ctor as any).prepareModelQueryParams(
+    // Build the model query params (className, queryJson).  The executor
+    // resolves the shape from the perspective's SHACL triples.
+    const { className, queryJson } = (ctor as any).prepareModelQueryParams(
       this.queryParams, this.modelClassName
     );
 
     // Register model subscription via Rust — this builds trigger SPARQL internally,
     // registers the subscription, and runs the initial query in one call.
     const { subscriptionId, result: initialModelResult } = await this.perspective.modelSubscribe(
-      className, queryJson, shapeJson
+      className, queryJson
     );
 
     // Convert JSON instances to model class instances
@@ -558,12 +559,12 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     this.dispose();
 
     const countParams = { ...this.queryParams, limit: 0 };
-    const { className, queryJson, shapeJson } = (this.ctor as any).prepareModelQueryParams(
+    const { className, queryJson } = (this.ctor as any).prepareModelQueryParams(
       countParams, this.modelClassName
     );
 
     const { subscriptionId, result: initialModelResult } = await this.perspective.modelSubscribe(
-      className, queryJson, shapeJson
+      className, queryJson
     );
 
     const parseCount = (raw: any): number => {
@@ -712,12 +713,12 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const subscriptionParams = { ...(this.queryParams || {}) };
     delete subscriptionParams.limit;
     delete subscriptionParams.offset;
-    const { className, queryJson, shapeJson } = (ctor as any).prepareModelQueryParams(
+    const { className, queryJson } = (ctor as any).prepareModelQueryParams(
       subscriptionParams, this.modelClassName
     );
 
     const { subscriptionId } = await this.perspective.modelSubscribe(
-      className, queryJson, shapeJson
+      className, queryJson
     );
 
     // Build the paginated query for Rust endpoint (count: true fetches both results and totalCount in one call)

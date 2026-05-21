@@ -176,9 +176,9 @@ export class PerspectiveClient {
         )
     }
 
-    async modelQuery(uuid: string, className: string, queryJson: string, shapeJson?: string): Promise<any> {
+    async modelQuery(uuid: string, className: string, queryJson: string): Promise<any> {
         const resultJson = await this.#apiClient.call<string>(
-            'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson, shape_json: shapeJson }
+            'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson }
         )
         return JSON.parse(resultJson)
     }
@@ -187,7 +187,6 @@ export class PerspectiveClient {
         uuid: string,
         className: string,
         instanceIds: string[],
-        shapeJson: string,
         propertyNames?: string[],
     ): Promise<Record<string, Record<string, any>>> {
         const resultJson = await this.#apiClient.call<string>(
@@ -195,16 +194,15 @@ export class PerspectiveClient {
                 uuid,
                 class_name: className,
                 instance_ids: instanceIds,
-                shape_json: shapeJson,
                 ...(propertyNames && { property_names: propertyNames }),
             }
         )
         return JSON.parse(resultJson)
     }
 
-    async modelSubscribe(uuid: string, className: string, queryJson: string, shapeJson?: string): Promise<{ subscriptionId: string, result: any }> {
+    async modelSubscribe(uuid: string, className: string, queryJson: string): Promise<{ subscriptionId: string, result: any }> {
         const response = await this.#apiClient.call<{ subscription_id: string, result: string }>(
-            'perspective.modelSubscribe', { uuid, class_name: className, query_json: queryJson, shape_json: shapeJson }
+            'perspective.modelSubscribe', { uuid, class_name: className, query_json: queryJson }
         )
         return {
             subscriptionId: response.subscription_id,
