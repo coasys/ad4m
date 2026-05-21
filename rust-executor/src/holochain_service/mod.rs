@@ -1041,7 +1041,7 @@ mod tests {
             use std::sync::Once;
             static V8_INIT: Once = Once::new();
             V8_INIT.call_once(|| {
-                deno_core::v8::V8::set_flags_from_string("--no-opt");
+                deno_core::v8::V8::set_flags_from_string("--no-opt --no-sparkplug --no-maglev");
                 deno_core::JsRuntime::init_platform(None, false);
             });
         }
