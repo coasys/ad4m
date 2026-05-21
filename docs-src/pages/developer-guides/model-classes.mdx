@@ -63,6 +63,89 @@ const recipes = await Recipe.findAll(perspective);
 
 This is how AD4M tooling (the MCP server, the CLI, the management UI) discovers models at runtime without ever importing application code.
 
+#### The Wire Format: JSON and Turtle
+
+A `SHACLShape` is not just an in-process JavaScript object. It also has two serialized forms that make a shape portable beyond the app that defined it:
+
+- **JSON** — the format used over the wire between the client and the AD4M executor. Every `addSdna` / `addSubjectClass` RPC carries a `shaclJson` string. This is the format you want to ship a shape between apps, store it in a config file, paste it into a Neighbourhood definition, or generate from another tool.
+- **Turtle** — the standard W3C SHACL serialization (RDF Turtle). Export-only in the client today (no `fromTurtle` round-trip yet), but useful for sharing shapes with non-AD4M tooling and for human-readable review.
+
+Both are produced by the same `SHACLShape`:
+
+```typescript
+import { SHACLShape } from '@coasys/ad4m';
+
+const { shape } = (await perspective.getAllShacl()).find(s => s.name === "Recipe")!;
+
+const json    = shape.toJSON();     // structured object, JSON.stringify-able
+const turtle  = shape.toTurtle();   // W3C SHACL Turtle string
+```
+
+A minimal shape's JSON form looks like this:
+
+```json
+{
+  "node_shape_uri": "shacl://Recipe",
+  "target_class": "recipe://Recipe",
+  "properties": [
+    {
+      "path": "recipe://name",
+      "name": "name",
+      "datatype": "xsd:string",
+      "min_count": 1,
+      "max_count": 1
+    },
+    {
+      "path": "recipe://ingredient",
+      "name": "ingredients"
+    }
+  ],
+  "constructor_actions": [
+    { "action": "addLink", "source": "this", "predicate": "rdf://type", "target": "recipe://Recipe" }
+  ]
+}
+```
+
+The same shape in Turtle:
+
+```turtle
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix ad4m: <ad4m://> .
+
+<shacl://Recipe>
+  a sh:NodeShape ;
+  sh:targetClass <recipe://Recipe> ;
+  sh:property [
+    sh:path <recipe://name> ;
+    sh:datatype <xsd:string> ;
+    sh:minCount 1 ;
+    sh:maxCount 1
+  ] ;
+  sh:property [
+    sh:path <recipe://ingredient>
+  ] .
+```
+
+#### Installing a Shape From JSON (No Decorated Class)
+
+Because the JSON form is exactly what the executor consumes over RPC, an app — or a CLI script, or a foreign client written in another language — can install a subject class **without ever importing a decorated TypeScript model**:
+
+```typescript
+// shape received over the wire / loaded from a file / fetched from a registry
+const shapeJson = JSON.parse(await readFile("recipe.shacl.json", "utf8"));
+
+// Install it directly on a perspective
+await perspective.addSubjectClass("Recipe", JSON.stringify(shapeJson));
+
+// Optionally, hydrate a model class from it for ergonomic access
+const shape = SHACLShape.fromJSON(shapeJson);
+const Recipe = Ad4mModel.fromSHACL(shape, "Recipe");
+const recipes = await Recipe.findAll(perspective);
+```
+
+This is the canonical path for sharing schemas across apps: the publisher serializes a shape to JSON (or Turtle for documentation), the consumer installs it with `addSubjectClass`, and from then on both apps read and write the same Subject Class against the same Perspective.
+
 ### Option 3: From JSON Schema (Dynamic)
 
 Perfect for integrating with external systems or when you have existing JSON Schema definitions:
