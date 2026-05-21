@@ -5635,6 +5635,245 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_where_compiled_getter_on_relation() {
+        let mut perspective = setup().await;
+        // Mirrors `Ad4mModel — Where-Clause Relation Filtering` integration test:
+        // TaskBoard.activeTasks uses a where-compiled getter to filter by status.
+        let task_shacl = r#"{
+            "target_class": "task://Task",
+            "properties": [
+                {"path": "task://type", "name": "type", "has_value": "task://task", "min_count": 1, "max_count": 1},
+                {"path": "task://title", "name": "title", "min_count": 1, "max_count": 1, "resolve_language": "literal"},
+                {"path": "task://status", "name": "status", "min_count": 1, "max_count": 1, "resolve_language": "literal"}
+            ]
+        }"#;
+        let board_shacl = r#"{
+            "target_class": "board://TaskBoard",
+            "properties": [
+                {"path": "board://name", "name": "name", "max_count": 1, "resolve_language": "literal"},
+                {
+                    "path": "board://has_task",
+                    "name": "activeTasks",
+                    "node_kind": "IRI",
+                    "relation_kind": "hasMany",
+                    "target_class_name": "Task",
+                    "getter": "SELECT ?target WHERE { <Base> <board://has_task> ?target . ?target <task://status> ?_wc0 . FILTER(STR(?_wc0) = \"active\" || STR(?_wc0) = \"literal:string:active\") }",
+                    "where_filter": {"status": "active"},
+                    "where_predicates": {"status": "task://status"}
+                },
+                {
+                    "path": "board://has_task",
+                    "name": "allTasks",
+                    "node_kind": "IRI",
+                    "relation_kind": "hasMany",
+                    "target_class_name": "Task",
+                    "getter": "SELECT ?target WHERE { <Base> <board://has_task> ?target . ?target <task://type> <task://task> . ?target <task://title> ?_v0 . ?target <task://status> ?_v1 . }"
+                }
+            ]
+        }"#;
+        perspective.add_sdna("Task".into(), "".into(), SdnaType::SubjectClass, Some(task_shacl.into()), &AgentContext::main_agent()).await.expect("add Task");
+        perspective.add_sdna("TaskBoard".into(), "".into(), SdnaType::SubjectClass, Some(board_shacl.into()), &AgentContext::main_agent()).await.expect("add TaskBoard");
+
+        let board = "literal:string:test_board";
+        let active1 = "literal:string:active1";
+        let active2 = "literal:string:active2";
+        let done1 = "literal:string:done1";
+        let signed_active = "literal:string:active";
+        let signed_done = "literal:string:done";
+        let signed_title = "literal:string:t";
+        let triples: Vec<(&str, &str, &str)> = vec![
+            // Board name
+            (board, "board://name", "literal:string:Sprint1"),
+            // Tasks: type flag + title + status
+            (active1, "task://type", "task://task"),
+            (active1, "task://title", signed_title),
+            (active1, "task://status", signed_active),
+            (active2, "task://type", "task://task"),
+            (active2, "task://title", signed_title),
+            (active2, "task://status", signed_active),
+            (done1, "task://type", "task://task"),
+            (done1, "task://title", signed_title),
+            (done1, "task://status", signed_done),
+            // Board → tasks
+            (board, "board://has_task", active1),
+            (board, "board://has_task", active2),
+            (board, "board://has_task", done1),
+        ];
+        for (i, (s, p, t)) in triples.iter().enumerate() {
+            let link = DecoratedLinkExpression {
+                author: "did:key:test".into(),
+                timestamp: format!("17000000000{:02}", i),
+                data: Link {
+                    source: s.to_string(),
+                    predicate: Some(p.to_string()),
+                    target: t.to_string(),
+                },
+                proof: DecoratedExpressionProof {
+                    key: "k".into(),
+                    signature: "s".into(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: None,
+            };
+            perspective.sparql_store.add_link(&link).expect("add link");
+        }
+
+        let query_json = format!(r#"{{"where":{{"id":"{}"}},"limit":1,"deepQuery":true}}"#, board);
+        let result_json = perspective
+            .model_query("TaskBoard", &query_json)
+            .expect("model_query");
+        let result: serde_json::Value =
+            serde_json::from_str(&result_json).expect("parse result");
+        let instances = result["instances"].as_array().expect("instances array");
+        assert_eq!(instances.len(), 1, "should find the board");
+        let active = instances[0]["activeTasks"].as_array().expect("activeTasks array");
+        assert_eq!(active.len(), 2, "where-getter should narrow to 2 active tasks");
+        let all = instances[0]["allTasks"].as_array().expect("allTasks array");
+        assert_eq!(all.len(), 3, "conformance getter should keep all 3 tasks");
+    }
+
+    #[tokio::test]
+    async fn test_model_query_fires_property_getter() {
+        let mut perspective = setup().await;
+        // Exact JSON produced by SHACLShape.toJSON() for the BlogPost
+        // fixture in tests/js/tests/prolog-and-literals.test.ts.
+        let shacl = r#"{
+            "node_shape_uri": "blog://BlogPostShape",
+            "target_class": "blog://BlogPost",
+            "properties": [
+                {
+                    "path": "blog://title",
+                    "name": "title",
+                    "datatype": "xsd://string",
+                    "max_count": 1,
+                    "writable": true,
+                    "resolve_language": "literal",
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "blog://title", "target": "value"}]
+                },
+                {
+                    "path": "blog://parent",
+                    "name": "parentPost",
+                    "max_count": 1,
+                    "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "blog://parent", "target": "value"}],
+                    "getter": "SELECT ?target WHERE { <Base> <blog://reply_to> ?target . } LIMIT 1"
+                },
+                {
+                    "path": "ad4m://getter/BlogPost/tags",
+                    "name": "tags",
+                    "node_kind": "IRI",
+                    "getter": "SELECT ?target WHERE { <Base> <blog://tagged_with> ?target . }",
+                    "relation_kind": "hasMany"
+                }
+            ],
+            "constructor_actions": [],
+            "destructor_actions": []
+        }"#;
+        perspective
+            .add_sdna(
+                "BlogPost".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+
+        let post_root = "literal:string:test_post_root";
+        let parent_root = "literal:string:test_parent_root";
+
+        // Title link makes the post a BlogPost instance (structural conformance)
+        for (src, pred, tgt) in &[
+            (post_root, "blog://title", "literal:string:my_post"),
+            (parent_root, "blog://title", "literal:string:my_parent"),
+            (post_root, "blog://reply_to", parent_root),
+        ] {
+            let link = DecoratedLinkExpression {
+                author: "did:key:test".into(),
+                timestamp: "1700000000000".into(),
+                data: Link {
+                    source: src.to_string(),
+                    predicate: Some(pred.to_string()),
+                    target: tgt.to_string(),
+                },
+                proof: DecoratedExpressionProof {
+                    key: "k".into(),
+                    signature: "s".into(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: None,
+            };
+            perspective.sparql_store.add_link(&link).expect("add_link");
+        }
+
+        let query_json = format!(
+            r#"{{"where":{{"id":"{}"}},"limit":1,"deepQuery":true}}"#,
+            post_root
+        );
+        let result_json = perspective
+            .model_query("BlogPost", &query_json)
+            .expect("model_query");
+        let result: serde_json::Value =
+            serde_json::from_str(&result_json).expect("parse result");
+        let instances = result["instances"].as_array().expect("instances array");
+        assert_eq!(instances.len(), 1, "should find the post");
+        let parent_value = instances[0]["parentPost"].as_str();
+        assert_eq!(
+            parent_value,
+            Some(parent_root),
+            "getter should populate parentPost"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_property_getter_survives_add_sdna_pipeline() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "target_class": "blog://BlogPost",
+            "properties": [
+                {
+                    "path": "blog://title",
+                    "name": "title",
+                    "datatype": "xsd://string",
+                    "max_count": 1,
+                    "resolve_language": "literal"
+                },
+                {
+                    "path": "blog://parent",
+                    "name": "parentPost",
+                    "max_count": 1,
+                    "getter": "SELECT ?target WHERE { <Base> <blog://reply_to> ?target . } LIMIT 1"
+                }
+            ]
+        }"#;
+        perspective
+            .add_sdna(
+                "BlogPost".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+
+        let shape = perspective.get_shape("BlogPost").expect("shape");
+        let parent = shape
+            .properties
+            .iter()
+            .find(|p| p.name == "parentPost")
+            .expect("parentPost property");
+        assert_eq!(
+            parent.getter.as_deref(),
+            Some("SELECT ?target WHERE { <Base> <blog://reply_to> ?target . } LIMIT 1"),
+            "getter must survive addSdna → SHACL store → load_shape round trip"
+        );
+    }
+
+    #[tokio::test]
     async fn test_model_query_resolves_shape_through_cache() {
         let mut perspective = setup().await;
         let shacl = cache_test_shacl("Recipe", "ns://");

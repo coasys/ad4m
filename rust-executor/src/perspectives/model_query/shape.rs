@@ -185,8 +185,12 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             || target_class_uri.is_some()
             || target_class_name.is_some()
             || prop_type_is_collection;
+        // All relations are marked `is_collection` so the query pipeline
+        // hydrates them as arrays during link grouping; the
+        // `is_scalar_relation` flag then tells the renderer to unwrap
+        // scalar relations (hasOne / belongsToOne) to a single value.
         let is_collection = if is_relation {
-            !scalar_kind
+            true
         } else {
             prop_type_is_collection
         };

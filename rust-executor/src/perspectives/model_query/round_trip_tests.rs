@@ -208,8 +208,11 @@ fn round_trip_scalar_relation_is_rendered_scalar() {
         .iter()
         .find(|p| p.name == "author")
         .expect("author");
+    // Scalar relations stay `is_collection: true` so the hydration pipeline
+    // accumulates link targets; the renderer uses `is_scalar_relation` to
+    // unwrap the array down to a single value.
     assert!(prop.is_scalar_relation);
-    assert!(!prop.is_collection);
+    assert!(prop.is_collection);
 }
 
 #[test]

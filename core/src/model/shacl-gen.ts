@@ -8,8 +8,6 @@
  */
 import { SHACLShape } from "../shacl/SHACLShape";
 import type { SHACLPropertyShape, ConformanceCondition } from "../shacl/SHACLShape";
-import { escapeQueryString } from "../utils";
-import { compileWhereClause } from "./query-utils";
 import { propertyNameToSetterName } from "./util";
 import type { PropertyMetadataEntry, RelationMetadataEntry, Ad4mModelLike } from "./decorators";
 
@@ -143,6 +141,13 @@ export function buildSHACL(
             propShape.resolveLanguage = propMeta.resolveLanguage;
         }
 
+        // Explicit getter SPARQL — the executor evaluates this when
+        // hydrating the property, in addition to (or instead of)
+        // reading raw links via `propMeta.through`.
+        if (propMeta.getter) {
+            propShape.getter = propMeta.getter;
+        }
+
         // ── Setter actions ──────────────────────────────────────────────
         if (propMeta.prologSetter) {
             console.warn(
@@ -190,11 +195,20 @@ export function buildSHACL(
     for (const relName in allRelationsMeta) {
         const relMeta = allRelationsMeta[relName];
 
-        if (!relMeta.predicate) continue;
+        // Getter-only relations (no `through`) have no real link predicate
+        // but still need a SHACL property entry so the executor can find
+        // the getter expression.  Synthesize a deterministic IRI so the
+        // SHACL graph is well-formed; the predicate is never used to match
+        // links because the getter is the sole source of values.  Use
+        // slash separators so the result is a valid IRI (colons in the
+        // authority confuse strict SPARQL IRI parsers).
+        if (!relMeta.predicate && !relMeta.getter) continue;
+        const synthesizedPath = relMeta.predicate
+            || `ad4m://getter/${subjectName}/${relName}`;
 
         const relShape: SHACLPropertyShape = {
             name: relName,
-            path: relMeta.predicate,
+            path: synthesizedPath,
         };
 
         // Relations typically contain IRIs
@@ -221,53 +235,48 @@ export function buildSHACL(
             relShape.local = relMeta.local;
         }
 
-        // Adder action
-        relShape.adder = [{
-            action: "addLink",
-            source: "this",
-            predicate: relMeta.predicate,
-            target: "value",
-            ...(relMeta.local && { local: true })
-        }];
+        // Adder / Remover actions — only meaningful for relations backed
+        // by a real link predicate.  Getter-only relations are read-only.
+        if (relMeta.predicate) {
+            relShape.adder = [{
+                action: "addLink",
+                source: "this",
+                predicate: relMeta.predicate,
+                target: "value",
+                ...(relMeta.local && { local: true })
+            }];
 
-        // Remover action
-        relShape.remover = [{
-            action: "removeLink",
-            source: "this",
-            predicate: relMeta.predicate,
-            target: "value",
-            ...(relMeta.local && { local: true })
-        }];
+            relShape.remover = [{
+                action: "removeLink",
+                source: "this",
+                predicate: relMeta.predicate,
+                target: "value",
+                ...(relMeta.local && { local: true })
+            }];
+        }
 
         // ── Build Getter (conformance filter) ───────────────────────────
         // Priority chain:
         // 1. Explicit getter string → use verbatim
-        // 2. `where` clause → compile DSL to SPARQL getter
-        // 3. target + filter !== false → auto-derive from shape
+        // 2. target + filter !== false → auto-derive conformance getter
+        //    from the shape.  Where-clause filtering is applied as a
+        //    post-getter pass via `whereFilter` / `wherePredicates`, which
+        //    use `parse_literal_value` and so transparently handle
+        //    `literal:json:` envelopes that simple FILTER(STR(?x) = ...)
+        //    comparisons can't.
         if (relMeta.getter) {
             relShape.getter = relMeta.getter;
-        } else if (relMeta.where) {
-            try {
-                const TargetClass = relMeta.target?.();
-                const targetMetadata = TargetClass
-                    ? (TargetClass as any).getModelMetadata?.() ?? null
-                    : null;
-
-                const conditions = compileWhereClause(
-                    relMeta.where,
-                    targetMetadata,
-                );
-
-                if (conditions.length > 0) {
-                    const escapedPredicate = escapeQueryString(relMeta.predicate);
-                    relShape.getter = `SELECT ?target WHERE { <Base> <${escapedPredicate}> ?target . ${conditions.join(' ')} }`;
-                }
-            } catch (e) {
-                // Target metadata may not be available yet
-            }
-        } else if (relMeta.target && relMeta.filter !== false) {
+        } else if (
+            relMeta.target
+            && relMeta.filter !== false
+            && relMeta.kind !== 'belongsToOne'
+            && relMeta.kind !== 'belongsToMany'
+        ) {
             // Lazy conformance filter: store deferred reference,
-            // resolve on first access via a getter on relShape
+            // resolve on first access via a getter on relShape.
+            // Skipped for reverse relations (belongsTo*) because the
+            // auto-derived getter assumes forward direction; the executor's
+            // `resolve_reverse_relations` already populates these correctly.
             const targetThunk = relMeta.target;
             const predicate = relMeta.predicate;
             let resolved = false;
