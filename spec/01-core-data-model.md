@@ -57,9 +57,12 @@ Expressions are signed as follows:
 ### Verification
 
 To verify an Expression:
-1. Parse `author` as a `did:key` to extract the Ed25519 public key.
-2. Recompute the SHA-256 hash of `data` and `timestamp` as above.
-3. Verify the signature in `proof.signature` (hex-decoded) against the hash using the public key.
+1. Resolve `author` (the agent's DID) to its DID Document.
+2. Locate the verification method whose ID matches `proof.key` and extract its public key. (For `did:key`, the document is derived deterministically from the DID; for other DID methods, resolution may require network lookup or a cached document.)
+3. Recompute the SHA-256 hash of `data` and `timestamp` as above.
+4. Verify the signature in `proof.signature` (hex-decoded) against the hash using the resolved public key.
+
+Using `proof.key` (rather than the `author` DID directly) allows agents to rotate or use multiple verification methods within the same DID Document.
 
 ## 1.3 LinkExpression
 

@@ -349,26 +349,151 @@ SELECT ?todo ?author WHERE {
 
 ## 4.7 Flows
 
-Flows define state machines over Subject Class instances. They specify valid states and transitions, managing link-based state tracking internally.
+Flows define **state machines over Expressions** (any URI — typically a Subject Class instance, but technically any expression URL). A flow specifies (a) which expressions can enter it, (b) the discrete states they can be in, (c) which link operations transition between states, and (d) how the current state is detected from the link graph.
+
+Like Subject Classes, flows are stored as links in the Perspective under the `ad4m://has_flow` predicate, so they propagate with the Perspective's SDNA and are queryable via SPARQL.
+
+### Flow Data Model
+
+A flow is composed of the following pieces (TypeScript types from `@coasys/ad4m`):
 
 ```typescript
-const todoFlow = {
-  name: "TODO",
-  states: { ready: 0, doing: 0.5, done: 1 },
-  stateQuery: (base) => `todo://state`,
-  transitions: [
-    {
-      from: "ready", to: "doing", action: "Start",
-      effects: [
-        { action: "addLink", source: "this", predicate: "todo://state", target: "todo://doing" },
-        { action: "removeLink", source: "this", predicate: "todo://state", target: "todo://ready" }
-      ]
-    }
-  ]
-};
+// Link pattern used to detect that an expression is in a given state.
+// If `source` is omitted, the expression's own URI is used.
+interface LinkPattern {
+  source?: string;
+  predicate: string;
+  target: string;
+}
+
+// Determines which expressions can start the flow.
+// "any" accepts every expression; otherwise the expression must
+// already match the given LinkPattern.
+type FlowableCondition = "any" | LinkPattern;
+
+// A primitive link operation. `action` is one of: "addLink", "removeLink",
+// "setSingleTarget", "collectionSetter". `source` may be the literal string
+// "this" to refer to the expression the flow is operating on.
+interface AD4MAction {
+  action: string;
+  source: string;     // URI or "this"
+  predicate: string;
+  target: string;
+  local?: boolean;    // if true, link is local-only (not shared)
+}
+
+interface FlowState {
+  name: string;            // e.g. "ready", "doing", "done"
+  value: number;           // ordering value (e.g. 0, 0.5, 1)
+  stateCheck: LinkPattern; // expression is in this state iff a matching link exists
+}
+
+interface FlowTransition {
+  actionName: string;      // user-facing label, e.g. "Start", "Finish"
+  fromState: string;       // state name
+  toState: string;         // state name
+  actions: AD4MAction[];   // link operations executed when transitioning
+}
+
+interface Flow {
+  name: string;                       // flow name, e.g. "TODO"
+  namespace: string;                  // URI prefix used for generated URIs
+  flowable: FlowableCondition;        // entry condition
+  startAction: AD4MAction[];          // actions executed when starting the flow
+  states: FlowState[];
+  transitions: FlowTransition[];
+}
 ```
 
-> **Note:** The Flow system is implementation-defined in its specifics. Alternative implementations SHOULD support the `ad4m://has_flow` predicate but MAY defer full flow support.
+### Link Serialization
+
+A flow is stored as a sub-graph of links rooted at a generated **flow URI**: `{namespace}{Name}Flow`. The shape is:
+
+```
+flowUri  rdf://type             ad4m://Flow
+flowUri  ad4m://flowName        literal:string:<JSON-encoded name>
+flowUri  ad4m://flowable        ad4m://any | literal:string:<JSON LinkPattern>
+flowUri  ad4m://startAction     literal:string:<JSON AD4MAction[]>
+
+# For each state:
+flowUri  ad4m://hasState        stateUri
+stateUri rdf://type             ad4m://FlowState
+stateUri ad4m://stateName       literal:string:<name>
+stateUri ad4m://stateValue      literal:number:<value>
+stateUri ad4m://stateCheck      literal:string:<JSON LinkPattern>
+
+# For each transition:
+flowUri       ad4m://hasTransition       transitionUri
+transitionUri rdf://type                 ad4m://FlowTransition
+transitionUri ad4m://actionName          literal:string:<name>
+transitionUri ad4m://fromState           stateUri
+transitionUri ad4m://toState             stateUri
+transitionUri ad4m://transitionActions   literal:string:<JSON AD4MAction[]>
+```
+
+Finally, a registration link `ad4m://self →[ad4m://has_flow]→ flowUri` is added so that the flow shows up in SDNA queries.
+
+### Runtime Operations
+
+Conforming implementations SHOULD expose the following operations on a Perspective for working with flows:
+
+| Operation | Semantics |
+|-----------|-----------|
+| `sdnaFlows()` | List all flow names defined in the Perspective (i.e. names of all `ad4m://has_flow` targets). |
+| `availableFlows(exprUri)` | List flow names whose `flowable` condition matches `exprUri`. `"any"` always matches; a `LinkPattern` matches iff a corresponding link exists. |
+| `startFlow(name, exprUri)` | Run the flow's `startAction` against `exprUri`. Errors if the flow is unknown or has no start action. |
+| `expressionsInFlowState(name, value)` | Return all expressions for which the `stateCheck` of the state with the given numeric `value` matches. |
+| `flowState(name, exprUri)` | Return the numeric `value` of the unique state whose `stateCheck` currently matches `exprUri`. Errors if zero or more than one state matches. |
+| `flowActions(name, exprUri)` | Return the `actionName`s of transitions whose `fromState` matches `exprUri`'s current state. |
+| `runFlowAction(name, exprUri, actionName)` | Execute the `actions` of the named transition against `exprUri`. |
+
+### Example: TODO Flow
+
+```typescript
+const todoFlow = new SHACLFlow("TODO", "todo://");
+
+todoFlow.flowable = "any";
+
+todoFlow.startAction = [
+  { action: "addLink", source: "this", predicate: "todo://state", target: "todo://ready" }
+];
+
+todoFlow.addState({
+  name: "ready", value: 0,
+  stateCheck: { predicate: "todo://state", target: "todo://ready" }
+});
+todoFlow.addState({
+  name: "doing", value: 0.5,
+  stateCheck: { predicate: "todo://state", target: "todo://doing" }
+});
+todoFlow.addState({
+  name: "done", value: 1,
+  stateCheck: { predicate: "todo://state", target: "todo://done" }
+});
+
+todoFlow.addTransition({
+  actionName: "Start", fromState: "ready", toState: "doing",
+  actions: [
+    { action: "removeLink", source: "this", predicate: "todo://state", target: "todo://ready" },
+    { action: "addLink",    source: "this", predicate: "todo://state", target: "todo://doing" }
+  ]
+});
+todoFlow.addTransition({
+  actionName: "Finish", fromState: "doing", toState: "done",
+  actions: [
+    { action: "removeLink", source: "this", predicate: "todo://state", target: "todo://doing" },
+    { action: "addLink",    source: "this", predicate: "todo://state", target: "todo://done" }
+  ]
+});
+
+await perspective.addFlow(todoFlow);
+```
+
+### Conformance
+
+- An implementation that supports flows MUST store them using the link shape described above so that they remain interoperable with other implementations sharing the same Perspective.
+- The `ad4m://has_flow` predicate MUST be recognized as the registration predicate; everything else lives under the flow URI.
+- An implementation MAY defer full flow execution support; in that case it MUST still preserve `has_flow` links during sync so other clients can drive the flows.
 
 ## 4.8 SDNA in Neighbourhoods
 

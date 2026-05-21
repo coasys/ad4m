@@ -2,15 +2,25 @@
 
 ## 2.1 Identity
 
-Every AD4M agent is identified by a [W3C DID](https://www.w3.org/TR/did-core/) using the `did:key` method ([did:key spec](https://w3c-ccg.github.io/did-method-key/)).
+Every AD4M agent is identified by a [W3C DID](https://www.w3.org/TR/did-core/).
 
-The reference implementation uses **Ed25519** key pairs exclusively:
+The reference implementation currently uses the `did:key` method ([did:key spec](https://w3c-ccg.github.io/did-method-key/)) with **Ed25519** key pairs:
 
 ```
 did:key:z6Mk...
 ```
 
-An agent's DID is derived deterministically from their Ed25519 public key. The DID Document is generated from the `did:key` method and contains a single verification method.
+For `did:key`, an agent's DID is derived deterministically from their Ed25519 public key, and the DID Document is generated from the DID itself and contains a single verification method.
+
+### Other DID Methods
+
+The protocol is not intentionally restricted to `did:key`. Implementations MAY support additional DID methods (e.g. `did:web`, `did:pkh`, `did:ion`), in which case:
+
+- DID resolution MUST yield a DID Document containing the verification method referenced by `proof.key` (see [§1.2 Verification](./01-core-data-model.md#verification)).
+- The agent's private key MUST be imported into the Wallet (the executor does not generate keys for non-`did:key` methods, since the DID is bound to externally-managed keys).
+- Signature verification follows the algorithm declared by the verification method in the DID Document.
+
+`did:key` remains the baseline that all conforming implementations MUST support; other methods are optional for interoperability.
 
 ## 2.2 Key Management (Wallet)
 

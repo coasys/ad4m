@@ -1,6 +1,6 @@
-# 10. Ad4mModel — Application Data Model API
+# 9. Ad4mModel — Application Data Model API
 
-## 10.1 Overview
+## 9.1 Overview
 
 Ad4mModel is the **primary developer-facing API** for building applications on AD4M. It provides a decorator-based, ORM-like abstraction over the link graph, SHACL shapes, and SPARQL queries.
 
@@ -8,7 +8,7 @@ Application developers SHOULD use Ad4mModel for all data operations. Developers 
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
 
-## 10.2 Model Declaration
+## 9.2 Model Declaration
 
 A model class declares a Subject Class using decorators that generate SHACL shapes (see §4).
 
@@ -159,7 +159,7 @@ Alias for `@HasMany`:
 blocks: string[] = [];
 ```
 
-## 10.3 Decorator Metadata Registry
+## 9.3 Decorator Metadata Registry
 
 Decorator metadata is stored using **WeakMaps** keyed by class constructor. This avoids issues with inheritance chains sharing mutable state.
 
@@ -186,7 +186,7 @@ When a relation has a known `target` model class, `buildConformanceFilter()` ins
 
 These conditions are compiled into a SPARQL `SELECT` query used as a getter for the relation, ensuring only conformant linked nodes are returned.
 
-## 10.4 Complete Example
+## 9.4 Complete Example
 
 ```typescript
 @Model({ name: "Space" })
@@ -228,7 +228,7 @@ class Block extends Ad4mModel {
 }
 ```
 
-## 10.5 Model Lifecycle
+## 9.5 Model Lifecycle
 
 ### Registration
 
@@ -306,7 +306,7 @@ await Message.remove(perspective, instanceId);
 
 Executes SHACL destructor actions, removing all links associated with the instance including incoming links from other instances.
 
-## 10.6 Querying
+## 9.6 Querying
 
 ### Static Query Methods
 
@@ -469,7 +469,7 @@ const paginatedSub = Message.query(perspective)
   });
 ```
 
-## 10.7 Query Engine — Rust-Side SPARQL
+## 9.7 Query Engine — Rust-Side SPARQL
 
 Ad4mModel queries execute **server-side in Rust**. The SDK is a thin WebSocket client that sends query parameters via the `perspective.modelQuery` RPC operation and receives hydrated JSON instances.
 
@@ -589,7 +589,7 @@ The `<Base>` placeholder is replaced with each instance's base expression URI, a
 
 `validate_readonly_query()` ensures user-supplied SPARQL queries are read-only by parsing with Oxigraph's SPARQL parser. Only `SELECT`, `ASK`, `CONSTRUCT`, and `DESCRIBE` are accepted; `INSERT`, `DELETE`, `DROP`, etc. are rejected.
 
-## 10.8 Transactions
+## 9.8 Transactions
 
 `Model.transaction()` provides atomic batch operations:
 
@@ -603,7 +603,7 @@ await Model.transaction(perspective, async (tx) => {
 
 All link mutations within the transaction are batched and committed as a single `PerspectiveDiff`.
 
-## 10.9 SHACL Shape Generation
+## 9.9 SHACL Shape Generation
 
 Ad4mModel decorators automatically generate SHACL shapes. The generation process uses `buildSHACL()` from the decorator metadata:
 
@@ -616,7 +616,7 @@ Ad4mModel decorators automatically generate SHACL shapes. The generation process
 
 The SHACL shapes are stored as SDNA links as specified in §4.2. Implementations MUST generate conformant SHACL shapes from decorator metadata. Shapes MUST be interoperable — a model registered by one implementation MUST be readable by another.
 
-## 10.10 JSON Schema Integration
+## 9.10 JSON Schema Integration
 
 Models MAY be created dynamically from JSON Schema definitions:
 
@@ -651,7 +651,7 @@ The `x-ad4m` extension in JSON Schema properties maps to Ad4mModel decorator opt
 | `x-ad4m.resolveLanguage` | `resolveLanguage` |
 | `x-ad4m.initial` | `initial` value |
 
-## 10.11 Implementation Requirements
+## 9.11 Implementation Requirements
 
 | Feature | Priority | Notes |
 |---------|----------|-------|
@@ -674,7 +674,7 @@ The `x-ad4m` extension in JSON Schema properties maps to Ad4mModel decorator opt
 
 Client-side Ad4mModel implementations (TypeScript/JavaScript) are the primary target. Server-side executors MUST support SPARQL queries over the link graph and SHOULD implement the `perspective.modelQuery` RPC operation to enable efficient server-side query execution.
 
-## 10.12 PerspectiveProxy Introspection APIs
+## 9.12 PerspectiveProxy Introspection APIs
 
 The PerspectiveProxy provides introspection methods for working with registered models and their SHACL shapes at runtime:
 

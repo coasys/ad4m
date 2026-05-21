@@ -139,7 +139,7 @@ The three perspective capabilities are genuinely orthogonal:
 
 | Language Pattern | Exports |
 |------------------|---------|
-| Full-sync Neighbourhood (p-diff-sync) | `commit` + `query` + `sync` + `peers` |
+| Full-sync Neighbourhood | `commit` + `query` + `sync` + `peers` |
 | DM inbox (sender view) | `commit` |
 | DM inbox (owner view) | `commit` + `query` + `sync` + `peers` |
 | Read-only DHT-backed knowledge graph | `query` |
@@ -515,7 +515,7 @@ interface LanguageMeta {
 
 ### Language Templating
 
-Languages can be **templated** — a base Language is instantiated with parameters to create a new Language. This is how link Languages are created for new Neighbourhoods: the p-diff-sync template is instantiated with a new Holochain DNA, producing a unique Language for that Neighbourhood.
+Languages can be **templated** — a base Language is instantiated with parameters to create a new Language. This is how Link Languages are typically created for new Neighbourhoods: a Link Language template is instantiated with backend-specific parameters (e.g. a new Holochain DNA hash, or a server URL), producing a unique Language for that Neighbourhood.
 
 ## 3.15 Other Capabilities
 

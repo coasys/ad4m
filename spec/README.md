@@ -16,12 +16,11 @@ AD4M has been demonstrated as a protocol (not just an implementation) through th
 2. **[Agent Model](./02-agent-model.md)** — DID-based identity, key management, capability tokens, social conventions
 3. **[Language Interface](./03-language-interface.md)** — Flat export model, capability discovery, ALDK, WIT definition, `ad4m:host` module
 4. **[Social DNA (SDNA)](./04-social-dna.md)** — Subject classes, flows, collections, and SHACL-based schemas
-5. **[P-Diff-Sync Protocol](./05-p-diff-sync.md)** — Neighbourhood synchronization via Holochain
-6. **[WebSocket RPC API](./06-websocket-rpc-api.md)** — Executor WebSocket RPC and events interface for clients
-7. **[Bootstrap & System Languages](./07-bootstrap-languages.md)** — System bootstrap and core language types
-8. **[Interoperability Requirements](./08-interoperability.md)** — MUST/SHOULD requirements for alternative implementations
-9. **[Versioning & Compatibility](./09-versioning.md)** — Protocol versioning strategy
-10. **[Ad4mModel](./10-ad4m-model.md)** — Application data model API (decorator-based ORM over links, SHACL, and SPARQL)
+5. **[WebSocket RPC API](./05-websocket-rpc-api.md)** — Executor WebSocket RPC and events interface for clients
+6. **[Bootstrap & System Languages](./06-bootstrap-languages.md)** — System bootstrap and core language types
+7. **[Interoperability Requirements](./07-interoperability.md)** — MUST/SHOULD requirements for alternative implementations
+8. **[Versioning & Compatibility](./08-versioning.md)** — Protocol versioning strategy
+9. **[Ad4mModel](./09-ad4m-model.md)** — Application data model API (decorator-based ORM over links, SHACL, and SPARQL)
 
 ## Companion Documents
 

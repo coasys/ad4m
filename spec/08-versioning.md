@@ -1,6 +1,6 @@
-# 9. Versioning & Compatibility
+# 8. Versioning & Compatibility
 
-## 9.1 Protocol Versioning
+## 8.1 Protocol Versioning
 
 The AD4M protocol uses **semantic versioning** (SemVer):
 
@@ -14,7 +14,7 @@ MAJOR.MINOR.PATCH
 
 **Current version:** 1.0.0 (Draft)
 
-## 9.2 Compatibility Principles
+## 8.2 Compatibility Principles
 
 ### Wire Format Stability
 
@@ -41,7 +41,7 @@ MAJOR.MINOR.PATCH
 6. Languages that target a specific WIT world (`ad4m-language`, `ad4m-language-holochain`, etc.) declare their extension requirements; runtimes that don't support a required extension refuse to load the Language.
 7. The `create(context)` factory and adapter-class model MUST NOT be used for Language loading.
 
-## 9.3 Compatibility Matrix
+## 8.3 Compatibility Matrix
 
 | Component | Version Coupling | Notes |
 |-----------|-----------------|-------|
@@ -50,11 +50,10 @@ MAJOR.MINOR.PATCH
 | WebSocket RPC API | MINOR | New operations don't break existing clients |
 | SDNA SHACL shapes | MINOR | New shapes are additive |
 | Language interface (WIT) | MINOR | New capabilities are optional exports |
-| P-Diff-Sync DNA | Implementation-defined | DNA changes require new Neighbourhoods |
 | Bootstrap Languages | Implementation-defined | Can be swapped for alternatives |
 | SPARQL store schema | Implementation-defined | Reifier model is stable; query functions may evolve |
 
-## 9.4 Migration Strategy
+## 8.4 Migration Strategy
 
 ### Neighbourhood Migration
 
@@ -70,7 +69,7 @@ If the DID method or signing scheme changes:
 2. Entanglement proofs can link identities across schemes
 3. Existing expressions remain verifiable as long as the verification code for their signing scheme is available
 
-## 9.5 Implementation Version Reporting
+## 8.5 Implementation Version Reporting
 
 Implementations MUST report their version via the `runtime.info` RPC operation:
 
@@ -84,7 +83,7 @@ interface RuntimeInfo {
 
 > **TBD:** A protocol version field should be added to `RuntimeInfo` to distinguish protocol version from implementation version. This is recommended for future versions of this specification.
 
-## 9.6 Feature Detection
+## 8.6 Feature Detection
 
 Since not all implementations support all features, clients SHOULD use feature detection:
 

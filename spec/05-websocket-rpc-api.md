@@ -1,6 +1,6 @@
-# 6. WebSocket RPC API
+# 5. WebSocket RPC API
 
-## 6.1 Overview
+## 5.1 Overview
 
 The AD4M executor exposes a **WebSocket RPC** API via Axum. This is the sole client interface for all SDK operations and real-time event delivery.
 
@@ -24,7 +24,7 @@ The token is either:
 
 All subsequent messages on the authenticated connection share that auth context. No per-message authentication is required.
 
-## 6.2 RPC Protocol
+## 5.2 RPC Protocol
 
 ### Request Format
 
@@ -81,7 +81,7 @@ Application-level ping/pong messages maintain connection health:
 
 This is in addition to WebSocket-level ping/pong frames.
 
-## 6.3 RPC Operations
+## 5.3 RPC Operations
 
 All operations are grouped by domain. The `type` field in requests uses the format `<domain>.<operation>`.
 
@@ -403,7 +403,7 @@ Handler: `users_ws.rs`
 | `user.emailTest` | Test email |
 | `user.requestVerification` | Request verification |
 
-## 6.4 Events Protocol
+## 5.4 Events Protocol
 
 Events are delivered as server-push messages on the RPC connection (`/api/v1/ws`) interleaved with RPC responses. A dedicated events-only endpoint is also available for clients that need event delivery without RPC:
 
@@ -484,7 +484,7 @@ Server → Client event messages:
 }
 ```
 
-## 6.5 HTTP Endpoints
+## 5.5 HTTP Endpoints
 
 Two HTTP endpoints remain for specific use cases where WebSocket is not appropriate:
 
@@ -508,7 +508,7 @@ Binary audio upload for real-time transcription. Constraints:
 - Maximum 10 MB buffer per stream
 - Requires authentication via `Authorization` header
 
-## 6.6 Core Types
+## 5.6 Core Types
 
 The following TypeScript type definitions describe the core data structures used across RPC operations and events:
 
