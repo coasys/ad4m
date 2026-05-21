@@ -18,7 +18,7 @@ The reference executor also exposes `GET /health` as a liveness probe (200 OK wh
 
 Authentication is performed once at WebSocket upgrade via a query parameter:
 
-```
+```text
 GET /api/v1/ws?token=<jwt>
 ```
 
@@ -152,7 +152,7 @@ The SHACL JSON wire format (§5.1) is the only data structure on the wire that d
 
 The two URL forms an executor MUST parse and produce:
 
-```
+```text
 <language_address>://<expression_address>     # general
 literal:<type>:<percent-encoded-value>         # inline literal (no //)
 did:<method>:<id>                              # DID (no ://)

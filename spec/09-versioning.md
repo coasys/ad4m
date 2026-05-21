@@ -13,7 +13,7 @@ There are two version numbers that matter, and they are distinct:
 
 A client SHOULD inspect `ad4mProtocolVersion` for compatibility negotiation. `ad4mExecutorVersion` is informational (useful for support and bug reports).
 
-> **Implementation Note.** The reference implementation currently returns only `ad4mExecutorVersion` from `runtime.info`. Adding `ad4mProtocolVersion` to the wire is a pre-1.0 work item. Until it is added, clients SHOULD assume the protocol version equals the lowest version that contains every operation they observe responding successfully.
+> **Implementation Note.** As of this writing, the reference implementation returns only `ad4mExecutorVersion` from `runtime.info`. Adding `ad4mProtocolVersion` to the wire is required for full conformance to this spec at version 1.0.0 and is tracked as an open item against the reference implementation. Until it is wired, clients SHOULD assume the protocol version equals the lowest version that contains every operation they observe responding successfully.
 
 ## 9.2 SemVer
 

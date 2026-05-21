@@ -2,7 +2,7 @@
 
 **Social DNA (SDNA)** is the schema layer of AD4M. It defines typed entities — Subject Classes — over the link graph using [W3C SHACL](https://www.w3.org/TR/shacl/), and exposes a [SPARQL 1.1](https://www.w3.org/TR/sparql11-query/) query surface for retrieving them.
 
-SDNA is the *wire-level interoperability layer* between AD4M applications: two apps that agree on SHACL shapes can read and write each other's data even though they were written in different languages, framework versions, or against different executors. SDNA is therefore on the critical path for cross-implementation conformance — see [§7.2.8 in the original interop tally, now](./11-conformance.md).
+SDNA is the *wire-level interoperability layer* between AD4M applications: two apps that agree on SHACL shapes can read and write each other's data even though they were written in different languages, framework versions, or against different executors. SDNA is therefore on the critical path for cross-implementation conformance — see the SDNA entries (M-SDNA-*) in [§11 Conformance](./11-conformance.md).
 
 This section specifies (a) the SHACL JSON wire format, (b) how SHACL shapes are encoded as links inside a Perspective, (c) the SPARQL semantics over the reifier storage model, and (d) the AD4M custom SPARQL functions.
 
@@ -88,7 +88,7 @@ Plus a body link carrying the stringified SHACL JSON for the entry:
 
 For a Subject Class named `Foo` with `target_class = "foo://Foo"`, the SHACL parser writes the following triples (in addition to the registration link above):
 
-```
+```text
 <foo://Foo>     rdf://type            <ad4m://SubjectClass>
 <foo://Foo>     ad4m://shape          <shacl://Foo>
 <shacl://Foo>   rdf://type            <sh://NodeShape>
@@ -101,7 +101,7 @@ For a Subject Class named `Foo` with `target_class = "foo://Foo"`, the SHACL par
 
 For each property `prop` of the NodeShape, the parser writes a property-shape sub-graph rooted at `<shape_uri>.<prop_name>`:
 
-```
+```text
 <shacl://Foo>           sh://property      <shacl://Foo.bar>
 <shacl://Foo.bar>       rdf://type         <sh://PropertyShape>   # or <ad4m://CollectionShape>
 <shacl://Foo.bar>       sh://path          <foo://has_bar>
@@ -149,7 +149,7 @@ All query operations MUST reject update-style SPARQL forms (`INSERT`, `DELETE`, 
 
 A conforming engine SHOULD pre-register the following prefixes so common queries need no `PREFIX` clauses:
 
-```
+```sparql
 PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
 PREFIX sh:   <http://www.w3.org/ns/shacl#>
@@ -192,7 +192,7 @@ This procedure is what enables MCP servers, foreign-language clients, and toolin
 
 Flows define state machines over Subject Class instances. They are stored under the `ad4m://has_flow` registration predicate using a sub-graph analogous to NodeShapes:
 
-```
+```text
 <flowUri> rdf://type        <ad4m://Flow>
 <flowUri> ad4m://flowName   literal:string:<Name>
 <flowUri> ad4m://flowable   ad4m://any  | literal:string:<LinkPattern JSON>
@@ -203,7 +203,7 @@ Flows define state machines over Subject Class instances. They are stored under 
 
 Per-state sub-graph:
 
-```
+```text
 <stateUri> rdf://type         <ad4m://FlowState>
 <stateUri> ad4m://stateName   literal:string:<name>
 <stateUri> ad4m://stateValue  literal:number:<value>
@@ -212,7 +212,7 @@ Per-state sub-graph:
 
 Per-transition sub-graph:
 
-```
+```text
 <transitionUri> rdf://type                <ad4m://FlowTransition>
 <transitionUri> ad4m://actionName         literal:string:<name>
 <transitionUri> ad4m://fromState          <stateUri>

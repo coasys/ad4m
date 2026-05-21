@@ -8,7 +8,7 @@ Every AD4M agent is identified by a single W3C **Decentralized Identifier (DID)*
 
 A conforming executor MUST support the **`did:key` method** ([did:key spec](https://w3c-ccg.github.io/did-method-key/)) with **Ed25519** key pairs as the baseline. A `did:key` DID has the form:
 
-```
+```text
 did:key:z6Mk...
 ```
 
@@ -47,7 +47,7 @@ Apps never see the wallet directly. They obtain authority via capability tokens 
 
 A signed `Expression<T>` is constructed as follows.
 
-```
+```text
 1. Serialize `data` to JSON bytes:  json_bytes = serialize_json(data)
 2. Format the timestamp as RFC 3339 UTC with millisecond precision:
        timestamp_str = "YYYY-MM-DDTHH:MM:SS.mmmZ"
@@ -93,7 +93,7 @@ For `LinkExpression`, the optional `status` field (`"shared" | "local"`) MUST NO
 
 To verify an `Expression<T>`:
 
-```
+```text
 1. Resolve `author` to its DID Document.
    - For did:key, derive deterministically from the DID.
    - For other methods, use the appropriate resolver.

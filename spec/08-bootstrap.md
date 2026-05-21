@@ -87,7 +87,7 @@ A conforming executor MUST be able to consume this exact format. Implementations
 
 The sequence of operations the executor MUST perform at startup:
 
-```
+```text
 1. Read the bootstrap seed.
 2. Load (or generate) the agent's wallet.
 3. Initialize any backing storage (databases, DHT runtimes).
@@ -111,7 +111,7 @@ Steps 1–4 are pre-conditions for the runtime to do anything useful and MUST co
 
 Every Language address an executor installs — at bootstrap, on Neighbourhood join, or via direct user action — MUST be verified against the trusted-agents set:
 
-```
+```text
 1. Check the local cache for the Language bundle.
 2. If not cached, fetch the signed Expression<LanguageSource> from the
    Language Language by address.

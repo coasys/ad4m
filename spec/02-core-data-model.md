@@ -31,9 +31,9 @@ If a `predicate` is supplied and non-empty, it MUST also be a valid URI by the s
 
 ### 2.1.2 Predicate normalization
 
-An empty-string predicate (`""`) MUST be normalized to `null` (or the host language's equivalent absent value) before storage, signing, hashing, and over-the-wire serialization. Implementations MUST accept either `null` or `""` on input and produce one of them — never both shapes — on output.
+An empty-string predicate (`""`) MUST be normalized to `null` (or the host language's equivalent absent value) before storage, signing, hashing, and over-the-wire serialization. Implementations MUST accept either `null` or `""` on input and MUST emit `null` on output — `null` is the canonical form everywhere downstream.
 
-This matters because empty-string and absent predicates would otherwise hash differently in the reifier model (§2.10).
+This matters because empty-string and absent predicates would otherwise hash differently in the reifier model (§2.10), and split the canonical form would break signature verification across implementations.
 
 ### 2.1.3 IRI compatibility
 
@@ -181,7 +181,7 @@ The `perspective` field carries application-defined profile properties (name, av
 
 An **Expression URL** addresses a specific Expression resolvable through a specific Language:
 
-```
+```text
 <language_address>://<expression_address>
 ```
 
@@ -205,7 +205,7 @@ For all other schemes, the part before `://` is treated as an opaque Language ad
 
 The `literal:` scheme encodes inline data without a backing Language.
 
-```
+```text
 literal:<type>:<rfc3986-percent-encoded-value>
 ```
 
@@ -265,13 +265,13 @@ Reference: [`rust-executor/src/perspectives/sparql_store.rs`](../rust-executor/s
 
 ### 2.10.1 Reifier IRI
 
-```
+```text
 link:<first 32 hex chars of SHA256(author || source || predicate || target || timestamp)>
 ```
 
 Concretely:
 
-```
+```text
 hash_input  = utf8(author)
             || utf8(source)
             || utf8(predicate or "")

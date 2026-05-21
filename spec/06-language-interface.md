@@ -15,7 +15,7 @@ The export surface *is* the interface. A capability is *detected* by introspecti
 
 ## 6.2 The two directions
 
-```
+```text
 RUNTIME → LANGUAGE      The executor calls a function the Language exports.
                         Used for: capability calls (perspectiveCommit,
                         expressionCreate, perspectiveQueryRun, …),

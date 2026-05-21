@@ -4,22 +4,22 @@ This appendix walks an end-to-end scenario across §§ 2–8 so a reader can see
 
 This is illustrative rather than normative — every step is implemented by RPCs documented in [Appendix A](./appendix-a-rpc-reference.md) and behaviours specified in §§ 2–8.
 
-## C.1 Setup
+## B.1 Setup
 
 Both Alice and Bob have just installed a conforming executor. Each runs locally on `ws://localhost:12000`.
 
-```
+```text
 Alice's executor                          Bob's executor
    wallet locked                              wallet locked
    admin credential off                       admin credential off
    RPC server running                         RPC server running
 ```
 
-## C.2 Alice generates an identity
+## B.2 Alice generates an identity
 
 Alice opens a setup UI that holds the admin credential (so it can talk to the executor before any app token exists).
 
-```
+```text
 → ws://localhost:12000/api/v1/ws?token=<admin-credential>
 
 → { "id": "1", "type": "agent.generate",
@@ -45,11 +45,11 @@ The executor:
   "isUnlocked": true }
 ```
 
-## C.3 Alice grants an app a capability token
+## B.3 Alice grants an app a capability token
 
 Alice runs a chat app that wants to read/write the `perspective` and `agent` domains. The app calls the consent flow (§4.8):
 
-```
+```text
 → { "id": "2", "type": "agent.requestCapability",
     "params": { "authInfo": {
       "appName": "Chat",
@@ -67,7 +67,7 @@ Alice runs a chat app that wants to read/write the `perspective` and `agent` dom
 
 Alice approves in the executor's UI (`agent.permitCapability(abc-123)`). The app then collects the token:
 
-```
+```text
 → { "id": "3", "type": "agent.generateJwt",
     "params": { "requestId": "abc-123", "rand": "...", ... } }
 
@@ -99,11 +99,11 @@ The JWT carries (decoded for illustration):
 
 The Chat app now opens its own WebSocket — `ws://localhost:12000/api/v1/ws?token=<JWT>` — and does everything else under this token. The admin-credential connection is no longer needed.
 
-## C.4 Alice publishes a Neighbourhood
+## B.4 Alice publishes a Neighbourhood
 
 The Chat app picks one of the executor's `knownLinkLanguages` to use as the Link Language for the new Neighbourhood. It first templates a per-Neighbourhood instance:
 
-```
+```text
 → { "id": "4", "type": "language.applyTemplate",
     "params": { "sourceAddress": "Qm...link-language-template-address",
                 "templateData": "{\"name\":\"AliceBobChat\"}" } }
@@ -115,7 +115,7 @@ The executor fetched the template, ran its parameter substitution, then went thr
 
 Now create a Perspective backed by this Link Language and publish it as a Neighbourhood:
 
-```
+```text
 → { "id": "5", "type": "perspective.create",
     "params": { "name": "AliceBobChat" } }
 
@@ -132,11 +132,11 @@ Now create a Perspective backed by this Link Language and publish it as a Neighb
 
 Alice sends Bob the URL `neighbourhood://Qm...nh-address` out-of-band.
 
-## C.5 Bob joins
+## B.5 Bob joins
 
 Bob's executor is already initialized. The Chat app on Bob's side has its own token (same consent flow). Bob calls:
 
-```
+```text
 → { "id": "7", "type": "neighbourhood.join",
     "params": { "url": "neighbourhood://Qm...nh-address" } }
 ```
@@ -149,19 +149,19 @@ Bob's executor:
 4. Created a new local PerspectiveHandle backed by the Link Language.
 5. Began syncing.
 
-```
+```text
 ← { "id": "7", "result": { "uuid": "p-bob-1",
                             "state": "LinkLanguageInstalledButNotSynced" } }
 ```
 
 After sync completes, Bob receives an event:
 
-```
+```text
 { "type": "sync-state-change",
   "data": { "perspectiveUuid": "p-bob-1", "state": "Synced" } }
 ```
 
-## C.6 Alice registers a Subject Class
+## B.6 Alice registers a Subject Class
 
 Both apps need to agree on what a "Message" is. Alice writes a SHACL shape (in the JSON form of §5.1):
 
@@ -184,7 +184,7 @@ Both apps need to agree on what a "Message" is. Alice writes a SHACL shape (in t
 
 Alice's app sends this once:
 
-```
+```text
 → { "id": "8", "type": "perspective.addSubjectClass",
     "params": { "uuid": "p-1", "name": "Message",
                 "shaclJson": "<the JSON above, stringified>" } }
@@ -192,9 +192,9 @@ Alice's app sends this once:
 
 The executor encodes the shape as the link sub-graph in §5.2 — `ad4m://has_subject_class → literal:string:Message`, plus the `sh://NodeShape`, `sh://property`, etc. links. Because `p-1` is the local handle for the shared `AliceBobChat` Neighbourhood, these SHACL links get sync'd to Bob's executor by the Link Language. Bob does not need to register the same Subject Class — it appears on his side automatically.
 
-## C.7 Alice posts a message
+## B.7 Alice posts a message
 
-```
+```text
 → { "id": "9", "type": "perspective.createSubject",
     "params": { "uuid": "p-1", "className": "Message",
                 "baseExpression": "chat://msg-001" } }
@@ -218,11 +218,11 @@ For each `addLink`, the executor:
 - Projected it into the SPARQL store as 8 quads (§2.10).
 - Sent it through the Link Language's `perspectiveCommit` (§6.5) so Bob's executor will pull it.
 
-## C.8 Bob queries the messages
+## B.8 Bob queries the messages
 
 Bob's executor has received the synced links. Bob's app runs a SPARQL query:
 
-```
+```text
 → { "id": "12", "type": "perspective.querySparql",
     "params": { "uuid": "p-bob-1",
                 "query": "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -251,11 +251,11 @@ This query exercises:
 - The custom `<ad4m://fn/parse_literal>` SPARQL function (§5.4.4) to decode `literal:string:...` URIs into native SPARQL strings.
 - Cross-implementation parity: since reifier IRIs are computed identically (§2.10.1), Bob's executor sees the same `?r` IRI Alice's executor saw when it created the link.
 
-## C.9 Bob verifies signatures (optional)
+## B.9 Bob verifies signatures (optional)
 
 If Bob wants to independently verify Alice signed the message body link:
 
-```
+```text
 → { "id": "13", "type": "runtime.verifySignature",
     "params": { "did":              "did:key:z6MkAlice...",
                 "didSigningKeyId":  "did:key:z6MkAlice...#z6MkAlice...",
@@ -267,7 +267,7 @@ If Bob wants to independently verify Alice signed the message body link:
 
 Or Bob's app can just trust the `proofValid` metadata on the reifier — the executor already ran verification at receive time (§3.4) and exposes the result as `<ad4m://ontology/proofValid>`.
 
-## C.10 What this example does NOT show
+## B.10 What this example does NOT show
 
 - **Telepresence** — Bob and Alice's online-status broadcast, signal handling, presence subscriptions. Requires a Link Language exporting the `telepresence` capability (§6.5).
 - **Templating with private parameters** — for templates that bake secrets (e.g. DM inboxes), the consent flow on the recipient side.
