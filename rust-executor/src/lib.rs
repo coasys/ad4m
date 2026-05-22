@@ -415,7 +415,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         use std::sync::Once;
         static V8_FLAGS_INIT: Once = Once::new();
         V8_FLAGS_INIT.call_once(|| {
-            deno_core::v8::V8::set_flags_from_string("--no-opt --no-sparkplug --no-maglev");
+            deno_core::v8::V8::set_flags_from_string("--max-opt=0");
             deno_core::JsRuntime::init_platform(None, false);
         });
     }
