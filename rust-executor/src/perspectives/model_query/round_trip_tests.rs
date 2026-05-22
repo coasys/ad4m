@@ -344,7 +344,9 @@ fn round_trip_target_class_name_falls_back_to_sh_class_suffix() {
         .find(|r| r.name == "author")
         .expect("author relation");
     // Without an explicit target_class_name link the loader falls back to
-    // extracting the local-name from the sh:class URI, mirroring the
-    // TypeScript writer's behaviour.
-    assert_eq!(rel.target_class_name, "UserShape");
+    // extracting the local-name from the sh:class URI.  A trailing `Shape`
+    // suffix is normalised away so the cache/resolver lookup uses the bare
+    // class name (`User`), matching the keys the writer emits.
+    assert_eq!(rel.target_class_name, "User");
+    assert_eq!(rel.target_class_uri, "ns://UserShape");
 }

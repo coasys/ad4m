@@ -165,11 +165,22 @@ fn shape_to_shacl_class(class_name: &str, shape: &ModelShape) -> ShaclClass {
                 None
             };
             let min_count = if p.is_required { Some(1u32) } else { None };
+            // `ShaclProperty.class` is the typed-relation node-shape URI
+            // (e.g. `ns://UserShape`).  Prefer the original `sh:class` IRI
+            // captured during SHACL parsing so MCP consumers receive the
+            // full URI, falling back to the bare class name only when the
+            // writer did not emit a `sh:class` for the relation.
             let class_uri = shape
                 .include_relations
                 .iter()
                 .find(|r| r.name == p.name)
-                .map(|r| r.target_class_name.clone())
+                .map(|r| {
+                    if !r.target_class_uri.is_empty() {
+                        r.target_class_uri.clone()
+                    } else {
+                        r.target_class_name.clone()
+                    }
+                })
                 .filter(|s| !s.is_empty());
             ShaclProperty {
                 name: p.name.clone(),

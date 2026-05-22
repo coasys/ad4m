@@ -316,6 +316,11 @@ pub struct ShapeRelation {
     pub(crate) kind: String,      // "hasMany", "hasOne", "belongsToOne", "belongsToMany"
     pub(crate) max_count: Option<usize>,
     pub(crate) target_class_name: String,
+    /// Original `sh:class` URI as emitted by the SHACL writer.  Preserved
+    /// alongside `target_class_name` so the MCP layer (which exposes the
+    /// node-shape URI to clients) can return the full IRI rather than the
+    /// bare class name.  Empty when no `sh:class` was set on the property.
+    pub(crate) target_class_uri: String,
 }
 
 /// Complete shape of a model class — the set of all properties, relations,

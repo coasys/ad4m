@@ -44,7 +44,11 @@ pub fn evaluate_getters_batch(
         return Ok(Value::Object(Map::new()));
     }
 
-    let getter_props: Vec<&ShapeProperty> = shape
+    // Project the shape down to the properties actually requested by the
+    // caller.  Without this, `evaluate_getters` would run every getter on
+    // the model — defeating the targeted-batch contract and re-issuing
+    // expensive SPARQL queries for properties the client did not ask for.
+    let filtered_props: Vec<ShapeProperty> = shape
         .properties
         .iter()
         .filter(|p| {
@@ -53,11 +57,21 @@ pub fn evaluate_getters_batch(
                     .map(|names| names.iter().any(|n| n == &p.name))
                     .unwrap_or(true)
         })
+        .cloned()
         .collect();
 
-    if getter_props.is_empty() {
+    if filtered_props.is_empty() {
         return Ok(Value::Object(Map::new()));
     }
+
+    let prop_names: Vec<String> = filtered_props.iter().map(|p| p.name.clone()).collect();
+
+    let filtered_shape = ModelShape {
+        target_class: shape.target_class.clone(),
+        shape_uri: shape.shape_uri.clone(),
+        properties: filtered_props,
+        include_relations: shape.include_relations.clone(),
+    };
 
     let mut instances: Vec<Value> = instance_ids
         .iter()
@@ -68,16 +82,16 @@ pub fn evaluate_getters_batch(
         })
         .collect();
 
-    evaluate_getters(store, &mut instances, shape, None, true)?;
+    evaluate_getters(store, &mut instances, &filtered_shape, None, true)?;
 
     let mut result = Map::new();
     for inst in &instances {
         if let Some(id) = inst.get("id").and_then(|v| v.as_str()) {
             let mut props = Map::new();
-            for prop in &getter_props {
-                if let Some(val) = inst.get(&prop.name) {
+            for name in &prop_names {
+                if let Some(val) = inst.get(name) {
                     if val != &Value::Null {
-                        props.insert(prop.name.clone(), val.clone());
+                        props.insert(name.clone(), val.clone());
                     }
                 }
             }

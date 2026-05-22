@@ -213,27 +213,45 @@ pub(super) fn build_projection_where_patterns(
     // Resolve the target class's shape through the perspective cache so we
     // can translate property names in the projection's where-clause into the
     // predicate IRIs they map to in the store.
-    let pred_lookup: HashMap<String, String> = if let Some(ref target_name) = proj.target_class_name
-    {
-        if let Ok(target_shape) = resolver.get_shape(target_name) {
-            let mut map = HashMap::new();
-            for p in &target_shape.properties {
-                if !p.predicate.is_empty() {
-                    map.insert(p.name.clone(), p.predicate.clone());
+    let (pred_lookup, resolution_failed) = if let Some(ref target_name) = proj.target_class_name {
+        match resolver.get_shape(target_name) {
+            Ok(target_shape) => {
+                let mut map = HashMap::new();
+                for p in &target_shape.properties {
+                    if !p.predicate.is_empty() {
+                        map.insert(p.name.clone(), p.predicate.clone());
+                    }
                 }
-            }
-            for r in &target_shape.include_relations {
-                if !r.predicate.is_empty() {
-                    map.insert(r.name.clone(), r.predicate.clone());
+                for r in &target_shape.include_relations {
+                    if !r.predicate.is_empty() {
+                        map.insert(r.name.clone(), r.predicate.clone());
+                    }
                 }
+                (map, false)
             }
-            map
-        } else {
-            HashMap::new()
+            Err(e) => {
+                log::warn!(
+                    "Projection where-clause resolution failed for target '{target_name}': {e}"
+                );
+                (HashMap::<String, String>::new(), true)
+            }
         }
     } else {
-        HashMap::new()
+        (HashMap::<String, String>::new(), false)
     };
+
+    // Fail closed when the projection has non-system property filters but
+    // the target shape could not be resolved.  Silently emitting an empty
+    // pred_lookup would drop those filters and unexpectedly broaden the
+    // projection results.
+    if resolution_failed {
+        let has_property_filters = wc
+            .keys()
+            .any(|k| k != "id" && k != "base" && k != "author" && k != "timestamp");
+        if has_property_filters {
+            return "    FILTER(false)\n".to_string();
+        }
+    }
 
     let mut patterns = Vec::new();
     let mut filter_idx = 0usize;

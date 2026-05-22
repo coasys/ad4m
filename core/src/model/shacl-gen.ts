@@ -332,7 +332,16 @@ export function buildSHACL(
                     }
                 }
             } catch (e) {
-                // Target class may not be available yet
+                // Target class resolution failed (typically a circular
+                // decorator dependency).  Since the executor no longer
+                // receives target metadata over the wire, dropping the
+                // reference here would turn a transient build-time issue
+                // into a permanent broken-include at query time.  Log
+                // loudly so the failure is discoverable.
+                console.warn(
+                    `[shacl-gen] Failed to resolve target class for relation `
+                    + `"${subjectName}.${relName}": ${e instanceof Error ? e.message : String(e)}`
+                );
             }
         }
 

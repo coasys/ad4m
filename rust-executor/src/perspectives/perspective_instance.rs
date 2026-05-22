@@ -384,12 +384,19 @@ impl PerspectiveInstance {
         self.is_teardown.store(true, Ordering::Release);
     }
 
-    /// Sync all existing links to the SPARQL (Oxigraph) store
+    /// Sync all existing links to the SPARQL (Oxigraph) store.
+    ///
+    /// Reloading the store replaces every triple in one shot, so any
+    /// `ModelShape` warmed before the reload may now reflect stale SHACL
+    /// metadata.  Flush the entire `shape_cache` so the next query
+    /// re-parses against the freshly-loaded triples.
     pub fn sync_existing_links_to_sparql(
         &self,
         links: &[DecoratedLinkExpression],
     ) -> Result<(), deno_core::anyhow::Error> {
-        self.sparql_store.reload(links.to_vec())
+        self.sparql_store.reload(links.to_vec())?;
+        self.shape_cache.write().unwrap().clear();
+        Ok(())
     }
 
     async fn ensure_link_language(&self) {
@@ -1795,6 +1802,82 @@ impl PerspectiveInstance {
             .await
     }
 
+    /// Remove every SHACL link associated with the given target-class URIs.
+    /// Called when refreshing an existing `SubjectClass` so old property
+    /// triples are not left behind to compete with the fresh shape.
+    ///
+    /// Walks the link graph produced by [`parse_shacl_to_links`]:
+    ///   target_class_uri
+    ///     ── rdf://type      ──▶ ad4m://SubjectClass
+    ///     ── ad4m://shape    ──▶ shape_uri
+    ///   shape_uri
+    ///     ── sh://property   ──▶ prop_shape_uri  (one per declared property)
+    ///     ── *other shape-level predicates*
+    ///   prop_shape_uri
+    ///     ── *property-level predicates*
+    async fn remove_subject_class_shacl_links(
+        &mut self,
+        target_class_uris: &[String],
+    ) -> Result<(), AnyError> {
+        let mut to_remove: Vec<LinkExpression> = Vec::new();
+
+        for target_class_uri in target_class_uris {
+            // 1. target_class_uri → rdf://type → ad4m://SubjectClass
+            //    and target_class_uri → ad4m://shape → shape_uri
+            let target_class_links = self.get_links_local(&LinkQuery {
+                source: Some(target_class_uri.clone()),
+                ..Default::default()
+            })?;
+
+            let shape_uris: Vec<String> = target_class_links
+                .iter()
+                .filter(|(link, _)| link.data.predicate.as_deref() == Some("ad4m://shape"))
+                .map(|(link, _)| link.data.target.clone())
+                .collect();
+
+            to_remove.extend(
+                target_class_links
+                    .into_iter()
+                    .filter(|(link, _)| {
+                        matches!(
+                            link.data.predicate.as_deref(),
+                            Some("rdf://type") | Some("ad4m://shape")
+                        )
+                    })
+                    .map(|(link, _)| link),
+            );
+
+            for shape_uri in &shape_uris {
+                let shape_links = self.get_links_local(&LinkQuery {
+                    source: Some(shape_uri.clone()),
+                    ..Default::default()
+                })?;
+
+                let prop_shape_uris: Vec<String> = shape_links
+                    .iter()
+                    .filter(|(link, _)| link.data.predicate.as_deref() == Some("sh://property"))
+                    .map(|(link, _)| link.data.target.clone())
+                    .collect();
+
+                to_remove.extend(shape_links.into_iter().map(|(link, _)| link));
+
+                for prop_shape_uri in prop_shape_uris {
+                    let prop_links = self.get_links_local(&LinkQuery {
+                        source: Some(prop_shape_uri),
+                        ..Default::default()
+                    })?;
+                    to_remove.extend(prop_links.into_iter().map(|(link, _)| link));
+                }
+            }
+        }
+
+        if !to_remove.is_empty() {
+            self.remove_links(to_remove, None).await?;
+        }
+
+        Ok(())
+    }
+
     /// Batch variant: registers multiple SDNA entries under a single mutex acquisition.
     pub async fn add_sdna_batch(
         &mut self,
@@ -1835,7 +1918,13 @@ impl PerspectiveInstance {
 
         let mut sdna_links: Vec<Link> = Vec::new();
 
-        // Check if SHACL definition already exists for this class BEFORE doing anything
+        // For SubjectClass refresh: if a class with this name already exists
+        // we must purge the prior SHACL graph before writing new triples.
+        // Without this, divergent old/new SHACL property triples coexist in
+        // the store and the loader produces non-deterministic shapes.
+        //
+        // When `shacl_json` is `None` and the class already exists, we
+        // preserve the historical no-op behaviour: nothing to refresh.
         if matches!(sdna_type, SdnaType::SubjectClass) {
             // Check for any existing SubjectClass with this name, regardless of namespace
             // We query by target (ad4m://SubjectClass) and then filter by class name
@@ -1845,24 +1934,40 @@ impl PerspectiveInstance {
                 ..Default::default()
             })?;
 
-            // Check if any existing class matches this name
-            let exists = all_class_links.iter().any(|(link, _)| {
-                // Extract class name from source URI (e.g., "flux://Channel" -> "Channel")
-                link.data
-                    .source
-                    .split("://")
-                    .last()
-                    .and_then(|s| s.split('/').last())
-                    .map(|class_name| class_name == name)
-                    .unwrap_or(false)
-            });
+            // Collect any existing class URIs that match this name
+            let existing_target_class_uris: Vec<String> = all_class_links
+                .iter()
+                .filter_map(|(link, _)| {
+                    let source = &link.data.source;
+                    let matches = source
+                        .split("://")
+                        .last()
+                        .and_then(|s| s.split('/').last())
+                        .map(|class_name| class_name == name)
+                        .unwrap_or(false);
+                    if matches {
+                        Some(source.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-            if exists {
+            if !existing_target_class_uris.is_empty() {
+                if shacl_json.is_none() {
+                    log::info!(
+                        "Class '{}' SHACL definition already exists, skipping duplicate",
+                        name
+                    );
+                    return Ok(true);
+                }
+
                 log::info!(
-                    "Class '{}' SHACL definition already exists, skipping duplicate",
+                    "Class '{}' already exists — refreshing SHACL definition",
                     name
                 );
-                return Ok(true);
+                self.remove_subject_class_shacl_links(&existing_target_class_uris)
+                    .await?;
             }
         }
 
@@ -5671,8 +5776,26 @@ mod tests {
                 }
             ]
         }"#;
-        perspective.add_sdna("Task".into(), "".into(), SdnaType::SubjectClass, Some(task_shacl.into()), &AgentContext::main_agent()).await.expect("add Task");
-        perspective.add_sdna("TaskBoard".into(), "".into(), SdnaType::SubjectClass, Some(board_shacl.into()), &AgentContext::main_agent()).await.expect("add TaskBoard");
+        perspective
+            .add_sdna(
+                "Task".into(),
+                "".into(),
+                SdnaType::SubjectClass,
+                Some(task_shacl.into()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add Task");
+        perspective
+            .add_sdna(
+                "TaskBoard".into(),
+                "".into(),
+                SdnaType::SubjectClass,
+                Some(board_shacl.into()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add TaskBoard");
 
         let board = "literal:string:test_board";
         let active1 = "literal:string:active1";
@@ -5719,16 +5842,24 @@ mod tests {
             perspective.sparql_store.add_link(&link).expect("add link");
         }
 
-        let query_json = format!(r#"{{"where":{{"id":"{}"}},"limit":1,"deepQuery":true}}"#, board);
+        let query_json = format!(
+            r#"{{"where":{{"id":"{}"}},"limit":1,"deepQuery":true}}"#,
+            board
+        );
         let result_json = perspective
             .model_query("TaskBoard", &query_json)
             .expect("model_query");
-        let result: serde_json::Value =
-            serde_json::from_str(&result_json).expect("parse result");
+        let result: serde_json::Value = serde_json::from_str(&result_json).expect("parse result");
         let instances = result["instances"].as_array().expect("instances array");
         assert_eq!(instances.len(), 1, "should find the board");
-        let active = instances[0]["activeTasks"].as_array().expect("activeTasks array");
-        assert_eq!(active.len(), 2, "where-getter should narrow to 2 active tasks");
+        let active = instances[0]["activeTasks"]
+            .as_array()
+            .expect("activeTasks array");
+        assert_eq!(
+            active.len(),
+            2,
+            "where-getter should narrow to 2 active tasks"
+        );
         let all = instances[0]["allTasks"].as_array().expect("allTasks array");
         assert_eq!(all.len(), 3, "conformance getter should keep all 3 tasks");
     }
@@ -5816,8 +5947,7 @@ mod tests {
         let result_json = perspective
             .model_query("BlogPost", &query_json)
             .expect("model_query");
-        let result: serde_json::Value =
-            serde_json::from_str(&result_json).expect("parse result");
+        let result: serde_json::Value = serde_json::from_str(&result_json).expect("parse result");
         let instances = result["instances"].as_array().expect("instances array");
         assert_eq!(instances.len(), 1, "should find the post");
         let parent_value = instances[0]["parentPost"].as_str();

@@ -165,7 +165,9 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         // Collection vs single-valued is signaled two ways by the writer:
         //   - explicit rdf:type ad4m:CollectionShape (legacy path), and
         //   - maxCount unset on a relation (writer omits maxCount for *Many).
-        // Either marker makes this a collection.
+        // Either marker makes this a collection of values, but neither on
+        // its own indicates a relation — a literal-valued property can also
+        // be a collection (e.g. an array of strings).
         let prop_type_is_collection = rows.iter().any(|row| {
             row["propType"]
                 .as_str()
@@ -181,10 +183,12 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             Some(_) => Some("forward".to_string()),
             None => None,
         };
-        let is_relation = relation_kind.is_some()
-            || target_class_uri.is_some()
-            || target_class_name.is_some()
-            || prop_type_is_collection;
+        // A property is a relation only when relation-specific metadata is
+        // present (`ad4m://relationKind`, `sh://class`, or
+        // `ad4m://targetClassName`).  `CollectionShape` alone signals
+        // multi-valued cardinality, not link-typed semantics.
+        let is_relation =
+            relation_kind.is_some() || target_class_uri.is_some() || target_class_name.is_some();
         // All relations are marked `is_collection` so the query pipeline
         // hydrates them as arrays during link grouping; the
         // `is_scalar_relation` flag then tells the renderer to unwrap
@@ -244,10 +248,17 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             });
 
             let resolved_target_class_name = target_class_name.clone().unwrap_or_else(|| {
-                // Fall back to extracting from the sh:class URI suffix.
+                // Fall back to extracting from the sh:class URI suffix and
+                // normalising away a trailing `Shape` suffix so the value
+                // matches the bare class names used to key the shape cache.
                 target_class_uri
                     .as_deref()
                     .map(extract_class_local_name)
+                    .map(|s| {
+                        s.strip_suffix("Shape")
+                            .map(|stripped| stripped.to_string())
+                            .unwrap_or(s)
+                    })
                     .unwrap_or_default()
             });
 
@@ -258,6 +269,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 kind: relation_kind.unwrap_or_else(|| "hasMany".to_string()),
                 max_count: max_count.map(|m| m as usize),
                 target_class_name: resolved_target_class_name,
+                target_class_uri: target_class_uri.clone().unwrap_or_default(),
             });
         } else {
             properties.push(ShapeProperty {
@@ -542,10 +554,14 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                     .collect::<HashMap<String, String>>()
             });
 
+            // Mirror `load_shape` cardinality handling: scalar relations
+            // (hasOne / belongsToOne) are stored as single-valued, collection
+            // relations remain marked as `is_collection: true`.  Hard-coding
+            // `true` here previously diverged from the runtime path.
             properties.push(ShapeProperty {
                 name: name.clone(),
                 predicate: predicate.clone(),
-                is_collection: true,
+                is_collection: !is_scalar_relation,
                 is_flag: false,
                 is_required: false,
                 initial_value: None,
@@ -565,6 +581,11 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                     .or_else(|| target_shape["className"].as_str())
                     .unwrap_or("")
                     .to_string();
+                let target_class_uri = target_shape["shapeUri"]
+                    .as_str()
+                    .or_else(|| rel_meta["class"].as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let kind = rel_meta["kind"].as_str().unwrap_or("hasMany").to_string();
                 let direction = rel_meta["direction"]
                     .as_str()
@@ -579,6 +600,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                     kind,
                     max_count,
                     target_class_name,
+                    target_class_uri,
                 });
             }
         }
