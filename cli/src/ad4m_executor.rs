@@ -1,4 +1,9 @@
 #![allow(dead_code)]
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 extern crate ad4m_client;
 extern crate anyhow;
 extern crate chrono;
