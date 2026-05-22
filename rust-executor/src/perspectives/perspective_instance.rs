@@ -196,6 +196,15 @@ struct SubscribedQuery {
     model_query_params: Option<ModelSubscriptionParams>,
 }
 
+/// A batch with its creation timestamp, for timeout-based cleanup.
+struct TimestampedBatch {
+    diff: PerspectiveDiff,
+    created_at: Instant,
+}
+
+/// Maximum age of an uncommitted batch before it is automatically cleaned up.
+static BATCH_TIMEOUT_SECS: u64 = 300; // 5 minutes
+
 /// Parameters for a model query subscription. Stored alongside the trigger SPARQL
 /// so that `check_subscribed_queries` can re-execute the model query in Rust.
 #[derive(Clone)]
@@ -272,7 +281,7 @@ pub struct PerspectiveInstance {
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
-    batch_store: Arc<RwLock<HashMap<String, PerspectiveDiff>>>,
+    batch_store: Arc<RwLock<HashMap<String, TimestampedBatch>>>,
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
@@ -994,9 +1003,10 @@ impl PerspectiveInstance {
     ) -> Result<DecoratedLinkExpression, AnyError> {
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
-            let diff = batches
+            let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
+            let diff = &mut batch.diff;
 
             let _handle = self.persisted.lock().await.clone();
 
@@ -1143,9 +1153,10 @@ impl PerspectiveInstance {
         link_expression.data.validate()?;
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
-            let diff = batches
+            let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
+            let diff = &mut batch.diff;
 
             let mut link_expr = link_expression.clone();
             link_expr.status = Some(status.clone());
@@ -1200,9 +1211,10 @@ impl PerspectiveInstance {
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
-            let diff = batches
+            let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
+            let diff = &mut batch.diff;
 
             let mut decorated_expressions = Vec::new();
             for mut link_expr in link_expressions {
@@ -1378,9 +1390,10 @@ impl PerspectiveInstance {
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
-            let diff = batches
+            let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
+            let diff = &mut batch.diff;
 
             diff.removals.push(old_link.clone());
             let mut new_link_expr = new_link_expression.clone();
@@ -1493,9 +1506,10 @@ impl PerspectiveInstance {
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
-            let diff = batches
+            let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
+            let diff = &mut batch.diff;
 
             let decorated_links: Vec<_> = existing_links
                 .iter()
@@ -2643,6 +2657,13 @@ impl PerspectiveInstance {
             }
         }
 
+        // Flush RocksDB memtables to disk to reclaim memory.
+        // Without this, RocksDB keeps write data in memory until auto-flush
+        // triggers, which can cause significant memory accumulation.
+        if let Err(e) = self.sparql_store.flush() {
+            log::warn!("Failed to flush SPARQL store after persist_link_diff: {:?}", e);
+        }
+
         Ok(())
     }
 
@@ -3444,8 +3465,8 @@ impl PerspectiveInstance {
                     // Also prune matching links from pending batch additions
                     if let Some(ref bid) = batch_id {
                         let mut batches = self.batch_store.write().await;
-                        if let Some(diff) = batches.get_mut(bid) {
-                            diff.additions.retain(|link_expr| {
+                        if let Some(batch) = batches.get_mut(bid) {
+                            batch.diff.additions.retain(|link_expr| {
                                 let source_match = link_expr.data.source == remove_source;
                                 let pred_match = remove_predicate.is_none()
                                     || link_expr.data.predicate == remove_predicate;
@@ -3484,8 +3505,8 @@ impl PerspectiveInstance {
                     // create a duplicate (e.g. save+update in one transaction).
                     if let Some(ref bid) = batch_id {
                         let mut batches = self.batch_store.write().await;
-                        if let Some(diff) = batches.get_mut(bid) {
-                            diff.additions.retain(|link_expr| {
+                        if let Some(batch) = batches.get_mut(bid) {
+                            batch.diff.additions.retain(|link_expr| {
                                 !(link_expr.data.source == source
                                     && link_expr.data.predicate == predicate)
                             });
@@ -3522,8 +3543,8 @@ impl PerspectiveInstance {
                     // Also prune matching links from pending batch additions
                     if let Some(ref bid) = batch_id {
                         let mut batches = self.batch_store.write().await;
-                        if let Some(diff) = batches.get_mut(bid) {
-                            diff.additions.retain(|link_expr| {
+                        if let Some(batch) = batches.get_mut(bid) {
+                            batch.diff.additions.retain(|link_expr| {
                                 !(link_expr.data.source == source
                                     && link_expr.data.predicate == predicate)
                             });
@@ -4481,13 +4502,32 @@ impl PerspectiveInstance {
                 self.check_subscribed_queries(changed_preds).await;
             }
 
-            // Periodic subscription logging
+            // Periodic subscription logging and proactive timeout cleanup
             log_counter += 1;
             if log_counter >= LOG_INTERVAL {
                 log_counter = 0;
                 // Get perspective_uuid FIRST before acquiring subscribed_queries lock to avoid deadlock
                 let perspective_uuid = self.uuid.clone();
-                let queries = self.subscribed_queries.lock().await;
+                let mut queries = self.subscribed_queries.lock().await;
+
+                // Proactively remove timed-out subscriptions even when no
+                // trigger has fired. Without this, expired subscriptions sit
+                // in the map forever, holding their last_result strings in
+                // memory, when no new links are being added.
+                let now = Instant::now();
+                let before_len = queries.len();
+                queries.retain(|_id, q| {
+                    now.duration_since(q.last_keepalive).as_secs() <= QUERY_SUBSCRIPTION_TIMEOUT
+                });
+                let removed = before_len - queries.len();
+                if removed > 0 {
+                    log::info!(
+                        "🧹 Cleaned up {} timed-out subscription(s) for perspective {}",
+                        removed,
+                        perspective_uuid
+                    );
+                }
+
                 if !queries.is_empty() {
                     log::info!(
                         "📊 Prolog subscriptions [{}]: {} active",
@@ -4610,11 +4650,32 @@ impl PerspectiveInstance {
 
     pub async fn create_batch(&self) -> String {
         let batch_uuid = Uuid::new_v4().to_string();
-        self.batch_store.write().await.insert(
+
+        let mut batches = self.batch_store.write().await;
+
+        // Clean up any abandoned batches older than BATCH_TIMEOUT_SECS
+        let now = Instant::now();
+        let before = batches.len();
+        batches.retain(|_id, batch| {
+            now.duration_since(batch.created_at).as_secs() < BATCH_TIMEOUT_SECS
+        });
+        let removed = before - batches.len();
+        if removed > 0 {
+            log::info!(
+                "Cleaned up {} abandoned batch(es) older than {}s",
+                removed,
+                BATCH_TIMEOUT_SECS
+            );
+        }
+
+        batches.insert(
             batch_uuid.clone(),
-            PerspectiveDiff {
-                additions: Vec::new(),
-                removals: Vec::new(),
+            TimestampedBatch {
+                diff: PerspectiveDiff {
+                    additions: Vec::new(),
+                    removals: Vec::new(),
+                },
+                created_at: now,
             },
         );
         batch_uuid
@@ -4634,7 +4695,7 @@ impl PerspectiveInstance {
             let mut batch_store = self.batch_store.write().await;
 
             match batch_store.remove(&batch_uuid) {
-                Some(diff) => diff,
+                Some(batch) => batch.diff,
                 None => return Err(anyhow!("No batch found with given UUID")),
             }
         };
