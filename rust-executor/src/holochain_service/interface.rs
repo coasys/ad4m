@@ -290,8 +290,23 @@ lazy_static! {
 }
 
 pub async fn get_holochain_service() -> HolochainServiceInterface {
-    let lock = HOLOCHAIN_SERVICE.read().await;
-    lock.clone().expect("Holochain Conductor not started")
+    // Poll for the conductor to become available, with a timeout.
+    // Language threads may call this before HolochainService::init() has
+    // finished setting the global — instead of panicking immediately we
+    // give the conductor up to 120 seconds to start.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(120);
+    loop {
+        {
+            let lock = HOLOCHAIN_SERVICE.read().await;
+            if let Some(svc) = lock.clone() {
+                return svc;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("Holochain Conductor not started after 120s timeout");
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
 }
 
 pub async fn maybe_get_holochain_service() -> Option<HolochainServiceInterface> {
