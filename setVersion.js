@@ -163,11 +163,6 @@ console.log("Agent language: " + agentLanguage.version + " -> " + VERSION)
 agentLanguage.version = VERSION
 fs.writeFileSync('bootstrap-languages/agent-language/package.json', JSON.stringify(agentLanguage, null, 2) + '\n')
 
-const directMessageLanguage = JSON.parse(fs.readFileSync('bootstrap-languages/direct-message-language/package.json', 'utf8'))
-console.log("Direct message language: " + directMessageLanguage.version + " -> " + VERSION)
-directMessageLanguage.version = VERSION
-fs.writeFileSync('bootstrap-languages/direct-message-language/package.json', JSON.stringify(directMessageLanguage, null, 2) + '\n')
-
 const neighbourhoodLanguage = JSON.parse(fs.readFileSync('bootstrap-languages/neighbourhood-language/package.json', 'utf8'))
 console.log("Neighbourhood language: " + neighbourhoodLanguage.version + " -> " + VERSION)
 neighbourhoodLanguage.version = VERSION
