@@ -1,7 +1,7 @@
 import { ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import { Ad4mClient } from "@coasys/ad4m";
-import { startExecutor, baseUrl } from "../utils/utils.js";
+import { startExecutor, baseUrl, quitExecutor } from "../utils/utils.js";
 import { getFreePorts, registerPorts, deregisterPorts } from "./ports.js";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -102,29 +102,23 @@ export async function startAgent(
   async function stop(): Promise<void> {
     _activeExecutors.delete(executorProcess);
     deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
-    await new Promise<void>((resolve) => {
-      // Already exited?
-      if (executorProcess.exitCode !== null) {
-        resolve();
-        return;
+
+    // Prefer the REST `/runtime/quit` endpoint over a raw SIGTERM here.
+    // The shared-agent suites (model) tear the executor down once at the end
+    // of a long run, and on CI the SIGTERM-only path was leaving the test
+    // process unable to observe the executor's exit and hanging mocha past
+    // the 30 minute no-output deadline.  `quitExecutor` matches the shutdown
+    // pattern that the other passing suites (prolog-and-literals, app, etc.)
+    // already use and falls back to SIGTERM → SIGKILL on its own.
+    try {
+      await quitExecutor(executorProcess, apiPort, opts.adminCredential);
+    } catch {
+      // quitExecutor already escalates internally; the only way to land here
+      // is a programming error, in which case kill is still the right thing.
+      if (executorProcess.exitCode === null && !executorProcess.killed) {
+        try { executorProcess.kill("SIGKILL"); } catch {}
       }
-      // Resolve when the process actually exits (not just when the signal is sent).
-      // This prevents the next test from starting while SPARQL/HC ports are still held.
-      const fallbackTimer = setTimeout(() => {
-        try {
-          executorProcess.kill("SIGKILL");
-        } catch {}
-        resolve();
-      }, 15_000);
-      fallbackTimer.unref();
-      executorProcess.once("exit", () => {
-        clearTimeout(fallbackTimer);
-        resolve();
-      });
-      if (!executorProcess.killed) {
-        executorProcess.kill("SIGTERM");
-      }
-    });
+    }
   }
 
   return { client, apiPort, stop };
