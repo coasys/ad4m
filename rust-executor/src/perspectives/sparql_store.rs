@@ -719,12 +719,20 @@ impl SparqlStore {
         Ok(())
     }
 
+    /// Flush pending writes to disk.
+    /// This ensures RocksDB memtable data is written to SST files,
+    /// allowing the memtable memory to be reclaimed.
+    pub fn flush(&self) -> Result<(), Error> {
+        self.store.flush().map_err(|e| anyhow!("SPARQL store flush failed: {}", e))
+    }
+
     /// Clear the store and bulk-insert all provided links.
     pub fn reload(&self, links: Vec<DecoratedLinkExpression>) -> Result<(), Error> {
         self.clear()?;
         for link in &links {
             self.insert_link_triples(link)?;
         }
+        self.flush()?;
         Ok(())
     }
 
