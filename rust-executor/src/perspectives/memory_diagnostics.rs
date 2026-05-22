@@ -8,7 +8,7 @@
 //! are initialised (done automatically in lib.rs).
 
 use super::perspective_instance::PerspectiveMemoryStats;
-use super::PERSPECTIVES;
+use super::{get_app_data_path, PERSPECTIVES};
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -20,7 +20,7 @@ fn process_memory() -> (usize, usize) {
         if let Ok(contents) = std::fs::read_to_string("/proc/self/statm") {
             let parts: Vec<&str> = contents.split_whitespace().collect();
             if parts.len() >= 2 {
-                let page_size = 4096usize; // typical Linux page size
+                let page_size = 4096usize;
                 let virt_pages = parts[0].parse::<usize>().unwrap_or(0);
                 let rss_pages = parts[1].parse::<usize>().unwrap_or(0);
                 return (rss_pages * page_size, virt_pages * page_size);
@@ -34,6 +34,55 @@ fn process_memory() -> (usize, usize) {
     }
 }
 
+/// Parse /proc/self/status for detailed memory breakdown (Linux only).
+/// Returns a formatted string with key memory fields.
+fn proc_status_memory() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(contents) = std::fs::read_to_string("/proc/self/status") {
+            let fields = [
+                "VmRSS", "RssAnon", "RssFile", "RssShmem", "VmData", "VmStk", "VmLib", "VmSwap",
+            ];
+            let mut parts = Vec::new();
+            for line in contents.lines() {
+                for field in &fields {
+                    if line.starts_with(field) {
+                        let value = line.split_whitespace().collect::<Vec<_>>();
+                        if value.len() >= 2 {
+                            parts.push(format!("{}:{}", field, value[1..].join("")));
+                        }
+                    }
+                }
+            }
+            return parts.join(" | ");
+        }
+        String::new()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        String::new()
+    }
+}
+
+/// Recursively compute directory size in bytes.
+fn dir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if ft.is_file() {
+                total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            } else if ft.is_dir() {
+                total += dir_size(&entry.path());
+            }
+        }
+    }
+    total
+}
+
 fn format_bytes(bytes: usize) -> String {
     if bytes >= 1_073_741_824 {
         format!("{:.2} GB", bytes as f64 / 1_073_741_824.0)
@@ -44,6 +93,10 @@ fn format_bytes(bytes: usize) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+fn format_bytes_u64(bytes: u64) -> String {
+    format_bytes(bytes as usize)
 }
 
 fn format_bytes_signed(bytes: isize) -> String {
@@ -66,7 +119,6 @@ fn jemalloc_stats() -> (usize, usize, usize, usize, usize) {
     #[cfg(not(target_env = "msvc"))]
     {
         use tikv_jemalloc_ctl::{epoch, stats};
-        // Advance jemalloc's stats epoch so values are fresh.
         let _ = epoch::advance();
         let allocated = stats::allocated::read().unwrap_or(0);
         let active = stats::active::read().unwrap_or(0);
@@ -81,18 +133,28 @@ fn jemalloc_stats() -> (usize, usize, usize, usize, usize) {
     }
 }
 
-/// Collect per-perspective stats on a blocking thread (since PERSPECTIVES
-/// uses std::sync::RwLock and the inner tokio locks need blocking_lock).
-fn collect_perspective_stats() -> Vec<PerspectiveMemoryStats> {
+/// Collect per-perspective stats on a blocking thread.
+fn collect_perspective_stats() -> Vec<(PerspectiveMemoryStats, u64)> {
     let perspectives = match PERSPECTIVES.read() {
         Ok(p) => p,
         Err(_) => return vec![],
     };
 
+    let base_path = get_app_data_path().map(|p| std::path::PathBuf::from(&p).join("perspectives"));
+
     let mut stats = Vec::with_capacity(perspectives.len());
     for (_uuid, perspective_lock) in perspectives.iter() {
         if let Ok(perspective) = perspective_lock.read() {
-            stats.push(perspective.memory_diagnostics_sync());
+            let mem = perspective.memory_diagnostics_sync();
+            // Compute on-disk size of this perspective's RocksDB store
+            let disk_bytes = base_path
+                .as_ref()
+                .map(|base| {
+                    let store_dir = base.join(&mem.uuid).join("sparql_store");
+                    dir_size(&store_dir)
+                })
+                .unwrap_or(0);
+            stats.push((mem, disk_bytes));
         }
     }
     stats
@@ -110,66 +172,65 @@ pub fn start_memory_diagnostics() {
 
             // Process-level memory
             let (rss, virt) = process_memory();
-            let (allocated, active, metadata, resident, mapped) = jemalloc_stats();
+            let (allocated, active, metadata, resident, _mapped) = jemalloc_stats();
 
             let rss_delta = rss as isize - prev_rss as isize;
             let alloc_delta = allocated as isize - prev_allocated as isize;
             prev_rss = rss;
             prev_allocated = allocated;
 
+            // How much RSS is NOT accounted for by jemalloc
+            let non_jemalloc = if rss > resident { rss - resident } else { 0 };
+
             log::info!(
-                "MEMORY | RSS: {} ({}) | VIRT: {} | jemalloc alloc: {} ({}) active: {} meta: {} resident: {} mapped: {}",
+                "MEMORY | RSS: {} ({}) | jemalloc alloc: {} ({}) resident: {} | non-jemalloc RSS: {} | VIRT: {}",
                 format_bytes(rss),
                 format_bytes_signed(rss_delta),
-                format_bytes(virt),
                 format_bytes(allocated),
                 format_bytes_signed(alloc_delta),
-                format_bytes(active),
-                format_bytes(metadata),
                 format_bytes(resident),
-                format_bytes(mapped),
+                format_bytes(non_jemalloc),
+                format_bytes(virt),
             );
 
-            // Per-perspective stats — collected on a blocking thread to avoid
-            // holding std::sync::RwLock across .await points.
+            // Detailed /proc/self/status breakdown
+            let status = proc_status_memory();
+            if !status.is_empty() {
+                log::info!("  /proc/self/status: {}", status);
+            }
+
+            // Per-perspective stats
             let perspective_stats = tokio::task::spawn_blocking(collect_perspective_stats)
                 .await
                 .unwrap_or_default();
 
             if !perspective_stats.is_empty() {
                 let mut total_quads = 0usize;
-                let mut total_subs = 0usize;
-                let mut total_sub_bytes = 0usize;
-                let mut total_batches = 0usize;
+                let mut total_disk = 0u64;
 
-                for stats in &perspective_stats {
+                for (stats, disk_bytes) in &perspective_stats {
                     total_quads += stats.quad_count;
-                    total_subs += stats.subscriptions;
-                    total_sub_bytes += stats.sub_result_bytes;
-                    total_batches += stats.batches;
+                    total_disk += disk_bytes;
 
-                    // Only log details for perspectives with non-trivial data
-                    if stats.quad_count > 0 || stats.subscriptions > 0 || stats.batches > 0 {
+                    if stats.quad_count > 0 || stats.subscriptions > 0 || *disk_bytes > 0 {
                         log::info!(
-                            "  [{}] \"{}\" | quads: {} | subs: {} (result_bytes: {}) | batches: {} (links: {})",
+                            "  [{}] \"{}\" | quads: {} | disk: {} | subs: {} ({}) | batches: {}",
                             &stats.uuid[..8.min(stats.uuid.len())],
                             stats.name,
                             stats.quad_count,
+                            format_bytes_u64(*disk_bytes),
                             stats.subscriptions,
                             format_bytes(stats.sub_result_bytes),
                             stats.batches,
-                            stats.batch_links,
                         );
                     }
                 }
 
                 log::info!(
-                    "  TOTALS | perspectives: {} | quads: {} | subs: {} (result_bytes: {}) | batches: {}",
+                    "  TOTALS | perspectives: {} | quads: {} | disk: {}",
                     perspective_stats.len(),
                     total_quads,
-                    total_subs,
-                    format_bytes(total_sub_bytes),
-                    total_batches,
+                    format_bytes_u64(total_disk),
                 );
             }
         }
