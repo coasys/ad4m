@@ -344,7 +344,7 @@ const ui = Ad4mConnect({
   // Show the "Remote Node" option alongside "Local Node"
   hosting: true,
   // Pre-fill the manual URL input on the host browser screen
-  remoteUrl: "wss://ad4m-hosting.example.com:12001/graphql",
+  remoteUrl: "wss://ad4m-hosting.example.com:12001/api/v1/ws",
 });
 
 ui.connect().then((client) => {
@@ -356,7 +356,7 @@ ui.connect().then((client) => {
 | Option      | Type      | Description                                                                                                                                     |
 | ----------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `hosting`   | `boolean` | Shows a "Remote Node" option on the connection screen alongside the default "Local Node" option                                                 |
-| `remoteUrl` | `string`  | Pre-fills the manual URL input on the host browser screen (e.g. `wss://host:12001/graphql`). The user still needs to click "Connect" to proceed |
+| `remoteUrl` | `string`  | Pre-fills the manual URL input on the host browser screen (e.g. `wss://host:12001/api/v1/ws`). The user still needs to click "Connect" to proceed |
 
 #### User-Facing Flow
 
