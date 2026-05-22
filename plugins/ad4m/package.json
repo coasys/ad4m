@@ -18,7 +18,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@coasys/ad4m": "0.12.0-rc1-dev.5"
+    "@coasys/ad4m": "0.13.0-test-6"
   },
   "devDependencies": {
     "vitest": "^3.0.0",
