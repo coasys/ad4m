@@ -103,13 +103,19 @@ export async function startAgent(
     _activeExecutors.delete(executorProcess);
     deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
 
+    // Close the Ad4mClient first so its WebSocket ping timer and reconnect
+    // schedule stop running.  Without this, the un-unref'd timers in
+    // ApiClient keep the Node event loop alive past mocha's `--exit`
+    // boundary in the shared-agent suite (model), and the job hangs until
+    // CircleCI's 30 minute no-output deadline.
+    try {
+      client.close();
+    } catch {}
+
     // Prefer the REST `/runtime/quit` endpoint over a raw SIGTERM here.
-    // The shared-agent suites (model) tear the executor down once at the end
-    // of a long run, and on CI the SIGTERM-only path was leaving the test
-    // process unable to observe the executor's exit and hanging mocha past
-    // the 30 minute no-output deadline.  `quitExecutor` matches the shutdown
-    // pattern that the other passing suites (prolog-and-literals, app, etc.)
-    // already use and falls back to SIGTERM → SIGKILL on its own.
+    // `quitExecutor` matches the shutdown pattern that the other passing
+    // suites (prolog-and-literals, app, etc.) already use and falls back
+    // to SIGTERM → SIGKILL on its own.
     try {
       await quitExecutor(executorProcess, apiPort, opts.adminCredential);
     } catch {
