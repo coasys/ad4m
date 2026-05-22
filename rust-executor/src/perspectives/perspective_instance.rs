@@ -2661,7 +2661,10 @@ impl PerspectiveInstance {
         // Without this, RocksDB keeps write data in memory until auto-flush
         // triggers, which can cause significant memory accumulation.
         if let Err(e) = self.sparql_store.flush() {
-            log::warn!("Failed to flush SPARQL store after persist_link_diff: {:?}", e);
+            log::warn!(
+                "Failed to flush SPARQL store after persist_link_diff: {:?}",
+                e
+            );
         }
 
         Ok(())
