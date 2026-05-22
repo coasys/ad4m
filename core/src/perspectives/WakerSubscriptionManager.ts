@@ -173,10 +173,11 @@ export class WakerSubscriptionManager {
             const parentQuery = `SELECT ?source WHERE { ?source <ad4m://has_child> <${msgAddr}> . }`;
             this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
             const parentResult = await this.perspectiveClient.querySparql(sub.perspective, parentQuery);
-            if (Array.isArray(parentResult)) {
-              for (const link of parentResult) {
-                if (link && link.source) {
-                  parents.push(link.source);
+            const bindings = parentResult?.results?.bindings;
+            if (Array.isArray(bindings)) {
+              for (const binding of bindings) {
+                if (binding?.source?.value) {
+                  parents.push(binding.source.value);
                 }
               }
             }
