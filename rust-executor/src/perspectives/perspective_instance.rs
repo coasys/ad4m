@@ -353,19 +353,23 @@ impl PerspectiveInstance {
 
     /// Return diagnostic stats for this perspective's memory-relevant data structures.
     pub async fn memory_diagnostics(&self) -> PerspectiveMemoryStats {
-        let subscriptions = self.subscribed_queries.lock().await.len();
-        let sub_result_bytes: usize = {
+        let (subscriptions, sub_result_bytes) = {
             let subs = self.subscribed_queries.lock().await;
-            subs.values()
+            let count = subs.len();
+            let bytes: usize = subs
+                .values()
                 .map(|q| q.last_result.len() + q.query.len())
-                .sum()
+                .sum();
+            (count, bytes)
         };
-        let batches = self.batch_store.read().await.len();
-        let batch_links: usize = {
+        let (batches, batch_links) = {
             let bs = self.batch_store.read().await;
-            bs.values()
+            let count = bs.len();
+            let links: usize = bs
+                .values()
                 .map(|b| b.diff.additions.len() + b.diff.removals.len())
-                .sum()
+                .sum();
+            (count, links)
         };
         let quad_count = self.sparql_store.quad_count();
         let name = self.persisted.lock().await.name.clone().unwrap_or_default();
@@ -384,19 +388,23 @@ impl PerspectiveInstance {
     /// Synchronous version of memory_diagnostics for use from sync contexts
     /// (e.g. when holding the sync PERSPECTIVES RwLock).
     pub fn memory_diagnostics_sync(&self) -> PerspectiveMemoryStats {
-        let subscriptions = self.subscribed_queries.blocking_lock().len();
-        let sub_result_bytes: usize = {
+        let (subscriptions, sub_result_bytes) = {
             let subs = self.subscribed_queries.blocking_lock();
-            subs.values()
+            let count = subs.len();
+            let bytes: usize = subs
+                .values()
                 .map(|q| q.last_result.len() + q.query.len())
-                .sum()
+                .sum();
+            (count, bytes)
         };
-        let batches = self.batch_store.blocking_read().len();
-        let batch_links: usize = {
+        let (batches, batch_links) = {
             let bs = self.batch_store.blocking_read();
-            bs.values()
+            let count = bs.len();
+            let links: usize = bs
+                .values()
                 .map(|b| b.diff.additions.len() + b.diff.removals.len())
-                .sum()
+                .sum();
+            (count, links)
         };
         let quad_count = self.sparql_store.quad_count();
         let name = self
@@ -4595,18 +4603,42 @@ impl PerspectiveInstance {
                 // in the map forever, holding their last_result strings in
                 // memory, when no new links are being added.
                 let now = Instant::now();
-                let before_len = queries.len();
+                let mut removed_queries: Vec<String> = Vec::new();
                 queries.retain(|_id, q| {
-                    now.duration_since(q.last_keepalive).as_secs() <= QUERY_SUBSCRIPTION_TIMEOUT
+                    let keep = now.duration_since(q.last_keepalive).as_secs()
+                        <= QUERY_SUBSCRIPTION_TIMEOUT;
+                    if !keep {
+                        removed_queries.push(q.query.clone());
+                    }
+                    keep
                 });
-                let removed = before_len - queries.len();
-                if removed > 0 {
+                // Drop the lock before async prolog calls
+                drop(queries);
+
+                if !removed_queries.is_empty() {
                     log::info!(
                         "🧹 Cleaned up {} timed-out subscription(s) for perspective {}",
-                        removed,
+                        removed_queries.len(),
                         perspective_uuid
                     );
+                    // Notify prolog service for each removed subscription,
+                    // mirroring the flow in check_subscribed_queries().
+                    for query in &removed_queries {
+                        if let Err(e) = get_prolog_service()
+                            .await
+                            .subscription_ended(perspective_uuid.clone(), query.clone())
+                            .await
+                        {
+                            log::warn!(
+                                "Failed to notify prolog service of subscription timeout: {}",
+                                e
+                            );
+                        }
+                    }
                 }
+
+                // Re-acquire for the logging section below
+                let queries = self.subscribed_queries.lock().await;
 
                 if !queries.is_empty() {
                     log::info!(

@@ -147,19 +147,34 @@ fn jemalloc_stats() -> (usize, usize, usize, usize, usize) {
 }
 
 /// Collect per-perspective stats on a blocking thread.
+///
+/// The global `PERSPECTIVES` lock is held only long enough to collect
+/// in-memory stats from each perspective.  Disk-size computation (filesystem
+/// I/O) happens after the lock is released so mutations aren't blocked.
 fn collect_perspective_stats() -> Vec<(PerspectiveMemoryStats, u64)> {
-    let perspectives = match PERSPECTIVES.read() {
-        Ok(p) => p,
-        Err(_) => return vec![],
-    };
+    // Phase 1: collect in-memory stats under the PERSPECTIVES lock.
+    let mem_stats: Vec<PerspectiveMemoryStats> = {
+        let perspectives = match PERSPECTIVES.read() {
+            Ok(p) => p,
+            Err(_) => return vec![],
+        };
+        perspectives
+            .iter()
+            .filter_map(|(_uuid, perspective_lock)| {
+                perspective_lock
+                    .read()
+                    .ok()
+                    .map(|p| p.memory_diagnostics_sync())
+            })
+            .collect()
+    }; // PERSPECTIVES lock released here
 
+    // Phase 2: compute on-disk sizes without holding any global lock.
     let base_path = get_app_data_path().map(|p| std::path::PathBuf::from(&p).join("perspectives"));
 
-    let mut stats = Vec::with_capacity(perspectives.len());
-    for (_uuid, perspective_lock) in perspectives.iter() {
-        if let Ok(perspective) = perspective_lock.read() {
-            let mem = perspective.memory_diagnostics_sync();
-            // Compute on-disk size of this perspective's RocksDB store
+    mem_stats
+        .into_iter()
+        .map(|mem| {
             let disk_bytes = base_path
                 .as_ref()
                 .map(|base| {
@@ -167,10 +182,9 @@ fn collect_perspective_stats() -> Vec<(PerspectiveMemoryStats, u64)> {
                     dir_size(&store_dir)
                 })
                 .unwrap_or(0);
-            stats.push((mem, disk_bytes));
-        }
-    }
-    stats
+            (mem, disk_bytes)
+        })
+        .collect()
 }
 
 /// Spawn a tokio task that logs memory diagnostics every 30 seconds.
@@ -189,6 +203,16 @@ pub fn start_memory_diagnostics() {
 
         loop {
             sleep(Duration::from_secs(30)).await;
+
+            // Skip all expensive work when the target log level is disabled.
+            let enabled = if verbose {
+                log::log_enabled!(log::Level::Info)
+            } else {
+                log::log_enabled!(log::Level::Debug)
+            };
+            if !enabled {
+                continue;
+            }
 
             // Process-level memory
             let (rss, virt) = process_memory();
