@@ -15,9 +15,9 @@ chrono = { version = "0.4.38", default-features = false, features = ["clock", "s
 thiserror = "1"
 getrandom = { version = "0.3" }
 
-hdk = { version = "0.7.0-dev.10", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys" }
-holo_hash =  { version = "0.7.0-dev.6", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys" }
-holochain_serialized_bytes = "=0.0.56"
+hdk = { version = "0.7.0-dev.16", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.24-space-override-coasys" }
+holo_hash =  { version = "0.7.0-dev.9", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.24-space-override-coasys" }
+holochain_serialized_bytes = "=0.0.57"
 agent_store_integrity = { path = "../agent_store_integrity" }
 
 [target.wasm32-unknown-unknown]

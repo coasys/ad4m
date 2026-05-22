@@ -43,6 +43,8 @@ commands:
             echo "Rust: $(rustc --version)"
             echo "Installing wasm-bindgen-cli for Rust WASM builds..."
             cargo install wasm-bindgen-cli --version 0.2.118
+            echo "Ensuring holochain_cli (hc) matches the workspace Holochain version..."
+            cargo install holochain_cli --git https://github.com/coasys/holochain.git --branch 0.7.0-dev.24-space-override-coasys
             echo "Deno: $(deno --version | head -1)"
             echo "Go: $(go version)"
             echo "pnpm: $(pnpm --version || echo 'not installed yet')"

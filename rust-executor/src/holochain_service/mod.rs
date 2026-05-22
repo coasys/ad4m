@@ -534,20 +534,34 @@ impl HolochainService {
                     .and_then(|db| db.get_setting("unyt_dna_hash").ok().flatten())
             });
         if let Some(dna_hash) = dna_hash_opt {
-            //if let Ok(Some(auth_material)) =
-            //    crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
-            //{
-            info!("Applying unyt space override for DNA {}", dna_hash);
+            let auth_material =
+                crate::db::Ad4mDb::global_instance()
+                    .lock()
+                    .ok()
+                    .and_then(|guard| {
+                        guard
+                            .as_ref()
+                            .and_then(|db| db.get_setting("unyt_auth_material").ok().flatten())
+                    });
+            info!(
+                "Applying unyt space override for DNA {} (bootstrap={}, signal={}, relay={}, auth_material={})",
+                dna_hash,
+                crate::unyt_service::UNYT_BOOTSTRAP_URL,
+                crate::unyt_service::UNYT_SIGNAL_URL,
+                crate::unyt_service::UNYT_RELAY_URL,
+                if auth_material.is_some() { "present" } else { "missing" }
+            );
             config.network.space_overrides.insert(
                 dna_hash,
                 SpaceNetworkOverride {
                     bootstrap_url: Some(Url2::parse(crate::unyt_service::UNYT_BOOTSTRAP_URL)),
                     signal_url: Some(Url2::parse(crate::unyt_service::UNYT_SIGNAL_URL)),
-                    base64_auth_material: None,
+                    base64_auth_material: auth_material,
                     relay_url: Some(Url2::parse(crate::unyt_service::UNYT_RELAY_URL)),
                 },
             );
-            //}
+        } else {
+            info!("No unyt_dna_hash in DB — skipping space override");
         }
 
         info!("Starting holochain conductor with config: {:#?}", config);

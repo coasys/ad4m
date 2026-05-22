@@ -8,6 +8,11 @@ members = [
 ]
 
 [patch.crates-io]
+# SWC patches: backport serde 1.0.220+ compatibility from swc_common 14.0.4 / ast_node 4.0.0
+swc_common = { git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-swc-patches" }
+ast_node = { git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-swc-patches" }
+swc_config = { git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-swc-patches" }
+
 # DEBUG: Using forked kitsune2 with debugging instrumentation and fixed default behavior
 # These patches ensure ad4m uses the fixed kitsune2 that doesn't default to blocking
 #kitsune2_api = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
@@ -24,16 +29,26 @@ members = [
 #kitsune2_bootstrap_client = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
 #kitsune2_bootstrap_client = { path = "../../kitsune2/crates/bootstrap_client" }
 
-kitsune2 = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_api = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_bootstrap_client = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_bootstrap_srv = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_core = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_dht = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_gossip = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+# Local kitsune2 patches for testing per-space relay registration without auth
+#kitsune2 = { path = "../kitsune2/crates/kitsune2" }
+#kitsune2_api = { path = "../kitsune2/crates/api" }
+#kitsune2_core = { path = "../kitsune2/crates/core" }
+#kitsune2_dht = { path = "../kitsune2/crates/dht" }
+#kitsune2_gossip = { path = "../kitsune2/crates/gossip" }
+#kitsune2_bootstrap_client = { path = "../kitsune2/crates/bootstrap_client" }
+#kitsune2_bootstrap_srv = { path = "../kitsune2/crates/bootstrap_srv" }
+#kitsune2_transport_iroh = { path = "../kitsune2/crates/transport_iroh" }
+#kitsune2_transport_tx5 = { path = "../kitsune2/crates/transport_tx5" }
+#kitsune2 = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+#kitsune2_api = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+#kitsune2_bootstrap_client = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+#kitsune2_bootstrap_srv = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+#kitsune2_core = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+#kitsune2_dht = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+#kitsune2_gossip = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
 #kitsune2_test_utils = { git = "https://github.com/holochain/kitsune2.git", rev = "26159cb9bac7cc845fff57a1630aa9d7112c37d5" }
-kitsune2_transport_iroh = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_transport_tx5 = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+#kitsune2_transport_iroh = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+#kitsune2_transport_tx5 = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
 # Optimization for test builds to keep binary under ARM64 ±128MB branch limit.
 # Without this, the test binary is too large for the linker on Apple Silicon.
 [profile.test]

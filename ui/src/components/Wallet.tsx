@@ -128,7 +128,18 @@ const Wallet = () => {
         const balStr = await client.runtime.unytWalletBalance();
         if (balStr) {
           try {
-            setBalance(JSON.parse(balStr));
+            const parsed = JSON.parse(balStr);
+            // Ledger structure: { balance: {unitIdx: amount}, fees_owed, ... }
+            const balanceMap = parsed.balance || parsed;
+            const flat: Record<string, string> = {};
+            if (typeof balanceMap === "object" && Object.keys(balanceMap).length > 0) {
+              for (const [k, v] of Object.entries(balanceMap)) {
+                flat[k === "0" ? "wHOT" : k] = String(v);
+              }
+            } else {
+              flat["wHOT"] = "0";
+            }
+            setBalance(flat);
           } catch {
             setBalance({ wHOT: balStr });
           }
