@@ -172,7 +172,7 @@ pub fn start_memory_diagnostics() {
 
             // Process-level memory
             let (rss, virt) = process_memory();
-            let (allocated, active, metadata, resident, _mapped) = jemalloc_stats();
+            let (allocated, _active, _metadata, resident, _mapped) = jemalloc_stats();
 
             let rss_delta = rss as isize - prev_rss as isize;
             let alloc_delta = allocated as isize - prev_allocated as isize;
