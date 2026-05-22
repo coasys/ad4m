@@ -177,6 +177,11 @@ impl SparqlStore {
         })
     }
 
+    /// Returns the number of quads in the store (for diagnostics).
+    pub fn quad_count(&self) -> usize {
+        self.store.len().unwrap_or(0)
+    }
+
     /// Returns true if the store contains any quads beyond the migration marker.
     pub fn has_data(&self) -> bool {
         let migration_subj = NamedNodeRef::new_unchecked("ad4m://system/migration");

@@ -205,6 +205,17 @@ struct TimestampedBatch {
 /// Maximum age of an uncommitted batch before it is automatically cleaned up.
 static BATCH_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
+/// Diagnostic stats for a single perspective's memory-relevant data structures.
+pub struct PerspectiveMemoryStats {
+    pub uuid: String,
+    pub name: String,
+    pub subscriptions: usize,
+    pub sub_result_bytes: usize,
+    pub batches: usize,
+    pub batch_links: usize,
+    pub quad_count: usize,
+}
+
 /// Parameters for a model query subscription. Stored alongside the trigger SPARQL
 /// so that `check_subscribed_queries` can re-execute the model query in Rust.
 #[derive(Clone)]
@@ -338,6 +349,72 @@ impl PerspectiveInstance {
 
     pub async fn teardown_background_tasks(&self) {
         self.is_teardown.store(true, Ordering::Release);
+    }
+
+    /// Return diagnostic stats for this perspective's memory-relevant data structures.
+    pub async fn memory_diagnostics(&self) -> PerspectiveMemoryStats {
+        let subscriptions = self.subscribed_queries.lock().await.len();
+        let sub_result_bytes: usize = {
+            let subs = self.subscribed_queries.lock().await;
+            subs.values()
+                .map(|q| q.last_result.len() + q.query.len())
+                .sum()
+        };
+        let batches = self.batch_store.read().await.len();
+        let batch_links: usize = {
+            let bs = self.batch_store.read().await;
+            bs.values()
+                .map(|b| b.diff.additions.len() + b.diff.removals.len())
+                .sum()
+        };
+        let quad_count = self.sparql_store.quad_count();
+        let name = self.persisted.lock().await.name.clone().unwrap_or_default();
+
+        PerspectiveMemoryStats {
+            uuid: self.uuid.clone(),
+            name,
+            subscriptions,
+            sub_result_bytes,
+            batches,
+            batch_links,
+            quad_count,
+        }
+    }
+
+    /// Synchronous version of memory_diagnostics for use from sync contexts
+    /// (e.g. when holding the sync PERSPECTIVES RwLock).
+    pub fn memory_diagnostics_sync(&self) -> PerspectiveMemoryStats {
+        let subscriptions = self.subscribed_queries.blocking_lock().len();
+        let sub_result_bytes: usize = {
+            let subs = self.subscribed_queries.blocking_lock();
+            subs.values()
+                .map(|q| q.last_result.len() + q.query.len())
+                .sum()
+        };
+        let batches = self.batch_store.blocking_read().len();
+        let batch_links: usize = {
+            let bs = self.batch_store.blocking_read();
+            bs.values()
+                .map(|b| b.diff.additions.len() + b.diff.removals.len())
+                .sum()
+        };
+        let quad_count = self.sparql_store.quad_count();
+        let name = self
+            .persisted
+            .blocking_lock()
+            .name
+            .clone()
+            .unwrap_or_default();
+
+        PerspectiveMemoryStats {
+            uuid: self.uuid.clone(),
+            name,
+            subscriptions,
+            sub_result_bytes,
+            batches,
+            batch_links,
+            quad_count,
+        }
     }
 
     /// Sync all existing links to the SPARQL (Oxigraph) store
