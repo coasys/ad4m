@@ -1,8 +1,10 @@
 //! Periodic memory diagnostics for tracking down leaks.
 //!
 //! Spawns a background task that logs process RSS, jemalloc stats, and
-//! per-perspective data-structure sizes every 30 seconds. Output goes to
-//! the standard `log::info!` logger so it appears in the executor log.
+//! per-perspective data-structure sizes every 30 seconds.
+//!
+//! By default, output goes to `log::debug!`.  Set the environment variable
+//! `AD4M_MEMORY_DIAGNOSTICS=1` to promote all output to `log::info!`.
 //!
 //! Activate by calling `start_memory_diagnostics()` after perspectives
 //! are initialised (done automatically in lib.rs).
@@ -11,6 +13,17 @@ use super::perspective_instance::PerspectiveMemoryStats;
 use super::{get_app_data_path, PERSPECTIVES};
 use std::time::Duration;
 use tokio::time::sleep;
+
+/// Log at info or debug level depending on the `verbose` flag.
+macro_rules! mem_log {
+    ($verbose:expr, $($arg:tt)*) => {
+        if $verbose {
+            log::info!($($arg)*);
+        } else {
+            log::debug!($($arg)*);
+        }
+    };
+}
 
 /// Read process RSS from /proc/self/statm (Linux only).
 /// Returns (rss_bytes, virt_bytes) or (0, 0) on non-Linux / error.
@@ -161,9 +174,16 @@ fn collect_perspective_stats() -> Vec<(PerspectiveMemoryStats, u64)> {
 }
 
 /// Spawn a tokio task that logs memory diagnostics every 30 seconds.
+///
+/// Logs at `debug` level by default.  Set `AD4M_MEMORY_DIAGNOSTICS=1`
+/// to log at `info` level instead.
 pub fn start_memory_diagnostics() {
-    tokio::spawn(async {
-        log::info!("Memory diagnostics started (reporting every 30s)");
+    let verbose = std::env::var("AD4M_MEMORY_DIAGNOSTICS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    tokio::spawn(async move {
+        mem_log!(verbose, "Memory diagnostics started (reporting every 30s)");
         let mut prev_rss: usize = 0;
         let mut prev_allocated: usize = 0;
 
@@ -182,7 +202,8 @@ pub fn start_memory_diagnostics() {
             // How much RSS is NOT accounted for by jemalloc
             let non_jemalloc = if rss > resident { rss - resident } else { 0 };
 
-            log::info!(
+            mem_log!(
+                verbose,
                 "MEMORY | RSS: {} ({}) | jemalloc alloc: {} ({}) resident: {} | non-jemalloc RSS: {} | VIRT: {}",
                 format_bytes(rss),
                 format_bytes_signed(rss_delta),
@@ -196,7 +217,7 @@ pub fn start_memory_diagnostics() {
             // Detailed /proc/self/status breakdown
             let status = proc_status_memory();
             if !status.is_empty() {
-                log::info!("  /proc/self/status: {}", status);
+                mem_log!(verbose, "  /proc/self/status: {}", status);
             }
 
             // Per-perspective stats
@@ -213,7 +234,8 @@ pub fn start_memory_diagnostics() {
                     total_disk += disk_bytes;
 
                     if stats.quad_count > 0 || stats.subscriptions > 0 || *disk_bytes > 0 {
-                        log::info!(
+                        mem_log!(
+                            verbose,
                             "  [{}] \"{}\" | quads: {} | disk: {} | subs: {} ({}) | batches: {}",
                             &stats.uuid[..8.min(stats.uuid.len())],
                             stats.name,
@@ -226,7 +248,8 @@ pub fn start_memory_diagnostics() {
                     }
                 }
 
-                log::info!(
+                mem_log!(
+                    verbose,
                     "  TOTALS | perspectives: {} | quads: {} | disk: {}",
                     perspective_stats.len(),
                     total_quads,
