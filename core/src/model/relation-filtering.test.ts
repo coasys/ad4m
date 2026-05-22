@@ -270,11 +270,18 @@ describe("generateSHACL() relation getter population", () => {
   it("should use explicit getter when provided (ignoring auto-generation)", () => {
     const { shape } = (ParentWithRelations as any).generateSHACL();
 
-    // Getter-only relations have no predicate and are excluded from SHACL shapes
+    // Getter-only relations have no `through` predicate but must still
+    // appear in the SHACL shape so the executor can find the getter; the
+    // writer synthesises a deterministic IRI for `sh:path`.
     const customProp = shape.properties.find(
       (p: SHACLPropertyShape) => p.name === "customItems"
     );
-    expect(customProp).toBeUndefined();
+    expect(customProp).toBeDefined();
+    expect(customProp!.getter).toBe(
+      "SELECT ?target WHERE { ?target <test://custom> ?source . }"
+    );
+    expect(customProp!.path).toBeDefined();
+    expect(customProp!.path).toContain("ad4m://getter/");
   });
 
   it("should survive full round-trip: generateSHACL → toLinks → fromLinks", () => {
@@ -299,11 +306,15 @@ describe("generateSHACL() relation getter population", () => {
     expect(flaggedProp!.conformanceConditions).toBeDefined();
     expect(flaggedProp!.conformanceConditions!.length).toBeGreaterThan(0);
 
-    // The custom getter-only relation should NOT be in the SHACL shape
+    // Getter-only relations now round-trip too — the synthesised path
+    // lets the SHACL graph carry the entry through links/fromLinks.
     const customProp = reconstructed.properties.find(
       (p: SHACLPropertyShape) => p.name === "customItems"
     );
-    expect(customProp).toBeUndefined();
+    expect(customProp).toBeDefined();
+    expect(customProp!.getter).toBe(
+      "SELECT ?target WHERE { ?target <test://custom> ?source . }"
+    );
   });
 });
 
@@ -574,7 +585,13 @@ describe("where clause validation", () => {
 });
 
 describe("where clause compilation", () => {
-  it("should compile where clause to SPARQL getter", () => {
+  // Under the source-of-truth refactor the SHACL writer no longer inlines
+  // `where` conditions into the relation's SPARQL getter.  Instead it emits
+  // `ad4m://whereFilter` + `ad4m://wherePredicates` triples that the
+  // Rust executor evaluates as a post-getter pass at query time.  These
+  // tests assert that contract on the writer side.
+
+  it("should emit whereFilter and wherePredicates on the relation shape", () => {
     @Model({ name: "WhereTarget" })
     class WhereTarget extends Ad4mModel {
       @Property({ through: "test://status", required: true })
@@ -595,13 +612,11 @@ describe("where clause compilation", () => {
       (p: SHACLPropertyShape) => p.name === "items"
     );
     expect(itemsProp).toBeDefined();
-    expect(itemsProp!.getter).toBeDefined();
-    expect(itemsProp!.getter).toContain("test://has_item");
-    expect(itemsProp!.getter).toContain("test://status");
-    expect(itemsProp!.getter).toContain("active");
+    expect(itemsProp!.whereFilter).toEqual({ status: "active" });
+    expect(itemsProp!.wherePredicates).toEqual({ status: "test://status" });
   });
 
-  it("should use where clause instead of auto-derived conformance when both target and where are set", () => {
+  it("should set whereFilter alongside an auto-derived conformance getter when target is provided", () => {
     @Model({ name: "WhereOverrideParent" })
     class WhereOverrideParent extends Ad4mModel {
       @HasMany(() => FlaggedTarget, {
@@ -616,16 +631,15 @@ describe("where clause compilation", () => {
       (p: SHACLPropertyShape) => p.name === "flaggedItems"
     );
     expect(prop).toBeDefined();
+    // whereFilter / wherePredicates carry the post-getter filter; type
+    // filtering stays on the auto-derived conformance getter.
+    expect(prop!.whereFilter).toEqual({ name: "specific" });
+    expect(prop!.wherePredicates).toEqual({ name: "test://name" });
     expect(prop!.getter).toBeDefined();
-    // Should contain the where condition (name = specific)
-    expect(prop!.getter).toContain("test://name");
-    expect(prop!.getter).toContain("specific");
-    // Should NOT contain the auto-derived flag condition
-    // (where overrides auto-conformance)
-    expect(prop!.getter).not.toContain("test://flagged_type");
+    expect(prop!.getter).toContain("test://flagged_type");
   });
 
-  it("should compile where clause with not operator", () => {
+  it("should emit whereFilter with a not operator unchanged", () => {
     @Model({ name: "WhereNotTarget" })
     class WhereNotTarget extends Ad4mModel {
       @Property({ through: "test://status" })
@@ -646,13 +660,11 @@ describe("where clause compilation", () => {
       (p: SHACLPropertyShape) => p.name === "items"
     );
     expect(prop).toBeDefined();
-    expect(prop!.getter).toBeDefined();
-    // Should contain a negation condition
-    expect(prop!.getter).toContain("test://status");
-    expect(prop!.getter).toContain("archived");
+    expect(prop!.whereFilter).toEqual({ status: { not: "archived" } });
+    expect(prop!.wherePredicates).toEqual({ status: "test://status" });
   });
 
-  it("should compile where clause with array values (IN)", () => {
+  it("should emit whereFilter with array (IN) values unchanged", () => {
     @Model({ name: "WhereArrayTarget" })
     class WhereArrayTarget extends Ad4mModel {
       @Property({ through: "test://category" })
@@ -673,13 +685,11 @@ describe("where clause compilation", () => {
       (p: SHACLPropertyShape) => p.name === "items"
     );
     expect(prop).toBeDefined();
-    expect(prop!.getter).toBeDefined();
-    expect(prop!.getter).toContain("test://category");
-    expect(prop!.getter).toContain("food");
-    expect(prop!.getter).toContain("drink");
+    expect(prop!.whereFilter).toEqual({ category: ["food", "drink"] });
+    expect(prop!.wherePredicates).toEqual({ category: "test://category" });
   });
 
-  it("should compile where clause without target using raw predicate URIs", () => {
+  it("should emit whereFilter without wherePredicates when target metadata is absent", () => {
     @Model({ name: "WhereNoTargetParent" })
     class WhereNoTargetParent extends Ad4mModel {
       @HasMany({
@@ -694,12 +704,13 @@ describe("where clause compilation", () => {
       (p: SHACLPropertyShape) => p.name === "items"
     );
     expect(prop).toBeDefined();
-    expect(prop!.getter).toBeDefined();
-    expect(prop!.getter).toContain("test://status");
-    expect(prop!.getter).toContain("active");
+    expect(prop!.whereFilter).toEqual({ "test://status": "active" });
+    // Without target metadata the writer cannot resolve property→predicate;
+    // the executor falls back to interpreting keys as raw IRIs.
+    expect(prop!.wherePredicates).toBeUndefined();
   });
 
-  it("should set both where-compiled getter and sh:class when target is present", () => {
+  it("should set both whereFilter and sh:class when target is present", () => {
     @Model({ name: "WherePlusClassParent" })
     class WherePlusClassParent extends Ad4mModel {
       @HasMany(() => FlaggedTarget, {
@@ -714,15 +725,12 @@ describe("where clause compilation", () => {
       (p: SHACLPropertyShape) => p.name === "flaggedItems"
     );
     expect(prop).toBeDefined();
-    // where-compiled getter
-    expect(prop!.getter).toBeDefined();
-    expect(prop!.getter).toContain("specific");
-    // sh:class still set (target is present)
+    expect(prop!.whereFilter).toEqual({ name: "specific" });
     expect(prop!.class).toBeDefined();
     expect(prop!.class).toContain("FlaggedTarget");
   });
 
-  it("should round-trip where-compiled getter through toLinks/fromLinks", () => {
+  it("should round-trip whereFilter and wherePredicates through toLinks/fromLinks", () => {
     @Model({ name: "WhereRoundTripTarget" })
     class WhereRoundTripTarget extends Ad4mModel {
       @Property({ through: "test://status", required: true })
@@ -749,9 +757,8 @@ describe("where clause compilation", () => {
       (p: SHACLPropertyShape) => p.name === "items"
     );
     expect(prop).toBeDefined();
-    expect(prop!.getter).toBeDefined();
-    expect(prop!.getter).toContain("test://status");
-    expect(prop!.getter).toContain("active");
+    expect(prop!.whereFilter).toEqual({ status: "active" });
+    expect(prop!.wherePredicates).toEqual({ status: "test://status" });
   });
 });
 
