@@ -119,7 +119,9 @@ function escapeSPARQL(value: string): string {
     .replace(/"/g, '\\"')
     .replace(/\n/g, "\\n")
     .replace(/\r/g, "\\r")
-    .replace(/\t/g, "\\t");
+    .replace(/\t/g, "\\t")
+    .replace(/\0/g, "")
+    .replace(/\f/g, "\\u000C");
 }
 
 /**
@@ -136,8 +138,14 @@ export function formatSPARQLValue(value: any): string {
  * Format an AD4M URI as an RDF IRI for use in SPARQL triple patterns.
  * All AD4M link source/predicate/target values become IRIs in angle brackets.
  * The Rust SPARQL service transparently transforms these to valid IRI format.
+ *
+ * Rejects characters that would break or inject into a SPARQL IRI token,
+ * matching the Rust-side `validate_iri()` function.
  */
 function iri(value: string): string {
+  if (/[<>{}" ]/.test(value)) {
+    throw new Error(`Invalid IRI component: '${value}'`);
+  }
   return `<${value}>`;
 }
 
@@ -297,21 +305,7 @@ export function buildSPARQLQuery(
       ?_reifier <ad4m://ontology/timestamp> ?timestamp .
       ${filterClause}
     }
-    ${buildSPARQLOrderLimitOffset(metadata, query)}
   `.trim();
-}
-
-/**
- * Build ORDER BY / LIMIT / OFFSET clauses for the SPARQL query.
- *
- * NOTE: The outer SELECT returns multiple rows per instance (one per link),
- * so LIMIT/OFFSET at the outer level would cut off links mid-instance.
- * This function is kept for backward compatibility and always returns "".
- * SPARQL-level pagination is handled via a subquery in buildSPARQLQuery
- * using buildPaginationSubquery().
- */
-export function buildSPARQLOrderLimitOffset(_metadata: ModelMetadata, query: Query): string {
-  return "";
 }
 
 /**
@@ -369,7 +363,7 @@ export function buildPaginationSubquery(
       { SELECT DISTINCT ?source${tsSelect} WHERE {${innerJoin}${orderJoinPatterns.join('')}${tsPattern}
         FILTER(isIRI(?source))
         ${innerFilter}
-      } GROUP BY ?source ${orderByClause} ${limitClause} ${offsetClause} }\n`;
+      } ${orderByClause} ${limitClause} ${offsetClause} }\n`;
 }
 
 /**

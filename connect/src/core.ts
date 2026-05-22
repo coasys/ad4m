@@ -78,32 +78,49 @@ export default class Ad4mConnect extends EventTarget {
       console.log('[Ad4m Connect] Embedded mode - waiting for AD4M config via postMessage');
       
       return new Promise((resolve, reject) => {
-        // Set up 30 second timeout
-        const timeout = setTimeout(() => {
-          reject(new Error('Timeout waiting for AD4M config from parent window'));
+        // The 30-second timeout only guards waiting for AD4M_CONFIG_ACK — the parent
+        // acknowledging that it received our request and is alive. Once the ACK arrives
+        // we know auth is in progress and we wait indefinitely for the actual AD4M_CONFIG
+        // (the user may take several minutes to complete the auth flow).
+        const ackTimeout = setTimeout(() => {
+          window.removeEventListener('message', handleAck);
+          reject(new Error('Timeout waiting for AD4M_CONFIG_ACK from parent window (is the app running inside we-web?)'));
         }, 30000);
-        
-        // Store resolvers to call when AD4M_CONFIG arrives
+
+        const handleAck = (event: MessageEvent) => {
+          if (event.data?.type === 'AD4M_CONFIG_ACK' && event.source === window.parent) {
+            clearTimeout(ackTimeout);
+            window.removeEventListener('message', handleAck);
+            console.log('[Ad4m Connect] Received AD4M_CONFIG_ACK — parent is alive, waiting for config after auth');
+          }
+        };
+        window.addEventListener('message', handleAck);
+
+        // Store resolvers to call when AD4M_CONFIG arrives (via initializeEmbeddedMode listener)
         this.embeddedResolve = (client: Ad4mClient) => {
-          clearTimeout(timeout);
+          clearTimeout(ackTimeout);
+          window.removeEventListener('message', handleAck);
           console.log('[Ad4m Connect] Successfully connected in embedded mode');
           resolve(client);
         };
         
         this.embeddedReject = (error: Error) => {
-          clearTimeout(timeout);
+          clearTimeout(ackTimeout);
+          window.removeEventListener('message', handleAck);
           reject(error);
         };
         
         // If we already have a client (message arrived before connect() was called)
         if (this.ad4mClient) {
           if (this.authState === 'authenticated') {
-            clearTimeout(timeout);
+            clearTimeout(ackTimeout);
+            window.removeEventListener('message', handleAck);
             console.log('[Ad4m Connect] Client already initialized in embedded mode');
             resolve(this.ad4mClient);
           } else {
             // Auth already failed before connect() was called
-            clearTimeout(timeout);
+            clearTimeout(ackTimeout);
+            window.removeEventListener('message', handleAck);
             reject(new Error(`Embedded auth state: ${this.authState}`));
           }
         }
@@ -367,7 +384,11 @@ export default class Ad4mConnect extends EventTarget {
           // Set connection details from parent (after successful validation)
           this.port = parsedPort;
           this.token = normalizedToken;
-          this.url = `http://localhost:${parsedPort}`;
+          // Use the URL provided by the parent if valid (e.g. remote host), otherwise fall back to localhost
+          const rawUrl = event.data.url;
+          this.url = (rawUrl && typeof rawUrl === 'string' && rawUrl.startsWith('http'))
+            ? rawUrl
+            : `http://localhost:${parsedPort}`;
           
           // Store in localStorage for persistence (avoid storing undefined or stale credentials)
           setLocal('ad4m-port', parsedPort.toString());

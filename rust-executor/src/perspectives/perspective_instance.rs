@@ -37,7 +37,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Instant};
@@ -212,32 +212,39 @@ struct ModelSubscriptionParams {
 /// Also returns an empty set if a `GRAPH` pattern uses a variable predicate
 /// (e.g. `GRAPH ?g { ?source ?predicate ?target }`). Such patterns match links
 /// with ANY predicate, so we cannot narrow the subscription to a fixed set.
+/// Compiled regexes for SPARQL predicate extraction — compiled once, reused on every call.
+static RE_GRAPH_VAR_PRED: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"GRAPH\s+\?\w+\s*\{[^}]*(?:\?\w+|<[^>]+>)\s+(\?\w+)\s+(?:\?\w+|<[^>]+>)[^}]*\}",
+    )
+    .unwrap()
+});
+static RE_VAR_PRED: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?:\?\w+|<[^>]+>)\s+\?\w+\s+(?:\?\w+|<[^>]+>)\s*\.").unwrap()
+});
+static RE_IRI_PRED: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?:\?\w+|<[^>]+>)\s+(<[^>]+>)\s+(?:\?\w+|<[^>]+>)").unwrap()
+});
+
 fn extract_predicates_from_sparql(query: &str) -> HashSet<String> {
     // Detect variable predicate inside GRAPH patterns:
     // GRAPH ?var { ... ?var1 ?varPred ?var2 ... }
     // This is the pattern our model queries use for fetching all links.
-    let graph_var_pred = regex::Regex::new(
-        r"GRAPH\s+\?\w+\s*\{[^}]*(?:\?\w+|<[^>]+>)\s+(\?\w+)\s+(?:\?\w+|<[^>]+>)[^}]*\}",
-    )
-    .unwrap();
-    if graph_var_pred.is_match(query) {
+    if RE_GRAPH_VAR_PRED.is_match(query) {
         return HashSet::new();
     }
 
     // Detect variable predicate in regular triple patterns (e.g. ?source ?predicate ?target)
     // When a query uses a variable predicate, it can match any predicate,
     // so we must always re-check.
-    let var_pred =
-        regex::Regex::new(r"(?:\?\w+|<[^>]+>)\s+\?\w+\s+(?:\?\w+|<[^>]+>)\s*\.").unwrap();
-    if var_pred.is_match(query) {
+    if RE_VAR_PRED.is_match(query) {
         return HashSet::new();
     }
 
     let mut predicates = HashSet::new();
     // Match triple patterns: (var|uri) <uri> (var|uri)
     // The middle <uri> is the predicate
-    let re = regex::Regex::new(r"(?:\?\w+|<[^>]+>)\s+(<[^>]+>)\s+(?:\?\w+|<[^>]+>)").unwrap();
-    for cap in re.captures_iter(query) {
+    for cap in RE_IRI_PRED.captures_iter(query) {
         let pred = cap[1].trim_matches(|c| c == '<' || c == '>');
         predicates.insert(pred.to_string());
     }
@@ -629,13 +636,13 @@ impl PerspectiveInstance {
         let mut before = self.notification_trigger_snapshot().await;
         while !self.is_teardown.load(Ordering::Acquire) {
             interval.tick().await;
-            let changed = self.trigger_notification_check.load(Ordering::Acquire);
+            let changed = self
+                .trigger_notification_check
+                .swap(false, Ordering::AcqRel);
 
             if changed {
                 //log::debug!("Notification check loop triggered for perspective {}", uuid);
                 //let start = std::time::Instant::now();
-                self.trigger_notification_check
-                    .store(false, Ordering::Release);
                 //let snapshot_start = std::time::Instant::now();
 
                 let after = self.notification_trigger_snapshot().await;
@@ -874,7 +881,6 @@ impl PerspectiveInstance {
     }
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) -> Result<(), AnyError> {
-        let uuid = self.uuid.clone();
         // Deduplicate by (author, timestamp, source, predicate, target)
         // Use structured keys to avoid delimiter collision issues
         let mut seen_add: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1725,15 +1731,45 @@ impl PerspectiveInstance {
     pub async fn add_sdna(
         &mut self,
         name: String,
+        sdna_code: String,
+        sdna_type: SdnaType,
+        shacl_json: Option<String>,
+        context: &AgentContext,
+    ) -> Result<bool, AnyError> {
+        let mutex = self.sdna_change_mutex.clone();
+        let _guard = mutex.lock().await;
+        self.add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
+            .await
+    }
+
+    /// Batch variant: registers multiple SDNA entries under a single mutex acquisition.
+    pub async fn add_sdna_batch(
+        &mut self,
+        entries: Vec<(String, String, SdnaType, Option<String>)>,
+        context: &AgentContext,
+    ) -> Result<Vec<bool>, AnyError> {
+        let mutex = self.sdna_change_mutex.clone();
+        let _guard = mutex.lock().await;
+
+        let mut results = Vec::with_capacity(entries.len());
+        for (name, sdna_code, sdna_type, shacl_json) in entries {
+            let result = self
+                .add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
+                .await?;
+            results.push(result);
+        }
+        Ok(results)
+    }
+
+    /// Inner implementation of add_sdna without mutex acquisition.
+    async fn add_sdna_inner(
+        &mut self,
+        name: String,
         mut sdna_code: String,
         sdna_type: SdnaType,
         shacl_json: Option<String>,
         context: &AgentContext,
     ) -> Result<bool, AnyError> {
-        //let mut added = false;
-        let mutex = self.sdna_change_mutex.clone();
-        let _guard = mutex.lock().await;
-
         let predicate = match sdna_type {
             SdnaType::SubjectClass => "ad4m://has_subject_class",
             SdnaType::Flow => "ad4m://has_flow",
@@ -1783,22 +1819,6 @@ impl PerspectiveInstance {
                 .expect("just initialized Literal couldn't be turned into URL");
         }
 
-        // let links = self
-        //     .get_links(&LinkQuery {
-        //         source: Some("ad4m://self".to_string()),
-        //         predicate: Some(predicate.to_string()),
-        //         target: Some(literal_name.clone()),
-        //         from_date: None,
-        //         until_date: None,
-        //         limit: None,
-        //     })
-        //     .await?;
-        // let author = agent::did();
-        // let links = links
-        //     .into_iter()
-        //     .filter(|l| l.author == author)
-        //     .collect::<Vec<DecoratedLinkExpression>>();
-        //if links.is_empty() {
         sdna_links.push(Link {
             source: "ad4m://self".to_string(),
             predicate: Some(predicate.to_string()),
@@ -1824,9 +1844,6 @@ impl PerspectiveInstance {
                 .await?;
         }
 
-        //added = true;
-        //}
-        // Mutex guard is automatically dropped here
         Ok(true)
     }
 
@@ -4022,15 +4039,6 @@ impl PerspectiveInstance {
             };
 
             if let Some(last_result) = existing_result {
-                let result_string = format!("#init#{}", last_result);
-                for delay in [100, 1000] {
-                    self.send_subscription_update(
-                        existing_id.clone(),
-                        result_string.clone(),
-                        Some(Duration::from_millis(delay)),
-                    )
-                    .await;
-                }
                 return Ok((existing_id, last_result));
             }
         }
@@ -4072,17 +4080,6 @@ impl PerspectiveInstance {
             .lock()
             .await
             .insert(subscription_id.clone(), subscribed_query);
-
-        // Send initial result after 3 delays
-        let init_string = format!("#init#{}", result_string);
-        for delay in [100, 1000] {
-            self.send_subscription_update(
-                subscription_id.clone(),
-                init_string.clone(),
-                Some(Duration::from_millis(delay)),
-            )
-            .await;
-        }
 
         Ok((subscription_id, result_string))
     }
@@ -4155,15 +4152,6 @@ impl PerspectiveInstance {
                     q.last_keepalive = Instant::now();
                 }
             }
-            let init_string = format!("#init#{}", initial_result);
-            for delay in [100, 1000] {
-                self.send_subscription_update(
-                    existing_id.clone(),
-                    init_string.clone(),
-                    Some(Duration::from_millis(delay)),
-                )
-                .await;
-            }
             return Ok((existing_id, initial_result));
         }
 
@@ -4186,17 +4174,6 @@ impl PerspectiveInstance {
             .lock()
             .await
             .insert(subscription_id.clone(), subscribed_query);
-
-        // 5. Send initial result
-        let init_string = format!("#init#{}", initial_result);
-        for delay in [100, 1000] {
-            self.send_subscription_update(
-                subscription_id.clone(),
-                init_string.clone(),
-                Some(Duration::from_millis(delay)),
-            )
-            .await;
-        }
 
         Ok((subscription_id, initial_result))
     }
@@ -4343,6 +4320,10 @@ impl PerspectiveInstance {
             if !sub_predicates.is_empty() {
                 if let ChangedPredicates::Specific(ref changed) = changed_predicates {
                     if sub_predicates.is_disjoint(changed) {
+                        log::debug!(
+                            "⏭️ Skipping subscription {} — predicates {:?} disjoint from changed {:?}",
+                            id, sub_predicates, changed
+                        );
                         continue; // No overlap — skip this subscription
                     }
                 } else if matches!(changed_predicates, ChangedPredicates::NoneRecorded) {
@@ -4389,7 +4370,10 @@ impl PerspectiveInstance {
                         .await
                     {
                         Ok(result) => prolog_resolution_to_string(result),
-                        Err(_) => return None,
+                        Err(e) => {
+                            log::error!("Prolog subscription query failed: {}", e);
+                            return None;
+                        }
                     }
                 };
                 Some((id, result_string))
@@ -4407,9 +4391,24 @@ impl PerspectiveInstance {
             for result in results.into_iter().flatten() {
                 let (id, result_string) = result;
                 if let Some(stored_query) = queries.get_mut(&id) {
-                    if result_string != stored_query.last_result {
+                    let changed = result_string != stored_query.last_result;
+                    if changed {
+                        let old_len = stored_query.last_result.len();
+                        let new_len = result_string.len();
+                        log::debug!(
+                            "📤 Subscription {} result changed (old_len={}, new_len={})",
+                            id,
+                            old_len,
+                            new_len
+                        );
                         stored_query.last_result = result_string.clone();
                         updates_to_send.push((id, result_string));
+                    } else {
+                        log::trace!(
+                            "📭 Subscription {} result unchanged (len={})",
+                            id,
+                            result_string.len()
+                        );
                     }
                 }
             }
@@ -4465,14 +4464,20 @@ impl PerspectiveInstance {
                 // Batch debounce: wait a short window for more changes to accumulate
                 sleep(Duration::from_millis(BATCH_WINDOW_MS)).await;
 
-                // Reset trigger and take the accumulated changed predicates
+                // Atomically reset trigger AFTER the sleep, so we catch any
+                // triggers that arrived during the debounce window.
                 self.trigger_prolog_subscription_check
-                    .store(false, Ordering::Release);
+                    .swap(false, Ordering::AcqRel);
                 let changed_preds = std::mem::replace(
                     &mut *self.changed_predicates.lock().await,
                     ChangedPredicates::NoneRecorded,
                 );
 
+                log::debug!(
+                    "🔔 Subscription check triggered for perspective {} with changed_preds: {:?}",
+                    self.uuid,
+                    changed_preds
+                );
                 self.check_subscribed_queries(changed_preds).await;
             }
 
@@ -4768,30 +4773,6 @@ mod tests {
         AgentService::init_global_test_instance();
         init_prolog_service().await;
 
-        let uuid = Uuid::new_v4().to_string();
-
-        let instance = PerspectiveInstance::new(
-            PerspectiveHandle {
-                uuid,
-                name: Some("Test Perspective".to_string()),
-                shared_url: None,
-                neighbourhood: None,
-                state: PerspectiveState::Private,
-                owners: None,
-            },
-            None,
-        );
-
-        // Ensure prolog engine pool is initialized
-        instance
-            .ensure_prolog_engine_pool()
-            .await
-            .expect("Failed to initialize prolog engine pool");
-
-        instance
-    }
-
-    async fn create_perspective() -> PerspectiveInstance {
         let uuid = Uuid::new_v4().to_string();
 
         let instance = PerspectiveInstance::new(
@@ -5433,7 +5414,7 @@ mod tests {
     fn test_predicate_filtering_empty_sub_always_matches() {
         // Empty sub predicates (variable predicate query) should always match
         let sub_predicates: HashSet<String> = HashSet::new();
-        let changed: HashSet<String> = ["flux://has_reaction".to_string()].into();
+        let _changed: HashSet<String> = ["flux://has_reaction".to_string()].into();
         // Empty set is disjoint with everything, but our code checks !sub_predicates.is_empty() first
         assert!(sub_predicates.is_empty()); // so this subscription would NOT be skipped
     }

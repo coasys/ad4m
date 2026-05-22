@@ -53,6 +53,9 @@ export async function ensureAgentReady(
         );
         break; // Connected successfully
       } catch (e: any) {
+        logger.error(`[ad4m] Error: ${e.message}`);
+        logger.error(`[ad4m] Stack: ${e.stack}`);
+        logger.error(`[ad4m] ${e}`);
         if (attempt < maxAttempts) {
           logger.info(
             `[ad4m] Server not ready yet (${e.message}), retrying in ${CONNECT_RETRY_DELAY_MS}ms... (${attempt}/${maxAttempts})`,

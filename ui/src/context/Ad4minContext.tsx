@@ -1,8 +1,4 @@
-import { Ad4mClient, ExceptionType } from "@coasys/ad4m";
-import {
-  ExceptionInfo,
-  Notification as NotificationType,
-} from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
+import { Ad4mClient, ExceptionInfo, ExceptionType, Notification as NotificationType } from "@coasys/ad4m";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { sendNotification } from "@tauri-apps/plugin-notification";

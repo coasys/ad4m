@@ -336,8 +336,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async first(): Promise<T | null> {
+    const savedLimit = this.queryParams.limit;
     this.queryParams.limit = 1;
     const results = await this.get();
+    this.queryParams.limit = savedLimit;
     return results[0] ?? null;
   }
 
@@ -391,8 +393,15 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       return (ctor as any).parseModelResult(this.perspective, raw, this.queryParams.include, this.queryParams.properties);
     };
 
-    // Parse initial results
-    const initialResults = parseResults(initialModelResult);
+    // Resolve non-literal (file-language) properties — handles both raw URI strings
+    // and already-resolved FileData objects returned by the Rust executor.
+    const resolveAndReturn = async (instances: T[]): Promise<T[]> => {
+      await (ctor as any).resolveNonLiteralProps(this.perspective, instances);
+      return instances;
+    };
+
+    // Parse initial results (with non-literal resolution)
+    const initialResults = await resolveAndReturn(parseResults(initialModelResult));
 
     // Track last emitted result fingerprint to suppress duplicate callbacks
     let lastResultFingerprint: string | null = null;
@@ -409,37 +418,67 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
       subscriptionId,
       (rawResult: any) => {
-        // Skip delayed #init# messages — initial data was already returned
-        // synchronously from modelSubscribe(). Late init messages contain stale
-        // data that would overwrite real subscription updates.
-        if (rawResult && rawResult.isInit) return;
         try {
-          const results = parseResults(rawResult);
-          const fp = buildFingerprint(results);
-          if (fp === lastResultFingerprint) return;
-          lastResultFingerprint = fp;
-          callback(results);
+          const parsed = parseResults(rawResult);
+          console.debug(`[ModelQueryBuilder.subscribe] Update received for ${subscriptionId}: ${parsed.length} instances`);
+          resolveAndReturn(parsed).then((results) => {
+            const fp = buildFingerprint(results);
+            if (fp === lastResultFingerprint) {
+              console.debug(`[ModelQueryBuilder.subscribe] Fingerprint unchanged, skipping callback`);
+              return;
+            }
+            console.debug(`[ModelQueryBuilder.subscribe] Fingerprint changed, calling callback with ${results.length} results`);
+            lastResultFingerprint = fp;
+            callback(results);
+          }).catch((e) => {
+            console.error('Model subscription update resolve error:', e);
+          });
         } catch (e) {
           console.error('Model subscription update parse error:', e);
         }
       },
     );
 
-    // Set up keepalive with failure tracking
-    let keepaliveFailures = 0;
-    const keepaliveTimer = setInterval(() => {
-      this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId).then(() => {
-        keepaliveFailures = 0;
-      }).catch((e: any) => {
-        keepaliveFailures++;
-        console.warn(`Model subscription keepalive failed (attempt ${keepaliveFailures}) for ${subscriptionId}:`, e);
-      });
-    }, 30000);
+    // Set up keepalive with recovery — uses setTimeout loop so we can
+    // break out and resubscribe when the server evicts the subscription.
+    let disposed = false;
+    let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
+    let resubscribeAttempts = 0;
+    const MAX_RESUBSCRIBE_ATTEMPTS = 5;
+    const keepaliveLoop = async () => {
+      if (disposed) return;
+      try {
+        await this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId);
+        resubscribeAttempts = 0; // Reset on success
+      } catch (e: any) {
+        console.warn(`Model subscription keepalive failed for ${subscriptionId}:`, e);
+        if (!disposed && resubscribeAttempts < MAX_RESUBSCRIBE_ATTEMPTS) {
+          resubscribeAttempts++;
+          const backoffMs = Math.min(1000 * Math.pow(2, resubscribeAttempts), 60000);
+          console.warn(`Resubscribing (attempt ${resubscribeAttempts}/${MAX_RESUBSCRIBE_ATTEMPTS}, backoff ${backoffMs}ms)...`);
+          await new Promise(r => setTimeout(r, backoffMs));
+          try {
+            unsubscribe();
+            await this.subscribe(callback);
+          } catch (resubErr) {
+            console.error('Model subscription resubscribe failed:', resubErr);
+          }
+        } else if (resubscribeAttempts >= MAX_RESUBSCRIBE_ATTEMPTS) {
+          console.error(`Model subscription ${subscriptionId}: max resubscribe attempts reached, giving up.`);
+        }
+        return; // new subscription owns its own keepalive loop
+      }
+      if (!disposed) {
+        keepaliveTimer = setTimeout(keepaliveLoop, 30000);
+      }
+    };
+    keepaliveTimer = setTimeout(keepaliveLoop, 30000);
 
     // Store dispose function
     this.currentSubscription = {
       dispose: () => {
-        clearInterval(keepaliveTimer);
+        disposed = true;
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
         unsubscribe();
         this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).catch(() => {});
       },
@@ -537,7 +576,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
       subscriptionId,
       (rawResult: any) => {
-        if (rawResult && rawResult.isInit) return;
         try {
           callback(parseCount(rawResult));
         } catch (e) {
@@ -546,19 +584,43 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       },
     );
 
-    let keepaliveFailures = 0;
-    const keepaliveTimer = setInterval(() => {
-      this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId).then(() => {
-        keepaliveFailures = 0;
-      }).catch((e: any) => {
-        keepaliveFailures++;
-        console.warn(`Count subscription keepalive failed (attempt ${keepaliveFailures}) for ${subscriptionId}:`, e);
-      });
-    }, 30000);
+    let disposed = false;
+    let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
+    let resubscribeAttempts = 0;
+    const MAX_RESUBSCRIBE_ATTEMPTS = 5;
+    const keepaliveLoop = async () => {
+      if (disposed) return;
+      try {
+        await this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId);
+        resubscribeAttempts = 0;
+      } catch (e: any) {
+        console.warn(`Count subscription keepalive failed for ${subscriptionId}:`, e);
+        if (!disposed && resubscribeAttempts < MAX_RESUBSCRIBE_ATTEMPTS) {
+          resubscribeAttempts++;
+          const backoffMs = Math.min(1000 * Math.pow(2, resubscribeAttempts), 60000);
+          console.warn(`Count resubscribing (attempt ${resubscribeAttempts}/${MAX_RESUBSCRIBE_ATTEMPTS}, backoff ${backoffMs}ms)...`);
+          await new Promise(r => setTimeout(r, backoffMs));
+          try {
+            unsubscribe();
+            await this.countSubscribe(callback);
+          } catch (resubErr) {
+            console.error('Count subscription resubscribe failed:', resubErr);
+          }
+        } else if (resubscribeAttempts >= MAX_RESUBSCRIBE_ATTEMPTS) {
+          console.error(`Count subscription ${subscriptionId}: max resubscribe attempts reached, giving up.`);
+        }
+        return;
+      }
+      if (!disposed) {
+        keepaliveTimer = setTimeout(keepaliveLoop, 30000);
+      }
+    };
+    keepaliveTimer = setTimeout(keepaliveLoop, 30000);
 
     this.currentSubscription = {
       dispose: () => {
-        clearInterval(keepaliveTimer);
+        disposed = true;
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
         unsubscribe();
         this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).catch(() => {});
       },
@@ -674,24 +736,48 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
       subscriptionId,
       (rawResult: any) => {
-        if (rawResult && rawResult.isInit) return;
+        console.debug(`[ModelQueryBuilder.paginateSubscribe] Update received for ${subscriptionId}, re-fetching paginated data...`);
         processResults().catch(e => console.error('Paginate subscription error:', e));
       },
     );
 
-    let keepaliveFailures = 0;
-    const keepaliveTimer = setInterval(() => {
-      this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId).then(() => {
-        keepaliveFailures = 0;
-      }).catch((e: any) => {
-        keepaliveFailures++;
-        console.warn(`Paginate subscription keepalive failed (attempt ${keepaliveFailures}) for ${subscriptionId}:`, e);
-      });
-    }, 30000);
+    let disposed = false;
+    let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
+    let resubscribeAttempts = 0;
+    const MAX_RESUBSCRIBE_ATTEMPTS = 5;
+    const keepaliveLoop = async () => {
+      if (disposed) return;
+      try {
+        await this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId);
+        resubscribeAttempts = 0;
+      } catch (e: any) {
+        console.warn(`Paginate subscription keepalive failed for ${subscriptionId}:`, e);
+        if (!disposed && resubscribeAttempts < MAX_RESUBSCRIBE_ATTEMPTS) {
+          resubscribeAttempts++;
+          const backoffMs = Math.min(1000 * Math.pow(2, resubscribeAttempts), 60000);
+          console.warn(`Paginate resubscribing (attempt ${resubscribeAttempts}/${MAX_RESUBSCRIBE_ATTEMPTS}, backoff ${backoffMs}ms)...`);
+          await new Promise(r => setTimeout(r, backoffMs));
+          try {
+            unsubscribe();
+            await this.paginateSubscribe(pageSize, pageNumber, callback);
+          } catch (resubErr) {
+            console.error('Paginate subscription resubscribe failed:', resubErr);
+          }
+        } else if (resubscribeAttempts >= MAX_RESUBSCRIBE_ATTEMPTS) {
+          console.error(`Paginate subscription ${subscriptionId}: max resubscribe attempts reached, giving up.`);
+        }
+        return;
+      }
+      if (!disposed) {
+        keepaliveTimer = setTimeout(keepaliveLoop, 30000);
+      }
+    };
+    keepaliveTimer = setTimeout(keepaliveLoop, 30000);
 
     this.currentSubscription = {
       dispose: () => {
-        clearInterval(keepaliveTimer);
+        disposed = true;
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
         unsubscribe();
         this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).catch(() => {});
       },

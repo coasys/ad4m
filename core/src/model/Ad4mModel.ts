@@ -25,6 +25,46 @@ import type {
 
 
 // ---------------------------------------------------------------------------
+// Default decoder for file-storage (non-literal resolveLanguage) properties
+// ---------------------------------------------------------------------------
+
+/**
+ * When the Rust executor resolves a non-literal expression it may return a
+ * `FileData`-shaped object (`{ data_base64, file_type, ... }`) rather than a
+ * raw URI string.  If the model class has no custom `transform` registered
+ * (e.g. it was synthesised from a SHACL shape at runtime) we still want to
+ * decode the content rather than passing raw `FileData` to callers.
+ *
+ * Decoding rules (mirrors the JS `decodeFileAsJson` / `decodeFileAsString` helpers):
+ *   - `application/json` (default when `file_type` is absent) → JSON.parse
+ *   - anything else                                            → raw decoded string
+ *
+ * If `resolved` is not a `FileData` object the value is returned unchanged so
+ * that callers can use this as a safe unconditional fallback.
+ */
+function defaultFileDecode(resolved: unknown): unknown {
+  if (
+    resolved !== null &&
+    typeof resolved === 'object' &&
+    'data_base64' in (resolved as object)
+  ) {
+    const fd = resolved as { data_base64: string; file_type?: string };
+    let raw: string;
+    try {
+      raw = atob(fd.data_base64);
+    } catch {
+      return resolved; // malformed base64 — keep as-is
+    }
+    const isJson = !fd.file_type || fd.file_type === 'application/json';
+    if (isJson) {
+      try { return JSON.parse(raw); } catch { return raw; }
+    }
+    return raw;
+  }
+  return resolved;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers for Rust-side include resolution
 // ---------------------------------------------------------------------------
 
@@ -138,7 +178,7 @@ function jsonToModelInstance<T extends Ad4mModel>(
       if (o.resolveLanguage != null && o.resolveLanguage !== 'literal') continue;
       instance[propName] = o.transform(instance[propName]);
     }
-  } catch (_) { /* no metadata available */ }
+  } catch (e) { console.debug('jsonToModelInstance: transform metadata unavailable:', e); }
 
   // Recursively convert included relation values to class instances
   if (include) {
@@ -619,7 +659,8 @@ export class Ad4mModel {
    *     • `null` / empty object — skip ALL relations (used by bare
    *       subscriptions that don't eagerly load relations).
    */
-  private takeSnapshot(includedRelations?: Record<string, any> | null): void {
+  /** @internal */
+  protected takeSnapshot(includedRelations?: Record<string, any> | null): void {
     const ctor = this.constructor as typeof Ad4mModel;
     const metadata = ctor.getModelMetadata();
     const snap: Record<string, any> = {};
@@ -832,128 +873,11 @@ export class Ad4mModel {
   static prepareModelQueryParams(
     query: Query = {},
     classNameOverride?: string | null,
-  ): { className: string; queryJson: string; shapeJson: string } {
-    const metadata = this.getModelMetadata();
-    const className = classNameOverride || metadata.className;
-
-    const queryInput: any = {};
-    if (query.parent) {
-      const parentPredicate = resolveParentPredicate(query.parent, this);
-      queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
-    }
-    if (query.properties) queryInput.properties = query.properties;
-    if (query.include) queryInput.include = query.include;
-    if (query.where) queryInput.where = query.where;
-    if (query.order) {
-      queryInput.order = Object.entries(query.order).map(([k, v]) => [k, v]);
-    }
-    if (query.offset !== undefined) queryInput.offset = query.offset;
-    if (query.limit !== undefined) queryInput.limit = query.limit;
-    if (query.count !== undefined) queryInput.count = query.count;
-    queryInput.deepQuery = query.deepQuery ?? true;
-
-    if (query.include) {
-      const allRelMeta = getRelationsMetadata(this as any);
-      enrichShapeForIncludes(metadata, query.include, allRelMeta);
-    }
-
-    // Pre-compute conformance getters (with where-clause support)
-    {
-      const allRelMeta = getRelationsMetadata(this as any);
-      for (const [relName, relMeta] of Object.entries(metadata.relations)) {
-        const rel = relMeta as any;
-        if (rel.getter || rel.direction === 'reverse' || rel.filter === false) continue;
-        const meta = allRelMeta[relName];
-        if (!meta?.target) continue;
-        try {
-          const TargetClass = meta.target();
-          const filter = buildConformanceFilter(meta.predicate, TargetClass);
-
-          // Compile where clauses to SPARQL when all target properties use
-          // literal encoding (literal:string:X etc.) which is SPARQL-matchable.
-          // Properties with a non-literal resolveLanguage store expression hashes
-          // that can't be matched by value in SPARQL.
-          let whereConditions: string[] = [];
-          if (rel.where) {
-            try {
-              const targetMetadata = (TargetClass as any).getModelMetadata?.() ?? null;
-              let allSparqlFilterable = true;
-              if (targetMetadata) {
-                for (const propName of Object.keys(rel.where)) {
-                  if (['id', 'author', 'timestamp'].includes(propName)) continue;
-                  const propMeta = targetMetadata.properties[propName];
-                  if (propMeta?.resolveLanguage && propMeta.resolveLanguage !== 'literal') {
-                    allSparqlFilterable = false;
-                    break;
-                  }
-                }
-              }
-              if (allSparqlFilterable) {
-                whereConditions = compileWhereClause(rel.where, targetMetadata);
-              }
-            } catch (_) {}
-          }
-
-          if (filter) {
-            let getter = filter.getter;
-            if (whereConditions.length > 0) {
-              getter = getter.replace(/ \}$/, ` ${whereConditions.join(' ')} }`);
-            }
-            rel.getter = getter;
-          } else if (whereConditions.length > 0) {
-            const escapedPred = meta.predicate.replace(/[<>"{}|\\^`\u0000-\u0020]/g, '');
-            rel.getter = `SELECT ?target WHERE { <Base> <${escapedPred}> ?target . ${whereConditions.join(' ')} }`;
-          }
-        } catch (_) {}
-      }
-    }
-
-    return {
-      className,
-      queryJson: JSON.stringify(queryInput),
-      shapeJson: JSON.stringify(metadata),
-    };
-  }
-
-  /**
-   * Parse raw model query/subscription result JSON into typed model instances.
-   * Used by ModelQueryBuilder to convert subscription updates without circular imports.
-   * @internal
-   */
-  static parseModelResult<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T),
-    perspective: PerspectiveProxy,
-    raw: any,
-    include?: IncludeMap,
-    properties?: string[],
-  ): T[] {
-    const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    const arr = data.instances || data;
-    if (!Array.isArray(arr)) return [];
-    return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
-  }
-
-  // instancesFromQueryResult — removed (superseded by Rust executeModelQuery pipeline)
-
-  /**
-   * Execute a model query via the executor-side endpoint.
-   * 
-   * This replaces the old SPARQL-build → hydrate → JS-filter → JS-sort → JS-paginate pipeline
-   * with a single RPC to the executor that handles everything in Rust.
-   * 
-   * @internal
-   */
-  private static async executeModelQuery<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T),
-    perspective: PerspectiveProxy,
-    query: Query = {},
-    classNameOverride?: string | null,
-  ): Promise<ResultsWithTotalCount<T>> {
+  ): { className: string; queryJson: string; shapeJson: string; metadata: ModelMetadata } {
     const metadata = this.getModelMetadata();
     const className = classNameOverride || metadata.className;
 
     // Expand includeAll: true to a full IncludeMap covering every forward relation.
-    // Done before queryInput is built so all downstream uses of query.include see the expansion.
     if (query.includeAll) {
       const allRelMeta = getRelationsMetadata(this as any);
       const expanded: IncludeMap = {};
@@ -962,12 +886,9 @@ export class Ad4mModel {
           expanded[relName] = true;
         }
       }
-      // Explicit include entries take precedence over the expansion
       query = { ...query, include: { ...expanded, ...query.include } };
     }
 
-    // Build the query input that the Rust endpoint expects.
-    // Convert the TS Query type to the executor's ModelQueryInput format.
     const queryInput: any = {};
     if (query.parent) {
       const parentPredicate = resolveParentPredicate(query.parent, this);
@@ -999,7 +920,7 @@ export class Ad4mModel {
               if (targetMeta) {
                 proj.targetShape = targetMeta;
               }
-            } catch (_) { /* target class may not be available */ }
+            } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for projection:`, e); }
           }
         }
         queryInput.projections = projections;
@@ -1007,7 +928,6 @@ export class Ad4mModel {
     }
     if (query.where) queryInput.where = query.where;
     if (query.order) {
-      // Convert { propName: 'ASC' | 'DESC' } to [[propName, 'ASC'|'DESC'], ...]
       queryInput.order = Object.entries(query.order).map(([k, v]) => [k, v]);
     }
     if (query.offset !== undefined) queryInput.offset = query.offset;
@@ -1015,91 +935,156 @@ export class Ad4mModel {
     if (query.count !== undefined) queryInput.count = query.count;
     queryInput.deepQuery = query.deepQuery ?? true;
 
-    // Enrich relation metadata with target class shapes for Rust-side
-    // include resolution. This eliminates per-relation GraphQL round-trips
-    // by letting the Rust endpoint resolve includes in-process.
     if (queryInput.include) {
       const allRelMeta = getRelationsMetadata(this as any);
       enrichShapeForIncludes(metadata, queryInput.include, allRelMeta);
     }
 
-    // ── Pre-compute conformance getters for Rust-side evaluation ──────
-    // For each relation with a target class and filter !== false, compute
-    // the conformance getter SPARQL so Rust can evaluate it in-process
-    // (eliminating N × querySparql round-trips per instance).
-    // When a relation has a `where` clause, compile the where conditions
-    // into the getter SPARQL so Rust applies them during evaluation.
+    // Pre-compute conformance getters for Rust-side evaluation.
+    // Where clauses are NOT compiled into getter SPARQL because stored
+    // property values are signed expression envelopes (literal:json:...),
+    // not simple literal:string:X values. Instead, where clauses are
+    // attached as metadata for Rust-side post-evaluation filtering.
     {
       const allRelMeta = getRelationsMetadata(this as any);
       for (const [relName, relMeta] of Object.entries(metadata.relations)) {
         const rel = relMeta as any;
-        if (rel.getter) continue; // explicit getter already set
-        if (rel.direction === 'reverse') continue; // reverse relations use reverse link lookup
-        if (rel.filter === false) continue; // opt-out of conformance filtering
-
+        if (rel.getter || rel.direction === 'reverse' || rel.filter === false) continue;
         const meta = allRelMeta[relName];
         if (!meta?.target) continue;
-
         try {
           const TargetClass = meta.target();
           const filter = buildConformanceFilter(meta.predicate, TargetClass);
 
-          // Compile where clauses to SPARQL when all target properties use
-          // literal encoding (literal:string:X etc.) which is SPARQL-matchable.
-          // Properties with a non-literal resolveLanguage store expression hashes
-          // that can't be matched by value in SPARQL.
-          let whereConditions: string[] = [];
+          if (filter) {
+            rel.getter = filter.getter;
+          }
+
+          // Attach where-clause metadata for Rust-side post-getter filtering
           if (rel.where) {
             try {
               const targetMetadata = (TargetClass as any).getModelMetadata?.() ?? null;
-              let allSparqlFilterable = true;
               if (targetMetadata) {
+                const predicates: Record<string, string> = {};
                 for (const propName of Object.keys(rel.where)) {
                   if (['id', 'author', 'timestamp'].includes(propName)) continue;
                   const propMeta = targetMetadata.properties[propName];
-                  if (propMeta?.resolveLanguage && propMeta.resolveLanguage !== 'literal') {
-                    allSparqlFilterable = false;
-                    break;
+                  if (propMeta?.predicate) {
+                    predicates[propName] = propMeta.predicate;
                   }
                 }
+                if (Object.keys(predicates).length > 0) {
+                  rel.whereFilter = rel.where;
+                  rel.wherePredicates = predicates;
+                }
               }
-              if (allSparqlFilterable) {
-                whereConditions = compileWhereClause(rel.where, targetMetadata);
-              }
-            } catch (_) { /* target metadata unavailable */ }
+            } catch (e) { console.debug(`prepareModelQueryParams: target metadata unavailable for relation '${relName}':`, e); }
           }
+        } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for relation '${relName}':`, e); }
+      }
+    }
 
-          if (filter) {
-            let getter = filter.getter;
-            if (whereConditions.length > 0) {
-              // Append where conditions before the closing }
-              getter = getter.replace(/ \}$/, ` ${whereConditions.join(' ')} }`);
-            }
-            rel.getter = getter;
-          } else if (whereConditions.length > 0) {
-            // No conformance filter but where clause exists — build getter from where alone
-            const escapedPred = meta.predicate.replace(/[<>"{}|\\^`\u0000-\u0020]/g, '');
-            rel.getter = `SELECT ?target WHERE { <Base> <${escapedPred}> ?target . ${whereConditions.join(' ')} }`;
+    return {
+      className,
+      queryJson: JSON.stringify(queryInput),
+      shapeJson: JSON.stringify(metadata),
+      metadata,
+    };
+  }
+
+  /**
+   * Parse raw model query/subscription result JSON into typed model instances.
+   * Used by ModelQueryBuilder to convert subscription updates without circular imports.
+   * @internal
+   */
+  static parseModelResult<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    raw: any,
+    include?: IncludeMap,
+    properties?: string[],
+  ): T[] {
+    const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const arr = data.instances || data;
+    if (!Array.isArray(arr)) return [];
+    return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
+  }
+
+  /**
+   * Resolve non-literal (file-language) properties on an array of already-constructed
+   * model instances.  Handles two cases:
+   *
+   *   1. The Rust executor returned a raw URI string → fetch via `getExpression` then apply transform.
+   *   2. The Rust executor already resolved the expression and returned a `FileData` object
+   *      (happens when the perspective backend eagerly fetches file content) → apply transform
+   *      (or `defaultFileDecode` if no transform is registered on the class, e.g. for SHACL-
+   *      synthesised model classes).
+   *
+   * Extracted as a public static so `ModelQueryBuilder.subscribe()` can reuse it without
+   * duplicating logic or introducing a circular dependency.
+   * @internal
+   */
+  static async resolveNonLiteralProps<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    instances: T[],
+  ): Promise<void> {
+    const propsMeta = getPropertiesMetadata(this as any);
+    const resolveProps = Object.entries(propsMeta).filter(
+      ([, opts]: [string, any]) =>
+        opts.resolveLanguage != null &&
+        opts.resolveLanguage !== 'literal',
+    );
+    if (resolveProps.length === 0) return;
+
+    await Promise.all(
+      instances.map(async (inst: any) => {
+        for (const [propName, opts] of resolveProps) {
+          const val = inst[propName];
+          const transform = (opts as any).transform;
+          const applyTransform = (resolved: unknown) =>
+            typeof transform === 'function' ? transform(resolved) : defaultFileDecode(resolved);
+
+          if (typeof val === 'string' && val && !val.startsWith('literal:')) {
+            // Case 1: raw URI — fetch from language runtime
+            try {
+              const expression = await perspective.getExpression(val);
+              if (expression) {
+                let resolved: any;
+                try { resolved = JSON.parse(expression.data); } catch { resolved = expression.data; }
+                inst[propName] = applyTransform(resolved);
+              }
+            } catch (e) { console.debug(`resolveNonLiteralProps: resolution failed for '${propName}':`, e); }
+          } else if (val !== null && val !== undefined && typeof val === 'object') {
+            // Case 2: already resolved by Rust — apply transform / default decode
+            inst[propName] = applyTransform(val);
           }
-        } catch (e) {
-          // Target class may not be available; skip silently
         }
-      }
-    }
+      }),
+    );
+  }
 
-    // Send shape metadata to the executor so it knows the model structure.
-    // This is more reliable than reading SHACL from the store because
-    // the TS decorators are the definitive source of truth.
-    const shapeJson = JSON.stringify(metadata);
-    const queryJson = JSON.stringify(queryInput);
+  // instancesFromQueryResult — removed (superseded by Rust executeModelQuery pipeline)
 
-    // TEMP DEBUG: Log getters with where-clause filters to diagnose CI failure
-    for (const [relName, relMeta] of Object.entries(metadata.relations)) {
-      const rel = relMeta as any;
-      if (rel.where) {
-        console.log(`[MODEL_QUERY_DEBUG] relation="${relName}" getter=${rel.getter ?? 'NONE'} where=${JSON.stringify(rel.where)}`);
-      }
-    }
+  /**
+   * Execute a model query via the executor-side endpoint.
+   * 
+   * This replaces the old SPARQL-build → hydrate → JS-filter → JS-sort → JS-paginate pipeline
+   * with a single RPC to the executor that handles everything in Rust.
+   * 
+   * @internal
+   */
+  private static async executeModelQuery<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    query: Query = {},
+    classNameOverride?: string | null,
+  ): Promise<ResultsWithTotalCount<T>> {
+    // Delegate all query input building, shape enrichment, and getter
+    // pre-computation to the shared prepareModelQueryParams helper.
+    const { className, queryJson, shapeJson } = this.prepareModelQueryParams(
+      query, classNameOverride,
+    );
 
     const result = await perspective.modelQuery(className, queryJson, shapeJson);
 
@@ -1111,37 +1096,18 @@ export class Ad4mModel {
 
     // Resolve non-literal expressions (e.g. file languages where the stored
     // value is a content-addressed hash that must be fetched from the language
-    // runtime). The Rust endpoint returns raw target URIs; we resolve them here.
-    const propsMeta = getPropertiesMetadata(this as any);
-    const resolveProps = Object.entries(propsMeta).filter(
-      ([, opts]: [string, any]) =>
-        opts.resolveLanguage != null &&
-        opts.resolveLanguage !== 'literal',
-    );
-    if (resolveProps.length > 0) {
-      await Promise.all(
-        instances.map(async (inst: any) => {
-          for (const [propName, opts] of resolveProps) {
-            const val = inst[propName];
-            if (typeof val !== 'string' || !val || val.startsWith('literal:')) continue;
-            try {
-              const expression = await perspective.getExpression(val);
-              if (expression) {
-                let resolved: any;
-                try { resolved = JSON.parse(expression.data); } catch { resolved = expression.data; }
-                const transform = (opts as any).transform;
-                inst[propName] = typeof transform === 'function' ? transform(resolved) : resolved;
-              }
-            } catch (_) { /* resolution failed — keep raw value */ }
-          }
-        }),
-      );
-    }
+    // runtime). The Rust endpoint may return either a raw target URI (string)
+    // or an already-resolved FileData object — both cases are handled here.
+    await (this as any).resolveNonLiteralProps(perspective, instances);
 
-    // Take snapshots for dirty tracking
-    const snapshotRelations = queryInput.include;
+    // Take snapshots for dirty tracking (exclude $-prefixed projection keys)
+    const snapshotRelations = query.include
+      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
+      : undefined;
     for (const inst of instances) {
-      (inst as Ad4mModel).takeSnapshot(snapshotRelations);
+      (inst as Ad4mModel).takeSnapshot(
+        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
+      );
     }
 
     return {
@@ -1155,32 +1121,29 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
+   * @param _engine - **Deprecated.** Accepted for backward compatibility but ignored.
+   *   All queries now use the Rust SPARQL pipeline.
    * @returns Array of matching models
-   * 
+   *
    * @example
    * ```typescript
-   * // Get all recipes (uses SPARQL by default)
    * const allRecipes = await Recipe.findAll(perspective);
-   * 
-   * // Get recipes with specific criteria (uses SPARQL)
+   *
    * const recipes = await Recipe.findAll(perspective, {
-   *   where: { 
+   *   where: {
    *     name: "Pasta",
    *     rating: { gt: 4 }
    *   },
    *   order: { createdAt: "DESC" },
    *   limit: 10
    * });
-   * 
-   * // Explicitly use Prolog (legacy, for backward compatibility)
-   * const recipesProlog = await Recipe.findAll(perspective, {}, false);
    * ```
    */
   static async findAll<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
     query: Query = {},
+    /** @deprecated Ignored — Prolog engine has been removed. */
     _engine?: 'sparql' | 'prolog' | boolean
   ): Promise<T[]> {
     if (query.properties && query.properties.length === 0) {
@@ -1198,7 +1161,7 @@ export class Ad4mModel {
    *
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSPARQL - Whether to use SPARQL (default: true) or Prolog (legacy)
+   * @param _engine - **Deprecated.** Accepted for backward compatibility but ignored.
    * @returns The first matching instance, or `null`
    *
    * @example
@@ -1215,6 +1178,7 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query: Query = {},
+    /** @deprecated Ignored — Prolog engine has been removed. */
     _engine?: 'sparql' | 'prolog' | boolean,
   ): Promise<T | null> {
     const limitedQuery = { ...query, limit: 1 };
@@ -1227,9 +1191,9 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
+   * @param _engine - **Deprecated.** Accepted for backward compatibility but ignored.
    * @returns Object containing results array and total count
-   * 
+   *
    * @example
    * ```typescript
    * const { results, totalCount } = await Recipe.findAllAndCount(perspective, {
@@ -1237,15 +1201,13 @@ export class Ad4mModel {
    *   limit: 10
    * });
    * console.log(`Showing 10 of ${totalCount} dessert recipes`);
-   * 
-   * // Use Prolog explicitly (legacy)
-   * const { results, totalCount } = await Recipe.findAllAndCount(perspective, {}, false);
    * ```
    */
   static async findAllAndCount<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
     query: Query = {},
+    /** @deprecated Ignored — Prolog engine has been removed. */
     _engine?: 'sparql' | 'prolog' | boolean
   ): Promise<ResultsWithTotalCount<T>> {
     return await this.executeModelQuery(perspective, query);
@@ -1269,11 +1231,12 @@ export class Ad4mModel {
    * ```
    */
   static async paginate<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
-    pageSize: number, 
-    pageNumber: number, 
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    pageSize: number,
+    pageNumber: number,
     query?: Query,
+    /** @deprecated Ignored — Prolog engine has been removed. */
     _engine?: 'sparql' | 'prolog' | boolean
   ): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(query || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
@@ -1683,7 +1646,7 @@ export class Ad4mModel {
         const TargetClass = meta.target();
         const filter = buildConformanceFilter(meta.predicate, TargetClass);
         if (filter) rel.getter = filter.getter;
-      } catch (_) { /* target class may not be available */ }
+      } catch (e) { console.debug(`evaluateGetters: target class unavailable for relation '${relName}':`, e); }
     }
 
     const shapeJson = JSON.stringify(metadata);
@@ -2021,6 +1984,26 @@ export class Ad4mModel {
     perspective: PerspectiveProxy,
   ): Promise<void> {
     await perspective.ensureSDNASubjectClass(this);
+  }
+
+  /**
+   * Batch-registers multiple model classes on a perspective in a single RPC call.
+   * This is significantly faster than calling `register()` on each model individually
+   * because it eliminates N-1 round-trips and mutex acquisitions.
+   *
+   * @param perspective - The perspective to register the models on
+   * @param models - Array of Ad4mModel subclasses to register
+   *
+   * @example
+   * ```typescript
+   * await Ad4mModel.registerAll(perspective, [Community, Channel, Message, Task]);
+   * ```
+   */
+  static async registerAll(
+    perspective: PerspectiveProxy,
+    models: (typeof Ad4mModel)[],
+  ): Promise<void> {
+    await perspective.ensureSubjectClasses(models);
   }
 
   /**

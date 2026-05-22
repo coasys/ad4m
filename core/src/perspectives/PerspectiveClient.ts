@@ -16,14 +16,8 @@ export type UuidCallback = (uuid: string) => null
 export type LinkCallback = (link: LinkExpression) => null
 export type SyncStateChangeCallback = (state: PerspectiveState) => null
 
-function normalizeQueryResult(raw: unknown, errorContext: string): { result: AllInstancesResult; isInit: boolean } {
+function normalizeQueryResult(raw: unknown, errorContext: string): AllInstancesResult {
     let finalResult: unknown = raw
-    let isInit = false
-
-    if (typeof finalResult === 'string' && finalResult.startsWith('#init#')) {
-        finalResult = finalResult.substring(6)
-        isInit = true
-    }
 
     if (typeof finalResult === 'string') {
         try {
@@ -33,11 +27,7 @@ function normalizeQueryResult(raw: unknown, errorContext: string): { result: All
         }
     }
 
-    if (isInit && typeof finalResult === 'object' && finalResult !== null) {
-        (finalResult as Record<string, unknown>).isInit = true
-    }
-
-    return { result: finalResult as AllInstancesResult, isInit }
+    return finalResult as AllInstancesResult
 }
 
 export class PerspectiveClient {
@@ -131,13 +121,13 @@ export class PerspectiveClient {
         return JSON.parse(result)
     }
 
-    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
+    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult }> {
         const response = await this.#apiClient.call<{ subscriptionId: string, result: unknown }>(
             'perspective.subscribeQuery', { uuid, query }
         )
         const { subscriptionId, result } = response
-        const normalized = normalizeQueryResult(result, 'Error parsing subscribeQuery result:')
-        return { subscriptionId, result: normalized.result, isInit: normalized.isInit }
+        const parsed = normalizeQueryResult(result, 'Error parsing subscribeQuery result:')
+        return { subscriptionId, result: parsed }
     }
 
     async perspectiveKeepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
@@ -161,8 +151,8 @@ export class PerspectiveClient {
                 const eventSubscriptionId = event.subscriptionId || event.subscription_id
                 if (eventSubscriptionId !== subscriptionId) return
 
-                const normalized = normalizeQueryResult(event.result, 'Error parsing query subscription:')
-                onData(normalized.result)
+                const parsed = normalizeQueryResult(event.result, 'Error parsing query subscription:')
+                onData(parsed)
             }
         )
         this.#querySubscriptionUnsubscribers.set(subscriptionId, unsub)
@@ -286,6 +276,12 @@ export class PerspectiveClient {
     async addSdna(uuid: string, name: string, sdnaCode: string | undefined, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string): Promise<boolean> {
         return this.#apiClient.call<boolean>(
             'perspective.addSdna', { uuid, name, sdnaCode: sdnaCode || "", sdnaType, shaclJson }
+        )
+    }
+
+    async addSdnaBatch(uuid: string, entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[]): Promise<boolean[]> {
+        return this.#apiClient.call<boolean[]>(
+            'perspective.addSdna', { uuid, entries: entries.map(e => ({ ...e, sdnaCode: e.sdnaCode || "" })) }
         )
     }
 
@@ -424,6 +420,18 @@ export class PerspectiveClient {
         existing.push(unsub)
         this.#linkUnsubscribers.set(uuid as string, existing)
         await this.#apiClient.waitForSubscription()
+    }
+
+    /** Unsubscribe all link/sync-state listeners registered for the given perspective UUID.
+     *  Called by PerspectiveProxy.dispose() to prevent subscription leaks. */
+    removeAllListeners(uuid: string): void {
+        const unsubs = this.#linkUnsubscribers.get(uuid)
+        if (unsubs) {
+            for (const fn of unsubs) {
+                try { fn() } catch {}
+            }
+            this.#linkUnsubscribers.delete(uuid)
+        }
     }
 
     getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {

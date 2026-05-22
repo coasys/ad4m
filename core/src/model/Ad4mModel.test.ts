@@ -1424,66 +1424,6 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     expect(queryJson.offset).toBe(0);
   });
 
-  it("paginateSubscribe should skip isInit messages from subscription", async () => {
-    const mockSubscriptionId = "paginate-init-sub";
-    let capturedCallback: ((result: any) => void) | null = null;
-
-    const mockClient = {
-      modelSubscribe: jest.fn().mockResolvedValue({
-        subscriptionId: mockSubscriptionId,
-        result: { instances: [], totalCount: 0 },
-      }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        capturedCallback = cb;
-        return () => {};
-      }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
-      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-    };
-
-    let modelQueryCallCount = 0;
-    const mockPerspective = {
-      uuid: "test-uuid",
-      client: mockClient,
-      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string, shapeJson?: string) => {
-        return mockClient.modelSubscribe("test-uuid", className, queryJson, shapeJson);
-      }),
-      modelQuery: jest.fn().mockImplementation(async () => {
-        modelQueryCallCount++;
-        return { instances: [], totalCount: 0 };
-      }),
-    } as any;
-
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "InitGuardTest" })
-    class InitGuardTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://init" })
-      type: string = "test://init";
-      @Property({ through: "test://name" })
-      name: string = "";
-    }
-
-    const userCallback = jest.fn();
-    const builder = InitGuardTest.query(mockPerspective);
-    await builder.paginateSubscribe(10, 1, userCallback);
-
-    // Reset the count after initial fetch
-    const initialCallCount = modelQueryCallCount;
-
-    // Simulate an isInit message from subscription
-    expect(capturedCallback).not.toBeNull();
-    capturedCallback!({ isInit: true });
-
-    // Wait for any async processing
-    await new Promise(r => setTimeout(r, 50));
-
-    // modelQuery should NOT have been called again (isInit was filtered)
-    expect(modelQueryCallCount).toBe(initialCallCount);
-    // User callback should NOT have been invoked by isInit
-    expect(userCallback).not.toHaveBeenCalled();
-  });
-
   it("paginateSubscribe should re-fetch on real subscription updates", async () => {
     const mockSubscriptionId = "paginate-update-sub";
     let capturedCallback: ((result: any) => void) | null = null;
@@ -1530,7 +1470,7 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
 
     const initialCallCount = modelQueryCallCount;
 
-    // Simulate a real subscription update (not isInit)
+    // Simulate a subscription update
     capturedCallback!({ instances: [{ id: "new-item" }], totalCount: 1 });
 
     // Wait for async processing
@@ -1544,6 +1484,177 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     expect(callArg).toHaveProperty("totalCount");
     expect(callArg).toHaveProperty("pageSize", 10);
     expect(callArg).toHaveProperty("pageNumber", 1);
+  });
+});
+
+// ============================================================================
+// Subscription keepalive recovery tests
+// ============================================================================
+
+describe("ModelQueryBuilder keepalive recovery", () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  /**
+   * Helper: build a mock perspective whose keepAliveQuery rejects after
+   * `failAfter` successful calls, simulating a server-side subscription
+   * eviction (returns "Subscription not found").  On resubscribe (a second
+   * modelSubscribe call) it returns a *new* subscription ID.
+   */
+  function buildMocks(failAfter = 0) {
+    let keepaliveCallCount = 0;
+    let modelSubscribeCallCount = 0;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockImplementation(async () => {
+        modelSubscribeCallCount++;
+        return {
+          subscriptionId: `sub-${modelSubscribeCallCount}`,
+          result: { instances: [], totalCount: 0 },
+        };
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, _cb: any) => {
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockImplementation(async () => {
+        keepaliveCallCount++;
+        if (keepaliveCallCount > failAfter) {
+          throw new Error("RPC error 500: Subscription not found");
+        }
+        return true;
+      }),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(
+        async (className: string, queryJson: string, shapeJson?: string) =>
+          mockClient.modelSubscribe("test-uuid", className, queryJson, shapeJson)
+      ),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
+      getLinks: jest.fn().mockResolvedValue([]),
+    } as any;
+
+    return { mockClient, mockPerspective, getKeepaliveCount: () => keepaliveCallCount, getSubscribeCount: () => modelSubscribeCallCount };
+  }
+
+  it("subscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
+    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(/* failAfter */ 1);
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "KeepaliveRecoveryTest" })
+    class KeepaliveRecoveryTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://ka" })
+      type: string = "test://ka";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const builder = KeepaliveRecoveryTest.query(mockPerspective);
+    await builder.subscribe(() => {});
+
+    // Initial subscription
+    expect(getSubscribeCount()).toBe(1);
+
+    // First keepalive at 30s — succeeds (failAfter=1)
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(1);
+
+    // Second keepalive at 60s — fails → should trigger resubscribe
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(2);
+
+    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
+    await jest.advanceTimersByTimeAsync(2500);
+
+    // A second modelSubscribe call means recovery happened
+    expect(getSubscribeCount()).toBe(2);
+
+    // Clean up
+    builder.dispose();
+  });
+
+  it("countSubscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
+    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(0); // fail immediately
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "CountKeepaliveTest" })
+    class CountKeepaliveTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://cka" })
+      type: string = "test://cka";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const builder = CountKeepaliveTest.query(mockPerspective);
+    await builder.countSubscribe(() => {});
+
+    expect(getSubscribeCount()).toBe(1);
+
+    // First keepalive at 30s — fails immediately → should trigger resubscribe
+    await jest.advanceTimersByTimeAsync(30_000);
+    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
+    await jest.advanceTimersByTimeAsync(2500);
+
+    expect(getSubscribeCount()).toBe(2);
+
+    builder.dispose();
+  });
+
+  it("paginateSubscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
+    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(0);
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "PaginateKeepaliveTest" })
+    class PaginateKeepaliveTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://pka" })
+      type: string = "test://pka";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const builder = PaginateKeepaliveTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, () => {});
+
+    expect(getSubscribeCount()).toBe(1);
+
+    await jest.advanceTimersByTimeAsync(30_000);
+    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
+    await jest.advanceTimersByTimeAsync(2500);
+
+    expect(getSubscribeCount()).toBe(2);
+
+    builder.dispose();
+  });
+
+  it("subscribe: stops retrying after dispose()", async () => {
+    const { mockClient, mockPerspective } = buildMocks(Infinity); // keepalive always succeeds
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "DisposeTest" })
+    class DisposeTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://disp" })
+      type: string = "test://disp";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const builder = DisposeTest.query(mockPerspective);
+    await builder.subscribe(() => {});
+
+    builder.dispose();
+
+    // Advance well past multiple keepalive intervals
+    await jest.advanceTimersByTimeAsync(120_000);
+
+    // No keepalive calls should have happened after dispose
+    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(0);
   });
 });
 
@@ -2185,5 +2296,77 @@ describe("IncludeProjection type guard and key splitting", () => {
     });
 
     expect((results[0] as any).$signalCount).toBe(7);
+  });
+
+  // --- hydration of non-count projections ---
+
+  it("passes through scalar non-count projection value hydrated by Rust", async () => {
+    // Rust hydrates projection targets in-process and returns full JSON objects.
+    // The TS layer receives an already-hydrated object and passes it through.
+    mockPerspective.modelQuery.mockResolvedValueOnce({
+      instances: [{ id: "post://1", title: "Hello", $mySignal: { id: "signal://abc", signalTypeId: "type1" } }],
+      totalCount: 1,
+    });
+
+    const results = await Post.findAll(mockPerspective, {
+      include: { $mySignal: { from: "signals", limit: 1 } },
+    });
+
+    const mySignal = (results[0] as any).$mySignal;
+    expect(mySignal).toMatchObject({ id: "signal://abc", signalTypeId: "type1" });
+  });
+
+  it("passes through array non-count projection values hydrated by Rust", async () => {
+    // Rust hydrates all IRIs in the list and returns full JSON objects.
+    mockPerspective.modelQuery.mockResolvedValueOnce({
+      instances: [{
+        id: "post://1", title: "Hello",
+        $recentSignals: [
+          { id: "signal://a", signalTypeId: "type1" },
+          { id: "signal://b", signalTypeId: "type2" },
+        ],
+      }],
+      totalCount: 1,
+    });
+
+    const results = await Post.findAll(mockPerspective, {
+      include: { $recentSignals: { from: "signals" } },
+    });
+
+    const sigs = (results[0] as any).$recentSignals;
+    expect(Array.isArray(sigs)).toBe(true);
+    expect(sigs).toHaveLength(2);
+    expect(sigs[0]).toMatchObject({ id: "signal://a", signalTypeId: "type1" });
+    expect(sigs[1]).toMatchObject({ id: "signal://b", signalTypeId: "type2" });
+  });
+
+  it("passes through raw IRI when Rust cannot hydrate the projection target", async () => {
+    // When the target cannot be resolved, Rust keeps the raw IRI string.
+    mockPerspective.modelQuery.mockResolvedValueOnce({
+      instances: [{ id: "post://1", title: "Hello", $mySignal: "signal://unknown" }],
+      totalCount: 1,
+    });
+
+    const results = await Post.findAll(mockPerspective, {
+      include: { $mySignal: { from: "signals", limit: 1 } },
+    });
+
+    // Raw IRI preserved when no matching target instance exists in the store.
+    expect((results[0] as any).$mySignal).toBe("signal://unknown");
+  });
+
+  it("does NOT attempt hydration for count projections (they return numbers)", async () => {
+    mockPerspective.modelQuery.mockResolvedValueOnce({
+      instances: [{ id: "post://1", $signalCount: 5 }],
+      totalCount: 1,
+    });
+
+    const results = await Post.findAll(mockPerspective, {
+      include: { $signalCount: { from: "signals", count: true } },
+    });
+
+    // Only one modelQuery call — no follow-up findAll for count projections.
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+    expect((results[0] as any).$signalCount).toBe(5);
   });
 });

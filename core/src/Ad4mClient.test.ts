@@ -148,9 +148,14 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
             language: { address: 'lang://test' }, proof: { valid: true },
         };
     },
-    'expression.getMany': [
-        { author: 'did:test:1', timestamp: '2023-01-01', data: { type: 'test' }, language: { address: 'lang://test' }, proof: { valid: true } },
-    ],
+    'expression.getMany': (p: Record<string, unknown>) => {
+        // Return one result per URL (aligned by index), matching real API behavior
+        const urls = (p.urls || []) as string[];
+        return urls.map((url: string) => ({
+            author: 'did:test:1', timestamp: '2023-01-01', data: { type: 'test' },
+            language: { address: 'lang://test' }, proof: { valid: true },
+        }));
+    },
     'expression.create': 'Qm-expression-hash',
     'expression.interactions': [{ label: 'interact1', name: 'doSomething', parameters: [] }],
     'expression.interact': 'interaction-result',
@@ -348,6 +353,9 @@ afterAll(() => {
 beforeEach(() => {
     lastRpcCall = null;
     MockWebSocket.instances = [];
+    // Clear caches to prevent cross-test interference
+    ad4m.agent.clearByDidCache();
+    ad4m.expression.clearCache();
 });
 
 // ===================== AGENT TESTS =====================
@@ -857,7 +865,9 @@ describe('ExpressionClient', () => {
 
     test('getMany() returns multiple expressions', async () => {
         const exprs = await ad4m.expression.getMany(['url1', 'url2']);
-        expect(exprs).toHaveLength(1);
+        expect(exprs).toHaveLength(2);
+        expect(exprs[0].author).toBe('did:test:1');
+        expect(exprs[1].author).toBe('did:test:1');
     });
 
     test('getRaw() returns raw expression', async () => {
