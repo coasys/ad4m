@@ -1743,10 +1743,17 @@ impl PerspectiveInstance {
         Ok(class_names)
     }
 
-    fn get_links_local(
+    /// Query the SPARQL store for matching links, returning the decorated form
+    /// already cached in the store. Does NOT re-verify signatures — the
+    /// `proof.valid` flag was set on insert and persisted into RocksDB.
+    ///
+    /// Use this from query paths that just need to surface the link data.
+    /// Internal call sites that need the bare `LinkExpression` (e.g. to feed
+    /// Prolog) should use [`Self::get_links_local`] which unwraps for them.
+    fn get_links_local_decorated(
         &self,
         query: &LinkQuery,
-    ) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
+    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let from_date = query.from_date.as_ref().map(|d| {
             let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
             dt.to_rfc3339()
@@ -1756,16 +1763,25 @@ impl PerspectiveInstance {
             dt.to_rfc3339()
         });
 
-        let decorated_links = self.sparql_store.query_links(
+        Ok(self.sparql_store.query_links(
             query.source.as_deref(),
             query.predicate.as_deref(),
             query.target.as_deref(),
             from_date.as_deref(),
             until_date.as_deref(),
-            None, // Don't limit here — get_links() applies limit after sorting
-        )?;
+            None, // limit is applied after sorting in get_links()
+        )?)
+    }
 
-        let result: Vec<(LinkExpression, LinkStatus)> = decorated_links
+    fn get_links_local(
+        &self,
+        query: &LinkQuery,
+    ) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
+        // Unwrap the decorated form into the (LinkExpression, LinkStatus)
+        // tuple format the legacy in-process callers (SDNA, Prolog facts)
+        // expect. No re-verification — we trust the stored `valid` flag.
+        let decorated_links = self.get_links_local_decorated(query)?;
+        Ok(decorated_links
             .into_iter()
             .map(|decorated| {
                 let status = decorated.status.clone().unwrap_or(LinkStatus::Shared);
@@ -1781,9 +1797,7 @@ impl PerspectiveInstance {
                 };
                 (link_expr, status)
             })
-            .collect();
-
-        Ok(result)
+            .collect())
     }
 
     pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
@@ -1802,9 +1816,19 @@ impl PerspectiveInstance {
             }
         }
 
-        let mut links = self.get_links_local(&query)?;
+        // Pull the already-decorated form from the SPARQL store; sort and
+        // limit in-place. Previously this path materialised Vec<...> three
+        // times: once as DecoratedLinkExpression in get_links_local_decorated,
+        // again as Vec<(LinkExpression, LinkStatus)> in get_links_local
+        // (unwrap), and a third time after sort by re-wrapping each pair via
+        // `DecoratedLinkExpression::from((link, status))` — which re-runs
+        // Ed25519 signature verification per link. For a 10K-link result
+        // that's ~30K extra small allocations + 10K crypto ops every call.
+        // The wind-tunnel S9 query path was the dominant remaining source of
+        // RSS growth; this collapses it to a single Vec.
+        let mut links = self.get_links_local_decorated(&query)?;
 
-        links.sort_by(|(a, _), (b, _)| {
+        links.sort_by(|a, b| {
             let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap_or_default();
             let b_time = DateTime::parse_from_rfc3339(&b.timestamp).unwrap_or_default();
             if reverse {
@@ -1816,13 +1840,10 @@ impl PerspectiveInstance {
 
         if let Some(limit) = query.limit {
             let limit = links.len().min(limit as usize);
-            links = links[..limit].to_vec();
+            links.truncate(limit);
         }
 
-        Ok(links
-            .into_iter()
-            .map(|(link, status)| DecoratedLinkExpression::from((link.clone(), status)))
-            .collect())
+        Ok(links)
     }
 
     /// Adds the given Social DNA code to the perspective's SDNA code
@@ -2243,11 +2264,10 @@ impl PerspectiveInstance {
         // Fetch links based on mode
         let mut links: Vec<DecoratedLinkExpression> = match PROLOG_MODE {
             PrologMode::Simple => {
-                // Get all links for Simple mode
-                self.get_links_local(&LinkQuery::default())?
-                    .into_iter()
-                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
-                    .collect()
+                // Get all links for Simple mode. Use the decorated form
+                // directly — re-running signature verification per link was
+                // hot in the wind tunnel.
+                self.get_links_local_decorated(&LinkQuery::default())?
             }
             PrologMode::SdnaOnly => {
                 // Get only SDNA links for SdnaOnly mode (efficient query)
@@ -2426,11 +2446,7 @@ impl PerspectiveInstance {
                 };
 
                 // Get links for SDNA fact generation
-                let links = self
-                    .get_links_local(&LinkQuery::default())?
-                    .into_iter()
-                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
-                    .collect::<Vec<_>>();
+                let links = self.get_links_local_decorated(&LinkQuery::default())?;
 
                 service
                     .run_query_simple(
@@ -2525,11 +2541,7 @@ impl PerspectiveInstance {
                 });
 
                 // Get links for SDNA fact generation
-                let links = self
-                    .get_links_local(&LinkQuery::default())?
-                    .into_iter()
-                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
-                    .collect::<Vec<_>>();
+                let links = self.get_links_local_decorated(&LinkQuery::default())?;
 
                 service
                     .run_query_simple(
