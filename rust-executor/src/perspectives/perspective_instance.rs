@@ -2742,15 +2742,21 @@ impl PerspectiveInstance {
             }
         }
 
-        // Flush RocksDB memtables to disk to reclaim memory.
-        // Without this, RocksDB keeps write data in memory until auto-flush
-        // triggers, which can cause significant memory accumulation.
-        if let Err(e) = self.sparql_store.flush() {
-            log::warn!(
-                "Failed to flush SPARQL store after persist_link_diff: {:?}",
-                e
-            );
-        }
+        // EXPERIMENT: removed per-write flush. The fix-branch added a flush
+        // call here to reclaim memtable memory, but flushing on EVERY single
+        // addLink creates one tiny SST file per write. Each SST file carries
+        // in-memory metadata (block cache + bloom filter + table cache entry),
+        // so 1 link/s writes for 5 minutes = 300 SST files = ~300 in-memory
+        // metadata entries that RocksDB keeps until compaction catches up.
+        // That accounts for the per-add retention seen in wind tunnel monitor
+        // phase (~124 KB/link vs ~4 KB/link during a burst seed).
+        //
+        // RocksDB auto-flushes memtables when they reach write_buffer_size
+        // (default 64 MB). For our workload (max ~16 KB/link), that's ~4000
+        // links before an auto-flush, which is plenty. If memtable pressure
+        // is a real concern in production it should be addressed via
+        // configuration (smaller write_buffer_size, more memtables) or a
+        // throttled background flush, not a per-write fsync.
 
         Ok(())
     }
@@ -2815,7 +2821,15 @@ impl PerspectiveInstance {
                     .trigger_prolog_subscription_check
                     .store(true, Ordering::Release);
 
-                self_clone.pubsub_publish_diff(diff).await;
+                // NOTE: pubsub_publish_diff is NOT called here.
+                // The synchronous caller (add_link_expression / link_mutations /
+                // diff_from_link_language) already published the same diff to
+                // PERSPECTIVE_LINK_ADDED/REMOVED/UPDATED *before* spawning us.
+                // Republishing here delivered every link event TWICE to every
+                // WS subscriber (confirmed 2.0× delivery ratio in wind-tunnel
+                // S9) which doubled broadcast cost and was a UI/subscription
+                // re-evaluation footgun. Subscription re-evaluation is already
+                // gated by `trigger_prolog_subscription_check` + changed_predicates.
 
                 if let Some(sender) = completion_sender {
                     let _ = sender.send(());
@@ -2929,7 +2943,11 @@ impl PerspectiveInstance {
 
             if did_update {
                 self_clone.record_changed_predicates(&diff).await;
-                self_clone.pubsub_publish_diff(diff).await;
+
+                // NOTE: pubsub_publish_diff is NOT called here (Pooled mode).
+                // Same reason as the Disabled/Simple/SdnaOnly branch above —
+                // the synchronous caller already published this diff once.
+                // Subscription re-evaluation runs from the trigger flags below.
 
                 // Trigger notification and subscription checks after prolog facts are updated
                 self_clone
