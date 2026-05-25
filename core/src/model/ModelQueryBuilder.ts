@@ -10,6 +10,7 @@ import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import type {
   Where, Order, IncludeMap, Query,
   ResultsWithTotalCount, PaginationResult,
+  TypedWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
 } from "./types";
 
 /** Query builder for Ad4mModel queries.
@@ -80,8 +81,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * })
    * ```
    */
-  where(conditions: Where): ModelQueryBuilder<T> {
-    this.queryParams.where = conditions;
+  where(conditions: TypedWhere<T>): ModelQueryBuilder<T> {
+    this.queryParams.where = conditions as Where;
     return this;
   }
 
@@ -96,8 +97,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * .order({ createdAt: "DESC" })
    * ```
    */
-  order(orderBy: Order): ModelQueryBuilder<T> {
-    this.queryParams.order = orderBy;
+  order(orderBy: TypedOrder<T>): ModelQueryBuilder<T> {
+    this.queryParams.order = orderBy as Order;
     return this;
   }
 
@@ -218,8 +219,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * .properties(["name", "description", "rating"])
    * ```
    */
-  properties(properties: string[]): ModelQueryBuilder<T> {
-    this.queryParams.properties = properties;
+  properties(properties: PropertyKeysOf<T>[] | string[]): ModelQueryBuilder<T> {
+    this.queryParams.properties = properties as string[];
     return this;
   }
 
@@ -272,21 +273,13 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    *   .run();
    * ```
    */
-  include(map: IncludeMap): ModelQueryBuilder<T> {
-    this.queryParams.include = map;
+  include(map: TypedIncludeMap<T>): ModelQueryBuilder<T> {
+    this.queryParams.include = map as IncludeMap;
     return this;
   }
 
   overrideModelClassName(className: string): ModelQueryBuilder<T> {
     this.modelClassName = className;
-    return this;
-  }
-
-  /**
-   * Sets the query engine to use.
-   * @deprecated Prolog engine has been removed. All queries use SPARQL/Rust.
-   */
-  engine(_eng: 'sparql' | 'prolog'): ModelQueryBuilder<T> {
     return this;
   }
 

@@ -116,9 +116,9 @@ export class PerspectiveClient {
         return JSON.parse(result)
     }
 
-    async querySparql(uuid: string, query: string): Promise<unknown> {
+    async querySparql<T = unknown>(uuid: string, query: string): Promise<T> {
         const result = await this.#apiClient.call<string>('perspective.querySparql', { uuid, engine: 'sparql', query })
-        return JSON.parse(result)
+        return JSON.parse(result) as T
     }
 
     async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult }> {

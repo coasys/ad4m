@@ -21,6 +21,7 @@ import type {
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
+  TypedQuery, IncludeExtras, IncludeOf,
 } from "./types";
 
 
@@ -1139,19 +1140,18 @@ export class Ad4mModel {
    * });
    * ```
    */
-  static async findAll<T extends Ad4mModel>(
+  static async findAll<T extends Ad4mModel, Q extends TypedQuery<T> = {}>(
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
-    query: Query = {},
-    /** @deprecated Ignored — Prolog engine has been removed. */
-    _engine?: 'sparql' | 'prolog' | boolean
-  ): Promise<T[]> {
-    if (query.properties && query.properties.length === 0) {
+    query?: Q,
+  ): Promise<(T & IncludeExtras<T, IncludeOf<Q>>)[]> {
+    const q = (query ?? {}) as Query;
+    if (q.properties && q.properties.length === 0) {
       throw new Error("properties[] must not be empty — omit the field to return all properties, or specify at least one field name");
     }
 
-    const { results } = await this.executeModelQuery(perspective, query);
-    return results;
+    const { results } = await this.executeModelQuery(perspective, q);
+    return results as (T & IncludeExtras<T, IncludeOf<Q>>)[];
   }
 
   /**
@@ -1174,15 +1174,13 @@ export class Ad4mModel {
    * }
    * ```
    */
-  static async findOne<T extends Ad4mModel>(
+  static async findOne<T extends Ad4mModel, Q extends TypedQuery<T> = {}>(
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
-    query: Query = {},
-    /** @deprecated Ignored — Prolog engine has been removed. */
-    _engine?: 'sparql' | 'prolog' | boolean,
-  ): Promise<T | null> {
-    const limitedQuery = { ...query, limit: 1 };
-    const results = await this.findAll(perspective, limitedQuery);
+    query?: Q,
+  ): Promise<(T & IncludeExtras<T, IncludeOf<Q>>) | null> {
+    const limitedQuery = { ...((query ?? {}) as Query), limit: 1 } as Q;
+    const results = await this.findAll<T, Q>(perspective, limitedQuery);
     return results[0] ?? null;
   }
 
@@ -1203,14 +1201,13 @@ export class Ad4mModel {
    * console.log(`Showing 10 of ${totalCount} dessert recipes`);
    * ```
    */
-  static async findAllAndCount<T extends Ad4mModel>(
+  static async findAllAndCount<T extends Ad4mModel, Q extends TypedQuery<T> = {}>(
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
-    query: Query = {},
-    /** @deprecated Ignored — Prolog engine has been removed. */
-    _engine?: 'sparql' | 'prolog' | boolean
-  ): Promise<ResultsWithTotalCount<T>> {
-    return await this.executeModelQuery(perspective, query);
+    query?: Q,
+  ): Promise<ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>> {
+    const out = await this.executeModelQuery(perspective, (query ?? {}) as Query);
+    return out as ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>;
   }
 
   /**
@@ -1230,18 +1227,16 @@ export class Ad4mModel {
    * console.log(`Page ${page.pageNumber} of recipes, ${page.results.length} items`);
    * ```
    */
-  static async paginate<T extends Ad4mModel>(
+  static async paginate<T extends Ad4mModel, Q extends TypedQuery<T> = {}>(
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     pageSize: number,
     pageNumber: number,
-    query?: Query,
-    /** @deprecated Ignored — Prolog engine has been removed. */
-    _engine?: 'sparql' | 'prolog' | boolean
-  ): Promise<PaginationResult<T>> {
-    const paginationQuery = { ...(query || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
+    query?: Q,
+  ): Promise<PaginationResult<T & IncludeExtras<T, IncludeOf<Q>>>> {
+    const paginationQuery = { ...((query ?? {}) as Query), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery);
-    return { results, totalCount, pageSize, pageNumber };
+    return { results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount, pageSize, pageNumber };
   }
 
   /**
@@ -1270,8 +1265,12 @@ export class Ad4mModel {
    * });
    * ```
    */
-  static async count(perspective: PerspectiveProxy, query: Query = {}): Promise<number> {
-    const { totalCount } = await this.executeModelQuery(perspective, { ...query, limit: 0 });
+  static async count<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    query?: TypedQuery<T>,
+  ): Promise<number> {
+    const { totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0 });
     return totalCount;
   }
 
@@ -2067,11 +2066,11 @@ export class Ad4mModel {
    * ```
    */
   static query<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
-    query?: Query
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    query?: TypedQuery<T>,
   ): ModelQueryBuilder<T> {
-    return new ModelQueryBuilder<T>(perspective, this as any, query);
+    return new ModelQueryBuilder<T>(perspective, this as any, (query ?? {}) as Query);
   }
 
   /**

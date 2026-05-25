@@ -645,8 +645,7 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
     jest.clearAllMocks();
   });
 
-  it("should use SPARQL when engine is 'sparql' in findAll()", async () => {
-    // modelQuery returns already-hydrated instances from the Rust executor
+  it("routes findAll() through modelQuery", async () => {
     mockPerspective.modelQuery.mockResolvedValue({
       instances: [
         { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
@@ -654,27 +653,12 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
       totalCount: 1
     });
 
-    const results = await Recipe.findAll(mockPerspective, {}, 'sparql');
+    const results = await Recipe.findAll(mockPerspective);
 
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
     expect(results[0].name).toBe("Pasta");
-  });
-
-  it("should route through modelQuery when engine is 'prolog' in findAll() (prolog is now no-op)", async () => {
-    mockPerspective.modelQuery.mockResolvedValue({
-      instances: [
-        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
-      ],
-      totalCount: 1
-    });
-
-    const results = await Recipe.findAll(mockPerspective, {}, false);
-    
-    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.infer).not.toHaveBeenCalled();
-    expect(results).toHaveLength(1);
   });
 
   it("should use SPARQL when engine is 'sparql' in findAllAndCount()", async () => {
@@ -737,7 +721,7 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
     expect(count).toBe(10);
   });
 
-  it("should use SPARQL when engine is 'sparql' in ModelQueryBuilder.get()", async () => {
+  it("routes ModelQueryBuilder.get() through modelQuery", async () => {
     mockPerspective.modelQuery.mockResolvedValue({
       instances: [
         { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
@@ -747,7 +731,6 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
 
     const results = await Recipe.query(mockPerspective)
       .where({ name: "Pasta" })
-      .engine('sparql')
       .get();
 
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
@@ -756,26 +739,7 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
     expect(results[0].name).toBe("Pasta");
   });
 
-  it("should use modelQuery when .engine('prolog') is called (engine is now a no-op)", async () => {
-    mockPerspective.modelQuery.mockResolvedValue({
-      instances: [
-        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
-      ],
-      totalCount: 1
-    });
-
-    const results = await Recipe.query(mockPerspective)
-      .where({ name: "Pasta" })
-      .engine('prolog')
-      .get();
-    
-    // engine('prolog') is now a no-op — everything goes through modelQuery
-    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.infer).not.toHaveBeenCalled();
-    expect(results).toHaveLength(1);
-  });
-
-  it("should use SPARQL when engine is 'sparql' in ModelQueryBuilder.count()", async () => {
+  it("routes ModelQueryBuilder.count() through modelQuery", async () => {
     mockPerspective.modelQuery.mockResolvedValue({
       instances: [],
       totalCount: 3
@@ -783,7 +747,6 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
 
     const count = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 4 } })
-      .engine('sparql')
       .count();
 
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
@@ -791,7 +754,7 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
     expect(count).toBe(3);
   });
 
-  it("should use SPARQL when engine is 'sparql' in ModelQueryBuilder.paginate()", async () => {
+  it("routes ModelQueryBuilder.paginate() through modelQuery", async () => {
     mockPerspective.modelQuery.mockResolvedValue({
       instances: [
         { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
@@ -801,7 +764,6 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
 
     const page = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 3 } })
-      .engine('sparql')
       .paginate(10, 1);
 
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
@@ -917,7 +879,6 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     // Count recipes with rating > 3 using ModelQueryBuilder
     const count = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 3 } })
-      .engine('sparql')
       .count();
     
     expect(count).toBe(2);
@@ -936,7 +897,6 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     // Count using ModelQueryBuilder
     const count = await Recipe.query(mockPerspective)
       .where({ timestamp: { between: [startTimestamp, endTimestamp] } })
-      .engine('sparql')
       .count();
     
     expect(count).toBe(3);
