@@ -179,7 +179,7 @@ export type ModelDataKeys<T extends Ad4mModel> = {
 export type PropertyKeysOf<T extends Ad4mModel> = {
   [K in keyof T]: K extends ModelDataKeys<T>
     ? NonNullable<T[K]> extends Ad4mModel ? never
-      : T[K] extends Ad4mModel[] ? never
+      : NonNullable<T[K]> extends Ad4mModel[] ? never
       : K
     : never
 }[keyof T];
@@ -187,12 +187,13 @@ export type PropertyKeysOf<T extends Ad4mModel> = {
 /** Keys of T that can appear in `include` — typed Ad4mModel references AND
  *  `string[]` link-target arrays (the `@HasMany` + `string[]` pattern that
  *  AD4M uses for relations without a target class thunk). Handles both
- *  `?: Foo` (optional → `Foo | undefined`) and `Foo | null` field shapes. */
+ *  `?: Foo` (optional → `Foo | undefined`) and `Foo | null` field shapes, and
+ *  optional/nullable array variants (`?: Foo[]`, `Foo[] | null`). */
 export type RelationKeysOf<T extends Ad4mModel> = {
   [K in keyof T]: K extends ModelDataKeys<T>
     ? NonNullable<T[K]> extends Ad4mModel ? K
-      : T[K] extends Ad4mModel[] ? K
-      : T[K] extends string[] ? K
+      : NonNullable<T[K]> extends Ad4mModel[] ? K
+      : NonNullable<T[K]> extends string[] ? K
       : never
     : never
 }[keyof T];
@@ -201,7 +202,7 @@ export type RelationKeysOf<T extends Ad4mModel> = {
  *  Falls back to `Ad4mModel` (loose) for the `string[]` relation pattern,
  *  since no target class is available at the type level. */
 export type RelatedModel<T extends Ad4mModel, K extends RelationKeysOf<T>> =
-    T[K] extends (infer U)[] ? (U extends Ad4mModel ? U : Ad4mModel)
+    NonNullable<T[K]> extends (infer U)[] ? (U extends Ad4mModel ? U : Ad4mModel)
   : NonNullable<T[K]> extends Ad4mModel ? NonNullable<T[K]>
   : Ad4mModel;
 

@@ -77,6 +77,29 @@ class AgentProfileLike extends WeNodeLike {
   location?: LocationBlockLike;
 }
 
+// Optional-array fixture: covers `?: T[]` and `?: string[]` patterns. Before
+// the `NonNullable<T[K]> extends X[]` change, these optional array relations
+// were silently dropped from RelationKeysOf because `Foo[] | undefined extends
+// Foo[]` evaluates to false.
+@Model({ name: "OptionalArrayLike" })
+class OptionalArrayLike extends Ad4mModel {
+  @Property({ through: "x://name" })
+  name: string = "";
+
+  // Optional typed-array relation
+  @HasMany(() => Comment, { through: "x://comments" })
+  comments?: Comment[];
+
+  // Optional string[] relation (the `@HasMany` + `string[]` pattern)
+  @HasMany({ through: "x://members" })
+  members?: string[];
+
+  // Optional scalar array — also `string[] | undefined`, should appear as a
+  // relation too (matches the runtime semantics: any array field can be a
+  // link collection unless we have stronger schema info).
+  tags?: string[];
+}
+
 // ---------------------------------------------------------------------------
 // Type-level helpers
 // ---------------------------------------------------------------------------
@@ -115,6 +138,23 @@ expectAssignable<AgentProps>("avatar");
 
 expectAssignable<TypedIncludeMap<AgentProfileLike>>({ location: true });
 expectAssignable<TypedIncludeMap<AgentProfileLike>>({ signals: true });
+
+// Optional-array regression: `comments?: Comment[]`, `members?: string[]`,
+// `tags?: string[]` should all be recognised as relations. Previously
+// rejected because `T[K] = T[] | undefined` doesn't extend `T[]`.
+type OptArrRels = RelationKeysOf<OptionalArrayLike>;
+expectAssignable<OptArrRels>("comments");
+expectAssignable<OptArrRels>("members");
+expectAssignable<OptArrRels>("tags");
+
+expectAssignable<TypedIncludeMap<OptionalArrayLike>>({ comments: true });
+expectAssignable<TypedIncludeMap<OptionalArrayLike>>({ members: true });
+expectAssignable<TypedIncludeMap<OptionalArrayLike>>({
+  $commentCount: { from: "comments", count: true },
+});
+
+// RelatedModel must also peel the optional wrapper before inferring U
+expectExact<RelatedModel<OptionalArrayLike, "comments">, Comment>(true);
 
 // ---------------------------------------------------------------------------
 // TypedWhere
