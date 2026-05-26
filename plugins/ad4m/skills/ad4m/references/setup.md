@@ -227,7 +227,7 @@ After init + generate, `--app-data-path` contains:
 │   └── languages/            # Installed language bundles
 ├── ad4m_db.sqlite            # Agent database
 ├── mainnet_seed.seed         # Bootstrap configuration
-└── surrealdb_perspectives/   # Per-perspective SurrealDB stores
+└── perspectives/             # Per-perspective SPARQL (Oxigraph) stores
 ```
 
 ## Security Considerations

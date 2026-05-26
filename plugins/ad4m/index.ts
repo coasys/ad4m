@@ -673,7 +673,7 @@ Notes:
           type: "channel-messages",
           perspective: params.perspective_id,
           channel: params.expression_address,
-          query: data.surreal_query ?? data.waker_config?.query,
+          query: data.query ?? data.waker_config?.query,
         };
 
         if (!subscription.query) {

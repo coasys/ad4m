@@ -181,7 +181,7 @@ pub struct LinkMutationResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct QueryRequest {
-    pub engine: String, // "prolog" | "surreal"
+    pub engine: String, // "prolog" | "sparql"
     pub query: String,
 }
 

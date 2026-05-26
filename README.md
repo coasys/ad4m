@@ -56,7 +56,7 @@ Each AD4M instance is a full-featured data node that:
 AD4M integrates several powerful technologies into a cohesive whole:
 - [Holochain](https://github.com/holochain/holochain): For distributed hash tables and p2p networking
 - [Deno & V8](https://github.com/denoland/deno): For secure JavaScript/TypeScript execution
-- [SurrealDB](https://github.com/surrealdb/surrealdb): For local graph-relational data persistence and live queries
+- [Oxigraph](https://github.com/oxigraph/oxigraph): For local RDF/SPARQL persistence and live queries
 - [Scryer-Prolog](https://github.com/mthom/scryer-prolog): For semantic reasoning and queries
 - [Axum](https://github.com/tokio-rs/axum): For WebSocket RPC and HTTP API
 - [Kalosm](https://github.com/floneum/floneum): For AI model inference with Candle

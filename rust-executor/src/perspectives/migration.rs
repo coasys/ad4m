@@ -1,7 +1,7 @@
 /// Migration module for perspective link data.
 ///
 /// Provides migration paths:
-/// - Rusqlite → SPARQL (Oxigraph) — for users upgrading from pre-SurrealDB versions
+/// - Rusqlite → SPARQL (Oxigraph) — for users upgrading from earlier versions
 ///
 /// During migration, `literal://` URIs are converted to the canonical `literal:` format.
 ///
@@ -73,7 +73,7 @@ pub fn convert_link_literal_uris(link: &mut DecoratedLinkExpression) -> usize {
 
 /// Migrate all links for a perspective from Rusqlite to the SPARQL (Oxigraph) service.
 ///
-/// This handles users upgrading from any previous version (pre-SurrealDB or post-SurrealDB).
+/// This handles users upgrading from any previous Rusqlite-backed version.
 /// During migration, all `literal://` URIs are converted to the canonical `literal:` format.
 ///
 /// The function is idempotent — calling it multiple times on the same perspective is safe.

@@ -2184,7 +2184,6 @@ describe("WakerSubscriptionManager", () => {
   function makeMockProxy() {
     let resultCallback: ((result: any) => void) | null = null;
     const proxy = {
-      isSurrealDB: false,
       initialized: Promise.resolve(),
       subscribe: vi.fn(() => Promise.resolve()),
       dispose: vi.fn(),
@@ -2195,7 +2194,7 @@ describe("WakerSubscriptionManager", () => {
     return {
       ProxyClass: vi.fn(() => proxy),
       proxy,
-      /** Simulate SurrealDB delivering a result */
+      /** Simulate the subscription delivering a result */
       deliver: (result: any) => {
         if (!resultCallback) throw new Error("onResult not registered yet");
         resultCallback(result);

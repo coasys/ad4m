@@ -577,11 +577,8 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
                 }
             }
         }
-        "surreal" => Err(WsRpcError::bad_request(
-            "SurrealDB query engine not available. Use 'sparql'.",
-        )),
         other => Err(WsRpcError::bad_request(format!(
-            "Unknown query engine: {}. Use 'sparql' or 'surreal'.",
+            "Unknown query engine: {}. Use 'sparql'.",
             other
         ))),
     }
@@ -751,7 +748,7 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     })?)
 }
 
-async fn subscribe_surreal_query(
+async fn subscribe_sparql_query(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
@@ -764,7 +761,7 @@ async fn subscribe_surreal_query(
 
     let _ = get_perspective_with_access(&uuid, &ctx).await?;
     Err(WsRpcError::not_implemented(
-        "subscribe_surreal_query not yet implemented",
+        "subscribe_sparql_query not yet implemented",
     ))
 }
 
@@ -1056,7 +1053,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.subscribeQuery", subscribe_query);
     map.register("perspective.keepAliveQuery", keep_alive_query);
     map.register("perspective.disposeQuery", dispose_query);
-    map.register("perspective.subscribeSparql", subscribe_surreal_query);
+    map.register("perspective.subscribeSparql", subscribe_sparql_query);
     map.register("perspective.keepAliveSparql", keep_alive_query);
     map.register("perspective.disposeSparql", dispose_query);
     map.register("perspective.modelQuery", model_query_handler);

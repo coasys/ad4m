@@ -252,7 +252,7 @@ describe('buildSPARQLQuery — non-literal and flag properties', () => {
 describe('buildSPARQLQuery — IRI correctness', () => {
   const modelClass: any = {};
 
-  it('uses <ad4m://fn/parse_literal> IRI, not fn::parse_literal SurrealDB syntax', () => {
+  it('uses <ad4m://fn/parse_literal> IRI, not invalid fn::parse_literal namespaced form', () => {
     const query = { where: { name: 'test' } };
     const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
     expect(sparql).toContain('<ad4m://fn/parse_literal>');

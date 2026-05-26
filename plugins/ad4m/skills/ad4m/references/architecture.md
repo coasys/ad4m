@@ -245,4 +245,4 @@ Query available models: `get_models` (MCP) or retrieve links with predicate `ad4
 
 - **AI Service** — local LLM inference, embeddings, Whisper transcription
 - **Prolog Engine** — logic queries over perspectives (legacy, being replaced)
-- **SurrealDB** — per-perspective document store for indexed queries
+- **SPARQL (Oxigraph)** — per-perspective RDF store for indexed queries
