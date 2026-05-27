@@ -4,7 +4,8 @@ members = [
     "cli",
     "rust-client",
     "rust-executor",
-    "ui/src-tauri"
+    "ui/src-tauri",
+    "bootstrap-languages/p-diff-sync/hc-dna/tests/sweettest",
 ]
 
 [patch.crates-io]

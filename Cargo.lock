@@ -14358,6 +14358,43 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "perspective_diff_sync_integrity"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "derive_more 0.99.20",
+ "hdi",
+ "hdk",
+ "holo_hash",
+ "holochain_serialized_bytes",
+ "serde",
+]
+
+[[package]]
+name = "perspective_diff_sync_tests"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "futures",
+ "hdi",
+ "hdk",
+ "holochain",
+ "holochain_serialized_bytes",
+ "holochain_state",
+ "holochain_trace 0.7.0-dev.1",
+ "holochain_types",
+ "holochain_zome_types",
+ "perspective_diff_sync_integrity",
+ "pretty_assertions",
+ "rand 0.8.5",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid 1.18.1",
+]
+
+[[package]]
 name = "pest"
 version = "2.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -2,7 +2,6 @@
 members = [
   "zomes/perspective_diff_sync",
   "zomes/perspective_diff_sync_integrity",
-  "tests/sweettest"
 ]
 resolver="2"
 
@@ -11,3 +10,5 @@ opt-level = "z"
 
 [profile.release]
 opt-level = "z"
+
+
