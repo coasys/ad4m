@@ -40,7 +40,8 @@ async fn test_merge_fetch() {
             },
             my_did: "did:test:alice".to_string(),
         },
-    ).await;
+    )
+    .await;
     println!("Alice committed: {:?}", alice_commit);
 
     await_consistency(1000).await;
@@ -61,7 +62,8 @@ async fn test_merge_fetch() {
             },
             my_did: "did:test:bob".to_string(),
         },
-    ).await;
+    )
+    .await;
     println!("Bob committed: {:?}", bob_commit);
 
     // Connect the conductors
@@ -84,25 +86,24 @@ async fn test_merge_fetch() {
         serde_json::json!({ "hash": bob_commit, "is_scribe": true }),
         5,
         2000,
-        |result: &perspective_diff_sync_integrity::PullResult| {
-            result.diff.additions.len() == 1
-        },
-    ).await.expect("Alice's pull should succeed");
+        |result: &perspective_diff_sync_integrity::PullResult| result.diff.additions.len() == 1,
+    )
+    .await
+    .expect("Alice's pull should succeed");
 
-    assert_eq!(alice_pull.diff.additions.len(), 1, "Alice should see Bob's addition");
     assert_eq!(
-        alice_pull.diff.additions[0].data,
-        bob_link.data,
+        alice_pull.diff.additions.len(),
+        1,
+        "Alice should see Bob's addition"
+    );
+    assert_eq!(
+        alice_pull.diff.additions[0].data, bob_link.data,
         "Alice should see Bob's link data"
     );
 
     // Get Alice's new merge commit hash
-    let alice_revision: Option<ActionHash> = call_zome(
-        &conductors[0],
-        alice_cell,
-        "current_revision",
-        (),
-    ).await;
+    let alice_revision: Option<ActionHash> =
+        call_zome(&conductors[0], alice_cell, "current_revision", ()).await;
 
     await_consistency(2000).await;
 
@@ -114,21 +115,24 @@ async fn test_merge_fetch() {
         serde_json::json!({ "hash": alice_revision.unwrap(), "is_scribe": false }),
         5,
         2000,
-        |result: &perspective_diff_sync_integrity::PullResult| {
-            result.diff.additions.len() == 1
-        },
-    ).await.expect("Bob's pull should succeed");
+        |result: &perspective_diff_sync_integrity::PullResult| result.diff.additions.len() == 1,
+    )
+    .await
+    .expect("Bob's pull should succeed");
 
-    assert_eq!(bob_pull.diff.additions.len(), 1, "Bob should see Alice's addition");
     assert_eq!(
-        bob_pull.diff.additions[0].data,
-        alice_link.data,
+        bob_pull.diff.additions.len(),
+        1,
+        "Bob should see Alice's addition"
+    );
+    assert_eq!(
+        bob_pull.diff.additions[0].data, alice_link.data,
         "Bob should see Alice's link data"
     );
 
     // Cleanup
-    for conductor in conductors.iter_mut() {
-        conductor.shutdown().await;
+    for conductor in conductors.iter() {
+        let _ = conductor;
     }
 }
 
@@ -158,8 +162,12 @@ async fn test_merge_fetch_deep() {
     }
 
     // Get Alice's current revision
-    let alice_rev: Option<ActionHash> = call_zome(&conductors[0], alice_cell, "current_revision", ()).await;
-    assert!(alice_rev.is_some(), "Alice should have a revision after commits");
+    let alice_rev: Option<ActionHash> =
+        call_zome(&conductors[0], alice_cell, "current_revision", ()).await;
+    assert!(
+        alice_rev.is_some(),
+        "Alice should have a revision after commits"
+    );
 
     // Bob commits 7 links (creating fork)
     for _ in 0..7 {
@@ -167,8 +175,12 @@ async fn test_merge_fetch_deep() {
     }
 
     // Get Bob's current revision
-    let bob_rev: Option<ActionHash> = call_zome(&conductors[1], bob_cell, "current_revision", ()).await;
-    assert!(bob_rev.is_some(), "Bob should have a revision after commits");
+    let bob_rev: Option<ActionHash> =
+        call_zome(&conductors[1], bob_cell, "current_revision", ()).await;
+    assert!(
+        bob_rev.is_some(),
+        "Bob should have a revision after commits"
+    );
 
     // Connect conductors
     conductors.exchange_peer_info().await;
@@ -190,14 +202,19 @@ async fn test_merge_fetch_deep() {
         serde_json::json!({ "hash": bob_rev.unwrap(), "is_scribe": true }),
         5,
         2000,
-        |result: &perspective_diff_sync_integrity::PullResult| {
-            result.diff.additions.len() == 7
-        },
-    ).await.expect("Alice's merge should succeed");
-    assert_eq!(alice_merge.diff.additions.len(), 7, "Alice should see 7 from Bob");
+        |result: &perspective_diff_sync_integrity::PullResult| result.diff.additions.len() == 7,
+    )
+    .await
+    .expect("Alice's merge should succeed");
+    assert_eq!(
+        alice_merge.diff.additions.len(),
+        7,
+        "Alice should see 7 from Bob"
+    );
 
     // Get Alice's new merged revision
-    let alice_merged_rev: Option<ActionHash> = call_zome(&conductors[0], alice_cell, "current_revision", ()).await;
+    let alice_merged_rev: Option<ActionHash> =
+        call_zome(&conductors[0], alice_cell, "current_revision", ()).await;
 
     await_consistency(2000).await;
 
@@ -209,15 +226,19 @@ async fn test_merge_fetch_deep() {
         serde_json::json!({ "hash": alice_merged_rev.unwrap(), "is_scribe": false }),
         5,
         2000,
-        |result: &perspective_diff_sync_integrity::PullResult| {
-            result.diff.additions.len() == 7
-        },
-    ).await.expect("Bob's pull should succeed");
-    assert_eq!(bob_final.diff.additions.len(), 7, "Bob should see 7 from Alice");
+        |result: &perspective_diff_sync_integrity::PullResult| result.diff.additions.len() == 7,
+    )
+    .await
+    .expect("Bob's pull should succeed");
+    assert_eq!(
+        bob_final.diff.additions.len(),
+        7,
+        "Bob should see 7 from Alice"
+    );
 
     // Cleanup
-    for conductor in conductors.iter_mut() {
-        conductor.shutdown().await;
+    for conductor in conductors.iter() {
+        let _ = conductor;
     }
 }
 
@@ -234,21 +255,20 @@ async fn test_large_diff_chunking() {
     // Commit 600 links (above the CHUNKING_THRESHOLD of 500)
     let large_input = create_commit_input_multi("alice", 600);
 
-    let commit_result: ActionHash = call_zome(
-        &conductor,
-        &cell,
-        "commit",
-        large_input,
-    ).await;
+    let commit_result: ActionHash = call_zome(&conductor, &cell, "commit", large_input).await;
 
     println!("Large commit succeeded: {:?}", commit_result);
 
     // Verify we can read it back
     let current: Option<ActionHash> = call_zome(&conductor, &cell, "current_revision", ()).await;
     assert!(current.is_some(), "Should have a current revision");
-    assert_eq!(current.unwrap(), commit_result, "Current revision should match commit");
+    assert_eq!(
+        current.unwrap(),
+        commit_result,
+        "Current revision should match commit"
+    );
 
-    conductor.shutdown().await;
+    let _ = conductor;
 }
 
 /// Test commit with empty diff
@@ -265,7 +285,7 @@ async fn test_empty_commit() {
     let rev1: Option<ActionHash> = call_zome(&conductor, &cell, "current_revision", ()).await;
     assert!(rev1.is_some());
 
-    conductor.shutdown().await;
+    let _ = conductor;
 }
 
 /// Test that handle_broadcast does NOT update current_revision when chunk loading fails.
@@ -277,8 +297,8 @@ async fn test_empty_commit() {
 /// leave current_revision unchanged.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_chunked_broadcast_does_not_update_revision_on_failure() {
-    use perspective_diff_sync_integrity::{HashBroadcast, PerspectiveDiffEntryReference};
     use holochain_serialized_bytes::SerializedBytes;
+    use perspective_diff_sync_integrity::{HashBroadcast, PerspectiveDiffEntryReference};
     // Note: perspective_diff_sync_integrity uses holo_hash@0.7.0-dev.3 while the
     // test's holochain dependency uses holo_hash@0.6.0.  ActionHash values from
     // call_zome (0.6.0 type) cannot be used directly in HashBroadcast / new_chunked
@@ -299,14 +319,11 @@ async fn test_chunked_broadcast_does_not_update_revision_on_failure() {
         bob_cell,
         "commit",
         create_commit_input("initial"),
-    ).await;
+    )
+    .await;
 
-    let bob_current_before: Option<ActionHash> = call_zome(
-        &conductors[1],
-        bob_cell,
-        "current_revision",
-        (),
-    ).await;
+    let bob_current_before: Option<ActionHash> =
+        call_zome(&conductors[1], bob_cell, "current_revision", ()).await;
     let bob_current_hash = bob_current_before
         .clone()
         .expect("Bob must have a current_revision after committing");
@@ -317,16 +334,21 @@ async fn test_chunked_broadcast_does_not_update_revision_on_failure() {
         alice_cell,
         "commit",
         create_commit_input_multi("alice", 600),
-    ).await;
+    )
+    .await;
 
     let alice_entry: PerspectiveDiffEntryReference = call_zome(
         &conductors[0],
         alice_cell,
         "get_diff_entry_reference",
         alice_large_commit.clone(),
-    ).await;
+    )
+    .await;
 
-    assert!(alice_entry.is_chunked(), "Alice's large diff must be chunked");
+    assert!(
+        alice_entry.is_chunked(),
+        "Alice's large diff must be chunked"
+    );
     let diffs_since_snapshot = alice_entry.diffs_since_snapshot;
     // chunk_hashes is already the 0.7.0-dev.3 type (came from PerspectiveDiffEntryReference).
     let chunk_hashes = alice_entry.diff_chunks.unwrap();
@@ -350,20 +372,16 @@ async fn test_chunked_broadcast_does_not_update_revision_on_failure() {
                 .expect("serialize chunk_hashes"),
         },
         "broadcast_author": "did:test:alice",
-    })).expect("deserialize HashBroadcast from JSON");
+    }))
+    .expect("deserialize HashBroadcast from JSON");
 
     // Serialize the broadcast as SerializedBytes, mirroring how Holochain delivers
     // remote signals (recv_remote_signal takes SerializedBytes, not a typed value).
-    let signal = SerializedBytes::try_from(broadcast)
-        .expect("Failed to serialize HashBroadcast");
+    let signal = SerializedBytes::try_from(broadcast).expect("Failed to serialize HashBroadcast");
 
     // Deliver the broadcast directly; handle_broadcast must fail trying to load chunks.
-    let result = call_zome_fallible::<_, ()>(
-        &conductors[1],
-        bob_cell,
-        "recv_remote_signal",
-        signal,
-    ).await;
+    let result =
+        call_zome_fallible::<_, ()>(&conductors[1], bob_cell, "recv_remote_signal", signal).await;
 
     assert!(
         result.is_err(),
@@ -371,21 +389,16 @@ async fn test_chunked_broadcast_does_not_update_revision_on_failure() {
     );
 
     // The fix: current_revision must not be advanced when chunk loading fails.
-    let bob_current_after: Option<ActionHash> = call_zome(
-        &conductors[1],
-        bob_cell,
-        "current_revision",
-        (),
-    ).await;
+    let bob_current_after: Option<ActionHash> =
+        call_zome(&conductors[1], bob_cell, "current_revision", ()).await;
 
     assert_eq!(
-        bob_current_after,
-        bob_current_before,
+        bob_current_after, bob_current_before,
         "current_revision must not change when chunk loading fails"
     );
 
-    for conductor in conductors.iter_mut() {
-        conductor.shutdown().await;
+    for conductor in conductors.iter() {
+        let _ = conductor;
     }
 }
 
@@ -415,12 +428,7 @@ async fn test_render_returns_chunked_diffs() {
 
     // Commit 600 links - this will be chunked since it exceeds CHUNKING_THRESHOLD of 500
     let large_input = create_commit_input_multi("alice", 600);
-    let commit_hash: ActionHash = call_zome(
-        &conductor,
-        &cell,
-        "commit",
-        large_input,
-    ).await;
+    let commit_hash: ActionHash = call_zome(&conductor, &cell, "commit", large_input).await;
 
     println!("Large commit succeeded: {:?}", commit_hash);
 
@@ -430,10 +438,14 @@ async fn test_render_returns_chunked_diffs() {
         &cell,
         "get_diff_entry_reference",
         commit_hash.clone(),
-    ).await;
+    )
+    .await;
 
     println!("Entry is chunked: {}", entry.is_chunked());
-    println!("Entry has {} chunks", entry.diff_chunks.as_ref().map(|c| c.len()).unwrap_or(0));
+    println!(
+        "Entry has {} chunks",
+        entry.diff_chunks.as_ref().map(|c| c.len()).unwrap_or(0)
+    );
     assert!(entry.is_chunked(), "Entry should be chunked for this test");
 
     // THE BUG TEST: Call render() and verify it returns all 600 links
@@ -455,7 +467,7 @@ async fn test_render_returns_chunked_diffs() {
 
     println!("✓ TEST PASSED: render() correctly returned all 600 links from chunked entry");
 
-    conductor.shutdown().await;
+    let _ = conductor;
 }
 
 /// Test that pull() with current.is_none() correctly handles chunked diffs
@@ -481,12 +493,8 @@ async fn test_pull_initial_with_chunked_diffs() {
 
     // Alice commits 600 links
     let large_input = create_commit_input_multi("alice", 600);
-    let alice_commit: ActionHash = call_zome(
-        &conductors[0],
-        alice_cell,
-        "commit",
-        large_input,
-    ).await;
+    let alice_commit: ActionHash =
+        call_zome(&conductors[0], alice_cell, "commit", large_input).await;
 
     println!("Alice's commit: {:?}", alice_commit);
 
@@ -508,20 +516,30 @@ async fn test_pull_initial_with_chunked_diffs() {
             // but updates current_revision, so just check it doesn't error
             true
         },
-    ).await.expect("Bob's pull should succeed");
+    )
+    .await
+    .expect("Bob's pull should succeed");
 
     println!("Bob's pull succeeded");
 
     // Verify Bob's current revision is now Alice's commit
-    let bob_current: Option<ActionHash> = call_zome(&conductors[1], bob_cell, "current_revision", ()).await;
-    assert_eq!(bob_current, Some(alice_commit.clone()), "Bob should have Alice's revision as current");
+    let bob_current: Option<ActionHash> =
+        call_zome(&conductors[1], bob_cell, "current_revision", ()).await;
+    assert_eq!(
+        bob_current,
+        Some(alice_commit.clone()),
+        "Bob should have Alice's revision as current"
+    );
 
     // Verify Bob can render the full perspective with all 600 links
     println!("\n=== Bob rendering perspective ===");
     let bob_perspective: perspective_diff_sync_integrity::Perspective =
         call_zome(&conductors[1], bob_cell, "render", ()).await;
 
-    println!("Bob's render() returned {} links", bob_perspective.links.len());
+    println!(
+        "Bob's render() returned {} links",
+        bob_perspective.links.len()
+    );
 
     assert_eq!(
         bob_perspective.links.len(),
@@ -532,7 +550,7 @@ async fn test_pull_initial_with_chunked_diffs() {
     println!("✓ TEST PASSED: Bob correctly pulled and rendered Alice's chunked commit");
 
     // Cleanup
-    for conductor in conductors.iter_mut() {
-        conductor.shutdown().await;
+    for conductor in conductors.iter() {
+        let _ = conductor;
     }
 }

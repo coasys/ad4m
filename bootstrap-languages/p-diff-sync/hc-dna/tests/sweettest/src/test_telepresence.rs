@@ -27,7 +27,7 @@ async fn test_create_did_link() {
     // Create another one (should be idempotent or succeed)
     create_did_link(&conductor, &cell, "did:test:alice").await;
 
-    conductor.shutdown().await;
+    let _ = conductor;
 }
 
 /// Test setting and getting online status
@@ -40,7 +40,7 @@ async fn test_online_status() {
     // Set online status
     let status = PerspectiveExpression {
         author: "did:test:alice".to_string(),
-        timestamp: Utc::now(),
+        timestamp: Utc::now().to_rfc3339(),
         data: Perspective { links: vec![] },
         proof: ExpressionProof {
             signature: "test_sig".to_string(),
@@ -57,7 +57,7 @@ async fn test_online_status() {
     // In production, there's an ACTIVE_AGENT_DURATION check
     println!("Online agents: {:?}", agents);
 
-    conductor.shutdown().await;
+    let _ = conductor;
 }
 
 /// Test getting online agents across multiple conductors
@@ -74,7 +74,7 @@ async fn test_get_online_agents_multi() {
     // Set online status for both
     let alice_status = PerspectiveExpression {
         author: "did:test:alice".to_string(),
-        timestamp: Utc::now(),
+        timestamp: Utc::now().to_rfc3339(),
         data: Perspective { links: vec![] },
         proof: ExpressionProof {
             signature: "alice_sig".to_string(),
@@ -84,7 +84,7 @@ async fn test_get_online_agents_multi() {
 
     let bob_status = PerspectiveExpression {
         author: "did:test:bob".to_string(),
-        timestamp: Utc::now(),
+        timestamp: Utc::now().to_rfc3339(),
         data: Perspective { links: vec![] },
         proof: ExpressionProof {
             signature: "bob_sig".to_string(),
@@ -92,20 +92,28 @@ async fn test_get_online_agents_multi() {
         },
     };
 
-    call_zome::<_, ()>(&conductors[0], alice_cell, "set_online_status", alice_status).await;
+    call_zome::<_, ()>(
+        &conductors[0],
+        alice_cell,
+        "set_online_status",
+        alice_status,
+    )
+    .await;
     call_zome::<_, ()>(&conductors[1], bob_cell, "set_online_status", bob_status).await;
 
     await_consistency(3000).await;
 
     // Both should see each other as online (eventually)
-    let alice_sees: Vec<OnlineAgent> = call_zome(&conductors[0], alice_cell, "get_online_agents", ()).await;
-    let bob_sees: Vec<OnlineAgent> = call_zome(&conductors[1], bob_cell, "get_online_agents", ()).await;
+    let alice_sees: Vec<OnlineAgent> =
+        call_zome(&conductors[0], alice_cell, "get_online_agents", ()).await;
+    let bob_sees: Vec<OnlineAgent> =
+        call_zome(&conductors[1], bob_cell, "get_online_agents", ()).await;
 
     println!("Alice sees agents: {:?}", alice_sees);
     println!("Bob sees agents: {:?}", bob_sees);
 
-    for conductor in conductors.iter_mut() {
-        conductor.shutdown().await;
+    for conductor in conductors.iter() {
+        let _ = conductor;
     }
 }
 
@@ -119,20 +127,16 @@ async fn test_get_active_agents() {
     await_consistency(2000).await;
 
     // Get active agents from Alice's perspective
-    let alice_active: Vec<holochain_types::prelude::AgentPubKey> = call_zome(
-        &conductors[0],
-        alice_cell,
-        "get_active_agents",
-        (),
-    ).await;
+    let alice_active: Vec<holochain_types::prelude::AgentPubKey> =
+        call_zome(&conductors[0], alice_cell, "get_active_agents", ()).await;
 
     println!("Alice sees active agents: {:?}", alice_active);
 
     // Should see at least Bob (might also include self depending on implementation)
     // The exact behavior depends on how active_agent links are created
 
-    for conductor in conductors.iter_mut() {
-        conductor.shutdown().await;
+    for conductor in conductors.iter() {
+        let _ = conductor;
     }
 }
 
@@ -154,7 +158,7 @@ async fn test_get_others() {
 
     println!("Alice sees others: {:?}", others);
 
-    for conductor in conductors.iter_mut() {
-        conductor.shutdown().await;
+    for conductor in conductors.iter() {
+        let _ = conductor;
     }
 }

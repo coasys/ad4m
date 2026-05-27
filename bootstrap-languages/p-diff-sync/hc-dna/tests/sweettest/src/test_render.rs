@@ -25,9 +25,13 @@ async fn test_render_basic() {
 
     // Render should return all links
     let rendered: Perspective = call_zome(&conductor, &cell, "render", ()).await;
-    assert_eq!(rendered.links.len(), 5, "Should have 5 links after rendering");
+    assert_eq!(
+        rendered.links.len(),
+        5,
+        "Should have 5 links after rendering"
+    );
 
-    conductor.shutdown().await;
+    let _ = conductor;
 }
 
 /// Test render triggers snapshot creation
@@ -50,9 +54,13 @@ async fn test_render_with_snapshot() {
 
     // Render should still work after snapshot
     let rendered: Perspective = call_zome(&conductor, &cell, "render", ()).await;
-    assert_eq!(rendered.links.len(), 105, "Should have 105 links after rendering");
+    assert_eq!(
+        rendered.links.len(),
+        105,
+        "Should have 105 links after rendering"
+    );
 
-    conductor.shutdown().await;
+    let _ = conductor;
 }
 
 /// Test render with two agents that sync
@@ -71,20 +79,20 @@ async fn test_render_after_sync() {
     }
 
     // Bob has no current revision yet (can't render without one)
-    let bob_rev_before: Option<ActionHash> = call_zome(&conductors[1], bob_cell, "current_revision", ()).await;
-    assert!(bob_rev_before.is_none(), "Bob should have no revision before sync");
+    let bob_rev_before: Option<ActionHash> =
+        call_zome(&conductors[1], bob_cell, "current_revision", ()).await;
+    assert!(
+        bob_rev_before.is_none(),
+        "Bob should have no revision before sync"
+    );
 
     // Connect and sync
     conductors.exchange_peer_info().await;
     await_consistency(10000).await;
 
     // Bob pulls from Alice's revision
-    let alice_revision: Option<ActionHash> = call_zome(
-        &conductors[0],
-        alice_cell,
-        "current_revision",
-        (),
-    ).await;
+    let alice_revision: Option<ActionHash> =
+        call_zome(&conductors[0], alice_cell, "current_revision", ()).await;
     assert!(alice_revision.is_some(), "Alice should have a revision");
 
     // When an agent with no current revision pulls, the pull returns an empty diff
@@ -100,11 +108,13 @@ async fn test_render_after_sync() {
             bob_cell,
             "pull",
             serde_json::json!({ "hash": alice_rev, "is_scribe": false }),
-        ).await;
+        )
+        .await;
 
         if result.is_ok() {
             // Check if Bob now has a current revision (meaning the pull succeeded)
-            let bob_rev: Option<ActionHash> = call_zome(&conductors[1], bob_cell, "current_revision", ()).await;
+            let bob_rev: Option<ActionHash> =
+                call_zome(&conductors[1], bob_cell, "current_revision", ()).await;
             if bob_rev.is_some() {
                 success = true;
                 break;
@@ -113,14 +123,21 @@ async fn test_render_after_sync() {
         await_consistency(2000).await;
     }
 
-    assert!(success, "Bob should successfully pull and have a current revision");
+    assert!(
+        success,
+        "Bob should successfully pull and have a current revision"
+    );
 
     // Now Bob should be able to render (he has a current revision from the pull)
     let bob_render_after: Perspective = call_zome(&conductors[1], bob_cell, "render", ()).await;
-    assert_eq!(bob_render_after.links.len(), 3, "Bob should see 3 links after sync");
+    assert_eq!(
+        bob_render_after.links.len(),
+        3,
+        "Bob should see 3 links after sync"
+    );
 
-    for conductor in conductors.iter_mut() {
-        conductor.shutdown().await;
+    for conductor in conductors.iter() {
+        let _ = conductor;
     }
 }
 
@@ -148,7 +165,8 @@ async fn test_render_with_removals() {
             },
             my_did: "did:test:alice".to_string(),
         },
-    ).await;
+    )
+    .await;
 
     // Render should show 3 links
     let rendered1: Perspective = call_zome(&conductor, &cell, "render", ()).await;
@@ -166,17 +184,23 @@ async fn test_render_with_removals() {
             },
             my_did: "did:test:alice".to_string(),
         },
-    ).await;
+    )
+    .await;
 
     // Render should show 2 links
     let rendered2: Perspective = call_zome(&conductor, &cell, "render", ()).await;
-    assert_eq!(rendered2.links.len(), 2, "Should have 2 links after removal");
+    assert_eq!(
+        rendered2.links.len(),
+        2,
+        "Should have 2 links after removal"
+    );
 
     // Verify link2 is not in the result
-    let has_link2 = rendered2.links.iter().any(|l| {
-        l.data.source == link2.data.source && l.data.target == link2.data.target
-    });
+    let has_link2 = rendered2
+        .links
+        .iter()
+        .any(|l| l.data.source == link2.data.source && l.data.target == link2.data.target);
     assert!(!has_link2, "link2 should have been removed");
 
-    conductor.shutdown().await;
+    let _ = conductor;
 }

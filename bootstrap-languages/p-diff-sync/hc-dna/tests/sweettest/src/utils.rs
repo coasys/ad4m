@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use chrono::Utc;
 use futures::future;
 use holochain::conductor::api::error::ConductorApiError;
-use holochain::sweettest::{SweetAgents, SweetCell, SweetConductor, SweetConductorBatch, SweetDnaFile};
+use holochain::sweettest::{
+    SweetAgents, SweetCell, SweetConductor, SweetConductorBatch, SweetDnaFile,
+};
 use holochain_types::prelude::*;
 use perspective_diff_sync_integrity::{
     CommitInput, ExpressionProof, LinkExpression, PerspectiveDiff, PullResult, Triple,
@@ -17,8 +19,7 @@ use uuid::Uuid;
 /// Path to the compiled DNA file
 pub fn dna_path() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    PathBuf::from(manifest_dir)
-        .join("../../workdir/perspective-diff-sync.dna")
+    PathBuf::from(manifest_dir).join("../../workdir/perspective-diff-sync.dna")
 }
 
 /// Load the perspective_diff_sync DNA
@@ -31,7 +32,7 @@ pub async fn load_dna() -> DnaFile {
 /// Setup a single conductor with one agent
 pub async fn setup_1_conductor() -> (SweetConductor, SweetCell) {
     let dna = load_dna().await;
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
     let agent = SweetAgents::one(conductor.keystore()).await;
     let app = conductor
         .setup_app_for_agent("test-app", agent, &[dna])
@@ -44,13 +45,14 @@ pub async fn setup_1_conductor() -> (SweetConductor, SweetCell) {
 /// Setup multiple conductors with agents, optionally networked together
 pub async fn setup_conductors(n: usize, network: bool) -> (SweetConductorBatch, Vec<SweetCell>) {
     let dna = load_dna().await;
-    let mut conductors = SweetConductorBatch::from_standard_config(n).await;
+    let mut conductors = SweetConductorBatch::standard(n).await;
 
     let agents: Vec<AgentPubKey> = future::join_all(
-        conductors.iter().map(|c| async {
-            SweetAgents::one(c.keystore()).await
-        })
-    ).await;
+        conductors
+            .iter()
+            .map(|c: &SweetConductor| async { SweetAgents::one(c.keystore()).await }),
+    )
+    .await;
 
     let apps = conductors
         .setup_app_for_zipped_agents("test-app", &agents, &[dna.clone()])
@@ -77,7 +79,7 @@ pub fn generate_link_expression(author: &str) -> LinkExpression {
             target: Some(format!("test://target/{}", random_id)),
             predicate: Some(format!("test://predicate/{}", Uuid::new_v4())),
         },
-        timestamp: Utc::now(),
+        timestamp: Utc::now().to_rfc3339(),
         proof: ExpressionProof {
             signature: format!("sig_{}", Uuid::new_v4()),
             key: format!("key_{}", author),
@@ -164,10 +166,16 @@ where
                 if predicate(&result) {
                     return Ok(result);
                 }
-                println!("Attempt {}/{}: predicate not satisfied, retrying...", attempt, max_retries);
+                println!(
+                    "Attempt {}/{}: predicate not satisfied, retrying...",
+                    attempt, max_retries
+                );
             }
             Err(e) => {
-                println!("Attempt {}/{}: call failed with {:?}, retrying...", attempt, max_retries, e);
+                println!(
+                    "Attempt {}/{}: call failed with {:?}, retrying...",
+                    attempt, max_retries, e
+                );
             }
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
@@ -181,11 +189,7 @@ pub async fn await_consistency(delay_ms: u64) {
 }
 
 /// Commit a link expression and return the commit hash
-pub async fn commit_link(
-    conductor: &SweetConductor,
-    cell: &SweetCell,
-    author: &str,
-) -> ActionHash {
+pub async fn commit_link(conductor: &SweetConductor, cell: &SweetCell, author: &str) -> ActionHash {
     let input = create_commit_input(author);
     call_zome(conductor, cell, "commit", input).await
 }
@@ -218,18 +222,11 @@ pub async fn pull(
 }
 
 /// Get current revision hash
-pub async fn current_revision(
-    conductor: &SweetConductor,
-    cell: &SweetCell,
-) -> Option<ActionHash> {
+pub async fn current_revision(conductor: &SweetConductor, cell: &SweetCell) -> Option<ActionHash> {
     call_zome(conductor, cell, "current_revision", ()).await
 }
 
 /// Create DID to public key link
-pub async fn create_did_link(
-    conductor: &SweetConductor,
-    cell: &SweetCell,
-    did: &str,
-) {
+pub async fn create_did_link(conductor: &SweetConductor, cell: &SweetCell, did: &str) {
     call_zome::<_, ()>(conductor, cell, "create_did_pub_key_link", did.to_string()).await
 }
