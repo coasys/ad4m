@@ -26,7 +26,19 @@ pub struct LinkExpression {
     pub proof: ExpressionProof,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes, Default, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    SerializedBytes,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Ord,
+    PartialOrd,
+)]
 pub struct PerspectiveDiff {
     pub additions: Vec<LinkExpression>,
     pub removals: Vec<LinkExpression>,
@@ -56,7 +68,7 @@ impl PerspectiveDiff {
     pub fn total_diff_number(&self) -> usize {
         self.additions.len() + self.removals.len()
     }
-    
+
     pub fn get_sb(self) -> ExternResult<SerializedBytes> {
         self.try_into()
             .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
@@ -245,7 +257,9 @@ impl PerspectiveDiffEntryReference {
 
     /// Check if this entry uses chunked storage
     pub fn is_chunked(&self) -> bool {
-        self.diff_chunks.as_ref().map_or(false, |chunks| !chunks.is_empty())
+        self.diff_chunks
+            .as_ref()
+            .map_or(false, |chunks| !chunks.is_empty())
     }
 
     /// Backward compatibility method to extract the diff data
@@ -257,9 +271,23 @@ impl PerspectiveDiffEntryReference {
     // Compare using tuple ordering: entries with parents come first,
     // then by parent hashes, then by diffs_since_snapshot,
     // then by total diff count, then by diff contents
-    fn comparison_key(&self) -> (bool, &Option<Vec<HoloHash<holo_hash::hash_type::Action>>>, usize, usize, &PerspectiveDiff) {
+    fn comparison_key(
+        &self,
+    ) -> (
+        bool,
+        &Option<Vec<HoloHash<holo_hash::hash_type::Action>>>,
+        usize,
+        usize,
+        &PerspectiveDiff,
+    ) {
         let has_parents = self.parents.is_some();
-        (!has_parents, &self.parents, self.diffs_since_snapshot, self.diff.total_diff_number(), &self.diff)
+        (
+            !has_parents,
+            &self.parents,
+            self.diffs_since_snapshot,
+            self.diff.total_diff_number(),
+            &self.diff,
+        )
     }
 }
 
@@ -304,20 +332,40 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
                     }
                 }
 
-                // Validate chunk dependencies
-                // Chunks must be available before the parent entry can be validated.
-                // The commit flow ensures chunks are created and validated BEFORE the parent.
-                if let Some(diff_chunks) = pdiff_ref.diff_chunks {
-                    for chunk_action_hash in diff_chunks {
-                        // Ensure each chunk entry exists and is valid
-                        if must_get_valid_record(chunk_action_hash.clone()).is_err() {
-                            missing.push(chunk_action_hash.into());
-                        }
-                    }
-                }
+                // Chunk dependencies are intentionally NOT validated here.
+                //
+                // Background: returning `UnresolvedDependencies` for a missing chunk causes
+                // Holochain's `app_validation_workflow` to re-queue this op and retry on a
+                // ~100ms cadence (see `app_validation_workflow.rs` retry interval formula).
+                // If the chunks were never gossipped (author committed a large diff, then
+                // went offline / wiped state before the chunk ops propagated), the workflow
+                // retries forever, producing a "validation storm" — thousands of WARN log
+                // lines per second per stuck op. Holochain does not yet implement an
+                // "abandon" terminal state for ops with permanently-missing deps (see TODO
+                // in `validation_query.rs` around the LIMIT 10000 query).
+                //
+                // The integrity zome cannot distinguish a transient cascade miss from a
+                // permanent miss (HDI's `must_get_*` helpers short-circuit the WASM with
+                // `UnresolvedDependencies` on absence, leaving no path to return `Invalid`
+                // based on absence), so we have to accept the structural reference
+                // unconditionally and let the consumer surface the failure.
+                //
+                // Chunk presence is already enforced at consumption time:
+                //   * `handle_broadcast` calls `load_diff_from_entry` before advancing
+                //     `current_revision`, so a peer never fast-forwards onto a chunked
+                //     reference whose chunks it cannot fetch.
+                //   * `pull` / `render` propagate chunk-fetch errors out as zome-call
+                //     errors, so the AD4M coordinator surface treats the diff as missing
+                //     rather than silently empty.
+                //
+                // A peer that holds the parent op but cannot resolve the chunks therefore
+                // simply ignores the data until (a) the chunks gossip in, or (b) the user
+                // resyncs. That degrades gracefully, whereas validation looping does not.
 
                 if !missing.is_empty() {
-                    return Ok(ValidateCallbackResult::UnresolvedDependencies(UnresolvedDependencies::Hashes(missing)));
+                    return Ok(ValidateCallbackResult::UnresolvedDependencies(
+                        UnresolvedDependencies::Hashes(missing),
+                    ));
                 }
             }
 
