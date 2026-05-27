@@ -4,6 +4,35 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+// Tune jemalloc to return freed memory to the OS more aggressively. jemalloc
+// reads `MALLOC_CONF` (or, with tikv-jemallocator's prefixed symbols on
+// macOS/Linux, `_RJEM_MALLOC_CONF`) at process start. With the defaults,
+// peak allocations from bursty work — most notably SPARQL queries that
+// materialise the full link set into a Vec<DecoratedLinkExpression> — sit
+// in jemalloc arenas indefinitely, inflating RSS even after the Rust-side
+// memory has been dropped. The wind tunnel was attributing this to a leak:
+// RSS would step up ~5–7 MB per query and never come back down within the
+// monitor window.
+//
+// jemalloc reads its config on first allocation, which happens before
+// main(), so the only reliable way to apply this from the binary itself
+// is to override the static `malloc_conf` symbol that jemalloc looks up
+// at init time. With tikv-jemallocator the symbol is exposed as
+// `_rjem_malloc_conf` on prefixed builds (default on macOS/Linux).
+//
+// Operators / test harnesses can override these defaults by exporting
+// `_RJEM_MALLOC_CONF=...` (or `MALLOC_CONF=...` on unprefixed builds)
+// before launching ad4m-executor.
+//
+// - background_thread:true   purge runs on a background thread
+// - dirty_decay_ms:1000      release dirty pages 10× faster than default
+// - muzzy_decay_ms:1000      same for muzzy pages
+#[cfg(not(target_env = "msvc"))]
+#[allow(non_upper_case_globals)]
+#[export_name = "_rjem_malloc_conf"]
+pub static _rjem_malloc_conf: Option<&'static [u8]> =
+    Some(b"background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000\0");
+
 extern crate ad4m_client;
 extern crate anyhow;
 extern crate chrono;
