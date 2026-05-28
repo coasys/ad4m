@@ -380,20 +380,13 @@ impl SparqlStore {
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         use std::ops::ControlFlow;
         let mut links = Vec::new();
-        self.for_each_matched_link(
-            source,
-            predicate,
-            target,
-            from_date,
-            until_date,
-            |link| {
-                links.push(link);
-                match limit {
-                    Some(lim) if links.len() >= lim => ControlFlow::Break(()),
-                    _ => ControlFlow::Continue(()),
-                }
-            },
-        )?;
+        self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
+            links.push(link);
+            match limit {
+                Some(lim) if links.len() >= lim => ControlFlow::Break(()),
+                _ => ControlFlow::Continue(()),
+            }
+        })?;
         Ok(links)
     }
 
@@ -425,25 +418,16 @@ impl SparqlStore {
             // Ascending: keep K smallest timestamps. BinaryHeap is a max-heap,
             // so evicting the top whenever size exceeds `limit` retains
             // exactly the K smallest.
-            let mut heap: BinaryHeap<TimestampedLink> =
-                BinaryHeap::with_capacity(limit + 1);
-            self.for_each_matched_link(
-                source,
-                predicate,
-                target,
-                from_date,
-                until_date,
-                |link| {
-                    let dt = ChronoDateTime::parse_from_rfc3339(&link.timestamp)
-                        .unwrap_or_default();
-                    heap.push(TimestampedLink { dt, seq, link });
-                    seq += 1;
-                    if heap.len() > limit {
-                        heap.pop();
-                    }
-                    ControlFlow::Continue(())
-                },
-            )?;
+            let mut heap: BinaryHeap<TimestampedLink> = BinaryHeap::with_capacity(limit + 1);
+            self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
+                let dt = ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
+                heap.push(TimestampedLink { dt, seq, link });
+                seq += 1;
+                if heap.len() > limit {
+                    heap.pop();
+                }
+                ControlFlow::Continue(())
+            })?;
             let mut out: Vec<DecoratedLinkExpression> = Vec::with_capacity(heap.len());
             while let Some(r) = heap.pop() {
                 out.push(r.link);
@@ -456,23 +440,15 @@ impl SparqlStore {
             // evicts the smallest whenever size exceeds `limit`.
             let mut heap: BinaryHeap<Reverse<TimestampedLink>> =
                 BinaryHeap::with_capacity(limit + 1);
-            self.for_each_matched_link(
-                source,
-                predicate,
-                target,
-                from_date,
-                until_date,
-                |link| {
-                    let dt = ChronoDateTime::parse_from_rfc3339(&link.timestamp)
-                        .unwrap_or_default();
-                    heap.push(Reverse(TimestampedLink { dt, seq, link }));
-                    seq += 1;
-                    if heap.len() > limit {
-                        heap.pop();
-                    }
-                    ControlFlow::Continue(())
-                },
-            )?;
+            self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
+                let dt = ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
+                heap.push(Reverse(TimestampedLink { dt, seq, link }));
+                seq += 1;
+                if heap.len() > limit {
+                    heap.pop();
+                }
+                ControlFlow::Continue(())
+            })?;
             let mut out: Vec<DecoratedLinkExpression> = Vec::with_capacity(heap.len());
             while let Some(Reverse(r)) = heap.pop() {
                 out.push(r.link);
@@ -2132,13 +2108,8 @@ mod tests {
         for i in 0..10 {
             let ts = format!("2024-01-{:02}T00:00:00.000Z", i + 1);
             let src = format!("ad4m://src{}", i);
-            let link = make_link_with_ts(
-                &src,
-                "ad4m://pred",
-                "ad4m://tgt",
-                &ts,
-                "did:key:z6Mktest",
-            );
+            let link =
+                make_link_with_ts(&src, "ad4m://pred", "ad4m://tgt", &ts, "did:key:z6Mktest");
             svc.add_link(&link).unwrap();
         }
         // Top 3 ascending = the 3 oldest, sorted oldest→newest.
@@ -2157,13 +2128,8 @@ mod tests {
         for i in 0..10 {
             let ts = format!("2024-01-{:02}T00:00:00.000Z", i + 1);
             let src = format!("ad4m://src{}", i);
-            let link = make_link_with_ts(
-                &src,
-                "ad4m://pred",
-                "ad4m://tgt",
-                &ts,
-                "did:key:z6Mktest",
-            );
+            let link =
+                make_link_with_ts(&src, "ad4m://pred", "ad4m://tgt", &ts, "did:key:z6Mktest");
             svc.add_link(&link).unwrap();
         }
         // Top 3 descending = the 3 newest, sorted newest→oldest.
@@ -2182,13 +2148,8 @@ mod tests {
         for i in 0..3 {
             let ts = format!("2024-01-{:02}T00:00:00.000Z", i + 1);
             let src = format!("ad4m://src{}", i);
-            let link = make_link_with_ts(
-                &src,
-                "ad4m://pred",
-                "ad4m://tgt",
-                &ts,
-                "did:key:z6Mktest",
-            );
+            let link =
+                make_link_with_ts(&src, "ad4m://pred", "ad4m://tgt", &ts, "did:key:z6Mktest");
             svc.add_link(&link).unwrap();
         }
         // Asking for 100 but only 3 exist — should return all 3 sorted.

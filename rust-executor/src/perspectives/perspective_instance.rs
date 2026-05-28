@@ -5831,12 +5831,7 @@ mod tests {
         for _ in 0..50 {
             let link = create_link();
             perspective
-                .add_link(
-                    link,
-                    LinkStatus::Local,
-                    None,
-                    &AgentContext::main_agent(),
-                )
+                .add_link(link, LinkStatus::Local, None, &AgentContext::main_agent())
                 .await
                 .unwrap();
         }
