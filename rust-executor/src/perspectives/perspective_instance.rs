@@ -1816,8 +1816,38 @@ impl PerspectiveInstance {
             }
         }
 
-        // Pull the already-decorated form from the SPARQL store; sort and
-        // limit in-place. Previously this path materialised Vec<...> three
+        // When the caller supplies a `limit`, push it down into the store via
+        // a bounded top-N heap. This keeps memory at O(limit) regardless of
+        // how many links match — the previous materialise-sort-truncate path
+        // allocated the full Vec even for a 10-item page, which on large
+        // perspectives was a substantial regression in the same hot path this
+        // PR is trying to shrink.
+        //
+        // Otherwise (no limit) fall back to the in-memory sort path. We still
+        // pull the decorated form directly from the store so we don't pay the
+        // triple-materialisation tax described below.
+        if let Some(limit) = query.limit {
+            let from_date = query.from_date.as_ref().map(|d| {
+                let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+                dt.to_rfc3339()
+            });
+            let until_date = query.until_date.as_ref().map(|d| {
+                let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+                dt.to_rfc3339()
+            });
+            return Ok(self.sparql_store.query_links_top_n_by_timestamp(
+                query.source.as_deref(),
+                query.predicate.as_deref(),
+                query.target.as_deref(),
+                from_date.as_deref(),
+                until_date.as_deref(),
+                limit as usize,
+                reverse,
+            )?);
+        }
+
+        // No limit: pull the already-decorated form from the SPARQL store and
+        // sort in-place. Previously this path materialised Vec<...> three
         // times: once as DecoratedLinkExpression in get_links_local_decorated,
         // again as Vec<(LinkExpression, LinkStatus)> in get_links_local
         // (unwrap), and a third time after sort by re-wrapping each pair via
@@ -1837,11 +1867,6 @@ impl PerspectiveInstance {
                 a_time.cmp(&b_time)
             }
         });
-
-        if let Some(limit) = query.limit {
-            let limit = links.len().min(limit as usize);
-            links.truncate(limit);
-        }
 
         Ok(links)
     }
@@ -4929,6 +4954,16 @@ impl PerspectiveInstance {
 
             // Update Prolog: subscription engine (immediate) + query engine (lazy)
             self.update_prolog_engines(combined_diff.clone()).await;
+
+            // Publish PERSPECTIVE_LINK_ADDED/REMOVED/UPDATED to WS subscribers.
+            // The single-mutation paths (add_link / link_mutations /
+            // diff_from_link_language) publish their diff synchronously before
+            // spawning the prolog update, and spawn_prolog_facts_update
+            // deliberately skips publishing to avoid double-delivery on those
+            // paths. commit_batch never went through that publish step, so
+            // batched diffs were never reaching WS subscribers — that's what
+            // this call restores.
+            self.pubsub_publish_diff(combined_diff.clone()).await;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }
