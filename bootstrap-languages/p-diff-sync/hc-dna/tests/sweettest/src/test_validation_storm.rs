@@ -46,7 +46,7 @@
 //! so the ops reach a terminal state quickly and total attempts stay
 //! low (well under 100 across all ops).
 //!
-//! The assertion is "average attempts per op < 8" — generous enough
+//! The assertion is "average attempts per op < 4" — generous enough
 //! to absorb transient sys-validation retries while still failing
 //! decisively in the storm scenario.
 
