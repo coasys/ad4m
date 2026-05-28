@@ -433,6 +433,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     perspectives::initialize_from_db();
 
+    // Start periodic memory diagnostics (logs RSS, jemalloc stats,
+    // per-perspective data structure sizes every 30s).
+    perspectives::memory_diagnostics::start_memory_diagnostics();
+
     let app_dir = config
         .app_data_path
         .as_ref()
