@@ -177,6 +177,11 @@ impl SparqlStore {
         })
     }
 
+    /// Returns the number of quads in the store (for diagnostics).
+    pub fn quad_count(&self) -> usize {
+        self.store.len().unwrap_or(0)
+    }
+
     /// Returns true if the store contains any quads beyond the migration marker.
     pub fn has_data(&self) -> bool {
         let migration_subj = NamedNodeRef::new_unchecked("ad4m://system/migration");
@@ -354,12 +359,6 @@ impl SparqlStore {
 
         let mut links = Vec::new();
         let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
-        let ont_author = NamedNodeRef::new_unchecked(ONT_AUTHOR);
-        let ont_timestamp = NamedNodeRef::new_unchecked(ONT_TIMESTAMP);
-        let ont_proof_key = NamedNodeRef::new_unchecked(ONT_PROOF_KEY);
-        let ont_proof_sig = NamedNodeRef::new_unchecked(ONT_PROOF_SIG);
-        let ont_proof_valid = NamedNodeRef::new_unchecked(ONT_PROOF_VALID);
-        let ont_status = NamedNodeRef::new_unchecked(ONT_STATUS);
 
         // Search direct triples in the default graph
         for quad_result in
@@ -406,25 +405,40 @@ impl SparqlStore {
 
                 let reifier_subject: NamedOrBlankNodeRef = reifier_node.as_ref().into();
 
-                let get_annotation = |pred_node: NamedNodeRef| -> String {
-                    self.store
-                        .quads_for_pattern(
-                            Some(reifier_subject),
-                            Some(pred_node),
-                            None,
-                            Some(GraphNameRef::DefaultGraph),
-                        )
-                        .next()
-                        .and_then(|r| r.ok())
-                        .and_then(|q| match &q.object {
-                            Term::Literal(l) => Some(l.value().to_string()),
-                            _ => None,
-                        })
-                        .unwrap_or_default()
-                };
-
-                let author = get_annotation(ont_author);
-                let timestamp = get_annotation(ont_timestamp);
+                // Fetch ALL annotations in one pattern scan instead of 6
+                // separate quads_for_pattern calls. Each call to oxigraph's
+                // quads_for_pattern materialises an iterator (and likely a
+                // RocksDB snapshot); for a 10K-row query that's 6 × 10K =
+                // 60K iterator allocations on the hot path. One pass cuts
+                // that to 1 per link.
+                let mut author = String::new();
+                let mut timestamp = String::new();
+                let mut proof_key = String::new();
+                let mut proof_sig = String::new();
+                let mut proof_valid_str = String::new();
+                let mut status_val = String::new();
+                for ann_quad in self.store.quads_for_pattern(
+                    Some(reifier_subject),
+                    None,
+                    None,
+                    Some(GraphNameRef::DefaultGraph),
+                ) {
+                    let aq = ann_quad?;
+                    let pred_str = aq.predicate.as_str();
+                    let value = match &aq.object {
+                        Term::Literal(l) => l.value().to_string(),
+                        _ => continue,
+                    };
+                    match pred_str {
+                        ONT_AUTHOR => author = value,
+                        ONT_TIMESTAMP => timestamp = value,
+                        ONT_PROOF_KEY => proof_key = value,
+                        ONT_PROOF_SIG => proof_sig = value,
+                        ONT_PROOF_VALID => proof_valid_str = value,
+                        ONT_STATUS => status_val = value,
+                        _ => {}
+                    }
+                }
 
                 // Skip links without required metadata
                 if author.is_empty() || timestamp.is_empty() {
@@ -470,15 +484,11 @@ impl SparqlStore {
                     }
                 }
 
-                let proof_key = get_annotation(ont_proof_key);
-                let proof_sig = get_annotation(ont_proof_sig);
-                let proof_valid_str = get_annotation(ont_proof_valid);
                 let proof_valid = if proof_valid_str.is_empty() {
                     None
                 } else {
                     Some(proof_valid_str == "true")
                 };
-                let status_val = get_annotation(ont_status);
                 let status = match status_val.as_str() {
                     "Local" => Some(LinkStatus::Local),
                     "Shared" => Some(LinkStatus::Shared),
@@ -719,12 +729,22 @@ impl SparqlStore {
         Ok(())
     }
 
+    /// Flush pending writes to disk.
+    /// This ensures RocksDB memtable data is written to SST files,
+    /// allowing the memtable memory to be reclaimed.
+    pub fn flush(&self) -> Result<(), Error> {
+        self.store
+            .flush()
+            .map_err(|e| anyhow!("SPARQL store flush failed: {}", e))
+    }
+
     /// Clear the store and bulk-insert all provided links.
     pub fn reload(&self, links: Vec<DecoratedLinkExpression>) -> Result<(), Error> {
         self.clear()?;
         for link in &links {
             self.insert_link_triples(link)?;
         }
+        self.flush()?;
         Ok(())
     }
 
