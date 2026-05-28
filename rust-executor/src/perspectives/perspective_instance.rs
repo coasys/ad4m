@@ -5786,6 +5786,7 @@ mod tests {
             .subscribe(&crate::pubsub::PERSPECTIVE_LINK_ADDED_TOPIC)
             .await;
 
+        let expected_uuid = perspective.uuid.clone();
         let diff = perspective
             .commit_batch(batch_id, &AgentContext::main_agent())
             .await
@@ -5796,14 +5797,25 @@ mod tests {
             "commit_batch should return the batched addition"
         );
 
-        // Without the publish call, recv() will hang and the timeout fires.
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), added_rx.recv())
-            .await
-            .expect(
-                "commit_batch() did not publish PERSPECTIVE_LINK_ADDED within 2s — \
-                 batched diffs are not reaching WS subscribers",
-            )
-            .expect("PERSPECTIVE_LINK_ADDED broadcast channel closed unexpectedly");
+        // PERSPECTIVE_LINK_ADDED_TOPIC is global, so other tests running
+        // concurrently can publish to it as well. Drain until we find the
+        // message for THIS perspective + link (or the deadline expires).
+        // Without the publish call in commit_batch the loop never sees a
+        // matching message and the timeout fires.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let msg = loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let candidate = tokio::time::timeout(remaining, added_rx.recv())
+                .await
+                .expect(
+                    "commit_batch() did not publish a matching PERSPECTIVE_LINK_ADDED \
+                     within 2s — batched diffs are not reaching WS subscribers",
+                )
+                .expect("PERSPECTIVE_LINK_ADDED broadcast channel closed unexpectedly");
+            if candidate.contains(&expected_uuid) && candidate.contains(&link.target) {
+                break candidate;
+            }
+        };
 
         // Sanity-check the payload references the link we committed. The
         // published message is a JSON-encoded PerspectiveLinkFilter referring

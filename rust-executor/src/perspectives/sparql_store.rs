@@ -379,6 +379,12 @@ impl SparqlStore {
         limit: Option<usize>,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         use std::ops::ControlFlow;
+        // Bail out early on the zero-page case: the closure below pushes first,
+        // then checks `links.len() >= lim`, so without this guard `Some(0)`
+        // would return one element instead of zero.
+        if matches!(limit, Some(0)) {
+            return Ok(Vec::new());
+        }
         let mut links = Vec::new();
         self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
             links.push(link);
@@ -2099,6 +2105,27 @@ mod tests {
             .query_links(None, None, None, None, None, Some(5))
             .unwrap();
         assert_eq!(results.len(), 5);
+    }
+
+    #[test]
+    fn query_links_with_limit_zero_returns_empty() {
+        let svc = new_service();
+        for i in 0..5 {
+            let src = format!("ad4m://src{}", i);
+            svc.add_link(&make_link(&src, "ad4m://pred", "ad4m://tgt"))
+                .unwrap();
+        }
+        // The closure-based collector pushes a link before checking the limit,
+        // so without the early-return for `Some(0)` this would return 1 row.
+        let results = svc
+            .query_links(None, None, None, None, None, Some(0))
+            .unwrap();
+        assert!(
+            results.is_empty(),
+            "query_links(.., Some(0)) must return zero rows, got {} — \
+             zero-page semantics regressed",
+            results.len()
+        );
     }
 
     #[test]
