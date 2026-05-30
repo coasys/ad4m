@@ -82,7 +82,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
 
   it("should support NodeExpression transforms in properties", () => {
     // Transforms are now NodeExpression objects, not callable functions
-    // The fileToDataUri and other builders are available from @coasys/ad4m/shacl
+    // The fileToDataUri and other builders are exported from @coasys/ad4m
     const transform = path("test://prefix");
 
     @Model({ name: "TransformModel" })

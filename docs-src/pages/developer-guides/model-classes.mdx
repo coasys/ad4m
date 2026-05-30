@@ -143,7 +143,7 @@ class Recipe extends Ad4mModel {
 | `initial` | `any` | — | Default value written on creation. When `required: true` with no `initial`, the framework uses a sentinel value (`"literal://string:uninitialized"`) |
 | `local` | `boolean` | `false` | Store locally only — not synced to the network. Useful for user preferences or draft state |
 | `getter` | `string` | — | Raw SurrealQL expression for computed values. `Base` is replaced with the instance's node ID at query time. Mutually exclusive with regular storage |
-| `transform` | `(value: any) => any` | — | Post-retrieval transformation function, called after the value is hydrated |
+| `transform` | `NodeExpression` | — | Declarative post-retrieval transform expressed as a SHACL-AF Node Expression. Evaluated in the Rust model query engine, not in JavaScript. See [Transforms](#the-transform-option) |
 
 You can also use the `@Optional` decorator as an alias for `@Property` with `required: false` (the default), if you want to be explicit:
 
@@ -171,15 +171,72 @@ averageRating: number = 0;
 
 #### The `transform` option
 
-Apply a transformation after a value is retrieved from the graph:
+`transform` declares a post-hydration transformation as a **SHACL-AF Node
+Expression** — a small JSON-serialisable DSL that the Rust model query engine
+evaluates server-side. Transforms are part of the model's SHACL shape, so
+every consumer (JS, Rust, MCP, CLI) sees the same shape applied the same way
+and pays no per-instance JS lambda cost during query hydration.
+
+Compose transforms with builder functions exported from the package root:
 
 ```typescript
-@Property({
-  through: "recipe://tags_raw",
-  transform: (value) => typeof value === 'string' ? value.split(',') : value
-})
-tags: string[] = [];
+import {
+  Ad4mModel, Model, Property,
+  // SHACL Node Expression builders
+  focus, literal, path, exists, ifExpr, concat, coalesce, fn,
+  // Built-in transform
+  fileToDataUri,
+} from '@coasys/ad4m';
+
+@Model({ name: "Avatar" })
+class Avatar extends Ad4mModel {
+  // FileData stored via the file-storage language → decoded to a `data:` URI
+  // server-side using the shipped `fileToDataUri` built-in.
+  @Property({
+    through: "we://image",
+    resolveLanguage: FILE_STORAGE_LANGUAGE,
+    transform: fileToDataUri,
+  })
+  image?: string;
+
+  // Compose your own: prefix the stored value with a literal.
+  @Property({
+    through: "user://handle",
+    transform: concat(literal('@'), focus()),
+  })
+  handle: string = "";
+
+  // Fall back to a default when a related field is missing.
+  @Property({
+    through: "user://timezone",
+    transform: coalesce(focus(), literal('UTC')),
+  })
+  timezone: string = "";
+}
 ```
+
+##### Builder reference
+
+| Builder | Produces | Notes |
+| :--- | :--- | :--- |
+| `focus()` | The current node's value | The input being transformed. Useful as a base case. |
+| `literal(v)` | A constant value | Strings, numbers, booleans. |
+| `path('predicate://uri')` | Value reached by traversing a predicate from the focus node | One hop. |
+| `exists(expr)` | Boolean | Whether `expr` resolves to a non-empty value. |
+| `ifExpr(cond).then(a).else(b)` | `a` if `cond` is truthy, otherwise `b` | All three are themselves NodeExpressions. |
+| `concat(a, b, …)` | String concatenation of the arguments | Each argument is a NodeExpression. |
+| `coalesce(a, b, …)` | First non-null argument | Argument-order fallback. |
+| `fn('name', …args)` | Server-side function call | Used by built-ins like `fileToDataUri`; you can register your own in the Rust executor. |
+
+##### When to use transforms
+
+- **Decode wire formats:** turn a `FileData` payload into a `data:` URI, base64 → bytes, etc.
+- **Apply defaults at query time:** `coalesce(focus(), literal('default'))` instead of writing the default to every record.
+- **Cheap derived values:** prefixes, suffixes, joins — anything you'd otherwise compute in every consumer.
+
+Use a custom Prolog/SPARQL getter (`getter:`) instead when the transformation
+needs other links from the graph; transforms operate on the property's
+resolved value, not on the wider perspective.
 
 ### Relations
 
