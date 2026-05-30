@@ -4095,15 +4095,7 @@ fn test_resolve_projections_where_filter_via_target_shape_property() {
         },
     );
 
-    resolve_projections(
-        &store,
-        &mut instances,
-        &projections,
-        &shape,
-        &resolver,
-        0,
-    )
-    .unwrap();
+    resolve_projections(&store, &mut instances, &projections, &shape, &resolver, 0).unwrap();
 
     let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
     assert_eq!(
@@ -4126,15 +4118,7 @@ fn test_resolve_projections_where_filter_via_target_shape_property() {
         },
     );
 
-    resolve_projections(
-        &store,
-        &mut instances2,
-        &projections2,
-        &shape,
-        &resolver,
-        0,
-    )
-    .unwrap();
+    resolve_projections(&store, &mut instances2, &projections2, &shape, &resolver, 0).unwrap();
 
     let got = &instances2[0]["$myLikeSignal"];
     assert_eq!(
