@@ -295,7 +295,14 @@ pub(super) fn execute_model_query_inner(
 
     // Attach projection results
     if let Some(ref projections) = query_input.projections {
-        resolve_projections(store, &mut final_instances, projections, shape, resolver)?;
+        resolve_projections(
+            store,
+            &mut final_instances,
+            projections,
+            shape,
+            resolver,
+            depth,
+        )?;
     }
 
     Ok(ModelQueryResult {

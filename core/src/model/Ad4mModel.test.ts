@@ -2296,4 +2296,76 @@ describe("IncludeProjection type guard and key splitting", () => {
 
     expect((results[0] as any).$signalCount).toBe(7);
   });
+
+  // --- hydration of non-count projections ---
+
+  it("passes through scalar non-count projection value hydrated by Rust", async () => {
+    // Rust hydrates projection targets in-process and returns full JSON objects.
+    // The TS layer receives an already-hydrated object and passes it through.
+    mockPerspective.modelQuery.mockResolvedValueOnce({
+      instances: [{ id: "post://1", title: "Hello", $mySignal: { id: "signal://abc", signalTypeId: "type1" } }],
+      totalCount: 1,
+    });
+
+    const results = await Post.findAll(mockPerspective, {
+      include: { $mySignal: { from: "signals", limit: 1 } },
+    });
+
+    const mySignal = (results[0] as any).$mySignal;
+    expect(mySignal).toMatchObject({ id: "signal://abc", signalTypeId: "type1" });
+  });
+
+  it("passes through array non-count projection values hydrated by Rust", async () => {
+    // Rust hydrates all IRIs in the list and returns full JSON objects.
+    mockPerspective.modelQuery.mockResolvedValueOnce({
+      instances: [{
+        id: "post://1", title: "Hello",
+        $recentSignals: [
+          { id: "signal://a", signalTypeId: "type1" },
+          { id: "signal://b", signalTypeId: "type2" },
+        ],
+      }],
+      totalCount: 1,
+    });
+
+    const results = await Post.findAll(mockPerspective, {
+      include: { $recentSignals: { from: "signals" } },
+    });
+
+    const sigs = (results[0] as any).$recentSignals;
+    expect(Array.isArray(sigs)).toBe(true);
+    expect(sigs).toHaveLength(2);
+    expect(sigs[0]).toMatchObject({ id: "signal://a", signalTypeId: "type1" });
+    expect(sigs[1]).toMatchObject({ id: "signal://b", signalTypeId: "type2" });
+  });
+
+  it("passes through raw IRI when Rust cannot hydrate the projection target", async () => {
+    // When the target cannot be resolved, Rust keeps the raw IRI string.
+    mockPerspective.modelQuery.mockResolvedValueOnce({
+      instances: [{ id: "post://1", title: "Hello", $mySignal: "signal://unknown" }],
+      totalCount: 1,
+    });
+
+    const results = await Post.findAll(mockPerspective, {
+      include: { $mySignal: { from: "signals", limit: 1 } },
+    });
+
+    // Raw IRI preserved when no matching target instance exists in the store.
+    expect((results[0] as any).$mySignal).toBe("signal://unknown");
+  });
+
+  it("does NOT attempt hydration for count projections (they return numbers)", async () => {
+    mockPerspective.modelQuery.mockResolvedValueOnce({
+      instances: [{ id: "post://1", $signalCount: 5 }],
+      totalCount: 1,
+    });
+
+    const results = await Post.findAll(mockPerspective, {
+      include: { $signalCount: { from: "signals", count: true } },
+    });
+
+    // Only one modelQuery call — no follow-up findAll for count projections.
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+    expect((results[0] as any).$signalCount).toBe(5);
+  });
 });

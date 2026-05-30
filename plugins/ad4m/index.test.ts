@@ -292,14 +292,20 @@ describe("isExecutorRunning", () => {
     expect(result).toBe("mcp");
   });
 
-  it("returns 'http' when only HTTP endpoint responds", async () => {
+  it("returns 'http' when only HTTP endpoint responds with AD4M root info", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((url: any) => {
       if (String(url).includes("/mcp")) {
         return Promise.reject(new Error("ECONNREFUSED"));
       }
-      // HTTP endpoint responds
+      // Root info endpoint payload
       return Promise.resolve(
-        fakeJsonResponse({ data: { agentStatus: { isInitialized: true } } }),
+        fakeJsonResponse({
+          name: "AD4M Executor",
+          version: "0.12.0",
+          api: "/api/v1",
+          transport: "websocket",
+          ws: "/api/v1/ws",
+        }),
       );
     });
     const result = await isExecutorRunning(
@@ -310,14 +316,14 @@ describe("isExecutorRunning", () => {
     expect(result).toBe("http");
   });
 
-  it("returns 'http' when HTTP endpoint returns 200 with any JSON", async () => {
+  it("returns false when HTTP endpoint returns 200 but is not the AD4M executor", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((url: any) => {
       if (String(url).includes("/mcp")) {
         return Promise.reject(new Error("ECONNREFUSED"));
       }
-      // HTTP 200 with error response
+      // Some other service occupying port 12000 — must not be mistaken for AD4M
       return Promise.resolve(
-        fakeJsonResponse({ errors: [{ message: "not ready" }], data: null }),
+        fakeJsonResponse({ name: "SomethingElse", status: "ok" }),
       );
     });
     const result = await isExecutorRunning(
@@ -325,7 +331,7 @@ describe("isExecutorRunning", () => {
       1000,
       "http://localhost:12000",
     );
-    expect(result).toBe("http");
+    expect(result).toBe(false);
   });
 
   it("returns false when both endpoints fail", async () => {

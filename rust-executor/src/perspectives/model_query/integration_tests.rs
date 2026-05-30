@@ -695,7 +695,7 @@ fn test_resolve_projections_count() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
     }
 
     let count_a = instances[0]["$itemCount"].as_u64().unwrap_or(999);
@@ -739,7 +739,7 @@ fn test_resolve_projections_list() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
     }
 
     let items = instances[0]["$items"]
@@ -782,7 +782,7 @@ fn test_resolve_projections_scalar() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
     }
 
     let val = &instances[0]["$firstItem"];
@@ -817,7 +817,7 @@ fn test_resolve_projections_count_zero_when_no_links() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
     }
 
     let count = instances[0]["$itemCount"].as_u64().unwrap_or(999);
@@ -882,7 +882,7 @@ fn test_resolve_projections_where_filter_by_plain_iri() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
     }
 
     let count = instances[0]["$likeCount"].as_u64().unwrap_or(999);
@@ -944,7 +944,7 @@ fn test_resolve_projections_where_filter_by_author() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
     }
 
     let count = instances[0]["$mySignalCount"].as_u64().unwrap_or(999);
@@ -3988,4 +3988,158 @@ fn test_full_model_query_order_by_property_number() {
         .map(|i| i["score"].as_f64().unwrap())
         .collect();
     assert_eq!(got_scores, vec![999.0, 100.0], "DESC numeric sort");
+}
+
+#[test]
+fn test_resolve_projections_where_filter_via_target_shape_property() {
+    // Mirrors the WE $totalLikeCount pattern:
+    //   include: {
+    //     $totalLikeCount: { from: 'signals', where: { signalTypeId: 'like_type_id123' }, count: true }
+    //   }
+    // where signalTypeId is a @Property stored via literal_encode, and the WHERE
+    // filter value is the plain decoded form (what the TS caller passes).
+    // The fn/parse_literal FILTER decodes the stored literal:string:X IRI back to "X"
+    // for comparison — so caller passes "like_type_id123", not "literal:string:like_type_id123".
+    let store = SparqlStore::new(None).unwrap();
+
+    let parent_a = "test://parent/a";
+    let like_signal = "test://signal/like";
+    let dislike_signal = "test://signal/dislike";
+    let like_type_id_stored = "literal:string:like_type_id123";
+    let dislike_type_id_stored = "literal:string:dislike_type_id456";
+    let like_type_id_filter = "like_type_id123"; // plain decoded value — what the caller passes
+
+    // Add parent → signal links
+    store
+        .add_link(&make_link(
+            parent_a,
+            "test://has_signal",
+            like_signal,
+            "1000",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            parent_a,
+            "test://has_signal",
+            dislike_signal,
+            "1001",
+        ))
+        .unwrap();
+
+    // Add signal → signalTypeId property links (stored as literal:string: IRIs via literal_encode)
+    store
+        .add_link(&make_link(
+            like_signal,
+            "test://signal_type_id",
+            like_type_id_stored,
+            "1002",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            dislike_signal,
+            "test://signal_type_id",
+            dislike_type_id_stored,
+            "1003",
+        ))
+        .unwrap();
+
+    let shape = make_shape_with_relation("Parent", "signals", "test://has_signal");
+
+    // Register the Signal target shape on a StaticShapeResolver so the
+    // projection layer can resolve `target_class_name: "Signal"` the same
+    // way the cache-backed resolver does in production.
+    let resolver = super::test_helpers::StaticShapeResolver::new();
+    let signal_shape = ModelShape {
+        target_class: "Signal".to_string(),
+        shape_uri: "SignalShape".to_string(),
+        properties: vec![ShapeProperty {
+            name: "signalTypeId".to_string(),
+            predicate: "test://signal_type_id".to_string(),
+            is_collection: false,
+            is_flag: false,
+            is_required: false,
+            initial_value: None,
+            resolve_language: None,
+            datatype: None,
+            direction: Some("forward".to_string()),
+            is_scalar_relation: false,
+            getter: None,
+            where_filter: None,
+            where_predicates: None,
+        }],
+        include_relations: vec![],
+    };
+    resolver.register("Signal", signal_shape);
+
+    // Filter passes the plain decoded value — fn/parse_literal in SPARQL decodes
+    // the stored literal:string:like_type_id123 IRI back to "like_type_id123".
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "signalTypeId".to_string(),
+        WhereCondition::String(like_type_id_filter.to_string()),
+    );
+
+    let mut instances = vec![json!({ "id": parent_a })];
+    let mut projections = HashMap::new();
+    projections.insert(
+        "$totalLikeCount".to_string(),
+        ProjectionInput {
+            from: "signals".to_string(),
+            count: true,
+            target_class_name: Some("Signal".to_string()),
+            where_clause: Some(wc.clone()),
+            limit: None,
+            order: None,
+        },
+    );
+
+    resolve_projections(
+        &store,
+        &mut instances,
+        &projections,
+        &shape,
+        &resolver,
+        0,
+    )
+    .unwrap();
+
+    let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
+    assert_eq!(
+        count, 1,
+        "should count only the 'like' signal (1 of 2), got {count}"
+    );
+
+    // Also verify the LIST variant ($myLikeSignal pattern with limit: 1).
+    let mut instances2 = vec![json!({ "id": parent_a })];
+    let mut projections2 = HashMap::new();
+    projections2.insert(
+        "$myLikeSignal".to_string(),
+        ProjectionInput {
+            from: "signals".to_string(),
+            count: false,
+            target_class_name: Some("Signal".to_string()),
+            where_clause: Some(wc),
+            limit: Some(1),
+            order: None,
+        },
+    );
+
+    resolve_projections(
+        &store,
+        &mut instances2,
+        &projections2,
+        &shape,
+        &resolver,
+        0,
+    )
+    .unwrap();
+
+    let got = &instances2[0]["$myLikeSignal"];
+    assert_eq!(
+        got["id"].as_str().unwrap_or(""),
+        like_signal,
+        "list with limit:1 should return the hydrated like signal id, got {got}"
+    );
 }

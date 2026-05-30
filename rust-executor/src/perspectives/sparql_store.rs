@@ -17,6 +17,32 @@ const ONT_PROOF_VALID: &str = "ad4m://ontology/proofValid";
 const ONT_STATUS: &str = "ad4m://ontology/status";
 const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
 
+/// Heap entry for bounded top-N selection. Ordered by `(dt, seq)` ascending —
+/// `seq` provides a stable tiebreaker so two links with identical timestamps
+/// don't collide. Used by `SPARQLStore::query_links_top_n_by_timestamp`.
+struct TimestampedLink {
+    dt: ChronoDateTime<chrono::FixedOffset>,
+    seq: u64,
+    link: DecoratedLinkExpression,
+}
+
+impl PartialEq for TimestampedLink {
+    fn eq(&self, other: &Self) -> bool {
+        self.dt == other.dt && self.seq == other.seq
+    }
+}
+impl Eq for TimestampedLink {}
+impl PartialOrd for TimestampedLink {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for TimestampedLink {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.dt.cmp(&other.dt).then(self.seq.cmp(&other.seq))
+    }
+}
+
 fn literal(val: &str) -> Literal {
     Literal::new_simple_literal(val)
 }
@@ -177,6 +203,11 @@ impl SparqlStore {
         })
     }
 
+    /// Returns the number of quads in the store (for diagnostics).
+    pub fn quad_count(&self) -> usize {
+        self.store.len().unwrap_or(0)
+    }
+
     /// Returns true if the store contains any quads beyond the migration marker.
     pub fn has_data(&self) -> bool {
         let migration_subj = NamedNodeRef::new_unchecked("ad4m://system/migration");
@@ -335,6 +366,9 @@ impl SparqlStore {
 
     /// Query links matching optional filters using index-based pattern matching.
     /// Scans direct triples in the default graph, then looks up reifiers for metadata.
+    /// `limit` truncates in iteration order (RocksDB scan order, not timestamp);
+    /// callers that need a top-N page by timestamp should use
+    /// [`Self::query_links_top_n_by_timestamp`] instead, which bounds memory.
     pub fn query_links(
         &self,
         source: Option<&str>,
@@ -344,6 +378,112 @@ impl SparqlStore {
         until_date: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        use std::ops::ControlFlow;
+        // Bail out early on the zero-page case: the closure below pushes first,
+        // then checks `links.len() >= lim`, so without this guard `Some(0)`
+        // would return one element instead of zero.
+        if matches!(limit, Some(0)) {
+            return Ok(Vec::new());
+        }
+        let mut links = Vec::new();
+        self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
+            links.push(link);
+            match limit {
+                Some(lim) if links.len() >= lim => ControlFlow::Break(()),
+                _ => ControlFlow::Continue(()),
+            }
+        })?;
+        Ok(links)
+    }
+
+    /// Returns at most `limit` links matching the filters, sorted by RFC3339
+    /// timestamp (ascending if `reverse=false`, descending if `reverse=true`).
+    /// Uses a bounded heap of size `limit` so memory stays O(limit) regardless
+    /// of how many links match — avoids the O(N) materialise-sort-truncate
+    /// path when callers only want a top-N page (e.g. paginated `get_links`).
+    pub fn query_links_top_n_by_timestamp(
+        &self,
+        source: Option<&str>,
+        predicate: Option<&str>,
+        target: Option<&str>,
+        from_date: Option<&str>,
+        until_date: Option<&str>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+        use std::ops::ControlFlow;
+
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut seq: u64 = 0;
+        if !reverse {
+            // Ascending: keep K smallest timestamps. BinaryHeap is a max-heap,
+            // so evicting the top whenever size exceeds `limit` retains
+            // exactly the K smallest.
+            let mut heap: BinaryHeap<TimestampedLink> = BinaryHeap::with_capacity(limit + 1);
+            self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
+                let dt = ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
+                heap.push(TimestampedLink { dt, seq, link });
+                seq += 1;
+                if heap.len() > limit {
+                    heap.pop();
+                }
+                ControlFlow::Continue(())
+            })?;
+            let mut out: Vec<DecoratedLinkExpression> = Vec::with_capacity(heap.len());
+            while let Some(r) = heap.pop() {
+                out.push(r.link);
+            }
+            // heap pops largest-first → out is currently DESC; flip to ASC.
+            out.reverse();
+            Ok(out)
+        } else {
+            // Descending: keep K largest. `Reverse` inverts the heap so it
+            // evicts the smallest whenever size exceeds `limit`.
+            let mut heap: BinaryHeap<Reverse<TimestampedLink>> =
+                BinaryHeap::with_capacity(limit + 1);
+            self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
+                let dt = ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
+                heap.push(Reverse(TimestampedLink { dt, seq, link }));
+                seq += 1;
+                if heap.len() > limit {
+                    heap.pop();
+                }
+                ControlFlow::Continue(())
+            })?;
+            let mut out: Vec<DecoratedLinkExpression> = Vec::with_capacity(heap.len());
+            while let Some(Reverse(r)) = heap.pop() {
+                out.push(r.link);
+            }
+            // Reverse-heap pops smallest-first → out is currently ASC; flip to DESC.
+            out.reverse();
+            Ok(out)
+        }
+    }
+
+    /// Iterate over all links matching the given filters, calling `callback`
+    /// for each. The callback returns `ControlFlow::Break(())` to stop early.
+    /// Shared by [`Self::query_links`] and
+    /// [`Self::query_links_top_n_by_timestamp`] so the (gnarly) RocksDB
+    /// reifier walk lives in exactly one place.
+    fn for_each_matched_link<F>(
+        &self,
+        source: Option<&str>,
+        predicate: Option<&str>,
+        target: Option<&str>,
+        from_date: Option<&str>,
+        until_date: Option<&str>,
+        mut callback: F,
+    ) -> Result<(), Error>
+    where
+        F: FnMut(DecoratedLinkExpression) -> std::ops::ControlFlow<()>,
+    {
+        use std::ops::ControlFlow;
+
         let source_node = source.map(|s| NamedNode::new_unchecked(s));
         let predicate_node = predicate.map(|p| NamedNode::new_unchecked(p));
         let target_node = target.map(|t| NamedNode::new_unchecked(t));
@@ -352,14 +492,7 @@ impl SparqlStore {
         let p_ref = predicate_node.as_ref().map(|n| n.as_ref());
         let t_ref: Option<TermRef> = target_node.as_ref().map(|n| n.as_ref().into());
 
-        let mut links = Vec::new();
         let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
-        let ont_author = NamedNodeRef::new_unchecked(ONT_AUTHOR);
-        let ont_timestamp = NamedNodeRef::new_unchecked(ONT_TIMESTAMP);
-        let ont_proof_key = NamedNodeRef::new_unchecked(ONT_PROOF_KEY);
-        let ont_proof_sig = NamedNodeRef::new_unchecked(ONT_PROOF_SIG);
-        let ont_proof_valid = NamedNodeRef::new_unchecked(ONT_PROOF_VALID);
-        let ont_status = NamedNodeRef::new_unchecked(ONT_STATUS);
 
         // Search direct triples in the default graph
         for quad_result in
@@ -406,25 +539,40 @@ impl SparqlStore {
 
                 let reifier_subject: NamedOrBlankNodeRef = reifier_node.as_ref().into();
 
-                let get_annotation = |pred_node: NamedNodeRef| -> String {
-                    self.store
-                        .quads_for_pattern(
-                            Some(reifier_subject),
-                            Some(pred_node),
-                            None,
-                            Some(GraphNameRef::DefaultGraph),
-                        )
-                        .next()
-                        .and_then(|r| r.ok())
-                        .and_then(|q| match &q.object {
-                            Term::Literal(l) => Some(l.value().to_string()),
-                            _ => None,
-                        })
-                        .unwrap_or_default()
-                };
-
-                let author = get_annotation(ont_author);
-                let timestamp = get_annotation(ont_timestamp);
+                // Fetch ALL annotations in one pattern scan instead of 6
+                // separate quads_for_pattern calls. Each call to oxigraph's
+                // quads_for_pattern materialises an iterator (and likely a
+                // RocksDB snapshot); for a 10K-row query that's 6 × 10K =
+                // 60K iterator allocations on the hot path. One pass cuts
+                // that to 1 per link.
+                let mut author = String::new();
+                let mut timestamp = String::new();
+                let mut proof_key = String::new();
+                let mut proof_sig = String::new();
+                let mut proof_valid_str = String::new();
+                let mut status_val = String::new();
+                for ann_quad in self.store.quads_for_pattern(
+                    Some(reifier_subject),
+                    None,
+                    None,
+                    Some(GraphNameRef::DefaultGraph),
+                ) {
+                    let aq = ann_quad?;
+                    let pred_str = aq.predicate.as_str();
+                    let value = match &aq.object {
+                        Term::Literal(l) => l.value().to_string(),
+                        _ => continue,
+                    };
+                    match pred_str {
+                        ONT_AUTHOR => author = value,
+                        ONT_TIMESTAMP => timestamp = value,
+                        ONT_PROOF_KEY => proof_key = value,
+                        ONT_PROOF_SIG => proof_sig = value,
+                        ONT_PROOF_VALID => proof_valid_str = value,
+                        ONT_STATUS => status_val = value,
+                        _ => {}
+                    }
+                }
 
                 // Skip links without required metadata
                 if author.is_empty() || timestamp.is_empty() {
@@ -470,22 +618,18 @@ impl SparqlStore {
                     }
                 }
 
-                let proof_key = get_annotation(ont_proof_key);
-                let proof_sig = get_annotation(ont_proof_sig);
-                let proof_valid_str = get_annotation(ont_proof_valid);
                 let proof_valid = if proof_valid_str.is_empty() {
                     None
                 } else {
                     Some(proof_valid_str == "true")
                 };
-                let status_val = get_annotation(ont_status);
                 let status = match status_val.as_str() {
                     "Local" => Some(LinkStatus::Local),
                     "Shared" => Some(LinkStatus::Shared),
                     _ => None,
                 };
 
-                links.push(DecoratedLinkExpression {
+                let link = DecoratedLinkExpression {
                     author,
                     timestamp,
                     data: Link {
@@ -504,17 +648,15 @@ impl SparqlStore {
                         invalid: proof_valid.map(|v| !v),
                     },
                     status,
-                });
+                };
 
-                if let Some(lim) = limit {
-                    if links.len() >= lim {
-                        return Ok(links);
-                    }
+                if let ControlFlow::Break(_) = callback(link) {
+                    return Ok(());
                 }
             }
         }
 
-        Ok(links)
+        Ok(())
     }
 
     /// Find a specific link by source, predicate, target, author, and timestamp.
@@ -719,12 +861,22 @@ impl SparqlStore {
         Ok(())
     }
 
+    /// Flush pending writes to disk.
+    /// This ensures RocksDB memtable data is written to SST files,
+    /// allowing the memtable memory to be reclaimed.
+    pub fn flush(&self) -> Result<(), Error> {
+        self.store
+            .flush()
+            .map_err(|e| anyhow!("SPARQL store flush failed: {}", e))
+    }
+
     /// Clear the store and bulk-insert all provided links.
     pub fn reload(&self, links: Vec<DecoratedLinkExpression>) -> Result<(), Error> {
         self.clear()?;
         for link in &links {
             self.insert_link_triples(link)?;
         }
+        self.flush()?;
         Ok(())
     }
 
@@ -1953,6 +2105,98 @@ mod tests {
             .query_links(None, None, None, None, None, Some(5))
             .unwrap();
         assert_eq!(results.len(), 5);
+    }
+
+    #[test]
+    fn query_links_with_limit_zero_returns_empty() {
+        let svc = new_service();
+        for i in 0..5 {
+            let src = format!("ad4m://src{}", i);
+            svc.add_link(&make_link(&src, "ad4m://pred", "ad4m://tgt"))
+                .unwrap();
+        }
+        // The closure-based collector pushes a link before checking the limit,
+        // so without the early-return for `Some(0)` this would return 1 row.
+        let results = svc
+            .query_links(None, None, None, None, None, Some(0))
+            .unwrap();
+        assert!(
+            results.is_empty(),
+            "query_links(.., Some(0)) must return zero rows, got {} — \
+             zero-page semantics regressed",
+            results.len()
+        );
+    }
+
+    #[test]
+    fn query_links_top_n_ascending_returns_oldest() {
+        let svc = new_service();
+        // 10 links with timestamps spaced one day apart, ts9 newest.
+        for i in 0..10 {
+            let ts = format!("2024-01-{:02}T00:00:00.000Z", i + 1);
+            let src = format!("ad4m://src{}", i);
+            let link =
+                make_link_with_ts(&src, "ad4m://pred", "ad4m://tgt", &ts, "did:key:z6Mktest");
+            svc.add_link(&link).unwrap();
+        }
+        // Top 3 ascending = the 3 oldest, sorted oldest→newest.
+        let results = svc
+            .query_links_top_n_by_timestamp(None, None, None, None, None, 3, false)
+            .unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].timestamp, "2024-01-01T00:00:00.000Z");
+        assert_eq!(results[1].timestamp, "2024-01-02T00:00:00.000Z");
+        assert_eq!(results[2].timestamp, "2024-01-03T00:00:00.000Z");
+    }
+
+    #[test]
+    fn query_links_top_n_descending_returns_newest() {
+        let svc = new_service();
+        for i in 0..10 {
+            let ts = format!("2024-01-{:02}T00:00:00.000Z", i + 1);
+            let src = format!("ad4m://src{}", i);
+            let link =
+                make_link_with_ts(&src, "ad4m://pred", "ad4m://tgt", &ts, "did:key:z6Mktest");
+            svc.add_link(&link).unwrap();
+        }
+        // Top 3 descending = the 3 newest, sorted newest→oldest.
+        let results = svc
+            .query_links_top_n_by_timestamp(None, None, None, None, None, 3, true)
+            .unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].timestamp, "2024-01-10T00:00:00.000Z");
+        assert_eq!(results[1].timestamp, "2024-01-09T00:00:00.000Z");
+        assert_eq!(results[2].timestamp, "2024-01-08T00:00:00.000Z");
+    }
+
+    #[test]
+    fn query_links_top_n_limit_exceeds_results() {
+        let svc = new_service();
+        for i in 0..3 {
+            let ts = format!("2024-01-{:02}T00:00:00.000Z", i + 1);
+            let src = format!("ad4m://src{}", i);
+            let link =
+                make_link_with_ts(&src, "ad4m://pred", "ad4m://tgt", &ts, "did:key:z6Mktest");
+            svc.add_link(&link).unwrap();
+        }
+        // Asking for 100 but only 3 exist — should return all 3 sorted.
+        let results = svc
+            .query_links_top_n_by_timestamp(None, None, None, None, None, 100, false)
+            .unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].timestamp, "2024-01-01T00:00:00.000Z");
+        assert_eq!(results[2].timestamp, "2024-01-03T00:00:00.000Z");
+    }
+
+    #[test]
+    fn query_links_top_n_limit_zero_returns_empty() {
+        let svc = new_service();
+        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t"))
+            .unwrap();
+        let results = svc
+            .query_links_top_n_by_timestamp(None, None, None, None, None, 0, false)
+            .unwrap();
+        assert!(results.is_empty());
     }
 
     #[test]
