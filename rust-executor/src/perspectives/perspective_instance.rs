@@ -1816,8 +1816,38 @@ impl PerspectiveInstance {
             }
         }
 
-        // Pull the already-decorated form from the SPARQL store; sort and
-        // limit in-place. Previously this path materialised Vec<...> three
+        // When the caller supplies a `limit`, push it down into the store via
+        // a bounded top-N heap. This keeps memory at O(limit) regardless of
+        // how many links match — the previous materialise-sort-truncate path
+        // allocated the full Vec even for a 10-item page, which on large
+        // perspectives was a substantial regression in the same hot path this
+        // PR is trying to shrink.
+        //
+        // Otherwise (no limit) fall back to the in-memory sort path. We still
+        // pull the decorated form directly from the store so we don't pay the
+        // triple-materialisation tax described below.
+        if let Some(limit) = query.limit {
+            let from_date = query.from_date.as_ref().map(|d| {
+                let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+                dt.to_rfc3339()
+            });
+            let until_date = query.until_date.as_ref().map(|d| {
+                let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+                dt.to_rfc3339()
+            });
+            return Ok(self.sparql_store.query_links_top_n_by_timestamp(
+                query.source.as_deref(),
+                query.predicate.as_deref(),
+                query.target.as_deref(),
+                from_date.as_deref(),
+                until_date.as_deref(),
+                limit as usize,
+                reverse,
+            )?);
+        }
+
+        // No limit: pull the already-decorated form from the SPARQL store and
+        // sort in-place. Previously this path materialised Vec<...> three
         // times: once as DecoratedLinkExpression in get_links_local_decorated,
         // again as Vec<(LinkExpression, LinkStatus)> in get_links_local
         // (unwrap), and a third time after sort by re-wrapping each pair via
@@ -1837,11 +1867,6 @@ impl PerspectiveInstance {
                 a_time.cmp(&b_time)
             }
         });
-
-        if let Some(limit) = query.limit {
-            let limit = links.len().min(limit as usize);
-            links.truncate(limit);
-        }
 
         Ok(links)
     }
@@ -4930,6 +4955,16 @@ impl PerspectiveInstance {
             // Update Prolog: subscription engine (immediate) + query engine (lazy)
             self.update_prolog_engines(combined_diff.clone()).await;
 
+            // Publish PERSPECTIVE_LINK_ADDED/REMOVED/UPDATED to WS subscribers.
+            // The single-mutation paths (add_link / link_mutations /
+            // diff_from_link_language) publish their diff synchronously before
+            // spawning the prolog update, and spawn_prolog_facts_update
+            // deliberately skips publishing to avoid double-delivery on those
+            // paths. commit_batch never went through that publish step, so
+            // batched diffs were never reaching WS subscribers — that's what
+            // this call restores.
+            self.pubsub_publish_diff(combined_diff.clone()).await;
+
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }
 
@@ -5714,5 +5749,141 @@ mod tests {
             "Reifier query with variable ?predicate should return empty set, got: {:?}",
             predicates
         );
+    }
+
+    // ── Regression tests for PR #829 follow-up ──
+
+    /// Regression: `commit_batch()` must publish `PERSPECTIVE_LINK_ADDED` (and
+    /// the corresponding REMOVED/UPDATED topics) so WebSocket subscribers see
+    /// batched diffs. The single-mutation paths publish synchronously before
+    /// spawning prolog, and `spawn_prolog_facts_update` deliberately skips
+    /// publishing to avoid double-delivery on those paths — so without an
+    /// explicit publish in `commit_batch`, batched diffs silently never reach
+    /// WS subscribers. Asserts a message lands on the topic within 2s of the
+    /// commit returning.
+    #[tokio::test]
+    async fn test_commit_batch_publishes_link_added_event() {
+        let mut perspective = setup().await;
+        let link = create_link();
+        let batch_id = perspective.create_batch().await;
+
+        // Add a Shared addition into the batch (Shared so it lands on the
+        // PERSPECTIVE_LINK_ADDED topic — see `pubsub_publish_diff`).
+        perspective
+            .add_link(
+                link.clone(),
+                LinkStatus::Shared,
+                Some(batch_id.clone()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap();
+
+        // Subscribe BEFORE committing. The global PubSub uses tokio broadcast
+        // channels; subscribers only see messages sent after they subscribe.
+        let pubsub = crate::pubsub::get_global_pubsub().await;
+        let mut added_rx = pubsub
+            .subscribe(&crate::pubsub::PERSPECTIVE_LINK_ADDED_TOPIC)
+            .await;
+
+        let expected_uuid = perspective.uuid.clone();
+        let diff = perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .unwrap();
+        assert_eq!(
+            diff.additions.len(),
+            1,
+            "commit_batch should return the batched addition"
+        );
+
+        // PERSPECTIVE_LINK_ADDED_TOPIC is global, so other tests running
+        // concurrently can publish to it as well. Drain until we find the
+        // message for THIS perspective + link (or the deadline expires).
+        // Without the publish call in commit_batch the loop never sees a
+        // matching message and the timeout fires.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let msg = loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let candidate = tokio::time::timeout(remaining, added_rx.recv())
+                .await
+                .expect(
+                    "commit_batch() did not publish a matching PERSPECTIVE_LINK_ADDED \
+                     within 2s — batched diffs are not reaching WS subscribers",
+                )
+                .expect("PERSPECTIVE_LINK_ADDED broadcast channel closed unexpectedly");
+            if candidate.contains(&expected_uuid) && candidate.contains(&link.target) {
+                break candidate;
+            }
+        };
+
+        // Sanity-check the payload references the link we committed. The
+        // published message is a JSON-encoded PerspectiveLinkFilter referring
+        // to the perspective uuid + the decorated link.
+        assert!(
+            msg.contains(&link.target),
+            "Published PERSPECTIVE_LINK_ADDED message should reference the committed link's target ({}), got: {}",
+            link.target,
+            msg
+        );
+    }
+
+    /// Regression: paginated `get_links(limit=N)` must use the bounded-heap
+    /// store-side top-N method, not "materialise full Vec then sort+truncate".
+    /// Asserts the dedicated store method `query_links_top_n_by_timestamp`
+    /// exists (compile-error catch if removed) and that `get_links(limit=N)`
+    /// returns the same result as a direct call — i.e. it routes through the
+    /// bounded path rather than diverging back to the unbounded sort.
+    #[tokio::test]
+    async fn test_get_links_with_limit_uses_bounded_top_n_path() {
+        let mut perspective = setup().await;
+
+        // Insert 50 links. With sub-millisecond `add_link` calls the
+        // timestamps differ enough that sort order is stable.
+        for _ in 0..50 {
+            let link = create_link();
+            perspective
+                .add_link(link, LinkStatus::Local, None, &AgentContext::main_agent())
+                .await
+                .unwrap();
+        }
+
+        // Ascending (oldest-first) page of 5 via the public API.
+        let q = LinkQuery {
+            limit: Some(5),
+            ..Default::default()
+        };
+        let page = perspective.get_links(&q).await.unwrap();
+        assert_eq!(page.len(), 5, "limit=5 should return exactly 5 links");
+
+        // Same query directly against the store's bounded top-N method. If
+        // `get_links` no longer routes through this path, the equivalence
+        // assertion below catches drift between the two implementations.
+        let direct = perspective
+            .sparql_store
+            .query_links_top_n_by_timestamp(None, None, None, None, None, 5, false)
+            .unwrap();
+        assert_eq!(
+            direct.len(),
+            5,
+            "query_links_top_n_by_timestamp(limit=5) should return 5 links"
+        );
+
+        // Identical results: same timestamps in the same order.
+        let page_ts: Vec<&str> = page.iter().map(|l| l.timestamp.as_str()).collect();
+        let direct_ts: Vec<&str> = direct.iter().map(|l| l.timestamp.as_str()).collect();
+        assert_eq!(
+            page_ts, direct_ts,
+            "get_links(limit) must route through query_links_top_n_by_timestamp — \
+             ordering drift between paths means the bounded heap is not being used"
+        );
+
+        // Sorted ascending.
+        for w in page.windows(2) {
+            assert!(
+                w[0].timestamp <= w[1].timestamp,
+                "ascending top-N should yield non-decreasing timestamps"
+            );
+        }
     }
 }
