@@ -29,10 +29,15 @@ export class Ad4mClient {
     #runtimeClient: RuntimeClient
     #aiClient: AIClient
 
-    constructor(baseUrl: string, token?: string, subscribe: boolean = true) {
+    constructor(
+        baseUrl: string,
+        token?: string,
+        subscribe: boolean = true,
+        options?: { webSocketImpl?: new (url: string) => WebSocket }
+    ) {
         this.#baseUrl = baseUrl
         this.#token = token
-        this.#apiClient = new ApiClient(baseUrl, token)
+        this.#apiClient = new ApiClient(baseUrl, token, options?.webSocketImpl)
         this.#agentClient = new AgentClient(baseUrl, token, subscribe, this.#apiClient)
         this.#expressionClient = new ExpressionClient(baseUrl, token, this.#apiClient)
         this.#languageClient = new LanguageClient(baseUrl, token, this.#apiClient)

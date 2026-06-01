@@ -1,4 +1,5 @@
 import { isEmbedded, setLocal, getLocal, removeLocal, checkConnection, wsUrlToHttpBase } from './utils';
+import { PostMessageWebSocket } from './PostMessageWebSocket';
 import { Ad4mClient, VerificationRequestResult } from "@coasys/ad4m";
 import autoBind from "auto-bind";
 
@@ -355,11 +356,47 @@ export default class Ad4mConnect extends EventTarget {
           }
         }
 
-        console.log('[Ad4m Connect] Received AD4M_CONFIG from parent:', { port: event.data.port, hasToken: !!event.data.token });
+        console.log('[Ad4m Connect] Received AD4M_CONFIG from parent:', { port: event.data.port, hasToken: !!event.data.token, proxy: !!event.data.proxy });
         
+        // Validate and normalize token (optional but must be string if present)
+        const { token: rawToken } = event.data;
+        const normalizedToken = rawToken !== undefined && rawToken !== null && typeof rawToken === 'string' 
+          ? rawToken 
+          : '';
+
+        // ── Proxy mode ───────────────────────────────────────────────────────
+        // Parent sends proxy: true when the host application will open the real
+        // WebSocket to the AD4M daemon and proxy frames via postMessage.
+        // The URL/port fields are not needed in this path.
+        if (event.data.proxy) {
+          try {
+            this.token = normalizedToken;
+            if (normalizedToken) {
+              setLocal('ad4m-token', normalizedToken);
+            } else {
+              removeLocal('ad4m-token');
+            }
+
+            this.notifyConnectionChange('connecting');
+            this.ad4mClient = new Ad4mClient(
+              'http://proxy', // URL ignored by PostMessageWebSocket
+              normalizedToken,
+              false,          // defer subscriptions until auth confirmed
+              { webSocketImpl: PostMessageWebSocket as unknown as new (url: string) => WebSocket }
+            );
+            this.notifyConnectionChange('connected');
+            await this.checkAuth();
+          } catch (error) {
+            console.error('[Ad4m Connect] Failed to initialize proxy client from AD4M_CONFIG:', error);
+            this.rejectEmbedded(error as Error);
+          }
+          return;
+        }
+
+        // ── Direct mode (desktop / local where PNA is not an issue) ──────────
         // Validate and normalize port
-        const { port: rawPort, token: rawToken } = event.data;
-        
+        const { port: rawPort } = event.data;
+
         if (rawPort === undefined || rawPort === null) {
           const error = new Error('AD4M_CONFIG missing required field: port');
           console.error('[Ad4m Connect]', error.message);
@@ -374,11 +411,6 @@ export default class Ad4mConnect extends EventTarget {
           this.rejectEmbedded(error);
           return;
         }
-        
-        // Validate and normalize token (optional but must be string if present)
-        const normalizedToken = rawToken !== undefined && rawToken !== null && typeof rawToken === 'string' 
-          ? rawToken 
-          : '';
         
         try {
           // Set connection details from parent (after successful validation)
