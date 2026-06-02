@@ -52,7 +52,10 @@ export class PostMessageWebSocket {
             }
             if (msg.type === 'AD4M_PROXY_WS_ERROR') {
                 this._clearConnectTimeout()
+                this.readyState = PostMessageWebSocket.CLOSED
+                window.removeEventListener('message', this._messageHandler)
                 this.onerror?.(new Event('error'))
+                this.onclose?.(new CloseEvent('close', { code: 1006, reason: 'WebSocket error', wasClean: false }))
                 return
             }
             if (msg.type === 'AD4M_PROXY_WS_CLOSED') {
