@@ -22,42 +22,33 @@ pub struct MockPerspectiveGraph {
 }
 
 impl PerspectiveDiffRetreiver for MockPerspectiveGraph {
-    fn get<T>(hash: Hash) -> SocialContextResult<T>
-    where
-        T: TryFrom<SerializedBytes, Error = SerializedBytesError>,
-    {
-        let value = &GLOBAL_MOCKED_GRAPH
+    fn get(hash: Hash) -> SocialContextResult<PerspectiveDiffEntryReference> {
+        let value = GLOBAL_MOCKED_GRAPH
             .lock()
             .expect("Could not get lock on graph map")
             .graph_map
             .get(&hash)
             .expect("Could not find entry in map")
             .to_owned();
-        Ok(T::try_from(value.to_owned())?)
+        Ok(PerspectiveDiffEntryReference::try_from(value)?)
     }
 
-    fn get_with_timestamp<T>(hash: Hash) -> SocialContextResult<(T, DateTime<Utc>)>
-    where
-        T: TryFrom<SerializedBytes, Error = SerializedBytesError>,
-    {
-        let value = &GLOBAL_MOCKED_GRAPH
+    fn get_with_timestamp(
+        hash: Hash,
+    ) -> SocialContextResult<(PerspectiveDiffEntryReference, DateTime<Utc>)> {
+        let value = GLOBAL_MOCKED_GRAPH
             .lock()
             .expect("Could not get lock on graph map")
             .graph_map
             .get(&hash)
             .expect("Could not find entry in map")
             .to_owned();
-        Ok((T::try_from(value.to_owned())?, Utc::now()))
+        Ok((PerspectiveDiffEntryReference::try_from(value)?, Utc::now()))
     }
 
-    fn create_entry<I, E: std::fmt::Debug, E2>(entry: I) -> SocialContextResult<Hash>
-    where
-        ScopedEntryDefIndex: for<'a> TryFrom<&'a I, Error = E2>,
-        EntryVisibility: for<'a> From<&'a I>,
-        Entry: TryFrom<I, Error = E>,
-        WasmError: From<E>,
-        WasmError: From<E2>,
-    {
+    fn create_entry(
+        entry: perspective_diff_sync_integrity::EntryTypes,
+    ) -> SocialContextResult<Hash> {
         let mut object_store = GLOBAL_MOCKED_GRAPH
             .lock()
             .expect("Could not get lock on OBJECT_STORE");
@@ -509,9 +500,8 @@ fn can_get_and_create_mocked_holochain_objects() {
         *graph = MockPerspectiveGraph::from_dot(dot).expect("Could not create graph");
     }
     update();
-    let diff_ref = MockPerspectiveGraph::get::<PerspectiveDiffEntryReference>(node_id_hash(
-        &dot_structures::Id::Plain(String::from("1")),
-    ));
+    let diff_ref =
+        MockPerspectiveGraph::get(node_id_hash(&dot_structures::Id::Plain(String::from("1"))));
     assert!(diff_ref.is_ok());
 
     use perspective_diff_sync_integrity::{
@@ -528,6 +518,6 @@ fn can_get_and_create_mocked_holochain_objects() {
     ));
     assert!(commit.is_ok());
 
-    let get_commit = MockPerspectiveGraph::get::<PerspectiveDiffEntryReference>(commit.unwrap());
+    let get_commit = MockPerspectiveGraph::get(commit.unwrap());
     assert!(get_commit.is_ok());
 }
