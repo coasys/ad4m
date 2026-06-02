@@ -47,7 +47,7 @@ pub fn check_compute_credits(email: &str) -> Result<(), anyhow::Error> {
 ///
 /// This is the shared billing function callable from anywhere in the executor
 /// (e.g. AI service async tasks, perspective instance methods) without needing
-/// a GraphQL RequestContext or auth token.
+/// a REST RequestContext or auth token.
 pub fn bill_compute(
     email: &str,
     amount: f64,

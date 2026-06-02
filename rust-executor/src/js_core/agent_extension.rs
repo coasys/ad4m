@@ -6,7 +6,7 @@ use crate::{
         create_signed_expression, did, did_document, did_for_context, sign_for_context,
         sign_string_hex_for_context, signing_key_id_for_context, AgentContext, AgentService,
     },
-    graphql::graphql_types::{Agent, AgentStatus},
+    types::{Agent, AgentStatus},
 };
 use deno_core::anyhow;
 use deno_core::op2;

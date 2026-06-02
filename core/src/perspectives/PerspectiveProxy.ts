@@ -4,13 +4,11 @@ import { LinkQuery } from "./LinkQuery";
 import { PerspectiveHandle, PerspectiveState } from './PerspectiveHandle'
 import { Perspective } from "./Perspective";
 import { Literal } from "../Literal";
-import { Subject } from "../model/Subject";
 import { ExpressionRendered } from "../expression/Expression";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { AIClient } from "../ai/AIClient";
-import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
-import { gql } from "@apollo/client/core";
+
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
@@ -20,9 +18,19 @@ import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
+/** Extract namespace prefix from a URI (everything up to and including the last / or #) */
+function extractNamespaceFromUri(uri: string): string {
+    const hashIdx = uri.lastIndexOf('#');
+    if (hashIdx >= 0) return uri.substring(0, hashIdx + 1);
+    const slashIdx = uri.lastIndexOf('/');
+    if (slashIdx >= 0) return uri.substring(0, slashIdx + 1);
+    const colonIdx = uri.lastIndexOf(':');
+    if (colonIdx >= 0) return uri.substring(0, colonIdx + 1);
+    return uri;
+}
 
 
-// Generic subscription interface that matches Apollo's Subscription
+// Generic unsubscribe interface for event subscriptions
 interface Unsubscribable {
     unsubscribe(): void;
 }
@@ -32,7 +40,7 @@ interface Unsubscribable {
  * This class handles:
  * - Keeping the subscription alive by sending periodic keepalive signals
  * - Managing callbacks for result updates
- * - Subscribing to query updates via GraphQL subscriptions
+ * - Subscribing to query updates via WebSocket subscriptions
  * - Maintaining the latest query result
  * - Ensuring subscription is fully initialized before allowing access
  * - Cleaning up resources when disposed
@@ -119,22 +127,32 @@ export class QuerySubscriptionProxy {
             initialResult = await this.#client.subscribeQuery(this.#uuid, this.#query);
             this.#subscriptionId = initialResult.subscriptionId;
 
-            // Process the initial result immediately for fast UX
-            if (initialResult.result) {
+            // Process the initial result immediately for fast UX.
+            // The subscribeQuery() RPC call already returns the initial result,
+            // so treat that as successful initialization instead of waiting for a
+            // follow-up WebSocket update that may never arrive until the query changes.
+            if (initialResult.result !== undefined) {
                 this.#latestResult = initialResult.result;
                 this.#notifyCallbacks(initialResult.result);
+
+                if (this.#initResolve) {
+                    this.#initResolve(true);
+                    this.#initResolve = undefined;
+                    this.#initReject = undefined;
+                }
             } else {
                 console.warn('⚠️ No initial result returned from subscribeQuery!');
-            }
 
-            // Set up timeout for retry
-            this.#initTimeoutId = setTimeout(() => {
-                console.error('Subscription initialization timed out after 30 seconds. Resubscribing...');
-                // Recursively retry subscription, catching any errors
-                this.subscribe().catch(error => {
-                    console.error('Error during subscription retry after timeout:', error);
-                });
-            }, 30000);
+                // Only keep the initialization timeout when the backend did not
+                // provide an initial result up front.
+                this.#initTimeoutId = setTimeout(() => {
+                    console.error('Subscription initialization timed out after 30 seconds. Resubscribing...');
+                    // Recursively retry subscription, catching any errors
+                    this.subscribe().catch(error => {
+                        console.error('Error during subscription retry after timeout:', error);
+                    });
+                }, 30000);
+            }
             
             // Subscribe to query updates
             this.#unsubscribe = this.#client.subscribeToQueryUpdates(
@@ -152,9 +170,6 @@ export class QuerySubscriptionProxy {
                         this.#initResolve = undefined;  // Prevent double-resolve
                         this.#initReject = undefined;
                     }
-
-                    // Skip duplicate init messages
-                    if (updateResult.isInit && this.#latestResult) return;
 
                     this.#latestResult = updateResult;
                     this.#notifyCallbacks(updateResult);
@@ -281,7 +296,7 @@ export class QuerySubscriptionProxy {
      * 
      * This method:
      * 1. Stops the keepalive timer
-     * 2. Unsubscribes from GraphQL subscription updates
+     * 2. Unsubscribes from subscription updates
      * 3. Clears all registered callbacks
      * 4. Cleans up any pending initialization timeout
      * 
@@ -376,6 +391,10 @@ export class PerspectiveProxy {
 
     #handle: PerspectiveHandle
     #client: PerspectiveClient
+
+    /** @internal Exposed for ModelQueryBuilder subscription management */
+    get client(): PerspectiveClient { return this.#client; }
+
     #perspectiveLinkAddedCallbacks: LinkCallback[]
     #perspectiveLinkRemovedCallbacks: LinkCallback[]
     #perspectiveLinkUpdatedCallbacks: LinkCallback[]
@@ -403,6 +422,24 @@ export class PerspectiveProxy {
         this.#client.addPerspectiveLinkRemovedListener(this.#handle.uuid, this.#perspectiveLinkRemovedCallbacks)
         this.#client.addPerspectiveLinkUpdatedListener(this.#handle.uuid, this.#perspectiveLinkUpdatedCallbacks)
         this.#client.addPerspectiveSyncStateChangeListener(this.#handle.uuid, this.#perspectiveSyncStateChangeCallbacks)
+    }
+
+    /** Update the proxy's internal handle and public fields in-place.
+     *  Keeps the same object reference so all holders see the update. */
+    updateHandle(handle: PerspectiveHandle): void {
+        if (handle.uuid !== this.#handle.uuid) {
+            throw new Error(
+                `PerspectiveProxy.updateHandle: UUID mismatch — proxy is bound to "${this.#handle.uuid}" but received handle with UUID "${handle.uuid}". ` +
+                `This would silently diverge from listeners registered under the original UUID.`
+            );
+        }
+        this.#handle = handle;
+        this.uuid = handle.uuid;
+        this.name = handle.name;
+        this.owners = handle.owners;
+        this.sharedUrl = handle.sharedUrl;
+        this.neighbourhood = handle.neighbourhood;
+        this.state = handle.state;
     }
 
     /**
@@ -558,6 +595,59 @@ export class PerspectiveProxy {
         const result = await this.#client.querySparql(this.#handle.uuid, query);
         setCachedResult(this.#handle.uuid, query, result);
         return result;
+    }
+
+    /**
+     * Execute a model query — the executor-side replacement for SPARQL query building + JS hydration.
+     * 
+     * @param className - The model class name (e.g. "Recipe")
+     * @param queryJson - Structured query as JSON string
+     * @param shapeJson - Optional shape metadata JSON from the model class
+     * @returns Object with `instances` array and `totalCount`
+     */
+    async modelQuery(className: string, queryJson: string, shapeJson?: string): Promise<{ instances: any[], totalCount: number }> {
+        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, shapeJson);
+    }
+
+    /**
+     * Evaluate property getters for a batch of instances in a single RPC call.
+     * Returns a map of `{ instanceId: { prop: value, ... } }`.
+     *
+     * Use this instead of `Ad4mModel.evaluateGetters()` for lazy-loading
+     * getter-backed properties on visible items (e.g. `replyingTo` on messages).
+     *
+     * @param className - The model class name (e.g. "Message")
+     * @param instanceIds - Array of instance base expression URIs
+     * @param shapeJson - Shape metadata JSON from the model class
+     * @param propertyNames - Optional subset of property names to evaluate
+     * @returns Map of instance ID → evaluated property values
+     */
+    async evaluateGetters(
+        className: string,
+        instanceIds: string[],
+        shapeJson: string,
+        propertyNames?: string[],
+    ): Promise<Record<string, Record<string, any>>> {
+        return await this.#client.evaluateGetters(
+            this.#handle.uuid, className, instanceIds, shapeJson, propertyNames,
+        );
+    }
+
+    /**
+     * Subscribe to model query changes. Builds trigger SPARQL from the model shape
+     * internally in Rust, registers a subscription, runs the initial query, and
+     * pushes updated results when relevant links change.
+     *
+     * The subscription reuses the same GraphQL subscription channel as subscribeQuery().
+     * Use keepAliveQuery() / disposeQuerySubscription() with the returned subscriptionId.
+     *
+     * @param className - The model class name
+     * @param queryJson - JSON-serialized query parameters (same as modelQuery)
+     * @param shapeJson - Optional shape metadata JSON from the model class
+     * @returns Object with `subscriptionId` and initial `result`
+     */
+    async modelSubscribe(className: string, queryJson: string, shapeJson?: string): Promise<{ subscriptionId: string, result: any }> {
+        return await this.#client.modelSubscribe(this.#handle.uuid, className, queryJson, shapeJson);
     }
 
     /**
@@ -756,23 +846,31 @@ export class PerspectiveProxy {
     async removeListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
         if (type === 'link-added') {
             const index = this.#perspectiveLinkAddedCallbacks.indexOf(cb);
-
-            this.#perspectiveLinkAddedCallbacks.splice(index, 1);
+            if (index >= 0) this.#perspectiveLinkAddedCallbacks.splice(index, 1);
         } else if (type === 'link-removed') {
             const index = this.#perspectiveLinkRemovedCallbacks.indexOf(cb);
-
-            this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
+            if (index >= 0) this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
         } else if (type === 'link-updated') {
             const index = this.#perspectiveLinkUpdatedCallbacks.indexOf(cb);
-
-            this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
+            if (index >= 0) this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
         }
+    }
+
+    /** Clean up all subscriptions registered by this proxy.
+     *  Call this when the proxy is no longer needed to prevent subscription leaks.
+     *  After calling dispose(), the proxy should not be used. */
+    dispose(): void {
+        this.#client.removeAllListeners(this.#handle.uuid)
+        this.#perspectiveLinkAddedCallbacks.length = 0
+        this.#perspectiveLinkRemovedCallbacks.length = 0
+        this.#perspectiveLinkUpdatedCallbacks.length = 0
+        this.#perspectiveSyncStateChangeCallbacks.length = 0
     }
 
     /**
      * Creates a snapshot of the current perspective state.
      * Useful for backup or sharing.
-     * 
+     *
      * @returns Perspective object containing all links
      */
     async snapshot(): Promise<Perspective> {
@@ -1052,7 +1150,7 @@ export class PerspectiveProxy {
      * Adds Social DNA code to the perspective.
      * 
      * **Recommended:** Use {@link addShacl} instead, which accepts the `SHACLShape` type directly.
-     * This method is primarily for the GraphQL layer and legacy Prolog code.
+     * This method is primarily for the RPC API layer and legacy Prolog code.
      * 
      * @param name - Unique name for this SDNA definition
      * @param sdnaCode - Prolog SDNA code (legacy, can be empty string if shaclJson provided)
@@ -1070,6 +1168,43 @@ export class PerspectiveProxy {
      */
     async addSdna(name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string) {
         return this.#client.addSdna(this.#handle.uuid, name, sdnaCode, sdnaType, shaclJson)
+    }
+
+    /**
+     * Batch variant of addSdna — registers multiple SDNA entries in a single RPC call.
+     * Acquires the Rust-side mutex once for the entire batch.
+     */
+    async addSdnaAll(entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[]): Promise<boolean[]> {
+        return this.#client.addSdnaBatch(this.#handle.uuid, entries)
+    }
+
+    /**
+     * Batch-registers multiple model classes as SHACL subject classes in a single RPC call.
+     * Skips classes already registered on this perspective instance.
+     */
+    async ensureSubjectClasses(jsClasses: any[]): Promise<void> {
+        const entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[] = [];
+        for (const jsClass of jsClasses) {
+            const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
+            if (this.#ensuredSubjectClasses.has(className)) continue;
+
+            if (!jsClass.generateSHACL) {
+                throw new Error(`Class ${jsClass.name} must have generateSHACL(). Use @Model decorator.`);
+            }
+
+            const { shape } = jsClass.generateSHACL();
+            entries.push({
+                name: className,
+                sdnaType: 'subject_class',
+                shaclJson: JSON.stringify(shape.toJSON()),
+            });
+        }
+        if (entries.length === 0) return;
+
+        await this.addSdnaAll(entries);
+        for (const entry of entries) {
+            this.#ensuredSubjectClasses.add(entry.name);
+        }
     }
 
     /**
@@ -1313,7 +1448,7 @@ export class PerspectiveProxy {
      */
     async subjectClasses(): Promise<string[]> {
         try {
-            // Query SHACL class links directly — no need for a separate GraphQL endpoint
+            // Query SHACL class links directly — no need for a separate RPC endpoint
             const classLinks = await this.get(new LinkQuery({
                 predicate: "rdf://type",
                 target: "ad4m://SubjectClass"
@@ -1405,7 +1540,9 @@ export class PerspectiveProxy {
             return exprAddr as B extends undefined ? T : string;
         }
 
-        return this.getSubjectProxy(exprAddr, subjectClass) as Promise<B extends undefined ? T : string>;
+        // Return the expression address directly — callers should use Ad4mModel or
+        // getSubjectData() to interact with the created instance.
+        return exprAddr as unknown as B extends undefined ? T : string;
     }
 
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
@@ -1487,7 +1624,7 @@ export class PerspectiveProxy {
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
 
         // Get metadata from SHACL links
-        const metadata = await this.getSubjectClassMetadataFromSDNA(className);
+        const metadata = await this.getSubjectClassMetadata(className);
         if (!metadata) {
             console.warn(`isSubjectInstance: No SHACL metadata found for class ${className}`);
             return false;
@@ -1499,59 +1636,22 @@ export class PerspectiveProxy {
             return links.length > 0;
         }
 
-        // Check if the expression has all required triples (predicate + optional exact target)
-        for (const triple of metadata.requiredTriples) {
-            let query: LinkQuery;
-            if (triple.target) {
-                query = new LinkQuery({ source: expression, predicate: triple.predicate, target: triple.target });
-            } else {
-                query = new LinkQuery({ source: expression, predicate: triple.predicate });
-            }
-            const links = await this.get(query);
+        // Build a single SPARQL ASK query with all required triple patterns
+        const patterns = metadata.requiredTriples.map((t, i) => {
+            const target = t.target ? `<${t.target}>` : `?t${i}`;
+            return `<${expression}> <${t.predicate}> ${target} .`;
+        }).join('\n    ');
 
-            if (!links || links.length === 0) {
-                return false;
-            }
-        }
-
-        return true;
+        const result = await this.querySparql(`ASK WHERE {\n    ${patterns}\n}`);
+        return result === true;
     }
 
-
-    /** For an existing subject instance (existing in the perspective's links)
-     * this function returns a proxy object that can be used to access the subject's
-     * properties and methods.
-     *
-     * @param base URI of the subject's root expression
-     * @param subjectClass Either a string with the name of the subject class, or an object
-     * with the properties of the subject class. In the latter case, the first subject class
-     * that matches the given properties will be used.
-     */
-    async getSubjectProxy<T>(base: string, subjectClass: T): Promise<T> {
-        if(!await this.isSubjectInstance(base, subjectClass)) {
-            throw `Expression ${base} is not a subject instance of given class: ${JSON.stringify(subjectClass)}`
-        }
-        let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
-        let subject = new Subject(this, base, className)
-        await subject.init()
-        return subject as unknown as T
-    }
 
     /**
      * Gets subject class metadata from SHACL links using SHACLShape.fromLinks().
      * Retrieves the SHACL shape and extracts metadata for instance queries.
      */
     async getSubjectClassMetadata(className: string): Promise<{
-        requiredPredicates: string[],
-        requiredTriples: Array<{predicate: string, target?: string}>,
-        properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-        relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
-    } | null> {
-        return this.getSubjectClassMetadataFromSDNA(className);
-    }
-
-    /** @deprecated Use getSubjectClassMetadata() */
-    async getSubjectClassMetadataFromSDNA(className: string): Promise<{
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
         properties: Map<string, { predicate: string, resolveLanguage?: string }>,
@@ -1611,6 +1711,7 @@ export class PerspectiveProxy {
             return null;
         }
     }
+
     /**
      * Generates a SPARQL query to find instances based on class metadata.
      */
@@ -1631,239 +1732,17 @@ export class PerspectiveProxy {
             return Array.from(sources).map(s => ({ base: s }));
         }
 
-        // Use first required triple to get candidate set, then filter by rest
-        const first = metadata.requiredTriples[0];
-        let query: LinkQuery;
-        if (first.target) {
-            query = new LinkQuery({ predicate: first.predicate, target: first.target });
-        } else {
-            query = new LinkQuery({ predicate: first.predicate });
-        }
-        const candidateLinks = await this.get(query);
-        let candidates = [...new Set(candidateLinks.map(l => l.data.source))];
+        // Build a single SPARQL SELECT with all required triple patterns joined
+        const patterns = metadata.requiredTriples.map((t, i) => {
+            const target = t.target ? `<${t.target}>` : `?t${i}`;
+            return `?base <${t.predicate}> ${target} .`;
+        }).join('\n    ');
 
-        // Filter by remaining required triples
-        for (let i = 1; i < metadata.requiredTriples.length; i++) {
-            const triple = metadata.requiredTriples[i];
-            const remaining: string[] = [];
-            for (const expr of candidates) {
-                let q: LinkQuery;
-                if (triple.target) {
-                    q = new LinkQuery({ source: expr, predicate: triple.predicate, target: triple.target });
-                } else {
-                    q = new LinkQuery({ source: expr, predicate: triple.predicate });
-                }
-                const links = await this.get(q);
-                if (links.length > 0) remaining.push(expr);
-            }
-            candidates = remaining;
-        }
-
-        return candidates.map(c => ({ base: c }));
-    }
-
-    /**
-     * Gets a property value using SPARQL when Prolog fails.
-     * This is used as a fallback in SdnaOnly mode where link data isn't in Prolog.
-     */
-    async getPropertyValueViaSparql(baseExpression: string, className: string, propertyName: string): Promise<any> {
-        const metadata = await this.getSubjectClassMetadataFromSDNA(className);
-        if (!metadata) {
-            return undefined;
-        }
-
-        const propMeta = metadata.properties.get(propertyName);
-        if (!propMeta) {
-            return undefined;
-        }
-
-        const links = await this.get(new LinkQuery({ source: baseExpression, predicate: propMeta.predicate }));
-
-        if (!links || links.length === 0) {
-            return undefined;
-        }
-
-        const value = links[0].data.target;
-
-        // Handle expression resolution if needed
-        if (propMeta.resolveLanguage && value) {
-            try {
-                const expression = await this.getExpression(value);
-                try {
-                    return JSON.parse(expression.data);
-                } catch (e) {
-                    return expression.data;
-                }
-            } catch (err) {
-                return value;
-            }
-        }
-
-        return value;
-    }
-
-    /**
-     * Gets relation values using SPARQL when Prolog fails.
-     * This is used as a fallback in SdnaOnly mode where link data isn't in Prolog.
-     * Note: This is used by Subject.ts (legacy pattern). Ad4mModel.ts uses getModelMetadata() instead.
-     */
-    async getRelationValuesViaSparql(baseExpression: string, className: string, relationName: string): Promise<any[]> {
-        const metadata = await this.getSubjectClassMetadataFromSDNA(className);
-        if (!metadata) {
-            return [];
-        }
-
-        const relMeta = metadata.relations.get(relationName);
-        if (!relMeta) {
-            return [];
-        }
-
-        const links = await this.get(new LinkQuery({ source: baseExpression, predicate: relMeta.predicate }));
-
-        if (!links || links.length === 0) {
-            return [];
-        }
-
-        // Sort by timestamp ascending
-        links.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-
-        let values = links.map(l => l.data.target).filter(v => v !== "" && v !== '');
-        
-        // Apply condition filtering if present
-        if (relMeta.condition && values.length > 0) {
-            try {
-                const filteredValues: string[] = [];
-                
-                for (const value of values) {
-                    let condition = relMeta.condition
-                        .replace(/\$perspective/g, `'${this.uuid}'`)
-                        .replace(/\$base/g, `'${baseExpression}'`)
-                        .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
-                    
-                    // Parse condition to extract link query parameters
-                    // Conditions typically look like: WHERE in.uri = 'X' AND predicate = 'Y' AND out.uri = 'Z'
-                    // or: array::len(SELECT * FROM link WHERE ...) > 0
-                    // Convert to queryLinks calls
-                    const sourceMatch = condition.match(/in\.uri\s*=\s*'([^']+)'/);
-                    const predicateMatch = condition.match(/predicate\s*=\s*'([^']+)'/);
-                    const targetMatch = condition.match(/out\.uri\s*=\s*'([^']+)'/);
-                    
-                    if (sourceMatch || predicateMatch || targetMatch) {
-                        const linkQuery: any = {};
-                        if (sourceMatch) linkQuery.source = sourceMatch[1];
-                        if (predicateMatch) linkQuery.predicate = predicateMatch[1];
-                        if (targetMatch) linkQuery.target = targetMatch[1];
-                        
-                        const matchingLinks = await this.get(new LinkQuery(linkQuery));
-                        if (matchingLinks.length > 0) {
-                            filteredValues.push(value);
-                        }
-                    } else {
-                        // Can't parse condition, include by default
-                        filteredValues.push(value);
-                    }
-                }
-                
-                values = filteredValues;
-            } catch (error) {
-                console.warn(`Failed to apply condition filter for ${relationName}:`, error);
-            }
-        }
-
-        // Apply instance filter if present - batch-check all values at once
-        if (relMeta.instanceFilter) {
-            try {
-                const filterMetadata = await this.getSubjectClassMetadataFromSDNA(relMeta.instanceFilter);
-                if (!filterMetadata) {
-                    // Fallback to sequential checks if metadata isn't available
-                    return this.filterInstancesSequential(values, relMeta.instanceFilter);
-                }
-
-                return await this.batchCheckSubjectInstances(values, filterMetadata);
-            } catch (err) {
-                // Fallback to sequential checks on error
-                return this.filterInstancesSequential(values, relMeta.instanceFilter);
-            }
-        }
-
-        return values;
-    }
-
-    /**
-     * Batch-checks multiple expressions against subject class metadata using a single or limited SPARQL queries.
-     * This avoids N+1 query problems by checking all values at once.
-     */
-    async batchCheckSubjectInstances(
-        expressions: string[],
-        metadata: {
-            requiredPredicates: string[],
-            requiredTriples: Array<{predicate: string, target?: string}>,
-            properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-            relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
-        }
-    ): Promise<string[]> {
-        if (expressions.length === 0) {
-            return [];
-        }
-
-        // If no required triples, check which expressions have any links
-        if (metadata.requiredTriples.length === 0) {
-            const results: string[] = [];
-            for (const expr of expressions) {
-                const links = await this.get(new LinkQuery({ source: expr }));
-                if (links.length > 0) results.push(expr);
-            }
-            return results;
-        }
-
-        // For each required triple, find which expressions match
-        const validExpressionSets: Set<string>[] = [];
-        
-        for (const triple of metadata.requiredTriples) {
-            const matchingExprs = new Set<string>();
-            for (const expr of expressions) {
-                let query: LinkQuery;
-                if (triple.target) {
-                    query = new LinkQuery({ source: expr, predicate: triple.predicate, target: triple.target });
-                } else {
-                    query = new LinkQuery({ source: expr, predicate: triple.predicate });
-                }
-                const links = await this.get(query);
-                if (links.length > 0) matchingExprs.add(expr);
-            }
-            validExpressionSets.push(matchingExprs);
-        }
-
-        // Find intersection: expressions that passed ALL required triple checks
-        if (validExpressionSets.length === 0) {
-            return expressions;
-        }
-
-        const firstSet = validExpressionSets[0];
-        const validExpressions = expressions.filter(expr => {
-            return validExpressionSets.every(set => set.has(expr));
-        });
-
-        return validExpressions;
-    }
-
-    /**
-     * Fallback sequential instance checking when batch checking isn't available.
-     */
-    private async filterInstancesSequential(values: string[], instanceFilter: string): Promise<string[]> {
-        const filteredValues = [];
-        for (const value of values) {
-            try {
-                const isInstance = await this.isSubjectInstance(value, instanceFilter);
-                if (isInstance) {
-                    filteredValues.push(value);
-                }
-            } catch (err) {
-                // Skip values that fail instance check
-                continue;
-            }
-        }
-        return filteredValues;
+        const results = await this.querySparql(
+            `SELECT DISTINCT ?base WHERE {\n    ${patterns}\n}`
+        );
+        if (!Array.isArray(results)) return [];
+        return results.map((row: any) => ({ base: row.base }));
     }
 
     /** Returns all subject instances of the given subject class as proxy objects.
@@ -1888,7 +1767,7 @@ export class PerspectiveProxy {
         for(let className of classes) {
             //console.log(`getAllSubjectInstances: Processing class ${className}`);
             // Query SDNA for metadata, then query SPARQL for instances
-            const metadata = await this.getSubjectClassMetadataFromSDNA(className);
+            const metadata = await this.getSubjectClassMetadata(className);
             //console.log(`getAllSubjectInstances: Got metadata for ${className}:`, metadata);
             if (metadata) {
                 const results = await this.findInstancesByMetadata(metadata);
@@ -1906,9 +1785,9 @@ export class PerspectiveProxy {
                             // Load the instance data from links
                             await instance.get();
                         } else {
-                            // Legacy: Create a Subject proxy
-                            instance = new Subject(this, result.base, className);
-                            await instance.init();
+                            // Return plain data for string-based lookups
+                            const data = await this.getSubjectData(className, result.base);
+                            instance = { id: result.base, ...data };
                         }
                         instances.push(instance as unknown as T);
                         //console.log(`getAllSubjectInstances: Successfully created subject for ${result.base}`);
@@ -1921,41 +1800,6 @@ export class PerspectiveProxy {
             }
         }
         //console.log(`getAllSubjectInstances: Returning ${instances.length} instances`);
-        return instances
-    }
-
-    /** Returns all subject proxies of the given subject class as proxy objects.
-     *  @param subjectClass Either a string with the name of the subject class, or an object
-     * with the properties of the subject class. In the latter case, all subject classes
-     * that match the given properties will be used.
-     */
-    async getAllSubjectProxies<T>(subjectClass: T): Promise<T[]> {
-        let classes = []
-        if(typeof subjectClass === "string") {
-            classes = [subjectClass]
-        } else {
-            classes = await this.subjectClassesByTemplate(subjectClass as object)
-        }
-
-        let instances = []
-        for(let className of classes) {
-            // Query SDNA for metadata, then query SPARQL for instances
-            const metadata = await this.getSubjectClassMetadataFromSDNA(className);
-            if (metadata) {
-                const results = await this.findInstancesByMetadata(metadata);
-                
-
-                for (const result of results || []) {
-                    try {
-                        let subject = new Subject(this, result.base, className);
-                        await subject.init();
-                        instances.push(subject as unknown as T);
-                    } catch (e) {
-                        // Skip subjects that fail to initialize
-                    }
-                }
-            }
-        }
         return instances
     }
 
@@ -1994,16 +1838,17 @@ export class PerspectiveProxy {
             return null;
         }
 
-        // Query links for class shapes using queryLinks
-        const typeLinks = await this.get(new LinkQuery({ predicate: 'rdf://type', target: 'ad4m://SubjectClass' }));
-        const propLinks = await this.get(new LinkQuery({ predicate: 'sh://property' }));
-        const collLinks = await this.get(new LinkQuery({ predicate: 'sh://collection' }));
-        const results = [
-            ...typeLinks.map(l => ({ shape_source: l.data.source, predicate: l.data.predicate, target: l.data.target })),
-            ...propLinks.map(l => ({ shape_source: l.data.source, predicate: l.data.predicate, target: l.data.target })),
-            ...collLinks.map(l => ({ shape_source: l.data.source, predicate: l.data.predicate, target: l.data.target })),
-        ];
-        if (results.length === 0) return null;
+        // Single SPARQL query to get all class shapes with their properties and collections
+        const results = await this.querySparql(`
+            SELECT ?shape ?predicate ?target WHERE {
+                { ?shape <rdf://type> <ad4m://SubjectClass> . BIND(<rdf://type> AS ?predicate) BIND(<ad4m://SubjectClass> AS ?target) }
+                UNION
+                { ?shape <sh://property> ?target . BIND(<sh://property> AS ?predicate) }
+                UNION
+                { ?shape <sh://collection> ?target . BIND(<sh://collection> AS ?predicate) }
+            }
+        `);
+        if (!Array.isArray(results) || results.length === 0) return null;
 
         // Build a map of className -> { properties, relations }
         const classShapes: Map<string, { shapeUri: string, properties: string[], relations: string[] }> = new Map();
@@ -2011,7 +1856,7 @@ export class PerspectiveProxy {
         // First pass: find all subject classes
         for (const r of results) {
             if (r.predicate === 'rdf://type' && r.target === 'ad4m://SubjectClass') {
-                const source = r.shape_source;
+                const source = r.shape;
                 const sepIdx = source.indexOf('://');
                 if (sepIdx < 0) continue;
                 const className = source.substring(sepIdx + 3).split('/').pop();
@@ -2025,7 +1870,7 @@ export class PerspectiveProxy {
             if (r.predicate === 'sh://property' || r.predicate === 'sh://collection') {
                 // Match shape source to class (e.g., "recipe://RecipeShape" -> "Recipe")
                 for (const [className, shape] of classShapes) {
-                    if (r.shape_source.endsWith(`${className}Shape`)) {
+                    if (r.shape.endsWith(`${className}Shape`)) {
                         const dotIdx = r.target.lastIndexOf('.');
                         if (dotIdx < 0) continue;
                         const name = r.target.substring(dotIdx + 1);
@@ -2140,6 +1985,204 @@ export class PerspectiveProxy {
      * subsequent register() calls re-add SHACL definitions. */
     clearEnsuredSubjectClasses(): void {
         this.#ensuredSubjectClasses.clear();
+    }
+
+    /**
+     * Returns a list of all class names that have been registered as SHACL
+     * subject classes in this perspective (via `ensureSDNASubjectClass` or `addSdna`).
+     *
+     * @returns Array of class name strings (e.g. `["Channel", "Message", "Task"]`)
+     */
+    async listRegisteredClasses(): Promise<string[]> {
+        const results = await this.querySparql(
+            `SELECT DISTINCT ?class WHERE { ?class <rdf://type> <ad4m://SubjectClass> . }`
+        );
+        if (!Array.isArray(results)) return [];
+        return results.map((row: any) => {
+            const uri: string = row.class || '';
+            // Extract class name from URI like "recipe://Recipe" or "flux://Channel"
+            const hashIdx = uri.lastIndexOf('#');
+            if (hashIdx >= 0) return uri.substring(hashIdx + 1);
+            const slashIdx = uri.lastIndexOf('/');
+            if (slashIdx >= 0) return uri.substring(slashIdx + 1);
+            return uri;
+        }).filter(Boolean);
+    }
+
+    /**
+     * Returns the SHACL shape metadata for a registered class, including
+     * property names, predicates, datatypes, and cardinality constraints.
+     *
+     * @param className - The name of the registered class
+     * @returns Shape metadata or `null` if the class is not registered
+     */
+    async getClassShape(className: string): Promise<{
+        className: string;
+        shapeUri: string;
+        properties: Array<{
+            name: string;
+            predicate: string;
+            datatype?: string;
+            required: boolean;
+            collection: boolean;
+            writable: boolean;
+            options?: Array<{ value: string; label?: string }>;
+        }>;
+    } | null> {
+        // Find the shape URI for this class
+        const safeName = className.replace(/['"\\]/g, '');
+        const shapeResults = await this.querySparql(
+            `SELECT ?shapeUri ?targetClass WHERE {
+                ?targetClass <rdf://type> <ad4m://SubjectClass> .
+                ?targetClass <ad4m://shape> ?shapeUri .
+                FILTER(STRENDS(STR(?targetClass), "/${safeName}") || STRENDS(STR(?targetClass), "#${safeName}"))
+            } LIMIT 1`
+        );
+        if (!Array.isArray(shapeResults) || shapeResults.length === 0) return null;
+
+        const shapeUri = shapeResults[0].shapeUri;
+        const classUri = shapeResults[0].targetClass;
+
+        // Query all properties for this shape, including sh:in
+        const propResults = await this.querySparql(
+            `SELECT ?propShape ?path ?datatype ?minCount ?maxCount ?writable ?propType ?shIn WHERE {
+                <${shapeUri}> <sh://property> ?propShape .
+                ?propShape <sh://path> ?path .
+                ?propShape <rdf://type> ?propType .
+                OPTIONAL { ?propShape <sh://datatype> ?datatype }
+                OPTIONAL { ?propShape <sh://minCount> ?minCount }
+                OPTIONAL { ?propShape <sh://maxCount> ?maxCount }
+                OPTIONAL { ?propShape <ad4m://writable> ?writable }
+                OPTIONAL { ?propShape <sh://in> ?shIn }
+            }`
+        );
+
+        const properties = (Array.isArray(propResults) ? propResults : []).map((row: any) => {
+            // Extract property name from shape URI like "recipe://Recipe.name"
+            const propUri: string = row.propShape || '';
+            const dotIdx = propUri.lastIndexOf('.');
+            const name = dotIdx >= 0 ? propUri.substring(dotIdx + 1) : propUri;
+
+            const minCount = parseInt(row.minCount || '0', 10);
+            const isCollection = row.propType === 'ad4m://CollectionShape';
+            const writable = row.writable === 'true' || row.writable === 'literal:true';
+
+            // Parse sh:in values if present
+            let options: Array<{ value: string; label?: string }> | undefined;
+            if (row.shIn) {
+                try {
+                    let raw = row.shIn;
+                    // Strip literal: prefix if present, and URI-decode for robustness
+                    if (raw.startsWith('literal:string:')) {
+                        raw = decodeURIComponent(raw.substring('literal:string:'.length));
+                    }
+                    options = JSON.parse(raw);
+                } catch { /* ignore parse errors */ }
+            }
+
+            return {
+                name,
+                predicate: row.path || '',
+                datatype: row.datatype || undefined,
+                required: minCount > 0,
+                collection: isCollection,
+                writable,
+                ...(options && options.length > 0 ? { options } : {}),
+            };
+        });
+
+        return { className: safeName, shapeUri, properties };
+    }
+
+    /**
+     * Detects which registered subject classes a given instance conforms to,
+     * based on its stored triples matching the class shapes' required properties.
+     *
+     * @param baseExpression - The instance's base expression / subject URI
+     * @returns Array of class names the instance matches
+     */
+    async getInstanceClasses(baseExpression: string): Promise<string[]> {
+        const safeId = baseExpression.replace(/['"\\]/g, '');
+        // Get all registered classes and their required conformance properties
+        const results = await this.querySparql(
+            `SELECT DISTINCT ?class WHERE {
+                ?class <rdf://type> <ad4m://SubjectClass> .
+                ?class <ad4m://shape> ?shape .
+                ?shape <sh://property> ?propShape .
+                ?propShape <sh://minCount> ?mc .
+                FILTER(?mc >= 1)
+                ?propShape <sh://path> ?path .
+                <${safeId}> ?path ?_val .
+            }`
+        );
+        if (!Array.isArray(results)) return [];
+        return results.map((row: any) => {
+            const uri: string = row.class || '';
+            const hashIdx = uri.lastIndexOf('#');
+            if (hashIdx >= 0) return uri.substring(hashIdx + 1);
+            const slashIdx = uri.lastIndexOf('/');
+            if (slashIdx >= 0) return uri.substring(slashIdx + 1);
+            return uri;
+        }).filter(Boolean);
+    }
+
+    /**
+     * Returns all named options (sh:in values) for a registered class, grouped by property.
+     *
+     * @param className - The name of the registered class
+     * @returns Record mapping property name → array of { value, label } options
+     */
+    async getNamedOptions(className: string): Promise<Record<string, Array<{ value: string; label?: string }>>> {
+        const shape = await this.getClassShape(className);
+        if (!shape) return {};
+        const result: Record<string, Array<{ value: string; label?: string }>> = {};
+        for (const prop of shape.properties) {
+            if (prop.options && prop.options.length > 0) {
+                result[prop.name] = prop.options;
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Adds a named option (sh:in value) to a property of a registered class.
+     * This appends to the existing sh:in list stored on the property shape.
+     *
+     * @param className - The registered class name
+     * @param propertyName - The property to add the option to
+     * @param value - The RDF value for the option
+     * @param label - Optional human-readable label
+     */
+    async addNamedOption(className: string, propertyName: string, value: string, label?: string): Promise<void> {
+        const shape = await this.getClassShape(className);
+        if (!shape) throw new Error(`Class "${className}" not found`);
+
+        const prop = shape.properties.find(p => p.name === propertyName);
+        if (!prop) throw new Error(`Property "${propertyName}" not found on class "${className}"`);
+
+        // Build the property shape URI
+        const ns = extractNamespaceFromUri(shape.shapeUri);
+        const propShapeId = `${ns}${className}.${propertyName}`;
+
+        // Get existing options
+        const existing = prop.options || [];
+        // Don't add duplicates
+        if (existing.some(o => o.value === value)) return;
+
+        const updated = [...existing, { value, ...(label ? { label } : {}) }];
+
+        // Remove old sh:in link if exists by querying for it
+        const oldLinks = await this.get(new LinkQuery({ source: propShapeId, predicate: "sh://in" }));
+        for (const oldLink of oldLinks) {
+            await this.remove(oldLink);
+        }
+
+        // Add new sh:in link
+        await this.add(new Link({
+            source: propShapeId,
+            predicate: "sh://in",
+            target: `literal:string:${JSON.stringify(updated)}`
+        }));
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {

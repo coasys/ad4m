@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use serde_json::Value;
 
-use crate::types::{Agent, LinkExpression, PerspectiveExpression, SentPerspectiveMessage};
+use ad4m_client::types::{Agent, LinkExpression, PerspectiveExpression, SentPerspectiveMessage};
 
 pub fn print_prolog_results(results: Value) -> Result<()> {
     match results {

@@ -2,13 +2,13 @@ export * from "./Ad4mClient"
 export * from "./Address";
 export * from "./agent/Agent";
 export * from "./agent/AgentStatus";
+export * from "./cache/PersistentCache";
 export * from "./Exception";
 export * from "./expression/Expression";
 export * from "./expression/ExpressionRef";
 export * from "./language/Icon";
 export * from "./language/Language";
 export * from "./language/LanguageRef";
-export * from "./language/LanguageContext";
 export * from "./language/LanguageHandle";
 export * from "./language/LanguageMeta";
 export * from "./links/Links";
@@ -29,6 +29,11 @@ export * from "./utils";
 export * from "./agent/AgentClient";
 export * from "./ai/AIClient"
 export * from "./ai/Tasks"
-export * from "./runtime/RuntimeResolver"
+export * from "./runtime/RuntimeTypes"
+export { Model as AIModel, ModelApi, TokenizerSource, LocalModel, ModelType, ModelApiInput, TokenizerSourceInput, LocalModelInput, ModelInput, VoiceActivityParamsInput } from "./ai/AITypes"
 export * from './shacl/SHACLShape'
 export { SHACLFlow, FlowState, FlowTransition, LinkPattern, FlowableCondition } from './shacl/SHACLFlow'
+export * from "./generated/api";
+export { RpcError } from "./apiClient";
+/** @deprecated Use `RpcError` instead. */
+export { RpcError as RestError } from "./apiClient";

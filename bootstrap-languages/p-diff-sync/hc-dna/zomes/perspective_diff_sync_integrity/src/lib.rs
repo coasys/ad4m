@@ -22,7 +22,7 @@ pub struct Triple {
 pub struct LinkExpression {
     pub author: String,
     pub data: Triple,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: String,
     pub proof: ExpressionProof,
 }
 
@@ -123,7 +123,7 @@ app_entry!(Anchor);
 pub struct PerspectiveExpression {
     pub author: String,
     pub data: Perspective,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: String,
     pub proof: ExpressionProof,
 }
 
@@ -136,7 +136,7 @@ pub struct RoutedSignalPayload {
     pub recipient_did: String,
     pub author: String,
     pub data: Perspective,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: String,
     pub proof: ExpressionProof,
 }
 

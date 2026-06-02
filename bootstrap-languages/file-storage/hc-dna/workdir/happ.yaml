@@ -1,0 +1,10 @@
+manifest_version: '0'
+name: file-storage
+description: Holochain-backed file storage for AD4M
+roles:
+- name: file-store
+  provisioning:
+    strategy: create
+    deferred: false
+  dna:
+    path: ./file-storage.dna

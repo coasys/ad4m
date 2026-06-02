@@ -1,8 +1,4 @@
-import { Ad4mClient, ExceptionType } from "@coasys/ad4m";
-import {
-  ExceptionInfo,
-  Notification as NotificationType,
-} from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
+import { Ad4mClient, ExceptionInfo, ExceptionType, Notification as NotificationType } from "@coasys/ad4m";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { sendNotification } from "@tauri-apps/plugin-notification";
@@ -271,9 +267,7 @@ export function Ad4minProvider({ children }: any) {
     } else {
       invoke<{ port: number; tls_enabled: boolean }>("get_port").then((portInfo) => {
         if (portInfo) {
-          // Always use ws://localhost since we run a plain HTTP server
-          // on localhost even when TLS is enabled (TLS runs on 0.0.0.0)
-          const url = `ws://localhost:${portInfo.port}/graphql`;
+          const url = `http://localhost:${portInfo.port}`;
           connect(url);
         }
       });
@@ -284,9 +278,7 @@ export function Ad4minProvider({ children }: any) {
     appWindow.listen("ready", async () => {
       const portInfo = await invoke<{ port: number; tls_enabled: boolean }>("get_port");
       if (portInfo) {
-        // Always use ws://localhost since we run a plain HTTP server
-        // on localhost even when TLS is enabled (TLS runs on 0.0.0.0)
-        const url = `ws://localhost:${portInfo.port}/graphql`;
+        const url = `http://localhost:${portInfo.port}`;
         connect(url);
       }
     });

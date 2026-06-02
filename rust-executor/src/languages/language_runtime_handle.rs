@@ -1,5 +1,6 @@
 use log::{debug, error, info};
 use serde_json::Value as JsonValue;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use tokio::runtime::Builder;
 use tokio::sync::{
@@ -8,6 +9,8 @@ use tokio::sync::{
 };
 
 use crate::agent::AgentContext;
+use crate::languages::capability::{parse_capability_list, Capability};
+use crate::languages::LanguageContext;
 
 use super::language_runtime::{LanguageOperation, LanguageRuntime, LanguageRuntimeRequest};
 
@@ -117,8 +120,8 @@ impl LanguageRuntimeHandle {
             .await
     }
 
-    pub async fn load_module(&self, path: String) -> Result<(), String> {
-        self.send(LanguageOperation::LoadModule(path))
+    pub async fn load_module(&self, path: String, context: LanguageContext) -> Result<(), String> {
+        self.send(LanguageOperation::LoadModule(path, context))
             .await
             .map(|_| ())
     }
@@ -129,14 +132,9 @@ impl LanguageRuntimeHandle {
             .map(|_| ())
     }
 
-    pub async fn register_callbacks(&self) -> Result<(bool, bool), String> {
+    pub async fn register_callbacks(&self) -> Result<HashSet<Capability>, String> {
         let result_str = self.send(LanguageOperation::RegisterCallbacks).await?;
-        let v: serde_json::Value = serde_json::from_str(&result_str)
-            .map_err(|e| format!("Failed to parse callback result: {}", e))?;
-        Ok((
-            v["links"].as_bool().unwrap_or(false),
-            v["telepresence"].as_bool().unwrap_or(false),
-        ))
+        Ok(parse_capability_list(result_str.trim()))
     }
 
     pub async fn teardown(&self) -> Result<(), String> {
@@ -145,10 +143,30 @@ impl LanguageRuntimeHandle {
 
     /// Query the language name from the JS runtime after initLanguage has run.
     pub async fn query_language_name(&mut self) -> Option<String> {
-        let script = "(globalThis.__ad4m_language_instance__ && globalThis.__ad4m_language_instance__.name) || ''".to_string();
+        // Wrap in JSON.stringify so the result round-trips through a
+        // well-formed JSON string, not a raw v8 `to_rust_string_lossy`
+        // capture. Also tolerate the Rust ALDK shape where `name` is an
+        // exported zero-arg function (wasm-bindgen cannot export string
+        // constants): call it when it's a function, read the value when
+        // it's a string. The previous `trim().trim_matches('"')` path
+        // mangled any name containing a `"` or leading/trailing
+        // whitespace — rare for language names but trivial to fix
+        // correctly via `serde_json::from_str`.
+        let script = r#"
+            JSON.stringify(
+                (() => {
+                    const l = globalThis.__ad4m_language_instance__;
+                    if (!l) return "";
+                    const n = l.name;
+                    if (typeof n === "function") return String(n() ?? "");
+                    return String(n ?? "");
+                })()
+            )
+        "#
+        .to_string();
         match self.execute(script).await {
-            Ok(name) => {
-                let name = name.trim().trim_matches('"').to_string();
+            Ok(result) => {
+                let name: String = serde_json::from_str(result.trim()).ok()?;
                 if name.is_empty() {
                     None
                 } else {

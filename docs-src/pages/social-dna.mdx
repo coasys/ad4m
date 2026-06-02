@@ -450,44 +450,56 @@ const flows = await perspective.sdnaFlows();
 console.log(flows); // Should include "TODO"
 ```
 
-## Query Engines: SurrealDB & Prolog
+## Query Engine: SPARQL
 
-AD4M provides two query engines for working with Social DNA and perspective data:
+AD4M provides a high-performance SPARQL query engine for working with Social DNA and perspective data, powered by Oxigraph and executing entirely server-side in Rust.
 
-### SurrealDB: High-Performance Queries (Recommended)
+### SPARQL: Fast Graph Queries
 
-For most query needs, **SurrealDB provides 10-100x faster performance** than Prolog. It's especially powerful for:
-- Fast filtering and searching
-- Graph traversal queries using indexed `in.uri` and `out.uri` fields
-- Aggregations and analytics
-- Large dataset handling
+SPARQL is the standard query language for RDF data and is the primary query engine in AD4M:
+- Direct queries against the perspective's RDF graph
+- Filtering, sorting, and aggregation
+- Multi-hop graph traversal via pattern matching
+- Server-side execution for optimal performance
 
 ```typescript
-// Fast query - find all todos in "done" state
-const doneTodos = await perspective.querySurrealDB(
-  "SELECT * FROM link WHERE predicate = 'todo://state' AND target = 'todo://done'"
-);
+// Find all todos in "done" state
+const doneTodos = await perspective.querySparql(`
+  SELECT ?todo WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?todo ;
+          rdf:predicate <todo://state> ;
+          rdf:object <todo://done> .
+  }
+`);
 
-// Graph traversal - find all posts by Alice
-const alicePosts = await perspective.querySurrealDB(
-  "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'authored'"
-);
+// Find all posts by Alice
+const alicePosts = await perspective.querySparql(`
+  SELECT ?target WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject <user://alice> ;
+          rdf:predicate <authored> ;
+          rdf:object ?target .
+  }
+`);
 
 // Aggregation - count by type
-const stats = await perspective.querySurrealDB(
-  "SELECT predicate, count() as total FROM link GROUP BY predicate"
-);
+const stats = await perspective.querySparql(`
+  SELECT ?predicate (COUNT(?link) AS ?total) WHERE {
+    ?link a rdf:Statement ;
+          rdf:predicate ?predicate .
+  }
+  GROUP BY ?predicate
+`);
 ```
 
-**Performance Tip**: Use `in.uri` (source) and `out.uri` (target) for graph traversal - they're indexed.
+**Note**: `Ad4mModel` uses the SPARQL engine internally for `findAll()` and query builder operations. See the [SPARQL Queries Guide](/developer-guides/sparql-queries) for comprehensive examples.
 
-**Note**: `Ad4mModel` uses SurrealDB by default for `findAll()` and query builder operations. See the [SurrealDB Queries Guide](/developer-guides/surreal-queries) for comprehensive examples.
-
-### The Prolog Engine (Legacy)
+### The Prolog Engine (Backward Compatibility)
 
 <Callout type="warning" emoji="⚠️">
   The Prolog engine is maintained for backward compatibility. For new development,
-  use SurrealDB queries or the `Ad4mModel` system (which uses SurrealDB by default).
+  use SPARQL queries or the `Ad4mModel` system (which uses SPARQL internally).
 </Callout>
 
 For custom logic programming and backward compatibility, AD4M includes a Prolog engine:
@@ -503,7 +515,7 @@ reachable(A, B).  // True if B can be reached from A through any predicates
 ```
 
 **When to use which?**
-- **Use SurrealDB** for: Fast queries, graph traversal, analytics (most use cases)
+- **Use SPARQL** for: Fast queries, graph traversal, analytics (most use cases)
 - **Use Prolog** for: Complex logic rules, backward compatibility
 
 ## Using Social DNA in Your Space
@@ -526,17 +538,22 @@ await perspective.addSdna("Todo", flowDefinition, "flow");
 Then query your data:
 
 ```typescript
-// Option 1: Use Ad4mModel with SurrealDB (recommended, 10-100x faster)
+// Option 1: Use Ad4mModel (recommended — queries execute server-side via SPARQL)
 const activeTodos = await Todo.findAll(perspective, {
   where: { state: "active" }
 });
 
-// Option 2: Direct SurrealQL query
-const todos = await perspective.querySurrealDB(
-  "SELECT * FROM link WHERE predicate = 'todo://state' AND target = 'active'"
-);
+// Option 2: Direct SPARQL query
+const todos = await perspective.querySparql(`
+  SELECT ?todo WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?todo ;
+          rdf:predicate <todo://state> ;
+          rdf:object <active> .
+  }
+`);
 
-// Option 3: Prolog (legacy, for backward compatibility)
+// Option 3: Prolog (for backward compatibility)
 const todos = await perspective.infer(
   'instance(Todo, "Todo"), property_getter("Todo", Todo, "state", "active")'
 );

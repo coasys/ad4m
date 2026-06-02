@@ -4,6 +4,20 @@ import { sleep } from '../utils/utils'
 import { expect } from "chai";
 import * as sinon from "sinon";
 
+async function ensureAgentIsReady(testContext: TestContext) {
+    const ad4mClient = testContext.ad4mClient!;
+    const status = await ad4mClient.agent.status();
+
+    if (!status.isInitialized) {
+        await ad4mClient.agent.generate("passphrase");
+        return;
+    }
+
+    if (!status.isUnlocked) {
+        await ad4mClient.agent.unlock("passphrase");
+    }
+}
+
 export default function agentTests(testContext: TestContext) {
     return () => {
         describe('basic agent operations', () => {
@@ -53,6 +67,8 @@ export default function agentTests(testContext: TestContext) {
             }),
             it('can get and create agent expression profile', async () => {
                 const ad4mClient = testContext.ad4mClient!
+
+                await ensureAgentIsReady(testContext)
 
                 const agentUpdated = sinon.fake()
                 ad4mClient.agent.addUpdatedListener(agentUpdated)

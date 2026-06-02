@@ -23,7 +23,7 @@ cleanup_processes() {
 
 # Unique setup port range for this CI job so it doesn't conflict with
 # integration-tests-js (15700-15702) or integration-tests-multi-user-simple (15703-15705).
-export AD4M_SETUP_GQL_PORT=15706
+export AD4M_SETUP_PORT=15706
 export AD4M_SETUP_HC_ADMIN_PORT=15707
 export AD4M_SETUP_HC_APP_PORT=15708
 

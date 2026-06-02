@@ -34,10 +34,10 @@
         "default": 30000,
         "description": "How often to poll for new dynamic SHACL tools (ms)"
       },
-      "executorWsUrl": {
+      "executorUrl": {
         "type": "string",
-        "default": "ws://localhost:12000/graphql",
-        "description": "AD4M executor GraphQL WebSocket URL"
+        "default": "http://localhost:12000",
+        "description": "AD4M executor URL"
       },
       "wakerEnabled": {
         "type": "boolean",
@@ -89,9 +89,9 @@
       "label": "Executor Binary Path",
       "placeholder": "/usr/local/bin/ad4m-executor"
     },
-    "executorWsUrl": {
-      "label": "Executor WebSocket URL",
-      "placeholder": "ws://localhost:12000/graphql"
+    "executorUrl": {
+      "label": "Executor URL",
+      "placeholder": "http://localhost:12000"
     },
     "wakeUrl": {
       "label": "Wake Endpoint URL",

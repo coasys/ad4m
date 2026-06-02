@@ -9,10 +9,7 @@
 export * from "./types";
 export * from "./Ad4mModel";
 export * from "./decorators";
-export * from "./Subject";
 export * from "./query-common";
-export * from "./query-prolog";
-export * from "./prolog-facts";
 export * from "./json-schema";
 export * from "./query-utils";
 export * from "./query-sparql";
@@ -21,4 +18,3 @@ export * from "./ModelQueryBuilder";
 export * from "./sdna";
 export * from "./shacl-gen";
 export * from "./query-cache";
-export * from "./subscription-pool";

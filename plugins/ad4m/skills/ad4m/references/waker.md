@@ -1,10 +1,10 @@
 # AD4M Waker (Embedded)
 
-The AD4M waker watches perspectives for data changes via GraphQL WebSocket subscriptions and wakes your OpenClaw agent when relevant events occur. It runs as a background service inside the AD4M plugin — no separate process needed.
+The AD4M waker watches perspectives for data changes via WebSocket subscriptions and wakes your OpenClaw agent when relevant events occur. It runs as a background service inside the AD4M plugin — no separate process needed.
 
 ## How It Works
 
-1. The plugin's `ad4m-waker` service connects to the AD4M executor's GraphQL WebSocket endpoint
+1. The plugin's `ad4m-waker` service connects to the AD4M executor's WebSocket event endpoint
 2. When you call `subscribe_to_mentions` or `subscribe_to_children`, the plugin creates a `QuerySubscriptionProxy` with a SurrealQL live query
 3. When query results change, the plugin debounces and POSTs to OpenClaw's `/hooks/wake` endpoint
 4. Your agent wakes up with context about what changed and processes the new data via MCP tools
@@ -14,7 +14,7 @@ The AD4M waker watches perspectives for data changes via GraphQL WebSocket subsc
 | Field           | Default                             | Description                                                                     |
 | --------------- | ----------------------------------- | ------------------------------------------------------------------------------- |
 | `wakerEnabled`  | `true`                              | Enable/disable the waker service                                                |
-| `executorWsUrl` | `ws://localhost:12000/graphql`      | AD4M executor GraphQL WebSocket URL                                             |
+| `executorUrl`   | `http://localhost:12000`             | AD4M executor REST URL                                                          |
 | `wakeUrl`       | `http://localhost:18789/hooks/wake` | OpenClaw wake endpoint URL                                                      |
 | `wakeToken`     | auto from `hooks.token`             | Override for the hooks token. Auto-read from OpenClaw global config if omitted. |
 | `debounceMs`    | `2000`                              | Debounce interval to prevent rapid-fire wakes (ms)                              |

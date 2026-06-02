@@ -3,29 +3,218 @@ import { Link } from "../links/Links";
 import { LinkQuery } from "../perspectives/LinkQuery";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomId } from "./util";
-import { getPropertiesMetadata, getRelationsMetadata } from "./decorators";
+import { getPropertiesMetadata, getRelationsMetadata, buildConformanceFilter, setPropertyRegistryEntry, setRelationRegistryEntry, Model } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
-import { formatQueryValue } from "./query-utils";
+import { formatQueryValue, compileWhereClause } from "./query-utils";
 import { resolveParentPredicate } from "./query-common";
-import { buildParentQuery, buildAuthorAndTimestampQuery, buildPropertiesQuery, buildWhereQuery, buildCountQuery, buildOrderQuery, buildOffsetQuery, buildLimitQuery } from "./query-prolog";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
+import type { SHACLShape } from "../shacl/SHACLShape";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
-import { buildSPARQLQuery, buildSPARQLGetDataQuery, groupSPARQLResults } from "./query-sparql";
-import { buildBatchSPARQLQuery } from "./query-sparql-batch";
-import { hydrateBatchResult } from "./hydration-batch";
+import { buildSPARQLQuery } from "./query-sparql";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import {
-  normalizeValue, matchesCondition, hydrateFromLinks,
-  assignValuesToInstance as _assignValuesToInstance,
-  evaluateCustomGettersForInstance,
-  hydrateRelations,
+  normalizeValue,
 } from "./hydration";
 import type {
   ParentScope, IncludeMap, Query,
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
-  PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata, ValueTuple,
+  PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
+  IncludeProjection,
 } from "./types";
+
+
+// ---------------------------------------------------------------------------
+// Default decoder for file-storage (non-literal resolveLanguage) properties
+// ---------------------------------------------------------------------------
+
+/**
+ * When the Rust executor resolves a non-literal expression it may return a
+ * `FileData`-shaped object (`{ data_base64, file_type, ... }`) rather than a
+ * raw URI string.  If the model class has no custom `transform` registered
+ * (e.g. it was synthesised from a SHACL shape at runtime) we still want to
+ * decode the content rather than passing raw `FileData` to callers.
+ *
+ * Decoding rules (mirrors the JS `decodeFileAsJson` / `decodeFileAsString` helpers):
+ *   - `application/json` (default when `file_type` is absent) → JSON.parse
+ *   - anything else                                            → raw decoded string
+ *
+ * If `resolved` is not a `FileData` object the value is returned unchanged so
+ * that callers can use this as a safe unconditional fallback.
+ */
+function defaultFileDecode(resolved: unknown): unknown {
+  if (
+    resolved !== null &&
+    typeof resolved === 'object' &&
+    'data_base64' in (resolved as object)
+  ) {
+    const fd = resolved as { data_base64: string; file_type?: string };
+    let raw: string;
+    try {
+      raw = atob(fd.data_base64);
+    } catch {
+      return resolved; // malformed base64 — keep as-is
+    }
+    const isJson = !fd.file_type || fd.file_type === 'application/json';
+    if (isJson) {
+      try { return JSON.parse(raw); } catch { return raw; }
+    }
+    return raw;
+  }
+  return resolved;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for Rust-side include resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Recursively enrich relation metadata in the shape with target class shapes
+ * so the Rust endpoint can resolve includes in-process (no extra GraphQL
+ * round-trips per relation).
+ */
+function enrichShapeForIncludes(
+  metadata: ModelMetadata,
+  include: IncludeMap,
+  allRelMeta: Record<string, RelationMetadataEntry>,
+): void {
+  for (const [relName, includeVal] of Object.entries(include)) {
+    if (!includeVal) continue;
+    const meta = allRelMeta[relName];
+    if (!meta?.target) continue;
+
+    const TargetClass = meta.target() as typeof Ad4mModel;
+    // Deep-copy so we don't mutate the cached metadata
+    const targetMeta = JSON.parse(JSON.stringify(TargetClass.getModelMetadata()));
+
+    // Ensure the relation is in metadata.relations (fallback for edge cases)
+    if (!metadata.relations[relName]) {
+      metadata.relations[relName] = {
+        name: relName,
+        predicate: meta.predicate,
+        direction:
+          meta.kind === 'belongsToMany' || meta.kind === 'belongsToOne'
+            ? 'reverse'
+            : 'forward',
+      };
+    }
+    const rel = metadata.relations[relName] as any;
+    rel.kind = meta.kind;
+    rel.maxCount = meta.maxCount;
+    rel.targetShape = targetMeta;
+    rel.targetClassName = targetMeta.className;
+
+    // Recurse for nested includes
+    const nested =
+      typeof includeVal === 'object' && includeVal !== null
+        ? (includeVal as any).include
+        : undefined;
+    if (nested) {
+      const targetRelMeta = getRelationsMetadata(TargetClass as any);
+      enrichShapeForIncludes(targetMeta, nested, targetRelMeta);
+    }
+  }
+}
+
+/**
+ * Construct a model class instance from a plain JSON object returned by the
+ * Rust endpoint.  Recursively converts included relation values (which come
+ * back as plain JSON objects) into proper model class instances.
+ */
+function jsonToModelInstance<T extends Ad4mModel>(
+  ModelClass: typeof Ad4mModel & (new (...args: any[]) => T),
+  perspective: PerspectiveProxy,
+  json: any,
+  include?: IncludeMap,
+  properties?: string[],
+): T {
+  const instance = new ModelClass(perspective, json.id || json.baseExpression) as any;
+
+  // When a properties projection is active, remove own properties set by the
+  // constructor that are not in the projected JSON.  This ensures assertions
+  // like `expect(r).to.not.have.own.property("body")` pass.
+  if (properties) {
+    const jsonKeys = new Set(Object.keys(json));
+    for (const key of Object.getOwnPropertyNames(instance)) {
+      // Keep internal fields (backing store for getters), id, baseExpression, perspective
+      if (key === 'id' || key === 'baseExpression' || key === 'perspective' || key.startsWith('_')) continue;
+      if (!jsonKeys.has(key)) {
+        delete instance[key];
+      }
+    }
+  }
+
+  for (const [key, value] of Object.entries(json)) {
+    if (key === 'baseExpression' || key === 'id') continue;
+
+    // Skip getter-only properties anywhere in the prototype chain
+    let isReadonly = false;
+    let proto = Object.getPrototypeOf(instance);
+    while (proto) {
+      const desc = Object.getOwnPropertyDescriptor(proto, key);
+      if (desc) { isReadonly = !!(desc.get && !desc.set); break; }
+      proto = Object.getPrototypeOf(proto);
+    }
+    if (isReadonly) continue;
+
+    // Parse ISO timestamps to epoch milliseconds (matches hydrateFromLinks behaviour)
+    if ((key === 'createdAt' || key === 'updatedAt') && typeof value === 'string' && value.includes('T')) {
+      instance[key] = new Date(value).getTime();
+      continue;
+    }
+
+    instance[key] = value;
+  }
+
+  // Apply property transform functions from decorators (only for literal-resolved
+  // or no-resolveLanguage properties; non-literal properties are resolved + transformed
+  // asynchronously in executeModelQuery).
+  try {
+    const propsMeta = getPropertiesMetadata(ModelClass as any);
+    for (const [propName, opts] of Object.entries(propsMeta)) {
+      const o = opts as any;
+      if (typeof o.transform !== 'function' || !(propName in json)) continue;
+      // Skip non-literal resolveLanguage props — they need async expression resolution first
+      if (o.resolveLanguage != null && o.resolveLanguage !== 'literal') continue;
+      instance[propName] = o.transform(instance[propName]);
+    }
+  } catch (e) { console.debug('jsonToModelInstance: transform metadata unavailable:', e); }
+
+  // Recursively convert included relation values to class instances
+  if (include) {
+    const relMeta = getRelationsMetadata(ModelClass as any);
+    for (const [relName, includeVal] of Object.entries(include)) {
+      if (!includeVal) continue;
+      const meta = relMeta[relName];
+      if (!meta?.target) continue;
+      const TargetClass = meta.target() as any;
+      const nestedInclude =
+        typeof includeVal === 'object' && includeVal !== null
+          ? (includeVal as any).include
+          : undefined;
+      const nestedProperties =
+        typeof includeVal === 'object' && includeVal !== null
+          ? (includeVal as any).properties
+          : undefined;
+
+      const raw = instance[relName];
+      if (Array.isArray(raw)) {
+        instance[relName] = raw.map((item: any) => {
+          if (typeof item === 'object' && item !== null && item.id) {
+            return jsonToModelInstance(TargetClass, perspective, item, nestedInclude, nestedProperties);
+          }
+          return item;
+        });
+      } else if (typeof raw === 'object' && raw !== null && raw.id) {
+        instance[relName] = jsonToModelInstance(
+          TargetClass, perspective, raw, nestedInclude, nestedProperties,
+        );
+      }
+    }
+  }
+
+  return instance;
+}
 
 /**
  * Base class for defining data models in AD4M.
@@ -131,6 +320,14 @@ export class Ad4mModel {
   createdAt: any;
   updatedAt: any;
 
+  /**
+   * Backwards compatibility alias for createdAt.
+   * @deprecated Use createdAt instead. This will be removed in a future version.
+   */
+  get timestamp(): any {
+    return (this as any).createdAt;
+  }
+
   private static classNamesByClass = new WeakMap<typeof Ad4mModel, { [perspectiveId: string]: string }>();
 
   /**
@@ -175,14 +372,6 @@ export class Ad4mModel {
     }
 
     return classCache[perspectiveID];
-  }
-
-  /**
-   * Backwards compatibility alias for createdAt.
-   * @deprecated Use createdAt instead. This will be removed in a future version.
-   */
-  get timestamp(): any {
-    return (this as any).createdAt;
   }
 
   /**
@@ -261,9 +450,7 @@ export class Ad4mModel {
     // Extract relations (relations) from WeakMap registry
     const relationsMetadata: Record<string, RelationMetadata> = {};
     const allRelationsMeta = getRelationsMetadata(this as any);
-    const prototypeRelations = Object.fromEntries(
-      Object.entries(allRelationsMeta).filter(([, r]) => r.kind === 'hasMany' || r.kind === 'belongsToMany')
-    );
+    const prototypeRelations = allRelationsMeta;
     
     for (const [relationName, opts] of Object.entries(prototypeRelations)) {
       const options = opts as RelationMetadataEntry;
@@ -273,6 +460,8 @@ export class Ad4mModel {
         ...(options.local !== undefined && { local: options.local }),
         ...(options.getter !== undefined && { getter: options.getter }),
         direction: (options.kind === 'belongsToMany' || options.kind === 'belongsToOne') ? 'reverse' : 'forward',
+        ...(options.kind !== undefined && { kind: options.kind }),
+        ...(options.maxCount !== undefined && { maxCount: options.maxCount }),
         ...(options.target !== undefined && { target: options.target }),
         ...(options.filter !== undefined && { filter: options.filter }),
         ...(options.where !== undefined && { where: options.where }),
@@ -356,13 +545,6 @@ export class Ad4mModel {
    * The unique identifier (expression URI) of this model instance.
    */
   get id(): string {
-    return this._baseExpression;
-  }
-
-  /**
-   * @deprecated Use `.id` instead. Will be removed in a future version.
-   */
-  get baseExpression(): string {
     return this._baseExpression;
   }
 
@@ -462,14 +644,6 @@ export class Ad4mModel {
     }];
   }
 
-  /**
-   * Assigns decoded Prolog property values to an instance.
-   * Delegates to the standalone function in hydration.ts.
-   */
-  public static async assignValuesToInstance(perspective: PerspectiveProxy, instance: Ad4mModel, values: ValueTuple[]) {
-    return _assignValuesToInstance(perspective, instance, values);
-  }
-
   // ──────────────────────────────────────────────────────────
   //  Snapshot / dirty tracking
   // ──────────────────────────────────────────────────────────
@@ -485,7 +659,8 @@ export class Ad4mModel {
    *     • `null` / empty object — skip ALL relations (used by bare
    *       subscriptions that don't eagerly load relations).
    */
-  private takeSnapshot(includedRelations?: Record<string, any> | null): void {
+  /** @internal */
+  protected takeSnapshot(includedRelations?: Record<string, any> | null): void {
     const ctor = this.constructor as typeof Ad4mModel;
     const metadata = ctor.getModelMetadata();
     const snap: Record<string, any> = {};
@@ -603,87 +778,49 @@ export class Ad4mModel {
   }
 
   private async getData(opts?: GetOptions) {
-    // Builds an object with the author, timestamp, all properties, & all relations on the Ad4mModel and saves it to the instance
-    // Use SPARQL for data queries
+    // Route through the Rust model query endpoint — same pipeline as executeModelQuery
+    // but for a single instance by ID.
     try {
       const ctor = this.constructor as typeof Ad4mModel;
-      const metadata = ctor.getModelMetadata();
+      const query: Query = {
+        where: { id: this._baseExpression },
+        limit: 1,
+        deepQuery: true,  // Single-instance get() always evaluates property getters
+      };
+      if (opts?.properties) query.properties = opts.properties;
+      if (opts?.include) query.include = opts.include;
 
-      // Query for all links from this specific node (base expression)
-      const linksQuery = buildSPARQLGetDataQuery(this._baseExpression);
-      const links = await this._perspective.querySparql(linksQuery);
+      const { results } = await (ctor as any).executeModelQuery(
+        this._perspective, query, null
+      );
 
-      if (links && links.length > 0) {
-        // Core hydration: properties (latest-wins), relations, timestamps/author
-        const requestedProperties = opts?.properties && opts.properties.length > 0 ? opts.properties : undefined;
-        await hydrateFromLinks(this, links, metadata, this._perspective, requestedProperties);
-      }
-
-      // Populate reverse relation fields (belongsToOne / belongsToMany) as string IDs.
-      const allRelsMeta = getRelationsMetadata(ctor as any);
-      const requestedProps = opts?.properties && opts.properties.length > 0 ? new Set(opts.properties) : null;
-      for (const [relName, relMeta] of Object.entries(allRelsMeta)) {
-        if (relMeta.kind !== 'belongsToOne' && relMeta.kind !== 'belongsToMany') continue;
-        if (requestedProps && !requestedProps.has(relName)) continue;
-        const reverseLinks = await this._perspective.get(
-          new LinkQuery({ predicate: relMeta.predicate, target: this._baseExpression })
-        );
-        const sourceIds = reverseLinks
-          .filter((l) => l.data.target === this._baseExpression)
-          .map((l) => l.data.source);
-        if (relMeta.kind === 'belongsToOne') {
-          (this as any)[relName] = sourceIds.length > 0 ? sourceIds[sourceIds.length - 1] : null;
-        } else {
-          (this as any)[relName] = sourceIds;
+      if (results.length > 0) {
+        const hydrated = results[0];
+        // Copy all hydrated values from the Rust-side result onto this instance
+        for (const [key, value] of Object.entries(hydrated as any)) {
+          if (key === '_baseExpression' || key === '_perspective' || key === '_snapshot') continue;
+          if (key.startsWith('_')) continue;
+          // Check for readonly getters
+          let isReadonly = false;
+          let proto = Object.getPrototypeOf(this);
+          while (proto) {
+            const desc = Object.getOwnPropertyDescriptor(proto, key);
+            if (desc) { isReadonly = !!(desc.get && !desc.set); break; }
+            proto = Object.getPrototypeOf(proto);
+          }
+          if (isReadonly) continue;
+          (this as any)[key] = value;
         }
       }
 
-      // Evaluate SPARQL getters
-      const getterOpts = opts?.properties || opts?.include
-        ? { requestedProperties: opts?.properties, include: opts?.include }
-        : undefined;
-      await evaluateCustomGettersForInstance(this, this._perspective, metadata, getterOpts);
-
-      // Eager-load relations if requested
-      if (opts?.include) {
-        await hydrateRelations(ctor, [this], this._perspective, opts.include);
-      }
+      // Property getters and relation conformance getters are now evaluated
+      // Rust-side via evaluate_getters() in model_query.rs.
     } catch (e) {
-      console.error(`SPARQL getData also failed for ${this._baseExpression}:`, e);
+      console.error(`getData via Rust model query failed for ${this._baseExpression}:`, e);
     }
 
-    this.takeSnapshot();
+    this.takeSnapshot(opts?.include);
     return this;
-  }
-
-  public static async queryToProlog(perspective: PerspectiveProxy, query: Query, modelClassName?: string | null) {
-    const { properties, where, order, offset, limit, count } = query;
-    const className = modelClassName || (await this.getClassName(perspective));
-
-    // Resolve parent predicate from model metadata if needed
-    const resolvedParentPredicate = query.parent
-      ? resolveParentPredicate(query.parent, this)
-      : undefined;
-
-    const instanceQueries = [
-      buildAuthorAndTimestampQuery(),
-      buildParentQuery(query.parent, resolvedParentPredicate),
-      buildPropertiesQuery(properties),
-      buildWhereQuery(where),
-    ];
-
-    const resultSetQueries = [buildCountQuery(count), buildOrderQuery(order), buildOffsetQuery(offset), buildLimitQuery(limit)];
-
-    const fullQuery = `
-      findall([Base, Properties, Collections, Timestamp, Author], (
-        subject_class("${className}", SubjectClass),
-        instance(SubjectClass, Base),
-        ${instanceQueries.filter((q) => q).join(", ")}
-      ), UnsortedInstances),
-      ${resultSetQueries.filter((q) => q).join(", ")}
-    `;
-
-    return fullQuery;
   }
 
   /**
@@ -728,296 +865,254 @@ export class Ad4mModel {
     return buildSPARQLQuery(metadata, allRelMeta, query, this);
   }
 
-  public static async instancesFromPrologResult<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy,
-    query: Query,
-    result: AllInstancesResult
-  ): Promise<ResultsWithTotalCount<T>> {
-    if (!result?.[0]?.AllInstances) return { results: [], totalCount: 0 };
-    // Map results to instances
-    const requestedProperties = query?.properties || [];
-    const allInstances = await Promise.all(
-      result[0].AllInstances.map(async ([Base, Properties, Collections, Timestamp, Author]) => {
-        try {
-          const instance = new this(perspective, Base) as any;
-          // Remove unrequested attributes from instance
-          if (requestedProperties.length) {
-            Object.keys(instance).forEach((key) => {
-              if (!requestedProperties.includes(key) && key !== 'createdAt' && key !== 'updatedAt' && key !== 'author' && key !== 'id' && key !== 'baseExpression') delete instance[key];
-            });
-          }
-          // Collect values to assign to instance
-          const values = [...Properties, ...Collections, ["createdAt", Timestamp], ["author", Author]];
-          await Ad4mModel.assignValuesToInstance(perspective, instance, values);
-
-          return instance;
-        } catch (error) {
-          console.error(`Failed to process instance ${Base}:`, error);
-          // Return null for failed instances - we'll filter these out below
-          return null;
-        }
-      })
-    );
-    const instances = allInstances.filter((instance) => instance !== null) as T[];
-
-    // Eager-load relations if requested (BEFORE snapshot so dirty tracking is accurate)
-    if (query.include && instances.length > 0) {
-      await hydrateRelations(this, instances, perspective, query.include);
-    }
-
-    // Take snapshots for dirty tracking after ALL hydration is complete
-    // (including eager-loaded relations).
-    // When `include` is specified, only snapshot those relations.
-    // Otherwise snapshot ALL fields (properties + relations) since
-    // hydrateFromLinks populates relations with stable raw IDs.
-    const snapshotRelations = query.include;
-    for (const inst of instances) {
-      (inst as Ad4mModel).takeSnapshot(snapshotRelations);
-    }
-
-    return { results: instances, totalCount: result[0].TotalCount };
-  }
-
   /**
-   * Converts SPARQL query results to Ad4mModel instances.
-   * 
-   * @param perspective - The perspective context
-   * @param query - The query parameters used
-   * @param result - Array of result objects from SPARQL
-   * @returns Promise resolving to results with total count
-   * 
+   * Build the JSON parameters needed for a model query/subscription endpoint.
+   * Returns the className, queryJson, and shapeJson that the Rust executor expects.
    * @internal
    */
-  public static async instancesFromQueryResult<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy,
-    query: Query,
-    result: any[]
-  ): Promise<ResultsWithTotalCount<T>> {
-    if (!result || result.length === 0) return { results: [], totalCount: 0 };
-    
+  static prepareModelQueryParams(
+    query: Query = {},
+    classNameOverride?: string | null,
+  ): { className: string; queryJson: string; shapeJson: string; metadata: ModelMetadata } {
     const metadata = this.getModelMetadata();
-    const requestedProperties = query?.properties || [];
-    
-    // The query used GROUP BY with graph traversal, so each row has:
-    // - source: the node ID (e.g., "node:abc123")
-    // - source_uri: the actual URI (the base expression)
-    // - links: array of link objects with {predicate, target, author, timestamp}
+    const className = classNameOverride || metadata.className;
 
-    const instances: T[] = [];
-    for (const row of result) {
-      let base;
-      try {
-        // Use source_uri as the base (the actual URI), not the node ID
-        base = row.source_uri;
-
-        // Skip rows without a source_uri field
-        if (!base) {
-          continue;
-        }
-        
-        const links = row.links || [];
-        
-        const instance = new this(perspective, base) as any;
-
-        // Core hydration via unified helper (pass requestedProperties for sparse fieldset).
-        // Also hydrate any properties referenced in `where` so the JS post-filter can match them,
-        // even if they're not in the user's `properties` projection.
-        let hydrationProps = requestedProperties.length > 0 ? [...requestedProperties] : undefined;
-        if (hydrationProps && query.where) {
-          for (const key of Object.keys(query.where)) {
-            if (!hydrationProps.includes(key)) {
-              hydrationProps.push(key);
-            }
-          }
-        }
-        await hydrateFromLinks(instance, links, metadata, perspective, hydrationProps);
-        
-        // NOTE: Property deletion for sparse fieldsets is deferred until AFTER
-        // where-filtering so that where conditions can reference any property,
-        // even ones not in the `properties` projection.
-
-        instances.push(instance);
-      } catch (error) {
-        console.error(`Failed to process SPARQL instance ${base}:`, error);
-      }
-    }
-
-    // Populate reverse relation fields (belongsToOne / belongsToMany) as string IDs.
-    // These relations point FROM other nodes TO this instance, so they cannot be resolved
-    // from the node's own outgoing links fetched above. We do a reverse-link lookup here
-    // so that these fields are populated as IDs even without an explicit include.
-    const allRelsMeta = getRelationsMetadata(this as any);
-    const reverseRelEntries = Object.entries(allRelsMeta).filter(
-      ([relName, meta]) =>
-        (meta.kind === 'belongsToOne' || meta.kind === 'belongsToMany') &&
-        (requestedProperties.length === 0 || requestedProperties.includes(relName))
-    );
-    if (reverseRelEntries.length > 0 && instances.length > 0) {
-      await Promise.all(
-        instances.map(async (inst) => {
-          for (const [relName, relMeta] of reverseRelEntries) {
-            const reverseLinks = await perspective.get(
-              new LinkQuery({ predicate: relMeta.predicate, target: inst.id })
-            );
-            const sourceIds = reverseLinks
-              .filter((l) => l.data.target === inst.id)
-              .map((l) => l.data.source);
-            if (relMeta.kind === 'belongsToOne') {
-              (inst as any)[relName] = sourceIds.length > 0 ? sourceIds[sourceIds.length - 1] : null;
-            } else {
-              (inst as any)[relName] = sourceIds;
-            }
-          }
-        })
-      );
-    }
-
-    // Evaluate custom getters for all instances (single pass)
-    const getterOpts = requestedProperties.length > 0 || query.include
-      ? { requestedProperties, include: query.include }
-      : undefined;
-    for (const instance of instances) {
-      await evaluateCustomGettersForInstance(instance, perspective, metadata, getterOpts);
-    }
-    
-    // Filter by where conditions that couldn't be filtered in SPARQL
-    // This includes:
-    // - author/timestamp (computed from grouped links)
-    // - Properties with comparison operators (gt, gte, lt, lte, between, contains)
-    //   because <ad4m://fn/parse_literal>() returns strings, making numeric/date
-    //   comparisons unreliable. Equality, IN, and NOT are pushed to SPARQL.
-    // - Relation-based where clauses (e.g., { post: postId } for @BelongsToOne)
-    //   which require reverse-link resolution before filtering
-    let filteredInstances = instances;
-    if (query.where) {
-      filteredInstances = instances.filter(instance => {
-        for (const [propertyName, condition] of Object.entries(query.where!)) {
-          // Skip 'base'/'id' as it's filtered in SPARQL
-          if (propertyName === 'base' || propertyName === 'id') continue;
-
-          // For author and timestamp, always filter in JS
-          if (propertyName === 'author' || propertyName === 'timestamp') {
-            if (!matchesCondition(instance[propertyName], condition)) {
-              return false;
-            }
-            continue;
-          }
-
-          // Check if this is a relation field (not in properties metadata)
-          const isPropField = propertyName in metadata.properties;
-
-          if (!isPropField) {
-            // Relation-based where — filter in JS against the populated field
-            if (!matchesCondition(instance[propertyName], condition)) {
-              return false;
-            }
-            continue;
-          }
-
-          // Filter ALL property conditions in JS (safety net).
-          // Equality/IN/NOT are also filtered in SPARQL via <ad4m://fn/parse_literal>()
-          // but JS re-validates after hydration resolves values.
-          if (!matchesCondition(instance[propertyName], condition)) {
-            return false;
-          }
-        }
-        return true;
-      });
-    }
-
-    // Apply ordering in JavaScript
-    // If limit/offset is used but no explicit order, default to ordering by timestamp (ASC)
-    // This ensures consistent pagination behavior
-    const effectiveOrder = query.order ||
-      (query.limit !== undefined || query.offset !== undefined ? { createdAt: 'ASC' as 'ASC' } : null);
-
-    if (effectiveOrder) {
-      const orderEntries = Object.entries(effectiveOrder);
-
-      filteredInstances.sort((a: any, b: any) => {
-        for (const [orderPropName, orderDirection] of orderEntries) {
-          let aVal = a[orderPropName];
-          let bVal = b[orderPropName];
-
-          // Handle undefined values - push them to the end
-          if (aVal === undefined && bVal === undefined) continue;
-          if (aVal === undefined) return orderDirection === 'ASC' ? 1 : -1;
-          if (bVal === undefined) return orderDirection === 'ASC' ? -1 : 1;
-
-          // Compare values
-          let comparison = 0;
-          if (typeof aVal === 'number' && typeof bVal === 'number') {
-            comparison = aVal - bVal;
-          } else if (typeof aVal === 'string' && typeof bVal === 'string') {
-            comparison = aVal.localeCompare(bVal);
-          } else {
-            comparison = String(aVal).localeCompare(String(bVal));
-          }
-
-          if (comparison !== 0) {
-            return orderDirection === 'DESC' ? -comparison : comparison;
-          }
-          // comparison === 0: continue to next sort field
-        }
-        return 0;
-      });
-    }
-
-    // Calculate totalCount BEFORE applying limit/offset
-    const totalCount = filteredInstances.length;
-
-    // Apply offset and limit in JavaScript
-    let paginatedInstances = filteredInstances;
-    if (query.offset !== undefined || query.limit !== undefined) {
-      const start = query.offset || 0;
-      const end = query.limit ? start + query.limit : undefined;
-      paginatedInstances = filteredInstances.slice(start, end);
-    }
-
-    // Now that where-filtering is done, strip unrequested properties for sparse fieldsets.
-    // This must happen AFTER where-filtering so conditions can reference any property.
-    if (requestedProperties.length > 0) {
-      const requested = new Set(requestedProperties);
-      for (const inst of paginatedInstances) {
-        for (const propName of Object.keys(metadata.properties)) {
-          if (!requested.has(propName)) {
-            delete (inst as any)[propName];
-          }
-        }
-        for (const relName of Object.keys(metadata.relations)) {
-          if (!requested.has(relName) && !(query.include && relName in query.include)) {
-            delete (inst as any)[relName];
-          }
-        }
-        for (const metaField of ['author', 'createdAt', 'updatedAt'] as const) {
-          if (!requested.has(metaField)) {
-            delete (inst as any)[metaField];
-          }
+    // Expand includeAll: true to a full IncludeMap covering every forward relation.
+    if (query.includeAll) {
+      const allRelMeta = getRelationsMetadata(this as any);
+      const expanded: IncludeMap = {};
+      for (const [relName, relMeta] of Object.entries(allRelMeta)) {
+        if ((relMeta as any).direction !== 'reverse') {
+          expanded[relName] = true;
         }
       }
+      query = { ...query, include: { ...expanded, ...query.include } };
     }
 
-    // Eager-load relations if requested (BEFORE snapshot so dirty tracking is accurate)
-    if (query.include && paginatedInstances.length > 0) {
-      await hydrateRelations(this, paginatedInstances, perspective, query.include);
+    const queryInput: any = {};
+    if (query.parent) {
+      const parentPredicate = resolveParentPredicate(query.parent, this);
+      queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
+    }
+    if (query.properties) queryInput.properties = query.properties;
+    if (query.include) {
+      // Split include keys: $-prefixed / IncludeProjection values → queryInput.projections
+      // All other keys (boolean | RelationSubQuery) → queryInput.include
+      const normalIncludes: IncludeMap = {};
+      const projections: Record<string, IncludeProjection> = {};
+      for (const [key, val] of Object.entries(query.include)) {
+        if (key.startsWith('$')) {
+          projections[key] = val as IncludeProjection;
+        } else {
+          normalIncludes[key] = val;
+        }
+      }
+      if (Object.keys(normalIncludes).length > 0) queryInput.include = normalIncludes;
+      if (Object.keys(projections).length > 0) {
+        // Enrich projections with target shapes so Rust can apply where clause filtering
+        const allRelMeta = getRelationsMetadata(this as any);
+        for (const [, proj] of Object.entries(projections)) {
+          const relMeta = allRelMeta[proj.from];
+          if (!proj.targetShape && relMeta?.target) {
+            try {
+              const TargetClass = relMeta.target();
+              const targetMeta = (TargetClass as any).getModelMetadata?.();
+              if (targetMeta) {
+                proj.targetShape = targetMeta;
+              }
+            } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for projection:`, e); }
+          }
+        }
+        queryInput.projections = projections;
+      }
+    }
+    if (query.where) queryInput.where = query.where;
+    if (query.order) {
+      queryInput.order = Object.entries(query.order).map(([k, v]) => [k, v]);
+    }
+    if (query.offset !== undefined) queryInput.offset = query.offset;
+    if (query.limit !== undefined) queryInput.limit = query.limit;
+    if (query.count !== undefined) queryInput.count = query.count;
+    queryInput.deepQuery = query.deepQuery ?? true;
+
+    if (queryInput.include) {
+      const allRelMeta = getRelationsMetadata(this as any);
+      enrichShapeForIncludes(metadata, queryInput.include, allRelMeta);
     }
 
-    // Take snapshots for dirty tracking after ALL hydration is complete
-    // (including eager-loaded relations).
-    // When `include` is specified, only snapshot those relations.
-    // Otherwise snapshot ALL fields (properties + relations) since
-    // hydrateFromLinks populates relations with stable raw IDs —
-    // this ensures push-to-array + save() correctly detects dirty relations.
-    const snapshotRelations = query.include;
-    for (const inst of paginatedInstances) {
-      (inst as Ad4mModel).takeSnapshot(snapshotRelations);
+    // Pre-compute conformance getters for Rust-side evaluation.
+    // Where clauses are NOT compiled into getter SPARQL because stored
+    // property values are signed expression envelopes (literal:json:...),
+    // not simple literal:string:X values. Instead, where clauses are
+    // attached as metadata for Rust-side post-evaluation filtering.
+    {
+      const allRelMeta = getRelationsMetadata(this as any);
+      for (const [relName, relMeta] of Object.entries(metadata.relations)) {
+        const rel = relMeta as any;
+        if (rel.getter || rel.direction === 'reverse' || rel.filter === false) continue;
+        const meta = allRelMeta[relName];
+        if (!meta?.target) continue;
+        try {
+          const TargetClass = meta.target();
+          const filter = buildConformanceFilter(meta.predicate, TargetClass);
+
+          if (filter) {
+            rel.getter = filter.getter;
+          }
+
+          // Attach where-clause metadata for Rust-side post-getter filtering
+          if (rel.where) {
+            try {
+              const targetMetadata = (TargetClass as any).getModelMetadata?.() ?? null;
+              if (targetMetadata) {
+                const predicates: Record<string, string> = {};
+                for (const propName of Object.keys(rel.where)) {
+                  if (['id', 'author', 'timestamp'].includes(propName)) continue;
+                  const propMeta = targetMetadata.properties[propName];
+                  if (propMeta?.predicate) {
+                    predicates[propName] = propMeta.predicate;
+                  }
+                }
+                if (Object.keys(predicates).length > 0) {
+                  rel.whereFilter = rel.where;
+                  rel.wherePredicates = predicates;
+                }
+              }
+            } catch (e) { console.debug(`prepareModelQueryParams: target metadata unavailable for relation '${relName}':`, e); }
+          }
+        } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for relation '${relName}':`, e); }
+      }
     }
 
     return {
-      results: paginatedInstances,
-      totalCount
+      className,
+      queryJson: JSON.stringify(queryInput),
+      shapeJson: JSON.stringify(metadata),
+      metadata,
+    };
+  }
+
+  /**
+   * Parse raw model query/subscription result JSON into typed model instances.
+   * Used by ModelQueryBuilder to convert subscription updates without circular imports.
+   * @internal
+   */
+  static parseModelResult<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    raw: any,
+    include?: IncludeMap,
+    properties?: string[],
+  ): T[] {
+    const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const arr = data.instances || data;
+    if (!Array.isArray(arr)) return [];
+    return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
+  }
+
+  /**
+   * Resolve non-literal (file-language) properties on an array of already-constructed
+   * model instances.  Handles two cases:
+   *
+   *   1. The Rust executor returned a raw URI string → fetch via `getExpression` then apply transform.
+   *   2. The Rust executor already resolved the expression and returned a `FileData` object
+   *      (happens when the perspective backend eagerly fetches file content) → apply transform
+   *      (or `defaultFileDecode` if no transform is registered on the class, e.g. for SHACL-
+   *      synthesised model classes).
+   *
+   * Extracted as a public static so `ModelQueryBuilder.subscribe()` can reuse it without
+   * duplicating logic or introducing a circular dependency.
+   * @internal
+   */
+  static async resolveNonLiteralProps<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    instances: T[],
+  ): Promise<void> {
+    const propsMeta = getPropertiesMetadata(this as any);
+    const resolveProps = Object.entries(propsMeta).filter(
+      ([, opts]: [string, any]) =>
+        opts.resolveLanguage != null &&
+        opts.resolveLanguage !== 'literal',
+    );
+    if (resolveProps.length === 0) return;
+
+    await Promise.all(
+      instances.map(async (inst: any) => {
+        for (const [propName, opts] of resolveProps) {
+          const val = inst[propName];
+          const transform = (opts as any).transform;
+          const applyTransform = (resolved: unknown) =>
+            typeof transform === 'function' ? transform(resolved) : defaultFileDecode(resolved);
+
+          if (typeof val === 'string' && val && !val.startsWith('literal:')) {
+            // Case 1: raw URI — fetch from language runtime
+            try {
+              const expression = await perspective.getExpression(val);
+              if (expression) {
+                let resolved: any;
+                try { resolved = JSON.parse(expression.data); } catch { resolved = expression.data; }
+                inst[propName] = applyTransform(resolved);
+              }
+            } catch (e) { console.debug(`resolveNonLiteralProps: resolution failed for '${propName}':`, e); }
+          } else if (val !== null && val !== undefined && typeof val === 'object') {
+            // Case 2: already resolved by Rust — apply transform / default decode
+            inst[propName] = applyTransform(val);
+          }
+        }
+      }),
+    );
+  }
+
+  // instancesFromQueryResult — removed (superseded by Rust executeModelQuery pipeline)
+
+  /**
+   * Execute a model query via the executor-side endpoint.
+   * 
+   * This replaces the old SPARQL-build → hydrate → JS-filter → JS-sort → JS-paginate pipeline
+   * with a single RPC to the executor that handles everything in Rust.
+   * 
+   * @internal
+   */
+  private static async executeModelQuery<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    query: Query = {},
+    classNameOverride?: string | null,
+  ): Promise<ResultsWithTotalCount<T>> {
+    // Delegate all query input building, shape enrichment, and getter
+    // pre-computation to the shared prepareModelQueryParams helper.
+    const { className, queryJson, shapeJson } = this.prepareModelQueryParams(
+      query, classNameOverride,
+    );
+
+    const result = await perspective.modelQuery(className, queryJson, shapeJson);
+
+    // Convert JSON instances to model class instances, recursively constructing
+    // class instances for any included relations resolved by Rust.
+    const instances: T[] = result.instances.map((json: any) => {
+      return jsonToModelInstance(this, perspective, json, query.include, query.properties);
+    });
+
+    // Resolve non-literal expressions (e.g. file languages where the stored
+    // value is a content-addressed hash that must be fetched from the language
+    // runtime). The Rust endpoint may return either a raw target URI (string)
+    // or an already-resolved FileData object — both cases are handled here.
+    await (this as any).resolveNonLiteralProps(perspective, instances);
+
+    // Take snapshots for dirty tracking (exclude $-prefixed projection keys)
+    const snapshotRelations = query.include
+      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
+      : undefined;
+    for (const inst of instances) {
+      (inst as Ad4mModel).takeSnapshot(
+        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
+      );
+    }
+
+    return {
+      results: instances,
+      totalCount: result.totalCount,
     };
   }
 
@@ -1026,59 +1121,37 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
+   * @param _engine - **Deprecated.** Accepted for backward compatibility but ignored.
+   *   All queries now use the Rust SPARQL pipeline.
    * @returns Array of matching models
-   * 
+   *
    * @example
    * ```typescript
-   * // Get all recipes (uses SPARQL by default)
    * const allRecipes = await Recipe.findAll(perspective);
-   * 
-   * // Get recipes with specific criteria (uses SPARQL)
+   *
    * const recipes = await Recipe.findAll(perspective, {
-   *   where: { 
+   *   where: {
    *     name: "Pasta",
    *     rating: { gt: 4 }
    *   },
    *   order: { createdAt: "DESC" },
    *   limit: 10
    * });
-   * 
-   * // Explicitly use Prolog (legacy, for backward compatibility)
-   * const recipesProlog = await Recipe.findAll(perspective, {}, false);
    * ```
    */
   static async findAll<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
     query: Query = {},
-    engine: 'sparql' | 'prolog' | boolean = 'sparql'
+    /** @deprecated Ignored — Prolog engine has been removed. */
+    _engine?: 'sparql' | 'prolog' | boolean
   ): Promise<T[]> {
     if (query.properties && query.properties.length === 0) {
       throw new Error("properties[] must not be empty — omit the field to return all properties, or specify at least one field name");
     }
 
-    // Backward compatibility: boolean maps to sparql (true) or prolog (false)
-    const resolvedEngine = typeof engine === 'boolean'
-      ? (engine ? 'sparql' : 'prolog')
-      : engine;
-
-    if (resolvedEngine === 'sparql') {
-      // Always use the regular SPARQL path + JS-level hydrateRelations for includes.
-      // The batch SPARQL approach had issues with sub-queries (where/order/limit on includes),
-      // non-conforming node filtering, and parse_literal compatibility.
-      // hydrateRelations handles all of these correctly via per-relation findAll calls.
-      const sparqlQuery = await this.queryToSPARQL(perspective, query);
-      const rawResult = await perspective.querySparql(sparqlQuery);
-      const grouped = groupSPARQLResults(rawResult);
-      const { results } = await this.instancesFromQueryResult(perspective, query, grouped);
-      return results;
-    } else {
-      const prologQuery = await this.queryToProlog(perspective, query);
-      const result = await perspective.infer(prologQuery);
-      const { results } = await this.instancesFromPrologResult(perspective, query, result);
-      return results;
-    }
+    const { results } = await this.executeModelQuery(perspective, query);
+    return results;
   }
 
   /**
@@ -1088,7 +1161,7 @@ export class Ad4mModel {
    *
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSPARQL - Whether to use SPARQL (default: true) or Prolog (legacy)
+   * @param _engine - **Deprecated.** Accepted for backward compatibility but ignored.
    * @returns The first matching instance, or `null`
    *
    * @example
@@ -1105,10 +1178,11 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query: Query = {},
-    engine: 'sparql' | 'prolog' | boolean = 'sparql',
+    /** @deprecated Ignored — Prolog engine has been removed. */
+    _engine?: 'sparql' | 'prolog' | boolean,
   ): Promise<T | null> {
     const limitedQuery = { ...query, limit: 1 };
-    const results = await this.findAll(perspective, limitedQuery, engine);
+    const results = await this.findAll(perspective, limitedQuery);
     return results[0] ?? null;
   }
 
@@ -1117,9 +1191,9 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
+   * @param _engine - **Deprecated.** Accepted for backward compatibility but ignored.
    * @returns Object containing results array and total count
-   * 
+   *
    * @example
    * ```typescript
    * const { results, totalCount } = await Recipe.findAllAndCount(perspective, {
@@ -1127,31 +1201,16 @@ export class Ad4mModel {
    *   limit: 10
    * });
    * console.log(`Showing 10 of ${totalCount} dessert recipes`);
-   * 
-   * // Use Prolog explicitly (legacy)
-   * const { results, totalCount } = await Recipe.findAllAndCount(perspective, {}, false);
    * ```
    */
   static async findAllAndCount<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
     query: Query = {},
-    engine: 'sparql' | 'prolog' | boolean = 'sparql'
+    /** @deprecated Ignored — Prolog engine has been removed. */
+    _engine?: 'sparql' | 'prolog' | boolean
   ): Promise<ResultsWithTotalCount<T>> {
-    const resolvedEngine = typeof engine === 'boolean'
-      ? (engine ? 'sparql' : 'prolog')
-      : engine;
-
-    if (resolvedEngine === 'sparql') {
-      const sparqlQuery = await this.queryToSPARQL(perspective, query);
-      const rawResult = await perspective.querySparql(sparqlQuery);
-      const grouped = groupSPARQLResults(rawResult);
-      return await this.instancesFromQueryResult(perspective, query, grouped);
-    } else {
-      const prologQuery = await this.queryToProlog(perspective, query);
-      const result = await perspective.infer(prologQuery);
-      return await this.instancesFromPrologResult(perspective, query, result);
-    }
+    return await this.executeModelQuery(perspective, query);
   }
 
   /**
@@ -1161,7 +1220,6 @@ export class Ad4mModel {
    * @param pageSize - Number of items per page
    * @param pageNumber - Which page to retrieve (1-based)
    * @param query - Optional additional query parameters
-   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
    * @returns Paginated results with metadata
    * 
    * @example
@@ -1170,57 +1228,20 @@ export class Ad4mModel {
    *   where: { category: "Main Course" }
    * });
    * console.log(`Page ${page.pageNumber} of recipes, ${page.results.length} items`);
-   * 
-   * // Use Prolog explicitly (legacy)
-   * const pageProlog = await Recipe.paginate(perspective, 10, 1, {}, false);
    * ```
    */
   static async paginate<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
-    pageSize: number, 
-    pageNumber: number, 
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    pageSize: number,
+    pageNumber: number,
     query?: Query,
-    engine: 'sparql' | 'prolog' | boolean = 'sparql'
+    /** @deprecated Ignored — Prolog engine has been removed. */
+    _engine?: 'sparql' | 'prolog' | boolean
   ): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(query || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const resolvedEngine = typeof engine === 'boolean'
-      ? (engine ? 'sparql' : 'prolog')
-      : engine;
-
-    if (resolvedEngine === 'sparql') {
-      const sparqlQuery = await this.queryToSPARQL(perspective, paginationQuery);
-      const rawResult = await perspective.querySparql(sparqlQuery);
-      const grouped = groupSPARQLResults(rawResult);
-      const { results, totalCount } = await this.instancesFromQueryResult(perspective, paginationQuery, grouped);
-      return { results, totalCount, pageSize, pageNumber };
-    } else {
-      const prologQuery = await this.queryToProlog(perspective, paginationQuery);
-      const result = await perspective.infer(prologQuery);
-      const { results, totalCount } = await this.instancesFromPrologResult(perspective, paginationQuery, result);
-      return { results, totalCount, pageSize, pageNumber };
-    }
-  }
-
-  static async countQueryToProlog(perspective: PerspectiveProxy, query: Query = {}, modelClassName?: string | null) {
-    const { where } = query;
-    const className = modelClassName || (await this.getClassName(perspective));
-    const resolvedParentPredicate = query.parent
-      ? resolveParentPredicate(query.parent, this)
-      : undefined;
-    const instanceQueries = [buildAuthorAndTimestampQuery(), buildParentQuery(query.parent, resolvedParentPredicate), buildWhereQuery(where)];
-    const resultSetQueries = [buildCountQuery(true), buildOrderQuery(), buildOffsetQuery(), buildLimitQuery()];
-
-    const fullQuery = `
-      findall([Base, Properties, Collections, Timestamp, Author], (
-        subject_class("${className}", SubjectClass),
-        instance(SubjectClass, Base),
-        ${instanceQueries.filter((q) => q).join(", ")}
-      ), UnsortedInstances),
-      ${resultSetQueries.filter((q) => q).join(", ")}
-    `;
-
-    return fullQuery;
+    const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery);
+    return { results, totalCount, pageSize, pageNumber };
   }
 
   /**
@@ -1232,21 +1253,13 @@ export class Ad4mModel {
    * 
    * @private
    */
-  public static async countQueryToSPARQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
-    // Use the same query as the main query (with GROUP BY), just without LIMIT/OFFSET
-    // We'll count the number of rows returned (one row per source)
-    const countQuery = { ...query };
-    delete countQuery.limit;
-    delete countQuery.offset;
-    return await this.queryToSPARQL(perspective, countQuery);
-  }
+  // countQueryToSPARQL — removed (zero callers; Rust COUNT fast-path supersedes)
 
   /**
    * Gets a count of all matching instances.
    * 
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
    * @returns Total count of matching entities
    * 
    * @example
@@ -1255,26 +1268,11 @@ export class Ad4mModel {
    * const activeRecipes = await Recipe.count(perspective, {
    *   where: { status: "active" }
    * });
-   * 
-   * // Use Prolog explicitly (legacy)
-   * const countProlog = await Recipe.count(perspective, {}, false);
    * ```
    */
-  static async count(perspective: PerspectiveProxy, query: Query = {}, engine: 'sparql' | 'prolog' | boolean = 'sparql') {
-    const resolvedEngine = typeof engine === 'boolean'
-      ? (engine ? 'sparql' : 'prolog')
-      : engine;
-
-    if (resolvedEngine === 'sparql') {
-      const sparqlQuery = await this.queryToSPARQL(perspective, query);
-      const rawResult = await perspective.querySparql(sparqlQuery);
-      const grouped = groupSPARQLResults(rawResult);
-      const { totalCount } = await this.instancesFromQueryResult(perspective, query, grouped);
-      return totalCount;
-    } else {
-      const result = await perspective.infer(await this.countQueryToProlog(perspective, query));
-      return result?.[0]?.TotalCount || 0;
-    }
+  static async count(perspective: PerspectiveProxy, query: Query = {}): Promise<number> {
+    const { totalCount } = await this.executeModelQuery(perspective, { ...query, limit: 0 });
+    return totalCount;
   }
 
   private async setProperty(key: string, value: any, batchId?: string) {
@@ -1607,6 +1605,100 @@ export class Ad4mModel {
   }
 
   /**
+   * Evaluate SPARQL getters for a batch of instances on demand.
+   *
+   * Since deepQuery defaults to true, property getters are evaluated
+   * automatically during collection queries.  Use this method when
+   * deepQuery was explicitly set to false and you want to lazily
+   * resolve getter-backed properties for a subset of instances.
+   *
+   * @param instances - Array of model instances to evaluate getters on
+   * @param perspective - The perspective to query against
+   * @param propertyNames - Optional list of getter-backed property names to evaluate.
+   *                        If omitted, all getters are evaluated.
+   *
+   * @example
+   * ```typescript
+   * const messages = await Message.query(perspective).deepQuery(false).limit(30).get();
+   * // messages[i].replyingTo is undefined (getter skipped)
+   *
+   * // Evaluate getters for the visible subset
+   * await Message.evaluateGetters(messages.slice(0, 10), perspective, ['replyingTo']);
+   * // messages[0..9].replyingTo is now populated
+   * ```
+   */
+  static async evaluateGetters<T extends Ad4mModel>(
+    instances: T[],
+    perspective: PerspectiveProxy,
+    propertyNames?: string[],
+  ): Promise<void> {
+    if (instances.length === 0) return;
+    const metadata = this.getModelMetadata();
+
+    // Pre-compute conformance getters so the shape sent to Rust includes them
+    const allRelMeta = getRelationsMetadata(this as any);
+    for (const [relName, relMeta] of Object.entries(metadata.relations)) {
+      const rel = relMeta as any;
+      if (rel.getter || rel.direction === 'reverse' || rel.filter === false) continue;
+      const meta = allRelMeta[relName];
+      if (!meta?.target) continue;
+      try {
+        const TargetClass = meta.target();
+        const filter = buildConformanceFilter(meta.predicate, TargetClass);
+        if (filter) rel.getter = filter.getter;
+      } catch (e) { console.debug(`evaluateGetters: target class unavailable for relation '${relName}':`, e); }
+    }
+
+    const shapeJson = JSON.stringify(metadata);
+    const instanceIds = instances.map(inst => inst.id || (inst as any)._baseExpression);
+
+    // Single RPC call evaluates all getters in-process on the executor
+    const result = await perspective.evaluateGetters(
+      metadata.className,
+      instanceIds,
+      shapeJson,
+      propertyNames,
+    );
+
+    // Determine which property names were evaluated for snapshot sync
+    const evaluatedPropertyNames: string[] = [];
+    for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+      if ((propMeta as any).getter) {
+        if (!propertyNames || propertyNames.length === 0 || propertyNames.includes(propName)) {
+          evaluatedPropertyNames.push(propName);
+        }
+      }
+    }
+    // Also include relation getters
+    for (const [relName, relMeta] of Object.entries(metadata.relations)) {
+      if ((relMeta as any).getter) {
+        if (!propertyNames || propertyNames.length === 0 || propertyNames.includes(relName)) {
+          evaluatedPropertyNames.push(relName);
+        }
+      }
+    }
+
+    // Apply results to instances and sync snapshots
+    for (const instance of instances) {
+      const id = (instance as any).id || (instance as any)._baseExpression;
+      const props = result[id];
+      if (props) {
+        for (const [key, value] of Object.entries(props)) {
+          (instance as any)[key] = value;
+        }
+      }
+      // Sync snapshot so isDirty() doesn't flag getter-only changes
+      const modelInstance = instance as Ad4mModel;
+      if (modelInstance._snapshot) {
+        for (const propName of evaluatedPropertyNames) {
+          const val = (instance as any)[propName];
+          modelInstance._snapshot[propName] = normalizeValue(Array.isArray(val) ? [...val] : val);
+        }
+      }
+    }
+  }
+
+  /**
    * Gets the model instance with all properties and relations populated.
    *
    * @param optsOrInclude - Optional hydration options. Accepts two forms:
@@ -1895,6 +1987,26 @@ export class Ad4mModel {
   }
 
   /**
+   * Batch-registers multiple model classes on a perspective in a single RPC call.
+   * This is significantly faster than calling `register()` on each model individually
+   * because it eliminates N-1 round-trips and mutex acquisitions.
+   *
+   * @param perspective - The perspective to register the models on
+   * @param models - Array of Ad4mModel subclasses to register
+   *
+   * @example
+   * ```typescript
+   * await Ad4mModel.registerAll(perspective, [Community, Channel, Message, Task]);
+   * ```
+   */
+  static async registerAll(
+    perspective: PerspectiveProxy,
+    models: (typeof Ad4mModel)[],
+  ): Promise<void> {
+    await perspective.ensureSubjectClasses(models);
+  }
+
+  /**
    * Executes a set of model operations inside a single batch (transaction).
    *
    * All `save`, `update`, and `delete` calls made via the provided `batchId`
@@ -2018,6 +2130,125 @@ export class Ad4mModel {
     options: JSONSchemaToModelOptions
   ): typeof Ad4mModel {
     return buildModelFromJSONSchema(this, schema, options);
+  }
+
+  /**
+   * Creates a fully functional Ad4mModel subclass from a SHACL shape.
+   *
+   * Unlike `fromJSONSchema()`, no predicate inference is required —
+   * `SHACLShape` already contains the exact predicate URI in `path` for
+   * every property. The method reads each property's `path`, `maxCount`,
+   * `writable`, and `resolveLanguage` directly and writes them to the
+   * WeakMap metadata registries.
+   *
+   * Properties with `hasValue` (flag / type-discrimination markers) are
+   * registered as hidden flag entries so that the SPARQL query builder emits
+   * the fixed triple `?source <predicate> <value>` needed for type discrimination.
+   * Properties without a `name` field are skipped.
+   *
+   * **Backward-compat:** Old Flux SHACL shapes (created before `sh:hasValue`
+   * was persisted on property shapes) carry the flag value only in
+   * `shape.constructor_actions` as the `target` of an `addLink` action.
+   * This method recovers those values so that old perspectives are queried
+   * with the correct type-discriminator triple.
+   *
+   * @param shape - SHACL node shape (as returned by `PerspectiveProxy.getAllShacl()`)
+   * @param name  - Class name to assign (e.g. "Channel")
+   * @returns Generated Ad4mModel subclass, ready for querying
+   */
+  /**
+   * Synthesise an `Ad4mModel` subclass from a SHACL shape.
+   *
+   * @param shape           - The SHACL shape to synthesise from.
+   * @param name            - The model name (e.g. "Channel").
+   * @param classResolver   - Optional thunk factory.  When provided, any collection
+   *   property that carries a `sh:class` URI will have its `target` wired up lazily:
+   *   `target: () => classResolver(localName)`.  Because `target` is only called at
+   *   query time (inside `enrichShapeForIncludes` / `jsonToModelInstance`), the
+   *   resolver just needs to return the correct class by the time a query runs —
+   *   making it safe to pass a closure over a registry object that is still being
+   *   populated (e.g. the `result` record inside `getModelClasses`).
+   */
+  static fromSHACL(
+    shape: SHACLShape,
+    name: string,
+    classResolver?: (localName: string) => typeof Ad4mModel | undefined,
+  ): typeof Ad4mModel {
+    const DynamicModelClass = class extends (this as any) {} as unknown as typeof Ad4mModel;
+    (DynamicModelClass as any).className = name;
+    (DynamicModelClass.prototype as any).className = name;
+
+    // Build a backward-compat fallback map: predicate → fixed-IRI-value from
+    // constructor actions. Old SHACL stores (created before sh:hasValue was
+    // persisted on the property shape) don't carry sh:hasValue on properties,
+    // but the shape-level constructor_actions always contain an addLink action
+    // with the fixed flag value as the target.
+    const flagValueFromConstructor = new Map<string, string>();
+    for (const action of shape.constructor_actions ?? []) {
+      if (
+        action.action === 'addLink' &&
+        typeof action.predicate === 'string' &&
+        typeof action.target === 'string' &&
+        action.target !== 'value' &&
+        !action.target.startsWith('literal:')
+      ) {
+        flagValueFromConstructor.set(action.predicate, action.target);
+      }
+    }
+
+    for (const prop of shape.properties) {
+      const resolvedHasValue = prop.hasValue ?? flagValueFromConstructor.get(prop.path);
+
+      if (resolvedHasValue !== undefined) {
+        const flagKey = prop.name ?? `_flag_${prop.path.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+        setPropertyRegistryEntry(DynamicModelClass, flagKey, {
+          through: prop.path,
+          required: true,
+          initial: resolvedHasValue,
+          flag: true,
+          writable: false,
+          readOnly: true,
+        });
+        continue;
+      }
+
+      // Skip properties without a declared name
+      if (!prop.name) continue;
+
+      const isCollection = prop.maxCount === undefined || prop.maxCount > 1;
+
+      if (isCollection) {
+        // Derive a lazy `target` thunk when a sh:class URI is present and a
+        // classResolver was supplied.  The thunk is evaluated at query time so
+        // it is safe even if the target class hasn't been registered yet.
+        let targetThunk: (() => typeof Ad4mModel) | undefined;
+        if (prop.class && classResolver) {
+          const sep = Math.max(prop.class.lastIndexOf('#'), prop.class.lastIndexOf('/'));
+          const localName = sep >= 0 ? prop.class.slice(sep + 1) : prop.class;
+          targetThunk = () => classResolver(localName) as typeof Ad4mModel;
+        }
+
+        setRelationRegistryEntry(DynamicModelClass, prop.name, {
+          predicate: prop.path,
+          kind: 'hasMany',
+          ...(targetThunk !== undefined && { target: targetThunk }),
+          ...(prop.local !== undefined && { local: prop.local }),
+          ...(prop.getter !== undefined && { getter: prop.getter }),
+        });
+      } else {
+        setPropertyRegistryEntry(DynamicModelClass, prop.name, {
+          through: prop.path,
+          writable: prop.writable ?? true,
+          ...(prop.resolveLanguage !== undefined && { resolveLanguage: prop.resolveLanguage }),
+          ...(prop.local !== undefined && { local: prop.local }),
+        });
+      }
+    }
+
+    const ModelDecorator = Model({ name });
+    ModelDecorator(DynamicModelClass);
+
+    return DynamicModelClass as typeof Ad4mModel;
   }
 }
 

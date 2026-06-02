@@ -63,7 +63,7 @@ Creates:
 ```bash
 ad4m-executor run \
   --app-data-path /path/to/.ad4m \
-  --gql-port 12000 \
+  --port 12000 \
   --admin-credential <your-secret> \
   --enable-mcp true
 ```
@@ -72,7 +72,7 @@ ad4m-executor run \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--app-data-path` | (required) | Data directory |
-| `--gql-port` | 12000 | GraphQL API port |
+| `--port` | 12000 | API port (WebSocket RPC + HTTP) |
 | `--admin-credential` | (none) | Admin auth token — without this, empty token has admin access |
 | `--enable-mcp` | false | Enable MCP server |
 | `--mcp-port` | 3001 | MCP server port |
@@ -82,7 +82,7 @@ ad4m-executor run \
 **For AI agents**: Always run in a screen session with logging:
 
 ```bash
-screen -dmS ad4m-executor bash -c 'ad4m-executor run --app-data-path ~/.ad4m --gql-port 12000 --admin-credential mysecret --enable-mcp true 2>&1 | tee /tmp/ad4m-executor.log'
+screen -dmS ad4m-executor bash -c 'ad4m-executor run --app-data-path ~/.ad4m --port 12000 --admin-credential mysecret --enable-mcp true 2>&1 | tee /tmp/ad4m-executor.log'
 ```
 
 After startup, **write down** the admin credential, screen session name (`ad4m-executor`), log path (`/tmp/ad4m-executor.log`), MCP endpoint, and data path so you and your human can debug later. The executor is now running in the background — don't start another one.
@@ -94,16 +94,16 @@ First run only. Creates cryptographic keys and DID identity.
 **Via CLI:**
 
 ```bash
-ad4m --executor-url http://localhost:12000/graphql agent generate --passphrase <passphrase>
+ad4m --executor-url http://localhost:12000 agent generate --passphrase <passphrase>
 ```
 
-**Via GraphQL:**
+**Via REST API:**
 
 ```bash
-curl -s http://localhost:12000/graphql \
+curl -s http://localhost:12000/api/v1/agent/generate \
   -H "Content-Type: application/json" \
-  -H "Authorization: <admin-credential>" \
-  -d '{"query":"mutation { agentGenerate(passphrase: \"<passphrase>\") { did } }"}'
+  -H "Authorization: Bearer <admin-credential>" \
+  -d '{"passphrase": "<passphrase>"}'
 ```
 
 This triggers Holochain conductor startup and language installation. Takes 30-60 seconds.
@@ -113,10 +113,10 @@ This triggers Holochain conductor startup and language installation. Takes 30-60
 After restarting the executor, unlock the agent:
 
 ```bash
-curl -s http://localhost:12000/graphql \
+curl -s http://localhost:12000/api/v1/agent/unlock \
   -H "Content-Type: application/json" \
-  -H "Authorization: <admin-credential>" \
-  -d '{"query":"mutation { agentUnlock(passphrase: \"<passphrase>\", holochain: true) { isInitialized isUnlocked did } }"}'
+  -H "Authorization: Bearer <admin-credential>" \
+  -d '{"passphrase": "<passphrase>"}'
 ```
 
 The `holochain: true` parameter starts the Holochain conductor during unlock.
@@ -125,12 +125,10 @@ The `holochain: true` parameter starts the Holochain conductor during unlock.
 
 ```bash
 # Check agent status
-curl -s http://localhost:12000/graphql \
-  -H "Content-Type: application/json" \
-  -H "Authorization: <admin-credential>" \
-  -d '{"query":"{ agentStatus { isInitialized isUnlocked did } }"}'
+curl -s http://localhost:12000/api/v1/agent/status \
+  -H "Authorization: Bearer <admin-credential>"
 
-# Expected: {"data":{"agentStatus":{"isInitialized":true,"isUnlocked":true,"did":"did:key:z6Mk..."}}}
+# Expected: {"isInitialized":true,"isUnlocked":true,"did":"did:key:z6Mk..."}
 ```
 
 ## Deployment Scenarios & Networking
@@ -140,10 +138,10 @@ curl -s http://localhost:12000/graphql \
 Agent and executor on the same machine. No TLS needed.
 
 ```bash
-ad4m-executor run --app-data-path ~/.ad4m --gql-port 12000 \
+ad4m-executor run --app-data-path ~/.ad4m --port 12000 \
   --admin-credential mysecret --enable-mcp true
 # MCP at http://localhost:3001/mcp
-# GraphQL at http://localhost:12000/graphql
+# API at http://localhost:12000
 ```
 
 ### Scenario 2: Agent connects to remote executor
@@ -153,7 +151,7 @@ Agent on machine A, executor on machine B (LAN or internet). MCP works over plai
 **Option A: SSH tunnel (no TLS needed, simplest for agents)**
 
 ```bash
-# On agent machine — forward both GraphQL and MCP ports
+# On agent machine — forward both API and MCP ports
 ssh -L 12000:localhost:12000 -L 3001:localhost:3001 user@executor-host
 # Now agent connects to localhost:12000 / localhost:3001 as if local
 ```
@@ -188,7 +186,7 @@ Requires `--enable-multi-user true`. Each user authenticates separately.
 - Self-signed cert via `mkcert` (install CA on all client devices)
 
 ```bash
-ad4m-executor run --app-data-path ~/.ad4m --gql-port 12000 \
+ad4m-executor run --app-data-path ~/.ad4m --port 12000 \
   --admin-credential mysecret --enable-mcp true \
   --enable-multi-user true
 ```
@@ -229,8 +227,7 @@ After init + generate, `--app-data-path` contains:
 │   └── languages/            # Installed language bundles
 ├── ad4m_db.sqlite            # Agent database
 ├── mainnet_seed.seed         # Bootstrap configuration
-├── surrealdb_perspectives/   # Per-perspective SurrealDB stores
-└── schema.gql                # GraphQL schema
+└── surrealdb_perspectives/   # Per-perspective SurrealDB stores
 ```
 
 ## Security Considerations
@@ -246,26 +243,23 @@ The plugin manages MCP authentication internally — credentials are not sent in
 ### Executor Security
 
 - **Never expose the admin credential** in logs, chat messages, or shared config files
-- The executor's GraphQL endpoint (`--gql-port`, default 12000) should only be accessible to trusted agents
+- The executor's API endpoint (`--port`, default 12000) should only be accessible to trusted agents
 - Use TLS (`--tls-cert-file`, `--tls-key-file`) for any remote executor access
 
-## GraphQL API (Fallback)
+## WebSocket RPC API (Fallback)
 
-**Use MCP tools first.** GraphQL is for low-level operations not exposed via MCP (language management, direct queries, debugging).
+**Use MCP tools first.** The WebSocket RPC API is for low-level operations not exposed via MCP (language management, direct queries, debugging).
 
-```graphql
-# Agent status
-{ agentStatus { isInitialized isUnlocked did } }
+Connect to `ws://localhost:12000/api/v1/ws` and send JSON-RPC messages:
 
-# Add a link
-mutation { perspectiveAddLink(
-  uuid: "<perspective-uuid>"
-  link: { source: "ad4m://self", predicate: "has_name", target: "literal://string:Data" }
-) { author timestamp } }
+```json
+{"method": "agent.status", "params": {}, "id": "1"}
+
+{"method": "perspectives.add_link", "params": {"uuid": "<perspective-uuid>", "link": {"source": "ad4m://self", "predicate": "has_name", "target": "literal://string:Data"}}, "id": "2"}
 ```
 
-**Auth header:** `Authorization: <admin-credential>` (single-user) or `Authorization: Bearer <jwt>` (multi-user)
-**Endpoint:** `http://localhost:12000/graphql` (configurable via `--gql-port`)
+**Auth:** Send `{"method": "auth", "params": {"credential": "<admin-credential>"}}` (single-user) or `{"method": "auth", "params": {"jwt": "<token>"}}` (multi-user) as the first message.
+**Endpoint:** `ws://localhost:12000/api/v1/ws` (port configurable via `--port`)
 
 ## Troubleshooting
 
@@ -277,7 +271,7 @@ mutation { perspectiveAddLink(
 | Holochain conductor `IoError(internal)` | Corrupted conductor DB | Nuke `h/c/` directory, re-generate agent |
 | Port already in use | Previous instance running | Kill old process, clean lair files |
 | 404 on neighbourhood join | Version mismatch or expired link | Ensure same AD4M version as neighbourhood creator |
-| Cannot connect to executor | Executor not running or wrong port | `curl http://localhost:12000/graphql` to verify |
-| Waker not firing | WS not accessible or bad query | Check `ws://localhost:12100/graphql` and waker logs |
+| Cannot connect to executor | Executor not running or wrong port | `curl http://localhost:12000/health` to verify |
+| Waker not firing | WS not accessible or bad query | Check `ws://localhost:12000/api/v1/ws/events` and waker logs |
 | Messages "uninitialized" | Property set after creation (race) | Always use `message_create` or `create_subject` with `initial_values` |
 | Channel query returns empty | SHACL still syncing | Wait 3-5 min for Holochain gossip, then retry |

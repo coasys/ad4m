@@ -1,0 +1,27 @@
+[package]
+name = "ad4m-ldk"
+version = "0.13.0-test-1"
+edition = "2021"
+description = "AD4M Language Development Kit (Rust) — typed wrappers around the runtime imports and an `ad4m_language!` macro for authoring flat-export Languages compiled to WASM."
+license = "CAL-1.0"
+
+# Standalone — not part of the main rust-executor workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+
+[dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = true

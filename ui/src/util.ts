@@ -1,43 +1,10 @@
-import { ApolloClient, InMemoryCache } from "@apollo/client/core";
-import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { Ad4mClient, LinkExpression } from "@coasys/ad4m";
 import { invoke } from "@tauri-apps/api/core";
-import { createClient } from "graphql-ws";
 import { version } from "../package.json";
 
 export async function buildAd4mClient(server: string, subscribe = true): Promise<Ad4mClient> {
   let token: string = await invoke("request_credential");
-
-  return buildClient(server, token, subscribe);
-}
-
-function buildClient(server: string, token: string, subscribe: boolean): Ad4mClient {
-  const wsLink = new GraphQLWsLink(
-    createClient({
-      url: server,
-      connectionParams: () => {
-        return {
-          headers: {
-            authorization: token,
-          },
-        };
-      },
-    })
-  );
-  const apolloClient = new ApolloClient({
-    link: wsLink,
-    cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
-    defaultOptions: {
-      watchQuery: {
-        fetchPolicy: "no-cache",
-      },
-      query: {
-        fetchPolicy: "no-cache",
-      },
-    },
-  });
-
-  return new Ad4mClient(apolloClient, subscribe);
+  return new Ad4mClient(server, token, subscribe);
 }
 
 export function generateLanguageInitials(name: string) {

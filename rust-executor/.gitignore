@@ -9,3 +9,4 @@ schema.gql
 !src/entanglement_service/entanglement_service_extension.js
 dapp
 !src/holochain_service/holochain_service_extension.js
+bindings/

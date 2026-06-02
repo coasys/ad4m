@@ -1,6 +1,6 @@
 {
   "name": "@coasys/rust-ad4m-executor",
-  "description": "Rust built version of the ad4m-executor, exposing GraphQL methods for AD4M",
+  "description": "Rust built version of the ad4m-executor, exposing REST methods for AD4M",
   "main": "",
   "files": [],
   "type": "module",
@@ -31,5 +31,5 @@
   },
   "devDependencies": {},
   "dependencies": {},
-  "version": "0.13.0-test-2"
+  "version": "0.13.0-test-6"
 }

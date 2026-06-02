@@ -55,7 +55,6 @@ pub fn get_default_log_config() -> std::collections::HashMap<String, String> {
     defaults.insert("holochain".to_string(), "warn".to_string());
     defaults.insert("wasmer_compiler_cranelift".to_string(), "warn".to_string());
     defaults.insert("rust_executor".to_string(), "info".to_string());
-    defaults.insert("warp".to_string(), "info".to_string());
     defaults.insert("warp::server".to_string(), "info".to_string());
     defaults
 }

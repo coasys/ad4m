@@ -58,7 +58,26 @@ if (typeof globalThis.window === "undefined") {
     globalThis.window = globalThis;
 }
 
-// Map of serialised cell_id key → signalCallback for Holochain signal routing.
+// OPTIONAL EXTENSION: Storage File I/O (host-contract.md §"Extension:
+// Storage File I/O"). This is where the Deno executor opts into the
+// extension by attaching readStorageFile / writeStorageFile to
+// LANGUAGE_CONTROLLER. A runtime that doesn't want to expose raw file
+// access (e.g. a pure-browser runtime without IndexedDB) just omits
+// this block and languages that try to import readStorageFile will
+// get a clear error at call time.
+//
+// Kept in the bootstrap (not the extension snapshot) so this opt-in is
+// plainly visible at runtime and easy to audit or swap out.
+if (typeof globalThis.LANGUAGE_CONTROLLER === "object" && globalThis.LANGUAGE_CONTROLLER) {
+    globalThis.LANGUAGE_CONTROLLER.readStorageFile = function(path) {
+        return Deno.readTextFileSync(path);
+    };
+    globalThis.LANGUAGE_CONTROLLER.writeStorageFile = function(path, content) {
+        Deno.writeTextFileSync(path, content);
+    };
+}
+
+// Map of serialised cell_id key -> signalCallback for Holochain signal routing.
 // Key format: `${hex(dnaHash)}:${hex(agentPubkey)}`
 globalThis.__holochainSignalCallbacks__ = new Map();
 
@@ -82,8 +101,14 @@ function cellIdKey(cellId) {
  * Rust-side registry (so the central signal loop knows which language to target).
  */
 function registerSignalCallbacksForApp(appInfo, signalCallback, languageAddress) {
-    if (!signalCallback || !appInfo || !appInfo.cell_info) return;
+    if (!appInfo || !appInfo.cell_info) return;
 
+    // The Rust-side cell_id → languageAddress mapping is registered for
+    // EVERY app, regardless of whether the language passed a JS callback.
+    // Flat languages don't pass a callback (they expose handleHolochainSignal
+    // and rely on the globalThis.__handleHolochainSignal__ bridge installed
+    // by initLanguage); legacy factory languages pass a callback that goes
+    // into the JS-side dispatch map.
     for (const roleName of Object.keys(appInfo.cell_info)) {
         const cellInfos = appInfo.cell_info[roleName];
         for (const cellInfo of cellInfos) {
@@ -91,8 +116,10 @@ function registerSignalCallbacksForApp(appInfo, signalCallback, languageAddress)
             const inner = cellInfo.provisioned || cellInfo.cloned || cellInfo.stem || cellInfo.value;
             if (!inner || !inner.cell_id) continue;
             const key = cellIdKey(inner.cell_id);
-            globalThis.__holochainSignalCallbacks__.set(key, signalCallback);
-            // Also notify Rust so the central signal loop can route to this language
+            if (signalCallback) {
+                globalThis.__holochainSignalCallbacks__.set(key, signalCallback);
+            }
+            // Notify Rust so the central signal loop can route to this language
             LANGUAGE_CONTROLLER.registerHolochainSignalHandler(key, languageAddress);
         }
     }
@@ -174,6 +201,10 @@ function createHolochainDelegate(languageAddress) {
                 } else if (dna.file) {
                     // Raw hApp bytes (e.g. perspective-diff-sync passes { file: Uint8Array })
                     source = { type: "bytes", value: new Uint8Array(dna.file) };
+                } else if (dna.bundle) {
+                    // Rust ALDK DnaSpec: { nick: string, bundle: Vec<u8> }
+                    // serializes to { nick, bundle: Uint8Array | number[] }
+                    source = { type: "bytes", value: new Uint8Array(dna.bundle) };
                 } else if (dna.path) {
                     source = { type: "path", value: dna.path };
                 } else {
@@ -274,15 +305,108 @@ async function initLanguage(contextJson) {
         didForUser: (userEmail) => AGENT.didForUser(userEmail),
     };
 
-    const fullContext = {
-        agent: agentProxy,
-        customSettings: context.customSettings,
-        storageDirectory: context.storageDirectory,
-        Holochain: holochainDelegate,
-        ad4mSignal: ad4mSignal,
-    };
+    const mod = globalThis.languageModule;
 
-    const language = await globalThis.languageConstructor(fullContext);
+    // Set globals for non-serializable delegates (WASM languages access these via globalThis)
+    globalThis.__holochainDelegate__ = holochainDelegate;
+    globalThis.__ad4mSignal__ = ad4mSignal;
+    globalThis.__agentProxy__ = agentProxy;
+
+    // init() takes NO arguments — context is accessed via the host
+    // import functions installed above. The language calls
+    // languageStorageDirectory(), languageAddress(), languageSettings()
+    // to get its storage dir, address, and settings from the runtime.
+    await mod.init();
+
+    // Build language instance from the module's named exports.
+    //
+    // Explicitly assign each top-level flat export onto the `language`
+    // object. `Object.assign({}, mod)` on a module namespace exotic
+    // object is observably flaky in Deno — the spread succeeds without
+    // error but cross-peer p-diff-sync stops propagating diffs, which
+    // points at a failed live-binding lookup on the namespace. Walking
+    // `mod` with a plain `in` check avoids the spread path entirely.
+    //
+    // Name/version are normalized because languages may expose them as
+    // plain string constants (the JS authoring style) or as zero-arg
+    // accessor functions (the Rust ALDK style — wasm-bindgen cannot
+    // emit string constants).
+    const readMaybeFn = (v, fallback) => {
+        if (typeof v === "function") return v();
+        return v ?? fallback;
+    };
+    const language = {};
+    const flatExportNames = [
+        // Lifecycle
+        "init", "teardown", "interactions", "isPublic",
+        // Expression capability
+        "expressionGet", "expressionCreate", "expressionAddressOf",
+        "isImmutableExpression", "expressionIcon", "expressionConstructorIcon",
+        "expressionInteract",
+        // Perspective-commit
+        "perspectiveCommit",
+        // Perspective-sync
+        "perspectiveSyncSync", "perspectiveSyncRender", "perspectiveSyncCurrentRevision",
+        // Perspective-query
+        "perspectiveQuerySupportedKinds", "perspectiveQueryRun",
+        // Peers
+        "peersSetLocal", "peersRemote",
+        // Telepresence
+        "telepresenceSetOnlineStatus", "telepresenceGetOnlineAgents",
+        "telepresenceSendSignal", "telepresenceSendBroadcast",
+        "telepresenceRegisterSignalCallback",
+        // Legacy callback-setter shape — still used by current bootstrap
+        // languages (p-diff-sync, centralized-p-diff-sync) until they are
+        // ported to call emitPerspectiveDiff() directly. The runtime
+        // wires LANGUAGE_CONTROLLER sinks into these in
+        // register_callbacks().
+        "linkSyncAddCallback", "linkSyncRemoveCallback",
+        "linkSyncAddSyncStateChangeCallback",
+        // Other optional adapters
+        "languageGetSource", "getByAuthor", "getAll", "settingsIcon",
+        // Holochain signal routing — also installed on globalThis below
+        "handleHolochainSignal",
+    ];
+    for (const key of flatExportNames) {
+        const v = mod[key];
+        if (v !== undefined) {
+            language[key] = v;
+        }
+    }
+    language.name = readMaybeFn(mod.name, "unknown");
+    language.version = readMaybeFn(mod.version, undefined);
+
+    // Holochain signal bridge — `rust-executor/src/lib.rs` dispatches
+    // signals by evaluating `await globalThis.__handleHolochainSignal__(args)`
+    // in the language's isolate scope. Install the bridge here so
+    // languages declaring a `handleHolochainSignal` export actually
+    // receive signals. The bridge accepts the runtime's
+    // `{ cell_id, zome_name, payload }` shape and forwards it.
+    if (typeof mod.handleHolochainSignal === "function") {
+        language.handleHolochainSignal = mod.handleHolochainSignal;
+        globalThis.__handleHolochainSignal__ = async (signal) => {
+            // Convert __binary markers to Uint8Array, same as the default
+            // signal handler does above. Without this, languages receive
+            // raw {__binary:[...]} objects instead of Uint8Array for
+            // Holochain hashes and binary data.
+            if (signal && signal.payload) {
+                signal.payload = convertBinaryMarkers(signal.payload);
+            }
+            return await mod.handleHolochainSignal(signal);
+        };
+    }
+
+    // Teardown — wrap the language's own teardown (if any) in an async
+    // function so the runtime can always `await language.teardown()`.
+    if (mod.teardown) {
+        const originalTeardown = mod.teardown;
+        language.teardown = async () => {
+            await originalTeardown();
+        };
+    } else {
+        language.teardown = async () => {};
+    }
+
     globalThis.__ad4m_language_instance__ = language;
     globalThis.language = language;
     return language;

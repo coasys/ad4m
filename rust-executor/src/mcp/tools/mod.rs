@@ -36,9 +36,9 @@ use crate::agent::capabilities::{
     capabilities_from_token, check_capability, defs::PERSPECTIVE_CREATE_CAPABILITY, Capability,
 };
 use crate::agent::AgentContext;
-use crate::graphql::graphql_types::PerspectiveHandle;
 use crate::perspectives::get_perspective;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::types::PerspectiveHandle;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext},
     model::{
@@ -220,7 +220,7 @@ impl Ad4mMcpHandler {
         }
 
         // 4. No admin credential configured and no token → single-user local mode
-        //    (mirrors GraphQL localhost trust model)
+        //    (mirrors REST localhost trust model)
         if admin_cred.is_none() && session_token.is_empty() && http_header_value.is_none() {
             return true;
         }
@@ -369,7 +369,7 @@ impl Ad4mMcpHandler {
         }
     }
 
-    /// Get capabilities from the stored auth token (reuses same logic as GraphQL RequestContext)
+    /// Get capabilities from the stored auth token (reuses same logic as REST RequestContext)
     pub(crate) async fn get_capabilities(&self) -> Result<Vec<Capability>, String> {
         let token = self.get_auth_token().await;
         let admin_cred = self.context.admin_credential.clone();
@@ -408,7 +408,7 @@ impl Ad4mMcpHandler {
     /// In single-user mode, all perspectives are accessible.
     pub(crate) async fn can_access_perspective(&self, perspective: &PerspectiveHandle) -> bool {
         let user_email = self.get_user_email().await;
-        crate::graphql::query_resolvers::can_access_perspective(&user_email, perspective)
+        crate::helpers::can_access_perspective(&user_email, perspective)
     }
 
     /// Get a perspective by ID, verifying the agent is authenticated, has the required capability,
@@ -448,7 +448,7 @@ impl Ad4mMcpHandler {
     /// perspective ownership. This prevents unauthenticated clients from reading main-agent
     /// perspectives by exploiting the "no JWT → main agent context" fallback.
     ///
-    /// In single-user mode (no admin_credential), behaviour mirrors GraphQL: local trust model,
+    /// In single-user mode (no admin_credential), behaviour mirrors REST: local trust model,
     /// unauthenticated access is allowed (same as GQL localhost behaviour).
     pub(crate) async fn get_readable_perspective(
         &self,
@@ -536,7 +536,7 @@ impl Ad4mMcpHandler {
     ) -> Vec<crate::types::DecoratedLinkExpression> {
         let (encoded, raw) = Self::shacl_name_variants(class_name);
         let links = perspective
-            .get_links(&crate::graphql::graphql_types::LinkQuery {
+            .get_links(&crate::types::LinkQuery {
                 source: Some(encoded),
                 predicate: Some("ad4m://shacl_shape_uri".to_string()),
                 ..Default::default()
@@ -547,7 +547,7 @@ impl Ad4mMcpHandler {
             return links;
         }
         perspective
-            .get_links(&crate::graphql::graphql_types::LinkQuery {
+            .get_links(&crate::types::LinkQuery {
                 source: Some(raw),
                 predicate: Some("ad4m://shacl_shape_uri".to_string()),
                 ..Default::default()

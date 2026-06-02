@@ -7,7 +7,7 @@ Model classes in AD4M provide a way to define, store, and query structured data 
 
 ## Quick Start
 
-There are two ways to create model classes in AD4M:
+There are three ways to create model classes in AD4M:
 
 ### Option 1: Using Decorators (Recommended)
 
@@ -43,7 +43,110 @@ const cake = await Recipe.create(perspective, {
 });
 ```
 
-### Option 2: From JSON Schema (Dynamic)
+### Option 2: From a SHACL Shape (Dynamic)
+
+When a perspective already carries a SHACL shape — for example, a shape installed by another app or recovered via `perspective.getClassShape()` / `perspective.getAllShacl()` — you can hydrate a working model class straight from it. No predicate inference is needed: every property's URI is read directly from the shape.
+
+```typescript
+import { Ad4mModel } from '@coasys/ad4m';
+
+// Fetch the SHACL shape from a perspective that already has it registered
+const { shape } = (await perspective.getAllShacl())
+  .find(s => s.name === "Recipe")!;
+
+// Synthesise a fully functional model class from the shape
+const Recipe = Ad4mModel.fromSHACL(shape, "Recipe");
+
+// Use exactly like decorator-based models
+const recipes = await Recipe.findAll(perspective);
+```
+
+This is how AD4M tooling (the MCP server, the CLI, the management UI) discovers models at runtime without ever importing application code.
+
+#### The Wire Format: JSON and Turtle
+
+A `SHACLShape` is not just an in-process JavaScript object. It also has two serialized forms that make a shape portable beyond the app that defined it:
+
+- **JSON** — the format used over the wire between the client and the AD4M executor. Every `addSdna` / `addSubjectClass` RPC carries a `shaclJson` string. This is the format you want to ship a shape between apps, store it in a config file, paste it into a Neighbourhood definition, or generate from another tool.
+- **Turtle** — the standard W3C SHACL serialization (RDF Turtle). Export-only in the client today (no `fromTurtle` round-trip yet), but useful for sharing shapes with non-AD4M tooling and for human-readable review.
+
+Both are produced by the same `SHACLShape`:
+
+```typescript
+import { SHACLShape } from '@coasys/ad4m';
+
+const { shape } = (await perspective.getAllShacl()).find(s => s.name === "Recipe")!;
+
+const json    = shape.toJSON();     // structured object, JSON.stringify-able
+const turtle  = shape.toTurtle();   // W3C SHACL Turtle string
+```
+
+A minimal shape's JSON form looks like this:
+
+```json
+{
+  "node_shape_uri": "shacl://Recipe",
+  "target_class": "recipe://Recipe",
+  "properties": [
+    {
+      "path": "recipe://name",
+      "name": "name",
+      "datatype": "xsd:string",
+      "min_count": 1,
+      "max_count": 1
+    },
+    {
+      "path": "recipe://ingredient",
+      "name": "ingredients"
+    }
+  ],
+  "constructor_actions": [
+    { "action": "addLink", "source": "this", "predicate": "rdf://type", "target": "recipe://Recipe" }
+  ]
+}
+```
+
+The same shape in Turtle:
+
+```turtle
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix ad4m: <ad4m://> .
+
+<shacl://Recipe>
+  a sh:NodeShape ;
+  sh:targetClass <recipe://Recipe> ;
+  sh:property [
+    sh:path <recipe://name> ;
+    sh:datatype <xsd:string> ;
+    sh:minCount 1 ;
+    sh:maxCount 1
+  ] ;
+  sh:property [
+    sh:path <recipe://ingredient>
+  ] .
+```
+
+#### Installing a Shape From JSON (No Decorated Class)
+
+Because the JSON form is exactly what the executor consumes over RPC, an app — or a CLI script, or a foreign client written in another language — can install a subject class **without ever importing a decorated TypeScript model**:
+
+```typescript
+// shape received over the wire / loaded from a file / fetched from a registry
+const shapeJson = JSON.parse(await readFile("recipe.shacl.json", "utf8"));
+
+// Install it directly on a perspective
+await perspective.addSubjectClass("Recipe", JSON.stringify(shapeJson));
+
+// Optionally, hydrate a model class from it for ergonomic access
+const shape = SHACLShape.fromJSON(shapeJson);
+const Recipe = Ad4mModel.fromSHACL(shape, "Recipe");
+const recipes = await Recipe.findAll(perspective);
+```
+
+This is the canonical path for sharing schemas across apps: the publisher serializes a shape to JSON (or Turtle for documentation), the consumer installs it with `addSubjectClass`, and from then on both apps read and write the same Subject Class against the same Perspective.
+
+### Option 3: From JSON Schema (Dynamic)
 
 Perfect for integrating with external systems or when you have existing JSON Schema definitions:
 
@@ -117,7 +220,7 @@ class Recipe extends Ad4mModel {
   // identifier; the actual value comes from the custom `getter` expression.
   @ReadOnly({
     through: "recipe://rating",
-    getter: `math::mean(->link[WHERE predicate = 'recipe://user_rating'].out.uri)`
+    getter: `SELECT (AVG(xsd:decimal(?rating)) AS ?value) WHERE { <Base> <recipe://user_rating> ?rating . }`
   })
   averageRating: number = 0;
 }
@@ -142,7 +245,7 @@ class Recipe extends Ad4mModel {
 | `resolveLanguage` | `string` | `"literal"` | Language used to resolve the stored value. Use `"literal"` for simple values, or a Language address for richer content |
 | `initial` | `any` | — | Default value written on creation. When `required: true` with no `initial`, the framework uses a sentinel value (`"literal://string:uninitialized"`) |
 | `local` | `boolean` | `false` | Store locally only — not synced to the network. Useful for user preferences or draft state |
-| `getter` | `string` | — | Raw SurrealQL expression for computed values. `Base` is replaced with the instance's node ID at query time. Mutually exclusive with regular storage |
+| `getter` | `string` | — | SPARQL SELECT expression for computed values. `<Base>` is replaced with the instance's URI at query time. Mutually exclusive with regular storage |
 | `transform` | `(value: any) => any` | — | Post-retrieval transformation function, called after the value is hydrated |
 
 You can also use the `@Optional` decorator as an alias for `@Property` with `required: false` (the default), if you want to be explicit:
@@ -154,20 +257,17 @@ description?: string;
 
 #### The `getter` option in detail
 
-The `getter` option accepts a raw SurrealQL expression. The framework wraps it as:
-```sql
-SELECT ({getter}) AS value FROM node WHERE uri = {instanceId}
-```
-
-Use `Base` as a placeholder for the current instance's node — it gets replaced at query time:
+The `getter` option accepts a SPARQL SELECT expression that returns a single `?value` binding. The placeholder `<Base>` is replaced with the instance's URI at query time:
 
 ```typescript
 @ReadOnly({
   through: "recipe://rating",
-  getter: `math::mean(Base->link[WHERE predicate = 'recipe://user_rating'].out.uri)`
+  getter: `SELECT (AVG(xsd:decimal(?rating)) AS ?value) WHERE { <Base> <recipe://user_rating> ?rating . }`
 })
 averageRating: number = 0;
 ```
+
+
 
 #### The `transform` option
 
@@ -400,7 +500,7 @@ The SHACL shape is stored as links in the perspective graph, making it discovera
 | `ad4m://initial` | Default value on instance creation |
 | `ad4m://resolveLanguage` | Expression language for value resolution |
 | `ad4m://readOnly` | Read-only computed property |
-| `ad4m://getter` | SurrealQL getter for conformance filtering |
+| `ad4m://getter` | SPARQL getter for conformance filtering |
 | `ad4m://conformanceConditions` | Structured filter conditions for relation targets |
 
 AD4M extends standard SHACL with `ad4m://` predicates for features specific to the AD4M runtime (initial values, language resolution, write permissions).
@@ -536,7 +636,7 @@ console.log(recent[0].updatedAt); // 1709136000000
 ### Basic Queries
 
 ```typescript
-// Get all (uses SurrealDB by default — 10-100x faster than Prolog)
+// Get all
 const allRecipes = await Recipe.findAll(perspective);
 
 // With conditions
@@ -686,27 +786,36 @@ const comments = await Comment.query(perspective)
   .get();
 ```
 
-### SurrealDB vs Prolog
+### Query Engine
 
-`Ad4mModel` uses **SurrealDB by default** for all query operations, providing **10-100x faster performance** compared to the legacy Prolog engine.
+`Ad4mModel` uses the **SPARQL query engine** for all query operations. The executor compiles queries to SPARQL for Oxigraph to execute, then hydrates results back into model instances.
 
 ```typescript
-// Uses SurrealDB by default (fast!)
+// All queries execute server-side via SPARQL
 const recipes = await Recipe.findAll(perspective, { where: { rating: { gt: 4 } } });
-
-// Explicitly use Prolog if needed (for backward compatibility)
-const recipesProlog = await Recipe.findAll(perspective, {
-  where: { rating: { gt: 4 } }
-}, false); // useSurrealDB = false
-
-// Or on the query builder
-const recipesProlog = await Recipe.query(perspective)
-  .where({ rating: { gt: 4 } })
-  .useSurrealDB(false)
-  .get();
 ```
 
-For advanced graph traversal queries and direct SurrealQL access, see the [SurrealDB Queries Guide](/developer-guides/surreal-queries).
+For advanced graph traversal and direct SPARQL access, see the [SPARQL Queries Guide](/developer-guides/sparql-queries).
+
+### PerspectiveProxy Introspection APIs
+
+You can introspect registered model classes at runtime:
+
+```typescript
+// List all registered model classes in this perspective
+const classes = await perspective.listRegisteredClasses();
+// ["Recipe", "Comment", "Chef"]
+
+// Get the SHACL shape for a class
+const shape = await perspective.getClassShape("Recipe");
+// Returns the full SHACL shape definition
+
+// Get enum options for a property (sh:in constraints)
+const options = await perspective.getClassOptions("Recipe", "difficulty");
+// [{ value: "easy", label: "Easy" }, { value: "medium", label: "Medium" }, ...]
+```
+
+These APIs are useful for building dynamic UIs, tooling, and AI agent integrations that need to discover available data models at runtime.
 
 ### Real-time Subscriptions
 
@@ -767,10 +876,10 @@ For lower-level batch control, see the [Batch Operations Guide](/developer-guide
 | `update` | `update(perspective, id, data)` | Fetch by ID, merge data, save |
 | `delete` | `delete(perspective, id)` | Delete by ID with incoming link cleanup |
 | `remove` | `remove(perspective, id)` | *Deprecated* — alias for `delete` |
-| `findAll` | `findAll(perspective, query?, useSurrealDB?)` | Query all matching instances |
-| `findOne` | `findOne(perspective, query?, useSurrealDB?)` | First matching instance or `null` |
-| `findAllAndCount` | `findAllAndCount(perspective, query?, useSurrealDB?)` | Results + total count |
-| `paginate` | `paginate(perspective, pageSize, page, query?, useSurrealDB?)` | Paginated results |
+| `findAll` | `findAll(perspective, query?)` | Query all matching instances |
+| `findOne` | `findOne(perspective, query?)` | First matching instance or `null` |
+| `findAllAndCount` | `findAllAndCount(perspective, query?)` | Results + total count |
+| `paginate` | `paginate(perspective, pageSize, page, query?)` | Paginated results |
 | `register` | `register(perspective)` | Install the SHACL schema in the perspective |
 | `transaction` | `transaction(perspective, fn)` | Atomic batch operation |
 | `query` | `query(perspective)` | Returns a `ModelQueryBuilder` |
@@ -833,7 +942,7 @@ class TaskBoard extends Ad4mModel {
 | `target: () => Model` | Auto-generates conformance filter from model shape |
 | `where: { ... }` | Value-based filtering using query DSL |
 | `filter: false` | Opt out of auto-filtering even when `target` is set |
-| `getter: "..."` | Raw SurrealQL getter (escape hatch, mutually exclusive with `target`/`through`) |
+| `getter: "..."` | Raw SPARQL getter (escape hatch, mutually exclusive with `target`/`through`) |
 
 ## Model Inheritance
 
@@ -1044,29 +1153,29 @@ const BlogPost = Ad4mModel.fromJSONSchema(schema) as typeof Ad4mModel & {
    reviews: string[] = [];
    ```
 
-4. **Query Optimization**: Use specific queries instead of filtering in memory, and leverage SurrealDB's performance:
+4. **Query Optimization**: Use specific queries instead of filtering in memory:
    ```typescript
-   // Good - Let SurrealDB do the filtering (fast)
+   // Good - Let the query engine do the filtering server-side
    const topRated = await Recipe.query(perspective)
      .where({ rating: { gt: 4 } })
      .get();
    
-   // Bad - Fetching all and filtering in memory (slow)
+   // Bad - Fetching all and filtering in memory
    const all = await Recipe.findAll(perspective);
    const topRated = all.filter(r => r.rating > 4);
    ```
 
-5. **Use SurrealDB by Default**: SurrealDB is 10-100x faster than Prolog for most queries:
+5. **Use the `options` Parameter for Enums**: Define constrained choices with `sh:in` semantics:
    ```typescript
-   // Good - Uses SurrealDB by default
-   const recipes = await Recipe.findAll(perspective, {
-     where: { rating: { gt: 4 } }
-   });
-   
-   // Only use Prolog if you need backward compatibility
-   const recipesProlog = await Recipe.findAll(perspective, {
-     where: { rating: { gt: 4 } }
-   }, false); // useSurrealDB = false
+   @Property({
+     through: "recipe://difficulty",
+     options: [
+       { value: "easy", label: "Easy" },
+       { value: "medium", label: "Medium" },
+       { value: "hard", label: "Hard" }
+     ]
+   })
+   difficulty: string = "medium";
    ```
 
 6. **Subscriptions**: Clean up subscriptions when they're no longer needed:

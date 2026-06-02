@@ -397,4 +397,98 @@ describe('SHACLShape', () => {
       expect(prop.remover).toEqual(original.properties[0].remover);
     });
   });
+
+  describe('sh:in round-trip', () => {
+    it('preserves sh:in enum values through toLinks() → fromLinks()', () => {
+      const original = new SHACLShape('test://Model');
+      original.addProperty({
+        name: 'status',
+        path: 'test://status',
+        datatype: 'xsd:string',
+        in: [
+          { value: 'active', label: 'Active' },
+          { value: 'inactive', label: 'Inactive' },
+          { value: 'archived' },
+        ],
+      });
+
+      const links = original.toLinks();
+
+      // Verify sh:in link was created
+      const inLink = links.find(l => l.predicate === 'sh://in');
+      expect(inLink).toBeDefined();
+      expect(inLink!.target).toContain('literal:string:');
+
+      // Reconstruct and verify
+      const reconstructed = SHACLShape.fromLinks(links, 'test://ModelShape');
+      expect(reconstructed.properties[0].in).toBeDefined();
+      expect(reconstructed.properties[0].in).toEqual([
+        { value: 'active', label: 'Active' },
+        { value: 'inactive', label: 'Inactive' },
+        { value: 'archived' },
+      ]);
+    });
+
+    it('handles sh:in with special characters in values', () => {
+      const original = new SHACLShape('test://Model');
+      original.addProperty({
+        name: 'category',
+        path: 'test://category',
+        in: [
+          { value: 'food & drink', label: 'Food & Drink' },
+          { value: 'arts/crafts' },
+        ],
+      });
+
+      const links = original.toLinks();
+      const reconstructed = SHACLShape.fromLinks(links, 'test://ModelShape');
+      expect(reconstructed.properties[0].in).toEqual(original.properties[0].in);
+    });
+
+    it('handles sh:in with empty array (no link created)', () => {
+      const original = new SHACLShape('test://Model');
+      original.addProperty({
+        name: 'field',
+        path: 'test://field',
+        in: [],
+      });
+
+      const links = original.toLinks();
+      const inLink = links.find(l => l.predicate === 'sh://in');
+      expect(inLink).toBeUndefined();
+    });
+
+    it('handles sh:in with literal://string: prefix variant', () => {
+      // fromLinks should handle both `literal:string:` and `literal://string:` prefixes
+      const links = [
+        { source: 'test://ModelShape', predicate: 'sh://targetClass', target: 'test://Model' },
+        { source: 'test://ModelShape', predicate: 'sh://property', target: 'test://Model.status' },
+        { source: 'test://Model.status', predicate: 'sh://path', target: 'test://status' },
+        { source: 'test://Model.status', predicate: 'sh://in', target: 'literal://string:[{"value":"a"},{"value":"b"}]' },
+      ];
+
+      const reconstructed = SHACLShape.fromLinks(links, 'test://ModelShape');
+      expect(reconstructed.properties[0].in).toEqual([
+        { value: 'a' },
+        { value: 'b' },
+      ]);
+    });
+
+    it('preserves sh:in through toJSON() → fromJSON()', () => {
+      const original = new SHACLShape('test://Model');
+      original.addProperty({
+        name: 'priority',
+        path: 'test://priority',
+        in: [
+          { value: 'high', label: 'High' },
+          { value: 'medium', label: 'Medium' },
+          { value: 'low', label: 'Low' },
+        ],
+      });
+
+      const json = original.toJSON();
+      const reconstructed = SHACLShape.fromJSON(json);
+      expect(reconstructed.properties[0].in).toEqual(original.properties[0].in);
+    });
+  });
 });

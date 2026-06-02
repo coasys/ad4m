@@ -1,15 +1,15 @@
 import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
-import { rmSync } from "node:fs";
-import { GraphQLWsLink } from "@apollo/client/link/subscriptions/index.js";
-import { ApolloClient, InMemoryCache, gql } from "@apollo/client/core/index.js";
-import Websocket from "ws";
-import { createClient } from "graphql-ws";
+import { mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { createHash } from "node:crypto";
+import os from "node:os";
 import path from "path";
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// WebSocket is available natively in Node 21+.
 
 export async function isProcessRunning(processName: string): Promise<boolean> {
     const cmd = (() => {
@@ -105,6 +105,15 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
             const dataStr = data.toString();
             stderrBuffer.push(dataStr);
             console.log("Bootstrap server stderr: ", dataStr);
+
+            if (!resolved && dataStr.includes('command not found')) {
+                resolved = true;
+                cleanup();
+                try {
+                    servicesProcess.kill('SIGKILL');
+                } catch {}
+                reject(new Error(`kitsune2-bootstrap-srv unavailable: ${dataStr.trim()}`));
+            }
         };
 
         servicesProcess.stdout!.on('data', stdoutHandler);
@@ -144,7 +153,7 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
 
 export async function startExecutor(dataPath: string,
     bootstrapSeedPath: string,
-    gqlPort: number,
+    apiPort: number,
     hcAdminPort: number,
     hcAppPort: number,
     languageLanguageOnly: boolean = false,
@@ -157,11 +166,27 @@ export async function startExecutor(dataPath: string,
 ): Promise<ChildProcess> {
     const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
 
+    const effectiveDataPath = path.join(
+        os.tmpdir(),
+        `ad4m-${createHash('sha1').update(dataPath).digest('hex').slice(0, 12)}`,
+    );
+
     console.log(bootstrapSeedPath);
     console.log(dataPath);
+    if (effectiveDataPath !== dataPath) {
+        console.log(`Using shortened executor data path: ${effectiveDataPath}`);
+    }
     let executorProcess = null as ChildProcess | null;
     rmSync(dataPath, { recursive: true, force: true })
-    execSync(`${command} init --data-path ${dataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
+    rmSync(effectiveDataPath, { recursive: true, force: true })
+    execSync(`${command} init --data-path ${effectiveDataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
+
+    // Symlink legacy dataPath → effectiveDataPath so test helpers that
+    // reference the original path (e.g. injectPublishingAgent.js) still work.
+    if (effectiveDataPath !== dataPath) {
+        mkdirSync(path.dirname(dataPath), { recursive: true });
+        symlinkSync(effectiveDataPath, dataPath);
+    }
     
     console.log("Starting executor")
 
@@ -176,8 +201,8 @@ export async function startExecutor(dataPath: string,
     // spawn() runs the binary directly, so kill() / SIGKILL actually reach it.
     const args = [
         'run',
-        '--app-data-path', dataPath,
-        '--gql-port', String(gqlPort),
+        '--app-data-path', effectiveDataPath,
+        '--port', String(apiPort),
         '--hc-admin-port', String(hcAdminPort),
         '--hc-app-port', String(hcAppPort),
         '--hc-proxy-url', proxyUrl,
@@ -196,20 +221,31 @@ export async function startExecutor(dataPath: string,
 
     executorProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let executorReady = new Promise<void>((resolve, reject) => {
-        const waitFor = enableMcp
-            ? [`listening on http://127.0.0.1:${gqlPort}`, 'MCP HTTP server listening']
-            : [`listening on http://127.0.0.1:${gqlPort}`];
-        const found = new Set<string>();
+        // REST branch no longer emits the old `listening on http://127.0.0.1:<port>`
+        // marker consistently. Accept either the legacy marker or the REST startup log so tests
+        // can run against both pre-REST and REST executors.
+        const legacyApiMarker = `listening on http://127.0.0.1:${apiPort}`;
+        const restApiMarker = `API server starting on http://127.0.0.1:${apiPort}/api/v1`;
+        const mcpMarker = 'MCP HTTP server listening';
+        let apiReady = false;
+        let mcpReady = !enableMcp;
+        let resolved = false;
 
-        const checkReady = (data: string) => {
-            for (const marker of waitFor) {
-                if (data.includes(marker)) {
-                    found.add(marker);
-                }
-            }
-            if (found.size === waitFor.length) {
+        const maybeResolve = () => {
+            if (!resolved && apiReady && mcpReady) {
+                resolved = true;
                 resolve();
             }
+        };
+
+        const checkReady = (data: string) => {
+            if (data.includes(legacyApiMarker) || data.includes(restApiMarker)) {
+                apiReady = true;
+            }
+            if (enableMcp && data.includes(mcpMarker)) {
+                mcpReady = true;
+            }
+            maybeResolve();
         };
 
         executorProcess!.stdout!.on('data', (data: any) => checkReady(data.toString()));
@@ -228,44 +264,8 @@ export async function startExecutor(dataPath: string,
     return executorProcess;
 }
 
-export function apolloClient(port: number, token?: string): ApolloClient<any> {
-    //@ts-ignore
-    const wsLink = new GraphQLWsLink(createClient({
-        url: `ws://127.0.0.1:${port}/graphql`,
-        webSocketImpl: Websocket,
-        connectionParams: () => {
-            return {
-                headers: {
-                    authorization: token || ""
-                }
-            }
-        },
-    }));
-    wsLink.client.on('message' as any, (data: any) => {
-        if (data.payload) {
-            if (data.payload.errors) {
-                console.dir(data.payload.errors, { depth: null });
-            }
-        }
-    });
-
-    let client = new ApolloClient({
-        link: wsLink,
-        cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
-        defaultOptions: {
-            watchQuery: {
-                fetchPolicy: "no-cache",
-            },
-            query: {
-                fetchPolicy: "no-cache",
-            },
-            mutate: {
-                fetchPolicy: "no-cache"
-            }
-        },
-    });
-
-    return client;
+export function baseUrl(port: number): string {
+    return `http://127.0.0.1:${port}`;
 }
 
 export function sleep(ms: number) {
@@ -358,31 +358,44 @@ export async function gracefulShutdown(proc: ChildProcess | null | undefined, la
 }
 
 /**
- * Gracefully quit an executor by sending the runtimeQuit GraphQL mutation,
+ * Gracefully quit an executor by calling the REST runtime quit endpoint,
  * then falling back to gracefulShutdown (SIGTERM → SIGKILL) if needed.
  */
 export async function quitExecutor(
     executorProcess: ChildProcess,
-    gqlPort: number,
+    apiPort: number,
     adminCredential?: string,
     timeoutMs: number = 8000,
 ): Promise<void> {
     if (executorProcess.exitCode !== null) return;
 
-    // Fire the runtimeQuit mutation. The executor calls process::exit(0) which
-    // kills it before it can send a GraphQL response, so we'll get a WebSocket
-    // close error — that's expected.
+    // The REST runtime quit endpoint returns before scheduling process exit.
+    // If the connection drops while the executor is exiting, that's expected.
     try {
-        const client = apolloClient(gqlPort, adminCredential);
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+        };
+        if (adminCredential !== undefined) {
+            headers['Authorization'] = `Bearer ${adminCredential}`;
+        }
+
         await Promise.race([
-            client.mutate({ mutation: gql`mutation { runtimeQuit }` }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('runtimeQuit timeout')), 3000)),
+            fetch(`http://127.0.0.1:${apiPort}/api/v1/runtime/quit`, {
+                method: 'POST',
+                headers,
+            }).then(async (res) => {
+                if (!res.ok) {
+                    throw new Error(await res.text());
+                }
+                return res;
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('runtime quit timeout')), 3000)),
         ]);
     } catch (_e) {
-        // Expected: connection dropped or timed out
+        // Expected: connection dropped or timed out while the executor is exiting.
     }
 
-    // Wait for natural exit after runtimeQuit
+    // Wait for natural exit after runtime quit
     const exited = await new Promise<boolean>((resolve) => {
         if (executorProcess.exitCode !== null) { resolve(true); return; }
         const timer = setTimeout(() => resolve(false), timeoutMs);
@@ -390,8 +403,8 @@ export async function quitExecutor(
     });
 
     if (!exited) {
-        // runtimeQuit didn't work — fall back to SIGTERM/SIGKILL escalation
-        console.warn(`quitExecutor: executor (port ${gqlPort}) still running after runtimeQuit, falling back to gracefulShutdown`);
-        await gracefulShutdown(executorProcess, `executor:${gqlPort}`);
+        // runtime quit didn't work — fall back to SIGTERM/SIGKILL escalation
+        console.warn(`quitExecutor: executor (port ${apiPort}) still running after runtime quit, falling back to gracefulShutdown`);
+        await gracefulShutdown(executorProcess, `executor:${apiPort}`);
     }
 }

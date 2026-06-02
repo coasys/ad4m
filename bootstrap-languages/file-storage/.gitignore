@@ -14,6 +14,9 @@ ad4m-test.log
 yarn-error.log
 
 !dna.js
+!happ.js
 
 !rollup.config*
 build/dna.js
+build/happ.js
+hc-dna/workdir/*.happ

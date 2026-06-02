@@ -4,11 +4,11 @@
 
 use super::Ad4mMcpHandler;
 use crate::agent::capabilities::defs::PERSPECTIVE_CREATE_CAPABILITY;
-use crate::graphql::graphql_types::{LinkQuery, LinkStatus, PerspectiveHandle};
 use crate::perspectives::perspective_instance::SdnaType;
 use crate::perspectives::utils::prolog_resolution_to_string;
 use crate::perspectives::{add_perspective, all_perspectives};
 use crate::types::Link;
+use crate::types::{LinkQuery, LinkStatus, PerspectiveHandle};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -177,7 +177,7 @@ impl Ad4mMcpHandler {
             return format!("Capability error: {}", e);
         }
 
-        // In multi-user mode, set the creating user as owner (reuses GraphQL pattern)
+        // In multi-user mode, set the creating user as owner (reuses REST pattern)
         let user_email = self.get_user_email().await;
         let owner_did = if let Some(email) = &user_email {
             crate::agent::AgentService::get_user_did_by_email(email).ok()

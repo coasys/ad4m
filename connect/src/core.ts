@@ -1,7 +1,4 @@
-import { ApolloClient, InMemoryCache, NormalizedCacheObject } from "@apollo/client/core";
-import { createClient, Client as WSClient } from "graphql-ws";
-import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
-import { isEmbedded, setLocal, getLocal, removeLocal, connectWebSocket } from './utils';
+import { isEmbedded, setLocal, getLocal, removeLocal, checkConnection, wsUrlToHttpBase } from './utils';
 import { Ad4mClient, VerificationRequestResult } from "@coasys/ad4m";
 import autoBind from "auto-bind";
 
@@ -22,9 +19,11 @@ export default class Ad4mConnect extends EventTarget {
   connectionState: ConnectionStates = "not-connected";
   authState: AuthStates = "unauthenticated";
   ad4mClient?: Ad4mClient;
-  wsClient?: WSClient;
-  apolloClient?: ApolloClient<NormalizedCacheObject>;
-  activeSocket: WebSocket | null = null;
+  /** HTTP base URL (normalizes legacy ws:// URLs from localStorage) */
+  get baseUrl(): string {
+    return wsUrlToHttpBase(this.url);
+  }
+
   requestId?: string;
   requestedRestart: boolean = false;
 
@@ -44,7 +43,7 @@ export default class Ad4mConnect extends EventTarget {
   
     this.options = options;
     this.port = options.port || parseInt(getLocal("ad4m-port")) || DEFAULT_PORT
-    this.url = options.url || getLocal("ad4m-url") || `ws://localhost:${this.port}/graphql`;
+    this.url = options.url || getLocal("ad4m-url") || `http://localhost:${this.port}`;
     this.token = getLocal("ad4m-token") || '';
     this.embedded = isEmbedded();
     this.hostIndexUrl = options.hostIndexUrl || DEFAULT_INDEX_URL;
@@ -79,32 +78,49 @@ export default class Ad4mConnect extends EventTarget {
       console.log('[Ad4m Connect] Embedded mode - waiting for AD4M config via postMessage');
       
       return new Promise((resolve, reject) => {
-        // Set up 30 second timeout
-        const timeout = setTimeout(() => {
-          reject(new Error('Timeout waiting for AD4M config from parent window'));
+        // The 30-second timeout only guards waiting for AD4M_CONFIG_ACK — the parent
+        // acknowledging that it received our request and is alive. Once the ACK arrives
+        // we know auth is in progress and we wait indefinitely for the actual AD4M_CONFIG
+        // (the user may take several minutes to complete the auth flow).
+        const ackTimeout = setTimeout(() => {
+          window.removeEventListener('message', handleAck);
+          reject(new Error('Timeout waiting for AD4M_CONFIG_ACK from parent window (is the app running inside we-web?)'));
         }, 30000);
-        
-        // Store resolvers to call when AD4M_CONFIG arrives
+
+        const handleAck = (event: MessageEvent) => {
+          if (event.data?.type === 'AD4M_CONFIG_ACK' && event.source === window.parent) {
+            clearTimeout(ackTimeout);
+            window.removeEventListener('message', handleAck);
+            console.log('[Ad4m Connect] Received AD4M_CONFIG_ACK — parent is alive, waiting for config after auth');
+          }
+        };
+        window.addEventListener('message', handleAck);
+
+        // Store resolvers to call when AD4M_CONFIG arrives (via initializeEmbeddedMode listener)
         this.embeddedResolve = (client: Ad4mClient) => {
-          clearTimeout(timeout);
+          clearTimeout(ackTimeout);
+          window.removeEventListener('message', handleAck);
           console.log('[Ad4m Connect] Successfully connected in embedded mode');
           resolve(client);
         };
         
         this.embeddedReject = (error: Error) => {
-          clearTimeout(timeout);
+          clearTimeout(ackTimeout);
+          window.removeEventListener('message', handleAck);
           reject(error);
         };
         
         // If we already have a client (message arrived before connect() was called)
         if (this.ad4mClient) {
           if (this.authState === 'authenticated') {
-            clearTimeout(timeout);
+            clearTimeout(ackTimeout);
+            window.removeEventListener('message', handleAck);
             console.log('[Ad4m Connect] Client already initialized in embedded mode');
             resolve(this.ad4mClient);
           } else {
             // Auth already failed before connect() was called
-            clearTimeout(timeout);
+            clearTimeout(ackTimeout);
+            window.removeEventListener('message', handleAck);
             reject(new Error(`Embedded auth state: ${this.authState}`));
           }
         }
@@ -113,9 +129,9 @@ export default class Ad4mConnect extends EventTarget {
 
     // Standalone mode - connect directly
     try {
-      await connectWebSocket(this.url);
+      await checkConnection(this.baseUrl);
       setLocal("ad4m-url", this.url);
-      this.ad4mClient = await this.buildClient();
+      this.ad4mClient = this.buildClient();
       await this.checkAuth();
       return this.ad4mClient;
     } catch (error) {
@@ -125,107 +141,63 @@ export default class Ad4mConnect extends EventTarget {
     }
   }
 
-  private async buildClient(): Promise<Ad4mClient> {
+  private buildClient(): Ad4mClient {
     this.notifyConnectionChange("connecting");
 
-    if (this.apolloClient && this.wsClient) {
-      this.requestedRestart = true;
-      this.wsClient.dispose();
-      this.apolloClient.stop();
-      this.wsClient = null;
-      this.apolloClient = null;
+    // Close old client's WebSocket connections to avoid connection pool exhaustion
+    if (this.ad4mClient && typeof this.ad4mClient.close === 'function') {
+      this.ad4mClient.close();
     }
 
-    this.wsClient = createClient({
-      url: this.url,
-      connectionParams: async () => ({ headers: { authorization: this.token } }),
-      on: {
-        opened: (socket: WebSocket) => {
-          this.activeSocket = socket;
-        },
-        error: (e) => {
-          this.notifyConnectionChange("error");
-        },
-        connected: () => {
-          this.notifyConnectionChange("connected");
-        },
-        closed: async (event: CloseEvent) => {
-          // If the connection was closed cleanly, which happens on every first connection, don't treat this as a disconnect
-          if (event.wasClean || this.requestedRestart) return;
-
-          if (!this.token) {
-            this.notifyConnectionChange("error");
-          } else {
-            try {
-              // Force a fresh connection by rebuilding the client
-              // instead of potentially reusing a dead embedded client
-              this.ad4mClient = await this.buildClient();
-              await this.checkAuth();
-            } catch (error) {
-              console.error('[Ad4m Connect] Reconnection failed:', error);
-              this.notifyConnectionChange("error");
-            }
-          }
-        },
-      },
-    });
-
-    this.apolloClient = this.createApolloClient(this.wsClient);
-    this.ad4mClient = new Ad4mClient(this.apolloClient);
-    this.requestedRestart = false;
+    // Defer subscriptions until auth is verified to avoid 403 spam
+    this.ad4mClient = new Ad4mClient(this.baseUrl, this.token, false);
+    this.notifyConnectionChange("connected");
 
     return this.ad4mClient;
   }
 
-  private createApolloClient(wsClient: WSClient): ApolloClient<NormalizedCacheObject> {
-    return new ApolloClient({
-      link: new GraphQLWsLink(wsClient),
-      cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
-      defaultOptions: {
-        watchQuery: { fetchPolicy: "no-cache" as const },
-        query: { fetchPolicy: "no-cache" as const },
-        mutate: { fetchPolicy: "no-cache" as const },
-      },
-    });
-  }
-
-  private async withTempClient<T>(url: string, callback: (client: Ad4mClient) => Promise<T>): Promise<T> {
-    // Create a temporary client for the duration of the callback
-    const wsClient = createClient({ url, connectionParams: async () => ({ headers: { authorization: "" } }) });
-    const apolloClient = this.createApolloClient(wsClient);
-    const client = new Ad4mClient(apolloClient);
-
+  private async withTempClient<T>(wsUrl: string, callback: (client: Ad4mClient) => Promise<T>): Promise<T> {
+    const baseUrl = wsUrlToHttpBase(wsUrl);
+    const client = new Ad4mClient(baseUrl, undefined, false);
     try {
       return await callback(client);
     } finally {
-      wsClient.dispose();
+      client.close();
     }
   }
 
   async checkAuth(): Promise<boolean> {
     try {
       console.log('[Ad4m Connect] Checking authentication status...');
-      const isLocked = await this.ad4mClient.agent.isLocked();
+
+      // isLocked may not exist on older executors (404). Treat errors
+      // as "not locked" and fall through to the status check.
+      let isLocked = false;
+      try {
+        isLocked = await this.ad4mClient.agent.isLocked();
+      } catch (lockErr) {
+        const msg = lockErr?.message || '';
+        if (msg === "Cannot extractByTags from a ciphered wallet. You must unlock first.") {
+          console.log('[Ad4m Connect] Agent wallet is locked (error path)');
+          this.notifyAuthChange("locked");
+          return true;
+        }
+        // 404 / network error → assume not locked
+        console.warn('[Ad4m Connect] isLocked check unavailable, assuming unlocked:', msg);
+      }
 
       if (isLocked) {
         console.log('[Ad4m Connect] Agent wallet is locked');
         this.notifyAuthChange("locked");
       } else {
         await this.ad4mClient.agent.status();
+        this.ad4mClient.startSubscriptions();
         this.notifyAuthChange("authenticated");
       }
 
-      // Return true as we are authenticated
       return true;
     } catch (error) {
       console.error('[Ad4m Connect] Authentication check failed:', error);
-      const lockedMessage = "Cannot extractByTags from a ciphered wallet. You must unlock first.";
-      
-      if (error.message === lockedMessage) {
-        // TODO: isLocked throws an error, should just return a boolean. Temp fix
-        this.notifyAuthChange("locked");
-        return true;
-      }
       
       // Clear token if it's invalid (signed by different agent)
       if (error.message === "InvalidSignature") {
@@ -242,18 +214,6 @@ export default class Ad4mConnect extends EventTarget {
   // Disconnect and clean up
   async disconnect(): Promise<void> {
     console.log('[Ad4m Connect] Disconnecting...');
-    
-    // Dispose WebSocket client
-    if (this.wsClient) {
-      this.wsClient.dispose();
-      this.wsClient = null;
-    }
-    
-    // Stop Apollo client
-    if (this.apolloClient) {
-      this.apolloClient.stop();
-      this.apolloClient = null;
-    }
     
     // Clear client reference
     this.ad4mClient = undefined;
@@ -280,7 +240,7 @@ export default class Ad4mConnect extends EventTarget {
   // Hosting — credit subscription & polling fallback
 
   /**
-   * Subscribe to real-time credit updates via GraphQL subscription.
+   * Subscribe to real-time credit updates.
    * Falls back to polling if the subscription is not supported by the executor.
    */
   startCreditSubscription(): void {
@@ -297,10 +257,10 @@ export default class Ad4mConnect extends EventTarget {
         this.userInfo = userInfo;
         this.dispatchEvent(new CustomEvent('userinfochange', { detail: userInfo }));
 
-        if (userInfo.remainingCredits <= 0) {
+        if (!userInfo.freeAccess && userInfo.remainingCredits <= 0) {
           this.dispatchEvent(new CustomEvent('creditdepleted'));
         }
-        if (userInfo.remainingCredits <= this.lowCreditThreshold) {
+        if (!userInfo.freeAccess && userInfo.remainingCredits <= this.lowCreditThreshold) {
           this.dispatchEvent(new CustomEvent('creditlow'));
         }
       });
@@ -333,10 +293,10 @@ export default class Ad4mConnect extends EventTarget {
         this.userInfo = info;
         this.dispatchEvent(new CustomEvent('userinfochange', { detail: info }));
 
-        if (info.remainingCredits <= this.lowCreditThreshold) {
+        if (!info.freeAccess && info.remainingCredits <= this.lowCreditThreshold) {
           this.dispatchEvent(new CustomEvent('creditlow'));
         }
-        if (info.remainingCredits <= 0) {
+        if (!info.freeAccess && info.remainingCredits <= 0) {
           this.dispatchEvent(new CustomEvent('creditdepleted'));
         }
       } catch (error) {
@@ -424,7 +384,11 @@ export default class Ad4mConnect extends EventTarget {
           // Set connection details from parent (after successful validation)
           this.port = parsedPort;
           this.token = normalizedToken;
-          this.url = `ws://localhost:${parsedPort}/graphql`;
+          // Use the URL provided by the parent if valid (e.g. remote host), otherwise fall back to localhost
+          const rawUrl = event.data.url;
+          this.url = (rawUrl && typeof rawUrl === 'string' && rawUrl.startsWith('http'))
+            ? rawUrl
+            : `http://localhost:${parsedPort}`;
           
           // Store in localStorage for persistence (avoid storing undefined or stale credentials)
           setLocal('ad4m-port', parsedPort.toString());
@@ -437,7 +401,7 @@ export default class Ad4mConnect extends EventTarget {
           setLocal('ad4m-url', this.url);
           
           // Build the client with received credentials
-          this.ad4mClient = await this.buildClient();
+          this.ad4mClient = this.buildClient();
           await this.checkAuth();
         } catch (error) {
           console.error('[Ad4m Connect] Failed to initialize from AD4M_CONFIG:', error);
@@ -448,7 +412,17 @@ export default class Ad4mConnect extends EventTarget {
     
     // Request AD4M config from parent window
     console.log('[Ad4m Connect] Requesting AD4M config from parent window');
-    window.parent.postMessage({ type: 'REQUEST_AD4M_CONFIG' }, '*');
+    // Determine the actual parent origin for postMessage targeting.
+    // Prefer document.referrer (the real parent), validated against allowedOrigins.
+    // Fall back to '*' only when no origin information is available.
+    let parentOrigin = '*';
+    const referrerOrigin = document.referrer ? new URL(document.referrer).origin : null;
+    if (referrerOrigin && this.options.allowedOrigins?.includes(referrerOrigin)) {
+      parentOrigin = referrerOrigin;
+    } else if (this.options.allowedOrigins && this.options.allowedOrigins.length === 1) {
+      parentOrigin = this.options.allowedOrigins[0];
+    }
+    window.parent.postMessage({ type: 'REQUEST_AD4M_CONFIG' }, parentOrigin);
   }
 
   // Local authentication

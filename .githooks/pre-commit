@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# AD4M pre-commit hook.
+#
+# Guards against accidentally committing transient test state into
+# tests/js/bootstrapSeed.json and tests/js/publishBootstrapSeed.json.
+#
+# Those files are read by the executor at boot. The test harness
+# populates them before a test run (inline bundle source, extra
+# trustedAgent DID for the publishing agent) and resets them at the
+# end via scripts/cleanTestingData.js. If a run is interrupted —
+# failure, Ctrl-C, killed process — the reset doesn't happen and the
+# populated state ends up staged by `git add`.
+#
+# This hook rejects the commit in that case so the contaminated state
+# never reaches HEAD again. It relies on `jq` being on PATH (already
+# a dev dependency for the docs/test scripts).
+#
+# Enable with:    git config core.hooksPath .githooks
+
+set -euo pipefail
+
+fail() {
+    echo >&2
+    echo "pre-commit: $1" >&2
+    echo "  fix with:  (cd tests/js && node scripts/cleanTestingData.js)" >&2
+    echo "  then re-stage the file and commit again." >&2
+    echo >&2
+    exit 1
+}
+
+check_seed() {
+    local file="$1"
+    local allowed_trusted_agents_json="$2"
+
+    # Only run the check if the file is actually staged for this commit.
+    if ! git diff --cached --name-only -z | tr '\0' '\n' | grep -qxF "$file"; then
+        return 0
+    fi
+
+    # Read the staged (indexed) content — not the working copy — so we
+    # catch mistakes even if the developer already re-ran the clean
+    # script in their working tree.
+    local staged
+    staged=$(git show ":$file" 2>/dev/null) || fail "$file staged but unreadable"
+
+    local bundle
+    bundle=$(printf '%s' "$staged" | jq -r '.languageLanguageBundle // ""')
+    if [ -n "$bundle" ]; then
+        fail "$file has a populated languageLanguageBundle (must be empty when committed)."
+    fi
+
+    local trusted_agents
+    trusted_agents=$(printf '%s' "$staged" | jq -c '.trustedAgents // []')
+    if [ "$trusted_agents" != "$allowed_trusted_agents_json" ]; then
+        fail "$file has non-canonical trustedAgents: $trusted_agents (expected $allowed_trusted_agents_json)."
+    fi
+}
+
+check_seed \
+    tests/js/bootstrapSeed.json \
+    '["did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"]'
+check_seed \
+    tests/js/publishBootstrapSeed.json \
+    '[]'
+
+exit 0

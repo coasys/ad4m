@@ -113,7 +113,7 @@ Use external mode when you already have an `ad4m-executor` running — for examp
         config: {
           "mode": "external",
           "token": "eyJhbGciOi...",        // JWT from setup
-          "executorWsUrl": "ws://localhost:12000/graphql",
+          "executorUrl": "http://localhost:12000",
           "wakeToken": "your-hooks-token"   // optional, for waker
         }
       }
@@ -136,7 +136,7 @@ All fields are optional. In managed mode, credentials are auto-generated during 
 | `mcpEndpoint` | `http://localhost:3001/mcp` | AD4M executor MCP endpoint URL |
 | `token` | — | JWT token for external mode authentication |
 | `toolRefreshIntervalMs` | `30000` | How often to poll for new dynamic tools (ms) |
-| `executorWsUrl` | `ws://localhost:12000/graphql` | GraphQL WebSocket URL for the waker |
+| `executorUrl` | `http://localhost:12000` | REST URL for the executor |
 | `wakeUrl` | `http://localhost:18789/hooks/wake` | OpenClaw wake endpoint URL |
 | `wakeToken` | auto from `hooks.token` | Override for the hooks authentication token |
 | `debounceMs` | `2000` | Debounce interval for wake events (ms) |
@@ -151,7 +151,7 @@ Connects to the AD4M executor's MCP endpoint, discovers all available tools, and
 
 ### `ad4m-waker` — real-time subscriptions
 
-Connects to the executor's GraphQL WebSocket. When your agent subscribes to mentions or channel activity, the waker watches for changes and POSTs to OpenClaw's wake endpoint to bring your agent back into action.
+Connects to the executor's REST API. When your agent subscribes to mentions or channel activity, the waker watches for changes via SSE and POSTs to OpenClaw's wake endpoint to bring your agent back into action.
 
 ## Plugin-provided tools
 

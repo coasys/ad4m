@@ -1,45 +1,89 @@
-import type { Address, Language, LanguageContext, Interaction, ExpressionUI } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
-import ExpressionAdapterImpl from "./adapter.ts";
+/**
+ * # AES (Ethereum Attestation Service) Language
+ *
+ * Expression language that fetches attestations from EAS (easscan.org).
+ * Read-only: expressionGet fetches attestations for an Ethereum address,
+ * no expressionCreate (attestations are created on-chain).
+ */
 
-function iconFor(expression: Address): string {
-  return "";
-}
+import axiod from "https://deno.land/x/axiod/mod.ts";
+import { defineLanguage, agentCreateSignedExpression } from "@coasys/ad4m-ldk";
 
-function constructorIcon(): string {
-  return "";
-}
+const language = defineLanguage({
+    name: "aes-language",
+    version: "0.1.0",
 
-function interactions(expression: Address): Interaction[] {
-  return [];
-}
+    async init() {},
+    async teardown() {},
+    interactions() { return []; },
 
-export class UI implements ExpressionUI {
-  icon(): string {
-      return ""
-  }
+    expression: {
+        isImmutable(_address: string): boolean {
+            return false;
+        },
 
-  constructorIcon(): string {
-      return ""
-  }
-}
+        async get(ethAddr: string): Promise<any> {
+            let attestations = await axiod.post(
+                "https://easscan.org/graphql",
+                {
+                    query: `
+                query Query($attestationsWhere: AttestationWhereInput) {
+                  attestations(where: $attestationsWhere) {
+                    id
+                    data
+                    decodedDataJson
+                    recipient
+                    attester
+                    time
+                    timeCreated
+                    expirationTime
+                    revocationTime
+                    refUID
+                    revocable
+                    revoked
+                    txid
+                    schemaId
+                    ipfsHash
+                    isOffchain
+                  }
+                }
+              `,
+                    variables: {
+                        attestationsWhere: {
+                            recipient: {
+                                equals: ethAddr,
+                            },
+                        },
+                    },
+                },
+                {
+                    headers: {
+                        Accept: "application/json",
+                        "Content-Type": "application/json",
+                    },
+                }
+            );
 
-//!@ad4m-template-variable
-export const name = "aes-language";
+            if (attestations.status !== 200) {
+                console.error("Failed to fetch attestations", attestations);
+                throw new Error("Failed to fetch attestations");
+            }
 
-export default async function create(context: LanguageContext): Promise<Language> {
-  const expressionAdapter = new ExpressionAdapterImpl(context);
-  const isImmutableExpression = (expression: Address): boolean => {
-    return false;
-  };
-  const expressionUI = new UI();
+            let attestationsCleaned = attestations.data.data.attestations;
+            let attestationExpression =
+                agentCreateSignedExpression(attestationsCleaned);
 
-  return {
+            return attestationExpression;
+        },
+    },
+});
+
+export const {
     name,
-    iconFor,
-    constructorIcon,
-    isImmutableExpression,
-    expressionAdapter,
+    version,
+    init,
+    teardown,
     interactions,
-    expressionUI
-  } as Language;
-}
+    expressionGet,
+    isImmutableExpression,
+} = language;

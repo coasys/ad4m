@@ -1,6 +1,5 @@
-use crate::graphql::graphql_types::GetFilter;
-use crate::graphql::graphql_types::GetValue;
-use coasys_juniper::{graphql_value, FieldError, FieldResult};
+use crate::types::domain::GetFilter;
+use crate::types::domain::GetValue;
 use futures::Stream;
 use futures::StreamExt;
 use log::error;
@@ -60,13 +59,14 @@ impl PubSub {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) async fn subscribe_and_process<
     T: DeserializeOwned + Send + 'static + std::fmt::Debug + GetValue + GetFilter,
 >(
     pubsub: Arc<PubSub>,
     topic: Topic,
     filter: Option<String>,
-) -> Pin<Box<dyn Stream<Item = FieldResult<T::Value>> + Send>> {
+) -> Pin<Box<dyn Stream<Item = Result<T::Value, Box<dyn std::error::Error + Send>>> + Send>> {
     let receiver = pubsub.subscribe(&topic).await;
     let receiver_stream = BroadcastStream::new(receiver);
 
@@ -95,10 +95,10 @@ pub(crate) async fn subscribe_and_process<
                     error!("Type: {}", type_name);
                     error!("Message: {:?}", msg);
 
-                    let field_error = FieldError::new(
-                        e,
-                        graphql_value!({ "type": "INTERNAL_ERROR_COULD_NOT_SERIALIZE" }),
-                    );
+                    let field_error: Box<dyn std::error::Error + Send> = Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Failed to deserialize: {}", e),
+                    ));
                     futures::future::ready(Some(Err(field_error)))
                 }
             },
@@ -153,7 +153,7 @@ pub fn mark_credits_dirty(email: &str) {
 /// Buffer a compute log entry for async publication.
 /// The flush loop will drain these and publish to the subscription topic.
 pub static PENDING_COMPUTE_LOG_ENTRIES: LazyLock<
-    std::sync::Mutex<Vec<crate::graphql::graphql_types::ComputeLogEntry>>,
+    std::sync::Mutex<Vec<crate::types::domain::ComputeLogEntry>>,
 > = LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
 pub fn push_compute_log_entry(
@@ -164,7 +164,7 @@ pub fn push_compute_log_entry(
     cost: f64,
     credits_after: f64,
 ) {
-    let entry = crate::graphql::graphql_types::ComputeLogEntry {
+    let entry = crate::types::domain::ComputeLogEntry {
         id: id as i32,
         user_email: email.to_owned(),
         timestamp: chrono::Utc::now().to_rfc3339(),

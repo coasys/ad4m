@@ -499,6 +499,35 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 target: format!("literal:string:{}", remover_json),
             });
         }
+
+        // sh:class — target SHACL node shape URI for typed relation resolution
+        if let Some(class_uri) = &prop.class {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("sh://class".to_string()),
+                target: class_uri.clone(),
+            });
+        }
+
+        // Pre-computed getter expression for conformance-filtered relation traversal
+        if let Some(getter) = &prop.getter {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://getter".to_string()),
+                target: format!("literal:string:{}", getter),
+            });
+        }
+
+        // Structured conformance conditions for DB-agnostic type filtering
+        if !prop.conformance_conditions.is_empty() {
+            let conditions_json = serde_json::to_string(&prop.conformance_conditions)
+                .unwrap_or_else(|_| "[]".to_string());
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://conformanceConditions".to_string()),
+                target: format!("literal:string:{}", conditions_json),
+            });
+        }
     }
 
     Ok(links)

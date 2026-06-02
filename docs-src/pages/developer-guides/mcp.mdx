@@ -11,7 +11,7 @@ AD4M includes a built-in [Model Context Protocol (MCP)](https://modelcontextprot
 
 ## Why MCP?
 
-While AD4M's GraphQL API provides full programmatic access, MCP is purpose-built for AI agents:
+While AD4M's WebSocket RPC API provides full programmatic access, MCP is purpose-built for AI agents:
 
 - **Tool discovery** — agents automatically discover available operations and their parameters
 - **Dynamic tools** — SHACL subject classes generate domain-specific tools at runtime (e.g., `channel_create`, `message_set_body`)
@@ -28,7 +28,7 @@ While AD4M's GraphQL API provides full programmatic access, MCP is purpose-built
 ad4m-executor run \
   --app-data-path ~/.ad4m \
   --admin-credential my-secret \
-  --gql-port 12100 \
+  --port 12100 \
   --enable-mcp true
 ```
 

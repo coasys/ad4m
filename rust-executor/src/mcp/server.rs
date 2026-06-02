@@ -1,6 +1,6 @@
 //! MCP Server setup and transport handling
 //!
-//! The MCP server runs as an HTTP service alongside AD4M's GraphQL server.
+//! The MCP server runs as an HTTP service alongside AD4M's REST server.
 //! AI agents connect via HTTP to interact with AD4M perspectives, models,
 //! and neighbourhoods using the Model Context Protocol.
 //!
@@ -18,7 +18,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// MCP Server context, similar to GraphQL's RequestContext
+/// MCP Server context, similar to REST's RequestContext
 #[derive(Clone)]
 pub struct McpContext {
     pub admin_credential: Option<String>,

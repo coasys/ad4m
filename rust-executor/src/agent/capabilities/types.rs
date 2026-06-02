@@ -1,4 +1,3 @@
-use coasys_juniper::GraphQLObject;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,7 +8,7 @@ pub struct AuthInfoExtended {
     pub auth: AuthInfo,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthInfo {
     pub app_name: String,
@@ -21,10 +20,10 @@ pub struct AuthInfo {
     pub user_email: Option<String>, // Email field for multi-user tokens
 }
 
-impl TryFrom<crate::graphql::graphql_types::AuthInfoInput> for AuthInfo {
+impl TryFrom<crate::types::AuthInfoInput> for AuthInfo {
     type Error = String;
 
-    fn try_from(input: crate::graphql::graphql_types::AuthInfoInput) -> Result<Self, Self::Error> {
+    fn try_from(input: crate::types::AuthInfoInput) -> Result<Self, Self::Error> {
         let capabilities = match input.capabilities {
             Some(vec) if !vec.is_empty() => Some(vec.into_iter().map(|c| c.into()).collect()),
             _ => return Err("Capability request must include explicit capabilities".to_string()),
@@ -42,15 +41,15 @@ impl TryFrom<crate::graphql::graphql_types::AuthInfoInput> for AuthInfo {
     }
 }
 
-#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Capability {
     pub with: Resource,
     pub can: Vec<String>,
 }
 
-impl From<crate::graphql::graphql_types::CapabilityInput> for Capability {
-    fn from(input: crate::graphql::graphql_types::CapabilityInput) -> Self {
+impl From<crate::types::CapabilityInput> for Capability {
+    fn from(input: crate::types::CapabilityInput) -> Self {
         Self {
             with: input.with.into(),
             can: input.can,
@@ -58,15 +57,15 @@ impl From<crate::graphql::graphql_types::CapabilityInput> for Capability {
     }
 }
 
-#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Resource {
     pub domain: String,
     pub pointers: Vec<String>,
 }
 
-impl From<crate::graphql::graphql_types::ResourceInput> for Resource {
-    fn from(input: crate::graphql::graphql_types::ResourceInput) -> Self {
+impl From<crate::types::ResourceInput> for Resource {
+    fn from(input: crate::types::ResourceInput) -> Self {
         Self {
             domain: input.domain,
             pointers: input.pointers,

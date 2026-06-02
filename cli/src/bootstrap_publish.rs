@@ -12,8 +12,6 @@ pub struct SeedProto {
     pub link_languages: Vec<LanguageInstance>,
     #[serde(rename = "agentLanguage")]
     pub agent_language: LanguageInstance,
-    #[serde(rename = "directMessageLanguage")]
-    pub direct_message_language: LanguageInstance,
     #[serde(rename = "neighbourhoodLanguage")]
     pub neighbourhood_language: LanguageInstance,
     #[serde(rename = "perspectiveLanguage")]
@@ -63,7 +61,9 @@ pub async fn start_publishing(
     seed_proto: SeedProto,
     language_language_bundle: String,
 ) {
-    let ad4m_client = Ad4mClient::new("http://localhost:12000/graphql".to_string(), "".to_string());
+    let ad4m_client = Ad4mClient::connect("http://localhost:12000".to_string(), "".to_string())
+        .await
+        .expect("could not connect to executor");
 
     let agent = ad4m_client
         .agent
@@ -80,7 +80,6 @@ pub async fn start_publishing(
 
     let languages = vec![
         seed_proto.agent_language,
-        seed_proto.direct_message_language,
         seed_proto.perspective_language,
         seed_proto.neighbourhood_language,
     ];
@@ -101,7 +100,7 @@ pub async fn start_publishing(
             .languages
             .publish(
                 language.resource,
-                language.meta.name.clone(),
+                Some(language.meta.name.clone()),
                 Some(language.meta.description),
                 Some(language.meta.possible_template_params),
                 Some(language.meta.source_code_link),
@@ -114,12 +113,9 @@ pub async fn start_publishing(
                 .agent_language
                 .clone_from(&publish_result.address),
             1 => bootstrap_seed
-                .direct_message_language
-                .clone_from(&publish_result.address),
-            2 => bootstrap_seed
                 .perspective_language
                 .clone_from(&publish_result.address),
-            3 => bootstrap_seed
+            2 => bootstrap_seed
                 .neighbourhood_language
                 .clone_from(&publish_result.address),
             _ => (),
@@ -137,7 +133,7 @@ pub async fn start_publishing(
             .languages
             .publish(
                 language.resource,
-                language.meta.name.clone(),
+                Some(language.meta.name.clone()),
                 Some(language.meta.description),
                 Some(language.meta.possible_template_params),
                 Some(language.meta.source_code_link),
@@ -160,7 +156,7 @@ pub async fn start_publishing(
             .languages
             .publish(
                 language.resource,
-                language.meta.name.clone(),
+                Some(language.meta.name.clone()),
                 Some(language.meta.description),
                 Some(language.meta.possible_template_params),
                 Some(language.meta.source_code_link),

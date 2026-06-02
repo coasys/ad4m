@@ -30,9 +30,16 @@ import {
                     let resultString = agent_create_signed_expression_stringified(stringified)
                     let result = JSON.parse(resultString);
                     return result;
-                } catch (error) {
-                    console.error("Error calling agent_create_signed_expression_stringified:", error);
+                } catch (fallbackError) {
+                    // Both paths failed. Previously this swallowed the
+                    // error and returned undefined, which cascaded into
+                    // cryptic "cannot read properties of undefined" crashes
+                    // in every caller that tried to access .data or
+                    // .proof on the result. Rethrow so the failure is
+                    // visible at the actual signing call site.
+                    console.error("Error calling agent_create_signed_expression_stringified:", fallbackError);
                     console.error("Data was:", JSON.stringify(data))
+                    throw fallbackError;
                 }
             }
         },

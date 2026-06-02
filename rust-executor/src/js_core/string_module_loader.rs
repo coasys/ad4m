@@ -88,10 +88,10 @@ impl ModuleLoader for StringModuleLoader {
         _request_module_type: RequestedModuleType,
     ) -> ModuleLoadResponse {
         match module_specifier.to_file_path() {
-            Ok(path) => match std::fs::read_to_string(path) {
+            Ok(path) => match std::fs::read_to_string(&path) {
                 Ok(code) => ModuleLoadResponse::Sync(maybe_transpile(module_specifier, code)),
                 Err(e) => {
-                    log::error!("Error reading file: {}", e);
+                    log::error!("Error reading file {:?}: {}", path, e);
                     ModuleLoadResponse::Sync(Err(ModuleLoaderError::NotFound))
                 }
             },

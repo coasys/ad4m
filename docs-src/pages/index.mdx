@@ -32,9 +32,9 @@ and executes code that interfaces with Languages-protocol-like abstractions that
 protocols. This instance serves as the back-end that UIs and apps connect to, providing a unified, interoperable gateway to the user's digital world.
 
 At its core, **AD4M inverts the typical app-centric model**. Instead of apps owning your data and social graph, your AD4M instance owns them,
-running on your device (or a trusted host) and exposing a GraphQL API and an [MCP server](/developer-guides/mcp), for apps and AI agents alike to query and interact with.
-For example, a chat app might connect to `localhost:4000/graphql` to fetch messages stored in a Perspective, addressed via a Language like
-`QmXyz123://message789`. This local runtime attaches to existing Languages-say, `http` for web content or `solid` for semantic triples-executing
+running on your device (or a trusted host) and exposing a WebSocket RPC API and an [MCP server](/developer-guides/mcp), for apps and AI agents alike to query and interact with.
+For example, a chat app might connect to `http://localhost:12000` to fetch messages stored in a Perspective, addressed via a Language like
+`QmXyz123://message789`. This local runtime attaches to existing Languages—say, `http` for web content or `solid` for semantic triples—executing
 their logic to read or write Expressions (data objects). Developers don't rewrite the web; they extend it, with AD4M harmonizing these connections
 into a single, agent-owned layer.
 
@@ -52,7 +52,7 @@ Using Holochain for its core backbone, each instance doesn't just store data-it 
 Practically, this means every developer's user runs their own AD4M node. Install it, configure it (e.g., via a RuntimeConfig JSON), and it spins up a process holding their private keys, syncing their Perspectives, and running Language code-like a lightweight, personal cloud. A UI might then query:
 ```javascript
 // Initialize the client
-const ad4mClient = new Ad4mClient("ws://localhost:4000", false);
+const ad4mClient = new Ad4mClient("http://localhost:12000");
 
 // Get the current agent
 const agent = await ad4mClient.agent.me();
@@ -102,7 +102,7 @@ They standardize interactions across every AD4M instance, around the core ontolo
 
 For instance:
 ```javascript
-const ad4mClient = await getAd4mClient("ws://localhost:4000");
+const ad4mClient = new Ad4mClient("http://localhost:12000");
 const agentExpression = await ad4mClient.expression.get("did:key:z6Mk...");
 console.log(agentExpression.data); // { did: "did:key:z6Mk..." }
 ```
@@ -196,37 +196,45 @@ behaviors, and logic that transform static Perspectives and Neighbourhoods into 
 crafting app-specific intelligence-whether it's validating data, enforcing roles, or aggregating insights-all while keeping control distributed among agents.
 It's the engine driving AD4M's vision of a Collective Intelligence network, turning linked data into actionable, shared understanding.
 
-### Query Engines: SurrealDB & Prolog
+### Query Engine: SPARQL
 
-AD4M provides two powerful query engines for working with graph data in Perspectives:
+AD4M provides a high-performance SPARQL query engine for working with graph data in Perspectives:
 
-#### SurrealDB: High-Performance Queries (Recommended)
+#### SPARQL: Fast Graph Queries
 
-AD4M now includes **SurrealDB**, a modern database that provides **10-100x faster performance** than Prolog for most queries. SurrealDB uses SQL-like syntax (SurrealQL) and excels at:
-- Fast graph traversal using indexed `in.uri` and `out.uri` fields
+AD4M includes a SPARQL engine powered by Oxigraph, executing entirely server-side in Rust. SPARQL excels at:
+- Pattern-based graph traversal
 - Aggregations and analytics
 - Complex filtering and sorting
-- Large dataset handling
+- Multi-hop relationship queries
 
 ```javascript
-// Fast graph query - find who Alice follows
-const follows = await perspective.querySurrealDB(
-  "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'follows'"
-);
+// Graph query - find who Alice follows
+const follows = await perspective.querySparql(`
+  SELECT ?target WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject <user://alice> ;
+          rdf:predicate <follows> ;
+          rdf:object ?target .
+  }
+`);
 
 // Find posts by Alice
-const posts = await perspective.querySurrealDB(
-  "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'authored'"
-);
+const posts = await perspective.querySparql(`
+  SELECT ?target WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject <user://alice> ;
+          rdf:predicate <authored> ;
+          rdf:object ?target .
+  }
+`);
 ```
 
-**Performance Tip**: Use `in.uri` (source) and `out.uri` (target) for graph traversal - they're indexed and fast. Avoid subqueries (`IN (SELECT ...)`) as they're very slow.
+**Important**: `Ad4mModel` (described below) uses the SPARQL engine internally for all operations, providing efficient queries with no code changes required.
 
-**Important**: `Ad4mModel` (described below) now **uses SurrealDB by default** for all operations, providing dramatic performance improvements with no code changes required.
+For detailed examples and graph traversal patterns, see the [SPARQL Queries Guide](/developer-guides/sparql-queries).
 
-For detailed examples and graph traversal patterns, see the [SurrealDB Queries Guide](/developer-guides/surreal-queries).
-
-#### Prolog: Logic Programming (Legacy)
+#### Prolog: Logic Programming (Backward Compatibility)
 
 For backward compatibility and advanced logic programming, AD4M also includes Prolog, optimized for reasoning over relational data like the RDF triples in Perspectives.
 Prolog's declarative nature lets developers write rules as predicates:
@@ -257,8 +265,8 @@ While these raw query engines are powerful, AD4M simplifies development with a h
 
 ### Ad4mModel
 For app developers, writing queries directly is optional-AD4M's `Ad4mModel` class and its decorators handle the heavy lifting.
-This TypeScript base class lets you define model classes with properties and relationships, automatically using **SurrealDB** under the hood for
-fast query performance (10-100x faster than Prolog). Here's how you define a model:
+This TypeScript base class lets you define model classes with properties and relationships, with all queries executing server-side in Rust via SPARQL
+for fast query performance. Here's how you define a model:
 ```typescript
 import { Ad4mModel, Model, Property, HasMany, Flag, ReadOnly } from "@coasys/ad4m";
 
@@ -272,7 +280,7 @@ class Todo extends Ad4mModel {
 
     @ReadOnly({
         through: "todo://is_liked",
-        getter: 'count(->link[WHERE predicate = "flux://has_reaction" AND out.uri = "flux://thumbsup"]) > 0'
+        getter: `SELECT (COUNT(?reaction) > 0 AS ?value) WHERE { <Base> <flux://has_reaction> ?reaction . FILTER(?reaction = <flux://thumbsup>) }`
     })
     isLiked: boolean = false;
 
@@ -282,14 +290,14 @@ class Todo extends Ad4mModel {
 ```
 
 Behind this, `Ad4mModel`:
-- **Uses SurrealDB by default** for fast queries (10-100x faster)
-- Generates efficient SurrealQL queries automatically
+- Queries execute server-side in Rust via SPARQL
+- Generates efficient queries automatically
 - Stores data as graph links in the perspective
 - Provides type-safe TypeScript interfaces
 
-For example, `Todo.findAll(perspective, { where: { state: "todo://done" } })` automatically generates and executes an optimized SurrealQL query.
+For example, `Todo.findAll(perspective, { where: { state: "todo://done" } })` automatically generates and executes an optimized SPARQL query.
 
-For backward compatibility, Prolog is still supported (pass `useSurrealDB: false` to query methods). See the [Model Classes Guide](/developer-guides/model-classes) and [SurrealDB Queries Guide](/developer-guides/surreal-queries) for details.
+Prolog is still supported for backward compatibility. See the [Model Classes Guide](/developer-guides/model-classes) and [SPARQL Queries Guide](/developer-guides/sparql-queries) for details.
 
 You can use this model to work with Todo items in a type-safe way:
 ```typescript
@@ -313,7 +321,7 @@ await todo.save();
 await todo.delete();
 ```
 
-Developers define their app's data model in familiar TypeScript, and AD4M handles the Social DNA—stored as SHACL shapes in a Perspective or Neighbourhood—making it both accessible and powerful. This abstraction lets you focus on app logic while SurrealDB provides fast queries and SHACL schemas enable structured, validated data that scales across the network.
+Developers define their app's data model in familiar TypeScript, and AD4M handles the Social DNA—stored as SHACL shapes in a Perspective or Neighbourhood—making it both accessible and powerful. This abstraction lets you focus on app logic while the SPARQL engine provides fast server-side queries and SHACL schemas enable structured, validated data that scales across the network.
 
 
 ## Why?

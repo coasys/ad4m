@@ -24,7 +24,7 @@ export type Ad4mConnectOptions = {
   // Security options for embedded mode
   allowedOrigins?: string[];
   // Hosting options
-  hostIndexUrl?: string;     // URL of the central host index REST API
+  hostIndexUrl?: string;     // URL of the central host index API
   lowCreditThreshold?: number; // Credits level at which to warn the user (default: 10)
   // Credit lifecycle callbacks
   onCreditsDepleted?: () => void; // Called once when credits reach zero and the modal is opened
@@ -42,7 +42,7 @@ export type RemoteHost = {
   description?: string;      // host description
   profilePicUrl: string;
   location: string;          // e.g. "Frankfurt, DE"
-  url: string;               // WebSocket/GraphQL endpoint
+  url: string;               // API endpoint
   rates: PricingItem[];      // flexible pricing array
   aiModels: string[];        // e.g. ["gpt-4o", "claude-3.5-sonnet"]
   computeSpecs?: string | null; // e.g. "8 vCPU, 32GB RAM"

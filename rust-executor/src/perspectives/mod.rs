@@ -1,11 +1,13 @@
+pub mod memory_diagnostics;
 pub mod migration;
+pub mod model_query;
 pub mod perspective_instance;
 pub mod sdna;
 pub mod shacl_parser;
 pub mod shacl_to_prolog;
 pub mod sparql_store;
 pub mod utils;
-use crate::graphql::graphql_types::{
+use crate::types::{
     LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveExpression, PerspectiveHandle,
     PerspectiveRemovedWithOwner, PerspectiveState, PerspectiveWithOwner,
 };
@@ -102,6 +104,19 @@ pub fn initialize_from_db() {
                 }
                 Ok(_) => {} // Already migrated or nothing to migrate
                 Err(e) => log::warn!("Migration check for {}: {}", handle_clone.uuid, e),
+            }
+
+            // Run named-graph → reifier migration (idempotent)
+            match p.sparql_store.migrate_named_graphs_to_reifiers() {
+                Ok(count) if count > 0 => {
+                    log::info!(
+                        "🔄 Reifier migration for {}: {} links migrated",
+                        handle_clone.uuid,
+                        count
+                    );
+                }
+                Ok(_) => {} // Already migrated or nothing to migrate
+                Err(e) => log::warn!("Reifier migration for {}: {}", handle_clone.uuid, e),
             }
 
             // Rebuild SPARQL index from existing links
@@ -335,6 +350,39 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
     if let Some(ref instance) = removed_instance {
         instance.teardown_background_tasks().await;
 
+        // Drop any link-language -> perspective cache entries that
+        // pointed at this uuid. Without this, the cache keeps a
+        // stale PerspectiveHandle forever; the slow-path fallback
+        // self-heals for the async lookup but `publish_telepresence_signal_sync`
+        // in handle_telepresence_signal_from_link_language uses the
+        // cached handle DIRECTLY without verifying get_perspective
+        // still returns Some, so signals would keep flowing for a
+        // removed perspective until the cache entry was overwritten.
+        {
+            let handle_snapshot = instance.persisted.lock().await.clone();
+            if let Some(nh) = &handle_snapshot.neighbourhood {
+                let mut cache = LINK_LANG_TO_PERSPECTIVE_HANDLE.write().unwrap();
+                cache.remove(&nh.data.link_language);
+            }
+        }
+
+        // Clean up RocksDB directory for this perspective
+        if let Some(data_path) = get_app_data_path() {
+            let db_path =
+                std::path::Path::new(&data_path).join(format!("surrealdb_perspectives/{}", uuid));
+            if db_path.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&db_path) {
+                    log::warn!(
+                        "Failed to remove SurrealDB directory for perspective {}: {}",
+                        uuid,
+                        e
+                    );
+                } else {
+                    log::debug!("Cleaned up SurrealDB directory for perspective {}", uuid);
+                }
+            }
+        }
+
         // Publish one removal event per owner so each user gets their own notification
         let handle = instance.persisted.lock().await.clone();
         let pubsub = get_global_pubsub().await;
@@ -422,6 +470,11 @@ pub async fn handle_perspective_diff_from_link_language_impl(
                 e
             );
         }
+    } else {
+        log::warn!(
+            "DIFF-FROM-LINK-LANG [{}]: No perspective found for this link language!",
+            language_address
+        );
     }
 }
 
@@ -469,7 +522,7 @@ pub fn handle_telepresence_signal_from_link_language(
     }
 }
 
-/// Publish a telepresence signal to PubSub for delivery to GraphQL subscribers
+/// Publish a telepresence signal to PubSub for delivery to REST subscribers
 pub(crate) async fn publish_telepresence_signal(
     handle: PerspectiveHandle,
     signal: PerspectiveExpression,
@@ -617,7 +670,7 @@ pub async fn import_perspective(
         })
         .collect();
 
-    let diff = crate::graphql::graphql_types::DecoratedPerspectiveDiff {
+    let diff = crate::types::DecoratedPerspectiveDiff {
         additions: decorated_links,
         removals: vec![],
     };
@@ -647,7 +700,7 @@ mod tests {
         uuid: &String,
     ) -> Option<PerspectiveInstance> {
         for p in all_perspectives {
-            if p.persisted.lock().await.uuid == *uuid {
+            if p.uuid == *uuid {
                 return Some(p.clone());
             }
         }

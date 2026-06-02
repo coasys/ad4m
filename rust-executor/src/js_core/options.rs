@@ -22,6 +22,15 @@ pub fn language_module_loader() -> Rc<StringModuleLoader> {
         "https://ad4m.language/bootstrap",
         include_str!("language_bootstrap.js"),
     );
+    // `ad4m:host` is the canonical import specifier for host imports.
+    // Both JS and Rust/WASM language bundles emit
+    //   `import { agentDid, holochainCall, ... } from "ad4m:host"`
+    // at the top of their output (JS via esbuild `external`, Rust via
+    // wasm-bindgen `#[wasm_bindgen(module = "ad4m:host")]`).
+    //
+    // The file is plain JavaScript (no TypeScript) so no transpilation
+    // is needed and any runtime can load it without a TS compiler.
+    loader.add_module("ad4m:host", include_str!("host.js"));
     Rc::new(loader)
 }
 

@@ -6,7 +6,7 @@
  * 2. Discovering all available tools (including dynamic SHACL-generated ones)
  * 3. Registering each tool with OpenClaw via api.registerTool()
  * 4. Periodically polling for new dynamic tools as perspectives sync SHACL schemas
- * 5. Embedded waker: subscribes to AD4M perspectives via GraphQL WS and
+ * 5. Embedded waker: subscribes to AD4M perspectives via WebSocket and
  *    wakes the agent via /hooks/wake when changes are detected
  */
 
@@ -129,9 +129,9 @@ export default function ad4mPlugin(api: any) {
   // Determine endpoint - default to localhost for managed, use provided for external
   const endpoint = providedConfig.mcpEndpoint ?? "http://localhost:3001/mcp";
 
-  // Resolve executorWsUrl once — used by both ensureAgentReady and waker service
-  const executorWsUrl =
-    providedConfig.executorWsUrl ?? "ws://localhost:12000/graphql";
+  // Resolve executorUrl once — used by both ensureAgentReady and waker service
+  const executorUrl =
+    providedConfig.executorUrl ?? "http://localhost:12000";
 
   // On reload, pick up token from config if module-level state is empty
   if (!_authToken && providedConfig.token) {
@@ -157,7 +157,7 @@ export default function ad4mPlugin(api: any) {
     mode: mode || "managed",
     mcpEndpoint: endpoint,
     token: _authToken || undefined,
-    executorWsUrl,
+    executorUrl,
     wakeUrl: providedConfig.wakeUrl ?? "http://localhost:18789/hooks/wake",
     wakeToken: resolvedWakeToken,
     debounceMs: providedConfig.debounceMs ?? 2000,
@@ -176,7 +176,7 @@ export default function ad4mPlugin(api: any) {
         ? "*** (length: " + config.wakeToken.length + ")"
         : "UNDEFINED",
       wakerEnabled: config.wakerEnabled,
-      executorWsUrl: config.executorWsUrl,
+      executorUrl: config.executorUrl,
     })}`,
   );
 
@@ -969,7 +969,7 @@ Notes:
           adminCredential,
           logger,
           endpoint,
-          executorWsUrl,
+          executorUrl,
           binaryPath,
           config.rustLog,
           config.executorLogTarget ?? "file",
@@ -995,7 +995,7 @@ Notes:
 
           if (_authToken) {
             const agentResult = await ensureAgentReady(
-              executorWsUrl,
+              executorUrl,
               _authToken,
               logger,
               agentPassphrase,
@@ -1011,7 +1011,7 @@ Notes:
         } else {
           // We spawned the executor with our admin credential — use it directly.
           const agentResult = await ensureAgentReady(
-            executorWsUrl,
+            executorUrl,
             adminCredential,
             logger,
             agentPassphrase,
@@ -1094,7 +1094,7 @@ Notes:
 
       logger.info(`[ad4m-waker] config.wakeToken: ${config.wakeToken ? `set (${config.wakeToken.length} chars)` : "NOT SET"}`);
       logger.info(`[ad4m-waker] config.wakeUrl: ${config.wakeUrl ?? "default"}`);
-      logger.info(`[ad4m-waker] config.executorWsUrl: ${config.executorWsUrl ?? "default"}`);
+      logger.info(`[ad4m-waker] config.executorUrl: ${config.executorUrl ?? "default"}`);
       logger.info(`[ad4m-waker] config.mode: ${config.mode}`);
       logger.info(`[ad4m-waker] config.debounceMs: ${config.debounceMs}`);
 
@@ -1115,65 +1115,17 @@ Notes:
         return;
       }
 
-      const wsUrl = config.executorWsUrl ?? "ws://localhost:12000/graphql";
+      const httpUrl = config.executorUrl ?? "http://localhost:12000";
 
       try {
         // Dynamic imports to avoid load-time issues with @holochain/client transitive deps
         logger.info("[ad4m-waker] Loading dependencies...");
         const { Ad4mClient, QuerySubscriptionProxy } = require("@coasys/ad4m");
-        const { ApolloClient, InMemoryCache } = require("@apollo/client/core");
-        const { GraphQLWsLink } = require("@apollo/client/link/subscriptions");
-        const { createClient } = require("graphql-ws");
-        const WebSocket = require("ws");
         logger.info("[ad4m-waker] Dependencies loaded OK");
 
-        const connParams = _authToken
-          ? { headers: { authorization: _authToken } }
-          : {};
-        logger.info(`[ad4m-waker] connectionParams: ${JSON.stringify({ headers: { authorization: _authToken ? `${tokenType}[${_authToken.length}]` : "EMPTY" } })}`);
-        logger.info(`[ad4m-waker] Connecting WebSocket to ${wsUrl}...`);
+        logger.info(`[ad4m-waker] Connecting to ${httpUrl}...`);
 
-        const wsClient = createClient({
-          url: wsUrl,
-          webSocketImpl: WebSocket,
-          connectionParams: () => connParams,
-          lazy: false,
-          keepAlive: 10_000,
-          retryAttempts: Infinity,
-          retryWait: async (retries: number) => {
-            const delay = Math.min(1000 * Math.pow(2, retries), 30000);
-            logger.info(
-              `[ad4m-waker] reconnecting in ${delay}ms (attempt ${retries + 1})...`,
-            );
-            await new Promise((r: any) => setTimeout(r, delay));
-          },
-          on: {
-            connected: (socket: any) => {
-              logger.info(`[ad4m-waker] WebSocket connected (protocol: ${socket?.protocol ?? "unknown"})`);
-            },
-            closed: (event: any) => {
-              logger.warn(`[ad4m-waker] WebSocket closed — code: ${event?.code ?? "N/A"}, reason: "${event?.reason ?? "N/A"}", wasClean: ${event?.wasClean ?? "N/A"}`);
-              logger.warn(`[ad4m-waker] WebSocket closed — full event: ${JSON.stringify(event)}`);
-            },
-            error: (error: any) => {
-              logger.error(`[ad4m-waker] WebSocket error: ${error?.message ?? error}`);
-              if (error?.stack) logger.error(`[ad4m-waker] WebSocket error stack: ${error.stack}`);
-            },
-          },
-        });
-
-        const wsLink = new GraphQLWsLink(wsClient);
-        const apolloClient = new ApolloClient({
-          link: wsLink,
-          cache: new InMemoryCache(),
-          defaultOptions: {
-            watchQuery: { fetchPolicy: "no-cache" },
-            query: { fetchPolicy: "no-cache" },
-            mutate: { fetchPolicy: "no-cache" },
-          },
-        });
-
-        _wakerClient = new Ad4mClient(apolloClient);
+        _wakerClient = new Ad4mClient(httpUrl, _authToken, true);
         logger.info("[ad4m-waker] Ad4mClient created, calling agent.status()...");
 
         // Load persisted state (subscriptions + seen messages) before creating manager
@@ -1203,17 +1155,7 @@ Notes:
           logger.info(`[ad4m-waker] agent.status() returned: initialized=${status.isInitialized}, unlocked=${status.isUnlocked}, did=${status.did?.substring(0, 30) ?? "N/A"}`);
         } catch (statusErr: any) {
           logger.error(`[ad4m-waker] agent.status() FAILED: ${statusErr.message}`);
-          if (statusErr.graphQLErrors) {
-            for (const gqlErr of statusErr.graphQLErrors) {
-              logger.error(`[ad4m-waker]   GraphQL error: ${gqlErr.message}`);
-            }
-          }
-          if (statusErr.networkError) {
-            logger.error(`[ad4m-waker]   Network error: ${statusErr.networkError.message}`);
-            if (statusErr.networkError.result) {
-              logger.error(`[ad4m-waker]   Network error result: ${JSON.stringify(statusErr.networkError.result)}`);
-            }
-          }
+          if (statusErr.stack) logger.error(`[ad4m-waker] Stack: ${statusErr.stack}`);
           throw statusErr;
         }
 
@@ -1278,29 +1220,55 @@ Notes:
         .description(
           "Set up the AD4M plugin (discover executor, generate agent, print config)",
         )
-        .option("--url <url>", "Executor GraphQL URL (e.g., https://marvin.ad4m.dev/graphql)")
-        .option("--endpoint <url>", "MCP endpoint URL (default: derived from --url or localhost:3001)")
-        .option("--ws <url>", "Executor GraphQL WebSocket URL (derived from --url if not provided)", executorWsUrl)
+        .option(
+          "--url <url>",
+          "Executor URL (e.g., https://marvin.ad4m.dev). MCP endpoint is derived from this if --endpoint is not given.",
+        )
+        .option(
+          "--endpoint <url>",
+          "MCP endpoint URL (default: derived from --url or http://localhost:3001/mcp)",
+          endpoint,
+        )
+        .option(
+          "--executor-url <url>",
+          "Executor REST URL (alternative to --url; default: http://localhost:12000)",
+          executorUrl,
+        )
         .option("--email <email>", "Email for multi-user login")
-        .option("--password <password>", "Password for multi-user login (will prompt if not provided)")
+        .option(
+          "--password <password>",
+          "Password for multi-user login (will prompt if not provided)",
+        )
         .action(async (opts: any) => {
-          // Derive ws URL from --url if provided
-          let wsUrl = opts.ws || executorWsUrl;
-          if (opts.url) {
-            wsUrl = opts.url.replace(/^http(s?):/, "ws$1:");
+          // Resolve executor REST URL: --url wins over --executor-url which wins over default.
+          const resolvedExecutorUrl =
+            opts.url ?? opts.executorUrl ?? executorUrl;
+
+          // Derive MCP endpoint from --url if --endpoint was not explicitly given.
+          // commander assigns the default to opts.endpoint, so we only override when
+          // the user passed --url AND left --endpoint at its default.
+          let mcpEndpoint = opts.endpoint;
+          if (opts.url && opts.endpoint === endpoint) {
+            try {
+              const urlObj = new URL(opts.url);
+              mcpEndpoint = `${urlObj.protocol}//${urlObj.host}/mcp`;
+            } catch {
+              // Bad URL — fall through to the default; runSetup will surface the error.
+            }
           }
 
           // Password from CLI or env var; will be prompted inside setup only when needed
-          const password = opts.password || process.env.AD4M_PASSWORD || undefined;
+          const password =
+            opts.password || process.env.AD4M_PASSWORD || undefined;
 
-          // Derive MCP endpoint from --url if provided
-          let mcpEndpoint = opts.endpoint || endpoint;
-          if (opts.url && !opts.endpoint) {
-            const urlObj = new URL(opts.url);
-            mcpEndpoint = `${urlObj.protocol}//${urlObj.host}/mcp`;
-          }
-
-          await runSetup(ctx.config, ctx.logger, mcpEndpoint, wsUrl, opts.email, password, opts.url);
+          await runSetup(
+            ctx.config,
+            ctx.logger,
+            mcpEndpoint,
+            resolvedExecutorUrl,
+            opts.email,
+            password,
+          );
         });
     },
     { commands: ["ad4m-setup"] },

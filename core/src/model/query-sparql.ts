@@ -1,8 +1,10 @@
 /**
  * SPARQL query building utilities for Ad4mModel.
  *
- * Uses the direct triple + named graph storage model where each AD4M link
- * is stored in a named graph (keyed by link hash) with metadata in the default graph.
+ * Uses the RDF 1.2 reifier storage model where each AD4M link is stored as:
+ * 1. Direct triple: <source> <predicate> <target> . (default graph)
+ * 2. Reifier: <link:HASH> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( source predicate target )>> .
+ * 3. Metadata: <link:HASH> ad4m://ontology/* "value" . (default graph)
  *
  * All AD4M URIs (source, predicate, target) become RDF IRIs.
  *
@@ -117,7 +119,9 @@ function escapeSPARQL(value: string): string {
     .replace(/"/g, '\\"')
     .replace(/\n/g, "\\n")
     .replace(/\r/g, "\\r")
-    .replace(/\t/g, "\\t");
+    .replace(/\t/g, "\\t")
+    .replace(/\0/g, "")
+    .replace(/\f/g, "\\u000C");
 }
 
 /**
@@ -134,8 +138,14 @@ export function formatSPARQLValue(value: any): string {
  * Format an AD4M URI as an RDF IRI for use in SPARQL triple patterns.
  * All AD4M link source/predicate/target values become IRIs in angle brackets.
  * The Rust SPARQL service transparently transforms these to valid IRI format.
+ *
+ * Rejects characters that would break or inject into a SPARQL IRI token,
+ * matching the Rust-side `validate_iri()` function.
  */
 function iri(value: string): string {
+  if (/[<>{}" ]/.test(value)) {
+    throw new Error(`Invalid IRI component: '${value}'`);
+  }
   return `<${value}>`;
 }
 
@@ -249,96 +259,111 @@ export function buildSPARQLQuery(
   filterExpressions.push(...userFilters);
 
   // Main triple pattern — fetches all links for matched sources
-  // The direct triple in named graph: GRAPH ?linkGraph { ?source ?predicate ?target }
+  // Direct triple in default graph + RDF 1.2 reifier for link metadata
   // FILTER(isIRI(?source)) excludes non-IRI subjects
   const joinClause = joinPatterns.join("\n");
   const filterClause = filterExpressions.length > 0
     ? `FILTER(\n      ${filterExpressions.join(" &&\n      ")}\n    )`
     : "";
 
-  // NOTE: SPARQL-level LIMIT/OFFSET is intentionally NOT applied here.
-  // The outer SELECT returns multiple rows per instance (one per link),
-  // so SPARQL LIMIT/OFFSET would cut off links mid-instance and produce
-  // incorrect results. All pagination is handled in JS after grouping
-  // and hydration (instancesFromQueryResult).
+  // Determine if SPARQL-level pagination is safe.
+  // When JS-only where filters exist, we must NOT limit at the SPARQL level
+  // because the database would cap candidates before JS filters run.
+  const canPaginateInSPARQL = !hasJsOnlyWhereFilters(metadata, allRelationsMetadata, query.where)
+    && (query.limit !== undefined || query.offset !== undefined);
 
-  return `
-    SELECT ?source ?predicate ?target ?author ?timestamp WHERE {${joinClause}
-      GRAPH ?linkGraph { ?source ?predicate ?target . }
+  // Build a pagination subquery that constrains ?source to only the page
+  // of interest.  This avoids fetching all links for all matching instances.
+  const paginationSubquery = canPaginateInSPARQL
+    ? buildPaginationSubquery(joinPatterns, filterExpressions, metadata, query)
+    : '';
+
+  if (paginationSubquery) {
+    // Use the pagination subquery to constrain ?source, then fetch all links
+    // for those sources only.
+    return `
+
+    SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
+      ${paginationSubquery}${joinClause}
+      ?source ?predicate ?target .
+      ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
       FILTER(isIRI(?source) && isIRI(?predicate))
-      ?linkGraph <ad4m://ontology/author> ?author .
-      ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
+      ?_reifier <ad4m://ontology/author> ?author .
+      ?_reifier <ad4m://ontology/timestamp> ?timestamp .
       ${filterClause}
     }
-    ${buildSPARQLOrderLimitOffset(metadata, query)}
   `.trim();
-}
-
-/**
- * Build ORDER BY / LIMIT / OFFSET clauses for the SPARQL query.
- *
- * NOTE: The outer SELECT returns multiple rows per instance (one per link),
- * so LIMIT/OFFSET at the outer level would cut off links mid-instance.
- * Instead, we apply these clauses so the database can at least use them
- * as hints. The JS-side pagination in instancesFromQueryResult remains
- * the authoritative mechanism, but when ORDER BY + LIMIT are present the
- * database can short-circuit scanning via its indexes.
- *
- * For queries with both `order` and `limit`, we wrap the source-selection
- * in a subquery pattern (handled in buildSPARQLQuery). This function emits
- * the raw clauses for simpler cases or as a fallback.
- */
-export function buildSPARQLOrderLimitOffset(_metadata: ModelMetadata, query: Query): string {
-  // NOTE: LIMIT/OFFSET are intentionally NOT emitted here.
-  // The outer SELECT returns multiple rows per instance (one per link),
-  // so applying LIMIT/OFFSET at the SPARQL level would cut off links
-  // mid-instance. All pagination is handled in JS (instancesFromQueryResult).
-  // ORDER BY is also omitted since row-level ordering of multi-row-per-instance
-  // results is not meaningful; JS sorts hydrated instances instead.
-  return "";
-}
-
-/**
- * Build a SPARQL query to fetch all links for a single instance.
- */
-export function buildSPARQLGetDataQuery(baseExpression: string): string {
-  return `
-    SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
-      GRAPH ?linkGraph { ${iri(baseExpression)} ?predicate ?target . }
-      FILTER(isIRI(?predicate))
-      BIND(${iri(baseExpression)} AS ?source)
-      ?linkGraph <ad4m://ontology/author> ?author .
-      ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
-    }
-  `.trim();
-}
-
-/**
- * Group flat SPARQL link rows into the same shape that SPARQL returned:
- * `{ source_uri: string, links: Array<{predicate, target, author, timestamp}> }`
- */
-export function groupSPARQLResults(
-  rows: Array<{ source: string; predicate: string; target: string; author: string; timestamp: string }>
-): Array<{ source_uri: string; links: Array<{ predicate: string; target: string; author: string; timestamp: string }> }> {
-  const grouped = new Map<string, { predicate: string; target: string; author: string; timestamp: string }[]>();
-  
-  for (const row of rows) {
-    const key = row.source;
-    if (!grouped.has(key)) {
-      grouped.set(key, []);
-    }
-    grouped.get(key)!.push({
-      predicate: row.predicate,
-      target: row.target,
-      author: row.author,
-      timestamp: row.timestamp,
-    });
   }
 
-  return Array.from(grouped.entries()).map(([source_uri, links]) => ({
-    source_uri,
-    links,
-  }));
+  return `
+
+    SELECT ?source ?predicate ?target ?author ?timestamp WHERE {${joinClause}
+      ?source ?predicate ?target .
+      ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+      FILTER(isIRI(?source) && isIRI(?predicate))
+      ?_reifier <ad4m://ontology/author> ?author .
+      ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+      ${filterClause}
+    }
+  `.trim();
+}
+
+/**
+ * Build an inner subquery that selects DISTINCT ?source URIs with
+ * ORDER BY, LIMIT, and OFFSET applied at the instance level.
+ *
+ * Because the outer SELECT returns multiple rows per instance (one per link),
+ * we cannot apply LIMIT/OFFSET there.  Instead this subquery constrains
+ * ?source to only the instances on the requested page.
+ *
+ * @internal — used by buildSPARQLQuery when SPARQL-level pagination is safe.
+ */
+export function buildPaginationSubquery(
+  joinPatterns: string[],
+  filterExpressions: string[],
+  metadata: ModelMetadata,
+  query: Query,
+): string {
+  const innerJoin = joinPatterns.join('\n');
+  const innerFilter = filterExpressions.length > 0
+    ? `FILTER(\n      ${filterExpressions.join(' &&\n      ')}\n    )`
+    : '';
+
+  // Build ORDER BY clause from query.order
+  let orderByClause = '';
+  const orderJoinPatterns: string[] = [];
+  if (query.order) {
+    const orderTerms = Object.entries(query.order).map(([prop, dir]) => {
+      const sparqlVar = mapPropertyToSPARQLVar(prop, metadata);
+      // Check if this order property's variable is already bound by existing
+      // join patterns. If not, add an OPTIONAL join so ORDER BY is deterministic.
+      const varAlreadyBound = innerJoin.includes(sparqlVar);
+      if (!varAlreadyBound) {
+        const propMeta = metadata.properties[prop];
+        if (propMeta && propMeta.predicate && !propMeta.getter) {
+          orderJoinPatterns.push(`\n      OPTIONAL { ?source <${propMeta.predicate}> ${sparqlVar} . }`);
+        }
+      }
+      return dir === 'DESC' ? `DESC(${sparqlVar})` : `ASC(${sparqlVar})`;
+    });
+    if (orderTerms.length > 0) {
+      orderByClause = `ORDER BY ${orderTerms.join(' ')}`;
+    }
+  }
+
+  // No default ordering — when no explicit order is specified, results come in
+  // natural (insertion) order.
+  const tsSelect = '';
+  const tsPattern = '';
+
+  const limitClause = query.limit !== undefined ? `LIMIT ${query.limit}` : '';
+  const offsetClause = query.offset !== undefined && query.offset > 0 ? `OFFSET ${query.offset}` : '';
+
+  return `
+      { SELECT DISTINCT ?source${tsSelect} WHERE {${innerJoin}${orderJoinPatterns.join('')}${tsPattern}
+        FILTER(isIRI(?source))
+        ${innerFilter}
+      } ${orderByClause} ${limitClause} ${offsetClause} }\n`;
 }
 
 /**

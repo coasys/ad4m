@@ -7,10 +7,11 @@ pub mod types;
 pub use defs::*;
 use requests_map::{get_request, insert_request, remove_request};
 pub use token::*;
+#[allow(ambiguous_glob_reexports)]
 pub use types::*;
 
-use crate::graphql::graphql_types::*;
 use crate::pubsub::{get_global_pubsub, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC};
+use crate::types::*;
 use crate::utils::constant_time_eq;
 
 use std::collections::HashMap;

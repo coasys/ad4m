@@ -1,5 +1,5 @@
 use crate::{formatting::*, util::readline_masked};
-use ad4m_client::{agent::add_entanglement_proofs::EntanglementProofInput, Ad4mClient};
+use ad4m_client::{types::EntanglementProof, Ad4mClient};
 use anyhow::{bail, Result};
 use clap::Subcommand;
 
@@ -35,17 +35,17 @@ pub enum AgentFunctions {
         device_key: String,
         device_key_signed_by_did: String,
         device_key_type: String,
-        did: String,
+        did: Option<String>,
         did_signed_by_device_key: String,
-        did_signing_key_id: String,
+        did_signing_key_id: Option<String>,
     },
     DeleteEntanglementProof {
         device_key: String,
         device_key_signed_by_did: String,
         device_key_type: String,
-        did: String,
+        did: Option<String>,
         did_signed_by_device_key: String,
-        did_signing_key_id: String,
+        did_signing_key_id: Option<String>,
     },
     EntanglementProofPreFlight {
         device_key: String,
@@ -144,12 +144,12 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             did_signed_by_device_key,
             did_signing_key_id,
         } => {
-            let input = EntanglementProofInput {
+            let input = EntanglementProof {
                 device_key,
-                device_key_signed_by_did,
+                device_key_signed_by_did: Some(device_key_signed_by_did),
                 device_key_type,
                 did,
-                did_signed_by_device_key,
+                did_signed_by_device_key: Some(did_signed_by_device_key),
                 did_signing_key_id,
             };
             ad4m_client
@@ -166,12 +166,12 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             did_signed_by_device_key,
             did_signing_key_id,
         } => {
-            let input = ad4m_client::agent::delete_entanglement_proofs::EntanglementProofInput {
+            let input = EntanglementProof {
                 device_key,
-                device_key_signed_by_did,
+                device_key_signed_by_did: Some(device_key_signed_by_did),
                 device_key_type,
                 did,
-                did_signed_by_device_key,
+                did_signed_by_device_key: Some(did_signed_by_device_key),
                 did_signing_key_id,
             };
             ad4m_client
@@ -198,7 +198,40 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             println!("JWT: {:#?}", result);
         }
         AgentFunctions::Watch {} => {
-            ad4m_client.agent.watch().await?;
+            println!("Watching for agent status changes...");
+            println!("(Press Ctrl+C to stop)\n");
+            let mut rx = ad4m_client.subscribe_events();
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        match event_type {
+                            "agent-status-changed" => {
+                                if let Some(agent) = event.get("agent") {
+                                    println!("Agent status changed: {}", agent);
+                                } else {
+                                    println!("Agent status changed: {}", event);
+                                }
+                            }
+                            "agent-updated" => {
+                                if let Some(agent) = event.get("agent") {
+                                    println!("Agent updated: {}", agent);
+                                } else {
+                                    println!("Agent updated: {}", event);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        eprintln!("Warning: dropped {} events (too slow)", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        eprintln!("Event stream closed");
+                        break;
+                    }
+                }
+            }
         }
     };
     Ok(())

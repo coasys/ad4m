@@ -1,6 +1,6 @@
-//! Shared user management functions for MCP and GraphQL auth flows.
+//! Shared user management functions for MCP and REST auth flows.
 //!
-//! Extracted to avoid code duplication between MCP tools and GraphQL mutation resolvers.
+//! Extracted to avoid code duplication between MCP tools and REST handlers.
 
 use crate::agent::capabilities::{
     get_user_default_capabilities, token::generate_jwt as generate_jwt_token, AuthInfo,
@@ -175,6 +175,10 @@ pub async fn request_login_code(email: &str, app_name: Option<&str>) -> Result<(
         return Err("Multi-user mode is not enabled".to_string());
     }
     user_exists(email)?;
+
+    Ad4mDb::with_global_instance(|db| db.check_and_update_rate_limit(email))
+        .map_err(|e| e.to_string())?;
+
     let code = create_verification_code(email, "login")?;
     send_verification_email(email, &code, "login", app_name).await?;
     Ok(())

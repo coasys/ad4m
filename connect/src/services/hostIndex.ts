@@ -30,7 +30,7 @@ export async function fetchHosts(indexUrl?: string): Promise<RemoteHost[]> {
   return hosts;
 }
 
-/** Fetch current user info from the executor via GraphQL */
+/** Fetch current user info from the executor */
 export async function fetchUserInfo(ad4mClient: Ad4mClient): Promise<UserInfo> {
   const info = await ad4mClient.agent.hostingUserInfo();
   return {
@@ -41,7 +41,7 @@ export async function fetchUserInfo(ad4mClient: Ad4mClient): Promise<UserInfo> {
   };
 }
 
-/** Trigger a payment request via the executor's GraphQL API */
+/** Trigger a payment request via the executor */
 export async function requestPayment(
   ad4mClient: Ad4mClient,
   amountHOT: number

@@ -1,11 +1,22 @@
 version: 2.1
 references:
-  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:a0ab4b6358b7314a2ad49e232ba6c53b28a56e7f02641f226b2ed05544cc66d8
+  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
 
 # Self-hosted machine runner on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04)
 # Resource class: coasys/marvin
 
 commands:
+  fix_workdir:
+    description: "Recover from corrupted .git directory (e.g. after disk-full)"
+    steps:
+      - run:
+          name: Fix corrupted working directory
+          command: |
+            if [ -d .git ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
+              echo "Corrupted .git directory detected, removing for fresh clone..."
+              rm -rf .git
+            fi
+
   setup_env:
     description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
     parameters:
@@ -30,6 +41,8 @@ commands:
             echo "Node: $(node --version)"
             echo "npm: $(npm --version)"
             echo "Rust: $(rustc --version)"
+            echo "Installing wasm-bindgen-cli for Rust WASM builds..."
+            cargo install wasm-bindgen-cli --version 0.2.118
             echo "Deno: $(deno --version | head -1)"
             echo "Go: $(go version)"
             echo "pnpm: $(pnpm --version || echo 'not installed yet')"
@@ -37,13 +50,16 @@ commands:
   setup_integration_test_environment:
     description: "Setup common integration test environment"
     steps:
+      - fix_workdir
       - checkout
       - run:
           name: Restore binaries from local stash (no CircleCI network storage needed — same host)
           command: |
             mkdir -p target/release
-            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
-            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m-executor target/release/ad4m-executor
+            # Remove before copy: unlinking avoids ETXTBSY if a previous executor still holds the binary
+            rm -f target/release/ad4m target/release/ad4m-executor
+            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m target/release/ad4m
+            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m-executor target/release/ad4m-executor
       - setup_env
       - run:
           name: Install dependencies
@@ -63,6 +79,7 @@ jobs:
     machine: true
     resource_class: coasys/marvin
     steps:
+      - fix_workdir
       - checkout
       - setup_env
       - run:
@@ -99,8 +116,8 @@ jobs:
       - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
           command: |
-            mkdir -p /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}
-            cp target/release/ad4m target/release/ad4m-executor /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/
+            mkdir -p /tmp/circleci-artifacts/${CIRCLE_SHA1}
+            cp target/release/ad4m target/release/ad4m-executor /tmp/circleci-artifacts/${CIRCLE_SHA1}/
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
@@ -187,13 +204,14 @@ jobs:
     machine: true
     resource_class: coasys/marvin
     steps:
+      - fix_workdir
       - checkout
       - run:
           name: Restore binaries from local stash
           command: |
             mkdir -p target/release
-            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
-            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m-executor target/release/ad4m-executor
+            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m target/release/ad4m
+            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m-executor target/release/ad4m-executor
       - setup_env
       - run:
           name: git submodule
@@ -209,6 +227,7 @@ jobs:
     machine: true
     resource_class: coasys/marvin
     steps:
+      - fix_workdir
       - checkout
       - run:
           name: Install dependencies

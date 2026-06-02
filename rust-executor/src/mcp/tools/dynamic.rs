@@ -5,11 +5,11 @@
 //! not just hardcoded tool sets.
 
 use super::Ad4mMcpHandler;
-use crate::graphql::graphql_types::{LinkQuery, LinkStatus};
 use crate::mcp::shacl::{self, ShaclProperty};
 use crate::perspectives::perspective_instance::SubjectClassOption;
 use crate::perspectives::{all_perspectives, get_perspective};
 use crate::types::Link;
+use crate::types::{LinkQuery, LinkStatus};
 use rmcp::model::{CallToolResult, Content, Tool};
 use rmcp::ErrorData;
 use serde_json::json;

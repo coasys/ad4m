@@ -1,8 +1,8 @@
 import { css, html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import autoBind from "auto-bind";
-import { VerificationRequestResult } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
-import { connectWebSocket, setLocal } from "./utils";
+import { VerificationRequestResult } from "@coasys/ad4m/lib/src/runtime/RuntimeTypes";
+import { checkConnection, setLocal, wsUrlToHttpBase } from "./utils";
 import Ad4mConnect from "./core";
 import { Ad4mLogo, ArrowLeftIcon, CreditIcon } from "./components/icons";
 import { fetchHosts } from "./services/hostIndex";
@@ -224,6 +224,10 @@ export class Ad4mConnectElement extends LitElement {
         // Token expired or invalid - show connection options
         this.currentView = "connection-options";
         this.modalOpen = true;
+      } else if (e.detail === 'authenticated') {
+        // Successfully authenticated - switch to dashboard and close modal
+        this.currentView = "logged-in-dashboard";
+        this.modalOpen = false;
       }
       // Trigger re-render to update UI based on new auth state
       this.requestUpdate();
@@ -284,9 +288,21 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private async connectLocalNode() {
-    // Update URL to local and persist
-    this.core.url = `ws://localhost:${this.core.port}/graphql`;
-    setLocal("ad4m-url", this.core.url);
+    // First, try same-origin (works when Vite dev server proxies /health to executor)
+    try {
+      const probeRes = await fetch(window.location.origin + '/health', { signal: AbortSignal.timeout(2000) });
+      if (!probeRes.ok) throw new Error('probe failed');
+      const body = await probeRes.json();
+      if (body?.status !== 'ok') throw new Error('not an ad4m executor');
+      this.core.url = window.location.origin;
+      setLocal("ad4m-url", this.core.url);
+      console.log('[Ad4m Connect UI] Using same-origin proxy:', this.core.url);
+    } catch {
+      // Fall back to direct connection
+      const host = window.location.hostname === '127.0.0.1' ? '127.0.0.1' : 'localhost';
+      this.core.url = `http://${host}:${this.core.port}`;
+      setLocal("ad4m-url", this.core.url);
+    }
     
     try {
       await this.core.connect();
@@ -346,8 +362,8 @@ export class Ad4mConnectElement extends LitElement {
     const candidateUrl = host.url;
 
     try {
-      // Verify WS reachability before committing URL
-      await connectWebSocket(candidateUrl);
+      // Verify HTTP reachability before committing URL
+      await checkConnection(wsUrlToHttpBase(candidateUrl));
       console.log('[Ad4m Connect UI] Host connection successful:', host.name);
 
       // Verify it's an AD4M API
@@ -418,7 +434,7 @@ export class Ad4mConnectElement extends LitElement {
     setLocal("ad4m-url", this.core.url);
 
     try {
-      await connectWebSocket(e.detail.remoteUrl);
+      await checkConnection(wsUrlToHttpBase(e.detail.remoteUrl));
       const isValidAd4mApi = await this.core.isValidAd4mAPI();
       if (!isValidAd4mApi) throw new Error("Server is reachable but doesn't appear to be an AD4M executor");
 
@@ -650,9 +666,10 @@ export class Ad4mConnectElement extends LitElement {
     } else if (this.core.authState === "authenticated") {
       // Show settings button when authenticated and modal is closed
       const credits = this.userInfo?.remainingCredits;
+      const showCredits = credits != null && isFinite(credits);
       return html`
         <div class="settings-bar">
-          ${credits != null ? html`
+          ${showCredits ? html`
             <span class="credit-badge ${this.lowCredit ? 'low-credit' : ''}">
               ${CreditIcon()} ${credits.toFixed(2)} wHOT
             </span>

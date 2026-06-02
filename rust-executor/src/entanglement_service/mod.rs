@@ -1,7 +1,7 @@
 use crate::{
     agent::{sign_string_hex, AgentService},
     db::Ad4mDb,
-    graphql::graphql_types::EntanglementProof,
+    types::EntanglementProof,
 };
 
 pub mod entanglement_service_extension;

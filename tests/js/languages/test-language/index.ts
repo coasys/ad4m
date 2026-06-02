@@ -1,41 +1,47 @@
-import type { Address, Interaction, Expression, Language, LanguageContext } from "https://esm.sh/v135/@coasys/ad4m@0.5.0";
+/**
+ * Flat-export test language for AD4M-executor integration tests.
+ *
+ * Exercises the interactions + expression capability surface with a
+ * simple in-memory expression store.
+ */
+import type { Address, Interaction, Expression } from "https://esm.sh/v135/@coasys/ad4m@0.5.0";
 
-export default function create(context: LanguageContext): Language {
-    const expressions = new Array<Expression>()
+export const name = "test-language";
+export const version = "0.0.1";
 
-    function interactions(expressionAddress: Address): Interaction[] {
-        return [{
-            label: 'Modify an expression',
-            name: 'modify',
-            parameters: [{name: 'newValue', type: 'object'}],
-            execute: async (parameters: object) => {
-                const addr = parseInt(expressionAddress)
-                if(addr > expressions.length) return "Non-existant expression"
+const expressions: Expression[] = [];
+let agent: any = null;
 
-                //@ts-ignore
-                const content = parameters['newValue']
-                const expr = context.agent.createSignedExpression(content)
-                expressions[addr] = expr
-
-                return "ok"
-            }
-        }]
-    }
-
-    return {
-        name: "test-language",
-        interactions,
-        expressionAdapter: {
-            get: async (address: Address) => expressions[parseInt(address)],
-            putAdapter: {
-                createPublic: async (content: object): Promise<Address> => {
-                    const expr = context.agent.createSignedExpression(content)
-                    const addr = expressions.length
-                    expressions[addr] = expr
-                    return addr.toString()
-                }
-            }
-        }
-    } as Language
+export async function init(): Promise<void> {
+    agent = (globalThis as any).__agentProxy__;
 }
 
+export function interactions(expressionAddress: Address): Interaction[] {
+    return [{
+        label: "Modify an expression",
+        name: "modify",
+        parameters: [{ name: "newValue", type: "object" }],
+        execute: async (parameters: object) => {
+            const addr = parseInt(expressionAddress);
+            if (addr > expressions.length) return "Non-existant expression";
+            //@ts-ignore
+            const content = parameters["newValue"];
+            const expr = agent.createSignedExpression(content);
+            expressions[addr] = expr;
+            return "ok";
+        }
+    }];
+}
+
+export async function expressionGet(address: Address): Promise<Expression | null> {
+    return expressions[parseInt(address)] ?? null;
+}
+
+export async function expressionCreate(content: object): Promise<Address> {
+    const expr = agent.createSignedExpression(content);
+    const addr = expressions.length;
+    expressions[addr] = expr;
+    return addr.toString();
+}
+
+export async function teardown(): Promise<void> {}

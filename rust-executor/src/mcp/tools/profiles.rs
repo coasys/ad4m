@@ -6,8 +6,9 @@
 use super::Ad4mMcpHandler;
 use crate::agent::capabilities::user_email_from_token;
 use crate::agent::{create_signed_expression, AgentContext, AgentService};
-use crate::graphql::graphql_types::{Agent, Perspective};
 use crate::languages::LanguageController;
+use crate::types::domain::Perspective;
+use crate::types::Agent;
 use crate::types::{DecoratedLinkExpression, Link, VerifiedExpression};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -352,7 +353,7 @@ impl Ad4mMcpHandler {
         //    }
         //};
 
-        let file_storage_addr = "QmzSYwdjqeP9D13Sfmyc5HcabM9jL3DtPyhadnF6dQXu4FjVSbQ".to_string();
+        let file_storage_addr = "QmzSYwddqhm49PrRMzSrJf3AvmmreXMKtr1u56nbTjBFVmCzS8N".to_string();
 
         // Ensure the file-storage language is loaded before trying to create an expression.
         // language_by_ref() downloads and installs the language if it isn't already running.

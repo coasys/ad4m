@@ -290,7 +290,7 @@ const Profile = (props: Props) => {
   };
 
   const addAgentInfo = async (info: string) => {
-    await client?.runtime.hcAddAgentInfos(info);
+    await client?.runtime.hcAddAgentInfos([info]);
     setShowAddHcAgentInfos(false);
   };
 
@@ -320,7 +320,7 @@ const Profile = (props: Props) => {
 
   const formatProxy = (proxy: string | null) => {
     if (!proxy) return "";
-    return proxy.replace(/^https(.*)/, "wss$1").replace(/^http(.*)/, "ws$1") + "/graphql";
+    return proxy;
   };
 
   const copyText = (text: string) => {
@@ -488,8 +488,8 @@ const Profile = (props: Props) => {
               <ActionButton title="Proxy URL" onClick={() => copyText(proxy)} icon="clipboard" />
               <ActionButton title="QR Code" onClick={showProxyQRCode} icon="qr-code-scan" />
               <ActionButton
-                title="Open GraphQL"
-                onClick={() => openUrl(proxy.replace("wss", "https").replace("graphql", "playground"))}
+                title="Open API"
+                onClick={() => openUrl(proxy)}
                 icon="box-arrow-up-right"
               />
             </j-flex>

@@ -67,7 +67,7 @@ pub struct Ad4mConfig {
     pub network_bootstrap_seed: Option<String>,
     pub language_language_only: Option<bool>,
     pub run_dapp_server: Option<bool>,
-    pub gql_port: Option<u16>,
+    pub port: Option<u16>,
     #[serde(rename = "hcPortAdmin")]
     pub hc_admin_port: Option<u16>,
     #[serde(rename = "hcPortApp")]
@@ -121,8 +121,8 @@ impl Ad4mConfig {
         if self.run_dapp_server.is_none() {
             self.run_dapp_server = Some(true);
         }
-        if self.gql_port.is_none() {
-            self.gql_port = Some(12000);
+        if self.port.is_none() {
+            self.port = Some(12000);
         }
         if self.connect_holochain.is_none() {
             self.connect_holochain = Some(false);
@@ -162,7 +162,7 @@ impl Default for Ad4mConfig {
             network_bootstrap_seed: None,
             language_language_only: None,
             run_dapp_server: None,
-            gql_port: None,
+            port: None,
             hc_admin_port: None,
             hc_app_port: None,
             hc_use_local_proxy: None,

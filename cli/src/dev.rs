@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use colour::{self, green_ln};
-use std::{fs, str::FromStr};
+use std::fs;
 
 use crate::bootstrap_publish::*;
 
@@ -40,7 +40,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     network_bootstrap_seed: None,
                     language_language_only: Some(false),
                     run_dapp_server: Some(false),
-                    gql_port: None,
+                    port: None,
                     hc_admin_port: None,
                     hc_app_port: None,
                     hc_use_bootstrap: None,
@@ -69,10 +69,12 @@ pub async fn run(command: DevFunctions) -> Result<()> {
 
             let test_res = tokio::task::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
-                let client = ad4m_client::Ad4mClient::new(
-                    String::from("http://127.0.0.1:4000/graphql"),
+                let client = ad4m_client::Ad4mClient::connect(
+                    String::from("http://127.0.0.1:4000"),
                     String::from("*"),
-                );
+                )
+                .await
+                .expect("could not connect to executor");
                 let me = client.agent.me().await;
                 println!("Me: {:?}", me);
                 let agent_generate = client.agent.generate(String::from("test")).await;
@@ -81,7 +83,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     .languages
                     .publish(
                         language_path,
-                        String::from("some-test-lang"),
+                        Some(String::from("some-test-lang")),
                         Some(String::from("some-desc")),
                         None,
                         None,
@@ -96,11 +98,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 println!("Language: {:?}", language);
                 let expression = client
                     .expressions
-                    .expression_create(
-                        language_info.address,
-                        serde_json::Value::from_str(&data)
-                            .expect("could not cast input data to serde_json::Value"),
-                    )
+                    .expression_create(data.clone(), language_info.address)
                     .await;
                 println!("Expression create: {:?}", expression);
                 let expression = client.expressions.expression(expression.unwrap()).await;
@@ -197,7 +195,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     ),
                     language_language_only: Some(true),
                     run_dapp_server: Some(false),
-                    gql_port: None,
+                    port: None,
                     hc_admin_port: None,
                     hc_app_port: None,
                     hc_use_bootstrap: None,

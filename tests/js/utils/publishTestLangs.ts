@@ -4,11 +4,7 @@ import fs from "fs-extra";
 import { exit } from "process";
 import { execSync } from "child_process";
 import { fileURLToPath } from 'url';
-import { apolloClient, sleep, startExecutor } from "./utils";
-import fetch from 'node-fetch'
-
-//@ts-ignore
-global.fetch = fetch
+import { baseUrl, sleep, startExecutor } from "./utils";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,21 +18,19 @@ const perspectiveDiffSyncHashPath = path.resolve(__dirname, '..', 'scripts', 'pe
 // Allow env-var override so concurrent CI jobs can each use a unique port range
 // and avoid stomping on each other during the setup phase.
 // Defaults: 15700/15701/15702 (used by integration-tests-js / test-main)
-const gqlPort = parseInt(process.env.AD4M_SETUP_GQL_PORT || '15700', 10);
+const apiPort = parseInt(process.env.AD4M_SETUP_API_PORT || '15700', 10);
 const hcAdminPort = parseInt(process.env.AD4M_SETUP_HC_ADMIN_PORT || '15701', 10);
 const hcAppPort = parseInt(process.env.AD4M_SETUP_HC_APP_PORT || '15702', 10);
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
-    "agent-expression-store": {name: "agent-expression-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput, 
-    "direct-message-language": {name: "direct-message-language", description: "", possibleTemplateParams: ["uid", "recipient_did", "recipient_hc_agent_pubkey"]} as LanguageMetaInput, 
-    "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput, 
+    "agent-expression-store": {name: "agent-expression-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
+    "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
     "perspective-diff-sync": {name: "perspective-diff-sync", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
     "perspective-language": {name: "perspective-language", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
 }
 
 const languageHashes = {
-    "directMessageLanguage": "",
     "agentLanguage": "",
     "perspectiveLanguage": "",
     "neighbourhoodLanguage": "",
@@ -64,7 +58,7 @@ function createTestingAgent() {
 function injectSystemLanguages() {
     if (fs.existsSync(bootstrapSeedPath)) {
         const bootstrapSeed = JSON.parse(fs.readFileSync(bootstrapSeedPath).toString());
-        bootstrapSeed["directMessageLanguage"] = languageHashes["directMessageLanguage"];
+        bootstrapSeed["directMessageLanguage"] = "";
         bootstrapSeed["agentLanguage"] = languageHashes["agentLanguage"];
         bootstrapSeed["perspectiveLanguage"] = languageHashes["perspectiveLanguage"];
         bootstrapSeed["neighbourhoodLanguage"] = languageHashes["neighbourhoodLanguage"];
@@ -80,7 +74,7 @@ function injectLangAliasHashes() {
 }
 
 async function publish() {
-    const setupPorts = [gqlPort, hcAdminPort, hcAppPort];
+    const setupPorts = [apiPort, hcAdminPort, hcAppPort];
 
     // Pre-clean: kill any orphaned executor from a previous CI job that may be
     // squatting on our ports. Self-hosted runners reuse workdirs between jobs
@@ -91,10 +85,10 @@ async function publish() {
 
     createTestingAgent();
 
-    const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, gqlPort, hcAdminPort, hcAppPort, true);
+    const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, apiPort, hcAdminPort, hcAppPort, true);
 
     try {
-        const ad4mClient = new Ad4mClient(apolloClient(gqlPort));
+        const ad4mClient = new Ad4mClient(baseUrl(apiPort));
         await ad4mClient.agent.generate("passphrase");
 
         for (const [language, languageMeta] of Object.entries(languagesToPublish)) {
@@ -107,9 +101,6 @@ async function publish() {
             }
             if (language === "neighbourhood-store") {
                 languageHashes["neighbourhoodLanguage"] = publishedLang.address;
-            }
-            if (language === "direct-message-language") {
-                languageHashes["directMessageLanguage"] = publishedLang.address;
             }
             if (language === "perspective-language") {
                 languageHashes["perspectiveLanguage"] = publishedLang.address;
