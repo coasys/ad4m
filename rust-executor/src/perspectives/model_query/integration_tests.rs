@@ -697,7 +697,9 @@ async fn test_resolve_projections_count() {
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
+    resolve_projections(&store, &mut instances, &projections, &shape, 0)
+        .await
+        .unwrap();
 
     let count_a = instances[0]["$itemCount"].as_u64().unwrap_or(999);
     let count_b = instances[1]["$itemCount"].as_u64().unwrap_or(999);
@@ -738,7 +740,9 @@ async fn test_resolve_projections_list() {
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
+    resolve_projections(&store, &mut instances, &projections, &shape, 0)
+        .await
+        .unwrap();
 
     let items = instances[0]["$items"]
         .as_array()
@@ -778,7 +782,9 @@ async fn test_resolve_projections_scalar() {
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
+    resolve_projections(&store, &mut instances, &projections, &shape, 0)
+        .await
+        .unwrap();
 
     let val = &instances[0]["$firstItem"];
     assert_eq!(
@@ -810,7 +816,9 @@ async fn test_resolve_projections_count_zero_when_no_links() {
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
+    resolve_projections(&store, &mut instances, &projections, &shape, 0)
+        .await
+        .unwrap();
 
     let count = instances[0]["$itemCount"].as_u64().unwrap_or(999);
     assert_eq!(
@@ -872,7 +880,9 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
+    resolve_projections(&store, &mut instances, &projections, &shape, 0)
+        .await
+        .unwrap();
 
     let count = instances[0]["$likeCount"].as_u64().unwrap_or(999);
     assert_eq!(
@@ -931,7 +941,9 @@ async fn test_resolve_projections_where_filter_by_author() {
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
+    resolve_projections(&store, &mut instances, &projections, &shape, 0)
+        .await
+        .unwrap();
 
     let count = instances[0]["$mySignalCount"].as_u64().unwrap_or(999);
     assert_eq!(count, 2, "should count only alice's 2 signals, got {count}");
@@ -4020,8 +4032,8 @@ async fn test_full_model_query_order_by_property_number() {
     assert_eq!(got_scores, vec![999.0, 100.0], "DESC numeric sort");
 }
 
-#[test]
-fn test_resolve_projections_where_filter_via_target_shape_property() {
+#[tokio::test]
+async fn test_resolve_projections_where_filter_via_target_shape_property() {
     // Mirrors the WE $totalLikeCount pattern:
     //   include: {
     //     $totalLikeCount: { from: 'signals', where: { signalTypeId: 'like_type_id123' }, count: true }
@@ -4107,7 +4119,9 @@ fn test_resolve_projections_where_filter_via_target_shape_property() {
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
+    resolve_projections(&store, &mut instances, &projections, &shape, 0)
+        .await
+        .unwrap();
 
     let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
     assert_eq!(
@@ -4130,7 +4144,9 @@ fn test_resolve_projections_where_filter_via_target_shape_property() {
         },
     );
 
-    resolve_projections(&store, &mut instances2, &projections2, &shape, 0).unwrap();
+    resolve_projections(&store, &mut instances2, &projections2, &shape, 0)
+        .await
+        .unwrap();
 
     let got = &instances2[0]["$myLikeSignal"];
     assert_eq!(

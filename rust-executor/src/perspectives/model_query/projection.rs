@@ -30,7 +30,7 @@ use crate::perspectives::sparql_store::SparqlStore;
 /// When `proj.target_shape` is set, raw target IRIs are replaced with fully
 /// hydrated model instances via a recursive `execute_model_query_inner` call
 /// (one batch per projection key, eliminating TS-side round-trips).
-pub(super) fn resolve_projections(
+pub(super) async fn resolve_projections(
     store: &SparqlStore,
     instances: &mut Vec<Value>,
     projections: &HashMap<String, ProjectionInput>,
@@ -200,13 +200,16 @@ pub(super) fn resolve_projections(
                                     ..ModelQueryInput::default()
                                 };
 
-                                if let Ok(result) = super::query::execute_model_query_inner(
-                                    store,
-                                    target_class,
-                                    &sub_query,
-                                    Some(&target_shape_json),
-                                    depth + 1,
-                                ) {
+                                if let Ok(result) =
+                                    Box::pin(super::query::execute_model_query_inner(
+                                        store,
+                                        target_class,
+                                        &sub_query,
+                                        Some(&target_shape_json),
+                                        depth + 1,
+                                    ))
+                                    .await
+                                {
                                     let hydrated: HashMap<String, Value> = result
                                         .instances
                                         .into_iter()
