@@ -1,6 +1,13 @@
 use chrono::{DateTime, Utc};
 use hdi::prelude::*;
 
+// Bridge to the substrate-agnostic algorithm crate (Step 1.5):
+// implementing `HasDiffParents` on `PerspectiveDiffEntryReference` here —
+// rather than in p-diff-sync — sidesteps the orphan rule, since both
+// the trait (in `perspective_diff_algorithm`) and the type (here in
+// `perspective_diff_sync_integrity`) are foreign to p-diff-sync.
+use perspective_diff_algorithm::HasDiffParents;
+
 #[derive(
     Serialize, Deserialize, Clone, SerializedBytes, Debug, PartialEq, Eq, Hash, Ord, PartialOrd,
 )]
@@ -272,6 +279,12 @@ impl PartialOrd for PerspectiveDiffEntryReference {
 impl Ord for PerspectiveDiffEntryReference {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.comparison_key().cmp(&other.comparison_key())
+    }
+}
+
+impl HasDiffParents<HoloHash<holo_hash::hash_type::Action>> for PerspectiveDiffEntryReference {
+    fn parents(&self) -> Option<&[HoloHash<holo_hash::hash_type::Action>]> {
+        self.parents.as_deref()
     }
 }
 
