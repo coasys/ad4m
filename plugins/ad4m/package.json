@@ -3,10 +3,20 @@
   "version": "0.0.2",
   "description": "OpenClaw plugin for AD4M — bridges AD4M's MCP tools as native agent tools and turns subscriptions into waker events",
   "license": "MIT",
-  "main": "index.ts",
+  "type": "module",
+  "main": "./dist/index.mjs",
   "openclaw": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./index.ts"],
+    "runtimeExtensions": ["./dist/index.mjs"]
   },
+  "files": [
+    "dist/",
+    "openclaw.plugin.json",
+    "skills/",
+    "README.md",
+    "*.ts",
+    "!*.test.ts"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/coasys/ad4m",
@@ -14,6 +24,9 @@
   },
   "keywords": ["openclaw", "ad4m", "mcp", "p2p", "holochain", "neighbourhoods"],
   "scripts": {
+    "build": "tsdown",
+    "prepare": "tsdown",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -22,6 +35,8 @@
   },
   "devDependencies": {
     "vitest": "^3.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "tsdown": "0.22.1",
+    "@types/node": "^20.0.0"
   }
 }
