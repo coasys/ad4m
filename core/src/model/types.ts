@@ -150,6 +150,196 @@ export type Query = {
  */
 export type RelationSubQuery = Omit<Query, 'parent' | 'count'>;
 
+// ---------------------------------------------------------------------------
+// Typed Query DSL — Phase 1 of PLAN_6_TYPED_QUERIES.md
+//
+// These types layer compile-time field-name and value-type checking on top of
+// the loose Query/Where/Order/IncludeMap. They infer everything from the
+// model class's declared TS fields — no codegen, no runtime changes.
+//
+// Dynamic models (e.g. produced by `Ad4mModel.fromSHACL()`) carry no
+// field-level type information; for those `TypedQuery<Ad4mModel>` collapses
+// to the loose `Query` shape, which is the correct escape hatch.
+// ---------------------------------------------------------------------------
+
+/** Keys of T that are user-declared (not methods, not inherited from Ad4mModel). */
+export type ModelDataKeys<T extends Ad4mModel> = {
+  [K in keyof T]: K extends keyof Ad4mModel ? never
+    : T[K] extends (...args: any[]) => any ? never
+    : K
+}[keyof T];
+
+/** Keys of T that can appear in a `where` clause — scalars and scalar arrays.
+ *  Excludes typed Ad4mModel references (single or array); `string[]`/`number[]`
+ *  remain included because they're often filterable even when also used as
+ *  link targets.
+ *
+ *  Iterates over `keyof T` directly (not `ModelDataKeys<T>`) to preserve the
+ *  key constraint — mapped types over computed type aliases sometimes widen
+ *  to `string | undefined` in the key position, which then breaks indexing. */
+export type PropertyKeysOf<T extends Ad4mModel> = {
+  [K in keyof T]: K extends ModelDataKeys<T>
+    ? NonNullable<T[K]> extends Ad4mModel ? never
+      : NonNullable<T[K]> extends Ad4mModel[] ? never
+      : K
+    : never
+}[keyof T];
+
+/** Keys of T that can appear in `include` — typed Ad4mModel references AND
+ *  `string[]` link-target arrays (the `@HasMany` + `string[]` pattern that
+ *  AD4M uses for relations without a target class thunk). Handles both
+ *  `?: Foo` (optional → `Foo | undefined`) and `Foo | null` field shapes, and
+ *  optional/nullable array variants (`?: Foo[]`, `Foo[] | null`). */
+export type RelationKeysOf<T extends Ad4mModel> = {
+  [K in keyof T]: K extends ModelDataKeys<T>
+    ? NonNullable<T[K]> extends Ad4mModel ? K
+      : NonNullable<T[K]> extends Ad4mModel[] ? K
+      : NonNullable<T[K]> extends string[] ? K
+      : never
+    : never
+}[keyof T];
+
+/** The model type referenced by a relation field K on T.
+ *  Falls back to `Ad4mModel` (loose) for the `string[]` relation pattern,
+ *  since no target class is available at the type level. */
+export type RelatedModel<T extends Ad4mModel, K extends RelationKeysOf<T>> =
+    NonNullable<T[K]> extends (infer U)[] ? (U extends Ad4mModel ? U : Ad4mModel)
+  : NonNullable<T[K]> extends Ad4mModel ? NonNullable<T[K]>
+  : Ad4mModel;
+
+/** True when T has no statically-declared data fields (e.g. fromSHACL classes). */
+type HasNoTypedFields<T extends Ad4mModel> =
+  [PropertyKeysOf<T> | RelationKeysOf<T>] extends [never] ? true : false;
+
+// ---- Typed where conditions --------------------------------------------------
+
+export type StringWhereOps = {
+  not?: string | string[];
+  contains?: string;
+};
+
+export type NumericWhereOps = {
+  not?: number | number[];
+  lt?: number;
+  lte?: number;
+  gt?: number;
+  gte?: number;
+  between?: [number, number];
+};
+
+export type TypedWhereCondition<V> =
+    V extends string  ? string | string[] | StringWhereOps
+  : V extends number  ? number | number[] | NumericWhereOps
+  : V extends boolean ? boolean
+  : V extends Array<infer U>
+      ? U extends string ? string | string[] | StringWhereOps
+        : U extends number ? number | number[] | NumericWhereOps
+        : WhereCondition
+  : WhereCondition;
+
+/** Strict Where: keys constrained to T's properties, plus the well-known
+ *  link-metadata fields (`id`/`author`/`timestamp`). */
+type StrictTypedWhere<T extends Ad4mModel> =
+  & { [K in PropertyKeysOf<T>]?: TypedWhereCondition<T[K]> }
+  & {
+      base?: string | string[];
+      id?: string | string[];
+      author?: WhereCondition;
+      timestamp?: WhereCondition;
+    };
+
+/** Public typed `where` for a model class. Falls back to the loose `Where`
+ *  shape when T has no declared fields (e.g. fromSHACL-derived classes). */
+export type TypedWhere<T extends Ad4mModel> =
+  HasNoTypedFields<T> extends true ? Where : StrictTypedWhere<T>;
+
+// ---- Typed order -------------------------------------------------------------
+
+type StrictTypedOrder<T extends Ad4mModel> = {
+  [K in PropertyKeysOf<T> | 'timestamp' | 'author' | 'createdAt' | 'updatedAt']?: 'ASC' | 'DESC';
+};
+
+export type TypedOrder<T extends Ad4mModel> =
+  HasNoTypedFields<T> extends true ? Order : StrictTypedOrder<T>;
+
+// ---- Typed include + projection ---------------------------------------------
+
+/** Sub-query for an eager-loaded relation — inherits the target model's constraints. */
+export type TypedRelationSubQuery<U extends Ad4mModel> = {
+  where?: TypedWhere<U>;
+  order?: TypedOrder<U>;
+  include?: TypedIncludeMap<U>;
+  limit?: number;
+  offset?: number;
+};
+
+/** Projection — `from` must be a real relation on T; `where`/`order` constrained to that target.
+ *  Modelled as a discriminated union so the literal `count: true` and `limit: 1`
+ *  variants narrow inference into `IncludeExtras` (count → number, limit-1 → scalar). */
+export type TypedIncludeProjection<T extends Ad4mModel> = {
+  [K in RelationKeysOf<T>]:
+    | { from: K; count: true }
+    | { from: K; limit: 1; where?: TypedWhere<RelatedModel<T, K>>; order?: TypedOrder<RelatedModel<T, K>> }
+    | { from: K; limit?: number; where?: TypedWhere<RelatedModel<T, K>>; order?: TypedOrder<RelatedModel<T, K>> };
+}[RelationKeysOf<T>];
+
+type StrictTypedIncludeMap<T extends Ad4mModel> =
+  & { [K in RelationKeysOf<T>]?: boolean | TypedRelationSubQuery<RelatedModel<T, K>> }
+  & { [K in `$${string}`]?: TypedIncludeProjection<T> };
+
+export type TypedIncludeMap<T extends Ad4mModel> =
+  HasNoTypedFields<T> extends true ? IncludeMap : StrictTypedIncludeMap<T>;
+
+// ---- Result-side: project $-keys into the returned row type ------------------
+
+/**
+ * Given a model T and an `include` literal I, compute the extra fields
+ * contributed by `$`-prefixed projection keys.
+ *
+ * - `{ count: true }`           → `number`
+ * - `{ from: R, limit: 1 }`     → `RelatedModel<T,R> | null`
+ * - `{ from: R }` (no limit/1)  → `RelatedModel<T,R>[]`
+ *
+ * Returns `unknown` (intersection-neutral) when `I` has no `$`-keys, so that
+ * `T & IncludeExtras<T, I>` collapses back to `T` and downstream type
+ * predicates (`(x): x is T => ...`) keep working unchanged.
+ */
+export type IncludeExtras<T extends Ad4mModel, I> =
+  I extends Record<string, any>
+    ? Extract<keyof I, `$${string}`> extends never
+      ? unknown
+      : {
+          [K in Extract<keyof I, `$${string}`>]:
+              I[K] extends { count: true } ? number
+            : I[K] extends { from: infer R; limit: 1 }
+                ? (R extends RelationKeysOf<T> ? RelatedModel<T, R> | null : never)
+            : I[K] extends { from: infer R }
+                ? (R extends RelationKeysOf<T> ? RelatedModel<T, R>[] : never)
+            : unknown;
+        }
+    : unknown;
+
+// ---- Typed Query -------------------------------------------------------------
+
+type StrictTypedQuery<T extends Ad4mModel> = {
+  parent?: ParentScope;
+  properties?: PropertyKeysOf<T>[];
+  include?: TypedIncludeMap<T>;
+  includeAll?: boolean;
+  where?: TypedWhere<T>;
+  order?: TypedOrder<T>;
+  offset?: number;
+  limit?: number;
+  count?: boolean;
+  deepQuery?: boolean;
+};
+
+export type TypedQuery<T extends Ad4mModel> =
+  HasNoTypedFields<T> extends true ? Query : StrictTypedQuery<T>;
+
+/** Helper that extracts the `include` literal from a TypedQuery for use with IncludeExtras. */
+export type IncludeOf<Q> = Q extends { include?: infer I } ? I : undefined;
+
 /**
  * Options accepted by the instance `get()` method.
  *
