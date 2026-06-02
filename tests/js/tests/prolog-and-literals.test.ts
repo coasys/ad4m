@@ -13,6 +13,7 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     concat,
     literal,
     focus,
+    path as shaclPath,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
 import { startExecutor, baseUrl, quitExecutor } from "../utils/utils";
@@ -439,14 +440,9 @@ describe("Prolog + Literals", () => {
 
                     @Optional({
                         through: "recipe://image",
-                        resolveLanguage: "", // Will be set dynamically to note-store language
-                        transform: (data: any) => {
-                            if (data && typeof data === 'object' && data.data_base64) {
-                                return `data:image/png;base64,${data.data_base64}`;
-                            }
-                            return data;
-                        }
-                    } as PropertyOptions)
+                        resolveLanguage: "",
+                        transform: concat(literal("data:image/png;base64,"), shaclPath("data_base64")),
+                    })
                     image: string | any = ""
                 }
 

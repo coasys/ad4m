@@ -98,6 +98,10 @@ pub struct PropertyShape {
     /// the instance as belonging to the class.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_value: Option<String>,
+    /// Transform expression (SHACL-AF Node Expression).
+    /// Serialized as JSON and stored as a `literal:string:` link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transform: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -617,6 +621,15 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 source: prop_shape_uri.clone(),
                 predicate: Some("sh://hasValue".to_string()),
                 target,
+            });
+        }
+
+        if let Some(transform) = &prop.transform {
+            let json_str = serde_json::to_string(transform).unwrap_or_default();
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://transform".to_string()),
+                target: format!("literal:string:{}", json_str),
             });
         }
     }

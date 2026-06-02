@@ -350,3 +350,35 @@ fn round_trip_target_class_name_falls_back_to_sh_class_suffix() {
     assert_eq!(rel.target_class_name, "User");
     assert_eq!(rel.target_class_uri, "ns://UserShape");
 }
+
+#[test]
+fn round_trip_preserves_transform_expression() {
+    let shacl_json = r#"{
+        "target_class": "ns://ImagePost",
+        "properties": [
+            {
+                "path": "image://data",
+                "name": "image",
+                "datatype": "xsd://string",
+                "resolve_language": "literal",
+                "transform": {
+                    "type": "concat",
+                    "args": [
+                        { "type": "literal", "value": "data:image/png;base64," },
+                        { "type": "focus" }
+                    ]
+                }
+            }
+        ]
+    }"#;
+    let shape = round_trip("ImagePost", shacl_json);
+    let prop = shape
+        .properties
+        .iter()
+        .find(|p| p.name == "image")
+        .expect("image property");
+    assert!(
+        prop.transform.is_some(),
+        "transform should survive SHACL round-trip"
+    );
+}

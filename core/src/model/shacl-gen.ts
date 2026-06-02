@@ -137,7 +137,7 @@ export function buildSHACL(
             propShape.writable = propMeta.writable;
         }
 
-        if (propMeta.resolveLanguage) {
+        if (propMeta.resolveLanguage != null) {
             propShape.resolveLanguage = propMeta.resolveLanguage;
         }
 

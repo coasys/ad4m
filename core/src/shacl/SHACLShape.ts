@@ -524,7 +524,7 @@ export class SHACLShape {
         });
       }
 
-      if (prop.resolveLanguage) {
+      if (prop.resolveLanguage != null) {
         links.push({
           source: propShapeId,
           predicate: "ad4m://resolveLanguage",
@@ -629,7 +629,7 @@ export class SHACLShape {
         });
       }
 
-      if (prop.transform) {
+      if (prop.transform && typeof prop.transform === 'object') {
         links.push({
           source: propShapeId,
           predicate: "ad4m://transform",

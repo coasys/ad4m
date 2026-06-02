@@ -89,6 +89,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             ?getter ?hasValue ?className
             ?relationKind ?targetClassName
             ?whereFilter ?wherePredicates ?filterEnabled
+            ?transform
         WHERE {{
             <{shape_uri}> <sh://property> ?propUri .
             ?propUri <sh://path> ?path .
@@ -107,6 +108,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             OPTIONAL {{ ?propUri <ad4m://whereFilter> ?whereFilter . }}
             OPTIONAL {{ ?propUri <ad4m://wherePredicates> ?wherePredicates . }}
             OPTIONAL {{ ?propUri <ad4m://filter> ?filterEnabled . }}
+            OPTIONAL {{ ?propUri <ad4m://transform> ?transform . }}
         }}
         "#
     );
@@ -158,6 +160,12 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         let where_filter = parse_where_filter_literal(first["whereFilter"].as_str());
         let where_predicates = parse_where_predicates_literal(first["wherePredicates"].as_str());
         let filter_enabled = parse_bool_literal_target(first["filterEnabled"].as_str());
+        let transform = first["transform"]
+            .as_str()
+            .and_then(|raw| {
+                let json_str = decode_literal_string_target(raw);
+                serde_json::from_str::<super::types::TransformExpression>(&json_str).ok()
+            });
 
         let min_count = parse_count_literal(first["minCount"].as_str());
         let max_count = parse_count_literal(first["maxCount"].as_str());
@@ -245,7 +253,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 getter: getter.clone(),
                 where_filter: where_filter.clone(),
                 where_predicates: where_predicates.clone(),
-                transform: None,
+                transform: transform.clone(),
             });
 
             let resolved_target_class_name = target_class_name.clone().unwrap_or_else(|| {
@@ -284,7 +292,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 getter,
                 where_filter,
                 where_predicates,
-                transform: None,
+                transform,
             });
         }
     }
