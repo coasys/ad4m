@@ -23,6 +23,9 @@ export class PostMessageWebSocket {
     onclose:   ((e: CloseEvent) => void) | null = null
 
     private readonly _messageHandler: (e: MessageEvent) => void
+    private _connectTimeout: ReturnType<typeof setTimeout> | null = null
+
+    static readonly CONNECT_TIMEOUT_MS = 30_000
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     constructor(_url: string) {
@@ -33,6 +36,7 @@ export class PostMessageWebSocket {
             if (!msg || typeof msg.type !== 'string') return
 
             if (msg.type === 'AD4M_PROXY_WS_OPEN') {
+                this._clearConnectTimeout()
                 this.readyState = 1
                 this.onopen?.(new Event('open'))
                 return
@@ -42,10 +46,12 @@ export class PostMessageWebSocket {
                 return
             }
             if (msg.type === 'AD4M_PROXY_WS_ERROR') {
+                this._clearConnectTimeout()
                 this.onerror?.(new Event('error'))
                 return
             }
             if (msg.type === 'AD4M_PROXY_WS_CLOSED') {
+                this._clearConnectTimeout()
                 this.readyState = 3
                 this.onclose?.(
                     new CloseEvent('close', {
@@ -60,6 +66,21 @@ export class PostMessageWebSocket {
 
         window.addEventListener('message', this._messageHandler)
         window.parent.postMessage({ type: 'AD4M_PROXY_WS_CONNECT' }, '*')
+
+        this._connectTimeout = setTimeout(() => {
+            this._connectTimeout = null
+            window.removeEventListener('message', this._messageHandler)
+            this.readyState = 3
+            this.onerror?.(new Event('error'))
+            this.onclose?.(new CloseEvent('close', { code: 1006, reason: 'Connection timeout', wasClean: false }))
+        }, PostMessageWebSocket.CONNECT_TIMEOUT_MS)
+    }
+
+    private _clearConnectTimeout(): void {
+        if (this._connectTimeout !== null) {
+            clearTimeout(this._connectTimeout)
+            this._connectTimeout = null
+        }
     }
 
     send(data: string): void {
