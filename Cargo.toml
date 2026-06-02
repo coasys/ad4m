@@ -4,6 +4,7 @@ members = [
     "cli",
     "rust-client",
     "rust-executor",
+    "rust-executor/crates/holograph",
     "ui/src-tauri"
 ]
 
