@@ -14,7 +14,7 @@
 //! the integration test suite, which builds shapes from JSON fixtures
 //! without going through the SHACL writer.
 
-use super::types::{ModelShape, ShapeProperty, ShapeRelation, TransformExpression, WhereCondition};
+use super::types::{ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
 use super::utils::escape_sparql_string;
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::{anyhow, Error};
@@ -489,6 +489,7 @@ pub(crate) fn parse_where_filter(val: &Value) -> Option<BTreeMap<String, WhereCo
 /// SHACL writers.
 #[cfg(test)]
 pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Error> {
+    use super::types::TransformExpression;
     let meta: Value =
         serde_json::from_str(json).map_err(|e| anyhow!("Failed to parse shape JSON: {}", e))?;
 
