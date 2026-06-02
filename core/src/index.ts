@@ -16,6 +16,7 @@ export * from "./Literal";
 export * from "./perspectives/Perspective";
 export * from "./perspectives/PerspectiveHandle";
 export * from "./perspectives/PerspectiveProxy";
+export * from "./perspectives/SparqlBindings";
 export * from "./perspectives/WakerSubscriptionManager";
 export * from "./perspectives/PerspectiveDiff";
 export * from "./perspectives/LinkQuery";

@@ -19,7 +19,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use super::query::execute_model_query_inner;
-use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, WhereCondition};
+use super::types::{
+    IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, ShapeResolver, WhereCondition,
+};
 use super::utils::validate_iri;
 use crate::perspectives::sparql_store::SparqlStore;
 
@@ -115,6 +117,7 @@ pub(super) async fn resolve_includes_recursive(
     instances: &mut [Value],
     include: &HashMap<String, IncludeValue>,
     shape: &ModelShape,
+    resolver: &dyn ShapeResolver,
     depth: u8,
 ) -> Result<(), Error> {
     for (rel_name, include_val) in include {
@@ -135,9 +138,9 @@ pub(super) async fn resolve_includes_recursive(
         };
 
         if rel.direction == "reverse" {
-            resolve_reverse_include(store, instances, rel, &sub_query, depth).await?;
+            resolve_reverse_include(store, instances, rel, &sub_query, resolver, depth).await?;
         } else {
-            resolve_forward_include(store, instances, rel, &sub_query, depth).await?;
+            resolve_forward_include(store, instances, rel, &sub_query, resolver, depth).await?;
         }
     }
     Ok(())
@@ -153,6 +156,7 @@ async fn resolve_forward_include(
     instances: &mut [Value],
     rel: &ShapeRelation,
     sub_query: &ModelQueryInput,
+    resolver: &dyn ShapeResolver,
     depth: u8,
 ) -> Result<(), Error> {
     let mut seen = std::collections::HashSet::new();
@@ -192,11 +196,12 @@ async fn resolve_forward_include(
 
     let has_sub_order = sub_query.order.is_some();
 
+    let target_shape = resolver.get_shape(&rel.target_class_name)?;
     let result = Box::pin(execute_model_query_inner(
         store,
-        &rel.target_class_name,
+        target_shape.as_ref(),
         &query,
-        Some(&rel.target_shape_json),
+        resolver,
         depth + 1,
     ))
     .await?;
@@ -262,6 +267,7 @@ async fn resolve_reverse_include(
     instances: &mut [Value],
     rel: &ShapeRelation,
     sub_query: &ModelQueryInput,
+    resolver: &dyn ShapeResolver,
     depth: u8,
 ) -> Result<(), Error> {
     let all_ids: Vec<String> = instances
@@ -341,11 +347,12 @@ async fn resolve_reverse_include(
         }
         query.where_clause = Some(wc);
 
+        let target_shape = resolver.get_shape(&rel.target_class_name)?;
         let result = Box::pin(execute_model_query_inner(
             store,
-            &rel.target_class_name,
+            target_shape.as_ref(),
             &query,
-            Some(&rel.target_shape_json),
+            resolver,
             depth + 1,
         ))
         .await?;
