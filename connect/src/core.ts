@@ -399,14 +399,18 @@ export default class Ad4mConnect extends EventTarget {
               throw new Error('AD4M proxy mode requires a non-opaque parent origin. Ensure the host iframe is not sandboxed without allow-same-origin.');
             }
             const parentOrigin = event.origin;
-            const wsImpl = (url: string) => new PostMessageWebSocket(url, parentOrigin);
+            // Must be a real constructor class — graphql-ws calls `new webSocketImpl(url)`.
+            // Arrow functions cannot be called with `new`, so we use a class expression here.
+            class WsImpl extends PostMessageWebSocket {
+              constructor(url: string) { super(url, parentOrigin); }
+            }
 
             this.notifyConnectionChange('connecting');
             this.ad4mClient = new Ad4mClient(
               'http://proxy', // URL ignored by PostMessageWebSocket
               normalizedToken,
               false,          // defer subscriptions until auth confirmed
-              { webSocketImpl: wsImpl as unknown as new (url: string) => WebSocket }
+              { webSocketImpl: WsImpl as unknown as new (url: string) => WebSocket }
             );
             this.notifyConnectionChange('connected');
             await this.checkAuth();
