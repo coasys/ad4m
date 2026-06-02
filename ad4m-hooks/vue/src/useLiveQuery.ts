@@ -4,6 +4,7 @@ import {
   PaginationResult,
   PerspectiveProxy,
   Query,
+  TypedQuery,
   ParentScope,
 } from "@coasys/ad4m";
 import {
@@ -125,7 +126,11 @@ export function useLiveQuery<T extends Ad4mModel>(
   const error = ref<string>("");
   const pageNumber = ref(1);
   const totalCount = ref(0);
-  let modelQuery: ModelQueryBuilder<T | Ad4mModel> | null = null;
+  // Widened to ModelQueryBuilder<Ad4mModel> because the typed chain methods
+  // (`where`, `order`, `include`) are contravariant in T — invariance prevents
+  // the per-branch `ModelQueryBuilder<T>` / `ModelQueryBuilder<Ad4mModel>` from
+  // unifying directly. Subscribe callbacks cast back to T[] at the boundary.
+  let modelQuery: ModelQueryBuilder<Ad4mModel> | null = null;
 
   // Normalise: accept either a raw PerspectiveProxy or a ref/computed wrapping one
   const perspectiveRef = shallowRef<PerspectiveProxy | null>(
@@ -160,12 +165,18 @@ export function useLiveQuery<T extends Ad4mModel>(
     return q;
   }
 
-  /** Build a ModelQueryBuilder for either a class constructor or a string class name. */
-  function makeQueryBuilder(q: Query, p: PerspectiveProxy) {
+  /** Build a ModelQueryBuilder for either a class constructor or a string class name.
+   *  The cast to `TypedQuery<T>` is necessary because the hook is generic over an
+   *  arbitrary `T extends Ad4mModel` — TypeScript can't statically resolve whether
+   *  T has typed fields, so the deferred `TypedQuery<T>` conditional doesn't accept
+   *  the raw `Query` shape we build at runtime. End-user callers of the static API
+   *  retain strict typing; this cast is the documented escape hatch for generic
+   *  meta-utilities that build queries dynamically. */
+  function makeQueryBuilder(q: Query, p: PerspectiveProxy): ModelQueryBuilder<Ad4mModel> {
     if (typeof model === "string") {
-      return Ad4mModel.query(p, q).overrideModelClassName(model);
+      return Ad4mModel.query(p, q as TypedQuery<Ad4mModel>).overrideModelClassName(model);
     }
-    return (model as ModelCtor<T>).query(p, q);
+    return (model as ModelCtor<T>).query(p, q as TypedQuery<T>) as unknown as ModelQueryBuilder<Ad4mModel>;
   }
 
   function mergeEntries(oldEntries: T[], newEntries: T[]): T[] {

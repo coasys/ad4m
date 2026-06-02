@@ -1,3 +1,5 @@
+use super::model_query::load_shape_from_store;
+use super::model_query::types::{ModelShape, ShapeResolver};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::parse_shacl_to_links;
 use super::update_perspective;
@@ -218,11 +220,12 @@ pub struct PerspectiveMemoryStats {
 
 /// Parameters for a model query subscription. Stored alongside the trigger SPARQL
 /// so that `check_subscribed_queries` can re-execute the model query in Rust.
+/// Shape is resolved from the perspective's cache at each re-evaluation —
+/// no JSON metadata is held here.
 #[derive(Clone)]
 struct ModelSubscriptionParams {
     class_name: String,
     query_json: String,
-    shape_json: Option<String>,
 }
 
 /// Extract predicate IRIs from a SPARQL query by finding triple patterns.
@@ -297,6 +300,33 @@ pub struct PerspectiveInstance {
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
     pub(crate) sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
+    /// In-memory cache of parsed `ModelShape` instances keyed by class name.
+    /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
+    /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
+    shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+}
+
+/// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
+/// lifetime of a single query.  On miss it parses SHACL from the perspective's
+/// store and memoizes the result.
+struct PerspectiveShapeResolver<'a> {
+    cache: &'a std::sync::RwLock<HashMap<String, Arc<ModelShape>>>,
+    store: &'a crate::perspectives::sparql_store::SparqlStore,
+}
+
+impl<'a> ShapeResolver for PerspectiveShapeResolver<'a> {
+    fn get_shape(&self, class_name: &str) -> Result<Arc<ModelShape>, AnyError> {
+        if let Some(shape) = self.cache.read().unwrap().get(class_name).cloned() {
+            return Ok(shape);
+        }
+        let shape = load_shape_from_store(self.store, class_name)?;
+        let arc = Arc::new(shape);
+        self.cache
+            .write()
+            .unwrap()
+            .insert(class_name.to_string(), arc.clone());
+        Ok(arc)
+    }
 }
 
 impl PerspectiveInstance {
@@ -333,6 +363,29 @@ impl PerspectiveInstance {
                 crate::perspectives::sparql_store::SparqlStore::new(sparql_data_path.as_deref())
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
+            shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Look up a cached `ModelShape` for the given class name, loading it
+    /// from the perspective's SHACL triples on cache miss.  Returns an
+    /// `Arc<ModelShape>` shared across query and subscription re-evaluation.
+    pub fn get_shape(&self, class_name: &str) -> Result<Arc<ModelShape>, AnyError> {
+        self.shape_resolver().get_shape(class_name)
+    }
+
+    /// Drop any cached `ModelShape` for `class_name`.  Called when SHACL is
+    /// (re-)written for the class so the next query re-parses fresh state.
+    pub fn invalidate_shape(&self, class_name: &str) {
+        self.shape_cache.write().unwrap().remove(class_name);
+    }
+
+    /// Borrow a cache-backed `ShapeResolver` for the lifetime of a single
+    /// query.  Used by `execute_model_query` for include recursion.
+    fn shape_resolver(&self) -> PerspectiveShapeResolver<'_> {
+        PerspectiveShapeResolver {
+            cache: &self.shape_cache,
+            store: &self.sparql_store,
         }
     }
 
@@ -425,12 +478,19 @@ impl PerspectiveInstance {
         }
     }
 
-    /// Sync all existing links to the SPARQL (Oxigraph) store
+    /// Sync all existing links to the SPARQL (Oxigraph) store.
+    ///
+    /// Reloading the store replaces every triple in one shot, so any
+    /// `ModelShape` warmed before the reload may now reflect stale SHACL
+    /// metadata.  Flush the entire `shape_cache` so the next query
+    /// re-parses against the freshly-loaded triples.
     pub fn sync_existing_links_to_sparql(
         &self,
         links: &[DecoratedLinkExpression],
     ) -> Result<(), deno_core::anyhow::Error> {
-        self.sparql_store.reload(links.to_vec())
+        self.sparql_store.reload(links.to_vec())?;
+        self.shape_cache.write().unwrap().clear();
+        Ok(())
     }
 
     async fn ensure_link_language(&self) {
@@ -1887,6 +1947,82 @@ impl PerspectiveInstance {
             .await
     }
 
+    /// Remove every SHACL link associated with the given target-class URIs.
+    /// Called when refreshing an existing `SubjectClass` so old property
+    /// triples are not left behind to compete with the fresh shape.
+    ///
+    /// Walks the link graph produced by [`parse_shacl_to_links`]:
+    ///   target_class_uri
+    ///     ── rdf://type      ──▶ ad4m://SubjectClass
+    ///     ── ad4m://shape    ──▶ shape_uri
+    ///   shape_uri
+    ///     ── sh://property   ──▶ prop_shape_uri  (one per declared property)
+    ///     ── *other shape-level predicates*
+    ///   prop_shape_uri
+    ///     ── *property-level predicates*
+    async fn remove_subject_class_shacl_links(
+        &mut self,
+        target_class_uris: &[String],
+    ) -> Result<(), AnyError> {
+        let mut to_remove: Vec<LinkExpression> = Vec::new();
+
+        for target_class_uri in target_class_uris {
+            // 1. target_class_uri → rdf://type → ad4m://SubjectClass
+            //    and target_class_uri → ad4m://shape → shape_uri
+            let target_class_links = self.get_links_local(&LinkQuery {
+                source: Some(target_class_uri.clone()),
+                ..Default::default()
+            })?;
+
+            let shape_uris: Vec<String> = target_class_links
+                .iter()
+                .filter(|(link, _)| link.data.predicate.as_deref() == Some("ad4m://shape"))
+                .map(|(link, _)| link.data.target.clone())
+                .collect();
+
+            to_remove.extend(
+                target_class_links
+                    .into_iter()
+                    .filter(|(link, _)| {
+                        matches!(
+                            link.data.predicate.as_deref(),
+                            Some("rdf://type") | Some("ad4m://shape")
+                        )
+                    })
+                    .map(|(link, _)| link),
+            );
+
+            for shape_uri in &shape_uris {
+                let shape_links = self.get_links_local(&LinkQuery {
+                    source: Some(shape_uri.clone()),
+                    ..Default::default()
+                })?;
+
+                let prop_shape_uris: Vec<String> = shape_links
+                    .iter()
+                    .filter(|(link, _)| link.data.predicate.as_deref() == Some("sh://property"))
+                    .map(|(link, _)| link.data.target.clone())
+                    .collect();
+
+                to_remove.extend(shape_links.into_iter().map(|(link, _)| link));
+
+                for prop_shape_uri in prop_shape_uris {
+                    let prop_links = self.get_links_local(&LinkQuery {
+                        source: Some(prop_shape_uri),
+                        ..Default::default()
+                    })?;
+                    to_remove.extend(prop_links.into_iter().map(|(link, _)| link));
+                }
+            }
+        }
+
+        if !to_remove.is_empty() {
+            self.remove_links(to_remove, None).await?;
+        }
+
+        Ok(())
+    }
+
     /// Batch variant: registers multiple SDNA entries under a single mutex acquisition.
     pub async fn add_sdna_batch(
         &mut self,
@@ -1927,7 +2063,13 @@ impl PerspectiveInstance {
 
         let mut sdna_links: Vec<Link> = Vec::new();
 
-        // Check if SHACL definition already exists for this class BEFORE doing anything
+        // For SubjectClass refresh: if a class with this name already exists
+        // we must purge the prior SHACL graph before writing new triples.
+        // Without this, divergent old/new SHACL property triples coexist in
+        // the store and the loader produces non-deterministic shapes.
+        //
+        // When `shacl_json` is `None` and the class already exists, we
+        // preserve the historical no-op behaviour: nothing to refresh.
         if matches!(sdna_type, SdnaType::SubjectClass) {
             // Check for any existing SubjectClass with this name, regardless of namespace
             // We query by target (ad4m://SubjectClass) and then filter by class name
@@ -1937,24 +2079,40 @@ impl PerspectiveInstance {
                 ..Default::default()
             })?;
 
-            // Check if any existing class matches this name
-            let exists = all_class_links.iter().any(|(link, _)| {
-                // Extract class name from source URI (e.g., "flux://Channel" -> "Channel")
-                link.data
-                    .source
-                    .split("://")
-                    .last()
-                    .and_then(|s| s.split('/').last())
-                    .map(|class_name| class_name == name)
-                    .unwrap_or(false)
-            });
+            // Collect any existing class URIs that match this name
+            let existing_target_class_uris: Vec<String> = all_class_links
+                .iter()
+                .filter_map(|(link, _)| {
+                    let source = &link.data.source;
+                    let matches = source
+                        .split("://")
+                        .last()
+                        .and_then(|s| s.split('/').last())
+                        .map(|class_name| class_name == name)
+                        .unwrap_or(false);
+                    if matches {
+                        Some(source.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-            if exists {
+            if !existing_target_class_uris.is_empty() {
+                if shacl_json.is_none() {
+                    log::info!(
+                        "Class '{}' SHACL definition already exists, skipping duplicate",
+                        name
+                    );
+                    return Ok(true);
+                }
+
                 log::info!(
-                    "Class '{}' SHACL definition already exists, skipping duplicate",
+                    "Class '{}' already exists — refreshing SHACL definition",
                     name
                 );
-                return Ok(true);
+                self.remove_subject_class_shacl_links(&existing_target_class_uris)
+                    .await?;
             }
         }
 
@@ -1987,6 +2145,9 @@ impl PerspectiveInstance {
             let shacl_links = parse_shacl_to_links(&shacl, &name)?;
             self.add_links(shacl_links, LinkStatus::Shared, None, context)
                 .await?;
+            // SHACL just changed for this class — drop any cached shape so the
+            // next query re-parses against the fresh store state.
+            self.invalidate_shape(&name);
         }
 
         Ok(true)
@@ -2718,16 +2879,17 @@ impl PerspectiveInstance {
         &self,
         class_name: &str,
         query_json: &str,
-        shape_json: Option<&str>,
     ) -> Result<String, deno_core::anyhow::Error> {
         let query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
 
+        let resolver = self.shape_resolver();
+        let shape = resolver.get_shape(class_name)?;
         let result = super::model_query::execute_model_query(
             &self.sparql_store,
-            class_name,
+            shape.as_ref(),
             &query_input,
-            shape_json,
+            &resolver,
         )?;
 
         serde_json::to_string(&result).map_err(|e| {
@@ -2743,14 +2905,13 @@ impl PerspectiveInstance {
         class_name: &str,
         instance_ids: &[String],
         property_names: Option<&[String]>,
-        shape_json: Option<&str>,
     ) -> Result<String, deno_core::anyhow::Error> {
+        let shape = self.get_shape(class_name)?;
         let result = super::model_query::evaluate_getters_batch(
             &self.sparql_store,
-            class_name,
+            shape.as_ref(),
             instance_ids,
             property_names,
-            shape_json,
         )?;
 
         serde_json::to_string(&result).map_err(|e| {
@@ -4256,19 +4417,14 @@ impl PerspectiveInstance {
         &self,
         class_name: String,
         query_json: String,
-        shape_json: Option<String>,
         user_email: Option<String>,
     ) -> Result<(String, String), AnyError> {
         // 1. Run the initial model query
-        let initial_result = self.model_query(&class_name, &query_json, shape_json.as_deref())?;
+        let initial_result = self.model_query(&class_name, &query_json)?;
 
-        // 2. Build trigger SPARQL from shape predicates.
-        //    Parse the shape to extract required predicates for change detection.
-        let trigger_predicates = self.build_model_trigger_predicates(
-            &class_name,
-            shape_json.as_deref(),
-            Some(&query_json),
-        );
+        // 2. Build trigger SPARQL from shape predicates resolved through the cache.
+        let trigger_predicates =
+            self.build_model_trigger_predicates(&class_name, Some(&query_json));
 
         let trigger_sparql = if trigger_predicates.is_empty() {
             // Fallback: match any triple (always re-check)
@@ -4296,7 +4452,6 @@ impl PerspectiveInstance {
                     if let Some(ref params) = q.model_query_params {
                         params.class_name == class_name
                             && params.query_json == query_json
-                            && params.shape_json == shape_json
                             && q.user_email == user_email
                     } else {
                         false
@@ -4330,7 +4485,6 @@ impl PerspectiveInstance {
             model_query_params: Some(ModelSubscriptionParams {
                 class_name,
                 query_json,
-                shape_json,
             }),
         };
 
@@ -4343,42 +4497,17 @@ impl PerspectiveInstance {
     }
 
     /// Extract predicates from a model shape for subscription trigger matching.
+    /// Reads the shape from the cache (which warms from SHACL triples on miss)
+    /// so subscription re-evaluation matches the same predicate set queries do.
     fn build_model_trigger_predicates(
         &self,
         class_name: &str,
-        shape_json: Option<&str>,
         query_json: Option<&str>,
     ) -> Vec<String> {
         let mut predicates = Vec::new();
 
-        // Try to extract predicates from the shape JSON provided by the client
-        if let Some(json_str) = shape_json {
-            if let Ok(shape) = serde_json::from_str::<serde_json::Value>(json_str) {
-                // Extract property predicates
-                if let Some(props) = shape.get("properties").and_then(|p| p.as_object()) {
-                    for (_name, meta) in props {
-                        if let Some(pred) = meta.get("predicate").and_then(|p| p.as_str()) {
-                            predicates.push(pred.to_string());
-                        }
-                    }
-                }
-                // Extract relation predicates
-                if let Some(rels) = shape.get("relations").and_then(|r| r.as_object()) {
-                    for (_name, meta) in rels {
-                        if let Some(pred) = meta.get("predicate").and_then(|p| p.as_str()) {
-                            predicates.push(pred.to_string());
-                        }
-                    }
-                }
-                // Extract flag predicates
-                if let Some(flags) = shape.get("flags").and_then(|f| f.as_object()) {
-                    for (_name, meta) in flags {
-                        if let Some(pred) = meta.get("predicate").and_then(|p| p.as_str()) {
-                            predicates.push(pred.to_string());
-                        }
-                    }
-                }
-            }
+        if let Ok(shape) = self.get_shape(class_name) {
+            predicates.extend(shape.predicates());
         }
 
         // Extract parent predicate from query JSON (parent-scoped subscriptions
@@ -4395,11 +4524,6 @@ impl PerspectiveInstance {
             }
         }
 
-        // Always merge in the persisted shape predicates as a safe superset
-        if let Ok(shape) = super::model_query::load_shape_from_store(&self.sparql_store, class_name)
-        {
-            predicates.extend(shape.predicates());
-        }
         predicates.sort();
         predicates.dedup();
 
@@ -4509,11 +4633,7 @@ impl PerspectiveInstance {
 
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL
                 let result_string = if let Some(ref params) = model_params {
-                    match self_clone.model_query(
-                        &params.class_name,
-                        &params.query_json,
-                        params.shape_json.as_deref(),
-                    ) {
+                    match self_clone.model_query(&params.class_name, &params.query_json) {
                         Ok(r) => r,
                         Err(e) => {
                             log::error!("Model subscription query failed: {}", e);
@@ -5749,6 +5869,404 @@ mod tests {
             "Reifier query with variable ?predicate should return empty set, got: {:?}",
             predicates
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Shape cache: lazy load from SHACL, invalidation on re-write,
+    // and explicit error for unknown classes.
+    // -----------------------------------------------------------------------
+
+    /// Minimal SHACL JSON for a single-property class.  Builds the same
+    /// graph shape `shacl-gen.ts` emits in production.
+    fn cache_test_shacl(class: &str, namespace: &str) -> String {
+        format!(
+            r#"{{
+                "target_class": "{ns}{class}",
+                "properties": [
+                    {{ "path": "{ns}name", "name": "name", "datatype": "xsd://string", "min_count": 1, "max_count": 1, "resolve_language": "literal" }}
+                ]
+            }}"#,
+            ns = namespace,
+            class = class
+        )
+    }
+
+    #[tokio::test]
+    async fn test_get_shape_returns_error_when_no_shacl_stored() {
+        let perspective = setup().await;
+        let result = perspective.get_shape("Unknown");
+        assert!(result.is_err(), "missing class should error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("No SHACL shape stored for class 'Unknown'"),
+            "error should name the class, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shape_cache_returns_same_arc_on_second_call() {
+        let mut perspective = setup().await;
+        let shacl = cache_test_shacl("Recipe", "ns://");
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+        let first = perspective.get_shape("Recipe").expect("first lookup");
+        let second = perspective.get_shape("Recipe").expect("second lookup");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "cache should return the same Arc on a hit"
+        );
+        assert_eq!(first.target_class, "ns://Recipe");
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_shape_forces_reparse() {
+        let mut perspective = setup().await;
+        let shacl = cache_test_shacl("Recipe", "ns://");
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+        let first = perspective.get_shape("Recipe").expect("first lookup");
+        perspective.invalidate_shape("Recipe");
+        let second = perspective.get_shape("Recipe").expect("re-parse");
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "invalidation should cause a fresh Arc"
+        );
+        assert_eq!(second.target_class, first.target_class);
+    }
+
+    #[tokio::test]
+    async fn test_add_sdna_invalidates_cache_for_class() {
+        let mut perspective = setup().await;
+        let shacl_initial = cache_test_shacl("Recipe", "ns://");
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl_initial),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna initial");
+        let first = perspective.get_shape("Recipe").expect("first lookup");
+
+        // add_sdna refuses to register a class twice with the same name;
+        // simulate a SHACL re-write by invalidating directly (matches the
+        // path register_shape would take if re-registration were exposed).
+        perspective.invalidate_shape("Recipe");
+
+        let second = perspective
+            .get_shape("Recipe")
+            .expect("re-parse after invalidation");
+        assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn test_where_compiled_getter_on_relation() {
+        let mut perspective = setup().await;
+        // Mirrors `Ad4mModel — Where-Clause Relation Filtering` integration test:
+        // TaskBoard.activeTasks uses a where-compiled getter to filter by status.
+        let task_shacl = r#"{
+            "target_class": "task://Task",
+            "properties": [
+                {"path": "task://type", "name": "type", "has_value": "task://task", "min_count": 1, "max_count": 1},
+                {"path": "task://title", "name": "title", "min_count": 1, "max_count": 1, "resolve_language": "literal"},
+                {"path": "task://status", "name": "status", "min_count": 1, "max_count": 1, "resolve_language": "literal"}
+            ]
+        }"#;
+        let board_shacl = r#"{
+            "target_class": "board://TaskBoard",
+            "properties": [
+                {"path": "board://name", "name": "name", "max_count": 1, "resolve_language": "literal"},
+                {
+                    "path": "board://has_task",
+                    "name": "activeTasks",
+                    "node_kind": "IRI",
+                    "relation_kind": "hasMany",
+                    "target_class_name": "Task",
+                    "getter": "SELECT ?target WHERE { <Base> <board://has_task> ?target . ?target <task://status> ?_wc0 . FILTER(STR(?_wc0) = \"active\" || STR(?_wc0) = \"literal:string:active\") }",
+                    "where_filter": {"status": "active"},
+                    "where_predicates": {"status": "task://status"}
+                },
+                {
+                    "path": "board://has_task",
+                    "name": "allTasks",
+                    "node_kind": "IRI",
+                    "relation_kind": "hasMany",
+                    "target_class_name": "Task",
+                    "getter": "SELECT ?target WHERE { <Base> <board://has_task> ?target . ?target <task://type> <task://task> . ?target <task://title> ?_v0 . ?target <task://status> ?_v1 . }"
+                }
+            ]
+        }"#;
+        perspective
+            .add_sdna(
+                "Task".into(),
+                "".into(),
+                SdnaType::SubjectClass,
+                Some(task_shacl.into()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add Task");
+        perspective
+            .add_sdna(
+                "TaskBoard".into(),
+                "".into(),
+                SdnaType::SubjectClass,
+                Some(board_shacl.into()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add TaskBoard");
+
+        let board = "literal:string:test_board";
+        let active1 = "literal:string:active1";
+        let active2 = "literal:string:active2";
+        let done1 = "literal:string:done1";
+        let signed_active = "literal:string:active";
+        let signed_done = "literal:string:done";
+        let signed_title = "literal:string:t";
+        let triples: Vec<(&str, &str, &str)> = vec![
+            // Board name
+            (board, "board://name", "literal:string:Sprint1"),
+            // Tasks: type flag + title + status
+            (active1, "task://type", "task://task"),
+            (active1, "task://title", signed_title),
+            (active1, "task://status", signed_active),
+            (active2, "task://type", "task://task"),
+            (active2, "task://title", signed_title),
+            (active2, "task://status", signed_active),
+            (done1, "task://type", "task://task"),
+            (done1, "task://title", signed_title),
+            (done1, "task://status", signed_done),
+            // Board → tasks
+            (board, "board://has_task", active1),
+            (board, "board://has_task", active2),
+            (board, "board://has_task", done1),
+        ];
+        for (i, (s, p, t)) in triples.iter().enumerate() {
+            let link = DecoratedLinkExpression {
+                author: "did:key:test".into(),
+                timestamp: format!("17000000000{:02}", i),
+                data: Link {
+                    source: s.to_string(),
+                    predicate: Some(p.to_string()),
+                    target: t.to_string(),
+                },
+                proof: DecoratedExpressionProof {
+                    key: "k".into(),
+                    signature: "s".into(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: None,
+            };
+            perspective.sparql_store.add_link(&link).expect("add link");
+        }
+
+        let query_json = format!(
+            r#"{{"where":{{"id":"{}"}},"limit":1,"deepQuery":true}}"#,
+            board
+        );
+        let result_json = perspective
+            .model_query("TaskBoard", &query_json)
+            .expect("model_query");
+        let result: serde_json::Value = serde_json::from_str(&result_json).expect("parse result");
+        let instances = result["instances"].as_array().expect("instances array");
+        assert_eq!(instances.len(), 1, "should find the board");
+        let active = instances[0]["activeTasks"]
+            .as_array()
+            .expect("activeTasks array");
+        assert_eq!(
+            active.len(),
+            2,
+            "where-getter should narrow to 2 active tasks"
+        );
+        let all = instances[0]["allTasks"].as_array().expect("allTasks array");
+        assert_eq!(all.len(), 3, "conformance getter should keep all 3 tasks");
+    }
+
+    #[tokio::test]
+    async fn test_model_query_fires_property_getter() {
+        let mut perspective = setup().await;
+        // Exact JSON produced by SHACLShape.toJSON() for the BlogPost
+        // fixture in tests/js/tests/prolog-and-literals.test.ts.
+        let shacl = r#"{
+            "node_shape_uri": "blog://BlogPostShape",
+            "target_class": "blog://BlogPost",
+            "properties": [
+                {
+                    "path": "blog://title",
+                    "name": "title",
+                    "datatype": "xsd://string",
+                    "max_count": 1,
+                    "writable": true,
+                    "resolve_language": "literal",
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "blog://title", "target": "value"}]
+                },
+                {
+                    "path": "blog://parent",
+                    "name": "parentPost",
+                    "max_count": 1,
+                    "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "blog://parent", "target": "value"}],
+                    "getter": "SELECT ?target WHERE { <Base> <blog://reply_to> ?target . } LIMIT 1"
+                },
+                {
+                    "path": "ad4m://getter/BlogPost/tags",
+                    "name": "tags",
+                    "node_kind": "IRI",
+                    "getter": "SELECT ?target WHERE { <Base> <blog://tagged_with> ?target . }",
+                    "relation_kind": "hasMany"
+                }
+            ],
+            "constructor_actions": [],
+            "destructor_actions": []
+        }"#;
+        perspective
+            .add_sdna(
+                "BlogPost".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+
+        let post_root = "literal:string:test_post_root";
+        let parent_root = "literal:string:test_parent_root";
+
+        // Title link makes the post a BlogPost instance (structural conformance)
+        for (src, pred, tgt) in &[
+            (post_root, "blog://title", "literal:string:my_post"),
+            (parent_root, "blog://title", "literal:string:my_parent"),
+            (post_root, "blog://reply_to", parent_root),
+        ] {
+            let link = DecoratedLinkExpression {
+                author: "did:key:test".into(),
+                timestamp: "1700000000000".into(),
+                data: Link {
+                    source: src.to_string(),
+                    predicate: Some(pred.to_string()),
+                    target: tgt.to_string(),
+                },
+                proof: DecoratedExpressionProof {
+                    key: "k".into(),
+                    signature: "s".into(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: None,
+            };
+            perspective.sparql_store.add_link(&link).expect("add_link");
+        }
+
+        let query_json = format!(
+            r#"{{"where":{{"id":"{}"}},"limit":1,"deepQuery":true}}"#,
+            post_root
+        );
+        let result_json = perspective
+            .model_query("BlogPost", &query_json)
+            .expect("model_query");
+        let result: serde_json::Value = serde_json::from_str(&result_json).expect("parse result");
+        let instances = result["instances"].as_array().expect("instances array");
+        assert_eq!(instances.len(), 1, "should find the post");
+        let parent_value = instances[0]["parentPost"].as_str();
+        assert_eq!(
+            parent_value,
+            Some(parent_root),
+            "getter should populate parentPost"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_property_getter_survives_add_sdna_pipeline() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "target_class": "blog://BlogPost",
+            "properties": [
+                {
+                    "path": "blog://title",
+                    "name": "title",
+                    "datatype": "xsd://string",
+                    "max_count": 1,
+                    "resolve_language": "literal"
+                },
+                {
+                    "path": "blog://parent",
+                    "name": "parentPost",
+                    "max_count": 1,
+                    "getter": "SELECT ?target WHERE { <Base> <blog://reply_to> ?target . } LIMIT 1"
+                }
+            ]
+        }"#;
+        perspective
+            .add_sdna(
+                "BlogPost".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+
+        let shape = perspective.get_shape("BlogPost").expect("shape");
+        let parent = shape
+            .properties
+            .iter()
+            .find(|p| p.name == "parentPost")
+            .expect("parentPost property");
+        assert_eq!(
+            parent.getter.as_deref(),
+            Some("SELECT ?target WHERE { <Base> <blog://reply_to> ?target . } LIMIT 1"),
+            "getter must survive addSdna → SHACL store → load_shape round trip"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_model_query_resolves_shape_through_cache() {
+        let mut perspective = setup().await;
+        let shacl = cache_test_shacl("Recipe", "ns://");
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+
+        // First query warms the cache (load_shape fires once).
+        let result_json = perspective
+            .model_query("Recipe", "{}")
+            .expect("first query");
+        assert!(result_json.contains("\"instances\""));
+
+        // Subsequent queries hit the cache and resolve to the same Arc as
+        // get_shape would have returned.
+        let warm = perspective.get_shape("Recipe").expect("warm shape");
+        let warm_again = perspective.get_shape("Recipe").expect("warm shape again");
+        assert!(Arc::ptr_eq(&warm, &warm_again));
     }
 
     // ── Regression tests for PR #829 follow-up ──

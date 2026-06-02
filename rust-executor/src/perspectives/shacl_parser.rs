@@ -73,6 +73,31 @@ pub struct PropertyShape {
     /// must conform to this shape, enabling typed construction.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub class: Option<String>,
+    /// Kind of relation this property describes. One of "hasMany", "hasOne",
+    /// "belongsToOne", "belongsToMany".  Drives direction (forward/reverse)
+    /// and scalar-vs-collection rendering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relation_kind: Option<String>,
+    /// Bare target class name for a relation property — used by the executor
+    /// to look up the target shape through its in-memory cache.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_class_name: Option<String>,
+    /// Post-getter where-clause filter for relation properties.  Keys are
+    /// property names on the target class; values follow the where-clause DSL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub where_filter: Option<serde_json::Value>,
+    /// Predicate IRI lookup for `where_filter` keys (property name → predicate).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub where_predicates: Option<std::collections::HashMap<String, String>>,
+    /// Whether conformance/type filtering is enabled for this relation.
+    /// Omitted (defaulting to true) when not explicitly disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<bool>,
+    /// Fixed value constraint (sh:hasValue).  When combined with min_count >= 1
+    /// the property is interpreted as a `@Flag` — its presence + value mark
+    /// the instance as belonging to the class.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_value: Option<String>,
 }
 
 // ============================================================================
@@ -526,6 +551,72 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://conformanceConditions".to_string()),
                 target: format!("literal:string:{}", conditions_json),
+            });
+        }
+
+        // Relation kind — drives direction and scalar-vs-collection rendering.
+        if let Some(kind) = &prop.relation_kind {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://relationKind".to_string()),
+                target: format!("literal:string:{}", kind),
+            });
+        }
+
+        // Bare target class name for cache-based include resolution.
+        if let Some(target_name) = &prop.target_class_name {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://targetClassName".to_string()),
+                target: format!("literal:string:{}", target_name),
+            });
+        }
+
+        // Post-getter where-clause filter for relations.
+        if let Some(where_filter) = &prop.where_filter {
+            let filter_json =
+                serde_json::to_string(where_filter).unwrap_or_else(|_| "{}".to_string());
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://whereFilter".to_string()),
+                target: format!("literal:string:{}", filter_json),
+            });
+        }
+
+        // Predicate IRI lookup for where_filter keys.
+        if let Some(where_predicates) = &prop.where_predicates {
+            if !where_predicates.is_empty() {
+                let map_json =
+                    serde_json::to_string(where_predicates).unwrap_or_else(|_| "{}".to_string());
+                links.push(Link {
+                    source: prop_shape_uri.clone(),
+                    predicate: Some("ad4m://wherePredicates".to_string()),
+                    target: format!("literal:string:{}", map_json),
+                });
+            }
+        }
+
+        // Conformance/type filtering enable flag (only emitted when false).
+        if let Some(filter_enabled) = prop.filter {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://filter".to_string()),
+                target: format!("literal:{}", filter_enabled),
+            });
+        }
+
+        // sh:hasValue marks @Flag properties.  The target is stored as either
+        // a URI (typical for ad4m://type-style flags) or as a literal value.
+        if let Some(has_value) = &prop.has_value {
+            let target = if has_value.contains("://") || has_value.starts_with("literal:") {
+                has_value.clone()
+            } else {
+                format!("literal:string:{}", urlencoding::encode(has_value))
+            };
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("sh://hasValue".to_string()),
+                target,
             });
         }
     }

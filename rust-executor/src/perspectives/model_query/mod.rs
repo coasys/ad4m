@@ -88,6 +88,8 @@ mod integration_tests;
 mod projection;
 mod query;
 mod relations;
+#[cfg(test)]
+mod round_trip_tests;
 mod shape;
 mod sparql_builder;
 #[cfg(test)]
@@ -100,6 +102,6 @@ pub use query::execute_model_query;
 pub use relations::resolve_reverse_relations;
 pub(crate) use shape::load_shape_from_store;
 pub use types::{
-    IncludeValue, ModelQueryInput, ModelQueryResult, OrderDirection, ParentScope, ProjectionInput,
-    WhereCondition, WhereOps,
+    IncludeValue, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, ParentScope,
+    ProjectionInput, ShapeResolver, WhereCondition, WhereOps,
 };

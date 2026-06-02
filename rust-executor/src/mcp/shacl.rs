@@ -1,8 +1,12 @@
 //! SHACL class parsing for MCP tool generation
 //!
 //! Extracts subject class definitions from SHACL links in perspectives,
-//! providing typed structures for generating dynamic MCP tools.
+//! providing typed structures for generating dynamic MCP tools.  Reads
+//! through the perspective's `shape_cache` (`PerspectiveInstance::get_shape`)
+//! so both the MCP path and the model_query path resolve the same
+//! `ModelShape` instance for any given class.
 
+use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::LinkQuery;
 
@@ -105,9 +109,10 @@ impl ShaclProperty {
     }
 }
 
-/// Load all SHACL subject classes from a perspective.
-/// Reuses PerspectiveInstance::get_subject_classes_from_shacl() for class discovery,
-/// then enriches with property metadata from SHACL links.
+/// Load all SHACL subject classes from a perspective by going through the
+/// perspective's shape cache.  Each class is parsed from SHACL once and
+/// memoized, so repeated MCP tool generation runs are O(class count) rather
+/// than O(class count × predicate count) against the store.
 pub async fn load_classes(perspective: &PerspectiveInstance) -> Vec<ShaclClass> {
     let class_names = match perspective.get_subject_classes_from_shacl().await {
         Ok(names) => names,
@@ -116,45 +121,22 @@ pub async fn load_classes(perspective: &PerspectiveInstance) -> Vec<ShaclClass> 
 
     let mut classes = Vec::new();
     for class_name in class_names {
-        let (properties, shape_uri) =
-            load_class_properties_with_uri(perspective, &class_name).await;
-        let all_predicates = properties
-            .iter()
-            .filter_map(|p| p.predicate.clone())
-            .collect();
-        classes.push(ShaclClass {
-            name_lower: class_name.to_lowercase(),
-            name: class_name,
-            properties,
-            shape_uri,
-            all_predicates,
-        });
+        if let Some(c) = load_class(perspective, &class_name).await {
+            classes.push(c);
+        }
     }
 
     classes
 }
 
-/// Load a single class by name from a perspective
+/// Load a single class by name from a perspective through the shape cache.
+/// Returns `None` if no SHACL shape is stored for `class_name`.
 pub async fn load_class(perspective: &PerspectiveInstance, class_name: &str) -> Option<ShaclClass> {
-    let (properties, shape_uri) = load_class_properties_with_uri(perspective, class_name).await;
-    if properties.is_empty() {
-        // Fall back to full scan
-        let classes = load_classes(perspective).await;
-        return classes
-            .into_iter()
-            .find(|c| c.name.to_lowercase() == class_name.to_lowercase());
-    }
-    let all_predicates = properties
-        .iter()
-        .filter_map(|p| p.predicate.clone())
-        .collect();
-    Some(ShaclClass {
-        name_lower: class_name.to_lowercase(),
-        name: class_name.to_string(),
-        properties,
-        shape_uri,
-        all_predicates,
-    })
+    let shape = match perspective.get_shape(class_name) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+    Some(shape_to_shacl_class(class_name, &shape))
 }
 
 /// Extract property information from a SHACL shape (convenience wrapper)
@@ -165,6 +147,72 @@ pub async fn load_class_properties(
     load_class_properties_with_uri(perspective, class_name)
         .await
         .0
+}
+
+/// Translate a `ModelShape` (the canonical in-memory representation derived
+/// from SHACL triples) into the MCP-facing `ShaclClass` shape.  Adapter only:
+/// the fields are a subset of what `ModelShape` carries.
+fn shape_to_shacl_class(class_name: &str, shape: &ModelShape) -> ShaclClass {
+    let properties: Vec<ShaclProperty> = shape
+        .properties
+        .iter()
+        .map(|p| {
+            let datatype = p.datatype.clone();
+            let is_collection = p.is_collection;
+            let node_kind = if shape.include_relations.iter().any(|r| r.name == p.name) {
+                Some("sh://IRI".to_string())
+            } else {
+                None
+            };
+            let min_count = if p.is_required { Some(1u32) } else { None };
+            // `ShaclProperty.class` is the typed-relation node-shape URI
+            // (e.g. `ns://UserShape`).  Prefer the original `sh:class` IRI
+            // captured during SHACL parsing so MCP consumers receive the
+            // full URI, falling back to the bare class name only when the
+            // writer did not emit a `sh:class` for the relation.
+            let class_uri = shape
+                .include_relations
+                .iter()
+                .find(|r| r.name == p.name)
+                .map(|r| {
+                    if !r.target_class_uri.is_empty() {
+                        r.target_class_uri.clone()
+                    } else {
+                        r.target_class_name.clone()
+                    }
+                })
+                .filter(|s| !s.is_empty());
+            ShaclProperty {
+                name: p.name.clone(),
+                is_collection,
+                predicate: if p.predicate.is_empty() {
+                    None
+                } else {
+                    Some(p.predicate.clone())
+                },
+                datatype,
+                min_count,
+                max_count: None,
+                node_kind,
+                getter: p.getter.clone(),
+                class: class_uri,
+                resolve_language: p.resolve_language.clone(),
+            }
+        })
+        .collect();
+
+    let all_predicates = properties
+        .iter()
+        .filter_map(|p| p.predicate.clone())
+        .collect();
+
+    ShaclClass {
+        name_lower: class_name.to_lowercase(),
+        name: class_name.to_string(),
+        properties,
+        shape_uri: Some(shape.shape_uri.clone()),
+        all_predicates,
+    }
 }
 
 /// Extract property information from a SHACL shape, also returning the shape URI

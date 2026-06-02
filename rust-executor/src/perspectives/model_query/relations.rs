@@ -19,7 +19,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use super::query::execute_model_query_inner;
-use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, WhereCondition};
+use super::types::{
+    IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, ShapeResolver, WhereCondition,
+};
 use super::utils::validate_iri;
 use crate::perspectives::sparql_store::SparqlStore;
 
@@ -115,6 +117,7 @@ pub(super) fn resolve_includes_recursive(
     instances: &mut [Value],
     include: &HashMap<String, IncludeValue>,
     shape: &ModelShape,
+    resolver: &dyn ShapeResolver,
     depth: u8,
 ) -> Result<(), Error> {
     for (rel_name, include_val) in include {
@@ -135,9 +138,9 @@ pub(super) fn resolve_includes_recursive(
         };
 
         if rel.direction == "reverse" {
-            resolve_reverse_include(store, instances, rel, &sub_query, depth)?;
+            resolve_reverse_include(store, instances, rel, &sub_query, resolver, depth)?;
         } else {
-            resolve_forward_include(store, instances, rel, &sub_query, depth)?;
+            resolve_forward_include(store, instances, rel, &sub_query, resolver, depth)?;
         }
     }
     Ok(())
@@ -153,6 +156,7 @@ fn resolve_forward_include(
     instances: &mut [Value],
     rel: &ShapeRelation,
     sub_query: &ModelQueryInput,
+    resolver: &dyn ShapeResolver,
     depth: u8,
 ) -> Result<(), Error> {
     let mut seen = std::collections::HashSet::new();
@@ -192,13 +196,9 @@ fn resolve_forward_include(
 
     let has_sub_order = sub_query.order.is_some();
 
-    let result = execute_model_query_inner(
-        store,
-        &rel.target_class_name,
-        &query,
-        Some(&rel.target_shape_json),
-        depth + 1,
-    )?;
+    let target_shape = resolver.get_shape(&rel.target_class_name)?;
+    let result =
+        execute_model_query_inner(store, target_shape.as_ref(), &query, resolver, depth + 1)?;
 
     let mut hydrated: HashMap<String, Value> = HashMap::new();
     let ordered_ids: Vec<String> = result
@@ -261,6 +261,7 @@ fn resolve_reverse_include(
     instances: &mut [Value],
     rel: &ShapeRelation,
     sub_query: &ModelQueryInput,
+    resolver: &dyn ShapeResolver,
     depth: u8,
 ) -> Result<(), Error> {
     let all_ids: Vec<String> = instances
@@ -340,13 +341,9 @@ fn resolve_reverse_include(
         }
         query.where_clause = Some(wc);
 
-        let result = execute_model_query_inner(
-            store,
-            &rel.target_class_name,
-            &query,
-            Some(&rel.target_shape_json),
-            depth + 1,
-        )?;
+        let target_shape = resolver.get_shape(&rel.target_class_name)?;
+        let result =
+            execute_model_query_inner(store, target_shape.as_ref(), &query, resolver, depth + 1)?;
 
         ordered_result_ids = result
             .instances
