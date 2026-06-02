@@ -1,0 +1,18 @@
+[package]
+name = "holograph"
+version = "0.1.0"
+edition = "2021"
+authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
+description = "AD4M Holograph substrate — Kitsune2-backed link-language plumbing"
+license = "CAL-1.0"
+
+[lib]
+name = "holograph"
+path = "src/lib.rs"
+
+[dependencies]
+bytes = "1"
+ciborium = "0.2"
+kitsune2_api = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
