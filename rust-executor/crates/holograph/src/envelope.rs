@@ -43,6 +43,12 @@ pub struct OpEnvelope {
     pub author_pubkey: Bytes,
     /// Signature over `parents || payload || doc_id?`.
     pub signature: Bytes,
+    /// Authoring timestamp in microseconds since Unix epoch — set by the
+    /// creator at commit time, propagated unchanged so every peer derives
+    /// the same `Timestamp` from the same envelope bytes. Defaults to 0
+    /// for envelopes encoded before this field was added.
+    #[serde(default)]
+    pub created_at_micros: i64,
     /// Optional doc_id for multi-doc-per-space substrates. v1 leaves
     /// this `None`; v1.5 sharded mode populates it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -63,6 +69,26 @@ impl OpEnvelope {
             payload,
             author_pubkey,
             signature,
+            created_at_micros: 0,
+            doc_id,
+        }
+    }
+
+    /// Same as `new`, but with an explicit authoring timestamp.
+    pub fn new_at(
+        parents: impl IntoIterator<Item = OpId>,
+        payload: Bytes,
+        author_pubkey: Bytes,
+        signature: Bytes,
+        doc_id: Option<Bytes>,
+        created_at_micros: i64,
+    ) -> Self {
+        Self {
+            parents: parents.into_iter().map(Bytes::from).collect(),
+            payload,
+            author_pubkey,
+            signature,
+            created_at_micros,
             doc_id,
         }
     }
