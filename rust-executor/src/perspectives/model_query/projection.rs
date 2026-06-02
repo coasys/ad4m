@@ -203,15 +203,14 @@ pub(super) async fn resolve_projections(
                                 ..ModelQueryInput::default()
                             };
 
-                            if let Ok(result) =
-                                Box::pin(super::query::execute_model_query_inner(
-                                    store,
-                                    &target_shape,
-                                    &sub_query,
-                                    resolver,
-                                    depth + 1,
-                                ))
-                                .await
+                            if let Ok(result) = Box::pin(super::query::execute_model_query_inner(
+                                store,
+                                &target_shape,
+                                &sub_query,
+                                resolver,
+                                depth + 1,
+                            ))
+                            .await
                             {
                                 let hydrated: HashMap<String, Value> = result
                                     .instances

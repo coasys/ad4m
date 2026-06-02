@@ -275,7 +275,8 @@ pub(super) async fn execute_model_query_inner(
     // Eager-load included relations
     if let Some(ref include) = query_input.include {
         if !paginated.is_empty() && !shape.include_relations.is_empty() {
-            resolve_includes_recursive(store, &mut paginated, include, shape, resolver, depth).await?;
+            resolve_includes_recursive(store, &mut paginated, include, shape, resolver, depth)
+                .await?;
         }
     }
 
@@ -306,7 +307,8 @@ pub(super) async fn execute_model_query_inner(
             shape,
             resolver,
             depth,
-        ).await?;
+        )
+        .await?;
     }
 
     Ok(ModelQueryResult {

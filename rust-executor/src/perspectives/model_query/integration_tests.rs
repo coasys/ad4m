@@ -77,10 +77,9 @@ async fn test_full_model_query_with_where_filter() {
 
     // Query without WHERE - should find 1 instance
     let query_no_where = ModelQueryInput::default();
-    let result =
-        execute_model_query_from_json(&store, "Recipe", &query_no_where, shape_json)
-            .await
-            .unwrap();
+    let result = execute_model_query_from_json(&store, "Recipe", &query_no_where, shape_json)
+        .await
+        .unwrap();
     assert_eq!(
         result.instances.len(),
         1,
@@ -101,8 +100,8 @@ async fn test_full_model_query_with_where_filter() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-let result2 =
-        execute_model_query_from_json(&store, "Recipe", &query_with_where, shape_json).await
+    let result2 = execute_model_query_from_json(&store, "Recipe", &query_with_where, shape_json)
+        .await
         .unwrap();
     assert_eq!(
         result2.instances.len(),
@@ -166,7 +165,8 @@ async fn test_where_clause_raw_uri_property() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-let result = execute_model_query_from_json(&store, "Todo", &query, shape_json).await
+    let result = execute_model_query_from_json(&store, "Todo", &query, shape_json)
+        .await
         .unwrap();
     assert_eq!(
         result.instances.len(),
@@ -233,7 +233,8 @@ async fn test_where_clause_literal_prop_with_raw_uri_value() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-let result = execute_model_query_from_json(&store, "Todo", &query, shape_json).await
+    let result = execute_model_query_from_json(&store, "Todo", &query, shape_json)
+        .await
         .unwrap();
     assert_eq!(
         result.instances.len(),
@@ -380,7 +381,8 @@ async fn test_shared_predicate_relations_all_populated_via_store() {
     }"#;
 
     let query = ModelQueryInput::default();
-let result = execute_model_query_from_json(&store, "Channel", &query, shape_json).await
+    let result = execute_model_query_from_json(&store, "Channel", &query, shape_json)
+        .await
         .unwrap();
 
     assert_eq!(result.instances.len(), 1, "Should find 1 channel");
@@ -505,7 +507,8 @@ async fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
     }"#;
 
     let query = ModelQueryInput::default();
-let result = execute_model_query_from_json(&store, "Parent", &query, shape_json).await
+    let result = execute_model_query_from_json(&store, "Parent", &query, shape_json)
+        .await
         .unwrap();
 
     assert_eq!(result.instances.len(), 1);
@@ -701,9 +704,11 @@ async fn test_resolve_projections_count() {
         },
     );
 
-{
+    {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).await.unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
+            .await
+            .unwrap();
     }
 
     let count_a = instances[0]["$itemCount"].as_u64().unwrap_or(999);
@@ -745,9 +750,11 @@ async fn test_resolve_projections_list() {
         },
     );
 
-{
+    {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).await.unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
+            .await
+            .unwrap();
     }
 
     let items = instances[0]["$items"]
@@ -788,9 +795,11 @@ async fn test_resolve_projections_scalar() {
         },
     );
 
-{
+    {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).await.unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
+            .await
+            .unwrap();
     }
 
     let val = &instances[0]["$firstItem"];
@@ -823,9 +832,11 @@ async fn test_resolve_projections_count_zero_when_no_links() {
         },
     );
 
-{
+    {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).await.unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
+            .await
+            .unwrap();
     }
 
     let count = instances[0]["$itemCount"].as_u64().unwrap_or(999);
@@ -888,9 +899,11 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
         },
     );
 
-{
+    {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).await.unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
+            .await
+            .unwrap();
     }
 
     let count = instances[0]["$likeCount"].as_u64().unwrap_or(999);
@@ -950,9 +963,11 @@ async fn test_resolve_projections_where_filter_by_author() {
         },
     );
 
-{
+    {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).await.unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
+            .await
+            .unwrap();
     }
 
     let count = instances[0]["$mySignalCount"].as_u64().unwrap_or(999);
@@ -1523,8 +1538,8 @@ async fn test_deep_query_defaults_to_true() {
         ..Default::default()
     };
 
-let result =
-        execute_model_query_from_json(&store, "Message", &query_input, shape_json).await
+    let result = execute_model_query_from_json(&store, "Message", &query_input, shape_json)
+        .await
         .unwrap();
     assert!(!result.instances.is_empty(), "should find instance");
 
@@ -1577,8 +1592,8 @@ async fn test_deep_query_false_skips_property_getters() {
         ..Default::default()
     };
 
-let result =
-        execute_model_query_from_json(&store, "Message", &query_input, shape_json).await
+    let result = execute_model_query_from_json(&store, "Message", &query_input, shape_json)
+        .await
         .unwrap();
     assert!(!result.instances.is_empty());
 
@@ -1646,8 +1661,8 @@ async fn test_getters_run_after_pagination() {
         ..Default::default()
     };
 
-let result =
-        execute_model_query_from_json(&store, "Message", &query_input, shape_json).await
+    let result = execute_model_query_from_json(&store, "Message", &query_input, shape_json)
+        .await
         .unwrap();
     assert_eq!(result.instances.len(), 2, "should return 2 instances");
     assert_eq!(result.total_count, 5, "total count should be 5");
@@ -2290,7 +2305,8 @@ async fn test_full_model_query_signed_expression_where() {
         ..Default::default()
     };
 
-let result = execute_model_query_from_json(&store, "Item", &query, shape_json).await
+    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+        .await
         .unwrap();
     assert_eq!(
         result.instances.len(),
@@ -2366,7 +2382,8 @@ async fn test_full_model_query_signed_expression_numeric_where() {
         ..Default::default()
     };
 
-let result = execute_model_query_from_json(&store, "Item", &query, shape_json).await
+    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+        .await
         .unwrap();
     assert_eq!(
         result.instances.len(),
@@ -2418,7 +2435,8 @@ async fn test_full_model_query_signed_expression_boolean_where() {
         ..Default::default()
     };
 
-let result = execute_model_query_from_json(&store, "Thing", &query, shape_json).await
+    let result = execute_model_query_from_json(&store, "Thing", &query, shape_json)
+        .await
         .unwrap();
     assert_eq!(result.instances.len(), 1);
     assert_eq!(result.instances[0]["id"].as_str().unwrap(), item1);
@@ -2485,7 +2503,8 @@ async fn test_full_model_query_where_string_array_in() {
         ..Default::default()
     };
 
-let result = execute_model_query_from_json(&store, "Item", &query, shape_json).await
+    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+        .await
         .unwrap();
     assert_eq!(result.instances.len(), 2, "active and pending should match");
 }
@@ -2545,7 +2564,8 @@ async fn test_full_model_query_where_ops_not() {
         ..Default::default()
     };
 
-let result = execute_model_query_from_json(&store, "Item", &query, shape_json).await
+    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+        .await
         .unwrap();
     assert_eq!(result.instances.len(), 1);
     assert_eq!(result.instances[0]["id"].as_str().unwrap(), item1);
@@ -2839,7 +2859,8 @@ async fn test_build_instance_sparql_integration_getter_excluded_from_results() {
     }"#;
 
     let query = ModelQueryInput::default();
-let result = execute_model_query_from_json(&store, "Channel", &query, shape_json).await
+    let result = execute_model_query_from_json(&store, "Channel", &query, shape_json)
+        .await
         .unwrap();
 
     assert_eq!(result.instances.len(), 1, "Should find exactly 1 channel");
@@ -4142,7 +4163,9 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         },
     );
 
-resolve_projections(&store, &mut instances, &projections, &shape, &resolver, 0).await.unwrap();
+    resolve_projections(&store, &mut instances, &projections, &shape, &resolver, 0)
+        .await
+        .unwrap();
 
     let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
     assert_eq!(
@@ -4165,7 +4188,9 @@ resolve_projections(&store, &mut instances, &projections, &shape, &resolver, 0).
         },
     );
 
-resolve_projections(&store, &mut instances2, &projections2, &shape, &resolver, 0).await.unwrap();
+    resolve_projections(&store, &mut instances2, &projections2, &shape, &resolver, 0)
+        .await
+        .unwrap();
 
     let got = &instances2[0]["$myLikeSignal"];
     assert_eq!(
