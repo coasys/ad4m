@@ -15,9 +15,9 @@
 //! reifier metadata (author/timestamp).
 
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use super::types::{ModelShape, OrderDirection, ProjectionInput, WhereCondition};
+use super::types::{ModelQueryInput, ModelShape, OrderDirection, ProjectionInput, WhereCondition};
 use super::utils::{escape_sparql_string, validate_iri};
 use crate::perspectives::sparql_store::SparqlStore;
 
@@ -26,11 +26,16 @@ use crate::perspectives::sparql_store::SparqlStore;
 /// For each projection key, builds and executes a single grouped SPARQL
 /// query that collects either counts or target IRI lists, then merges the
 /// results into the instance objects.
+///
+/// When `proj.target_shape` is set, raw target IRIs are replaced with fully
+/// hydrated model instances via a recursive `execute_model_query_inner` call
+/// (one batch per projection key, eliminating TS-side round-trips).
 pub(super) fn resolve_projections(
     store: &SparqlStore,
     instances: &mut Vec<Value>,
     projections: &HashMap<String, ProjectionInput>,
     shape: &ModelShape,
+    depth: u8,
 ) -> Result<(), deno_core::anyhow::Error> {
     if instances.is_empty() || projections.is_empty() {
         return Ok(());
@@ -159,6 +164,72 @@ pub(super) fn resolve_projections(
                         .map(|s| Value::String(s.to_string()))
                         .unwrap_or(Value::Null);
                     list_map.entry(parent.to_string()).or_default().push(t);
+                }
+            }
+
+            // ----------------------------------------------------------------
+            // 4. If a target shape is available, hydrate raw IRIs → full model
+            //    instances in-process — no TS round-trip required.
+            // ----------------------------------------------------------------
+            if let Some(ref target_shape) = proj.target_shape {
+                if !proj.count {
+                    if let Some(target_class) = target_shape["className"].as_str() {
+                        if !target_class.is_empty() {
+                            // Collect all unique raw IRI strings.
+                            let mut seen = std::collections::HashSet::new();
+                            let mut all_ids: Vec<String> = Vec::new();
+                            for vals in list_map.values() {
+                                for v in vals {
+                                    if let Some(s) = v.as_str() {
+                                        if seen.insert(s.to_string()) {
+                                            all_ids.push(s.to_string());
+                                        }
+                                    }
+                                }
+                            }
+
+                            if !all_ids.is_empty() {
+                                let target_shape_json =
+                                    serde_json::to_string(target_shape).unwrap_or_default();
+                                let mut sub_where = BTreeMap::new();
+                                sub_where
+                                    .insert("id".to_string(), WhereCondition::StringArray(all_ids));
+                                let sub_query = ModelQueryInput {
+                                    where_clause: Some(sub_where),
+                                    deep_query: Some(true),
+                                    ..ModelQueryInput::default()
+                                };
+
+                                if let Ok(result) = super::query::execute_model_query_inner(
+                                    store,
+                                    target_class,
+                                    &sub_query,
+                                    Some(&target_shape_json),
+                                    depth + 1,
+                                ) {
+                                    let hydrated: HashMap<String, Value> = result
+                                        .instances
+                                        .into_iter()
+                                        .filter_map(|inst| {
+                                            let id = inst["id"].as_str()?.to_string();
+                                            Some((id, inst))
+                                        })
+                                        .collect();
+
+                                    // Replace raw IRI strings with hydrated objects.
+                                    for vals in list_map.values_mut() {
+                                        for v in vals.iter_mut() {
+                                            if let Some(id) = v.as_str() {
+                                                if let Some(obj) = hydrated.get(id) {
+                                                    *v = obj.clone();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

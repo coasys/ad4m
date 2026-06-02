@@ -58,8 +58,8 @@ commands:
             mkdir -p target/release
             # Remove before copy: unlinking avoids ETXTBSY if a previous executor still holds the binary
             rm -f target/release/ad4m target/release/ad4m-executor
-            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
-            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m-executor target/release/ad4m-executor
+            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m target/release/ad4m
+            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m-executor target/release/ad4m-executor
       - setup_env
       - run:
           name: Install dependencies
@@ -116,8 +116,8 @@ jobs:
       - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
           command: |
-            mkdir -p /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}
-            cp target/release/ad4m target/release/ad4m-executor /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/
+            mkdir -p /tmp/circleci-artifacts/${CIRCLE_SHA1}
+            cp target/release/ad4m target/release/ad4m-executor /tmp/circleci-artifacts/${CIRCLE_SHA1}/
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
@@ -210,8 +210,8 @@ jobs:
           name: Restore binaries from local stash
           command: |
             mkdir -p target/release
-            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
-            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m-executor target/release/ad4m-executor
+            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m target/release/ad4m
+            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m-executor target/release/ad4m-executor
       - setup_env
       - run:
           name: git submodule

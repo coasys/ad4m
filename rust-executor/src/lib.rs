@@ -415,7 +415,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         use std::sync::Once;
         static V8_FLAGS_INIT: Once = Once::new();
         V8_FLAGS_INIT.call_once(|| {
-            deno_core::v8::V8::set_flags_from_string("--no-opt");
+            deno_core::v8::V8::set_flags_from_string("--max-opt=0");
             deno_core::JsRuntime::init_platform(None, false);
         });
     }
@@ -432,6 +432,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
 
     perspectives::initialize_from_db();
+
+    // Start periodic memory diagnostics (logs RSS, jemalloc stats,
+    // per-perspective data structure sizes every 30s).
+    perspectives::memory_diagnostics::start_memory_diagnostics();
 
     let app_dir = config
         .app_data_path

@@ -43,18 +43,29 @@ The executor supports various configuration parameters to customize its behavior
 ```bash
 # Basic configuration
 ad4m-executor run \
-  --gql-port 12000 \           # Main GraphQL API port (default: 4000)
-  --admin-credential secret \   # Bypass authentication handshake
-  --app-data-path ./data \     # Custom data directory (default: ~/.ad4m)
-  --run-dapp-server true       # Run the DApp server (default: false)
+  --port 12000 \
+  --admin-credential secret \
+  --app-data-path ./data \
+  --run-dapp-server true
+# --port: API port (default: 12000)
+# --admin-credential: Bypass authentication handshake
+# --app-data-path: Custom data directory (default: ~/.ad4m)
+# --run-dapp-server: Run the DApp server (default: false)
 
 # Holochain-related configuration
-  --hc-admin-port 1234 \       # Holochain admin interface port (default: 1234)
-  --hc-app-port 8888 \         # Holochain app interface port (default: 8888)
-  --hc-use-bootstrap true \    # Use bootstrap service (default: true)
-  --hc-use-proxy true \        # Use proxy for Holochain (default: true)
-  --hc-proxy-url url \         # Custom proxy URL
-  --hc-bootstrap-url url       # Custom bootstrap URL
+ad4m-executor run \
+  --hc-admin-port 1234 \
+  --hc-app-port 8888 \
+  --hc-use-bootstrap true \
+  --hc-use-proxy true \
+  --hc-proxy-url url \
+  --hc-bootstrap-url url
+# --hc-admin-port: Holochain admin interface port (default: 1234)
+# --hc-app-port: Holochain app interface port (default: 8888)
+# --hc-use-bootstrap: Use bootstrap service (default: true)
+# --hc-use-proxy: Use proxy for Holochain (default: true)
+# --hc-proxy-url: Custom proxy URL
+# --hc-bootstrap-url: Custom bootstrap URL
 ```
 
 ### Running Multiple Executors
@@ -67,13 +78,17 @@ ad4m-executor run
 
 # Second executor (custom ports)
 ad4m-executor run \
-  --gql-port 14000 \           # Different GraphQL port
-  --hc-admin-port 2234 \       # Different Holochain admin port
-  --hc-app-port 9888 \         # Different Holochain app port
-  --app-data-path ~/.ad4m2     # Separate data directory
+  --port 14000 \
+  --hc-admin-port 2234 \
+  --hc-app-port 9888 \
+  --app-data-path ~/.ad4m2
+# --port: Different API port
+# --hc-admin-port: Different Holochain admin port
+# --hc-app-port: Different Holochain app port
+# --app-data-path: Separate data directory
 ```
 
-When connecting to the second executor with the client, specify the custom GraphQL port:
+When connecting to the second executor with the client, specify the custom port:
 
 ```bash
 ad4m --executor-url http://localhost:14000 agent me

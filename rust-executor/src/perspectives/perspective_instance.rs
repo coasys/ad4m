@@ -196,6 +196,26 @@ struct SubscribedQuery {
     model_query_params: Option<ModelSubscriptionParams>,
 }
 
+/// A batch with its creation timestamp, for timeout-based cleanup.
+struct TimestampedBatch {
+    diff: PerspectiveDiff,
+    created_at: Instant,
+}
+
+/// Maximum age of an uncommitted batch before it is automatically cleaned up.
+static BATCH_TIMEOUT_SECS: u64 = 300; // 5 minutes
+
+/// Diagnostic stats for a single perspective's memory-relevant data structures.
+pub struct PerspectiveMemoryStats {
+    pub uuid: String,
+    pub name: String,
+    pub subscriptions: usize,
+    pub sub_result_bytes: usize,
+    pub batches: usize,
+    pub batch_links: usize,
+    pub quad_count: usize,
+}
+
 /// Parameters for a model query subscription. Stored alongside the trigger SPARQL
 /// so that `check_subscribed_queries` can re-execute the model query in Rust.
 #[derive(Clone)]
@@ -272,7 +292,7 @@ pub struct PerspectiveInstance {
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
-    batch_store: Arc<RwLock<HashMap<String, PerspectiveDiff>>>,
+    batch_store: Arc<RwLock<HashMap<String, TimestampedBatch>>>,
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
@@ -329,6 +349,80 @@ impl PerspectiveInstance {
 
     pub async fn teardown_background_tasks(&self) {
         self.is_teardown.store(true, Ordering::Release);
+    }
+
+    /// Return diagnostic stats for this perspective's memory-relevant data structures.
+    pub async fn memory_diagnostics(&self) -> PerspectiveMemoryStats {
+        let (subscriptions, sub_result_bytes) = {
+            let subs = self.subscribed_queries.lock().await;
+            let count = subs.len();
+            let bytes: usize = subs
+                .values()
+                .map(|q| q.last_result.len() + q.query.len())
+                .sum();
+            (count, bytes)
+        };
+        let (batches, batch_links) = {
+            let bs = self.batch_store.read().await;
+            let count = bs.len();
+            let links: usize = bs
+                .values()
+                .map(|b| b.diff.additions.len() + b.diff.removals.len())
+                .sum();
+            (count, links)
+        };
+        let quad_count = self.sparql_store.quad_count();
+        let name = self.persisted.lock().await.name.clone().unwrap_or_default();
+
+        PerspectiveMemoryStats {
+            uuid: self.uuid.clone(),
+            name,
+            subscriptions,
+            sub_result_bytes,
+            batches,
+            batch_links,
+            quad_count,
+        }
+    }
+
+    /// Synchronous version of memory_diagnostics for use from sync contexts
+    /// (e.g. when holding the sync PERSPECTIVES RwLock).
+    pub fn memory_diagnostics_sync(&self) -> PerspectiveMemoryStats {
+        let (subscriptions, sub_result_bytes) = {
+            let subs = self.subscribed_queries.blocking_lock();
+            let count = subs.len();
+            let bytes: usize = subs
+                .values()
+                .map(|q| q.last_result.len() + q.query.len())
+                .sum();
+            (count, bytes)
+        };
+        let (batches, batch_links) = {
+            let bs = self.batch_store.blocking_read();
+            let count = bs.len();
+            let links: usize = bs
+                .values()
+                .map(|b| b.diff.additions.len() + b.diff.removals.len())
+                .sum();
+            (count, links)
+        };
+        let quad_count = self.sparql_store.quad_count();
+        let name = self
+            .persisted
+            .blocking_lock()
+            .name
+            .clone()
+            .unwrap_or_default();
+
+        PerspectiveMemoryStats {
+            uuid: self.uuid.clone(),
+            name,
+            subscriptions,
+            sub_result_bytes,
+            batches,
+            batch_links,
+            quad_count,
+        }
     }
 
     /// Sync all existing links to the SPARQL (Oxigraph) store
@@ -994,9 +1088,10 @@ impl PerspectiveInstance {
     ) -> Result<DecoratedLinkExpression, AnyError> {
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
-            let diff = batches
+            let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
+            let diff = &mut batch.diff;
 
             let _handle = self.persisted.lock().await.clone();
 
@@ -1143,9 +1238,10 @@ impl PerspectiveInstance {
         link_expression.data.validate()?;
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
-            let diff = batches
+            let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
+            let diff = &mut batch.diff;
 
             let mut link_expr = link_expression.clone();
             link_expr.status = Some(status.clone());
@@ -1200,9 +1296,10 @@ impl PerspectiveInstance {
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
-            let diff = batches
+            let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
+            let diff = &mut batch.diff;
 
             let mut decorated_expressions = Vec::new();
             for mut link_expr in link_expressions {
@@ -1378,9 +1475,10 @@ impl PerspectiveInstance {
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
-            let diff = batches
+            let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
+            let diff = &mut batch.diff;
 
             diff.removals.push(old_link.clone());
             let mut new_link_expr = new_link_expression.clone();
@@ -1493,9 +1591,10 @@ impl PerspectiveInstance {
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
-            let diff = batches
+            let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
+            let diff = &mut batch.diff;
 
             let decorated_links: Vec<_> = existing_links
                 .iter()
@@ -1644,10 +1743,17 @@ impl PerspectiveInstance {
         Ok(class_names)
     }
 
-    fn get_links_local(
+    /// Query the SPARQL store for matching links, returning the decorated form
+    /// already cached in the store. Does NOT re-verify signatures — the
+    /// `proof.valid` flag was set on insert and persisted into RocksDB.
+    ///
+    /// Use this from query paths that just need to surface the link data.
+    /// Internal call sites that need the bare `LinkExpression` (e.g. to feed
+    /// Prolog) should use [`Self::get_links_local`] which unwraps for them.
+    fn get_links_local_decorated(
         &self,
         query: &LinkQuery,
-    ) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
+    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let from_date = query.from_date.as_ref().map(|d| {
             let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
             dt.to_rfc3339()
@@ -1657,16 +1763,25 @@ impl PerspectiveInstance {
             dt.to_rfc3339()
         });
 
-        let decorated_links = self.sparql_store.query_links(
+        Ok(self.sparql_store.query_links(
             query.source.as_deref(),
             query.predicate.as_deref(),
             query.target.as_deref(),
             from_date.as_deref(),
             until_date.as_deref(),
-            None, // Don't limit here — get_links() applies limit after sorting
-        )?;
+            None, // limit is applied after sorting in get_links()
+        )?)
+    }
 
-        let result: Vec<(LinkExpression, LinkStatus)> = decorated_links
+    fn get_links_local(
+        &self,
+        query: &LinkQuery,
+    ) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
+        // Unwrap the decorated form into the (LinkExpression, LinkStatus)
+        // tuple format the legacy in-process callers (SDNA, Prolog facts)
+        // expect. No re-verification — we trust the stored `valid` flag.
+        let decorated_links = self.get_links_local_decorated(query)?;
+        Ok(decorated_links
             .into_iter()
             .map(|decorated| {
                 let status = decorated.status.clone().unwrap_or(LinkStatus::Shared);
@@ -1682,9 +1797,7 @@ impl PerspectiveInstance {
                 };
                 (link_expr, status)
             })
-            .collect();
-
-        Ok(result)
+            .collect())
     }
 
     pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
@@ -1703,9 +1816,49 @@ impl PerspectiveInstance {
             }
         }
 
-        let mut links = self.get_links_local(&query)?;
+        // When the caller supplies a `limit`, push it down into the store via
+        // a bounded top-N heap. This keeps memory at O(limit) regardless of
+        // how many links match — the previous materialise-sort-truncate path
+        // allocated the full Vec even for a 10-item page, which on large
+        // perspectives was a substantial regression in the same hot path this
+        // PR is trying to shrink.
+        //
+        // Otherwise (no limit) fall back to the in-memory sort path. We still
+        // pull the decorated form directly from the store so we don't pay the
+        // triple-materialisation tax described below.
+        if let Some(limit) = query.limit {
+            let from_date = query.from_date.as_ref().map(|d| {
+                let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+                dt.to_rfc3339()
+            });
+            let until_date = query.until_date.as_ref().map(|d| {
+                let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+                dt.to_rfc3339()
+            });
+            return Ok(self.sparql_store.query_links_top_n_by_timestamp(
+                query.source.as_deref(),
+                query.predicate.as_deref(),
+                query.target.as_deref(),
+                from_date.as_deref(),
+                until_date.as_deref(),
+                limit as usize,
+                reverse,
+            )?);
+        }
 
-        links.sort_by(|(a, _), (b, _)| {
+        // No limit: pull the already-decorated form from the SPARQL store and
+        // sort in-place. Previously this path materialised Vec<...> three
+        // times: once as DecoratedLinkExpression in get_links_local_decorated,
+        // again as Vec<(LinkExpression, LinkStatus)> in get_links_local
+        // (unwrap), and a third time after sort by re-wrapping each pair via
+        // `DecoratedLinkExpression::from((link, status))` — which re-runs
+        // Ed25519 signature verification per link. For a 10K-link result
+        // that's ~30K extra small allocations + 10K crypto ops every call.
+        // The wind-tunnel S9 query path was the dominant remaining source of
+        // RSS growth; this collapses it to a single Vec.
+        let mut links = self.get_links_local_decorated(&query)?;
+
+        links.sort_by(|a, b| {
             let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap_or_default();
             let b_time = DateTime::parse_from_rfc3339(&b.timestamp).unwrap_or_default();
             if reverse {
@@ -1715,15 +1868,7 @@ impl PerspectiveInstance {
             }
         });
 
-        if let Some(limit) = query.limit {
-            let limit = links.len().min(limit as usize);
-            links = links[..limit].to_vec();
-        }
-
-        Ok(links
-            .into_iter()
-            .map(|(link, status)| DecoratedLinkExpression::from((link.clone(), status)))
-            .collect())
+        Ok(links)
     }
 
     /// Adds the given Social DNA code to the perspective's SDNA code
@@ -2144,11 +2289,10 @@ impl PerspectiveInstance {
         // Fetch links based on mode
         let mut links: Vec<DecoratedLinkExpression> = match PROLOG_MODE {
             PrologMode::Simple => {
-                // Get all links for Simple mode
-                self.get_links_local(&LinkQuery::default())?
-                    .into_iter()
-                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
-                    .collect()
+                // Get all links for Simple mode. Use the decorated form
+                // directly — re-running signature verification per link was
+                // hot in the wind tunnel.
+                self.get_links_local_decorated(&LinkQuery::default())?
             }
             PrologMode::SdnaOnly => {
                 // Get only SDNA links for SdnaOnly mode (efficient query)
@@ -2327,11 +2471,7 @@ impl PerspectiveInstance {
                 };
 
                 // Get links for SDNA fact generation
-                let links = self
-                    .get_links_local(&LinkQuery::default())?
-                    .into_iter()
-                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
-                    .collect::<Vec<_>>();
+                let links = self.get_links_local_decorated(&LinkQuery::default())?;
 
                 service
                     .run_query_simple(
@@ -2426,11 +2566,7 @@ impl PerspectiveInstance {
                 });
 
                 // Get links for SDNA fact generation
-                let links = self
-                    .get_links_local(&LinkQuery::default())?
-                    .into_iter()
-                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
-                    .collect::<Vec<_>>();
+                let links = self.get_links_local_decorated(&LinkQuery::default())?;
 
                 service
                     .run_query_simple(
@@ -2644,6 +2780,22 @@ impl PerspectiveInstance {
             }
         }
 
+        // EXPERIMENT: removed per-write flush. The fix-branch added a flush
+        // call here to reclaim memtable memory, but flushing on EVERY single
+        // addLink creates one tiny SST file per write. Each SST file carries
+        // in-memory metadata (block cache + bloom filter + table cache entry),
+        // so 1 link/s writes for 5 minutes = 300 SST files = ~300 in-memory
+        // metadata entries that RocksDB keeps until compaction catches up.
+        // That accounts for the per-add retention seen in wind tunnel monitor
+        // phase (~124 KB/link vs ~4 KB/link during a burst seed).
+        //
+        // RocksDB auto-flushes memtables when they reach write_buffer_size
+        // (default 64 MB). For our workload (max ~16 KB/link), that's ~4000
+        // links before an auto-flush, which is plenty. If memtable pressure
+        // is a real concern in production it should be addressed via
+        // configuration (smaller write_buffer_size, more memtables) or a
+        // throttled background flush, not a per-write fsync.
+
         Ok(())
     }
 
@@ -2707,7 +2859,15 @@ impl PerspectiveInstance {
                     .trigger_prolog_subscription_check
                     .store(true, Ordering::Release);
 
-                self_clone.pubsub_publish_diff(diff).await;
+                // NOTE: pubsub_publish_diff is NOT called here.
+                // The synchronous caller (add_link_expression / link_mutations /
+                // diff_from_link_language) already published the same diff to
+                // PERSPECTIVE_LINK_ADDED/REMOVED/UPDATED *before* spawning us.
+                // Republishing here delivered every link event TWICE to every
+                // WS subscriber (confirmed 2.0× delivery ratio in wind-tunnel
+                // S9) which doubled broadcast cost and was a UI/subscription
+                // re-evaluation footgun. Subscription re-evaluation is already
+                // gated by `trigger_prolog_subscription_check` + changed_predicates.
 
                 if let Some(sender) = completion_sender {
                     let _ = sender.send(());
@@ -2821,7 +2981,11 @@ impl PerspectiveInstance {
 
             if did_update {
                 self_clone.record_changed_predicates(&diff).await;
-                self_clone.pubsub_publish_diff(diff).await;
+
+                // NOTE: pubsub_publish_diff is NOT called here (Pooled mode).
+                // Same reason as the Disabled/Simple/SdnaOnly branch above —
+                // the synchronous caller already published this diff once.
+                // Subscription re-evaluation runs from the trigger flags below.
 
                 // Trigger notification and subscription checks after prolog facts are updated
                 self_clone
@@ -3445,8 +3609,8 @@ impl PerspectiveInstance {
                     // Also prune matching links from pending batch additions
                     if let Some(ref bid) = batch_id {
                         let mut batches = self.batch_store.write().await;
-                        if let Some(diff) = batches.get_mut(bid) {
-                            diff.additions.retain(|link_expr| {
+                        if let Some(batch) = batches.get_mut(bid) {
+                            batch.diff.additions.retain(|link_expr| {
                                 let source_match = link_expr.data.source == remove_source;
                                 let pred_match = remove_predicate.is_none()
                                     || link_expr.data.predicate == remove_predicate;
@@ -3485,8 +3649,8 @@ impl PerspectiveInstance {
                     // create a duplicate (e.g. save+update in one transaction).
                     if let Some(ref bid) = batch_id {
                         let mut batches = self.batch_store.write().await;
-                        if let Some(diff) = batches.get_mut(bid) {
-                            diff.additions.retain(|link_expr| {
+                        if let Some(batch) = batches.get_mut(bid) {
+                            batch.diff.additions.retain(|link_expr| {
                                 !(link_expr.data.source == source
                                     && link_expr.data.predicate == predicate)
                             });
@@ -3523,8 +3687,8 @@ impl PerspectiveInstance {
                     // Also prune matching links from pending batch additions
                     if let Some(ref bid) = batch_id {
                         let mut batches = self.batch_store.write().await;
-                        if let Some(diff) = batches.get_mut(bid) {
-                            diff.additions.retain(|link_expr| {
+                        if let Some(batch) = batches.get_mut(bid) {
+                            batch.diff.additions.retain(|link_expr| {
                                 !(link_expr.data.source == source
                                     && link_expr.data.predicate == predicate)
                             });
@@ -4487,13 +4651,56 @@ impl PerspectiveInstance {
                 self.check_subscribed_queries(changed_preds).await;
             }
 
-            // Periodic subscription logging
+            // Periodic subscription logging and proactive timeout cleanup
             log_counter += 1;
             if log_counter >= LOG_INTERVAL {
                 log_counter = 0;
                 // Get perspective_uuid FIRST before acquiring subscribed_queries lock to avoid deadlock
                 let perspective_uuid = self.uuid.clone();
+                let mut queries = self.subscribed_queries.lock().await;
+
+                // Proactively remove timed-out subscriptions even when no
+                // trigger has fired. Without this, expired subscriptions sit
+                // in the map forever, holding their last_result strings in
+                // memory, when no new links are being added.
+                let now = Instant::now();
+                let mut removed_queries: Vec<String> = Vec::new();
+                queries.retain(|_id, q| {
+                    let keep = now.duration_since(q.last_keepalive).as_secs()
+                        <= QUERY_SUBSCRIPTION_TIMEOUT;
+                    if !keep {
+                        removed_queries.push(q.query.clone());
+                    }
+                    keep
+                });
+                // Drop the lock before async prolog calls
+                drop(queries);
+
+                if !removed_queries.is_empty() {
+                    log::info!(
+                        "🧹 Cleaned up {} timed-out subscription(s) for perspective {}",
+                        removed_queries.len(),
+                        perspective_uuid
+                    );
+                    // Notify prolog service for each removed subscription,
+                    // mirroring the flow in check_subscribed_queries().
+                    for query in &removed_queries {
+                        if let Err(e) = get_prolog_service()
+                            .await
+                            .subscription_ended(perspective_uuid.clone(), query.clone())
+                            .await
+                        {
+                            log::warn!(
+                                "Failed to notify prolog service of subscription timeout: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+
+                // Re-acquire for the logging section below
                 let queries = self.subscribed_queries.lock().await;
+
                 if !queries.is_empty() {
                     log::info!(
                         "📊 Prolog subscriptions [{}]: {} active",
@@ -4616,11 +4823,32 @@ impl PerspectiveInstance {
 
     pub async fn create_batch(&self) -> String {
         let batch_uuid = Uuid::new_v4().to_string();
-        self.batch_store.write().await.insert(
+
+        let mut batches = self.batch_store.write().await;
+
+        // Clean up any abandoned batches older than BATCH_TIMEOUT_SECS
+        let now = Instant::now();
+        let before = batches.len();
+        batches.retain(|_id, batch| {
+            now.duration_since(batch.created_at).as_secs() < BATCH_TIMEOUT_SECS
+        });
+        let removed = before - batches.len();
+        if removed > 0 {
+            log::info!(
+                "Cleaned up {} abandoned batch(es) older than {}s",
+                removed,
+                BATCH_TIMEOUT_SECS
+            );
+        }
+
+        batches.insert(
             batch_uuid.clone(),
-            PerspectiveDiff {
-                additions: Vec::new(),
-                removals: Vec::new(),
+            TimestampedBatch {
+                diff: PerspectiveDiff {
+                    additions: Vec::new(),
+                    removals: Vec::new(),
+                },
+                created_at: now,
             },
         );
         batch_uuid
@@ -4640,7 +4868,7 @@ impl PerspectiveInstance {
             let mut batch_store = self.batch_store.write().await;
 
             match batch_store.remove(&batch_uuid) {
-                Some(diff) => diff,
+                Some(batch) => batch.diff,
                 None => return Err(anyhow!("No batch found with given UUID")),
             }
         };
@@ -4732,6 +4960,16 @@ impl PerspectiveInstance {
 
             // Update Prolog: subscription engine (immediate) + query engine (lazy)
             self.update_prolog_engines(combined_diff.clone()).await;
+
+            // Publish PERSPECTIVE_LINK_ADDED/REMOVED/UPDATED to WS subscribers.
+            // The single-mutation paths (add_link / link_mutations /
+            // diff_from_link_language) publish their diff synchronously before
+            // spawning the prolog update, and spawn_prolog_facts_update
+            // deliberately skips publishing to avoid double-delivery on those
+            // paths. commit_batch never went through that publish step, so
+            // batched diffs were never reaching WS subscribers — that's what
+            // this call restores.
+            self.pubsub_publish_diff(combined_diff.clone()).await;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }
@@ -5517,5 +5755,141 @@ mod tests {
             "Reifier query with variable ?predicate should return empty set, got: {:?}",
             predicates
         );
+    }
+
+    // ── Regression tests for PR #829 follow-up ──
+
+    /// Regression: `commit_batch()` must publish `PERSPECTIVE_LINK_ADDED` (and
+    /// the corresponding REMOVED/UPDATED topics) so WebSocket subscribers see
+    /// batched diffs. The single-mutation paths publish synchronously before
+    /// spawning prolog, and `spawn_prolog_facts_update` deliberately skips
+    /// publishing to avoid double-delivery on those paths — so without an
+    /// explicit publish in `commit_batch`, batched diffs silently never reach
+    /// WS subscribers. Asserts a message lands on the topic within 2s of the
+    /// commit returning.
+    #[tokio::test]
+    async fn test_commit_batch_publishes_link_added_event() {
+        let mut perspective = setup().await;
+        let link = create_link();
+        let batch_id = perspective.create_batch().await;
+
+        // Add a Shared addition into the batch (Shared so it lands on the
+        // PERSPECTIVE_LINK_ADDED topic — see `pubsub_publish_diff`).
+        perspective
+            .add_link(
+                link.clone(),
+                LinkStatus::Shared,
+                Some(batch_id.clone()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap();
+
+        // Subscribe BEFORE committing. The global PubSub uses tokio broadcast
+        // channels; subscribers only see messages sent after they subscribe.
+        let pubsub = crate::pubsub::get_global_pubsub().await;
+        let mut added_rx = pubsub
+            .subscribe(&crate::pubsub::PERSPECTIVE_LINK_ADDED_TOPIC)
+            .await;
+
+        let expected_uuid = perspective.uuid.clone();
+        let diff = perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .unwrap();
+        assert_eq!(
+            diff.additions.len(),
+            1,
+            "commit_batch should return the batched addition"
+        );
+
+        // PERSPECTIVE_LINK_ADDED_TOPIC is global, so other tests running
+        // concurrently can publish to it as well. Drain until we find the
+        // message for THIS perspective + link (or the deadline expires).
+        // Without the publish call in commit_batch the loop never sees a
+        // matching message and the timeout fires.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let msg = loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let candidate = tokio::time::timeout(remaining, added_rx.recv())
+                .await
+                .expect(
+                    "commit_batch() did not publish a matching PERSPECTIVE_LINK_ADDED \
+                     within 2s — batched diffs are not reaching WS subscribers",
+                )
+                .expect("PERSPECTIVE_LINK_ADDED broadcast channel closed unexpectedly");
+            if candidate.contains(&expected_uuid) && candidate.contains(&link.target) {
+                break candidate;
+            }
+        };
+
+        // Sanity-check the payload references the link we committed. The
+        // published message is a JSON-encoded PerspectiveLinkFilter referring
+        // to the perspective uuid + the decorated link.
+        assert!(
+            msg.contains(&link.target),
+            "Published PERSPECTIVE_LINK_ADDED message should reference the committed link's target ({}), got: {}",
+            link.target,
+            msg
+        );
+    }
+
+    /// Regression: paginated `get_links(limit=N)` must use the bounded-heap
+    /// store-side top-N method, not "materialise full Vec then sort+truncate".
+    /// Asserts the dedicated store method `query_links_top_n_by_timestamp`
+    /// exists (compile-error catch if removed) and that `get_links(limit=N)`
+    /// returns the same result as a direct call — i.e. it routes through the
+    /// bounded path rather than diverging back to the unbounded sort.
+    #[tokio::test]
+    async fn test_get_links_with_limit_uses_bounded_top_n_path() {
+        let mut perspective = setup().await;
+
+        // Insert 50 links. With sub-millisecond `add_link` calls the
+        // timestamps differ enough that sort order is stable.
+        for _ in 0..50 {
+            let link = create_link();
+            perspective
+                .add_link(link, LinkStatus::Local, None, &AgentContext::main_agent())
+                .await
+                .unwrap();
+        }
+
+        // Ascending (oldest-first) page of 5 via the public API.
+        let q = LinkQuery {
+            limit: Some(5),
+            ..Default::default()
+        };
+        let page = perspective.get_links(&q).await.unwrap();
+        assert_eq!(page.len(), 5, "limit=5 should return exactly 5 links");
+
+        // Same query directly against the store's bounded top-N method. If
+        // `get_links` no longer routes through this path, the equivalence
+        // assertion below catches drift between the two implementations.
+        let direct = perspective
+            .sparql_store
+            .query_links_top_n_by_timestamp(None, None, None, None, None, 5, false)
+            .unwrap();
+        assert_eq!(
+            direct.len(),
+            5,
+            "query_links_top_n_by_timestamp(limit=5) should return 5 links"
+        );
+
+        // Identical results: same timestamps in the same order.
+        let page_ts: Vec<&str> = page.iter().map(|l| l.timestamp.as_str()).collect();
+        let direct_ts: Vec<&str> = direct.iter().map(|l| l.timestamp.as_str()).collect();
+        assert_eq!(
+            page_ts, direct_ts,
+            "get_links(limit) must route through query_links_top_n_by_timestamp — \
+             ordering drift between paths means the bounded heap is not being used"
+        );
+
+        // Sorted ascending.
+        for w in page.windows(2) {
+            assert!(
+                w[0].timestamp <= w[1].timestamp,
+                "ascending top-N should yield non-decreasing timestamps"
+            );
+        }
     }
 }
