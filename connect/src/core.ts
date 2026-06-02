@@ -347,8 +347,21 @@ export default class Ad4mConnect extends EventTarget {
           return;
         }
 
-        // Verify origin is in allowlist (if configured)
-        if (this.options.allowedOrigins && this.options.allowedOrigins.length > 0) {
+        // Verify origin is in allowlist (if configured).
+        // In proxy mode the parent sees ALL GraphQL traffic, so the allowlist is the
+        // only gate against a malicious site embedding this app — enforce it strictly.
+        if (event.data.proxy) {
+          if (!this.options.allowedOrigins || this.options.allowedOrigins.length === 0) {
+            console.error('[Ad4m Connect] proxy mode requires allowedOrigins to be configured. Rejecting AD4M_CONFIG to prevent arbitrary sites from embedding this app.');
+            this.rejectEmbedded(new Error('proxy mode requires allowedOrigins'));
+            return;
+          }
+          if (!event.origin || !this.options.allowedOrigins.includes(event.origin)) {
+            console.warn('[Ad4m Connect] Rejected AD4M_CONFIG from unauthorized origin:', event.origin);
+            this.rejectEmbedded(new Error(`Unauthorized origin: ${event.origin}`));
+            return;
+          }
+        } else if (this.options.allowedOrigins && this.options.allowedOrigins.length > 0) {
           if (!event.origin || !this.options.allowedOrigins.includes(event.origin)) {
             console.warn('[Ad4m Connect] Rejected AD4M_CONFIG from unauthorized origin:', event.origin);
             this.rejectEmbedded(new Error(`Unauthorized origin: ${event.origin}`));

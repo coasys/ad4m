@@ -33,6 +33,9 @@ export class PostMessageWebSocket {
         this._targetOrigin = targetOrigin
         this._messageHandler = (e: MessageEvent) => {
             if (e.source !== window.parent) return
+            // Pin to the origin we verified at connection setup — rejects frames
+            // from a parent that has navigated to a different origin since then.
+            if (e.origin !== this._targetOrigin) return
 
             const msg = e.data
             if (!msg || typeof msg.type !== 'string') return
