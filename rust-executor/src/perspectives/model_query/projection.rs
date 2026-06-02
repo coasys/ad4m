@@ -17,7 +17,9 @@
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
-use super::types::{ModelQueryInput, ModelShape, OrderDirection, ProjectionInput, WhereCondition};
+use super::types::{
+    ModelQueryInput, ModelShape, OrderDirection, ProjectionInput, ShapeResolver, WhereCondition,
+};
 use super::utils::{escape_sparql_string, validate_iri};
 use crate::perspectives::sparql_store::SparqlStore;
 
@@ -35,6 +37,7 @@ pub(super) fn resolve_projections(
     instances: &mut Vec<Value>,
     projections: &HashMap<String, ProjectionInput>,
     shape: &ModelShape,
+    resolver: &dyn ShapeResolver,
     depth: u8,
 ) -> Result<(), deno_core::anyhow::Error> {
     if instances.is_empty() || projections.is_empty() {
@@ -90,7 +93,7 @@ pub(super) fn resolve_projections(
             }
         };
 
-        let where_patterns = build_projection_where_patterns(proj);
+        let where_patterns = build_projection_where_patterns(proj, resolver);
         let reifier_patterns = build_projection_reifier_patterns(proj, &safe_pred);
 
         if proj.count {
@@ -168,61 +171,60 @@ pub(super) fn resolve_projections(
             }
 
             // ----------------------------------------------------------------
-            // 4. If a target shape is available, hydrate raw IRIs → full model
-            //    instances in-process — no TS round-trip required.
+            // 4. If a target class is named, hydrate raw IRIs → full model
+            //    instances in-process — no TS round-trip required. The
+            //    target shape is resolved through the in-perspective
+            //    `ShapeResolver` (cache-backed since PR #827), which keeps
+            //    SHACL the single source of truth across the recursion.
             // ----------------------------------------------------------------
-            if let Some(ref target_shape) = proj.target_shape {
-                if !proj.count {
-                    if let Some(target_class) = target_shape["className"].as_str() {
-                        if !target_class.is_empty() {
-                            // Collect all unique raw IRI strings.
-                            let mut seen = std::collections::HashSet::new();
-                            let mut all_ids: Vec<String> = Vec::new();
-                            for vals in list_map.values() {
-                                for v in vals {
-                                    if let Some(s) = v.as_str() {
-                                        if seen.insert(s.to_string()) {
-                                            all_ids.push(s.to_string());
-                                        }
+            if let Some(ref target_class) = proj.target_class_name {
+                if !proj.count && !target_class.is_empty() {
+                    if let Ok(target_shape) = resolver.get_shape(target_class) {
+                        // Collect all unique raw IRI strings.
+                        let mut seen = std::collections::HashSet::new();
+                        let mut all_ids: Vec<String> = Vec::new();
+                        for vals in list_map.values() {
+                            for v in vals {
+                                if let Some(s) = v.as_str() {
+                                    if seen.insert(s.to_string()) {
+                                        all_ids.push(s.to_string());
                                     }
                                 }
                             }
+                        }
 
-                            if !all_ids.is_empty() {
-                                let target_shape_json =
-                                    serde_json::to_string(target_shape).unwrap_or_default();
-                                let mut sub_where = BTreeMap::new();
-                                sub_where
-                                    .insert("id".to_string(), WhereCondition::StringArray(all_ids));
-                                let sub_query = ModelQueryInput {
-                                    where_clause: Some(sub_where),
-                                    deep_query: Some(true),
-                                    ..ModelQueryInput::default()
-                                };
+                        if !all_ids.is_empty() {
+                            let mut sub_where = BTreeMap::new();
+                            sub_where
+                                .insert("id".to_string(), WhereCondition::StringArray(all_ids));
+                            let sub_query = ModelQueryInput {
+                                where_clause: Some(sub_where),
+                                deep_query: Some(true),
+                                ..ModelQueryInput::default()
+                            };
 
-                                if let Ok(result) = super::query::execute_model_query_inner(
-                                    store,
-                                    target_class,
-                                    &sub_query,
-                                    Some(&target_shape_json),
-                                    depth + 1,
-                                ) {
-                                    let hydrated: HashMap<String, Value> = result
-                                        .instances
-                                        .into_iter()
-                                        .filter_map(|inst| {
-                                            let id = inst["id"].as_str()?.to_string();
-                                            Some((id, inst))
-                                        })
-                                        .collect();
+                            if let Ok(result) = super::query::execute_model_query_inner(
+                                store,
+                                &target_shape,
+                                &sub_query,
+                                resolver,
+                                depth + 1,
+                            ) {
+                                let hydrated: HashMap<String, Value> = result
+                                    .instances
+                                    .into_iter()
+                                    .filter_map(|inst| {
+                                        let id = inst["id"].as_str()?.to_string();
+                                        Some((id, inst))
+                                    })
+                                    .collect();
 
-                                    // Replace raw IRI strings with hydrated objects.
-                                    for vals in list_map.values_mut() {
-                                        for v in vals.iter_mut() {
-                                            if let Some(id) = v.as_str() {
-                                                if let Some(obj) = hydrated.get(id) {
-                                                    *v = obj.clone();
-                                                }
+                                // Replace raw IRI strings with hydrated objects.
+                                for vals in list_map.values_mut() {
+                                    for v in vals.iter_mut() {
+                                        if let Some(id) = v.as_str() {
+                                            if let Some(obj) = hydrated.get(id) {
+                                                *v = obj.clone();
                                             }
                                         }
                                     }
@@ -272,35 +274,56 @@ pub(super) fn resolve_projections(
 /// Conditions on `id`/`base` filter on `?t` directly; conditions on
 /// `author`/`timestamp` are handled by [`build_projection_reifier_patterns`]
 /// instead.
-pub(super) fn build_projection_where_patterns(proj: &ProjectionInput) -> String {
+pub(super) fn build_projection_where_patterns(
+    proj: &ProjectionInput,
+    resolver: &dyn ShapeResolver,
+) -> String {
     let Some(ref wc) = proj.where_clause else {
         return String::new();
     };
 
-    let pred_lookup: HashMap<String, String> = if let Some(ref ts) = proj.target_shape {
-        let mut map = HashMap::new();
-        if let Some(props) = ts["properties"].as_object() {
-            for (name, pm) in props {
-                if let Some(pred) = pm["predicate"].as_str() {
-                    if !pred.is_empty() {
-                        map.insert(name.clone(), pred.to_string());
+    // Resolve the target class's shape through the perspective cache so we
+    // can translate property names in the projection's where-clause into the
+    // predicate IRIs they map to in the store.
+    let (pred_lookup, resolution_failed) = if let Some(ref target_name) = proj.target_class_name {
+        match resolver.get_shape(target_name) {
+            Ok(target_shape) => {
+                let mut map = HashMap::new();
+                for p in &target_shape.properties {
+                    if !p.predicate.is_empty() {
+                        map.insert(p.name.clone(), p.predicate.clone());
                     }
                 }
-            }
-        }
-        if let Some(rels) = ts["relations"].as_object() {
-            for (name, rm) in rels {
-                if let Some(pred) = rm["predicate"].as_str() {
-                    if !pred.is_empty() {
-                        map.insert(name.clone(), pred.to_string());
+                for r in &target_shape.include_relations {
+                    if !r.predicate.is_empty() {
+                        map.insert(r.name.clone(), r.predicate.clone());
                     }
                 }
+                (map, false)
+            }
+            Err(e) => {
+                log::warn!(
+                    "Projection where-clause resolution failed for target '{target_name}': {e}"
+                );
+                (HashMap::<String, String>::new(), true)
             }
         }
-        map
     } else {
-        HashMap::new()
+        (HashMap::<String, String>::new(), false)
     };
+
+    // Fail closed when the projection has non-system property filters but
+    // the target shape could not be resolved.  Silently emitting an empty
+    // pred_lookup would drop those filters and unexpectedly broaden the
+    // projection results.
+    if resolution_failed {
+        let has_property_filters = wc
+            .keys()
+            .any(|k| k != "id" && k != "base" && k != "author" && k != "timestamp");
+        if has_property_filters {
+            return "    FILTER(false)\n".to_string();
+        }
+    }
 
     let mut patterns = Vec::new();
     let mut filter_idx = 0usize;

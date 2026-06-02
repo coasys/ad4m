@@ -599,14 +599,17 @@ export class PerspectiveProxy {
 
     /**
      * Execute a model query — the executor-side replacement for SPARQL query building + JS hydration.
-     * 
+     *
+     * The executor resolves the model's shape from the perspective's SHACL
+     * triples (written by `addSdna`).  Callers no longer ship shape
+     * metadata with the query; the perspective is the source of truth.
+     *
      * @param className - The model class name (e.g. "Recipe")
      * @param queryJson - Structured query as JSON string
-     * @param shapeJson - Optional shape metadata JSON from the model class
      * @returns Object with `instances` array and `totalCount`
      */
-    async modelQuery(className: string, queryJson: string, shapeJson?: string): Promise<{ instances: any[], totalCount: number }> {
-        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, shapeJson);
+    async modelQuery(className: string, queryJson: string): Promise<{ instances: any[], totalCount: number }> {
+        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson);
     }
 
     /**
@@ -618,18 +621,16 @@ export class PerspectiveProxy {
      *
      * @param className - The model class name (e.g. "Message")
      * @param instanceIds - Array of instance base expression URIs
-     * @param shapeJson - Shape metadata JSON from the model class
      * @param propertyNames - Optional subset of property names to evaluate
      * @returns Map of instance ID → evaluated property values
      */
     async evaluateGetters(
         className: string,
         instanceIds: string[],
-        shapeJson: string,
         propertyNames?: string[],
     ): Promise<Record<string, Record<string, any>>> {
         return await this.#client.evaluateGetters(
-            this.#handle.uuid, className, instanceIds, shapeJson, propertyNames,
+            this.#handle.uuid, className, instanceIds, propertyNames,
         );
     }
 
@@ -643,11 +644,10 @@ export class PerspectiveProxy {
      *
      * @param className - The model class name
      * @param queryJson - JSON-serialized query parameters (same as modelQuery)
-     * @param shapeJson - Optional shape metadata JSON from the model class
      * @returns Object with `subscriptionId` and initial `result`
      */
-    async modelSubscribe(className: string, queryJson: string, shapeJson?: string): Promise<{ subscriptionId: string, result: any }> {
-        return await this.#client.modelSubscribe(this.#handle.uuid, className, queryJson, shapeJson);
+    async modelSubscribe(className: string, queryJson: string): Promise<{ subscriptionId: string, result: any }> {
+        return await this.#client.modelSubscribe(this.#handle.uuid, className, queryJson);
     }
 
     /**

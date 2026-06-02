@@ -1,24 +1,21 @@
-//! Model shape resolution from SHACL triples or client JSON metadata.
+//! Model shape resolution from SHACL triples.
 //!
 //! A "shape" describes the structure of a model class: its properties,
 //! predicates, relations, flags, initial values, getters, and target shapes
 //! for eager-loaded relations.  Shapes are needed at the start of every
 //! query to generate correct conformance patterns and hydrate results.
 //!
-//! Two resolution paths are supported:
+//! Production resolution is always [`load_shape`] — reads SHACL triples
+//! that were written by `addSdna()` into the perspective's link store.
+//! The result is memoized by `PerspectiveInstance::shape_cache` so each
+//! class is parsed at most once per process lifetime.
 //!
-//! - **From the store** ([`load_shape`] / [`load_shape_from_store`]) — reads
-//!   SHACL triple patterns that were written by `addSdna()` when the model
-//!   class was registered.  This is used when no client-side metadata is
-//!   available (e.g. for ad-hoc queries).
-//!
-//! - **From client JSON** ([`parse_shape_from_json`]) — parses the metadata
-//!   that the TypeScript client sends alongside the query.  This is more
-//!   reliable because it carries decorator information (flags, getters,
-//!   relation kinds, target shapes) that SHACL triples don't fully capture.
+//! [`parse_shape_from_json`] survives as a `#[cfg(test)]`-only helper for
+//! the integration test suite, which builds shapes from JSON fixtures
+//! without going through the SHACL writer.
 
 use super::types::{ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
-use super::utils::{escape_sparql_string, validate_iri};
+use super::utils::escape_sparql_string;
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
@@ -42,12 +39,13 @@ pub(crate) fn load_shape_from_store(
 /// - `<namespace://ClassName.propName> rdf://type sh://PropertyShape | ad4m://CollectionShape`
 /// - `<namespace://ClassName.propName> sh://datatype <xsd://...>`
 /// - `<namespace://ClassName.propName> sh://minCount literal:1^^xsd:integer`
+/// - `<namespace://ClassName.propName> ad4m://relationKind literal:string:hasMany`
+/// - `<namespace://ClassName.propName> ad4m://targetClassName literal:string:Ingredient`
 /// - etc.
-pub(super) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelShape, Error> {
+pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelShape, Error> {
     let safe_name = escape_sparql_string(class_name);
     // Step 1: Find the shape URI and target class via SPARQL
     // Use exact suffix matching (/{name} or #{name}) to avoid "Recipe" matching "MyRecipe"
-    // Build hash suffix separately to avoid `#` confusing `format!`
     let hash_suffix = format!("#{safe_name}");
     let query = format!(
         r#"
@@ -65,7 +63,7 @@ pub(super) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
 
     if results.is_empty() {
         return Err(anyhow!(
-            "No SHACL shape found for class '{}'. Ensure the class has been registered with addSdna().",
+            "No SHACL shape stored for class '{}'. Call ensureSubjectClasses / addSdna first.",
             class_name
         ));
     }
@@ -79,10 +77,19 @@ pub(super) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         .ok_or_else(|| anyhow!("Missing targetClass in SHACL query result"))?
         .to_string();
 
-    // Step 2: Load all property shapes for this shape
+    // Step 2: Load all property shapes for this shape.  Fetches every
+    // predicate the SHACL writer emits in one batched SELECT.  Using
+    // OPTIONAL keeps unset fields as nulls in the result rows.
     let props_query = format!(
         r#"
-        SELECT ?propUri ?path ?propType ?datatype ?minCount ?maxCount ?resolveLanguage WHERE {{
+        SELECT
+            ?propUri ?path ?propType
+            ?datatype ?minCount ?maxCount
+            ?resolveLanguage ?writable ?local
+            ?getter ?hasValue ?className
+            ?relationKind ?targetClassName
+            ?whereFilter ?wherePredicates ?filterEnabled
+        WHERE {{
             <{shape_uri}> <sh://property> ?propUri .
             ?propUri <sh://path> ?path .
             ?propUri <rdf://type> ?propType .
@@ -90,6 +97,16 @@ pub(super) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             OPTIONAL {{ ?propUri <sh://minCount> ?minCount . }}
             OPTIONAL {{ ?propUri <sh://maxCount> ?maxCount . }}
             OPTIONAL {{ ?propUri <ad4m://resolveLanguage> ?resolveLanguage . }}
+            OPTIONAL {{ ?propUri <ad4m://writable> ?writable . }}
+            OPTIONAL {{ ?propUri <ad4m://local> ?local . }}
+            OPTIONAL {{ ?propUri <ad4m://getter> ?getter . }}
+            OPTIONAL {{ ?propUri <sh://hasValue> ?hasValue . }}
+            OPTIONAL {{ ?propUri <sh://class> ?className . }}
+            OPTIONAL {{ ?propUri <ad4m://relationKind> ?relationKind . }}
+            OPTIONAL {{ ?propUri <ad4m://targetClassName> ?targetClassName . }}
+            OPTIONAL {{ ?propUri <ad4m://whereFilter> ?whereFilter . }}
+            OPTIONAL {{ ?propUri <ad4m://wherePredicates> ?wherePredicates . }}
+            OPTIONAL {{ ?propUri <ad4m://filter> ?filterEnabled . }}
         }}
         "#
     );
@@ -97,129 +114,361 @@ pub(super) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     let props_json = store.query(&props_query)?;
     let prop_results: Vec<Value> = serde_json::from_str(&props_json)?;
 
-    let mut properties = Vec::new();
+    // Property shapes can fan into multiple rows because their `rdf://type`
+    // may appear more than once (e.g. both sh:PropertyShape and a marker
+    // type).  Group by propUri so we coalesce metadata from all rows
+    // belonging to the same property shape before building the final
+    // ShapeProperty / ShapeRelation.
+    let mut grouped: HashMap<String, Vec<&Value>> = HashMap::new();
+    let mut prop_order: Vec<String> = Vec::new();
+    for row in &prop_results {
+        let prop_uri = row["propUri"].as_str().unwrap_or("").to_string();
+        if !grouped.contains_key(&prop_uri) {
+            prop_order.push(prop_uri.clone());
+        }
+        grouped.entry(prop_uri).or_default().push(row);
+    }
 
-    for prop_row in &prop_results {
-        let prop_uri = prop_row["propUri"].as_str().unwrap_or("");
-        let path = prop_row["path"].as_str().unwrap_or("").to_string();
-        let prop_type = prop_row["propType"].as_str().unwrap_or("");
-        let datatype = prop_row["datatype"].as_str().map(|s| s.to_string());
-        let min_count_str = prop_row["minCount"].as_str().unwrap_or("0");
-        let resolve_language = prop_row["resolveLanguage"].as_str().map(|s| {
-            // Decode if it's a literal: URI
-            if let Some(rest) = s.strip_prefix("literal:string:") {
-                urlencoding::decode(rest)
-                    .unwrap_or_else(|_| rest.into())
-                    .into_owned()
-            } else {
-                s.to_string()
-            }
+    let mut properties: Vec<ShapeProperty> = Vec::new();
+    let mut include_relations: Vec<ShapeRelation> = Vec::new();
+
+    for prop_uri in &prop_order {
+        let rows = match grouped.get(prop_uri) {
+            Some(r) => r,
+            None => continue,
+        };
+        let first = rows[0];
+
+        let path = first["path"].as_str().unwrap_or("").to_string();
+        let datatype = first["datatype"].as_str().map(|s| s.to_string());
+        let resolve_language = first["resolveLanguage"]
+            .as_str()
+            .map(decode_literal_string_target);
+        let writable = parse_bool_literal_target(first["writable"].as_str());
+        let local = parse_bool_literal_target(first["local"].as_str());
+        let getter = first["getter"].as_str().map(decode_literal_string_target);
+        let has_value = first["hasValue"].as_str().map(decode_literal_target_value);
+        let target_class_uri = first["className"].as_str().map(|s| s.to_string());
+        let relation_kind = first["relationKind"]
+            .as_str()
+            .map(decode_literal_string_target);
+        let target_class_name = first["targetClassName"]
+            .as_str()
+            .map(decode_literal_string_target);
+        let where_filter = parse_where_filter_literal(first["whereFilter"].as_str());
+        let where_predicates = parse_where_predicates_literal(first["wherePredicates"].as_str());
+        let filter_enabled = parse_bool_literal_target(first["filterEnabled"].as_str());
+
+        let min_count = parse_count_literal(first["minCount"].as_str());
+        let max_count = parse_count_literal(first["maxCount"].as_str());
+
+        // Collection vs single-valued is signaled two ways by the writer:
+        //   - explicit rdf:type ad4m:CollectionShape (legacy path), and
+        //   - maxCount unset on a relation (writer omits maxCount for *Many).
+        // Either marker makes this a collection of values, but neither on
+        // its own indicates a relation — a literal-valued property can also
+        // be a collection (e.g. an array of strings).
+        let prop_type_is_collection = rows.iter().any(|row| {
+            row["propType"]
+                .as_str()
+                .map(|t| t == "ad4m://CollectionShape")
+                .unwrap_or(false)
         });
+        let scalar_kind = relation_kind
+            .as_deref()
+            .map(|k| k == "hasOne" || k == "belongsToOne")
+            .unwrap_or(false);
+        let direction = match relation_kind.as_deref() {
+            Some("belongsToOne") | Some("belongsToMany") => Some("reverse".to_string()),
+            Some(_) => Some("forward".to_string()),
+            None => None,
+        };
+        // A property is a relation only when relation-specific metadata is
+        // present (`ad4m://relationKind`, `sh://class`, or
+        // `ad4m://targetClassName`).  `CollectionShape` alone signals
+        // multi-valued cardinality, not link-typed semantics.
+        let is_relation =
+            relation_kind.is_some() || target_class_uri.is_some() || target_class_name.is_some();
+        // All relations are marked `is_collection` so the query pipeline
+        // hydrates them as arrays during link grouping; the
+        // `is_scalar_relation` flag then tells the renderer to unwrap
+        // scalar relations (hasOne / belongsToOne) to a single value.
+        let is_collection = if is_relation {
+            true
+        } else {
+            prop_type_is_collection
+        };
 
-        // Extract name from prop_uri: "namespace://ClassName.propName" -> "propName"
+        // Extract local property name from prop_uri: "namespace://ClassName.propName" -> "propName"
         let name = prop_uri
             .rsplit_once('.')
             .map(|(_, n)| n.to_string())
             .unwrap_or_else(|| {
-                // Fallback: extract from path
                 path.rsplit(&['/', '#', ':'][..])
                     .next()
                     .unwrap_or("unknown")
                     .to_string()
             });
 
-        let is_collection = prop_type == "ad4m://CollectionShape";
+        // Flags are detected structurally: sh:hasValue + sh:minCount >= 1
+        // (canonical SHACL representation, written by shacl-gen for @Flag).
+        let is_flag = has_value.is_some() && min_count.unwrap_or(0) >= 1;
+        let initial_value = if is_flag {
+            has_value.clone()
+        } else {
+            initial_value_from_constructor(store, &target_class, &path)
+        };
 
-        // Parse minCount to detect required
-        let min_count: u32 = min_count_str
-            .strip_prefix("literal:")
-            .and_then(|s| s.split("^^").next())
-            .unwrap_or(min_count_str)
-            .parse()
-            .unwrap_or(0);
+        // Suppress writable-derived metadata: when explicitly false the
+        // executor should treat the property as read-only.  Currently
+        // expressed through the absence of a setter action; just keep
+        // the flag available on ShapeProperty for downstream consumers.
+        let _ = writable;
+        let _ = local;
+        let _ = filter_enabled;
 
-        // Check if this is a flag property by looking for an initial value
-        // Flags have a specific target value in the conformance check
-        let initial_value = get_initial_value(store, prop_uri, &path, &target_class)?;
-        let is_flag = initial_value.is_some() && min_count > 0;
+        if is_relation {
+            // Relations participate in the standard ShapeProperty list so
+            // the query/hydration pipeline can see their predicate, AND get
+            // an entry in include_relations for eager-loading recursion.
+            properties.push(ShapeProperty {
+                name: name.clone(),
+                predicate: path.clone(),
+                is_collection,
+                is_flag: false,
+                is_required: min_count.unwrap_or(0) >= 1,
+                initial_value: None,
+                resolve_language: resolve_language.clone(),
+                datatype: datatype.clone(),
+                direction: direction.clone(),
+                is_scalar_relation: scalar_kind,
+                getter: getter.clone(),
+                where_filter: where_filter.clone(),
+                where_predicates: where_predicates.clone(),
+            });
 
-        properties.push(ShapeProperty {
-            name,
-            predicate: path,
-            is_collection,
-            is_flag,
-            is_required: min_count > 0,
-            initial_value,
-            resolve_language,
-            datatype,
-            direction: None,
-            is_scalar_relation: false,
-            getter: None, // SHACL shapes don't carry getter metadata; JSON path does
-            where_filter: None,
-            where_predicates: None,
-        });
+            let resolved_target_class_name = target_class_name.clone().unwrap_or_else(|| {
+                // Fall back to extracting from the sh:class URI suffix and
+                // normalising away a trailing `Shape` suffix so the value
+                // matches the bare class names used to key the shape cache.
+                target_class_uri
+                    .as_deref()
+                    .map(extract_class_local_name)
+                    .map(|s| {
+                        s.strip_suffix("Shape")
+                            .map(|stripped| stripped.to_string())
+                            .unwrap_or(s)
+                    })
+                    .unwrap_or_default()
+            });
+
+            include_relations.push(ShapeRelation {
+                name,
+                predicate: path,
+                direction: direction.unwrap_or_else(|| "forward".to_string()),
+                kind: relation_kind.unwrap_or_else(|| "hasMany".to_string()),
+                max_count: max_count.map(|m| m as usize),
+                target_class_name: resolved_target_class_name,
+                target_class_uri: target_class_uri.clone().unwrap_or_default(),
+            });
+        } else {
+            properties.push(ShapeProperty {
+                name,
+                predicate: path,
+                is_collection,
+                is_flag,
+                is_required: min_count.unwrap_or(0) >= 1,
+                initial_value,
+                resolve_language,
+                datatype,
+                direction: None,
+                is_scalar_relation: false,
+                getter,
+                where_filter,
+                where_predicates,
+            });
+        }
     }
 
     Ok(ModelShape {
         target_class,
         shape_uri,
         properties,
-        include_relations: Vec::new(),
+        include_relations,
     })
 }
 
-/// Check if a property has an initial/flag value by looking at the constructor actions
-/// or at the initial value link pattern.
-fn get_initial_value(
+/// Recover an initial value for a non-flag property by inspecting the
+/// constructor actions encoded as `ad4m://constructor` literal JSON on
+/// the shape.  Returns the `target` of any `addLink` action whose
+/// `predicate` matches `predicate`.
+fn initial_value_from_constructor(
     store: &SparqlStore,
-    _prop_uri: &str,
-    predicate: &str,
     target_class: &str,
-) -> Result<Option<String>, Error> {
-    // Look for constructor actions that set an initial value for this predicate
-    // Constructor links: <ShapeUri> ad4m://constructor <literal:string:JSON>
-    // The JSON contains actions like {"action": "addLink", "source": "this", "predicate": "...", "target": "..."}
-
-    // Also check if there's an existing flag-like pattern: a conformance check that expects
-    // a specific target value for this predicate
-    // For now, we check if there are instances where this predicate points to a fixed URI (not a literal:)
-    // This is a simplified heuristic — the TS side uses decorator metadata (initial, flag) which
-    // we'll receive directly from the client in the query
-
-    // Quick check: is there a link from targetClass with this predicate to a fixed value?
-    // Look for the "required" flag property pattern
-    let safe_tc = match validate_iri(target_class) {
-        Ok(s) => s,
-        Err(_) => return Ok(None),
-    };
-    let safe_pred = match validate_iri(predicate) {
-        Ok(s) => s,
-        Err(_) => return Ok(None),
-    };
-    let query = format!(
+    predicate: &str,
+) -> Option<String> {
+    // The constructor link is anchored to the shape URI, not the target
+    // class.  Resolve the shape URI from the target class so we can
+    // query for its constructor.
+    let safe_tc = escape_sparql_string(target_class);
+    let shape_query = format!(
         r#"
-        SELECT ?target WHERE {{
-            <{safe_tc}> <{safe_pred}> ?target .
+        SELECT ?shapeUri WHERE {{
+            <{safe_tc}> <ad4m://shape> ?shapeUri .
         }}
         LIMIT 1
         "#
     );
+    let shape_result_json = store.query(&shape_query).ok()?;
+    let shape_rows: Vec<Value> = serde_json::from_str(&shape_result_json).ok()?;
+    let shape_uri = shape_rows.first()?["shapeUri"].as_str()?.to_string();
 
-    let result_json = store.query(&query).unwrap_or_else(|_| "[]".to_string());
-    let results: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
+    let safe_shape = escape_sparql_string(&shape_uri);
+    let ctor_query = format!(
+        r#"
+        SELECT ?ctor WHERE {{
+            <{safe_shape}> <ad4m://constructor> ?ctor .
+        }}
+        LIMIT 1
+        "#
+    );
+    let ctor_result_json = store.query(&ctor_query).ok()?;
+    let ctor_rows: Vec<Value> = serde_json::from_str(&ctor_result_json).ok()?;
+    let ctor_literal = ctor_rows.first()?["ctor"].as_str()?.to_string();
 
-    // If the target_class itself has a link with this predicate, it might be a flag/initial value
-    // But this is heuristic — the definitive source is the TS metadata sent with the query
-    // For now return None and let the client send shape metadata
-    let _ = results;
-    Ok(None)
+    let ctor_json = decode_literal_string_target(&ctor_literal);
+    let actions: Value = serde_json::from_str(&ctor_json).ok()?;
+    let arr = actions.as_array()?;
+    for action in arr {
+        let action_name = action["action"].as_str().unwrap_or("");
+        let pred = action["predicate"].as_str().unwrap_or("");
+        if action_name == "addLink" && pred == predicate {
+            if let Some(target) = action["target"].as_str() {
+                return Some(target.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Decode `literal:5^^xsd:integer` or `literal:number:5` into a `u32`.
+fn parse_count_literal(raw: Option<&str>) -> Option<u32> {
+    let raw = raw?;
+    let trimmed = raw
+        .strip_prefix("literal://")
+        .or_else(|| raw.strip_prefix("literal:"))
+        .unwrap_or(raw);
+    let base = trimmed.split("^^").next().unwrap_or(trimmed);
+    let base = base.strip_prefix("number:").unwrap_or(base);
+    base.parse::<u32>().ok()
+}
+
+/// Decode `literal:true` / `literal:boolean:true` into a `bool`.
+fn parse_bool_literal_target(raw: Option<&str>) -> Option<bool> {
+    let raw = raw?;
+    let trimmed = raw
+        .strip_prefix("literal://")
+        .or_else(|| raw.strip_prefix("literal:"))
+        .unwrap_or(raw);
+    let base = trimmed.strip_prefix("boolean:").unwrap_or(trimmed);
+    match base {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// Decode the target of a `literal:string:<urlencoded>` link.
+fn decode_literal_string_target(raw: &str) -> String {
+    let trimmed = raw
+        .strip_prefix("literal://string:")
+        .or_else(|| raw.strip_prefix("literal:string:"))
+        .unwrap_or(raw);
+    urlencoding::decode(trimmed)
+        .map(|s| s.into_owned())
+        .unwrap_or_else(|_| trimmed.to_string())
+}
+
+/// Decode a `literal:...` target into its raw value, preserving URI
+/// targets unchanged.  Used for `sh:hasValue` which may be either a
+/// raw URI (for relation flags) or a literal: form (for scalar flags).
+fn decode_literal_target_value(raw: &str) -> String {
+    if let Some(rest) = raw.strip_prefix("literal:string:") {
+        return urlencoding::decode(rest)
+            .map(|s| s.into_owned())
+            .unwrap_or_else(|_| rest.to_string());
+    }
+    if let Some(rest) = raw.strip_prefix("literal://string:") {
+        return urlencoding::decode(rest)
+            .map(|s| s.into_owned())
+            .unwrap_or_else(|_| rest.to_string());
+    }
+    if let Some(rest) = raw
+        .strip_prefix("literal:")
+        .or_else(|| raw.strip_prefix("literal://"))
+    {
+        // Non-string literal — strip any datatype suffix.
+        let base = rest.split("^^").next().unwrap_or(rest);
+        return base.to_string();
+    }
+    raw.to_string()
+}
+
+/// Decode the `whereFilter` literal:string into a BTreeMap of
+/// WhereConditions, matching the shape executor consumers expect.
+fn parse_where_filter_literal(raw: Option<&str>) -> Option<BTreeMap<String, WhereCondition>> {
+    let raw = raw?;
+    let json_str = decode_literal_string_target(raw);
+    let parsed: Value = serde_json::from_str(&json_str).ok()?;
+    parse_where_filter(&parsed)
+}
+
+/// Decode the `wherePredicates` literal:string into a HashMap of
+/// property-name → predicate-IRI.
+fn parse_where_predicates_literal(raw: Option<&str>) -> Option<HashMap<String, String>> {
+    let raw = raw?;
+    let json_str = decode_literal_string_target(raw);
+    let parsed: Value = serde_json::from_str(&json_str).ok()?;
+    let obj = parsed.as_object()?;
+    let mut out = HashMap::new();
+    for (k, v) in obj {
+        if let Some(s) = v.as_str() {
+            out.insert(k.clone(), s.to_string());
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Extract the local-name portion of a class URI, mirroring the
+/// `extractLocalName` helper used by the SHACL writer in TypeScript.
+fn extract_class_local_name(uri: &str) -> String {
+    if let Some(hash_pos) = uri.rfind('#') {
+        return uri[hash_pos + 1..].to_string();
+    }
+    if let Some(slash_pos) = uri.rfind('/') {
+        let after = &uri[slash_pos + 1..];
+        if !after.is_empty() {
+            return after.to_string();
+        }
+    }
+    if let Some(colon_pos) = uri.rfind(':') {
+        let after = &uri[colon_pos + 1..];
+        if !after.is_empty() {
+            return after.to_string();
+        }
+    }
+    uri.to_string()
 }
 
 /// Parse a JSON object into a where-clause filter map.
 ///
 /// Each key-value pair is deserialized as a [`WhereCondition`].  Returns
 /// `None` if the input is not an object or produces an empty map.
-pub(super) fn parse_where_filter(val: &Value) -> Option<BTreeMap<String, WhereCondition>> {
+pub(crate) fn parse_where_filter(val: &Value) -> Option<BTreeMap<String, WhereCondition>> {
     let obj = val.as_object()?;
     let mut map = BTreeMap::new();
     for (key, cond) in obj {
@@ -234,13 +483,13 @@ pub(super) fn parse_where_filter(val: &Value) -> Option<BTreeMap<String, WhereCo
     }
 }
 
-/// Parse shape metadata from the JSON sent by the TypeScript client.
-///
-/// This is the preferred resolution path because the client has access to
-/// the definitive decorator metadata (flags, required, initial values,
-/// getters, relation kinds, target shapes for includes, etc.) that the
-/// SHACL store doesn't fully capture.
-pub(super) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Error> {
+/// Parse shape metadata from JSON.  **Test-only** — production shape
+/// resolution always goes through [`load_shape`] reading the SHACL graph
+/// stored in the perspective.  This helper survives because the
+/// integration test suite builds shapes from JSON fixtures rather than
+/// SHACL writers.
+#[cfg(test)]
+pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Error> {
     let meta: Value =
         serde_json::from_str(json).map_err(|e| anyhow!("Failed to parse shape JSON: {}", e))?;
 
@@ -249,7 +498,6 @@ pub(super) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
     let mut properties = Vec::new();
     let mut include_relations: Vec<ShapeRelation> = Vec::new();
 
-    // Parse properties from the metadata
     if let Some(props) = meta["properties"].as_object() {
         for (name, prop_meta) in props {
             let predicate = prop_meta["predicate"].as_str().unwrap_or("").to_string();
@@ -282,15 +530,11 @@ pub(super) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
         }
     }
 
-    // Parse relations from the metadata
     if let Some(rels) = meta["relations"].as_object() {
         for (name, rel_meta) in rels {
             let predicate = rel_meta["predicate"].as_str().unwrap_or("").to_string();
             let getter = rel_meta["getter"].as_str().map(|s| s.to_string());
 
-            // Skip relations with no predicate AND no getter — nothing to query.
-            // Relations with a getter but no predicate are read-only custom-SPARQL
-            // relations (e.g. `@HasMany({ getter: "SELECT ..." })`).
             if predicate.is_empty() && getter.is_none() {
                 continue;
             }
@@ -303,7 +547,6 @@ pub(super) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
             let kind = rel_meta["kind"].as_str().unwrap_or("hasMany").to_string();
             let is_scalar_relation = kind == "hasOne" || kind == "belongsToOne";
 
-            // Parse post-getter where filter for relation properties
             let where_filter = parse_where_filter(&rel_meta["whereFilter"]);
             let where_predicates = rel_meta["wherePredicates"].as_object().map(|obj| {
                 obj.iter()
@@ -311,10 +554,14 @@ pub(super) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                     .collect::<HashMap<String, String>>()
             });
 
+            // Mirror `load_shape` cardinality handling: scalar relations
+            // (hasOne / belongsToOne) are stored as single-valued, collection
+            // relations remain marked as `is_collection: true`.  Hard-coding
+            // `true` here previously diverged from the runtime path.
             properties.push(ShapeProperty {
                 name: name.clone(),
                 predicate: predicate.clone(),
-                is_collection: true, // always accumulate as array during hydration
+                is_collection: !is_scalar_relation,
                 is_flag: false,
                 is_required: false,
                 initial_value: None,
@@ -327,12 +574,16 @@ pub(super) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 where_predicates,
             });
 
-            // Parse enriched relation metadata (target shapes for include resolution)
-            if rel_meta.get("targetShape").is_some() {
+            if rel_meta.get("targetShape").is_some() || rel_meta.get("targetClassName").is_some() {
                 let target_shape = &rel_meta["targetShape"];
                 let target_class_name = rel_meta["targetClassName"]
                     .as_str()
                     .or_else(|| target_shape["className"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let target_class_uri = target_shape["shapeUri"]
+                    .as_str()
+                    .or_else(|| rel_meta["class"].as_str())
                     .unwrap_or("")
                     .to_string();
                 let kind = rel_meta["kind"].as_str().unwrap_or("hasMany").to_string();
@@ -349,13 +600,12 @@ pub(super) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                     kind,
                     max_count,
                     target_class_name,
-                    target_shape_json: serde_json::to_string(target_shape).unwrap_or_default(),
+                    target_class_uri,
                 });
             }
         }
     }
 
-    // Build a shape URI from the className
     let shape_uri = format!("{target_class}Shape");
 
     Ok(ModelShape {
@@ -460,5 +710,66 @@ mod tests {
         let input = json!({"status": "active", "priority": 5.0});
         let result = parse_where_filter(&input).unwrap();
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_count_literal_xsd_form() {
+        assert_eq!(parse_count_literal(Some("literal:5^^xsd:integer")), Some(5));
+    }
+
+    #[test]
+    fn test_parse_count_literal_number_form() {
+        assert_eq!(parse_count_literal(Some("literal:number:42")), Some(42));
+    }
+
+    #[test]
+    fn test_parse_count_literal_invalid() {
+        assert_eq!(parse_count_literal(Some("not-a-literal")), None);
+        assert_eq!(parse_count_literal(None), None);
+    }
+
+    #[test]
+    fn test_parse_bool_literal_target_variants() {
+        assert_eq!(parse_bool_literal_target(Some("literal:true")), Some(true));
+        assert_eq!(
+            parse_bool_literal_target(Some("literal:boolean:false")),
+            Some(false)
+        );
+        assert_eq!(
+            parse_bool_literal_target(Some("literal://true")),
+            Some(true)
+        );
+        assert_eq!(parse_bool_literal_target(Some("literal:other")), None);
+    }
+
+    #[test]
+    fn test_decode_literal_string_target_url_decoded() {
+        let encoded = format!("literal:string:{}", urlencoding::encode("hello world"));
+        assert_eq!(decode_literal_string_target(&encoded), "hello world");
+    }
+
+    #[test]
+    fn test_extract_class_local_name() {
+        assert_eq!(extract_class_local_name("recipe://Recipe"), "Recipe");
+        assert_eq!(
+            extract_class_local_name("http://example.com/ns#Channel"),
+            "Channel"
+        );
+        assert_eq!(
+            extract_class_local_name("http://example.com/ns/Message"),
+            "Message"
+        );
+    }
+
+    #[test]
+    fn test_parse_where_predicates_literal_round_trip() {
+        let payload = serde_json::json!({"status": "todo://status", "priority": "todo://priority"});
+        let literal = format!(
+            "literal:string:{}",
+            serde_json::to_string(&payload).unwrap()
+        );
+        let parsed = parse_where_predicates_literal(Some(&literal)).unwrap();
+        assert_eq!(parsed.get("status").unwrap(), "todo://status");
+        assert_eq!(parsed.get("priority").unwrap(), "todo://priority");
     }
 }

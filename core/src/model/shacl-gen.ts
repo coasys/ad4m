@@ -8,8 +8,6 @@
  */
 import { SHACLShape } from "../shacl/SHACLShape";
 import type { SHACLPropertyShape, ConformanceCondition } from "../shacl/SHACLShape";
-import { escapeQueryString } from "../utils";
-import { compileWhereClause } from "./query-utils";
 import { propertyNameToSetterName } from "./util";
 import type { PropertyMetadataEntry, RelationMetadataEntry, Ad4mModelLike } from "./decorators";
 
@@ -41,9 +39,6 @@ export function buildSHACL(
 
     // ── Determine namespace from first property or relation ─────────────
     let namespace = "ad4m://";
-    const relations = Object.fromEntries(
-        Object.entries(allRelationsMeta).filter(([, r]) => r.kind === 'hasMany' || r.kind === 'belongsToMany')
-    );
 
     // Try properties first
     if (Object.keys(properties).length > 0) {
@@ -56,8 +51,8 @@ export function buildSHACL(
         }
     }
     // Fall back to relations if no properties
-    else if (Object.keys(relations).length > 0) {
-        const firstRel = relations[Object.keys(relations)[0]];
+    else if (Object.keys(allRelationsMeta).length > 0) {
+        const firstRel = allRelationsMeta[Object.keys(allRelationsMeta)[0]];
         if (firstRel.predicate) {
             const match = firstRel.predicate.match(/^([^:]+:\/\/)/);
             if (match) {
@@ -146,6 +141,13 @@ export function buildSHACL(
             propShape.resolveLanguage = propMeta.resolveLanguage;
         }
 
+        // Explicit getter SPARQL — the executor evaluates this when
+        // hydrating the property, in addition to (or instead of)
+        // reading raw links via `propMeta.through`.
+        if (propMeta.getter) {
+            propShape.getter = propMeta.getter;
+        }
+
         // ── Setter actions ──────────────────────────────────────────────
         if (propMeta.prologSetter) {
             console.warn(
@@ -190,71 +192,91 @@ export function buildSHACL(
     }
 
     // ── Convert relations to SHACL property shapes ─────────────────────
-    for (const relName in relations) {
-        const relMeta = relations[relName];
+    for (const relName in allRelationsMeta) {
+        const relMeta = allRelationsMeta[relName];
 
-        if (!relMeta.predicate) continue;
+        // Getter-only relations (no `through`) have no real link predicate
+        // but still need a SHACL property entry so the executor can find
+        // the getter expression.  Synthesize a deterministic IRI so the
+        // SHACL graph is well-formed; the predicate is never used to match
+        // links because the getter is the sole source of values.  Use
+        // slash separators so the result is a valid IRI (colons in the
+        // authority confuse strict SPARQL IRI parsers).
+        if (!relMeta.predicate && !relMeta.getter) continue;
+        const synthesizedPath = relMeta.predicate
+            || `ad4m://getter/${subjectName}/${relName}`;
 
         const relShape: SHACLPropertyShape = {
             name: relName,
-            path: relMeta.predicate,
+            path: synthesizedPath,
         };
 
         // Relations typically contain IRIs
         relShape.nodeKind = 'IRI';
+
+        // Encode relation kind so the executor can derive direction and
+        // scalar-vs-collection rendering without consulting the JS class.
+        relShape.relationKind = relMeta.kind;
+
+        // Scalar relations cap at 1.
+        if (relMeta.kind === 'hasOne' || relMeta.kind === 'belongsToOne') {
+            relShape.maxCount = 1;
+        } else if (relMeta.maxCount !== undefined) {
+            relShape.maxCount = relMeta.maxCount;
+        }
+
+        // Encode opt-out of type filtering (default true; only emit when false).
+        if (relMeta.filter === false) {
+            relShape.filter = false;
+        }
 
         // AD4M-specific metadata
         if (relMeta.local !== undefined) {
             relShape.local = relMeta.local;
         }
 
-        // Adder action
-        relShape.adder = [{
-            action: "addLink",
-            source: "this",
-            predicate: relMeta.predicate,
-            target: "value",
-            ...(relMeta.local && { local: true })
-        }];
+        // Adder / Remover actions — only meaningful for relations backed
+        // by a real link predicate.  Getter-only relations are read-only.
+        if (relMeta.predicate) {
+            relShape.adder = [{
+                action: "addLink",
+                source: "this",
+                predicate: relMeta.predicate,
+                target: "value",
+                ...(relMeta.local && { local: true })
+            }];
 
-        // Remover action
-        relShape.remover = [{
-            action: "removeLink",
-            source: "this",
-            predicate: relMeta.predicate,
-            target: "value",
-            ...(relMeta.local && { local: true })
-        }];
+            relShape.remover = [{
+                action: "removeLink",
+                source: "this",
+                predicate: relMeta.predicate,
+                target: "value",
+                ...(relMeta.local && { local: true })
+            }];
+        }
 
         // ── Build Getter (conformance filter) ───────────────────────────
         // Priority chain:
         // 1. Explicit getter string → use verbatim
-        // 2. `where` clause → compile DSL to SPARQL getter
-        // 3. target + filter !== false → auto-derive from shape
+        // 2. target + filter !== false → auto-derive conformance getter
+        //    from the shape.  Where-clause filtering is applied as a
+        //    post-getter pass via `whereFilter` / `wherePredicates`, which
+        //    use `parse_literal_value` and so transparently handle
+        //    `literal:json:` envelopes that simple FILTER(STR(?x) = ...)
+        //    comparisons can't.
         if (relMeta.getter) {
             relShape.getter = relMeta.getter;
-        } else if (relMeta.where) {
-            try {
-                const TargetClass = relMeta.target?.();
-                const targetMetadata = TargetClass
-                    ? (TargetClass as any).getModelMetadata?.() ?? null
-                    : null;
-
-                const conditions = compileWhereClause(
-                    relMeta.where,
-                    targetMetadata,
-                );
-
-                if (conditions.length > 0) {
-                    const escapedPredicate = escapeQueryString(relMeta.predicate);
-                    relShape.getter = `SELECT ?target WHERE { <Base> <${escapedPredicate}> ?target . ${conditions.join(' ')} }`;
-                }
-            } catch (e) {
-                // Target metadata may not be available yet
-            }
-        } else if (relMeta.target && relMeta.filter !== false) {
+        } else if (
+            relMeta.target
+            && relMeta.filter !== false
+            && relMeta.kind !== 'belongsToOne'
+            && relMeta.kind !== 'belongsToMany'
+        ) {
             // Lazy conformance filter: store deferred reference,
-            // resolve on first access via a getter on relShape
+            // resolve on first access via a getter on relShape.
+            // Skipped for reverse relations (belongsTo*) because the
+            // auto-derived getter assumes forward direction; the executor's
+            // `resolve_reverse_relations` already populates these correctly.
             const targetThunk = relMeta.target;
             const predicate = relMeta.predicate;
             let resolved = false;
@@ -292,6 +314,8 @@ export function buildSHACL(
         }
 
         // ── sh:class — target shape reference ───────────────────────────
+        // Also emit ad4m:targetClassName so the executor can look up the
+        // target class shape through its in-memory cache by bare name.
         if (relMeta.target) {
             try {
                 const TargetClass = relMeta.target();
@@ -299,8 +323,53 @@ export function buildSHACL(
                 if (targetSHACL?.shape?.nodeShapeUri) {
                     relShape.class = targetSHACL.shape.nodeShapeUri;
                 }
+                if (targetSHACL?.name) {
+                    relShape.targetClassName = targetSHACL.name;
+                } else {
+                    const targetProto = (TargetClass as any).prototype;
+                    if (targetProto?.className) {
+                        relShape.targetClassName = targetProto.className;
+                    }
+                }
             } catch (e) {
-                // Target class may not be available yet
+                // Target class resolution failed (typically a circular
+                // decorator dependency).  Since the executor no longer
+                // receives target metadata over the wire, dropping the
+                // reference here would turn a transient build-time issue
+                // into a permanent broken-include at query time.  Log
+                // loudly so the failure is discoverable.
+                console.warn(
+                    `[shacl-gen] Failed to resolve target class for relation `
+                    + `"${subjectName}.${relName}": ${e instanceof Error ? e.message : String(e)}`
+                );
+            }
+        }
+
+        // ── Where-clause metadata for post-getter filtering ─────────────
+        // The executor uses these to apply where conditions against the
+        // target class without needing the target's ModelMetadata at query time.
+        if (relMeta.where) {
+            relShape.whereFilter = relMeta.where;
+            try {
+                const TargetClass = relMeta.target?.();
+                const targetMetadata = TargetClass
+                    ? (TargetClass as any).getModelMetadata?.() ?? null
+                    : null;
+                if (targetMetadata?.properties) {
+                    const predicates: Record<string, string> = {};
+                    for (const propName of Object.keys(relMeta.where)) {
+                        if (['id', 'author', 'timestamp'].includes(propName)) continue;
+                        const propMeta = targetMetadata.properties[propName];
+                        if (propMeta?.predicate) {
+                            predicates[propName] = propMeta.predicate;
+                        }
+                    }
+                    if (Object.keys(predicates).length > 0) {
+                        relShape.wherePredicates = predicates;
+                    }
+                }
+            } catch (e) {
+                // Target metadata may not be available yet
             }
         }
 

@@ -491,4 +491,114 @@ describe('SHACLShape', () => {
       expect(reconstructed.properties[0].in).toEqual(original.properties[0].in);
     });
   });
+
+  describe('runtime metadata predicates (SHACL as source of truth)', () => {
+    it('emits and parses relationKind', () => {
+      const shape = new SHACLShape('ns://Recipe');
+      shape.addProperty({
+        name: 'ingredients',
+        path: 'ns://has_ingredient',
+        relationKind: 'hasMany',
+      });
+      const links = shape.toLinks();
+      const kindLink = links.find(l => l.predicate === 'ad4m://relationKind');
+      expect(kindLink?.target).toBe('literal:string:hasMany');
+
+      const round = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+      expect(round.properties[0].relationKind).toBe('hasMany');
+    });
+
+    it('emits and parses targetClassName', () => {
+      const shape = new SHACLShape('ns://Recipe');
+      shape.addProperty({
+        name: 'ingredients',
+        path: 'ns://has_ingredient',
+        targetClassName: 'Ingredient',
+      });
+      const links = shape.toLinks();
+      const link = links.find(l => l.predicate === 'ad4m://targetClassName');
+      expect(link?.target).toBe('literal:string:Ingredient');
+
+      const round = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+      expect(round.properties[0].targetClassName).toBe('Ingredient');
+    });
+
+    it('emits and parses whereFilter as a JSON literal', () => {
+      const shape = new SHACLShape('ns://Board');
+      shape.addProperty({
+        name: 'tasks',
+        path: 'ns://has_task',
+        whereFilter: { status: 'active' },
+      });
+      const links = shape.toLinks();
+      const link = links.find(l => l.predicate === 'ad4m://whereFilter');
+      expect(link?.target).toContain('"status"');
+
+      const round = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+      expect(round.properties[0].whereFilter).toEqual({ status: 'active' });
+    });
+
+    it('emits and parses wherePredicates', () => {
+      const shape = new SHACLShape('ns://Board');
+      shape.addProperty({
+        name: 'tasks',
+        path: 'ns://has_task',
+        wherePredicates: { status: 'ns://status' },
+      });
+      const links = shape.toLinks();
+      const link = links.find(l => l.predicate === 'ad4m://wherePredicates');
+      expect(link).toBeDefined();
+
+      const round = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+      expect(round.properties[0].wherePredicates).toEqual({ status: 'ns://status' });
+    });
+
+    it('omits wherePredicates link for empty maps', () => {
+      const shape = new SHACLShape('ns://Board');
+      shape.addProperty({
+        name: 'tasks',
+        path: 'ns://has_task',
+        wherePredicates: {},
+      });
+      const links = shape.toLinks();
+      const link = links.find(l => l.predicate === 'ad4m://wherePredicates');
+      expect(link).toBeUndefined();
+    });
+
+    it('emits and parses filter=false as a literal boolean', () => {
+      const shape = new SHACLShape('ns://Doc');
+      shape.addProperty({
+        name: 'tags',
+        path: 'ns://tag',
+        filter: false,
+      });
+      const links = shape.toLinks();
+      const link = links.find(l => l.predicate === 'ad4m://filter');
+      expect(link?.target).toBe('literal:false');
+
+      const round = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+      expect(round.properties[0].filter).toBe(false);
+    });
+
+    it('round-trips all runtime metadata through toJSON() and fromJSON()', () => {
+      const original = new SHACLShape('ns://Board');
+      original.addProperty({
+        name: 'tasks',
+        path: 'ns://has_task',
+        relationKind: 'hasMany',
+        targetClassName: 'Task',
+        whereFilter: { status: 'active' },
+        wherePredicates: { status: 'ns://status' },
+        filter: false,
+      });
+      const json = original.toJSON();
+      const reconstructed = SHACLShape.fromJSON(json);
+      const prop = reconstructed.properties[0];
+      expect(prop.relationKind).toBe('hasMany');
+      expect(prop.targetClassName).toBe('Task');
+      expect(prop.whereFilter).toEqual({ status: 'active' });
+      expect(prop.wherePredicates).toEqual({ status: 'ns://status' });
+      expect(prop.filter).toBe(false);
+    });
+  });
 });

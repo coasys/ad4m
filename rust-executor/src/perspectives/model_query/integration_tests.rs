@@ -1,13 +1,13 @@
 use super::getters::{
-    convert_ask_to_batched_select, evaluate_getters, evaluate_getters_batch,
-    inject_values_into_select, strip_trailing_limit,
+    convert_ask_to_batched_select, evaluate_getters, inject_values_into_select,
+    strip_trailing_limit,
 };
 use super::projection::{
     build_projection_order_clause, build_projection_where_patterns, resolve_projections,
 };
-use super::query::execute_model_query;
 use super::shape::parse_shape_from_json;
 use super::sparql_builder::build_instance_sparql;
+use super::test_helpers::{evaluate_getters_batch_from_json, execute_model_query_from_json};
 use super::types::{ModelShape, ShapeProperty};
 use super::utils::literal_percent_encode;
 use super::*;
@@ -77,7 +77,8 @@ fn test_full_model_query_with_where_filter() {
 
     // Query without WHERE - should find 1 instance
     let query_no_where = ModelQueryInput::default();
-    let result = execute_model_query(&store, "Recipe", &query_no_where, Some(shape_json)).unwrap();
+    let result =
+        execute_model_query_from_json(&store, "Recipe", &query_no_where, shape_json).unwrap();
     assert_eq!(
         result.instances.len(),
         1,
@@ -99,7 +100,7 @@ fn test_full_model_query_with_where_filter() {
         ..Default::default()
     };
     let result2 =
-        execute_model_query(&store, "Recipe", &query_with_where, Some(shape_json)).unwrap();
+        execute_model_query_from_json(&store, "Recipe", &query_with_where, shape_json).unwrap();
     assert_eq!(
         result2.instances.len(),
         1,
@@ -162,7 +163,7 @@ fn test_where_clause_raw_uri_property() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-    let result = execute_model_query(&store, "Todo", &query, Some(shape_json)).unwrap();
+    let result = execute_model_query_from_json(&store, "Todo", &query, shape_json).unwrap();
     assert_eq!(
         result.instances.len(),
         1,
@@ -228,7 +229,7 @@ fn test_where_clause_literal_prop_with_raw_uri_value() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-    let result = execute_model_query(&store, "Todo", &query, Some(shape_json)).unwrap();
+    let result = execute_model_query_from_json(&store, "Todo", &query, shape_json).unwrap();
     assert_eq!(
         result.instances.len(),
         1,
@@ -374,7 +375,7 @@ fn test_shared_predicate_relations_all_populated_via_store() {
     }"#;
 
     let query = ModelQueryInput::default();
-    let result = execute_model_query(&store, "Channel", &query, Some(shape_json)).unwrap();
+    let result = execute_model_query_from_json(&store, "Channel", &query, shape_json).unwrap();
 
     assert_eq!(result.instances.len(), 1, "Should find 1 channel");
 
@@ -498,7 +499,7 @@ fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
     }"#;
 
     let query = ModelQueryInput::default();
-    let result = execute_model_query(&store, "Parent", &query, Some(shape_json)).unwrap();
+    let result = execute_model_query_from_json(&store, "Parent", &query, shape_json).unwrap();
 
     assert_eq!(result.instances.len(), 1);
     let inst = &result.instances[0];
@@ -524,12 +525,13 @@ fn test_build_projection_where_patterns_empty_when_no_clause() {
     let proj = ProjectionInput {
         from: "signals".to_string(),
         count: true,
-        target_shape: None,
+        target_class_name: None,
         where_clause: None,
         limit: None,
         order: None,
     };
-    assert_eq!(build_projection_where_patterns(&proj), "");
+    let resolver = super::test_helpers::StaticShapeResolver::new();
+    assert_eq!(build_projection_where_patterns(&proj, &resolver), "");
 }
 
 #[test]
@@ -542,12 +544,13 @@ fn test_build_projection_where_patterns_id_filter() {
     let proj = ProjectionInput {
         from: "signals".to_string(),
         count: false,
-        target_shape: None,
+        target_class_name: None,
         where_clause: Some(wc),
         limit: None,
         order: None,
     };
-    let patterns = build_projection_where_patterns(&proj);
+    let resolver = super::test_helpers::StaticShapeResolver::new();
+    let patterns = build_projection_where_patterns(&proj, &resolver);
     assert!(
         patterns.contains("FILTER(STR(?t) = \"signal://abc\")"),
         "expected id IRI filter, got: {patterns}"
@@ -556,13 +559,13 @@ fn test_build_projection_where_patterns_id_filter() {
 
 #[test]
 fn test_build_projection_where_patterns_with_target_shape() {
-    let target_shape = json!({
+    let target_shape_json = r#"{
         "className": "Signal",
         "properties": {
             "signalTypeId": { "predicate": "signal://type" }
         },
         "relations": {}
-    });
+    }"#;
     let mut wc = BTreeMap::new();
     wc.insert(
         "signalTypeId".to_string(),
@@ -571,12 +574,17 @@ fn test_build_projection_where_patterns_with_target_shape() {
     let proj = ProjectionInput {
         from: "signals".to_string(),
         count: true,
-        target_shape: Some(target_shape),
+        target_class_name: Some("Signal".to_string()),
         where_clause: Some(wc),
         limit: None,
         order: None,
     };
-    let patterns = build_projection_where_patterns(&proj);
+    let resolver = super::test_helpers::StaticShapeResolver::new();
+    resolver.register(
+        "Signal",
+        parse_shape_from_json(target_shape_json, "Signal").unwrap(),
+    );
+    let patterns = build_projection_where_patterns(&proj, &resolver);
     assert!(
         patterns.contains("?t <signal://type>"),
         "expected triple pattern for signal://type, got: {patterns}"
@@ -592,7 +600,7 @@ fn test_build_projection_order_clause_empty_when_no_order() {
     let proj = ProjectionInput {
         from: "signals".to_string(),
         count: false,
-        target_shape: None,
+        target_class_name: None,
         where_clause: None,
         limit: Some(5),
         order: None,
@@ -605,7 +613,7 @@ fn test_build_projection_order_clause_by_id() {
     let proj = ProjectionInput {
         from: "signals".to_string(),
         count: false,
-        target_shape: None,
+        target_class_name: None,
         where_clause: None,
         limit: None,
         order: Some(vec![("id".to_string(), OrderDirection::DESC)]),
@@ -678,14 +686,17 @@ fn test_resolve_projections_count() {
         ProjectionInput {
             from: "items".to_string(),
             count: true,
-            target_shape: None,
+            target_class_name: None,
             where_clause: None,
             limit: None,
             order: None,
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
+    {
+        let _resolver = super::test_helpers::StaticShapeResolver::new();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
+    }
 
     let count_a = instances[0]["$itemCount"].as_u64().unwrap_or(999);
     let count_b = instances[1]["$itemCount"].as_u64().unwrap_or(999);
@@ -719,14 +730,17 @@ fn test_resolve_projections_list() {
         ProjectionInput {
             from: "items".to_string(),
             count: false,
-            target_shape: None,
+            target_class_name: None,
             where_clause: None,
             limit: None,
             order: None,
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
+    {
+        let _resolver = super::test_helpers::StaticShapeResolver::new();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
+    }
 
     let items = instances[0]["$items"]
         .as_array()
@@ -759,14 +773,17 @@ fn test_resolve_projections_scalar() {
         ProjectionInput {
             from: "items".to_string(),
             count: false,
-            target_shape: None,
+            target_class_name: None,
             where_clause: None,
             limit: Some(1),
             order: None,
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
+    {
+        let _resolver = super::test_helpers::StaticShapeResolver::new();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
+    }
 
     let val = &instances[0]["$firstItem"];
     assert_eq!(
@@ -791,14 +808,17 @@ fn test_resolve_projections_count_zero_when_no_links() {
         ProjectionInput {
             from: "items".to_string(),
             count: true,
-            target_shape: None,
+            target_class_name: None,
             where_clause: None,
             limit: None,
             order: None,
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
+    {
+        let _resolver = super::test_helpers::StaticShapeResolver::new();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
+    }
 
     let count = instances[0]["$itemCount"].as_u64().unwrap_or(999);
     assert_eq!(
@@ -853,14 +873,17 @@ fn test_resolve_projections_where_filter_by_plain_iri() {
         ProjectionInput {
             from: "reactions".to_string(),
             count: true,
-            target_shape: None,
+            target_class_name: None,
             where_clause: Some(wc),
             limit: None,
             order: None,
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
+    {
+        let _resolver = super::test_helpers::StaticShapeResolver::new();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
+    }
 
     let count = instances[0]["$likeCount"].as_u64().unwrap_or(999);
     assert_eq!(
@@ -912,14 +935,17 @@ fn test_resolve_projections_where_filter_by_author() {
         ProjectionInput {
             from: "signals".to_string(),
             count: true,
-            target_shape: None,
+            target_class_name: None,
             where_clause: Some(wc),
             limit: None,
             order: None,
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
+    {
+        let _resolver = super::test_helpers::StaticShapeResolver::new();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
+    }
 
     let count = instances[0]["$mySignalCount"].as_u64().unwrap_or(999);
     assert_eq!(count, 2, "should count only alice's 2 signals, got {count}");
@@ -998,12 +1024,12 @@ fn test_evaluate_getters_batch_returns_results() {
         "relations": {}
     }"#;
 
-    let result = evaluate_getters_batch(
+    let result = evaluate_getters_batch_from_json(
         &store,
         "TestModel",
         &["test://inst-1".to_string()],
         None,
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
 
@@ -1016,12 +1042,12 @@ fn test_evaluate_getters_batch_returns_results() {
 #[test]
 fn test_evaluate_getters_batch_empty_ids() {
     let store = SparqlStore::new(None).unwrap();
-    let result = evaluate_getters_batch(
+    let result = evaluate_getters_batch_from_json(
         &store,
         "TestModel",
         &[],
         None,
-        Some(r#"{"className":"TestModel","properties":{},"relations":{}}"#),
+        r#"{"className":"TestModel","properties":{},"relations":{}}"#,
     )
     .unwrap();
     assert!(result.as_object().unwrap().is_empty());
@@ -1047,12 +1073,12 @@ fn test_evaluate_getters_batch_filters_by_property_names() {
     }"#;
 
     // Only request propA — propB should not appear in results
-    let result = evaluate_getters_batch(
+    let result = evaluate_getters_batch_from_json(
         &store,
         "TestModel",
         &["test://inst-1".to_string()],
         Some(&["propA".to_string()]),
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
 
@@ -1319,12 +1345,12 @@ fn test_batched_ask_getter_multiple_instances() {
         "relations": {}
     }"#;
 
-    let result = evaluate_getters_batch(
+    let result = evaluate_getters_batch_from_json(
         &store,
         "TestModel",
         &["test://inst-1".to_string(), "test://inst-2".to_string()],
         None,
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
 
@@ -1363,12 +1389,12 @@ fn test_batched_select_getter_multiple_instances() {
         "relations": {}
     }"#;
 
-    let result = evaluate_getters_batch(
+    let result = evaluate_getters_batch_from_json(
         &store,
         "TestModel",
         &["test://inst-1".to_string(), "test://inst-2".to_string()],
         None,
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
 
@@ -1427,12 +1453,12 @@ fn test_batched_collection_getter() {
         }
     }"#;
 
-    let result = evaluate_getters_batch(
+    let result = evaluate_getters_batch_from_json(
         &store,
         "TestModel",
         &["test://inst-1".to_string(), "test://inst-2".to_string()],
         None,
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
 
@@ -1488,7 +1514,8 @@ fn test_deep_query_defaults_to_true() {
         ..Default::default()
     };
 
-    let result = execute_model_query(&store, "Message", &query_input, Some(shape_json)).unwrap();
+    let result =
+        execute_model_query_from_json(&store, "Message", &query_input, shape_json).unwrap();
     assert!(!result.instances.is_empty(), "should find instance");
 
     let inst = &result.instances[0];
@@ -1540,7 +1567,8 @@ fn test_deep_query_false_skips_property_getters() {
         ..Default::default()
     };
 
-    let result = execute_model_query(&store, "Message", &query_input, Some(shape_json)).unwrap();
+    let result =
+        execute_model_query_from_json(&store, "Message", &query_input, shape_json).unwrap();
     assert!(!result.instances.is_empty());
 
     let inst = &result.instances[0];
@@ -1607,7 +1635,8 @@ fn test_getters_run_after_pagination() {
         ..Default::default()
     };
 
-    let result = execute_model_query(&store, "Message", &query_input, Some(shape_json)).unwrap();
+    let result =
+        execute_model_query_from_json(&store, "Message", &query_input, shape_json).unwrap();
     assert_eq!(result.instances.len(), 2, "should return 2 instances");
     assert_eq!(result.total_count, 5, "total count should be 5");
 
@@ -2243,7 +2272,7 @@ fn test_full_model_query_signed_expression_where() {
         ..Default::default()
     };
 
-    let result = execute_model_query(&store, "Item", &query, Some(shape_json)).unwrap();
+    let result = execute_model_query_from_json(&store, "Item", &query, shape_json).unwrap();
     assert_eq!(
         result.instances.len(),
         2,
@@ -2318,7 +2347,7 @@ fn test_full_model_query_signed_expression_numeric_where() {
         ..Default::default()
     };
 
-    let result = execute_model_query(&store, "Item", &query, Some(shape_json)).unwrap();
+    let result = execute_model_query_from_json(&store, "Item", &query, shape_json).unwrap();
     assert_eq!(
         result.instances.len(),
         1,
@@ -2369,7 +2398,7 @@ fn test_full_model_query_signed_expression_boolean_where() {
         ..Default::default()
     };
 
-    let result = execute_model_query(&store, "Thing", &query, Some(shape_json)).unwrap();
+    let result = execute_model_query_from_json(&store, "Thing", &query, shape_json).unwrap();
     assert_eq!(result.instances.len(), 1);
     assert_eq!(result.instances[0]["id"].as_str().unwrap(), item1);
 }
@@ -2435,7 +2464,7 @@ fn test_full_model_query_where_string_array_in() {
         ..Default::default()
     };
 
-    let result = execute_model_query(&store, "Item", &query, Some(shape_json)).unwrap();
+    let result = execute_model_query_from_json(&store, "Item", &query, shape_json).unwrap();
     assert_eq!(result.instances.len(), 2, "active and pending should match");
 }
 
@@ -2494,7 +2523,7 @@ fn test_full_model_query_where_ops_not() {
         ..Default::default()
     };
 
-    let result = execute_model_query(&store, "Item", &query, Some(shape_json)).unwrap();
+    let result = execute_model_query_from_json(&store, "Item", &query, shape_json).unwrap();
     assert_eq!(result.instances.len(), 1);
     assert_eq!(result.instances[0]["id"].as_str().unwrap(), item1);
 }
@@ -2785,7 +2814,7 @@ fn test_build_instance_sparql_integration_getter_excluded_from_results() {
     }"#;
 
     let query = ModelQueryInput::default();
-    let result = execute_model_query(&store, "Channel", &query, Some(shape_json)).unwrap();
+    let result = execute_model_query_from_json(&store, "Channel", &query, shape_json).unwrap();
 
     assert_eq!(result.instances.len(), 1, "Should find exactly 1 channel");
     assert_eq!(
@@ -2855,14 +2884,14 @@ fn test_full_model_query_ops_gt_lt_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
             where_clause: Some(wc),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     assert_eq!(result.instances.len(), 2, "gt:50 should match 70 and 90");
@@ -2876,14 +2905,14 @@ fn test_full_model_query_ops_gt_lt_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
             where_clause: Some(wc),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     assert_eq!(result.instances.len(), 2, "lt:50 should match 10 and 30");
@@ -2897,14 +2926,14 @@ fn test_full_model_query_ops_gt_lt_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
             where_clause: Some(wc),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     assert_eq!(
@@ -2953,14 +2982,14 @@ fn test_full_model_query_ops_gte_lte_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
             where_clause: Some(wc),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     assert_eq!(result.instances.len(), 2, "gte:50 should match 50 and 90");
@@ -2974,14 +3003,14 @@ fn test_full_model_query_ops_gte_lte_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
             where_clause: Some(wc),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     assert_eq!(result.instances.len(), 2, "lte:50 should match 10 and 50");
@@ -3025,14 +3054,14 @@ fn test_full_model_query_ops_not_string_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Task",
         &ModelQueryInput {
             where_clause: Some(wc),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     assert_eq!(result.instances.len(), 2, "NOT done → 2 active tasks");
@@ -3074,14 +3103,14 @@ fn test_full_model_query_ops_not_array_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Thing",
         &ModelQueryInput {
             where_clause: Some(wc),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     assert_eq!(
@@ -3130,7 +3159,7 @@ fn test_full_model_query_ops_with_pagination_pushed() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -3140,7 +3169,7 @@ fn test_full_model_query_ops_with_pagination_pushed() {
             order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     assert_eq!(result.instances.len(), 3, "Should get 3 items in page");
@@ -3183,14 +3212,14 @@ fn test_full_model_query_ops_contains_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Person",
         &ModelQueryInput {
             where_clause: Some(wc),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     assert_eq!(
@@ -3244,7 +3273,7 @@ fn test_full_model_query_ops_contains_with_pagination() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Person",
         &ModelQueryInput {
@@ -3254,7 +3283,7 @@ fn test_full_model_query_ops_contains_with_pagination() {
             order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     assert_eq!(result.instances.len(), 1, "Should get 1 item in page");
@@ -3339,7 +3368,7 @@ fn test_signed_envelope_where_paginate_count() {
         "status".to_string(),
         WhereCondition::String("active".to_string()),
     );
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Task",
         &ModelQueryInput {
@@ -3350,7 +3379,7 @@ fn test_signed_envelope_where_paginate_count() {
             count: Some(true),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
 
@@ -3376,7 +3405,7 @@ fn test_signed_envelope_where_paginate_count() {
     );
 
     // Page 2: offset 2
-    let result2 = execute_model_query(
+    let result2 = execute_model_query_from_json(
         &store,
         "Task",
         &ModelQueryInput {
@@ -3387,7 +3416,7 @@ fn test_signed_envelope_where_paginate_count() {
             count: Some(true),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
 
@@ -3465,7 +3494,7 @@ fn test_mixed_plain_and_signed_envelope_where() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Msg",
         &ModelQueryInput {
@@ -3473,7 +3502,7 @@ fn test_mixed_plain_and_signed_envelope_where() {
             order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
 
@@ -3490,14 +3519,14 @@ fn test_mixed_plain_and_signed_envelope_where() {
         "body".to_string(),
         WhereCondition::String("hello signed".to_string()),
     );
-    let result2 = execute_model_query(
+    let result2 = execute_model_query_from_json(
         &store,
         "Msg",
         &ModelQueryInput {
             where_clause: Some(wc2),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
 
@@ -3562,7 +3591,7 @@ fn test_perf_large_dataset_paginated_query() {
     );
 
     let start = std::time::Instant::now();
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Message",
         &ModelQueryInput {
@@ -3572,7 +3601,7 @@ fn test_perf_large_dataset_paginated_query() {
             order: Some(vec![("timestamp".to_string(), OrderDirection::DESC)]),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     let elapsed = start.elapsed();
@@ -3668,7 +3697,7 @@ fn test_perf_flux_message_parent_scope_paginated() {
 
     // Query: get 30 most recent messages from channel-2 (ORDER BY createdAt DESC)
     let start = std::time::Instant::now();
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Message",
         &ModelQueryInput {
@@ -3682,7 +3711,7 @@ fn test_perf_flux_message_parent_scope_paginated() {
             count: Some(true),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     let elapsed = start.elapsed();
@@ -3854,7 +3883,7 @@ fn test_full_model_query_order_by_property_string() {
     }"#;
 
     // ORDER BY name ASC with limit (triggers SPARQL pagination)
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Person",
         &ModelQueryInput {
@@ -3862,7 +3891,7 @@ fn test_full_model_query_order_by_property_string() {
             order: Some(vec![("name".to_string(), OrderDirection::ASC)]),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     assert_eq!(result.instances.len(), 2);
@@ -3872,7 +3901,7 @@ fn test_full_model_query_order_by_property_string() {
     assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
 
     // ORDER BY name DESC with limit
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Person",
         &ModelQueryInput {
@@ -3880,7 +3909,7 @@ fn test_full_model_query_order_by_property_string() {
             order: Some(vec![("name".to_string(), OrderDirection::DESC)]),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     assert_eq!(result.instances.len(), 2);
@@ -3921,7 +3950,7 @@ fn test_full_model_query_order_by_property_number() {
     }"#;
 
     // ORDER BY score ASC, limit 3 → should get 1, 5, 42
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -3929,7 +3958,7 @@ fn test_full_model_query_order_by_property_number() {
             order: Some(vec![("score".to_string(), OrderDirection::ASC)]),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     assert_eq!(result.instances.len(), 3);
@@ -3942,7 +3971,7 @@ fn test_full_model_query_order_by_property_number() {
     assert_eq!(got_scores, vec![1.0, 5.0, 42.0], "ASC numeric sort");
 
     // ORDER BY score DESC, limit 2 → should get 999, 100
-    let result = execute_model_query(
+    let result = execute_model_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -3950,7 +3979,7 @@ fn test_full_model_query_order_by_property_number() {
             order: Some(vec![("score".to_string(), OrderDirection::DESC)]),
             ..Default::default()
         },
-        Some(shape_json),
+        shape_json,
     )
     .unwrap();
     let got_scores: Vec<f64> = result
@@ -4018,13 +4047,31 @@ fn test_resolve_projections_where_filter_via_target_shape_property() {
 
     let shape = make_shape_with_relation("Parent", "signals", "test://has_signal");
 
-    let target_shape = json!({
-        "className": "Signal",
-        "properties": {
-            "signalTypeId": { "predicate": "test://signal_type_id" }
-        },
-        "relations": {}
-    });
+    // Register the Signal target shape on a StaticShapeResolver so the
+    // projection layer can resolve `target_class_name: "Signal"` the same
+    // way the cache-backed resolver does in production.
+    let resolver = super::test_helpers::StaticShapeResolver::new();
+    let signal_shape = ModelShape {
+        target_class: "Signal".to_string(),
+        shape_uri: "SignalShape".to_string(),
+        properties: vec![ShapeProperty {
+            name: "signalTypeId".to_string(),
+            predicate: "test://signal_type_id".to_string(),
+            is_collection: false,
+            is_flag: false,
+            is_required: false,
+            initial_value: None,
+            resolve_language: None,
+            datatype: None,
+            direction: Some("forward".to_string()),
+            is_scalar_relation: false,
+            getter: None,
+            where_filter: None,
+            where_predicates: None,
+        }],
+        include_relations: vec![],
+    };
+    resolver.register("Signal", signal_shape);
 
     // Filter passes the plain decoded value — fn/parse_literal in SPARQL decodes
     // the stored literal:string:like_type_id123 IRI back to "like_type_id123".
@@ -4041,14 +4088,14 @@ fn test_resolve_projections_where_filter_via_target_shape_property() {
         ProjectionInput {
             from: "signals".to_string(),
             count: true,
-            target_shape: Some(target_shape.clone()),
+            target_class_name: Some("Signal".to_string()),
             where_clause: Some(wc.clone()),
             limit: None,
             order: None,
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, 0).unwrap();
+    resolve_projections(&store, &mut instances, &projections, &shape, &resolver, 0).unwrap();
 
     let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
     assert_eq!(
@@ -4064,14 +4111,14 @@ fn test_resolve_projections_where_filter_via_target_shape_property() {
         ProjectionInput {
             from: "signals".to_string(),
             count: false,
-            target_shape: Some(target_shape),
+            target_class_name: Some("Signal".to_string()),
             where_clause: Some(wc),
             limit: Some(1),
             order: None,
         },
     );
 
-    resolve_projections(&store, &mut instances2, &projections2, &shape, 0).unwrap();
+    resolve_projections(&store, &mut instances2, &projections2, &shape, &resolver, 0).unwrap();
 
     let got = &instances2[0]["$myLikeSignal"];
     assert_eq!(
