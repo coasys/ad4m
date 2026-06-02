@@ -7,4 +7,4 @@ pub(crate) mod snapshots;
 pub(crate) mod test_graphs;
 pub(crate) mod tests;
 pub(crate) mod topo_sort;
-pub(crate) mod workspace;
+pub mod workspace;
