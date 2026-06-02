@@ -226,7 +226,7 @@ class Avatar extends Ad4mModel {
 | `ifExpr(cond).then(a).else(b)` | `a` if `cond` is truthy, otherwise `b` | All three are themselves NodeExpressions. |
 | `concat(a, b, …)` | String concatenation of the arguments | Each argument is a NodeExpression. |
 | `coalesce(a, b, …)` | First non-null argument | Argument-order fallback. |
-| `fn('name', …args)` | Server-side function call | Used by built-ins like `fileToDataUri`; you can register your own in the Rust executor. |
+| `fn('name', …args)` | Server-side function call | Used by built-ins like `fileToDataUri` (using `ad4m://fn/defaultFileDecode` fn) |
 
 ##### When to use transforms
 
