@@ -28,11 +28,11 @@ export function Connect() {
       if (!url) {
         setURLError("URL is required");
       } else if (
-        !/^(wss?:\/\/)([0-9]{1,3}(?:\.[0-9]{1,3}){3}|[a-zA-Z]+):([0-9]{1,5})(?:\/[a-zA-Z]{0,100})$/.test(
+        !/^(https?:\/\/)([0-9]{1,3}(?:\.[0-9]{1,3}){3}|[a-zA-Z][\w.-]*):([0-9]{1,5})(?:\/[a-zA-Z]{0,100})?$/.test(
           url
         )
       ) {
-        setURLError("Invalid websocket URL");
+        setURLError("Invalid URL (e.g. http://localhost:12000)");
       } else {
         try {
           const client = await buildAd4mClient(url!, false);
@@ -80,7 +80,7 @@ export function Connect() {
         <>
           <j-input
             label="Ad4m URL"
-            placeholder="ws://www.example.com/graphql"
+            placeholder="http://www.example.com"
             radius="md"
             size="md"
             onInput={onUrlChange}

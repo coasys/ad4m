@@ -1,7 +1,6 @@
 import { useContext, useEffect, useState } from "react";
 import { Ad4minContext } from "../context/Ad4minContext"
-import { Notification as NotificationType } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver"; import { PerspectiveProxy } from "@coasys/ad4m";
-;
+import { Notification as NotificationType, PerspectiveProxy } from "@coasys/ad4m";
 
 const Notification = ({ notification }: { notification: NotificationType }) => {
   const {

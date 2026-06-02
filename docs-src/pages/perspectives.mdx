@@ -108,37 +108,54 @@ const links = await perspective.get({
 });
 ```
 
-### SurrealDB Integration (Recommended)
+### SPARQL Query Engine
 
-Every Perspective includes a high-performance **SurrealDB query engine** that provides **10-100x faster performance** than traditional Prolog queries. SurrealDB is the recommended query method for most use cases:
+Every Perspective includes a high-performance **SPARQL query engine** powered by Oxigraph, executing entirely server-side in Rust. SPARQL is the recommended query method for most use cases:
 
 ```typescript
-// Direct SurrealQL query - fast and powerful
-const follows = await perspective.querySurrealDB(
-  "SELECT * FROM link WHERE predicate = 'follows'"
-);
+// Direct SPARQL query - fast and powerful
+const follows = await perspective.querySparql(`
+  SELECT ?source ?target WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?source ;
+          rdf:predicate <follows> ;
+          rdf:object ?target .
+  }
+`);
 
-// Graph traversal using indexed fields (in.uri = source, out.uri = target)
-const aliceFollows = await perspective.querySurrealDB(
-  "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'follows'"
-);
+// Find who Alice follows
+const aliceFollows = await perspective.querySparql(`
+  SELECT ?target WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject <user://alice> ;
+          rdf:predicate <follows> ;
+          rdf:object ?target .
+  }
+`);
 
 // Find who follows Alice (reverse traversal)
-const aliceFollowers = await perspective.querySurrealDB(
-  "SELECT source FROM link WHERE out.uri = 'user://alice' AND predicate = 'follows'"
-);
+const aliceFollowers = await perspective.querySparql(`
+  SELECT ?source WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?source ;
+          rdf:predicate <follows> ;
+          rdf:object <user://alice> .
+  }
+`);
 
 // Aggregations and analytics
-const stats = await perspective.querySurrealDB(
-  "SELECT predicate, count() as total FROM link GROUP BY predicate"
-);
+const stats = await perspective.querySparql(`
+  SELECT ?predicate (COUNT(?link) AS ?total) WHERE {
+    ?link a rdf:Statement ;
+          rdf:predicate ?predicate .
+  }
+  GROUP BY ?predicate
+`);
 ```
 
-**Performance Note**: Use `in.uri` (source) and `out.uri` (target) for graph traversal - they're indexed and fast. Avoid subqueries (`IN (SELECT ...)`) as they can be very slow.
+**Security Note**: `querySparql()` only allows read-only SELECT queries. Use `perspective.add()` and `perspective.remove()` to modify links.
 
-**Security Note**: `querySurrealDB()` only allows read-only operations (SELECT, RETURN, etc.). Use `perspective.add()` and `perspective.remove()` to modify links.
-
-For comprehensive examples and graph traversal patterns, see the [SurrealDB Queries Guide](/developer-guides/surreal-queries).
+For comprehensive examples and graph traversal patterns, see the [SPARQL Queries Guide](/developer-guides/sparql-queries).
 
 ### Prolog Integration (Legacy)
 
@@ -178,7 +195,7 @@ Query subscriptions provide real-time updates but require proper cleanup:
 
 Always remember to call `dispose()` when you're done with a subscription.
 
-**Recommendation**: Use SurrealDB for most queries (faster), and reserve Prolog for complex logic programming or custom SDNA rules.
+**Recommendation**: Use SPARQL for most queries, and reserve Prolog for complex logic programming or custom SDNA rules.
 
 ### Advanced Data Modeling
 
@@ -204,7 +221,7 @@ Adding a Link:
 
 ```ts
 const link = {
-  subject: "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
+  source: "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
   predicate: "sioc://likes",
   target: "literal://ad4m",
 };
@@ -228,7 +245,7 @@ What you get back will be an array of [LinkExpressions](/jsdoc/classes/LinkExpre
     "author": "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
     "timestamp": "2023-06-21T14:47:48.935Z",
     "data": {
-      "subject": "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
+      "source": "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
       "predicate": "sioc://likes",
       "target": "literal://ad4m"
     },

@@ -2,14 +2,10 @@ import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { Ad4mClient } from "@coasys/ad4m";
-import { startExecutor, apolloClient, sleep, gracefulShutdown } from "../utils/utils";
+import { startExecutor, baseUrl, sleep, gracefulShutdown } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import path from "path";
-import fetch from 'node-fetch'
 import { fileURLToPath } from 'url';
-
-//@ts-ignore
-global.fetch = fetch
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,7 +14,7 @@ describe("Integration", () => {
   const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
   const appDataPath = path.join(TEST_DIR, "agents", "simpleAlice");
   const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-  let gqlPort: number;
+  let apiPort: number;
   let hcAdminPort: number;
   let hcAppPort: number;
 
@@ -26,13 +22,13 @@ describe("Integration", () => {
   let executorProcess: ChildProcess | null = null
 
   before(async () => {
-    [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
-    registerPorts([gqlPort, hcAdminPort, hcAppPort]);
+    [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+    registerPorts([apiPort, hcAdminPort, hcAppPort]);
     executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-        gqlPort, hcAdminPort, hcAppPort);
+        apiPort, hcAdminPort, hcAppPort);
 
     console.log("Creating ad4m client")
-    ad4m = new Ad4mClient(apolloClient(gqlPort))
+    ad4m = new Ad4mClient(baseUrl(apiPort))
     console.log("Generating agent")
     await ad4m.agent.generate("secret")
     console.log("Done")
@@ -40,7 +36,7 @@ describe("Integration", () => {
 
   after(async () => {
     await gracefulShutdown(executorProcess, "executor");
-    deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
+    deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
   })
 
   it("should get agent status", async () => {

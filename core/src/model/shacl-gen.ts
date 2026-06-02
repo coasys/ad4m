@@ -128,6 +128,11 @@ export function buildSHACL(
             propShape.hasValue = propMeta.initial;
         }
 
+        // sh:in — allowed values (enum constraint)
+        if (propMeta.options && propMeta.options.length > 0) {
+            propShape.in = propMeta.options;
+        }
+
         // AD4M-specific metadata
         if (propMeta.local !== undefined) {
             propShape.local = propMeta.local;

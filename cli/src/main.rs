@@ -135,8 +135,8 @@ enum Domain {
         language_language_only: Option<bool>,
         #[arg(long, action)]
         run_dapp_server: Option<bool>,
-        #[arg(short, long, action)]
-        gql_port: Option<u16>,
+        #[arg(short = 'p', long = "port", action)]
+        port: Option<u16>,
         #[arg(long, action)]
         hc_admin_port: Option<u16>,
         #[arg(long, action)]
@@ -232,7 +232,7 @@ async fn main() -> Result<()> {
         network_bootstrap_seed,
         language_language_only,
         run_dapp_server,
-        gql_port,
+        port,
         hc_admin_port,
         hc_app_port,
         hc_use_bootstrap,
@@ -255,7 +255,7 @@ async fn main() -> Result<()> {
                 network_bootstrap_seed,
                 language_language_only,
                 run_dapp_server,
-                gql_port,
+                port,
                 hc_admin_port,
                 hc_app_port,
                 hc_use_bootstrap,
@@ -333,7 +333,7 @@ async fn main() -> Result<()> {
             network_bootstrap_seed: _,
             language_language_only: _,
             run_dapp_server: _,
-            gql_port: _,
+            port: _,
             hc_admin_port: _,
             hc_app_port: _,
             hc_use_bootstrap: _,

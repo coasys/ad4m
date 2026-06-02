@@ -1,12 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::agent::{
-    ByDidAgentByDid, ByDidAgentByDidPerspectiveLinks, MeAgent, MeAgentPerspectiveLinks,
-};
-use crate::perspectives::{
-    QueryLinksPerspectiveQueryLinks, SubscriptionLinkAddedPerspectiveLinkAdded,
-};
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Link {
     pub predicate: Option<String>,
@@ -23,6 +16,7 @@ pub struct ExpressionProof {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct LinkExpression {
     pub author: String,
     pub data: Link,
@@ -51,153 +45,157 @@ pub struct Resource {
     pub pointers: Vec<String>,
 }
 
-use crate::agent::{CapabilityInput, ResourceInput};
-
-impl From<Capability> for CapabilityInput {
-    fn from(cap: Capability) -> Self {
-        Self {
-            can: cap.can,
-            with: cap.with.into(),
-        }
-    }
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Perspective {
+    pub links: Vec<LinkExpression>,
 }
 
-impl From<Resource> for ResourceInput {
-    fn from(res: Resource) -> Self {
-        Self {
-            domain: res.domain,
-            pointers: res.pointers,
-        }
-    }
+pub struct SentPerspectiveMessage {
+    pub recipient: String,
+    pub message: PerspectiveExpression,
 }
 
-impl From<QueryLinksPerspectiveQueryLinks> for LinkExpression {
-    fn from(link: QueryLinksPerspectiveQueryLinks) -> Self {
-        Self {
-            author: link.author,
-            timestamp: link.timestamp,
-            data: Link {
-                predicate: link.data.predicate,
-                source: link.data.source,
-                target: link.data.target,
-            },
-            proof: ExpressionProof {
-                invalid: link.proof.invalid,
-                key: link.proof.key,
-                signature: link.proof.signature,
-                valid: link.proof.valid,
-            },
-            status: link.status,
-        }
-    }
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Agent {
+    pub did: String,
+    pub direct_message_language: Option<String>,
+    pub perspective: Option<Perspective>,
 }
 
-impl From<SubscriptionLinkAddedPerspectiveLinkAdded> for LinkExpression {
-    fn from(link: SubscriptionLinkAddedPerspectiveLinkAdded) -> Self {
-        Self {
-            author: link.author,
-            timestamp: link.timestamp,
-            data: Link {
-                predicate: link.data.predicate,
-                source: link.data.source,
-                target: link.data.target,
-            },
-            proof: ExpressionProof {
-                invalid: link.proof.invalid,
-                key: link.proof.key,
-                signature: link.proof.signature,
-                valid: link.proof.valid,
-            },
-            status: link.status,
-        }
-    }
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStatus {
+    pub did: Option<String>,
+    pub did_document: Option<String>,
+    pub error: Option<String>,
+    pub is_initialized: bool,
+    pub is_unlocked: bool,
 }
 
-impl From<MeAgentPerspectiveLinks> for LinkExpression {
-    fn from(link: MeAgentPerspectiveLinks) -> Self {
-        Self {
-            author: link.author,
-            timestamp: link.timestamp,
-            data: Link {
-                predicate: link.data.predicate,
-                source: link.data.source,
-                target: link.data.target,
-            },
-            proof: ExpressionProof {
-                invalid: link.proof.invalid,
-                key: link.proof.key,
-                signature: link.proof.signature,
-                valid: link.proof.valid,
-            },
-            status: link.status,
-        }
-    }
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSignature {
+    pub public_key: Option<String>,
+    pub signature: Option<String>,
 }
 
-impl From<ByDidAgentByDidPerspectiveLinks> for LinkExpression {
-    fn from(link: ByDidAgentByDidPerspectiveLinks) -> Self {
-        Self {
-            author: link.author,
-            timestamp: link.timestamp,
-            data: Link {
-                predicate: link.data.predicate,
-                source: link.data.source,
-                target: link.data.target,
-            },
-            proof: ExpressionProof {
-                invalid: link.proof.invalid,
-                key: link.proof.key,
-                signature: link.proof.signature,
-                valid: link.proof.valid,
-            },
-            status: link.status,
-        }
-    }
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Apps {
+    pub auth: serde_json::Value,
+    pub request_id: String,
+    pub revoked: Option<bool>,
+    pub token: String,
 }
 
-use crate::perspectives::{
-    SnapshotPerspectiveSnapshotLinks, SnapshotPerspectiveSnapshotLinksData,
-    SnapshotPerspectiveSnapshotLinksProof,
-};
-
-impl From<SnapshotPerspectiveSnapshotLinks> for LinkExpression {
-    fn from(link: SnapshotPerspectiveSnapshotLinks) -> Self {
-        Self {
-            author: link.author,
-            timestamp: link.timestamp,
-            data: Link {
-                predicate: link.data.predicate,
-                source: link.data.source,
-                target: link.data.target,
-            },
-            proof: ExpressionProof {
-                invalid: None,
-                key: link.proof.key,
-                signature: link.proof.signature,
-                valid: None,
-            },
-            status: link.status,
-        }
-    }
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EntanglementProof {
+    pub device_key: String,
+    pub device_key_type: String,
+    pub device_key_signed_by_did: Option<String>,
+    pub did: Option<String>,
+    pub did_signed_by_device_key: Option<String>,
+    pub did_signing_key_id: Option<String>,
 }
 
-impl From<LinkExpression> for SnapshotPerspectiveSnapshotLinks {
-    fn from(link: LinkExpression) -> Self {
-        Self {
-            author: link.author,
-            timestamp: link.timestamp,
-            data: SnapshotPerspectiveSnapshotLinksData {
-                predicate: link.data.predicate,
-                source: link.data.source,
-                target: link.data.target,
-            },
-            proof: SnapshotPerspectiveSnapshotLinksProof {
-                key: link.proof.key,
-                signature: link.proof.signature,
-            },
-            status: link.status,
-        }
-    }
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Neighbourhood {
+    pub link_language: String,
+    pub meta: Perspective,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NeighbourhoodExpression {
+    pub author: String,
+    pub data: Neighbourhood,
+    pub proof: ExpressionProof,
+    pub timestamp: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PerspectiveHandle {
+    pub name: Option<String>,
+    pub neighbourhood: Option<NeighbourhoodExpression>,
+    pub shared_url: Option<String>,
+    pub uuid: String,
+    pub state: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeInfo {
+    pub ad4m_executor_version: String,
+    pub is_initialized: bool,
+    pub is_unlocked: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageMeta {
+    pub address: String,
+    pub author: Option<String>,
+    pub description: Option<String>,
+    pub name: String,
+    pub possible_template_params: Option<Vec<String>>,
+    pub template_applied_params: Option<String>,
+    pub template_source_language_address: Option<String>,
+    pub source_code_link: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageHandle {
+    pub address: String,
+    pub icon: Option<serde_json::Value>,
+    pub name: String,
+    pub settings: Option<String>,
+    pub settings_icon: Option<serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageRef {
+    pub address: String,
+    pub name: String,
+}
+
+// Input types for REST requests
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkInput {
+    pub predicate: Option<String>,
+    pub source: String,
+    pub target: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PerspectiveInput {
+    pub links: Vec<LinkInput>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkExpressionInput {
+    pub author: String,
+    pub data: LinkInput,
+    pub proof: ExpressionProofInput,
+    pub timestamp: String,
+    pub status: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpressionProofInput {
+    pub invalid: Option<bool>,
+    pub key: Option<String>,
+    pub signature: Option<String>,
+    pub valid: Option<bool>,
 }
 
 impl From<LinkExpression> for LinkExpressionInput {
@@ -221,248 +219,57 @@ impl From<LinkExpression> for LinkExpressionInput {
     }
 }
 
-use crate::perspectives::AllPerspectivesNeighbourhoodDataMetaLinks;
-
-impl From<AllPerspectivesNeighbourhoodDataMetaLinks> for LinkExpression {
-    fn from(link: AllPerspectivesNeighbourhoodDataMetaLinks) -> Self {
-        Self {
-            author: link.author,
-            timestamp: link.timestamp,
-            data: Link {
-                predicate: link.data.predicate,
-                source: link.data.source,
-                target: link.data.target,
-            },
-            proof: ExpressionProof {
-                invalid: None,
-                key: link.proof.key,
-                signature: link.proof.signature,
-                valid: None,
-            },
-            status: link.status,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Perspective {
-    pub links: Vec<LinkExpression>,
-}
-
-use crate::perspectives::SnapshotPerspectiveSnapshot;
-use crate::runtime::set_status::ExpressionProofInput;
-use crate::runtime::set_status::LinkExpressionInput;
-use crate::runtime::set_status::LinkInput;
-use crate::runtime::set_status::PerspectiveInput;
-
-impl From<SnapshotPerspectiveSnapshot> for Perspective {
-    fn from(perspective: SnapshotPerspectiveSnapshot) -> Self {
-        Self {
-            links: perspective
-                .links
-                .into_iter()
-                .map(LinkExpression::from)
-                .collect(),
-        }
-    }
-}
-
 impl From<Perspective> for PerspectiveInput {
     fn from(perspective: Perspective) -> Self {
         Self {
             links: perspective
                 .links
                 .into_iter()
-                .map(LinkExpressionInput::from)
+                .map(|l| LinkInput {
+                    predicate: l.data.predicate,
+                    source: l.data.source,
+                    target: l.data.target,
+                })
                 .collect(),
         }
     }
 }
 
-impl From<LinkExpression> for friend_send_message::LinkExpressionInput {
-    fn from(link: LinkExpression) -> Self {
+// Capability input types for REST requests
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CapabilityInput {
+    pub can: Vec<String>,
+    pub with: ResourceInput,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ResourceInput {
+    pub domain: String,
+    pub pointers: Vec<String>,
+}
+
+impl From<Capability> for CapabilityInput {
+    fn from(cap: Capability) -> Self {
         Self {
-            author: link.author,
-            timestamp: link.timestamp,
-            data: friend_send_message::LinkInput {
-                predicate: link.data.predicate,
-                source: link.data.source,
-                target: link.data.target,
-            },
-            proof: friend_send_message::ExpressionProofInput {
-                key: link.proof.key,
-                signature: link.proof.signature,
-                invalid: link.proof.invalid,
-                valid: link.proof.valid,
-            },
-            status: link.status,
+            can: cap.can,
+            with: cap.with.into(),
         }
     }
 }
 
-use crate::runtime::friend_send_message;
-
-impl From<Perspective> for friend_send_message::PerspectiveInput {
-    fn from(perspective: Perspective) -> Self {
+impl From<Resource> for ResourceInput {
+    fn from(res: Resource) -> Self {
         Self {
-            links: perspective
-                .links
-                .into_iter()
-                .map(friend_send_message::LinkExpressionInput::from)
-                .collect(),
+            domain: res.domain,
+            pointers: res.pointers,
         }
     }
 }
 
-use crate::runtime::message_inbox;
-
-impl From<message_inbox::MessageInboxRuntimeMessageInbox> for PerspectiveExpression {
-    fn from(perspective_expression: message_inbox::MessageInboxRuntimeMessageInbox) -> Self {
-        Self {
-            author: perspective_expression.author,
-            timestamp: perspective_expression.timestamp,
-            data: Perspective {
-                links: perspective_expression
-                    .data
-                    .links
-                    .into_iter()
-                    .map(LinkExpression::from)
-                    .collect(),
-            },
-            proof: ExpressionProof {
-                invalid: perspective_expression.proof.invalid,
-                key: perspective_expression.proof.key,
-                signature: perspective_expression.proof.signature,
-                valid: perspective_expression.proof.valid,
-            },
-        }
-    }
-}
-
-use crate::runtime::message_inbox::MessageInboxRuntimeMessageInboxDataLinks;
-
-impl From<MessageInboxRuntimeMessageInboxDataLinks> for LinkExpression {
-    fn from(link: MessageInboxRuntimeMessageInboxDataLinks) -> Self {
-        Self {
-            author: link.author,
-            timestamp: link.timestamp,
-            data: Link {
-                predicate: link.data.predicate,
-                source: link.data.source,
-                target: link.data.target,
-            },
-            proof: ExpressionProof {
-                invalid: None,
-                key: link.proof.key,
-                signature: link.proof.signature,
-                valid: None,
-            },
-            status: link.status,
-        }
-    }
-}
-
-use crate::runtime::message_outbox::MessageOutboxRuntimeMessageOutbox;
-use crate::runtime::message_outbox::MessageOutboxRuntimeMessageOutboxMessageDataLinks;
-
-impl From<MessageOutboxRuntimeMessageOutboxMessageDataLinks> for LinkExpression {
-    fn from(link: MessageOutboxRuntimeMessageOutboxMessageDataLinks) -> Self {
-        Self {
-            author: link.author,
-            timestamp: link.timestamp,
-            data: Link {
-                predicate: link.data.predicate,
-                source: link.data.source,
-                target: link.data.target,
-            },
-            proof: ExpressionProof {
-                invalid: None,
-                key: link.proof.key,
-                signature: link.proof.signature,
-                valid: None,
-            },
-            status: link.status,
-        }
-    }
-}
-pub struct SentPerspectiveMessage {
-    pub recipient: String,
-    pub message: PerspectiveExpression,
-}
-
-impl From<MessageOutboxRuntimeMessageOutbox> for SentPerspectiveMessage {
-    fn from(message: MessageOutboxRuntimeMessageOutbox) -> Self {
-        Self {
-            recipient: message.recipient,
-            message: PerspectiveExpression {
-                author: message.message.author,
-                timestamp: message.message.timestamp,
-                data: Perspective {
-                    links: message
-                        .message
-                        .data
-                        .links
-                        .into_iter()
-                        .map(LinkExpression::from)
-                        .collect(),
-                },
-                proof: ExpressionProof {
-                    invalid: message.message.proof.invalid,
-                    key: message.message.proof.key,
-                    signature: message.message.proof.signature,
-                    valid: message.message.proof.valid,
-                },
-            },
-        }
-    }
-}
-
-pub struct Agent {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OnlineAgent {
     pub did: String,
-    pub direct_message_language: Option<String>,
-    pub perspective: Option<Perspective>,
-}
-
-impl From<MeAgent> for Agent {
-    fn from(me: MeAgent) -> Self {
-        Self {
-            did: me.did,
-            direct_message_language: me.direct_message_language,
-            perspective: me.perspective.map(|perspective| Perspective {
-                links: perspective
-                    .links
-                    .into_iter()
-                    .map(|link| link.into())
-                    .collect(),
-            }),
-        }
-    }
-}
-
-impl From<ByDidAgentByDid> for Agent {
-    fn from(agent: ByDidAgentByDid) -> Self {
-        Self {
-            did: agent.did,
-            direct_message_language: agent.direct_message_language,
-            perspective: agent.perspective.map(|perspective| Perspective {
-                links: perspective
-                    .links
-                    .into_iter()
-                    .map(|link| link.into())
-                    .collect(),
-            }),
-        }
-    }
-}
-
-pub struct Neighbourhood {
-    pub link_language: String,
-    pub meta: Perspective,
-}
-
-pub struct NeighbourhoodExpression {
-    pub author: String,
-    pub data: Neighbourhood,
-    pub proof: ExpressionProof,
-    pub timestamp: String,
+    pub status: Option<serde_json::Value>,
 }

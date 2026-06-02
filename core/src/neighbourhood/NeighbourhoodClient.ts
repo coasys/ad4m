@@ -1,18 +1,19 @@
-import { ApolloClient, gql, FetchResult } from "@apollo/client/core"
+import { ApiClient } from "../apiClient"
 import { Address } from "../Address"
 import { DID } from "../DID"
 import { OnlineAgent, TelepresenceSignalCallback } from "../language/Language"
 import { Perspective, PerspectiveUnsignedInput } from "../perspectives/Perspective"
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
-import unwrapApolloResult from "../unwrapApolloResult"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
+import type { JoinNeighbourhoodRequest, PublishNeighbourhoodRequest } from "../generated/api"
 
 export class NeighbourhoodClient {
-    #apolloClient: ApolloClient<any>
+    #apiClient: ApiClient
     #signalHandlers: Map<string, TelepresenceSignalCallback[]> = new Map()
+    #signalUnsubscribers: Map<string, () => void> = new Map()
 
-    constructor(client: ApolloClient<any>) {
-        this.#apolloClient = client
+    constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
+        this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
     }
 
     async publishFromPerspective(
@@ -20,209 +21,60 @@ export class NeighbourhoodClient {
         linkLanguage: Address,
         meta: Perspective
     ): Promise<string> {
-        const { neighbourhoodPublishFromPerspective } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation neighbourhoodPublishFromPerspective(
-                $linkLanguage: String!,
-                $meta: PerspectiveInput!,
-                $perspectiveUUID: String!
-            ) {
-                neighbourhoodPublishFromPerspective(
-                    linkLanguage: $linkLanguage,
-                    meta: $meta,
-                    perspectiveUUID: $perspectiveUUID
-                )
-            }`,
-            variables: { perspectiveUUID, linkLanguage, meta: meta}
-        }))
-        return neighbourhoodPublishFromPerspective
+        return this.#apiClient.call<string>('neighbourhood.publish', {
+            perspectiveUUID, linkLanguage, meta
+        })
     }
 
     async joinFromUrl(url: string): Promise<PerspectiveHandle> {
-        const { neighbourhoodJoinFromUrl } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation neighbourhoodJoinFromUrl($url: String!) {
-                neighbourhoodJoinFromUrl(url: $url) {
-                    uuid
-                    name
-                    sharedUrl
-                    state
-                    neighbourhood {
-                        data {
-                            linkLanguage
-                            meta {
-                                links
-                                    {
-                                        author
-                                        timestamp
-                                        data { source, predicate, target }
-                                        proof { valid, invalid, signature, key }
-                                    }
-                            }
-                        }
-                        author
-                    }
-                }
-            }`,
-            variables: { url }
-        }))
-        return neighbourhoodJoinFromUrl
+        return this.#apiClient.call<PerspectiveHandle>('neighbourhood.join', { url })
     }
 
     async otherAgents(perspectiveUUID: string): Promise<DID[]> {
-        const { neighbourhoodOtherAgents } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query neighbourhoodOtherAgents($perspectiveUUID: String!) {
-                neighbourhoodOtherAgents(perspectiveUUID: $perspectiveUUID)
-            }`,
-            variables: { perspectiveUUID }
-        }))
-        return neighbourhoodOtherAgents
+        return this.#apiClient.call<DID[]>('neighbourhood.otherAgents', { uuid: perspectiveUUID })
     }
 
     async hasTelepresenceAdapter(perspectiveUUID: string): Promise<boolean> {
-        const { neighbourhoodHasTelepresenceAdapter } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query neighbourhoodHasTelepresenceAdapter($perspectiveUUID: String!) {
-                neighbourhoodHasTelepresenceAdapter(perspectiveUUID: $perspectiveUUID)
-            }`,
-            variables: { perspectiveUUID }
-        }))
-        return neighbourhoodHasTelepresenceAdapter
+        return this.#apiClient.call<boolean>('neighbourhood.hasTelepresence', { uuid: perspectiveUUID })
     }
 
     async onlineAgents(perspectiveUUID: string): Promise<OnlineAgent[]> {
-        const { neighbourhoodOnlineAgents } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query neighbourhoodOnlineAgents($perspectiveUUID: String!) {
-                neighbourhoodOnlineAgents(perspectiveUUID: $perspectiveUUID) {
-                    did
-                    status {
-                        author
-                        timestamp
-                        data {
-                            links {
-                                author
-                                timestamp
-                                data { source, predicate, target }
-                                proof { valid, invalid, signature, key }
-                            }
-                        }
-                        proof { valid, invalid, signature, key }
-                    }
-                }
-            }`,
-            variables: { perspectiveUUID }
-        }))
-        return neighbourhoodOnlineAgents
+        return this.#apiClient.call<OnlineAgent[]>('neighbourhood.onlineAgents', { uuid: perspectiveUUID })
     }
 
     async setOnlineStatus(perspectiveUUID: string, status: Perspective): Promise<boolean> {
-        const { neighbourhoodSetOnlineStatus } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation neighbourhoodSetOnlineStatus(
-                $perspectiveUUID: String!,
-                $status: PerspectiveInput!
-            ) {
-                neighbourhoodSetOnlineStatus(
-                    perspectiveUUID: $perspectiveUUID,
-                    status: $status
-                )
-            }`,
-            variables: { perspectiveUUID, status }
-        }))
-
-        return neighbourhoodSetOnlineStatus
+        return this.#apiClient.call<boolean>('neighbourhood.setOnlineStatus', { uuid: perspectiveUUID, status })
     }
 
     async setOnlineStatusU(perspectiveUUID: string, status: PerspectiveUnsignedInput): Promise<boolean> {
-        const { neighbourhoodSetOnlineStatusU } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation neighbourhoodSetOnlineStatusU(
-                $perspectiveUUID: String!,
-                $status: PerspectiveUnsignedInput!
-            ) {
-                neighbourhoodSetOnlineStatusU(
-                    perspectiveUUID: $perspectiveUUID,
-                    status: $status
-                )
-            }`,
-            variables: { perspectiveUUID, status }
-        }))
-
-        return neighbourhoodSetOnlineStatusU
+        return this.#apiClient.call<boolean>('neighbourhood.setOnlineStatus', { uuid: perspectiveUUID, status, signed: false })
     }
 
     async sendSignal(perspectiveUUID: string, remoteAgentDid: string, payload: Perspective): Promise<boolean> {
-        const { neighbourhoodSendSignal } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation neighbourhoodSendSignal(
-                $perspectiveUUID: String!,
-                $remoteAgentDid: String!,
-                $payload: PerspectiveInput!
-            ) {
-                neighbourhoodSendSignal(
-                    perspectiveUUID: $perspectiveUUID,
-                    remoteAgentDid: $remoteAgentDid,
-                    payload: $payload
-                )
-            }`,
-            variables: { perspectiveUUID, remoteAgentDid, payload }
-        }))
-
-        return neighbourhoodSendSignal
+        return this.#apiClient.call<boolean>('neighbourhood.sendSignal', {
+            uuid: perspectiveUUID, remoteAgentDid, payload
+        })
     }
 
     async sendSignalU(perspectiveUUID: string, remoteAgentDid: string, payload: PerspectiveUnsignedInput): Promise<boolean> {
-        const { neighbourhoodSendSignalU } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation neighbourhoodSendSignalU(
-                $perspectiveUUID: String!,
-                $remoteAgentDid: String!,
-                $payload: PerspectiveUnsignedInput!
-            ) {
-                neighbourhoodSendSignalU(
-                    perspectiveUUID: $perspectiveUUID,
-                    remoteAgentDid: $remoteAgentDid,
-                    payload: $payload
-                )
-            }`,
-            variables: { perspectiveUUID, remoteAgentDid, payload }
-        }))
-
-        return neighbourhoodSendSignalU
+        return this.#apiClient.call<boolean>('neighbourhood.sendSignal', {
+            uuid: perspectiveUUID, remoteAgentDid, payload, signed: false
+        })
     }
 
     async sendBroadcast(perspectiveUUID: string, payload: Perspective, loopback: boolean = false): Promise<boolean> {
-        const { neighbourhoodSendBroadcast } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation neighbourhoodSendBroadcast(
-                $perspectiveUUID: String!,
-                $payload: PerspectiveInput!,
-                $loopback: Boolean
-            ) {
-                neighbourhoodSendBroadcast(
-                    perspectiveUUID: $perspectiveUUID,
-                    payload: $payload,
-                    loopback: $loopback
-                )
-            }`,
-            variables: { perspectiveUUID, payload, loopback }
-        }))
-
-        return neighbourhoodSendBroadcast
+        return this.#apiClient.call<boolean>('neighbourhood.sendBroadcast', {
+            uuid: perspectiveUUID, payload, loopback
+        })
     }
 
     async sendBroadcastU(perspectiveUUID: string, payload: PerspectiveUnsignedInput, loopback: boolean = false): Promise<boolean> {
-        const { neighbourhoodSendBroadcastU } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation neighbourhoodSendBroadcastU(
-                $perspectiveUUID: String!,
-                $payload: PerspectiveUnsignedInput!,
-                $loopback: Boolean
-            ) {
-                neighbourhoodSendBroadcastU(
-                    perspectiveUUID: $perspectiveUUID,
-                    payload: $payload,
-                    loopback: $loopback
-                )
-            }`,
-            variables: { perspectiveUUID, payload, loopback }
-        }))
-
-        return neighbourhoodSendBroadcastU
+        return this.#apiClient.call<boolean>('neighbourhood.sendBroadcast', {
+            uuid: perspectiveUUID, payload, loopback, signed: false
+        })
     }
 
-    dispatchSignal(perspectiveUUID:string, signal: any) {
+    dispatchSignal(perspectiveUUID: string, signal: unknown) {
         const handlers = this.#signalHandlers.get(perspectiveUUID)
         if (handlers) {
             for (const handler of handlers) {
@@ -236,38 +88,14 @@ export class NeighbourhoodClient {
     }
 
     async subscribeToSignals(perspectiveUUID: string): Promise<void> {
-        const that = this
-        this.#apolloClient.subscribe({
-            query: gql`subscription neighbourhoodSignal($perspectiveUUID: String!) {
-                neighbourhoodSignal(perspectiveUUID: $perspectiveUUID) {
-                    author
-                    timestamp
-                    data {
-                        links
-                            {
-                                author
-                                timestamp
-                                data { source, predicate, target }
-                                proof { valid, invalid, signature, key }
-                            }
-                    }
-                    proof { valid, invalid, signature, key }
+        const unsub = this.#apiClient.subscribe(
+            (data) => {
+                if (data.type === 'signal') {
+                    this.dispatchSignal(perspectiveUUID, data.signal)
                 }
-            }`,
-            variables: { perspectiveUUID }
-        }).subscribe({
-            next: (result: FetchResult<any>) => {
-                try {
-                    const { neighbourhoodSignal } = unwrapApolloResult(result)
-                    that.dispatchSignal(perspectiveUUID, neighbourhoodSignal)
-                } catch(e) {
-                    console.error("Error in signal subscription:", e)
-                }
-            },
-            error: (err: any) => {
-                console.error("Signal subscription error for perspective", perspectiveUUID, err)
             }
-        })
+        )
+        this.#signalUnsubscribers.set(perspectiveUUID, unsub)
     }
 
     async addSignalHandler(perspectiveUUID: string, handler: TelepresenceSignalCallback): Promise<void> {
@@ -275,7 +103,6 @@ export class NeighbourhoodClient {
         if (!handlersForPerspective) {
             handlersForPerspective = []
             this.#signalHandlers.set(perspectiveUUID, handlersForPerspective)
-            // Push handler BEFORE subscribing so it's available when signals arrive
             handlersForPerspective.push(handler)
             await this.subscribeToSignals(perspectiveUUID)
         } else {
@@ -289,6 +116,14 @@ export class NeighbourhoodClient {
             const index = handlersForPerspective.indexOf(handler)
             if (index > -1) {
                 handlersForPerspective.splice(index, 1)
+            }
+            if (handlersForPerspective.length === 0) {
+                this.#signalHandlers.delete(perspectiveUUID)
+                const unsub = this.#signalUnsubscribers.get(perspectiveUUID)
+                if (unsub) {
+                    unsub()
+                    this.#signalUnsubscribers.delete(perspectiveUUID)
+                }
             }
         }
     }

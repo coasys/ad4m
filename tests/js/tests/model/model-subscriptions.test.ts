@@ -223,6 +223,39 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     expect(all.some((batch) => batch.some((p) => p.id === post.id))).to.be.true;
   });
 
+  it("parent-scoped paginateSubscribe() fires when a child is created via create(..., { parent })", async () => {
+    const channel = await TestChannel.create(perspective, { name: "sub-chan-batch" });
+
+    const pages: Array<{ results: TestPost[]; totalCount?: number }> = [];
+    const builder = TestPost.query(perspective)
+      .parent(channel.id, TestChannel, { field: "posts" })
+      .order({ createdAt: "DESC" });
+
+    const initialPage = await builder.paginateSubscribe(10, 1, (page) => pages.push(page));
+    expect(initialPage.results).to.have.length(0);
+    expect(initialPage.totalCount).to.equal(0);
+
+    // Give the subscription a brief moment to finish wiring up before the batch commit.
+    await new Promise((r) => setTimeout(r, 500));
+
+    const post = await TestPost.create(
+      perspective,
+      { title: "Batch Child", body: "created via parent" },
+      { parent: { model: TestChannel, id: channel.id, field: "posts" } },
+    );
+
+    await waitUntil(
+      () => pages.some((page) => page.results.some((p) => p.id === post.id) && page.totalCount === 1),
+      8000,
+      "paginated parent subscription re-fires after child create() batch commit",
+    );
+    builder.dispose();
+
+    const latest = pages.at(-1)!;
+    expect(latest.results.some((p) => p.id === post.id)).to.be.true;
+    expect(latest.totalCount).to.equal(1);
+  });
+
   it("parent-scoped subscribe() fires when a child is unlinked from the parent", async () => {
     const channel = await TestChannel.create(perspective, { name: "sub-chan-2" });
     const post = await TestPost.create(perspective, { title: "Removable", body: "" });

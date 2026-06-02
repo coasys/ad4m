@@ -1,11 +1,10 @@
 import { DID } from "../DID";
 import { PerspectiveExpression } from "../perspectives/Perspective";
-import { InputType, Field, ObjectType } from "type-graphql";
 
 /**
  * # AD4M Language — client-side types
  *
- * This file only contains the client-visible types that the AD4M GraphQL
+ * This file only contains the client-visible types that the AD4M REST
  * API exposes on top of a running Language — interaction metadata, online
  * agent records, and the telepresence-signal callback shape.
  *
@@ -25,28 +24,16 @@ import { InputType, Field, ObjectType } from "type-graphql";
 //
 // Languages optionally publish a list of user-invocable actions per
 // Expression ("interactions"). The runtime surfaces these to UIs via
-// GraphQL, which is why `InteractionParameter` / `InteractionMeta` /
-// `InteractionCall` need the type-graphql decorators — they cross the
-// GraphQL boundary as first-class objects.
+// the API as first-class objects.
 
-@ObjectType()
 export class InteractionParameter {
-    @Field()
     name: string;
-
-    @Field()
     type: string;
 }
 
-@ObjectType()
 export class InteractionMeta {
-    @Field()
     label: string;
-
-    @Field()
     name: string;
-
-    @Field(() => [InteractionParameter])
     parameters: InteractionParameter[];
 }
 
@@ -63,12 +50,8 @@ export interface Interaction {
     execute(parameters: object): Promise<string | null>;
 }
 
-@InputType()
 export class InteractionCall {
-    @Field()
     name: string;
-
-    @Field()
     parametersStringified: string;
 
     public get parameters(): object {
@@ -83,12 +66,8 @@ export class InteractionCall {
 
 // ----- Telepresence ----------------------------------------------------------
 
-@ObjectType()
 export class OnlineAgent {
-    @Field()
     did: DID;
-
-    @Field()
     status: PerspectiveExpression;
 }
 

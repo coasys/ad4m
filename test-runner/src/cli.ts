@@ -155,7 +155,7 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
       'run',
       '--admin-credential', global.ad4mToken,
       '--app-data-path', relativePath,
-      '--gql-port', port.toString(),
+      '--port', port.toString(),
       '--language-language-only', 'false',
     ])
 
@@ -171,7 +171,7 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
     })
 
     child.stdout.on('data', async (data) => {
-      if (data.toString().includes('GraphQL server started, Unlock the agent to start holohchain') || data.toString().includes('listening on http://127.0.0.1')) {
+      if (data.toString().includes('listening on http://127.0.0.1')) {
         const ad4mClient = await buildAd4mClient(port);
 
         const generateAgentResponse = await ad4mClient.agent.generate('123456789');

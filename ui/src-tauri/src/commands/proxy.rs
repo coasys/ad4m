@@ -16,7 +16,7 @@ pub async fn login_proxy(
 ) -> Result<(), String> {
     log::info!("Login proxy server with did: {}", subdomain);
 
-    let graphql_port = app_state.graphql_port;
+    let port = app_state.port;
     let req_credential = &app_state.req_credential;
     let subdomain = format_subdomain(&subdomain);
 
@@ -33,10 +33,15 @@ pub async fn login_proxy(
             format!("Set proxy error:  {:?}", err)
         })?;
 
-    let ad4m_client = Ad4mClient::new(
-        format!("{}:{}/graphql", AD4M_SERVER, graphql_port),
+    let ad4m_client = Ad4mClient::connect(
+        format!("{}:{}", AD4M_SERVER, port),
         req_credential.to_string(),
-    );
+    )
+    .await
+    .map_err(|err| {
+        log::error!("Error connecting to executor: {:?}", err);
+        format!("Set proxy error: {:?}", err)
+    })?;
     let signed_message = ad4m_client.agent.sign_message(rand).await.map_err(|err| {
         log::error!("Error happend when agent sign message: {:?}", err);
         format!("Set proxy error:  {:?}", err)
@@ -44,7 +49,10 @@ pub async fn login_proxy(
 
     let credential = reqwest::get(format!(
         "{}/login/verify?did={}&signature={}&publicKey={}",
-        PROXY_SERVER, subdomain, signed_message.signature, signed_message.public_key
+        PROXY_SERVER,
+        subdomain,
+        signed_message.signature.unwrap_or_default(),
+        signed_message.public_key.unwrap_or_default()
     ))
     .await
     .map_err(|err| {
@@ -78,7 +86,7 @@ pub async fn setup_proxy(
 ) -> Result<String, String> {
     log::info!("Setup proxy: {}", subdomain);
 
-    let graphql_port = app_state.graphql_port;
+    let port = app_state.port;
     let (notify_shutdown, _) = broadcast::channel(1);
     let subdomain = format_subdomain(&subdomain);
 
@@ -88,7 +96,7 @@ pub async fn setup_proxy(
         Some(PROXY_SERVER),
         Some(&subdomain),
         None,
-        graphql_port,
+        port,
         notify_shutdown.clone(),
         5,
         credential.clone(),
@@ -133,4 +141,40 @@ pub fn stop_proxy(proxy: State<'_, ProxyState>) {
 
 fn format_subdomain(subdomain: &str) -> String {
     subdomain.replace("did:key:", "")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_subdomain_strips_did_key_prefix() {
+        let result = format_subdomain("did:key:z6MkweDLCqTEeM3DxR6BHqWRn3q5tW7LmxSJR");
+        assert_eq!(result, "z6MkweDLCqTEeM3DxR6BHqWRn3q5tW7LmxSJR");
+    }
+
+    #[test]
+    fn format_subdomain_no_prefix_unchanged() {
+        let result = format_subdomain("z6MkweDLCqTEeM3DxR6BHqWRn3q5tW7LmxSJR");
+        assert_eq!(result, "z6MkweDLCqTEeM3DxR6BHqWRn3q5tW7LmxSJR");
+    }
+
+    #[test]
+    fn format_subdomain_empty_string() {
+        let result = format_subdomain("");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn format_subdomain_only_prefix() {
+        let result = format_subdomain("did:key:");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn format_subdomain_multiple_occurrences() {
+        // If somehow "did:key:" appears multiple times, all are stripped
+        let result = format_subdomain("did:key:abc:did:key:xyz");
+        assert_eq!(result, "abc:xyz");
+    }
 }

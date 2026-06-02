@@ -25,7 +25,7 @@ use super::byte_array::ByteArray;
 use super::capability::{get_capabilities, Capability};
 use super::LanguageController;
 use crate::{
-    graphql::graphql_types::{OnlineAgent, PerspectiveExpression},
+    types::{OnlineAgent, PerspectiveExpression},
     types::{Perspective, PerspectiveDiff},
 };
 use base64::prelude::*;

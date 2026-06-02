@@ -21,36 +21,13 @@ ad4m-executor run
 Then use `Ad4mClient` to connect to and work with the running ad4m-executor like this:
 ```
 npm install --save @coasys/ad4m
-npm install --save-exact @apollo/client@3.7.10
-npm install --save graphql-ws
-npm install --save ws
 ```
 
 In your code:
 ```js
 import { Ad4mClient } from '@coasys/ad4m'
-import { ApolloClient, InMemoryCache } from "@apollo/client/core";
-import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
-import { createClient } from 'graphql-ws';
-import Websocket from "ws";
 
-const wsLink = new GraphQLWsLink(createClient({
-    url: `ws://localhost:4000/graphql`,
-    webSocketImpl: Websocket
-}));
-
-const apolloClient = new ApolloClient({
-    link: wsLink,
-    cache: new InMemoryCache(),
-    defaultOptions: {
-        watchQuery: {
-            fetchPolicy: 'network-only',
-            nextFetchPolicy: 'network-only'
-        },
-    }
-});
-
-ad4mClient = new Ad4mClient(apolloClient)
+const ad4mClient = new Ad4mClient("http://localhost:12000")
 ```
 
 ### Unlocking / initializing the agent

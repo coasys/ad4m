@@ -14,14 +14,14 @@ use deno_core::error::AnyError;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crate::graphql::graphql_types::{
-    DecoratedNeighbourhoodExpression, ExceptionInfo, ExceptionType, InteractionCall,
-    InteractionMeta, LanguageLanguageInput, LanguageMeta, LanguageRef, Neighbourhood,
-};
 use crate::holochain_service::maybe_get_holochain_service;
 use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
 use crate::runtime_service::RuntimeService;
 use crate::types::Address;
+use crate::types::{
+    DecoratedNeighbourhoodExpression, ExceptionInfo, ExceptionType, InteractionCall,
+    InteractionMeta, LanguageLanguageInput, LanguageMeta, LanguageRef, Neighbourhood,
+};
 use crate::{
     agent::{did, did_for_context, signing_key_id_for_context, AgentContext},
     utils::{language_storage_directory, languages_directory},
@@ -358,7 +358,7 @@ impl LanguageController {
         // Resolve system aliases ("did", "lang", "neighbourhood",
         // "perspective") once at the bottom so every caller — including
         // helpers like get_language_icons that were written to accept
-        // whatever the GraphQL resolver passed in — works with the real
+        // whatever the REST handler passed in — works with the real
         // content hash that the runtimes map is keyed by.
         let resolved = {
             let aliases = self.language_aliases.lock().await;
@@ -2018,7 +2018,7 @@ impl LanguageController {
                 // naked `"{}"` interpolation let any quote/backslash/newline
                 // in `prop` break out of the JS string — either syntax
                 // erroring the isolate or (worse) allowing injection from a
-                // GraphQL caller. `serde_json::to_string` produces a valid
+                // API caller. `serde_json::to_string` produces a valid
                 // JS string literal for any Unicode input.
                 let prop_literal =
                     serde_json::to_string(prop).unwrap_or_else(|_| "\"\"".to_string());
@@ -2211,7 +2211,7 @@ impl LanguageController {
 
     /// Get cached language name for an address
     pub async fn get_language_name(&self, address: &str) -> String {
-        // Resolve system aliases so GraphQL callers asking for "did"
+        // Resolve system aliases so REST callers asking for "did"
         // get the same result as callers asking for the real hash.
         let resolved = {
             let aliases = self.language_aliases.lock().await;
@@ -2547,7 +2547,8 @@ impl LanguageController {
         content: JsonValue,
         agent_context: &AgentContext,
     ) -> Result<String, LanguageError> {
-        // Handle literal language
+        // Handle literal language — create a signed expression envelope so
+        // provenance (author, timestamp, proof) is embedded in the URL.
         if lang_address == "literal" {
             let signed_expr = crate::agent::create_signed_expression(content, agent_context)
                 .map_err(|e| LanguageError::RuntimeError {
@@ -2667,7 +2668,7 @@ impl LanguageController {
         // `interactions` is optional in the flat Language interface
         // (spec §5.7) — both JS and Rust ALDK languages may omit it. The
         // dispatcher must not crash when it is absent; return an empty
-        // list instead so GraphQL callers see "no interactions" rather
+        // list instead so API callers see "no interactions" rather
         // than an opaque TypeError from deep inside the v8 isolate.
         // Tolerate three degenerate but realistic interactions() shapes:
         //   * absent (handled by the typeof guard)
@@ -2719,7 +2720,7 @@ impl LanguageController {
             serde_json::to_string(&expression_address).unwrap_or_else(|_| "\"\"".to_string());
         let escaped_name = serde_json::to_string(&call.name).unwrap_or_else(|_| "\"\"".to_string());
 
-        // `parameters_stringified` crosses the GraphQL boundary as a raw
+        // `parameters_stringified` crosses the REST boundary as a raw
         // string and is interpolated into a JS script below. Previously
         // the field was trusted as "a JS argument expression" and spliced
         // in unchecked, which was a script-injection vector: a caller
@@ -2730,7 +2731,7 @@ impl LanguageController {
         // interpolation. JSON is a strict subset of JS expressions, so
         // any string that parses cleanly as JSON is safe to splice into
         // a JS expression position, and a rejection error here gives the
-        // GraphQL caller a clear signal that the shape is wrong.
+        // REST caller a clear signal that the shape is wrong.
         //
         // The canonical shape is a single JSON object/array that the
         // language's execute/expressionInteract receives as its sole
@@ -2806,7 +2807,7 @@ impl LanguageController {
             Ok(None)
         } else {
             // The result is JSON-encoded (via JSON.stringify). If it's a JSON string,
-            // unwrap the outer quotes so the GraphQL layer returns the raw value.
+            // unwrap the outer quotes so the REST layer returns the raw value.
             if let Ok(serde_json::Value::String(s)) =
                 serde_json::from_str::<serde_json::Value>(trimmed)
             {

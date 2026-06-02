@@ -1017,7 +1017,7 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
         const domain = await client.runtime.tlsDomain();
         if (domain) {
           const port = tlsConfig?.tls_port || 12001;
-          const url = `wss://${domain}:${port}/graphql`;
+          const url = `https://${domain}:${port}`;
           setHostReg((prev) =>
             prev.hostUrl ? prev : { ...prev, hostUrl: url },
           );
@@ -2451,7 +2451,7 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
                         onChange={(e) =>
                           handleHostRegChange("hostUrl", e.target.value)
                         }
-                        placeholder="wss://your-domain.com:12001/graphql"
+                        placeholder="https://your-domain.com:12001"
                         style={{
                           fontSize: "15px",
                           width: "100%",
