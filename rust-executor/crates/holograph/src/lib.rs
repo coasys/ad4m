@@ -11,6 +11,8 @@
 
 pub mod config;
 pub mod envelope;
+pub mod op_store;
 
 pub use config::{ArcPolicy, LocFnPolicy, SpaceConfig, ValidationRegime};
 pub use envelope::{EnvelopeError, OpEnvelope};
+pub use op_store::{EnvelopeDecoder, KvOpStore};
