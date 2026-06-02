@@ -18,8 +18,8 @@ fn merge<Retriever: PerspectiveDiffRetreiver>(
     debug!("===PerspectiveDiffSync.merge(): Function start");
     let fn_start = get_now()?.time();
 
-    let latest_diff = Retriever::get::<PerspectiveDiffEntryReference>(latest.clone())?;
-    let current_diff = Retriever::get::<PerspectiveDiffEntryReference>(current.clone())?;
+    let latest_diff = Retriever::get(latest.clone())?;
+    let current_diff = Retriever::get(current.clone())?;
     //Create the merge diff
     let merge_diff = PerspectiveDiff {
         additions: vec![],

@@ -3,7 +3,7 @@ use std::str::FromStr;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use hdk::prelude::*;
 use perspective_diff_sync_integrity::{
-    Anchor, EntryTypes, HashReference, LinkTypes, LocalHashReference,
+    Anchor, EntryTypes, HashReference, LinkTypes, LocalHashReference, PerspectiveDiffEntryReference,
 };
 
 use super::PerspectiveDiffRetreiver;
@@ -14,25 +14,21 @@ use crate::Hash;
 pub struct HolochainRetreiver;
 
 impl PerspectiveDiffRetreiver for HolochainRetreiver {
-    fn get<T>(hash: Hash) -> SocialContextResult<T>
-    where
-        T: TryFrom<SerializedBytes, Error = SerializedBytesError>,
-    {
+    fn get(hash: Hash) -> SocialContextResult<PerspectiveDiffEntryReference> {
         get(hash, GetOptions::network())?
             .ok_or(SocialContextError::InternalError(
                 "HolochainRetreiver: Could not find entry",
             ))?
             .entry()
-            .to_app_option::<T>()?
+            .to_app_option::<PerspectiveDiffEntryReference>()?
             .ok_or(SocialContextError::InternalError(
                 "Expected element to contain app entry data",
             ))
     }
 
-    fn get_with_timestamp<T>(hash: Hash) -> SocialContextResult<(T, DateTime<Utc>)>
-    where
-        T: TryFrom<SerializedBytes, Error = SerializedBytesError>,
-    {
+    fn get_with_timestamp(
+        hash: Hash,
+    ) -> SocialContextResult<(PerspectiveDiffEntryReference, DateTime<Utc>)> {
         let element = get(hash, GetOptions::network())?;
         let element = element.ok_or(SocialContextError::InternalError(
             "HolochainRetreiver: Could not find entry",
@@ -45,22 +41,15 @@ impl PerspectiveDiffRetreiver for HolochainRetreiver {
             Utc,
         );
         let entry = entry
-            .to_app_option::<T>()?
+            .to_app_option::<PerspectiveDiffEntryReference>()?
             .ok_or(SocialContextError::InternalError(
                 "Expected element to contain app entry data",
             ))?;
         Ok((entry, timestamp))
     }
 
-    fn create_entry<I, E: std::fmt::Debug, E2>(entry: I) -> SocialContextResult<Hash>
-    where
-        ScopedEntryDefIndex: for<'a> TryFrom<&'a I, Error = E2>,
-        EntryVisibility: for<'a> From<&'a I>,
-        Entry: TryFrom<I, Error = E>,
-        WasmError: From<E>,
-        WasmError: From<E2>,
-    {
-        create_entry::<I, E, E2>(entry).map_err(|e| SocialContextError::Wasm(e))
+    fn create_entry(entry: EntryTypes) -> SocialContextResult<Hash> {
+        create_entry(entry).map_err(|e| SocialContextError::Wasm(e))
     }
 
     fn current_revision() -> SocialContextResult<Option<LocalHashReference>> {

@@ -94,20 +94,23 @@ impl ChunkedDiffs {
         for (idx, hash) in hashes.iter().enumerate() {
             debug!(
                 "ChunkedDiffs::from_entries: Loading chunk {}/{} (hash: {:?})",
-                idx + 1, hashes.len(), hash
+                idx + 1,
+                hashes.len(),
+                hash
             );
 
             // NO RETRY LOOP - fail fast if chunks aren't available
             // Validation dependencies ensure chunks arrive before parent entry validates
             // If this fails, the caller will retry the entire operation later
-            let diff_entry = match Retreiver::get::<PerspectiveDiffEntryReference>(hash.clone()) {
+            let diff_entry = match Retreiver::get(hash.clone()) {
                 Ok(entry) => {
                     debug!(
                         "ChunkedDiffs::from_entries: ✓ Chunk {}/{} retrieved successfully",
-                        idx + 1, hashes.len()
+                        idx + 1,
+                        hashes.len()
                     );
                     entry
-                },
+                }
                 Err(e) => {
                     warn!(
                         "ChunkedDiffs::from_entries: ✗ FAILED to retrieve chunk {}/{} (hash: {:?}) - Error: {:?}",
@@ -129,7 +132,10 @@ impl ChunkedDiffs {
             let diff = load_diff_from_entry::<Retreiver>(&diff_entry)?;
             debug!(
                 "ChunkedDiffs::from_entries: Chunk {}/{} processed - additions: {}, removals: {}",
-                idx + 1, hashes.len(), diff.additions.len(), diff.removals.len()
+                idx + 1,
+                hashes.len(),
+                diff.additions.len(),
+                diff.removals.len()
             );
             diffs.push(diff);
         }
@@ -181,7 +187,8 @@ pub fn load_diff_from_entry<Retriever: PerspectiveDiffRetreiver>(
         // Return inline diff
         debug!(
             "load_diff_from_entry: Entry is INLINE - additions: {}, removals: {}",
-            entry.diff.additions.len(), entry.diff.removals.len()
+            entry.diff.additions.len(),
+            entry.diff.removals.len()
         );
         Ok(entry.diff.clone())
     }
