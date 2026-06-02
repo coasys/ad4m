@@ -377,12 +377,23 @@ export default class Ad4mConnect extends EventTarget {
               removeLocal('ad4m-token');
             }
 
+            // Use the verified origin of the AD4M_CONFIG sender so postMessage
+            // frames are never delivered to an unexpected parent origin.
+            // Refuse to proceed if the origin is opaque (sandboxed iframe without
+            // allow-same-origin) — falling back to '*' would re-introduce the
+            // wildcard vulnerability for sensitive JSON-RPC frames.
+            if (!event.origin || event.origin === 'null') {
+              throw new Error('AD4M proxy mode requires a non-opaque parent origin. Ensure the host iframe is not sandboxed without allow-same-origin.');
+            }
+            const parentOrigin = event.origin;
+            const wsImpl = (url: string) => new PostMessageWebSocket(url, parentOrigin);
+
             this.notifyConnectionChange('connecting');
             this.ad4mClient = new Ad4mClient(
               'http://proxy', // URL ignored by PostMessageWebSocket
               normalizedToken,
               false,          // defer subscriptions until auth confirmed
-              { webSocketImpl: PostMessageWebSocket as unknown as new (url: string) => WebSocket }
+              { webSocketImpl: wsImpl as unknown as new (url: string) => WebSocket }
             );
             this.notifyConnectionChange('connected');
             await this.checkAuth();

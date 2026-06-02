@@ -24,11 +24,13 @@ export class PostMessageWebSocket {
 
     private readonly _messageHandler: (e: MessageEvent) => void
     private _connectTimeout: ReturnType<typeof setTimeout> | null = null
+    private readonly _targetOrigin: string
 
     static readonly CONNECT_TIMEOUT_MS = 30_000
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    constructor(_url: string) {
+    constructor(_url: string, targetOrigin: string) {
+        this._targetOrigin = targetOrigin
         this._messageHandler = (e: MessageEvent) => {
             if (e.source !== window.parent) return
 
@@ -65,7 +67,7 @@ export class PostMessageWebSocket {
         }
 
         window.addEventListener('message', this._messageHandler)
-        window.parent.postMessage({ type: 'AD4M_PROXY_WS_CONNECT' }, '*')
+        window.parent.postMessage({ type: 'AD4M_PROXY_WS_CONNECT' }, this._targetOrigin)
 
         this._connectTimeout = setTimeout(() => {
             this._connectTimeout = null
@@ -84,12 +86,12 @@ export class PostMessageWebSocket {
     }
 
     send(data: string): void {
-        window.parent.postMessage({ type: 'AD4M_PROXY_WS_SEND', data }, '*')
+        window.parent.postMessage({ type: 'AD4M_PROXY_WS_SEND', data }, this._targetOrigin)
     }
 
     close(code?: number, reason?: string): void {
         this.readyState = 2 // CLOSING
-        window.parent.postMessage({ type: 'AD4M_PROXY_WS_CLOSE', code, reason }, '*')
+        window.parent.postMessage({ type: 'AD4M_PROXY_WS_CLOSE', code, reason }, this._targetOrigin)
         window.removeEventListener('message', this._messageHandler)
     }
 }
