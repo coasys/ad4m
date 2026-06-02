@@ -468,17 +468,14 @@ export default class Ad4mConnect extends EventTarget {
     
     // Request AD4M config from parent window
     console.log('[Ad4m Connect] Requesting AD4M config from parent window');
-    // Determine the actual parent origin for postMessage targeting.
-    // Prefer document.referrer (the real parent), validated against allowedOrigins.
-    // Fall back to '*' only when no origin information is available.
-    let parentOrigin = '*';
-    const referrerOrigin = document.referrer ? new URL(document.referrer).origin : null;
-    if (referrerOrigin && this.options.allowedOrigins?.includes(referrerOrigin)) {
-      parentOrigin = referrerOrigin;
-    } else if (this.options.allowedOrigins && this.options.allowedOrigins.length === 1) {
-      parentOrigin = this.options.allowedOrigins[0];
-    }
-    window.parent.postMessage({ type: 'REQUEST_AD4M_CONFIG' }, parentOrigin);
+    // REQUEST_AD4M_CONFIG carries no sensitive data — it is a pure handshake
+    // signal asking the parent to respond with credentials. We use '*' because
+    // at this point we don't yet know which of the allowedOrigins the parent is
+    // actually at (e.g. WE dev:web and dev:electron run on different ports, both
+    // listed in allowedOrigins). Security is enforced on the *incoming* side:
+    // the AD4M_CONFIG listener below validates event.origin against
+    // allowedOrigins before accepting any credentials.
+    window.parent.postMessage({ type: 'REQUEST_AD4M_CONFIG' }, '*');
   }
 
   // Local authentication
