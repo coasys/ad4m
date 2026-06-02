@@ -12,7 +12,9 @@
 pub mod config;
 pub mod envelope;
 pub mod op_store;
+pub mod retriever_kitsune;
 
 pub use config::{ArcPolicy, LocFnPolicy, SpaceConfig, ValidationRegime};
 pub use envelope::{EnvelopeError, OpEnvelope};
 pub use op_store::{EnvelopeDecoder, KvOpStore};
+pub use retriever_kitsune::{KitsuneRetreiver, KitsuneRetreiverState};
