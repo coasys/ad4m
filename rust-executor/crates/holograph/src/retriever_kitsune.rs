@@ -189,6 +189,15 @@ impl KitsuneRetreiver {
         *slot = None;
     }
 
+    /// Reset the global state. Public escape hatch for integration tests
+    /// in this crate's `tests/` directory, which can't reach the `#[cfg(test)]`
+    /// helper. Don't call this from production code.
+    #[doc(hidden)]
+    pub fn __clear_state_for_tests__() {
+        let mut slot = STATE.write().expect("STATE rwlock poisoned");
+        *slot = None;
+    }
+
     fn state() -> Arc<KitsuneRetreiverState> {
         STATE
             .read()
