@@ -160,12 +160,10 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         let where_filter = parse_where_filter_literal(first["whereFilter"].as_str());
         let where_predicates = parse_where_predicates_literal(first["wherePredicates"].as_str());
         let filter_enabled = parse_bool_literal_target(first["filterEnabled"].as_str());
-        let transform = first["transform"]
-            .as_str()
-            .and_then(|raw| {
-                let json_str = decode_literal_string_target(raw);
-                serde_json::from_str::<super::types::TransformExpression>(&json_str).ok()
-            });
+        let transform = first["transform"].as_str().and_then(|raw| {
+            let json_str = decode_literal_string_target(raw);
+            serde_json::from_str::<super::types::TransformExpression>(&json_str).ok()
+        });
 
         let min_count = parse_count_literal(first["minCount"].as_str());
         let max_count = parse_count_literal(first["maxCount"].as_str());
