@@ -73,38 +73,56 @@ export async function runSetup(
 
   // ── Branch routing ──
 
-  if (running) {
-    // Branch B: Executor already running
-    if (email) {
-      // Email/password login requires the MCP surface (signup +
-      // verify_email_code tools live there). If we only detected the executor
-      // via REST, MCP is disabled and we can't run this flow.
-      if (running !== "mcp") {
-        logger.error(
-          "[ad4m-setup] Email login requires MCP, but executor was detected " +
-            "via REST. Enable MCP on the executor or use the capability code flow.",
-        );
-        printConfigSnippet(logger, "external", {
-          mcpEndpoint: endpoint,
-          executorUrl,
-          token: "<mcp-not-enabled>",
-          wakeToken,
-        });
-        return;
-      }
-      // Password is prompted inside setupExternalModeViaEmail when needed
-      await setupExternalModeViaEmail(
-        logger,
-        endpoint,
-        email,
-        password,
-        wakeToken,
-        executorUrl,
+  // --email is an explicit intent signal: the user is asking for the
+  // multi-user email/password login flow against the given executor URL.
+  // Honour it regardless of whether a local binary exists — otherwise the
+  // managed-mode fall-through below silently overrides the user's request.
+  if (email) {
+    if (!running) {
+      logger.error(
+        `[ad4m-setup] --email was provided but no executor is reachable at ${endpoint}. ` +
+          `Check that --url is correct (passed: ${executorUrl}) and that the remote ` +
+          `executor exposes its MCP endpoint.`,
       );
-    } else {
-      // Default: capability request flow (6-digit code from launcher UI)
-      await setupExternalMode(logger, endpoint, wakeToken, running, executorUrl);
+      printConfigSnippet(logger, "external", {
+        mcpEndpoint: endpoint,
+        executorUrl,
+        token: "<no-executor-reachable>",
+        wakeToken,
+      });
+      return;
     }
+    // Email/password login requires the MCP surface (signup +
+    // verify_email_code tools live there). REST-only detection means MCP
+    // is disabled and we can't run this flow.
+    if (running !== "mcp") {
+      logger.error(
+        "[ad4m-setup] Email login requires MCP, but executor was detected " +
+          "via REST. Enable MCP on the executor or use the capability code flow.",
+      );
+      printConfigSnippet(logger, "external", {
+        mcpEndpoint: endpoint,
+        executorUrl,
+        token: "<mcp-not-enabled>",
+        wakeToken,
+      });
+      return;
+    }
+    // Password is prompted inside setupExternalModeViaEmail when needed
+    await setupExternalModeViaEmail(
+      logger,
+      endpoint,
+      email,
+      password,
+      wakeToken,
+      executorUrl,
+    );
+    return;
+  }
+
+  if (running) {
+    // Branch B: Executor already running, no --email — capability code flow
+    await setupExternalMode(logger, endpoint, wakeToken, running, executorUrl);
   } else if (binaryPath) {
     // Branch A: No running executor, binary found
     await setupManagedMode(logger, binaryPath, endpoint, executorUrl, wakeToken);

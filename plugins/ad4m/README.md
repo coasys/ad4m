@@ -83,10 +83,38 @@ The setup detects your environment and picks the right path:
 
 | Scenario | What happens |
 |----------|-------------|
+| `--email` is provided | Connects to the URL given by `--url`, runs the multi-user email/password login flow |
 | No executor binary found | Downloads it automatically, then runs managed setup |
 | Binary found, no running executor | Starts executor, generates agent, prints managed config |
-| Executor already running | Connects to it, requests capabilities via JWT, prints external config |
+| Executor already running (no `--email`) | Connects to it, requests capabilities via JWT, prints external config |
 | Existing agent data in `~/.ad4m` | Asks you to provide your existing passphrase in the config |
+
+### Email login mode (multi-user executor)
+
+Use this when connecting to a hosted multi-user `ad4m-executor` (for example `https://marvin.ad4m.dev`) that supports email/password signup and login.
+
+```bash
+# Existing account — password prompted on stdin
+openclaw ad4m-setup --url https://marvin.ad4m.dev --email you@example.com
+
+# Or pass the password via env var (no prompt)
+AD4M_PASSWORD='your-password' \
+  openclaw ad4m-setup --url https://marvin.ad4m.dev --email you@example.com
+
+# Or via CLI flag
+openclaw ad4m-setup --url https://marvin.ad4m.dev --email you@example.com --password 'your-password'
+```
+
+`--url` is the executor's base URL; the MCP endpoint is derived as `<url>/mcp`. Override with `--endpoint` if it lives elsewhere.
+
+Flow:
+
+1. The plugin probes `<url>/mcp` to verify the executor is reachable and MCP is enabled.
+2. It calls `request_login_verification(email)`. If the account exists, an email code is sent. If not, it calls `signup(email, password)` instead.
+3. You enter the 6-digit code from your email. The plugin exchanges it for a JWT via `verify_email_code`.
+4. Setup prints an `external`-mode config snippet containing the JWT — copy it into your `openclaw.json`.
+
+Passing `--email` is treated as explicit intent for this mode: setup will not silently fall back to managed mode if the URL is unreachable; it will surface a clear error instead.
 
 ### External mode
 

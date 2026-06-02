@@ -2173,6 +2173,58 @@ describe("ad4mPlugin", () => {
     // Should NOT have attempted to start executor
     expect(mockSpawn).not.toHaveBeenCalled();
   }, 10000);
+
+  it("runSetup respects --email intent and does not fall back to managed mode when probe fails", async () => {
+    // Setup: probe fails (no executor reachable at the URL), but a local
+    // ad4m-executor binary exists. Without the email-intent guard this would
+    // silently fall through to managed mode and ignore the user's --email/--url.
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const realExistsSync = fs.existsSync;
+    const realAccessSync = fs.accessSync;
+    vi.spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
+      const s = p.toString();
+      if (s.endsWith("/.ad4m")) return false;
+      return realExistsSync(s);
+    });
+    vi.spyOn(fs, "accessSync").mockImplementation(
+      (p: fs.PathLike, mode?: number) => {
+        const s = p.toString();
+        if (s.endsWith("/ad4m-executor")) return; // binary present
+        return realAccessSync(s, mode);
+      },
+    );
+
+    const logger = makeMockLogger();
+    const { runSetup } = await import("./setup");
+    await runSetup(
+      {},
+      logger,
+      "https://marvin.ad4m.dev/mcp",
+      "https://marvin.ad4m.dev",
+      "alice@example.com",
+      "secret",
+    );
+
+    const errorMessages = logger.error.mock.calls.map((c: any[]) => c[0]);
+    const infoMessages = logger.info.mock.calls.map((c: any[]) => c[0]);
+
+    // Must surface a clear error pointing at --url, not silently set up managed mode
+    expect(
+      errorMessages.some(
+        (m: string) =>
+          m.includes("--email") &&
+          m.includes("no executor is reachable") &&
+          m.includes("https://marvin.ad4m.dev/mcp"),
+      ),
+    ).toBe(true);
+
+    // Must not have entered the managed-mode flow
+    expect(
+      infoMessages.some((m: string) => m.includes("Setting up managed mode")),
+    ).toBe(false);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  }, 10000);
 });
 
 // ============================================================================
