@@ -60,8 +60,8 @@ export function holographCreateNeighborhood(spaceId, storageDir) {
     __calls.push(["createNeighborhood", spaceId, storageDir]);
     return Promise.resolve(42);
 }
-export function holographCommit(handle, b64) {
-    __calls.push(["commit", handle, b64]);
+export function holographCommit(handle, diff) {
+    __calls.push(["commit", handle, diff]);
     return Promise.resolve("opid-base64");
 }
 export function holographRender(handle) {

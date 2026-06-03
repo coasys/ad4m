@@ -68,28 +68,33 @@ declare module "ad4m:host" {
     // if the runtime hasn't installed the delegate. See the holograph
     // spike's SPIKE.md §2.2 Step 5 for the contract.
     //
-    // EmittedOp shape returned by holographNextEmitted (string fields
-    // are base64-encoded raw bytes; ms timestamp is an i64-compatible
-    // number; JS number precision is fine for sub-millisecond
-    // timestamps from the Step-4 envelope decoder).
+    // WireDiff shape — what Languages hand to holographCommit and
+    // receive on emitted ops. The Rust substrate owns CBOR envelope
+    // wrap+unwrap (Step 6e), so JS deals with typed diff data on
+    // both ends.
+    export interface WireDiff {
+        additions: any[];
+        removals: any[];
+    }
+    // EmittedOp shape returned by holographNextEmitted.
     export interface EmittedOpWire {
         op_id_b64: string;
         created_at_ms: number;
-        envelope_b64: string;
+        diff: WireDiff;
     }
     /** Open or create a neighborhood-scoped substrate, returning a
      *  numeric handle threaded through every other holograph call. */
     export function holographCreateNeighborhood(spaceId: string, storageDir: string): Promise<number>;
-    /** Commit a locally-authored envelope (base64-encoded CBOR bytes).
+    /** Commit a locally-authored diff. The Rust side wraps it in an
+     *  OpEnvelope (CBOR + timestamp + signature) before storing.
      *  Returns the op-id base64. */
-    export function holographCommit(handle: number, envelopeB64: string): Promise<string>;
+    export function holographCommit(handle: number, diff: WireDiff): Promise<string>;
     /** Drive the algorithm-crate render entry point. Returns a JSON-
      *  shaped Perspective `{ links: [...] }`. */
     export function holographRender(handle: number): Promise<{ links: any[] }>;
-    /** Pop the next-available EmittedOp for the handle, or null if the
-     *  channel is currently drained. JS subscribers loop on this — no
-     *  setInterval/setTimeout polling required because the underlying
-     *  op awaits the mpsc receiver inside Rust. */
+    /** Pop the next-available EmittedOp for the handle. Awaits the
+     *  underlying Rust-side mpsc receiver, so no JS-side polling is
+     *  needed. Returns null only on channel close. */
     export function holographNextEmitted(handle: number): Promise<EmittedOpWire | null>;
     /** Register a local agent for the neighborhood (= `local_agent_join`
      *  on the K2 space). Returns the K2 URL this node is reachable at. */

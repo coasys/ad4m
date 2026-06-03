@@ -76,6 +76,6 @@ export {
     holographCloseNeighborhood,
 } from "ad4m:host";
 
-// Re-export the EmittedOp wire shape so Language modules can name it
-// without importing from "ad4m:host" twice.
-export type { EmittedOpWire } from "ad4m:host";
+// Re-export the EmittedOp + WireDiff types so Language modules can
+// name them without importing from "ad4m:host" twice.
+export type { EmittedOpWire, WireDiff } from "ad4m:host";
