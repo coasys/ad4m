@@ -20,7 +20,7 @@ use petgraph::{
     graph::{DiGraph, Graph, NodeIndex, UnGraph},
 };
 
-use crate::chunked_diffs::ChunkedDiffs;
+use crate::chunked_diffs::load_diff_aggregated;
 use crate::diff_types::{null_node, Hash, PerspectiveDiff, PerspectiveDiffEntryReference};
 use crate::errors::{AlgoError, AlgoResult};
 use crate::retriever::WorkspaceRetriever;
@@ -173,26 +173,7 @@ impl Workspace {
         // as chunks, materialize them before inserting into entry_map so
         // downstream render() / squashed_diff() sees the full payload.
         let resolved_diff = if current_diff.is_chunked() {
-            let chunk_hashes = current_diff.diff_chunks.clone().unwrap_or_default();
-            let mut chunks: Vec<PerspectiveDiff> = Vec::with_capacity(chunk_hashes.len());
-            for h in &chunk_hashes {
-                let entry = R::get_p_diff_reference(h)?;
-                // The chunk may itself be inline or further-chunked —
-                // recurse via ChunkedDiffs's aggregation path.
-                let inline = if entry.is_chunked() {
-                    // Nested chunking: fan out + flatten.
-                    let mut subchunks: Vec<PerspectiveDiff> = Vec::new();
-                    for sub_h in entry.diff_chunks.unwrap_or_default() {
-                        let sub_entry = R::get_p_diff_reference(&sub_h)?;
-                        subchunks.push(sub_entry.diff);
-                    }
-                    ChunkedDiffs::from_chunks(u16::MAX, subchunks).into_aggregated_diff()
-                } else {
-                    entry.diff
-                };
-                chunks.push(inline);
-            }
-            let loaded = ChunkedDiffs::from_chunks(u16::MAX, chunks).into_aggregated_diff();
+            let loaded = load_diff_aggregated::<R>(&current_diff)?;
             PerspectiveDiffEntryReference {
                 diff: loaded,
                 parents: current_diff.parents.clone(),
