@@ -35,6 +35,7 @@ use holograph::{ArcPolicy, KitsuneRetreiver, KitsuneRetreiverState};
 use kitsune2_api::SpaceId;
 use once_cell::sync::Lazy;
 
+use perspective_diff_sync::link_adapter::conversions::hash_to_algo;
 use perspective_diff_sync::link_adapter::workspace::Workspace;
 use perspective_diff_sync::retriever::PerspectiveDiffRetreiver;
 use perspective_diff_sync_integrity::{
@@ -140,7 +141,7 @@ fn build_diffs_linear_chain() {
 
     let mut workspace = Workspace::new();
     workspace
-        .build_diffs::<KitsuneRetreiver>(d.clone(), root.clone())
+        .build_diffs::<KitsuneRetreiver>(hash_to_algo(&d), hash_to_algo(&root))
         .expect("build_diffs");
 
     assert_eq!(
@@ -149,14 +150,16 @@ fn build_diffs_linear_chain() {
         "linear chain has one common ancestor"
     );
     assert_eq!(
-        workspace.common_ancestors[0], root,
+        workspace.common_ancestors[0],
+        hash_to_algo(&root),
         "common ancestor should be the root"
     );
     // entry_map should hold all 5 nodes.
     assert_eq!(workspace.entry_map.len(), 5);
     for h in &[&root, &a, &b, &c, &d] {
+        let algo_h = hash_to_algo(*h);
         assert!(
-            workspace.entry_map.contains_key(*h),
+            workspace.entry_map.contains_key(&algo_h),
             "missing entry {:?}",
             h
         );
@@ -189,11 +192,12 @@ fn build_diffs_fork_finds_common_ancestor() {
 
     let mut workspace = Workspace::new();
     workspace
-        .build_diffs::<KitsuneRetreiver>(z1.clone(), z2.clone())
+        .build_diffs::<KitsuneRetreiver>(hash_to_algo(&z1), hash_to_algo(&z2))
         .expect("build_diffs");
 
+    let x_algo = hash_to_algo(&x);
     assert!(
-        workspace.common_ancestors.contains(&x),
+        workspace.common_ancestors.contains(&x_algo),
         "fork's common ancestor should be x; got {:?}",
         workspace.common_ancestors
     );
@@ -225,14 +229,14 @@ fn build_diffs_merge_node_walks_both_parents() {
 
     let mut workspace = Workspace::new();
     workspace
-        .build_diffs::<KitsuneRetreiver>(m.clone(), root.clone())
+        .build_diffs::<KitsuneRetreiver>(hash_to_algo(&m), hash_to_algo(&root))
         .expect("build_diffs");
 
     // entry_map should contain at least root..m
-    assert!(workspace.entry_map.contains_key(&root));
-    assert!(workspace.entry_map.contains_key(&m));
-    assert!(workspace.entry_map.contains_key(&b));
-    assert!(workspace.entry_map.contains_key(&c));
+    assert!(workspace.entry_map.contains_key(&hash_to_algo(&root)));
+    assert!(workspace.entry_map.contains_key(&hash_to_algo(&m)));
+    assert!(workspace.entry_map.contains_key(&hash_to_algo(&b)));
+    assert!(workspace.entry_map.contains_key(&hash_to_algo(&c)));
 }
 
 /// Direct trait surface test: create_entry then Retriever::get round-trips

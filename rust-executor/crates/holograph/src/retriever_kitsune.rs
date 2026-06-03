@@ -34,7 +34,9 @@ use sha2::{Digest, Sha256};
 use std::sync::RwLock;
 use tokio::runtime::Runtime;
 
+use perspective_diff_algorithm as algo;
 use perspective_diff_sync::errors::{SocialContextError, SocialContextResult};
+use perspective_diff_sync::link_adapter::conversions::{entry_ref_to_algo, hash_from_algo};
 use perspective_diff_sync::retriever::PerspectiveDiffRetreiver;
 use perspective_diff_sync_integrity::{
     EntryTypes, HashReference, LocalHashReference, PerspectiveDiffEntryReference,
@@ -369,6 +371,27 @@ impl PerspectiveDiffRetreiver for KitsuneRetreiver {
             .insert(b"latest", buf)
             .map_err(|_| Self::err("sled put latest"))?;
         Ok(())
+    }
+}
+
+// Step 13b-C phase 2 bridge — see the same impl on `HolochainRetreiver`
+// and `MockPerspectiveGraph`. Snapshots aren't recorded on the K2 path
+// for the spike (SPIKE §1.5 narrowing), so `get_snapshot_by_target`
+// returns `Ok(None)`.
+impl algo::WorkspaceRetriever for KitsuneRetreiver {
+    fn get_p_diff_reference(
+        hash: &algo::Hash,
+    ) -> algo::AlgoResult<algo::PerspectiveDiffEntryReference> {
+        let h = hash_from_algo(hash);
+        let entry = <Self as PerspectiveDiffRetreiver>::get(h)
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(entry_ref_to_algo(entry))
+    }
+
+    fn get_snapshot_by_target(
+        _target_hash: &algo::Hash,
+    ) -> algo::AlgoResult<Option<algo::Snapshot>> {
+        Ok(None)
     }
 }
 

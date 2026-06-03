@@ -1,7 +1,18 @@
+// Step 13b-C phase 2 (wake-15): these HDK-boundary tests retain their
+// ActionHash inputs (the original p-diff-sync wire types) but now feed
+// the algorithm-crate `Workspace` via the `hash_to_algo` conversion;
+// the trait bound switches from `PerspectiveDiffRetreiver` to
+// `algo::WorkspaceRetriever` (MockPerspectiveGraph implements both).
+//
+// The pure BFS coverage now lives in
+// `perspective_diff_algorithm::workspace::tests`.
+
 #[test]
 pub fn test_merge_fast_forward() {
     use hdk::prelude::*;
+    use perspective_diff_algorithm as algo;
 
+    use crate::link_adapter::conversions::hash_to_algo;
     use crate::link_adapter::workspace::Workspace;
     use crate::retriever::{Associations, GraphInput, MockPerspectiveGraph, GLOBAL_MOCKED_GRAPH};
 
@@ -37,17 +48,23 @@ pub fn test_merge_fast_forward() {
 
     let mut workspace = Workspace::new();
     let res = workspace.collect_until_common_ancestor::<MockPerspectiveGraph>(
-        ActionHash::from_raw_36(vec![5; 36]),
-        ActionHash::from_raw_36(vec![4; 36]),
+        hash_to_algo(&ActionHash::from_raw_36(vec![5; 36])),
+        hash_to_algo(&ActionHash::from_raw_36(vec![4; 36])),
     );
     assert!(res.is_ok());
-    assert_eq!(res.unwrap(), ActionHash::from_raw_36(vec![0; 36]));
+    assert_eq!(
+        res.unwrap(),
+        hash_to_algo(&ActionHash::from_raw_36(vec![0; 36]))
+    );
+    let _ = algo::null_node;
 }
 
 #[test]
 pub fn test_fork_with_none_source() {
     use hdk::prelude::*;
+    use perspective_diff_algorithm as algo;
 
+    use crate::link_adapter::conversions::hash_to_algo;
     use crate::link_adapter::workspace::Workspace;
     use crate::retriever::{GraphInput, MockPerspectiveGraph, GLOBAL_MOCKED_GRAPH};
 
@@ -62,22 +79,19 @@ pub fn test_fork_with_none_source() {
 
     let mut workspace = Workspace::new();
     let res = workspace.collect_until_common_ancestor::<MockPerspectiveGraph>(
-        ActionHash::from_raw_36(vec![0; 36]),
-        ActionHash::from_raw_36(vec![1; 36]),
+        hash_to_algo(&ActionHash::from_raw_36(vec![0; 36])),
+        hash_to_algo(&ActionHash::from_raw_36(vec![1; 36])),
     );
     assert!(res.is_ok());
-    //TODO; this is a problem since our pull code is not expecting to find a common ancestor, since both tips are forks
-    //but in the case below where we have a merge entry we need to register the None node as a common ancestor so we can traverse the "their" branch back until the root
-    //and not break the traversal with common ancestor as the "ours" node as was happening before
-    //
-    //So what do we actually need to return here?
-    assert_eq!(res.unwrap(), ActionHash::from_raw_36(vec![0xdb; 36]));
+    assert_eq!(res.unwrap(), algo::null_node());
 }
 
 #[test]
 pub fn test_merge_fast_forward_none_source() {
     use hdk::prelude::*;
+    use perspective_diff_algorithm as algo;
 
+    use crate::link_adapter::conversions::hash_to_algo;
     use crate::link_adapter::workspace::Workspace;
     use crate::retriever::{Associations, GraphInput, MockPerspectiveGraph, GLOBAL_MOCKED_GRAPH};
 
@@ -95,9 +109,9 @@ pub fn test_merge_fast_forward_none_source() {
 
     let mut workspace = Workspace::new();
     let res = workspace.collect_until_common_ancestor::<MockPerspectiveGraph>(
-        ActionHash::from_raw_36(vec![2; 36]),
-        ActionHash::from_raw_36(vec![1; 36]),
+        hash_to_algo(&ActionHash::from_raw_36(vec![2; 36])),
+        hash_to_algo(&ActionHash::from_raw_36(vec![1; 36])),
     );
     assert!(res.is_ok());
-    assert_eq!(res.unwrap(), ActionHash::from_raw_36(vec![0xdb; 36]));
+    assert_eq!(res.unwrap(), algo::null_node());
 }

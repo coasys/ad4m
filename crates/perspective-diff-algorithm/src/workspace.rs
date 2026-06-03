@@ -886,4 +886,89 @@ mod tests {
         assert_eq!(workspace.common_ancestors.last().unwrap(), &h("0"));
         assert_eq!(workspace.entry_map.len(), 4);
     }
+
+    // Ported from p-diff-sync's link_adapter::workspace::tests in wake-15
+    // Step 13b-C phase 2 — same `build_diffs` BFS exercised on
+    // additional graph shapes.
+
+    #[test]
+    fn test_collect_until_common_ancestor_complex_merge() {
+        load_graph(
+            r#"digraph {
+            1 -> 0
+            2 -> 0
+            3 -> 0
+            4 -> 2
+            5 -> 4
+            5 -> 3
+            6 -> 5
+        }"#,
+        );
+
+        let mut workspace = Workspace::new();
+        let res = workspace.build_diffs::<MockRetriever>(h("1"), h("6"));
+        assert!(res.is_ok());
+        assert_eq!(workspace.common_ancestors.len(), 1);
+        assert_eq!(workspace.common_ancestors.last().unwrap(), &h("0"));
+        assert_eq!(workspace.entry_map.len(), 7);
+    }
+
+    #[test]
+    fn test_collect_until_common_ancestor_complex_merge_implicit_zero() {
+        // Nodes 1, 2, 3 have no parents (orphans). Node 1 isn't on any
+        // edge — declare it explicitly so MockGraph::from_dot picks
+        // it up.
+        load_graph(
+            r#"digraph {
+            1 [ label = "1" ]
+            2 [ label = "2" ]
+            3 [ label = "3" ]
+            4 -> 2
+            5 -> 4
+            5 -> 3
+            6 -> 5
+        }"#,
+        );
+
+        let mut workspace = Workspace::new();
+        let res = workspace.build_diffs::<MockRetriever>(h("1"), h("6"));
+        assert!(res.is_ok(), "{:?}", res);
+        assert_eq!(workspace.common_ancestors.len(), 2);
+        assert_eq!(workspace.common_ancestors.last().unwrap(), &null_node());
+    }
+
+    #[test]
+    fn real_world_graph() {
+        load_graph(
+            r#"digraph {
+            1 -> 0
+            2 -> 1
+            3 -> 2
+            4 -> 3
+            5 -> 4
+            6 -> 5
+            7 -> 6
+            8 -> 7
+            9 -> 8
+            10 -> 9
+            11 -> 1
+            12 -> 2
+            12 -> 11
+            13 -> 3
+            13 -> 12
+            14 -> 6
+            14 -> 13
+            15 -> 7
+            15 -> 14
+            16 -> 8
+            16 -> 15
+        }"#,
+        );
+
+        let mut workspace = Workspace::new();
+        let res = workspace.build_diffs::<MockRetriever>(h("16"), h("10"));
+        assert!(res.is_ok());
+        assert_eq!(workspace.common_ancestors.len(), 6);
+        assert_eq!(workspace.common_ancestors.first().unwrap(), &h("8"));
+    }
 }

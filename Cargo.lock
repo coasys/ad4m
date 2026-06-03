@@ -9095,6 +9095,7 @@ dependencies = [
  "kitsune2_core",
  "kitsune2_test_utils",
  "once_cell",
+ "perspective-diff-algorithm",
  "perspective_diff_sync",
  "perspective_diff_sync_integrity",
  "serde",
