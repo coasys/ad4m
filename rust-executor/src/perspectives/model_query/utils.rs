@@ -90,7 +90,10 @@ pub(super) fn parse_literal_value(uri: &str) -> Value {
     } else if let Some(rest) = body.strip_prefix("json:") {
         let decoded = urlencoding::decode(rest).unwrap_or_else(|_| rest.into());
         if let Ok(json_val) = serde_json::from_str::<Value>(&decoded) {
-            // For signed expression envelopes, extract .data
+            // Back-compat: legacy data may still contain signed-envelope literals
+            // from before the Channel V refactor (Jun 2026). New writes use plain
+            // literal: forms — see resolve_property_value. For envelopes that look
+            // like signed expressions, extract .data so callers see the inner value.
             if let Some(data) = json_val.get("data") {
                 if json_val.get("author").is_some() && json_val.get("proof").is_some() {
                     return data.clone();
