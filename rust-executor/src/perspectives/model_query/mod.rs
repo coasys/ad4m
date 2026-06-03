@@ -80,6 +80,7 @@
 //! | [`projection`] | Computing projection aggregations (counts and filtered lists) |
 //! | [`query`] | Top-level orchestrator that wires the whole pipeline together |
 
+mod eval_transform;
 mod filtering;
 mod getters;
 mod hydration;
