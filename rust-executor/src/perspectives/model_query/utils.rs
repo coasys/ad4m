@@ -48,15 +48,10 @@ pub(super) fn escape_sparql_string(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
-/// Cheap check: is this value plausibly an absolute IRI? Used by the
-/// index-friendly WHERE builders (V4/V5) to decide whether to add a
-/// raw-IRI fallback alongside the `literal:string:` direct probe.
-///
-/// Requires (a) `validate_iri` passes (no chars that would break the
-/// SPARQL IRIREF token), and (b) the value contains a `:` and starts with
-/// an ASCII letter — a minimal proxy for "has a URI scheme". This rejects
-/// bare strings like `"active"` that would otherwise produce the
-/// un-parseable IRIREF `<active>`.
+/// Cheap heuristic for "this string is plausibly an absolute IRI" — passes
+/// `validate_iri`, has a `:`, and starts with an ASCII letter. Used to decide
+/// whether a where-value is safe to emit as a `<…>` IRIREF; rejects bare
+/// strings like `"active"` that would produce un-parseable SPARQL.
 pub(super) fn looks_like_absolute_iri(s: &str) -> bool {
     if validate_iri(s).is_err() {
         return false;
@@ -93,12 +88,8 @@ pub(super) const MAX_INCLUDE_DEPTH: u8 = 8;
 // literal: URI parsing (typed)
 // ---------------------------------------------------------------------------
 
-/// Parse a `literal:` URI into a typed JSON value.
-/// Returns the raw string as Value::String if not a literal: URI.
-///
-/// Since the signed-envelope migration (v3), all literal values are stored
-/// as plain `literal:string:X`, `literal:number:X`, `literal:boolean:X`,
-/// or `literal:json:X` (for non-envelope JSON objects/arrays).
+/// Parse a `literal:` URI into a typed JSON value, or return the input as a
+/// string when it is not a literal URI.
 pub(super) fn parse_literal_value(uri: &str) -> Value {
     let body = if let Some(rest) = uri.strip_prefix("literal:") {
         rest
@@ -128,10 +119,10 @@ pub(super) fn parse_literal_value(uri: &str) -> Value {
     } else if let Some(rest) = body.strip_prefix("json:") {
         let decoded = urlencoding::decode(rest).unwrap_or_else(|_| rest.into());
         if let Ok(json_val) = serde_json::from_str::<Value>(&decoded) {
-            // Back-compat: legacy data may still contain signed-envelope literals
-            // from before the Channel V refactor (Jun 2026). New writes use plain
-            // literal: forms — see resolve_property_value. For envelopes that look
-            // like signed expressions, extract .data so callers see the inner value.
+            // Unwrap signed-expression envelopes (`{author, timestamp, data, proof}`)
+            // to the inner `.data` so consumers always see the underlying value
+            // rather than the wrapper, regardless of whether the target was
+            // written as a plain literal or as a signed expression.
             if let Some(data) = json_val.get("data") {
                 if json_val.get("author").is_some() && json_val.get("proof").is_some() {
                     return data.clone();

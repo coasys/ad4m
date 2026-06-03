@@ -3352,11 +3352,10 @@ async fn test_full_model_query_ops_contains_with_pagination() {
     );
 }
 
-/// Helper: create a legacy signed-envelope literal IRI — models the pre-migration
-/// data shape that older databases still contain on disk. New writes use plain
-/// `literal:string:X` form; the migration step converts envelopes → plain form
-/// on first boot. Tests that exercise the migration path use this helper to
-/// seed envelope-shaped data before calling `migrate_signed_envelopes_to_plain_literals`.
+/// Build a `literal:json:<signed_envelope>` IRI — the shape produced by
+/// `expression.create("literal", value)` and the shape stored on disk by
+/// older databases that pre-date plain-literal writes. Used by tests that
+/// seed envelope-form data and then exercise the migration path.
 fn legacy_envelope_literal(value: &str) -> String {
     let envelope = serde_json::json!({
         "author": "did:key:zQ3shTestAgent",
@@ -3373,17 +3372,15 @@ fn legacy_envelope_literal(value: &str) -> String {
     format!("literal:json:{}", literal_percent_encode(&json_str))
 }
 
-/// Regression test for legacy signed-envelope literals: insert envelope-form data,
-/// run the migration, then verify the model query (WHERE + pagination + count)
-/// returns the correct results against the migrated plain-literal form. This
-/// guards the back-compat path for stores that haven't yet migrated when the
-/// new executor boots.
+/// Seed envelope-form data, run the migration, and verify model queries
+/// (WHERE + pagination + count) succeed against the rewritten plain-literal
+/// targets. Guards the boot-time upgrade path for stores that still hold
+/// envelope-shaped targets from older writers.
 #[tokio::test]
 async fn test_legacy_envelope_migrated_then_paginate_count() {
     let store = SparqlStore::new(None).unwrap();
     let ts_base = 1700000000000i64;
 
-    // Insert 4 items: 3 active, 1 inactive — all using signed envelope format
     let items = vec![
         ("test://item-1", "active", "Alpha"),
         ("test://item-2", "active", "Beta"),
@@ -3507,16 +3504,15 @@ async fn test_legacy_envelope_migrated_then_paginate_count() {
     );
 }
 
-/// Regression: mixed legacy data (some plain literals already written, some
-/// still in envelope form) all get rewritten to plain form by the migration,
-/// after which the new index-friendly WHERE (V4) finds everything via direct
-/// IRI match. Also exercises `contains` which routes through `fn/parse_literal`.
+/// Mixed envelope-form and plain-form rows in the same store all become
+/// queryable after one migration pass, including via the `contains` filter
+/// (which still routes through `fn/parse_literal`).
 #[tokio::test]
 async fn test_legacy_mixed_migrated_then_contains() {
     let store = SparqlStore::new(None).unwrap();
     let ts_base = 1700000000000i64;
 
-    // Item 1: plain literal (already in new form on disk)
+    // Item 1: target is already a plain literal.
     store
         .add_link(&make_link(
             "test://old",
@@ -3534,7 +3530,7 @@ async fn test_legacy_mixed_migrated_then_contains() {
         ))
         .unwrap();
 
-    // Item 2: legacy signed envelope (pre-migration)
+    // Item 2: target is an envelope-form literal.
     store
         .add_link(&make_link(
             "test://new",
@@ -3552,8 +3548,6 @@ async fn test_legacy_mixed_migrated_then_contains() {
         ))
         .unwrap();
 
-    // Run migration: envelope-form rows become plain literals; pre-existing
-    // plain literals are untouched.
     store
         .migrate_signed_envelopes_to_plain_literals()
         .expect("migration should succeed");
@@ -3626,10 +3620,10 @@ async fn test_legacy_mixed_migrated_then_contains() {
     );
 }
 
-/// Parallel to `test_legacy_envelope_migrated_then_paginate_count` — same data
-/// shape, but inserted as plain `literal:string:X` from the start (no migration).
-/// Verifies V4's direct IRI match finds the data via POS-index probe without
-/// going through `fn/parse_literal`.
+/// Same workload as `test_legacy_envelope_migrated_then_paginate_count` but
+/// with plain `literal:string:` targets from the start. Confirms model
+/// queries reach the rows through the indexed direct-IRI WHERE form alone,
+/// without any envelope unwrap step.
 #[tokio::test]
 async fn test_plain_literal_where_paginate_count() {
     let store = SparqlStore::new(None).unwrap();
@@ -3717,10 +3711,9 @@ async fn test_plain_literal_where_paginate_count() {
     assert_eq!(result2.instances[0]["name"].as_str().unwrap(), "Delta");
 }
 
-/// Parallel to `test_legacy_mixed_migrated_then_contains` for the plain-literal
-/// storage path. Confirms `contains` (which still routes through
-/// `fn/parse_literal` for substring semantics) works correctly on plain
-/// `literal:string:X` IRIs.
+/// Guards that the `contains` filter — which can't reduce to a direct IRI
+/// equality and so still goes through `fn/parse_literal` for substring
+/// semantics — keeps matching plain `literal:string:` targets correctly.
 #[tokio::test]
 async fn test_plain_literal_contains_works_on_fn_parse_literal_path() {
     let store = SparqlStore::new(None).unwrap();
