@@ -25,8 +25,8 @@ migration per user direction (2026-04-10):
 - No `ad4m://inbox` / `ad4m://friend-of` predicate work.
 - No perspective-backed friends.
 
-The parallel SPARQL→SurrealDB migration and the model rewrites that also
-live on this branch are out of scope and must keep working.
+The parallel SPARQL (Oxigraph) storage migration and the model rewrites that
+also live on this branch are out of scope and must keep working.
 
 ## Honesty about scale
 
@@ -661,11 +661,11 @@ the target state.
    ship declarative for Phase E; proc-macro as a post-ship follow-up
    if needed.
 
-5. **Concurrent branches.** The SPARQL→SurrealDB and model rewrites
-   are on the same branch. If they merge before this refactor lands,
-   expect conflicts in `runtime_service`, query paths, and bootstrap
-   seed. Mitigation: communicate with whoever owns those; coordinate
-   rebase points.
+5. **Concurrent branches.** The SPARQL (Oxigraph) storage migration and
+   model rewrites are on the same branch. If they merge before this
+   refactor lands, expect conflicts in `runtime_service`, query paths,
+   and bootstrap seed. Mitigation: communicate with whoever owns those;
+   coordinate rebase points.
 
 6. **Session boundaries.** This plan spans multiple agent sessions.
    Each phase ends at a green-tests ship point so context can be
