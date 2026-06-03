@@ -1,0 +1,19 @@
+{
+  "name": "@coasys/holograph-link",
+  "description": "AD4M LinkLanguage backed by the holograph substrate (sled + Kitsune2 + perspective-diff-algorithm).",
+  "main": "index.js",
+  "scripts": {
+    "build": "deno run --allow-all esbuild.ts",
+    "test": "deno test --allow-all tests/smoke.test.ts",
+    "integration-test": "node ../../test-runner/build/cli.js --test ./integration-test.js --bundle \"./build/bundle.js\" --meta '{\"name\":\"holograph-link\",\"description\":\"AD4M LinkLanguage backed by the Kitsune2-substrate holograph runtime\",\"sourceCodeLink\":\"https://github.com/coasys/ad4m\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'"
+  },
+  "author": "Coasys AG",
+  "license": "CAL-1.0",
+  "dependencies": {
+    "@coasys/ad4m": "*"
+  },
+  "devDependencies": {
+    "run-script-os": "^1.1.6"
+  },
+  "version": "0.1.0"
+}

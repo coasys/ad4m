@@ -61,4 +61,21 @@ export {
     // above unless you specifically need filesystem-like semantics.
     readStorageFile,
     writeStorageFile,
+
+    // Holograph (Spec section 7.8 -- OPTIONAL EXTENSION). v1 surface for
+    // the holograph-link Language module; backed by HolographSpace
+    // (sled + Kitsune2) once the runtime installs the delegate. See
+    // host.d.ts for full method docs.
+    holographCreateNeighborhood,
+    holographCommit,
+    holographRender,
+    holographNextEmitted,
+    holographJoinAgent,
+    holographCurrentRevision,
+    holographLatestRevision,
+    holographCloseNeighborhood,
 } from "ad4m:host";
+
+// Re-export the EmittedOp wire shape so Language modules can name it
+// without importing from "ad4m:host" twice.
+export type { EmittedOpWire } from "ad4m:host";
