@@ -17,17 +17,20 @@ fn main() {
     let snapshot_path = Path::new("CUSTOM_DENO_SNAPSHOT.bin").to_path_buf();
 
     // Define extensions to include in the snapshot
+    // Order MUST match `js_core::options::language_worker_options`
+    // extensions vec — deno verifies snapshot extension order at runtime
+    // load and panics on any mismatch.
     let extensions = vec![
         wallet_service::init(),
         utils_service::init(),
         pubsub_service::init(),
         holochain_service::init(),
+        holograph_service::init(),
         signature_service::init(),
         agent_service::init(),
         entanglement_service::init(),
         runtime_service::init(),
         language_service::init(),
-        holograph_service::init(),
     ];
 
     create_runtime_snapshot(snapshot_path, SnapshotOptions::default(), extensions);

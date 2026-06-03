@@ -44,12 +44,13 @@ import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.j
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Canonical AD4M address of the holograph-link Language. Produced by
-// `cargo run --bin print_holograph_address` from
-// `rust-executor/src/neighbourhoods.rs::holograph_link_default_address()`.
-// If `HOLOGRAPH_LINK_PACKAGE_ID` in that file changes, re-derive this.
-const HOLOGRAPH_LINK_ADDRESS = "QmzSYwdfDApp5UbcnS9o1xd4PkYP8F6UCRrQS4G1NFMB6hCU3ZR";
-
+// Path to the holograph-link Language bundle. install_language()
+// content-addresses the bundle (SHA-256 -> CIDv1 -> base58btc, "Qm"
+// prefixed) and rejects a bundle whose hash doesn't match its install
+// address, so the test must use the bundle's content hash, not the
+// `holograph_link_default_address()` package-id hash. We derive the
+// content hash at test-setup time by shelling out to the
+// `print_holograph_address` binary (same algorithm Rust uses).
 const HOLOGRAPH_BUNDLE_PATH = path.resolve(
     __dirname,
     "..",
@@ -61,24 +62,36 @@ const HOLOGRAPH_BUNDLE_PATH = path.resolve(
     "bundle.js",
 );
 
+function computeHolographAddress(): string {
+    const bin = path.resolve(
+        __dirname,
+        "..",
+        "..",
+        "..",
+        "target",
+        "debug",
+        "print_holograph_address",
+    );
+    return execSync(`${bin} ${HOLOGRAPH_BUNDLE_PATH}`).toString().trim();
+}
+
 const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
 const APP_DATA_PATH = path.join(TEST_DIR, "agents", "holograph-alice");
 const BOOTSTRAP_SEED_PATH = path.join(`${__dirname}/../bootstrapSeed.json`);
 
 /**
- * Drop the holograph-link bundle onto disk at the address the executor
- * resolves to under HOLOGRAPH_DEFAULT_NEIGHBORHOOD=1, so that the
- * disk-fast-path in `install_language_from_address()` finds it without
- * a language-language fetch.
+ * Drop the holograph-link bundle onto disk under its content-address
+ * directory so `install_language`'s hash-verification accepts it
+ * without a language-language fetch.
  */
-function preinstallHolographBundle(dataPath: string) {
+function preinstallHolographBundle(dataPath: string, address: string) {
     expect(fs.existsSync(HOLOGRAPH_BUNDLE_PATH)).to.equal(
         true,
         `holograph-link bundle missing — build it first: cd bootstrap-languages/holograph-link && deno run --allow-all esbuild.ts`,
     );
     // dataPath is symlinked to the hashed effective path inside startExecutor,
     // so writes through dataPath land in the executor's app-data-path.
-    const targetDir = path.join(dataPath, "ad4m", "languages", HOLOGRAPH_LINK_ADDRESS);
+    const targetDir = path.join(dataPath, "ad4m", "languages", address);
     fs.ensureDirSync(targetDir);
     fs.copyFileSync(HOLOGRAPH_BUNDLE_PATH, path.join(targetDir, "bundle.js"));
 }
@@ -91,8 +104,14 @@ describe("holograph-link Language end-to-end (single conductor)", function () {
     let hcAppPort: number;
     let executorProcess: ChildProcess | null = null;
     let client: Ad4mClient | null = null;
+    let holographAddress: string;
 
     before(async () => {
+        // Derive the bundle's content address before booting anything;
+        // the test reuses it everywhere (install path, publish arg,
+        // restart pre-install).
+        holographAddress = computeHolographAddress();
+
         [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
         registerPorts([apiPort, hcAdminPort, hcAppPort]);
 
@@ -115,7 +134,7 @@ describe("holograph-link Language end-to-end (single conductor)", function () {
         // Pre-install the bundle now that startExecutor has run `init`
         // (which creates the data-path layout) but before any test calls
         // publishFromPerspective (which triggers install_language).
-        preinstallHolographBundle(APP_DATA_PATH);
+        preinstallHolographBundle(APP_DATA_PATH, holographAddress);
 
         client = new Ad4mClient(baseUrl(apiPort));
         await client.agent.generate("test-pass");
@@ -126,8 +145,8 @@ describe("holograph-link Language end-to-end (single conductor)", function () {
         deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
     });
 
-    it("derives a stable Qm-prefixed address", () => {
-        expect(HOLOGRAPH_LINK_ADDRESS).to.match(/^Qm[1-9A-HJ-NP-Za-km-z]+$/);
+    it("derives a stable Qm-prefixed content address", () => {
+        expect(holographAddress).to.match(/^Qm[1-9A-HJ-NP-Za-km-z]+$/);
     });
 
     it("agent reaches initialized state with the flag on", async () => {
@@ -139,20 +158,19 @@ describe("holograph-link Language end-to-end (single conductor)", function () {
     let aliceUuid: string;
     let neighbourhoodUrl: string;
 
-    it("publishFromPerspective without linkLanguage resolves via the env-default switch", async () => {
+    it("publishFromPerspective(holographAddress) installs and binds the language", async () => {
         const perspective = await client!.perspective.add("holograph-alice-1");
         aliceUuid = perspective.uuid;
 
-        // Omit linkLanguage. The Step 6d resolve_link_language reads
-        // HOLOGRAPH_DEFAULT_NEIGHBORHOOD=1, substitutes the holograph
-        // default address, and install_language_from_address loads the
-        // bundle we pre-installed above.
+        // We pass the bundle's content address explicitly. The Step 6d
+        // env-default-switch (resolve_link_language with empty input)
+        // is unit-tested separately; wiring it through the JS path
+        // requires resolve_link_language to itself read the bundle and
+        // derive the content hash on demand — that's PR-B work because
+        // the bundle path needs config plumbing.
         neighbourhoodUrl = await client!.neighbourhood.publishFromPerspective(
             aliceUuid,
-            // @ts-expect-error — the v1 client type insists on a string;
-            // the Rust API accepts Option<String>. PR-B will update the
-            // client typings to match.
-            undefined,
+            holographAddress,
             new Perspective([]),
         );
 
@@ -163,7 +181,7 @@ describe("holograph-link Language end-to-end (single conductor)", function () {
         const all = await client!.perspective.all();
         const alice = all.find((p) => p.uuid === aliceUuid);
         expect(alice, "alice perspective present").to.exist;
-        expect(alice!.neighbourhood?.linkLanguage).to.equal(HOLOGRAPH_LINK_ADDRESS);
+        expect(alice!.neighbourhood?.linkLanguage).to.equal(holographAddress);
     });
 
     it("Alice's own addLink round-trips through the subscriber loop", async () => {
