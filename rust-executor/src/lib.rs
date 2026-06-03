@@ -27,7 +27,7 @@ pub mod db;
 pub mod init;
 pub mod languages;
 pub mod logging;
-mod neighbourhoods;
+pub mod neighbourhoods;
 mod pubsub;
 use rustls::crypto::aws_lc_rs;
 #[cfg(test)]
