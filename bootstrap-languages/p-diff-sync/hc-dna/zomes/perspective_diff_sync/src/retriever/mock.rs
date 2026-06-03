@@ -13,7 +13,8 @@ use std::sync::Mutex;
 use super::PerspectiveDiffRetreiver;
 use crate::errors::{SocialContextError, SocialContextResult};
 use crate::link_adapter::conversions::{
-    entry_ref_from_algo, entry_ref_to_algo, hash_from_algo, hash_to_algo,
+    entry_ref_from_algo, entry_ref_to_algo, hash_from_algo, hash_ref_to_algo, hash_to_algo,
+    local_hash_ref_to_algo,
 };
 use crate::link_adapter::workspace::NULL_NODE;
 use crate::utils::create_link_expression;
@@ -149,6 +150,34 @@ impl algo::SnapshotRetriever for MockPerspectiveGraph {
         )
         .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
         Ok(hash_to_algo(&hash))
+    }
+}
+
+// Step 13b-E — forwards to the existing HDK-trait methods, which back
+// onto the in-process `CURRENT_REVISION` / `LATEST_REVISION` Mutex
+// statics declared further down this file.
+impl algo::RevisionsRetriever for MockPerspectiveGraph {
+    fn current_revision() -> algo::AlgoResult<Option<algo::LocalHashReference>> {
+        let rev = <Self as PerspectiveDiffRetreiver>::current_revision()
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(rev.map(local_hash_ref_to_algo))
+    }
+
+    fn latest_revision() -> algo::AlgoResult<Option<algo::HashReference>> {
+        let rev = <Self as PerspectiveDiffRetreiver>::latest_revision()
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(rev.map(hash_ref_to_algo))
+    }
+
+    fn update_current_revision(
+        hash: algo::Hash,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> algo::AlgoResult<()> {
+        <Self as PerspectiveDiffRetreiver>::update_current_revision(
+            hash_from_algo(&hash),
+            timestamp,
+        )
+        .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
     }
 }
 

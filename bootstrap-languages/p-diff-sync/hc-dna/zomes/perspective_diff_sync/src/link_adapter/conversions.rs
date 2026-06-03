@@ -16,8 +16,8 @@
 use hdk::prelude::*;
 use perspective_diff_algorithm as algo;
 use perspective_diff_sync_integrity::{
-    ExpressionProof, LinkExpression, PerspectiveDiff, PerspectiveDiffEntryReference, Snapshot,
-    Triple,
+    ExpressionProof, HashReference, LinkExpression, LocalHashReference, PerspectiveDiff,
+    PerspectiveDiffEntryReference, Snapshot, Triple,
 };
 
 use crate::Hash;
@@ -128,5 +128,36 @@ pub fn snapshot_from_algo(s: algo::Snapshot) -> Snapshot {
     Snapshot {
         diff_chunks: s.diff_chunks.iter().map(hash_from_algo).collect(),
         included_diffs: s.included_diffs.iter().map(hash_from_algo).collect(),
+    }
+}
+
+// ---- HashReference / LocalHashReference ------------------------------
+
+pub fn hash_ref_to_algo(r: HashReference) -> algo::HashReference {
+    algo::HashReference {
+        hash: hash_to_algo(&r.hash),
+        timestamp: r.timestamp,
+    }
+}
+
+#[allow(dead_code)]
+pub fn hash_ref_from_algo(r: algo::HashReference) -> HashReference {
+    HashReference {
+        hash: hash_from_algo(&r.hash),
+        timestamp: r.timestamp,
+    }
+}
+
+pub fn local_hash_ref_to_algo(r: LocalHashReference) -> algo::LocalHashReference {
+    algo::LocalHashReference {
+        hash: hash_to_algo(&r.hash),
+        timestamp: r.timestamp,
+    }
+}
+
+pub fn local_hash_ref_from_algo(r: algo::LocalHashReference) -> LocalHashReference {
+    LocalHashReference {
+        hash: hash_from_algo(&r.hash),
+        timestamp: r.timestamp,
     }
 }

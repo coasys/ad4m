@@ -8,7 +8,9 @@
 //! `PerspectiveDiffEntryReference`, `Snapshot`) — the HDK-side adapter
 //! converts the integrity-zome types to these on the way through.
 
-use crate::diff_types::{Hash, PerspectiveDiffEntryReference, Snapshot};
+use crate::diff_types::{
+    Hash, HashReference, LocalHashReference, PerspectiveDiffEntryReference, Snapshot,
+};
 use crate::errors::AlgoResult;
 
 /// The minimum read-side surface the in-crate `Workspace` builder needs
@@ -36,4 +38,27 @@ pub trait SnapshotRetriever: WorkspaceRetriever {
     /// `get_p_diff_reference`. `snapshots::generate_snapshot` calls this
     /// to write each chunk-diff entry the snapshot points at.
     fn create_diff_entry(entry: PerspectiveDiffEntryReference) -> AlgoResult<Hash>;
+}
+
+/// Revision pointer surface for the `revisions` module.
+///
+/// Step 13b-E (wake-16) — sibling of `WorkspaceRetriever`. The
+/// algorithm crate's `revisions::current_revision` /
+/// `revisions::update_current_revision` are thin wrappers around these
+/// methods so substrate-agnostic algorithm code (and downstream
+/// extracted modules — pull, render, commit) can read/write the
+/// per-substrate "current revision" pointer without forking into
+/// HDK-specific or sled-specific code.
+///
+/// `latest_revision` is also surfaced so future snapshot-driving code
+/// can read the network's latest pointer without an extra trait.
+pub trait RevisionsRetriever: WorkspaceRetriever {
+    fn current_revision() -> AlgoResult<Option<LocalHashReference>>;
+
+    fn latest_revision() -> AlgoResult<Option<HashReference>>;
+
+    fn update_current_revision(
+        hash: Hash,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> AlgoResult<()>;
 }

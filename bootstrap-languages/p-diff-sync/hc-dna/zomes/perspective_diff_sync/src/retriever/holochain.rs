@@ -9,7 +9,8 @@ use perspective_diff_sync_integrity::{
 use super::PerspectiveDiffRetreiver;
 use crate::errors::{SocialContextError, SocialContextResult};
 use crate::link_adapter::conversions::{
-    entry_ref_from_algo, entry_ref_to_algo, hash_from_algo, hash_to_algo, snapshot_to_algo,
+    entry_ref_from_algo, entry_ref_to_algo, hash_from_algo, hash_ref_to_algo, hash_to_algo,
+    local_hash_ref_to_algo, snapshot_to_algo,
 };
 use crate::utils::dedup;
 use crate::Hash;
@@ -223,6 +224,35 @@ impl algo::SnapshotRetriever for HolochainRetreiver {
         )
         .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
         Ok(hash_to_algo(&hash))
+    }
+}
+
+// Step 13b-E: revision-pointer surface for the `revisions` module.
+// Forwards to the existing HDK-side `PerspectiveDiffRetreiver` methods
+// and bridges the integrity-zome `LocalHashReference` / `HashReference`
+// to their algo mirrors.
+impl algo::RevisionsRetriever for HolochainRetreiver {
+    fn current_revision() -> algo::AlgoResult<Option<algo::LocalHashReference>> {
+        let rev = <Self as PerspectiveDiffRetreiver>::current_revision()
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(rev.map(local_hash_ref_to_algo))
+    }
+
+    fn latest_revision() -> algo::AlgoResult<Option<algo::HashReference>> {
+        let rev = <Self as PerspectiveDiffRetreiver>::latest_revision()
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(rev.map(hash_ref_to_algo))
+    }
+
+    fn update_current_revision(
+        hash: algo::Hash,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> algo::AlgoResult<()> {
+        <Self as PerspectiveDiffRetreiver>::update_current_revision(
+            hash_from_algo(&hash),
+            timestamp,
+        )
+        .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
     }
 }
 

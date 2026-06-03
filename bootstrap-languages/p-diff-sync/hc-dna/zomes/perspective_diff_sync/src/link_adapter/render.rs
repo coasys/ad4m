@@ -10,8 +10,9 @@ use crate::retriever::PerspectiveDiffRetreiver;
 use crate::utils::get_now;
 use crate::Perspective;
 
-pub fn render<Retriever: PerspectiveDiffRetreiver + algo::WorkspaceRetriever>(
-) -> SocialContextResult<Perspective> {
+pub fn render<
+    Retriever: PerspectiveDiffRetreiver + algo::WorkspaceRetriever + algo::RevisionsRetriever,
+>() -> SocialContextResult<Perspective> {
     debug!("===PerspectiveDiffSync.render(): Function start");
     let fn_start = get_now()?.time();
 

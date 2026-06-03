@@ -204,6 +204,26 @@ pub struct Snapshot {
     pub included_diffs: Vec<Hash>,
 }
 
+/// Network-wide "latest revision seen" pointer. Mirrors the integrity-
+/// zome `HashReference`.
+///
+/// Step 13b-E (wake-16): introduced alongside the `revisions` module
+/// extraction so substrate-agnostic algorithm code can read/write
+/// revision pointers without depending on HoloHash directly.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HashReference {
+    pub hash: Hash,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+/// Per-agent "current revision" pointer. Mirrors the integrity-zome
+/// `LocalHashReference`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalHashReference {
+    pub hash: Hash,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
 /// Implementation of the algorithm-crate-side `HasDiffParents<Hash>` for
 /// the new mirror entry-reference type. This is what lets
 /// `topo_sort_diff_references` chew on
