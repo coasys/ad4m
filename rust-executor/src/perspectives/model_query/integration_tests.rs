@@ -35,8 +35,8 @@ fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> Decorated
     }
 }
 
-#[test]
-fn test_full_model_query_with_where_filter() {
+#[tokio::test]
+async fn test_full_model_query_with_where_filter() {
     // Create an in-memory store
     let store = SparqlStore::new(None).unwrap();
 
@@ -77,8 +77,9 @@ fn test_full_model_query_with_where_filter() {
 
     // Query without WHERE - should find 1 instance
     let query_no_where = ModelQueryInput::default();
-    let result =
-        execute_model_query_from_json(&store, "Recipe", &query_no_where, shape_json).unwrap();
+    let result = execute_model_query_from_json(&store, "Recipe", &query_no_where, shape_json)
+        .await
+        .unwrap();
     assert_eq!(
         result.instances.len(),
         1,
@@ -99,8 +100,9 @@ fn test_full_model_query_with_where_filter() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-    let result2 =
-        execute_model_query_from_json(&store, "Recipe", &query_with_where, shape_json).unwrap();
+    let result2 = execute_model_query_from_json(&store, "Recipe", &query_with_where, shape_json)
+        .await
+        .unwrap();
     assert_eq!(
         result2.instances.len(),
         1,
@@ -108,8 +110,8 @@ fn test_full_model_query_with_where_filter() {
     );
 }
 
-#[test]
-fn test_where_clause_raw_uri_property() {
+#[tokio::test]
+async fn test_where_clause_raw_uri_property() {
     // Properties without resolve_language store raw URIs as targets.
     // The where clause must match the raw URI, not wrap it in literal:string:...
     let store = SparqlStore::new(None).unwrap();
@@ -163,7 +165,9 @@ fn test_where_clause_raw_uri_property() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Todo", &query, shape_json).unwrap();
+    let result = execute_model_query_from_json(&store, "Todo", &query, shape_json)
+        .await
+        .unwrap();
     assert_eq!(
         result.instances.len(),
         1,
@@ -172,8 +176,8 @@ fn test_where_clause_raw_uri_property() {
     assert_eq!(result.instances[0]["state"], json!("todo://ready"));
 }
 
-#[test]
-fn test_where_clause_literal_prop_with_raw_uri_value() {
+#[tokio::test]
+async fn test_where_clause_literal_prop_with_raw_uri_value() {
     // @Property defaults resolveLanguage to "literal", but constructor
     // initial values are stored as raw URIs. The where clause must match
     // both literal-encoded and raw URI forms.
@@ -229,7 +233,9 @@ fn test_where_clause_literal_prop_with_raw_uri_value() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Todo", &query, shape_json).unwrap();
+    let result = execute_model_query_from_json(&store, "Todo", &query, shape_json)
+        .await
+        .unwrap();
     assert_eq!(
         result.instances.len(),
         1,
@@ -246,8 +252,8 @@ fn test_where_clause_literal_prop_with_raw_uri_value() {
 // are empty, causing include resolution to return zero results.
 // -----------------------------------------------------------------------
 
-#[test]
-fn test_shared_predicate_relations_all_populated_via_store() {
+#[tokio::test]
+async fn test_shared_predicate_relations_all_populated_via_store() {
     // Simulate a Channel with views, messages, and conversations all using
     // the same predicate "ad4m://has_child".  Each child has a different
     // flag type so include resolution (if applied later) can discriminate.
@@ -375,7 +381,9 @@ fn test_shared_predicate_relations_all_populated_via_store() {
     }"#;
 
     let query = ModelQueryInput::default();
-    let result = execute_model_query_from_json(&store, "Channel", &query, shape_json).unwrap();
+    let result = execute_model_query_from_json(&store, "Channel", &query, shape_json)
+        .await
+        .unwrap();
 
     assert_eq!(result.instances.len(), 1, "Should find 1 channel");
 
@@ -434,8 +442,8 @@ fn test_shared_predicate_relations_all_populated_via_store() {
     }
 }
 
-#[test]
-fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
+#[tokio::test]
+async fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
     // Ensure relations with distinct predicates don't bleed into each other
     // even when one predicate is shared.
     let store = SparqlStore::new(None).unwrap();
@@ -499,7 +507,9 @@ fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
     }"#;
 
     let query = ModelQueryInput::default();
-    let result = execute_model_query_from_json(&store, "Parent", &query, shape_json).unwrap();
+    let result = execute_model_query_from_json(&store, "Parent", &query, shape_json)
+        .await
+        .unwrap();
 
     assert_eq!(result.instances.len(), 1);
     let inst = &result.instances[0];
@@ -520,8 +530,8 @@ fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
 
 // --- IncludeProjection helpers ---
 
-#[test]
-fn test_build_projection_where_patterns_empty_when_no_clause() {
+#[tokio::test]
+async fn test_build_projection_where_patterns_empty_when_no_clause() {
     let proj = ProjectionInput {
         from: "signals".to_string(),
         count: true,
@@ -534,8 +544,8 @@ fn test_build_projection_where_patterns_empty_when_no_clause() {
     assert_eq!(build_projection_where_patterns(&proj, &resolver), "");
 }
 
-#[test]
-fn test_build_projection_where_patterns_id_filter() {
+#[tokio::test]
+async fn test_build_projection_where_patterns_id_filter() {
     let mut wc = BTreeMap::new();
     wc.insert(
         "id".to_string(),
@@ -557,8 +567,8 @@ fn test_build_projection_where_patterns_id_filter() {
     );
 }
 
-#[test]
-fn test_build_projection_where_patterns_with_target_shape() {
+#[tokio::test]
+async fn test_build_projection_where_patterns_with_target_shape() {
     let target_shape_json = r#"{
         "className": "Signal",
         "properties": {
@@ -595,8 +605,8 @@ fn test_build_projection_where_patterns_with_target_shape() {
     );
 }
 
-#[test]
-fn test_build_projection_order_clause_empty_when_no_order() {
+#[tokio::test]
+async fn test_build_projection_order_clause_empty_when_no_order() {
     let proj = ProjectionInput {
         from: "signals".to_string(),
         count: false,
@@ -608,8 +618,8 @@ fn test_build_projection_order_clause_empty_when_no_order() {
     assert_eq!(build_projection_order_clause(&proj), "");
 }
 
-#[test]
-fn test_build_projection_order_clause_by_id() {
+#[tokio::test]
+async fn test_build_projection_order_clause_by_id() {
     let proj = ProjectionInput {
         from: "signals".to_string(),
         count: false,
@@ -649,13 +659,14 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
             getter: None,
             where_filter: None,
             where_predicates: None,
+            transform: None,
         }],
         include_relations: vec![],
     }
 }
 
-#[test]
-fn test_resolve_projections_count() {
+#[tokio::test]
+async fn test_resolve_projections_count() {
     // Set up a store with two parent nodes, each linked to different numbers
     // of child targets via the "test://has_item" predicate.
     let store = SparqlStore::new(None).unwrap();
@@ -695,7 +706,9 @@ fn test_resolve_projections_count() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
+            .await
+            .unwrap();
     }
 
     let count_a = instances[0]["$itemCount"].as_u64().unwrap_or(999);
@@ -704,8 +717,8 @@ fn test_resolve_projections_count() {
     assert_eq!(count_b, 1, "parent_b should have 1 item, got {count_b}");
 }
 
-#[test]
-fn test_resolve_projections_list() {
+#[tokio::test]
+async fn test_resolve_projections_list() {
     // parent_a has two children; verify list projection returns them as an array.
     let store = SparqlStore::new(None).unwrap();
 
@@ -739,7 +752,9 @@ fn test_resolve_projections_list() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
+            .await
+            .unwrap();
     }
 
     let items = instances[0]["$items"]
@@ -751,8 +766,8 @@ fn test_resolve_projections_list() {
     assert!(item_strs.contains(&item_2), "missing {item_2}");
 }
 
-#[test]
-fn test_resolve_projections_scalar() {
+#[tokio::test]
+async fn test_resolve_projections_scalar() {
     // limit: Some(1) should unwrap to a single string, not an array.
     let store = SparqlStore::new(None).unwrap();
 
@@ -782,7 +797,9 @@ fn test_resolve_projections_scalar() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
+            .await
+            .unwrap();
     }
 
     let val = &instances[0]["$firstItem"];
@@ -793,8 +810,8 @@ fn test_resolve_projections_scalar() {
     );
 }
 
-#[test]
-fn test_resolve_projections_count_zero_when_no_links() {
+#[tokio::test]
+async fn test_resolve_projections_count_zero_when_no_links() {
     // A parent with no linked children should get count 0, not be absent.
     let store = SparqlStore::new(None).unwrap();
     let parent_a = "test://parent/a";
@@ -817,7 +834,9 @@ fn test_resolve_projections_count_zero_when_no_links() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
+            .await
+            .unwrap();
     }
 
     let count = instances[0]["$itemCount"].as_u64().unwrap_or(999);
@@ -827,8 +846,8 @@ fn test_resolve_projections_count_zero_when_no_links() {
     );
 }
 
-#[test]
-fn test_resolve_projections_where_filter_by_plain_iri() {
+#[tokio::test]
+async fn test_resolve_projections_where_filter_by_plain_iri() {
     // Flux reactions are stored as plain expression IRIs (e.g. emoji://1f44d),
     // not as literal:json: blobs.  The STR() FILTER correctly narrows to
     // only the matching reaction type.
@@ -882,7 +901,9 @@ fn test_resolve_projections_where_filter_by_plain_iri() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
+            .await
+            .unwrap();
     }
 
     let count = instances[0]["$likeCount"].as_u64().unwrap_or(999);
@@ -892,8 +913,8 @@ fn test_resolve_projections_where_filter_by_plain_iri() {
     );
 }
 
-#[test]
-fn test_resolve_projections_where_filter_by_author() {
+#[tokio::test]
+async fn test_resolve_projections_where_filter_by_author() {
     // Mirrors the WE $myLikeSignal pattern:
     //   where: { author: { $store: 'adamStore.me.did' } }
     // This was previously silently ignored because the projection SPARQL
@@ -944,15 +965,17 @@ fn test_resolve_projections_where_filter_by_author() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0).unwrap();
+        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
+            .await
+            .unwrap();
     }
 
     let count = instances[0]["$mySignalCount"].as_u64().unwrap_or(999);
     assert_eq!(count, 2, "should count only alice's 2 signals, got {count}");
 }
 
-#[test]
-fn test_deep_query_flag_controls_property_getters() {
+#[tokio::test]
+async fn test_deep_query_flag_controls_property_getters() {
     // Create a shape with both a property getter and a relation getter
     let shape_json = r#"{
         "className": "TestModel",
@@ -999,8 +1022,8 @@ fn test_deep_query_flag_controls_property_getters() {
     );
 }
 
-#[test]
-fn test_evaluate_getters_batch_returns_results() {
+#[tokio::test]
+async fn test_evaluate_getters_batch_returns_results() {
     let store = SparqlStore::new(None).unwrap();
 
     // Insert a test link
@@ -1039,8 +1062,8 @@ fn test_evaluate_getters_batch_returns_results() {
     assert_eq!(inst_result["isActive"], Value::Bool(true));
 }
 
-#[test]
-fn test_evaluate_getters_batch_empty_ids() {
+#[tokio::test]
+async fn test_evaluate_getters_batch_empty_ids() {
     let store = SparqlStore::new(None).unwrap();
     let result = evaluate_getters_batch_from_json(
         &store,
@@ -1053,8 +1076,8 @@ fn test_evaluate_getters_batch_empty_ids() {
     assert!(result.as_object().unwrap().is_empty());
 }
 
-#[test]
-fn test_evaluate_getters_batch_filters_by_property_names() {
+#[tokio::test]
+async fn test_evaluate_getters_batch_filters_by_property_names() {
     let store = SparqlStore::new(None).unwrap();
 
     let shape_json = r#"{
@@ -1087,8 +1110,8 @@ fn test_evaluate_getters_batch_filters_by_property_names() {
 
 // ── VALUES batching tests ────────────────────────────────────────────
 
-#[test]
-fn test_evaluate_getters_where_compiled_literal_filter() {
+#[tokio::test]
+async fn test_evaluate_getters_where_compiled_literal_filter() {
     // Mimics the failing CI test: a relation getter with a where clause
     // that filters by a literal:string:X value.
     // Setup: board -> 3 tasks (2 active, 1 done)
@@ -1208,6 +1231,7 @@ fn test_evaluate_getters_where_compiled_literal_filter() {
             getter: Some(getter.to_string()),
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
+            transform: None,
         }],
         include_relations: vec![],
     };
@@ -1232,8 +1256,8 @@ fn test_evaluate_getters_where_compiled_literal_filter() {
     );
 }
 
-#[test]
-fn test_strip_trailing_limit() {
+#[tokio::test]
+async fn test_strip_trailing_limit() {
     assert_eq!(
         strip_trailing_limit("SELECT ?t WHERE { ?s <p> ?t . } LIMIT 1"),
         "SELECT ?t WHERE { ?s <p> ?t . }"
@@ -1248,8 +1272,8 @@ fn test_strip_trailing_limit() {
     );
 }
 
-#[test]
-fn test_convert_ask_to_batched_select() {
+#[tokio::test]
+async fn test_convert_ask_to_batched_select() {
     let result = convert_ask_to_batched_select(
         r#"ASK WHERE { ?source <test://active> "true" . }"#,
         "<test://a> <test://b>",
@@ -1268,8 +1292,8 @@ fn test_convert_ask_to_batched_select() {
     );
 }
 
-#[test]
-fn test_convert_ask_with_base_to_batched_select() {
+#[tokio::test]
+async fn test_convert_ask_with_base_to_batched_select() {
     let result =
         convert_ask_to_batched_select("ASK WHERE { <Base> <test://active> ?x }", "<test://a>");
     assert!(
@@ -1282,8 +1306,8 @@ fn test_convert_ask_with_base_to_batched_select() {
     );
 }
 
-#[test]
-fn test_inject_values_into_select() {
+#[tokio::test]
+async fn test_inject_values_into_select() {
     let result = inject_values_into_select(
         "SELECT ?target WHERE { ?source <test://reply> ?target . } LIMIT 1",
         "<test://a> <test://b>",
@@ -1302,8 +1326,8 @@ fn test_inject_values_into_select() {
     );
 }
 
-#[test]
-fn test_inject_values_adds_source_to_projection() {
+#[tokio::test]
+async fn test_inject_values_adds_source_to_projection() {
     let result = inject_values_into_select(
         "SELECT ?target WHERE { ?source <test://p> ?target . }",
         "<test://a>",
@@ -1319,8 +1343,8 @@ fn test_inject_values_adds_source_to_projection() {
     );
 }
 
-#[test]
-fn test_batched_ask_getter_multiple_instances() {
+#[tokio::test]
+async fn test_batched_ask_getter_multiple_instances() {
     let store = SparqlStore::new(None).unwrap();
 
     // inst-1 is active, inst-2 is not
@@ -1364,8 +1388,8 @@ fn test_batched_ask_getter_multiple_instances() {
     );
 }
 
-#[test]
-fn test_batched_select_getter_multiple_instances() {
+#[tokio::test]
+async fn test_batched_select_getter_multiple_instances() {
     let store = SparqlStore::new(None).unwrap();
 
     // inst-1 has a reply, inst-2 does not
@@ -1410,8 +1434,8 @@ fn test_batched_select_getter_multiple_instances() {
     );
 }
 
-#[test]
-fn test_batched_collection_getter() {
+#[tokio::test]
+async fn test_batched_collection_getter() {
     let store = SparqlStore::new(None).unwrap();
 
     // inst-1 has two children
@@ -1472,8 +1496,8 @@ fn test_batched_collection_getter() {
 
 // ── Pipeline ordering: getters run post-pagination ───────────────────
 
-#[test]
-fn test_deep_query_defaults_to_true() {
+#[tokio::test]
+async fn test_deep_query_defaults_to_true() {
     // Verify the default: when deep_query is None, property getters should run
     let store = SparqlStore::new(None).unwrap();
 
@@ -1514,8 +1538,9 @@ fn test_deep_query_defaults_to_true() {
         ..Default::default()
     };
 
-    let result =
-        execute_model_query_from_json(&store, "Message", &query_input, shape_json).unwrap();
+    let result = execute_model_query_from_json(&store, "Message", &query_input, shape_json)
+        .await
+        .unwrap();
     assert!(!result.instances.is_empty(), "should find instance");
 
     let inst = &result.instances[0];
@@ -1528,8 +1553,8 @@ fn test_deep_query_defaults_to_true() {
     );
 }
 
-#[test]
-fn test_deep_query_false_skips_property_getters() {
+#[tokio::test]
+async fn test_deep_query_false_skips_property_getters() {
     let store = SparqlStore::new(None).unwrap();
 
     let base = "test://msg-1";
@@ -1567,8 +1592,9 @@ fn test_deep_query_false_skips_property_getters() {
         ..Default::default()
     };
 
-    let result =
-        execute_model_query_from_json(&store, "Message", &query_input, shape_json).unwrap();
+    let result = execute_model_query_from_json(&store, "Message", &query_input, shape_json)
+        .await
+        .unwrap();
     assert!(!result.instances.is_empty());
 
     let inst = &result.instances[0];
@@ -1585,8 +1611,8 @@ fn test_deep_query_false_skips_property_getters() {
     );
 }
 
-#[test]
-fn test_getters_run_after_pagination() {
+#[tokio::test]
+async fn test_getters_run_after_pagination() {
     // Verify that getters run on the paginated set, not the full result set.
     // We do this by creating 5 instances but querying with limit=2.
     // If getters ran before pagination, all 5 would be evaluated.
@@ -1635,8 +1661,9 @@ fn test_getters_run_after_pagination() {
         ..Default::default()
     };
 
-    let result =
-        execute_model_query_from_json(&store, "Message", &query_input, shape_json).unwrap();
+    let result = execute_model_query_from_json(&store, "Message", &query_input, shape_json)
+        .await
+        .unwrap();
     assert_eq!(result.instances.len(), 2, "should return 2 instances");
     assert_eq!(result.total_count, 5, "total count should be 5");
 
@@ -1673,8 +1700,8 @@ fn signed_literal_number(value: f64) -> String {
     }
 }
 
-#[test]
-fn test_where_filter_signed_expression_string() {
+#[tokio::test]
+async fn test_where_filter_signed_expression_string() {
     // Reproduces the exact CI failure: where clause on a property stored
     // Where clause on a property stored as literal:string:<value>.
     let store = SparqlStore::new(None).unwrap();
@@ -1768,6 +1795,7 @@ fn test_where_filter_signed_expression_string() {
             getter: Some(getter.to_string()),
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
+            transform: None,
         }],
         include_relations: vec![],
     };
@@ -1790,8 +1818,8 @@ fn test_where_filter_signed_expression_string() {
     assert!(!ids.contains(&task3));
 }
 
-#[test]
-fn test_where_filter_signed_expression_no_matches() {
+#[tokio::test]
+async fn test_where_filter_signed_expression_no_matches() {
     // All targets filtered out -> empty array
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
@@ -1841,6 +1869,7 @@ fn test_where_filter_signed_expression_no_matches() {
             getter: Some(getter.to_string()),
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
+            transform: None,
         }],
         include_relations: vec![],
     };
@@ -1852,8 +1881,8 @@ fn test_where_filter_signed_expression_no_matches() {
     assert_eq!(result.len(), 0, "Should be empty when no matches");
 }
 
-#[test]
-fn test_where_filter_multiple_conditions() {
+#[tokio::test]
+async fn test_where_filter_multiple_conditions() {
     // Multiple where conditions: status=active AND priority > 3
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
@@ -1962,6 +1991,7 @@ fn test_where_filter_multiple_conditions() {
             getter: Some(getter.to_string()),
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
+            transform: None,
         }],
         include_relations: vec![],
     };
@@ -1974,8 +2004,8 @@ fn test_where_filter_multiple_conditions() {
     assert_eq!(result[0].as_str().unwrap(), task_hi);
 }
 
-#[test]
-fn test_where_filter_missing_property_on_target() {
+#[tokio::test]
+async fn test_where_filter_missing_property_on_target() {
     // Target lacks the property being filtered on -> should not match
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
@@ -2028,6 +2058,7 @@ fn test_where_filter_missing_property_on_target() {
             getter: Some(getter.to_string()),
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
+            transform: None,
         }],
         include_relations: vec![],
     };
@@ -2040,8 +2071,8 @@ fn test_where_filter_missing_property_on_target() {
     assert_eq!(result[0].as_str().unwrap(), child_with);
 }
 
-#[test]
-fn test_where_filter_plain_literal_string() {
+#[tokio::test]
+async fn test_where_filter_plain_literal_string() {
     // Where clause on literal:string: values (not signed expressions)
     // This should also work correctly
     let store = SparqlStore::new(None).unwrap();
@@ -2092,6 +2123,7 @@ fn test_where_filter_plain_literal_string() {
             getter: Some(getter.to_string()),
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
+            transform: None,
         }],
         include_relations: vec![],
     };
@@ -2104,8 +2136,8 @@ fn test_where_filter_plain_literal_string() {
     assert_eq!(result[0].as_str().unwrap(), child1);
 }
 
-#[test]
-fn test_where_filter_on_multiple_instances() {
+#[tokio::test]
+async fn test_where_filter_on_multiple_instances() {
     // Where filter across multiple parent instances
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
@@ -2179,6 +2211,7 @@ fn test_where_filter_on_multiple_instances() {
             getter: Some(getter.to_string()),
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
+            transform: None,
         }],
         include_relations: vec![],
     };
@@ -2195,8 +2228,8 @@ fn test_where_filter_on_multiple_instances() {
     assert_eq!(active2[0].as_str().unwrap(), task_c);
 }
 
-#[test]
-fn test_full_model_query_signed_expression_where() {
+#[tokio::test]
+async fn test_full_model_query_signed_expression_where() {
     // End-to-end: findAll with where clause on signed expression values
     // This is what the integration test does via the full pipeline
     let store = SparqlStore::new(None).unwrap();
@@ -2272,7 +2305,9 @@ fn test_full_model_query_signed_expression_where() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Item", &query, shape_json).unwrap();
+    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+        .await
+        .unwrap();
     assert_eq!(
         result.instances.len(),
         2,
@@ -2291,8 +2326,8 @@ fn test_full_model_query_signed_expression_where() {
     assert!(!names.contains(&"Gamma"));
 }
 
-#[test]
-fn test_full_model_query_signed_expression_numeric_where() {
+#[tokio::test]
+async fn test_full_model_query_signed_expression_numeric_where() {
     // findAll with numeric where clause on signed expression values
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
@@ -2347,7 +2382,9 @@ fn test_full_model_query_signed_expression_numeric_where() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Item", &query, shape_json).unwrap();
+    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+        .await
+        .unwrap();
     assert_eq!(
         result.instances.len(),
         1,
@@ -2356,8 +2393,8 @@ fn test_full_model_query_signed_expression_numeric_where() {
     assert_eq!(result.instances[0]["id"].as_str().unwrap(), item1);
 }
 
-#[test]
-fn test_full_model_query_signed_expression_boolean_where() {
+#[tokio::test]
+async fn test_full_model_query_signed_expression_boolean_where() {
     // findAll with boolean where clause on plain literal boolean values
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
@@ -2398,13 +2435,15 @@ fn test_full_model_query_signed_expression_boolean_where() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Thing", &query, shape_json).unwrap();
+    let result = execute_model_query_from_json(&store, "Thing", &query, shape_json)
+        .await
+        .unwrap();
     assert_eq!(result.instances.len(), 1);
     assert_eq!(result.instances[0]["id"].as_str().unwrap(), item1);
 }
 
-#[test]
-fn test_full_model_query_where_string_array_in() {
+#[tokio::test]
+async fn test_full_model_query_where_string_array_in() {
     // IN operator: where status IN ["active", "pending"]
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
@@ -2464,12 +2503,14 @@ fn test_full_model_query_where_string_array_in() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Item", &query, shape_json).unwrap();
+    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+        .await
+        .unwrap();
     assert_eq!(result.instances.len(), 2, "active and pending should match");
 }
 
-#[test]
-fn test_full_model_query_where_ops_not() {
+#[tokio::test]
+async fn test_full_model_query_where_ops_not() {
     // NOT operator: where status != "done"
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
@@ -2523,7 +2564,9 @@ fn test_full_model_query_where_ops_not() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Item", &query, shape_json).unwrap();
+    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+        .await
+        .unwrap();
     assert_eq!(result.instances.len(), 1);
     assert_eq!(result.instances[0]["id"].as_str().unwrap(), item1);
 }
@@ -2557,6 +2600,7 @@ fn scalar_prop(name: &str, predicate: &str, required: bool, flag: bool) -> Shape
         getter: None,
         where_filter: None,
         where_predicates: None,
+        transform: None,
     }
 }
 
@@ -2576,6 +2620,7 @@ fn collection_prop(name: &str, predicate: &str, getter: Option<&str>) -> ShapePr
         getter: getter.map(|s| s.to_string()),
         where_filter: None,
         where_predicates: None,
+        transform: None,
     }
 }
 
@@ -2588,8 +2633,8 @@ fn make_shape(props: Vec<ShapeProperty>) -> ModelShape {
     }
 }
 
-#[test]
-fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
+#[tokio::test]
+async fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
     // A model with only scalar properties (like ChannelSummary) should
     // produce a VALUES ?predicate clause listing only those predicates.
     let shape = make_shape(vec![
@@ -2610,8 +2655,8 @@ fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
     assert!(sparql.contains("<flux://description>"));
 }
 
-#[test]
-fn test_build_instance_sparql_excludes_getter_backed_collections() {
+#[tokio::test]
+async fn test_build_instance_sparql_excludes_getter_backed_collections() {
     // A model like Channel with typed @HasMany relations that have
     // auto-generated getters.  The getter-backed collections (views,
     // messages) should be EXCLUDED from the VALUES clause.
@@ -2649,8 +2694,8 @@ fn test_build_instance_sparql_excludes_getter_backed_collections() {
     );
 }
 
-#[test]
-fn test_build_instance_sparql_retains_raw_predicate_collections() {
+#[tokio::test]
+async fn test_build_instance_sparql_retains_raw_predicate_collections() {
     // A collection without a getter (raw predicate like participants)
     // should be INCLUDED in the VALUES clause because it's resolved
     // from the main query results, not by evaluate_getters.
@@ -2680,8 +2725,8 @@ fn test_build_instance_sparql_retains_raw_predicate_collections() {
     );
 }
 
-#[test]
-fn test_build_instance_sparql_shared_predicate_mixed_getter() {
+#[tokio::test]
+async fn test_build_instance_sparql_shared_predicate_mixed_getter() {
     // Edge case: two collections share the same predicate but only one
     // has a getter.  The predicate should be INCLUDED because the
     // getter-less collection needs it from the main query.
@@ -2707,8 +2752,8 @@ fn test_build_instance_sparql_shared_predicate_mixed_getter() {
     );
 }
 
-#[test]
-fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
+#[tokio::test]
+async fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
     // A shape with no properties at all should fall back to the
     // unrestricted wildcard (no VALUES clause).
     let shape = make_shape(vec![]);
@@ -2723,8 +2768,8 @@ fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
     assert!(sparql.contains("?source ?predicate ?target"));
 }
 
-#[test]
-fn test_build_instance_sparql_values_clause_is_deduplicated() {
+#[tokio::test]
+async fn test_build_instance_sparql_values_clause_is_deduplicated() {
     // If multiple scalar properties share the same predicate, the
     // VALUES clause should contain it only once.
     let shape = make_shape(vec![
@@ -2748,8 +2793,8 @@ fn test_build_instance_sparql_values_clause_is_deduplicated() {
     );
 }
 
-#[test]
-fn test_build_instance_sparql_integration_getter_excluded_from_results() {
+#[tokio::test]
+async fn test_build_instance_sparql_integration_getter_excluded_from_results() {
     // Full integration test: a Channel-like model with scalar properties
     // and a getter-backed @HasMany relation.  The main query should NOT
     // return rows for the getter-backed relation's predicate, so adding
@@ -2814,7 +2859,9 @@ fn test_build_instance_sparql_integration_getter_excluded_from_results() {
     }"#;
 
     let query = ModelQueryInput::default();
-    let result = execute_model_query_from_json(&store, "Channel", &query, shape_json).unwrap();
+    let result = execute_model_query_from_json(&store, "Channel", &query, shape_json)
+        .await
+        .unwrap();
 
     assert_eq!(result.instances.len(), 1, "Should find exactly 1 channel");
     assert_eq!(
@@ -2843,8 +2890,8 @@ fn test_build_instance_sparql_integration_getter_excluded_from_results() {
 // Ops-based SPARQL push tests
 // -----------------------------------------------------------------------
 
-#[test]
-fn test_full_model_query_ops_gt_lt_sparql_push() {
+#[tokio::test]
+async fn test_full_model_query_ops_gt_lt_sparql_push() {
     // Verify gt/lt numeric ops are pushed to SPARQL and return correct results
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
@@ -2893,6 +2940,7 @@ fn test_full_model_query_ops_gt_lt_sparql_push() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     assert_eq!(result.instances.len(), 2, "gt:50 should match 70 and 90");
 
@@ -2914,6 +2962,7 @@ fn test_full_model_query_ops_gt_lt_sparql_push() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     assert_eq!(result.instances.len(), 2, "lt:50 should match 10 and 30");
 
@@ -2935,6 +2984,7 @@ fn test_full_model_query_ops_gt_lt_sparql_push() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     assert_eq!(
         result.instances.len(),
@@ -2943,8 +2993,8 @@ fn test_full_model_query_ops_gt_lt_sparql_push() {
     );
 }
 
-#[test]
-fn test_full_model_query_ops_gte_lte_sparql_push() {
+#[tokio::test]
+async fn test_full_model_query_ops_gte_lte_sparql_push() {
     // Verify gte/lte numeric ops via SPARQL
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
@@ -2991,6 +3041,7 @@ fn test_full_model_query_ops_gte_lte_sparql_push() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     assert_eq!(result.instances.len(), 2, "gte:50 should match 50 and 90");
 
@@ -3012,12 +3063,13 @@ fn test_full_model_query_ops_gte_lte_sparql_push() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     assert_eq!(result.instances.len(), 2, "lte:50 should match 10 and 50");
 }
 
-#[test]
-fn test_full_model_query_ops_not_string_sparql_push() {
+#[tokio::test]
+async fn test_full_model_query_ops_not_string_sparql_push() {
     // NOT operator with string should be pushed to SPARQL
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
@@ -3063,12 +3115,13 @@ fn test_full_model_query_ops_not_string_sparql_push() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     assert_eq!(result.instances.len(), 2, "NOT done → 2 active tasks");
 }
 
-#[test]
-fn test_full_model_query_ops_not_array_sparql_push() {
+#[tokio::test]
+async fn test_full_model_query_ops_not_array_sparql_push() {
     // NOT IN (array) should be pushed to SPARQL
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
@@ -3112,6 +3165,7 @@ fn test_full_model_query_ops_not_array_sparql_push() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     assert_eq!(
         result.instances.len(),
@@ -3120,8 +3174,8 @@ fn test_full_model_query_ops_not_array_sparql_push() {
     );
 }
 
-#[test]
-fn test_full_model_query_ops_with_pagination_pushed() {
+#[tokio::test]
+async fn test_full_model_query_ops_with_pagination_pushed() {
     // Ops + pagination should both be pushed to SPARQL (no contains)
     let store = SparqlStore::new(None).unwrap();
 
@@ -3171,13 +3225,14 @@ fn test_full_model_query_ops_with_pagination_pushed() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     assert_eq!(result.instances.len(), 3, "Should get 3 items in page");
     assert_eq!(result.total_count, 7, "Total matching items: score >= 30");
 }
 
-#[test]
-fn test_full_model_query_ops_contains_sparql_push() {
+#[tokio::test]
+async fn test_full_model_query_ops_contains_sparql_push() {
     // `contains` in Ops should be pushed to SPARQL via CONTAINS+ENCODE_FOR_URI
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
@@ -3221,6 +3276,7 @@ fn test_full_model_query_ops_contains_sparql_push() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     assert_eq!(
         result.instances.len(),
@@ -3229,8 +3285,8 @@ fn test_full_model_query_ops_contains_sparql_push() {
     );
 }
 
-#[test]
-fn test_full_model_query_ops_contains_with_pagination() {
+#[tokio::test]
+async fn test_full_model_query_ops_contains_with_pagination() {
     // `contains` + pagination should both be pushed to SPARQL
     let store = SparqlStore::new(None).unwrap();
     let ts_base = 1700000000000i64;
@@ -3285,6 +3341,7 @@ fn test_full_model_query_ops_contains_with_pagination() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     assert_eq!(result.instances.len(), 1, "Should get 1 item in page");
     assert_eq!(result.total_count, 3, "Total matching: 3 Alices");
@@ -3317,8 +3374,8 @@ fn signed_envelope_literal(value: &str) -> String {
 /// Exercises the exact pattern used by paginateSubscribe: model query with WHERE
 /// filtering on a literal property, pagination (limit/offset), and count=true,
 /// where stored values are signed expression envelopes (literal:json:{signed}).
-#[test]
-fn test_signed_envelope_where_paginate_count() {
+#[tokio::test]
+async fn test_signed_envelope_where_paginate_count() {
     let store = SparqlStore::new(None).unwrap();
     let ts_base = 1700000000000i64;
 
@@ -3381,6 +3438,7 @@ fn test_signed_envelope_where_paginate_count() {
         },
         shape_json,
     )
+    .await
     .unwrap();
 
     // Should return 2 items in page, total_count = 3 (all active items)
@@ -3418,6 +3476,7 @@ fn test_signed_envelope_where_paginate_count() {
         },
         shape_json,
     )
+    .await
     .unwrap();
 
     assert_eq!(
@@ -3435,8 +3494,8 @@ fn test_signed_envelope_where_paginate_count() {
 
 /// Regression: mixed literal formats (plain + signed envelope) coexist in the same query.
 /// This can happen during migration or when different code paths create links.
-#[test]
-fn test_mixed_plain_and_signed_envelope_where() {
+#[tokio::test]
+async fn test_mixed_plain_and_signed_envelope_where() {
     let store = SparqlStore::new(None).unwrap();
     let ts_base = 1700000000000i64;
 
@@ -3504,6 +3563,7 @@ fn test_mixed_plain_and_signed_envelope_where() {
         },
         shape_json,
     )
+    .await
     .unwrap();
 
     assert_eq!(result.instances.len(), 2, "Both formats should match");
@@ -3528,6 +3588,7 @@ fn test_mixed_plain_and_signed_envelope_where() {
         },
         shape_json,
     )
+    .await
     .unwrap();
 
     assert_eq!(result2.instances.len(), 1, "Exact match on signed envelope");
@@ -3541,8 +3602,8 @@ fn test_mixed_plain_and_signed_envelope_where() {
 // Performance / scale tests
 // -----------------------------------------------------------------------
 
-#[test]
-fn test_perf_large_dataset_paginated_query() {
+#[tokio::test]
+async fn test_perf_large_dataset_paginated_query() {
     // Simulate Flux-like scenario: many messages across channels.
     // Verifies that paginated queries complete in a reasonable time.
     let store = SparqlStore::new(None).unwrap();
@@ -3603,6 +3664,7 @@ fn test_perf_large_dataset_paginated_query() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     let elapsed = start.elapsed();
 
@@ -3625,8 +3687,8 @@ fn test_perf_large_dataset_paginated_query() {
     );
 }
 
-#[test]
-fn test_perf_flux_message_parent_scope_paginated() {
+#[tokio::test]
+async fn test_perf_flux_message_parent_scope_paginated() {
     // Simulates the exact Flux chat-view query:
     //   useLiveQuery(Message, perspective, {
     //     parent: { model: Channel, id: source },
@@ -3713,6 +3775,7 @@ fn test_perf_flux_message_parent_scope_paginated() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     let elapsed = start.elapsed();
 
@@ -3856,8 +3919,8 @@ fn test_perf_flux_message_parent_scope_paginated() {
 // Property-key sort push tests
 // -----------------------------------------------------------------------
 
-#[test]
-fn test_full_model_query_order_by_property_string() {
+#[tokio::test]
+async fn test_full_model_query_order_by_property_string() {
     // ORDER BY a string property should be pushed to SPARQL
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
@@ -3893,6 +3956,7 @@ fn test_full_model_query_order_by_property_string() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     assert_eq!(result.instances.len(), 2);
     assert_eq!(result.total_count, 3);
@@ -3911,6 +3975,7 @@ fn test_full_model_query_order_by_property_string() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     assert_eq!(result.instances.len(), 2);
     // First 2 reverse alphabetically: Charlie, Bob
@@ -3918,8 +3983,8 @@ fn test_full_model_query_order_by_property_string() {
     assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
 }
 
-#[test]
-fn test_full_model_query_order_by_property_number() {
+#[tokio::test]
+async fn test_full_model_query_order_by_property_number() {
     // ORDER BY a numeric property
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
@@ -3960,6 +4025,7 @@ fn test_full_model_query_order_by_property_number() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     assert_eq!(result.instances.len(), 3);
     assert_eq!(result.total_count, 5);
@@ -3981,6 +4047,7 @@ fn test_full_model_query_order_by_property_number() {
         },
         shape_json,
     )
+    .await
     .unwrap();
     let got_scores: Vec<f64> = result
         .instances
@@ -3990,8 +4057,8 @@ fn test_full_model_query_order_by_property_number() {
     assert_eq!(got_scores, vec![999.0, 100.0], "DESC numeric sort");
 }
 
-#[test]
-fn test_resolve_projections_where_filter_via_target_shape_property() {
+#[tokio::test]
+async fn test_resolve_projections_where_filter_via_target_shape_property() {
     // Mirrors the WE $totalLikeCount pattern:
     //   include: {
     //     $totalLikeCount: { from: 'signals', where: { signalTypeId: 'like_type_id123' }, count: true }
@@ -4068,6 +4135,7 @@ fn test_resolve_projections_where_filter_via_target_shape_property() {
             getter: None,
             where_filter: None,
             where_predicates: None,
+            transform: None,
         }],
         include_relations: vec![],
     };
@@ -4095,7 +4163,9 @@ fn test_resolve_projections_where_filter_via_target_shape_property() {
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, &resolver, 0).unwrap();
+    resolve_projections(&store, &mut instances, &projections, &shape, &resolver, 0)
+        .await
+        .unwrap();
 
     let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
     assert_eq!(
@@ -4118,7 +4188,9 @@ fn test_resolve_projections_where_filter_via_target_shape_property() {
         },
     );
 
-    resolve_projections(&store, &mut instances2, &projections2, &shape, &resolver, 0).unwrap();
+    resolve_projections(&store, &mut instances2, &projections2, &shape, &resolver, 0)
+        .await
+        .unwrap();
 
     let got = &instances2[0]["$myLikeSignal"];
     assert_eq!(

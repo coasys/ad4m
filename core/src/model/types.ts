@@ -10,6 +10,7 @@
 // Forward type-only reference to Ad4mModel (no runtime circular dependency)
 // ---------------------------------------------------------------------------
 import type { Ad4mModel } from "./Ad4mModel";
+import type { NodeExpression } from "../shacl/NodeExpression";
 
 // ---------------------------------------------------------------------------
 // Query DSL types
@@ -390,7 +391,7 @@ export interface PropertyMetadata {
   /** Whether stored locally only */
   local?: boolean;
   /** Transform function */
-  transform?: (value: any) => any;
+  transform?: NodeExpression;
   /** Whether this is a flag property */
   flag?: boolean;
 }
