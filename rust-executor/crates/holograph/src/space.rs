@@ -220,27 +220,17 @@ pub struct HolographSpaceHandler {
 }
 
 impl HolographSpaceHandler {
-    pub fn new() -> (
-        Arc<Self>,
-        mpsc::UnboundedReceiver<TelepresenceNotification>,
-    ) {
+    pub fn new() -> (Arc<Self>, mpsc::UnboundedReceiver<TelepresenceNotification>) {
         let (tx, rx) = mpsc::unbounded_channel();
         (Arc::new(Self { notify_tx: tx }), rx)
     }
 }
 
 impl SpaceHandler for HolographSpaceHandler {
-    fn recv_notify(
-        &self,
-        from_peer: Url,
-        _space_id: SpaceId,
-        data: bytes::Bytes,
-    ) -> K2Result<()> {
+    fn recv_notify(&self, from_peer: Url, _space_id: SpaceId, data: bytes::Bytes) -> K2Result<()> {
         let msg = TelepresenceNotification { from_peer, data };
         if let Err(e) = self.notify_tx.send(msg) {
-            tracing::warn!(
-                "HolographSpaceHandler: telepresence receiver gone, dropping: {e}"
-            );
+            tracing::warn!("HolographSpaceHandler: telepresence receiver gone, dropping: {e}");
         }
         Ok(())
     }
@@ -455,10 +445,7 @@ impl K2OpStoreShim {
 }
 
 impl OpStore for K2OpStoreShim {
-    fn process_incoming_ops(
-        &self,
-        op_list: Vec<Bytes>,
-    ) -> BoxFuture<'_, K2Result<Vec<OpId>>> {
+    fn process_incoming_ops(&self, op_list: Vec<Bytes>) -> BoxFuture<'_, K2Result<Vec<OpId>>> {
         Box::pin(async move {
             let queue_opt = self.queue.read().expect("queue rwlock poisoned").clone();
             if let Some(q) = queue_opt {
@@ -490,10 +477,7 @@ impl OpStore for K2OpStoreShim {
         self.op_store.retrieve_ops(op_ids)
     }
 
-    fn filter_out_existing_ops(
-        &self,
-        op_ids: Vec<OpId>,
-    ) -> BoxFuture<'_, K2Result<Vec<OpId>>> {
+    fn filter_out_existing_ops(&self, op_ids: Vec<OpId>) -> BoxFuture<'_, K2Result<Vec<OpId>>> {
         self.op_store.filter_out_existing_ops(op_ids)
     }
 
@@ -503,13 +487,11 @@ impl OpStore for K2OpStoreShim {
         start: Timestamp,
         limit_bytes: u32,
     ) -> BoxFuture<'_, K2Result<(Vec<OpId>, u32, Timestamp)>> {
-        self.op_store.retrieve_op_ids_bounded(arc, start, limit_bytes)
+        self.op_store
+            .retrieve_op_ids_bounded(arc, start, limit_bytes)
     }
 
-    fn earliest_timestamp_in_arc(
-        &self,
-        arc: DhtArc,
-    ) -> BoxFuture<'_, K2Result<Option<Timestamp>>> {
+    fn earliest_timestamp_in_arc(&self, arc: DhtArc) -> BoxFuture<'_, K2Result<Option<Timestamp>>> {
         self.op_store.earliest_timestamp_in_arc(arc)
     }
 
@@ -534,10 +516,7 @@ impl OpStore for K2OpStoreShim {
         self.op_store.retrieve_slice_hash(arc, slice_index)
     }
 
-    fn retrieve_slice_hashes(
-        &self,
-        arc: DhtArc,
-    ) -> BoxFuture<'_, K2Result<Vec<(u64, Bytes)>>> {
+    fn retrieve_slice_hashes(&self, arc: DhtArc) -> BoxFuture<'_, K2Result<Vec<(u64, Bytes)>>> {
         self.op_store.retrieve_slice_hashes(arc)
     }
 
