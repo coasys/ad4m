@@ -119,7 +119,7 @@ dependencies = [
  "kitsune2_core",
  "kitsune2_gossip",
  "kitsune2_test_utils",
- "kitsune2_transport_tx5",
+ "kitsune2_transport_iroh",
  "kitsune_p2p_types",
  "lair_keystore_api 0.6.3 (git+https://github.com/coasys/lair.git?branch=0.6.3-coasys)",
  "lazy_static",

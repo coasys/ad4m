@@ -172,7 +172,7 @@ struct NeighborhoodState {
     /// Live K2 space handle. Step 6b stored this implicitly via the
     /// adapters; Step 9 keeps it here so `join_agent` can call
     /// `current_url()` to publish the conductor's reachable address
-    /// (Tx5 transport) instead of returning a placeholder.
+    /// (Iroh transport) instead of returning a placeholder.
     dyn_space: kitsune2_api::DynSpace,
 }
 
@@ -303,15 +303,16 @@ impl HolographRuntime {
 
         shim.install_queue(Arc::clone(space.queue()));
 
-        // Local-agent join. For the cross-process (Tx5) path we need a
-        // process-unique AgentId — TestLocalAgent::default() uses a
+        // Local-agent join. For the cross-process (Iroh) path we need
+        // a process-unique AgentId — TestLocalAgent::default() uses a
         // static counter so every fresh process starts at "test-1" and
         // the bootstrap server can't tell two conductors apart. The
         // in-process tests (Step 4d / Step 6f) still want TestLocalAgent
         // because they pair with TestVerifier in the same Builder.
         //
         // Production identity (AD4M DID-bound) is PR-B / morning work.
-        let agent: DynLocalAgent = if std::env::var("HOLOGRAPH_SBD_URL").is_ok() {
+        let cross_process = std::env::var("HOLOGRAPH_IROH_RELAY_URL").is_ok();
+        let agent: DynLocalAgent = if cross_process {
             Arc::new(kitsune2_core::Ed25519LocalAgent::default()) as DynLocalAgent
         } else {
             Arc::new(kitsune2_test_utils::agent::TestLocalAgent::default()) as DynLocalAgent
@@ -327,7 +328,7 @@ impl HolographRuntime {
             "[holograph] local agent join: agent_id_b64={} ({}B) cross_process={}",
             agent_b64,
             agent.agent().as_ref().len(),
-            std::env::var("HOLOGRAPH_SBD_URL").is_ok(),
+            cross_process,
         );
         dyn_space
             .local_agent_join(agent.clone())
@@ -405,10 +406,10 @@ impl HolographRuntime {
     /// DID through.
     ///
     /// Returns the reachable URL the K2 transport published for this
-    /// node (Tx5 path: `ws://sbd:port/<peer-id>`; mem path: the
-    /// placeholder `ws://holograph-local:0` because mem transport
-    /// isn't process-routable). The JS test harness uses this URL to
-    /// cross-register peers between conductors.
+    /// node (Iroh path: a node-id URL exposed via the iroh relay; mem
+    /// path: the placeholder `ws://holograph-local:0` because mem
+    /// transport isn't process-routable). The JS test harness uses
+    /// this URL to cross-register peers between conductors.
     pub async fn join_agent(
         &self,
         handle: HolographHandle,
@@ -446,14 +447,18 @@ impl HolographRuntime {
 /// Build a K2 `DynSpace` for our `HolographRuntime` neighborhood.
 ///
 /// Two transport modes, selected by env at first call:
-///   * `HOLOGRAPH_SBD_URL=<wss://sbd-url>` → Tx5 (WebRTC via SBD signal
-///     server). Cross-process; suitable for two-conductor JS tests.
+///   * `HOLOGRAPH_IROH_RELAY_URL=<http(s)://relay/relay>` → Iroh
+///     transport (QUIC; the `kitsune2-bootstrap-srv` binary doubles as
+///     the iroh relay at `<addr>/relay`). Cross-process; suitable for
+///     two-conductor JS tests. Matches the rest of the ad4m repo
+///     which uses Holochain's `transport-iroh` feature.
 ///   * unset → mem transport (in-process only). Used by Step 4d /
 ///     Step 6f Rust integration tests so they keep running fast and
 ///     deterministic.
 ///
-/// `HOLOGRAPH_SBD_PLAINTEXT=1` allows `ws://` instead of `wss://` —
-/// the test harness's bootstrap-srv ships plaintext on loopback.
+/// `HOLOGRAPH_IROH_PLAINTEXT=1` allows `http://` relays instead of
+/// `https://` — the test harness's bootstrap-srv ships plaintext on
+/// loopback.
 async fn build_dyn_space(
     runtime: Arc<Runtime>,
     op_store: Arc<KvOpStore>,
@@ -520,22 +525,22 @@ async fn build_dyn_space_inner(
     use kitsune2_core::default_test_builder;
     use kitsune2_test_utils::agent::TestVerifier;
 
-    let sbd_url = std::env::var("HOLOGRAPH_SBD_URL").ok();
+    let relay_url = std::env::var("HOLOGRAPH_IROH_RELAY_URL").ok();
     let boot_url = std::env::var("HOLOGRAPH_BOOTSTRAP_URL").ok();
     let shim_factory = Arc::new(ShimFactory { op_store, shim });
 
-    let builder = if let Some(url) = sbd_url.as_deref() {
-        // Cross-process path: Tx5 transport (WebRTC via SBD signal
-        // server) + CoreBootstrap (peer discovery via
-        // kitsune2-bootstrap-srv). Both URLs come from the JS test
-        // harness's `runHcLocalServices` helper, which spawns one
-        // bootstrap-srv that doubles as SBD signal.
+    let builder = if let Some(url) = relay_url.as_deref() {
+        // Cross-process path: Iroh transport (QUIC + relay-assisted
+        // hole-punching) + CoreBootstrap (peer discovery via
+        // kitsune2-bootstrap-srv). The kitsune2-bootstrap-srv binary
+        // doubles as the iroh relay at `<addr>/relay` (per K2's
+        // test_utils::bootstrap::TestBootstrapSrv pattern).
         use kitsune2_core::factories::CoreBootstrapFactory;
         use kitsune2_core::factories::{CoreBootstrapConfig, CoreBootstrapModConfig};
-        use kitsune2_transport_tx5::{
-            Tx5TransportConfig, Tx5TransportFactory, Tx5TransportModConfig,
+        use kitsune2_transport_iroh::{
+            IrohTransportConfig, IrohTransportFactory, IrohTransportModConfig,
         };
-        let allow_plain = std::env::var("HOLOGRAPH_SBD_PLAINTEXT")
+        let allow_plain = std::env::var("HOLOGRAPH_IROH_PLAINTEXT")
             .map(|v| v.trim() == "1")
             .unwrap_or(false);
         let b = Builder {
@@ -545,7 +550,7 @@ async fn build_dyn_space_inner(
             // produce.
             verifier: Arc::new(kitsune2_core::Ed25519Verifier),
             op_store: shim_factory,
-            transport: Tx5TransportFactory::create(),
+            transport: IrohTransportFactory::create(),
             bootstrap: CoreBootstrapFactory::create(),
             gossip: kitsune2_gossip::K2GossipFactory::create(),
             ..default_test_builder()
@@ -553,20 +558,22 @@ async fn build_dyn_space_inner(
         .with_default_config()
         .map_err(substrate)?;
         b.config
-            .set_module_config(&Tx5TransportModConfig {
-                tx5_transport: Tx5TransportConfig {
-                    signal_allow_plain_text: allow_plain,
-                    server_url: url.to_string(),
+            .set_module_config(&IrohTransportModConfig {
+                iroh_transport: IrohTransportConfig {
+                    relay_url: Some(url.to_string()),
+                    relay_allow_plain_text: allow_plain,
                     ..Default::default()
                 },
             })
             .map_err(substrate)?;
-        // CoreBootstrap requires server_url to be set for spaces; falls
-        // back to the SBD URL if no separate bootstrap URL was provided
-        // (the kitsune2-bootstrap-srv exposes both on the same port).
+        // CoreBootstrap requires server_url to be set for spaces; for
+        // a typical spike test setup the bootstrap server lives at the
+        // same host:port as the relay (just without the `/relay` path
+        // segment).
         let boot_server = boot_url.clone().unwrap_or_else(|| {
-            url.replace("ws://", "http://")
-                .replace("wss://", "https://")
+            // Strip trailing "/relay" if present so we get the root URL
+            // of the bootstrap-srv.
+            url.trim_end_matches("/relay").to_string()
         });
         // Default backoff_min_ms is 5000 (production-safe); for the
         // spike's loopback test we tighten it to 500ms so two
@@ -587,14 +594,14 @@ async fn build_dyn_space_inner(
             })
             .map_err(substrate)?;
         log::info!(
-            "[holograph] DynSpace built with Tx5 (sbd={}, plain={}) + CoreBootstrap (server={})",
+            "[holograph] DynSpace built with Iroh (relay={}, plain={}) + CoreBootstrap (server={})",
             url,
             allow_plain,
             boot_server
         );
         b
     } else {
-        log::debug!("[holograph] HOLOGRAPH_SBD_URL unset; using mem transport");
+        log::debug!("[holograph] HOLOGRAPH_IROH_RELAY_URL unset; using mem transport");
         Builder {
             verifier: Arc::new(TestVerifier),
             op_store: shim_factory,
