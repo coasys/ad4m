@@ -1,4 +1,5 @@
 import { SHACLShape, SHACLPropertyShape, AD4MAction } from './SHACLShape';
+import { concat, literal, focus } from './builders';
 
 describe('SHACLShape', () => {
   describe('toLinks()', () => {
@@ -489,6 +490,177 @@ describe('SHACLShape', () => {
       const json = original.toJSON();
       const reconstructed = SHACLShape.fromJSON(json);
       expect(reconstructed.properties[0].in).toEqual(original.properties[0].in);
+    });
+  });
+
+  describe('runtime metadata predicates (SHACL as source of truth)', () => {
+    it('emits and parses relationKind', () => {
+      const shape = new SHACLShape('ns://Recipe');
+      shape.addProperty({
+        name: 'ingredients',
+        path: 'ns://has_ingredient',
+        relationKind: 'hasMany',
+      });
+      const links = shape.toLinks();
+      const kindLink = links.find(l => l.predicate === 'ad4m://relationKind');
+      expect(kindLink?.target).toBe('literal:string:hasMany');
+
+      const round = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+      expect(round.properties[0].relationKind).toBe('hasMany');
+    });
+
+    it('emits and parses targetClassName', () => {
+      const shape = new SHACLShape('ns://Recipe');
+      shape.addProperty({
+        name: 'ingredients',
+        path: 'ns://has_ingredient',
+        targetClassName: 'Ingredient',
+      });
+      const links = shape.toLinks();
+      const link = links.find(l => l.predicate === 'ad4m://targetClassName');
+      expect(link?.target).toBe('literal:string:Ingredient');
+
+      const round = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+      expect(round.properties[0].targetClassName).toBe('Ingredient');
+    });
+
+    it('emits and parses whereFilter as a JSON literal', () => {
+      const shape = new SHACLShape('ns://Board');
+      shape.addProperty({
+        name: 'tasks',
+        path: 'ns://has_task',
+        whereFilter: { status: 'active' },
+      });
+      const links = shape.toLinks();
+      const link = links.find(l => l.predicate === 'ad4m://whereFilter');
+      expect(link?.target).toContain('"status"');
+
+      const round = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+      expect(round.properties[0].whereFilter).toEqual({ status: 'active' });
+    });
+
+    it('emits and parses wherePredicates', () => {
+      const shape = new SHACLShape('ns://Board');
+      shape.addProperty({
+        name: 'tasks',
+        path: 'ns://has_task',
+        wherePredicates: { status: 'ns://status' },
+      });
+      const links = shape.toLinks();
+      const link = links.find(l => l.predicate === 'ad4m://wherePredicates');
+      expect(link).toBeDefined();
+
+      const round = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+      expect(round.properties[0].wherePredicates).toEqual({ status: 'ns://status' });
+    });
+
+    it('omits wherePredicates link for empty maps', () => {
+      const shape = new SHACLShape('ns://Board');
+      shape.addProperty({
+        name: 'tasks',
+        path: 'ns://has_task',
+        wherePredicates: {},
+      });
+      const links = shape.toLinks();
+      const link = links.find(l => l.predicate === 'ad4m://wherePredicates');
+      expect(link).toBeUndefined();
+    });
+
+    it('emits and parses filter=false as a literal boolean', () => {
+      const shape = new SHACLShape('ns://Doc');
+      shape.addProperty({
+        name: 'tags',
+        path: 'ns://tag',
+        filter: false,
+      });
+      const links = shape.toLinks();
+      const link = links.find(l => l.predicate === 'ad4m://filter');
+      expect(link?.target).toBe('literal:false');
+
+      const round = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+      expect(round.properties[0].filter).toBe(false);
+    });
+
+    it('round-trips all runtime metadata through toJSON() and fromJSON()', () => {
+      const original = new SHACLShape('ns://Board');
+      original.addProperty({
+        name: 'tasks',
+        path: 'ns://has_task',
+        relationKind: 'hasMany',
+        targetClassName: 'Task',
+        whereFilter: { status: 'active' },
+        wherePredicates: { status: 'ns://status' },
+        filter: false,
+      });
+      const json = original.toJSON();
+      const reconstructed = SHACLShape.fromJSON(json);
+      const prop = reconstructed.properties[0];
+      expect(prop.relationKind).toBe('hasMany');
+      expect(prop.targetClassName).toBe('Task');
+      expect(prop.whereFilter).toEqual({ status: 'active' });
+      expect(prop.wherePredicates).toEqual({ status: 'ns://status' });
+      expect(prop.filter).toBe(false);
+    });
+  });
+
+  describe('transform property emission', () => {
+    it('emits an ad4m://transform link when transform is a NodeExpression', () => {
+      const shape = new SHACLShape('ns://ImagePost');
+      shape.addProperty({
+        name: 'image',
+        path: 'image://data',
+        datatype: 'xsd://string',
+        resolveLanguage: '',
+        transform: concat(literal('data:image/png;base64,'), focus()),
+      });
+
+      const links = shape.toLinks();
+      const transformLinks = links.filter(l => l.predicate === 'ad4m://transform');
+      expect(transformLinks).toHaveLength(1);
+
+      // Payload must be a SHACL-serialized NodeExpression, never raw JS.
+      const target = transformLinks[0].target;
+      expect(target.startsWith('literal:string:')).toBe(true);
+      const json = target.replace(/^literal:string:/, '');
+      expect(() => JSON.parse(json)).not.toThrow();
+      expect(JSON.parse(json)).toEqual({
+        type: 'concat',
+        args: [
+          { type: 'literal', value: 'data:image/png;base64,' },
+          { type: 'focus' },
+        ],
+      });
+    });
+
+    // Regression guard for the `typeof prop.transform === 'object'` clause
+    // added alongside the SHACL-source-of-truth round-trip fix.  Legacy model
+    // decorators still declare JS-function transforms (e.g. the pre-DSL
+    // `transform: (data) => ...` form).  Those cannot be represented as a
+    // SHACL-AF Node Expression and must be silently dropped during link
+    // emission — never coerced through `JSON.stringify`, which would write a
+    // bogus `literal:string:undefined` triple and corrupt the store.
+    it('silently drops function-typed transforms (no ad4m://transform link emitted)', () => {
+      const shape = new SHACLShape('ns://LegacyModel');
+      shape.addProperty({
+        name: 'image',
+        path: 'ns://image',
+        datatype: 'xsd://string',
+        // Legacy JS-function form, still found in pre-migration model classes.
+        // Cast through `any` because the public type only permits NodeExpression.
+        transform: ((data: any) => `data:image/png;base64,${data}`) as any,
+      });
+
+      const links = shape.toLinks();
+      const transformLinks = links.filter(l => l.predicate === 'ad4m://transform');
+      expect(transformLinks).toHaveLength(0);
+
+      // Defensive: nothing in the emitted link set should carry the string
+      // "undefined" or a serialized function — that would indicate an
+      // accidental JSON.stringify of the function value.
+      for (const link of links) {
+        expect(link.target).not.toMatch(/^literal:string:undefined$/);
+        expect(link.target).not.toMatch(/^literal:string:.*function/);
+      }
     });
   });
 });

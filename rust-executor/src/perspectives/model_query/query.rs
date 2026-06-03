@@ -1,20 +1,21 @@
 //! Top-level query orchestrator.
 //!
 //! [`execute_model_query`] is the single public entry point that external code
-//! (e.g. `perspective_instance.rs`) calls.  It wires together shape resolution,
-//! SPARQL construction, store execution, hydration, filtering, getter
-//! evaluation, relation resolution, and projection attachment — producing a
-//! [`ModelQueryResult`] with hydrated JSON instances and a total count.
+//! (e.g. `perspective_instance.rs`) calls.  Shape resolution is performed by
+//! the caller; this function takes an already-resolved [`ModelShape`] plus a
+//! [`ShapeResolver`] that recursive include resolution uses to look up
+//! target-class shapes (themselves cached).
 
+use super::eval_transform::eval_transform;
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
 use super::hydration::{filter_properties, group_results_by_source, hydrate_instances};
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
-use super::shape::{load_shape, parse_shape_from_json};
 use super::sparql_builder::{all_where_pushable, build_count_sparql, build_instance_sparql};
 use super::types::{
-    InstanceQueryPlan, ModelQueryInput, ModelQueryResult, OrderDirection, SortKey, SparqlPagination,
+    InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection,
+    ShapeResolver, SortKey, SparqlPagination,
 };
 use super::utils::{validate_iri, MAX_INCLUDE_DEPTH};
 use crate::perspectives::sparql_store::SparqlStore;
@@ -29,17 +30,18 @@ use serde_json::Value;
 /// # Arguments
 ///
 /// * `store` — The Oxigraph SPARQL store to query against.
-/// * `class_name` — Name of the model class (e.g. `"Recipe"`, `"Message"`).
+/// * `shape` — The resolved model shape for this class (from the cache).
 /// * `query_input` — The deserialized query object from the TS client.
-/// * `shape_json` — Optional JSON metadata describing the model's shape.
-///   When `None`, the shape is loaded from SHACL triples in the store.
-pub fn execute_model_query(
+/// * `resolver` — Used to resolve target-class shapes for recursive
+///   `include` resolution.  Typically a cache-backed resolver living on
+///   the `PerspectiveInstance`.
+pub async fn execute_model_query(
     store: &SparqlStore,
-    class_name: &str,
+    shape: &ModelShape,
     query_input: &ModelQueryInput,
-    shape_json: Option<&str>,
+    resolver: &dyn ShapeResolver,
 ) -> Result<ModelQueryResult, Error> {
-    execute_model_query_inner(store, class_name, query_input, shape_json, 0)
+    execute_model_query_inner(store, shape, query_input, resolver, 0).await
 }
 
 /// Inner implementation with recursion depth tracking.
@@ -47,35 +49,29 @@ pub fn execute_model_query(
 /// The `depth` parameter prevents infinite cycles when resolving nested
 /// `include` relations (e.g. A includes B which includes A).  If depth
 /// exceeds [`MAX_INCLUDE_DEPTH`], an empty result is returned.
-pub(super) fn execute_model_query_inner(
+pub(super) async fn execute_model_query_inner(
     store: &SparqlStore,
-    class_name: &str,
+    shape: &ModelShape,
     query_input: &ModelQueryInput,
-    shape_json: Option<&str>,
+    resolver: &dyn ShapeResolver,
     depth: u8,
 ) -> Result<ModelQueryResult, Error> {
     if depth > MAX_INCLUDE_DEPTH {
         log::warn!(
             "Include resolution depth {} exceeded for class '{}'; returning empty",
             MAX_INCLUDE_DEPTH,
-            class_name
+            shape.target_class
         );
         return Ok(ModelQueryResult {
             instances: vec![],
             total_count: 0,
         });
     }
-    // Load shape from store or parse from provided JSON
-    let shape = if let Some(json) = shape_json {
-        parse_shape_from_json(json, class_name)?
-    } else {
-        load_shape(store, class_name)?
-    };
 
     // Fast path: COUNT-only
     let is_count_only = query_input.limit == Some(0);
-    if is_count_only && all_where_pushable(query_input, &shape) {
-        if let Some(sparql) = build_count_sparql(&shape, query_input) {
+    if is_count_only && all_where_pushable(query_input, shape) {
+        if let Some(sparql) = build_count_sparql(shape, query_input) {
             let result_json = store.query(&sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             let count = results
@@ -95,7 +91,7 @@ pub(super) fn execute_model_query_inner(
     }
 
     // Full pipeline
-    let can_push_pagination = all_where_pushable(query_input, &shape) && {
+    let can_push_pagination = all_where_pushable(query_input, shape) && {
         match &query_input.order {
             None => true,
             Some(order) => {
@@ -145,18 +141,18 @@ pub(super) fn execute_model_query_inner(
             None
         };
 
-    let query_plan = build_instance_sparql(&shape, query_input, sparql_pagination.as_ref());
+    let query_plan = build_instance_sparql(shape, query_input, sparql_pagination.as_ref());
 
     let raw_results: Vec<Value> = match query_plan {
         InstanceQueryPlan::Single(sparql) => {
-            let result_json = store.query(&sparql)?;
+            let result_json = store.query_async(&sparql).await?;
             serde_json::from_str(&result_json)?
         }
         InstanceQueryPlan::TwoPhase {
             pagination_subquery,
             predicate_filter,
         } => {
-            let page_json = store.query(&pagination_subquery)?;
+            let page_json = store.query_async(&pagination_subquery).await?;
             let page_results: Vec<Value> = serde_json::from_str(&page_json)?;
 
             if page_results.is_empty() {
@@ -183,15 +179,18 @@ pub(super) fn execute_model_query_inner(
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
 }}"#
                     );
-                    let result_json = store.query(&property_sparql)?;
+                    let result_json = store.query_async(&property_sparql).await?;
                     serde_json::from_str(&result_json)?
                 }
             }
         }
     };
 
-    let grouped = group_results_by_source(&raw_results, &shape);
-    let mut instances = hydrate_instances(&shape, &grouped);
+    let grouped = group_results_by_source(&raw_results, shape);
+    let mut instances = hydrate_instances(shape, &grouped);
+
+    // Apply transform expressions for resolveLanguage properties
+    resolve_language_transforms(&shape, &mut instances).await?;
 
     // Resolve reverse relations
     let reverse_rels: Vec<(String, String, bool)> = shape
@@ -206,14 +205,14 @@ pub(super) fn execute_model_query_inner(
 
     // Apply post-hydration where-clause filters
     if let Some(ref where_clause) = query_input.where_clause {
-        if !all_where_pushable(query_input, &shape) {
-            instances.retain(|inst| matches_where(inst, where_clause, &shape));
+        if !all_where_pushable(query_input, shape) {
+            instances.retain(|inst| matches_where(inst, where_clause, shape));
         }
     }
 
     // Calculate total count
     let total_count = if sparql_pagination.is_some() {
-        if let Some(count_sparql) = build_count_sparql(&shape, query_input) {
+        if let Some(count_sparql) = build_count_sparql(shape, query_input) {
             let result_json = store.query(&count_sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             results
@@ -267,7 +266,7 @@ pub(super) fn execute_model_query_inner(
         evaluate_getters(
             store,
             &mut paginated,
-            &shape,
+            shape,
             query_input.include.as_ref(),
             deep_query,
         )?;
@@ -276,7 +275,8 @@ pub(super) fn execute_model_query_inner(
     // Eager-load included relations
     if let Some(ref include) = query_input.include {
         if !paginated.is_empty() && !shape.include_relations.is_empty() {
-            resolve_includes_recursive(store, &mut paginated, include, &shape, depth)?;
+            resolve_includes_recursive(store, &mut paginated, include, shape, resolver, depth)
+                .await?;
         }
     }
 
@@ -300,11 +300,83 @@ pub(super) fn execute_model_query_inner(
 
     // Attach projection results
     if let Some(ref projections) = query_input.projections {
-        resolve_projections(store, &mut final_instances, projections, &shape, depth)?;
+        resolve_projections(
+            store,
+            &mut final_instances,
+            projections,
+            shape,
+            resolver,
+            depth,
+        )
+        .await?;
     }
 
     Ok(ModelQueryResult {
         instances: final_instances,
         total_count,
     })
+}
+
+/// Apply transform expressions to resolveLanguage properties.
+///
+/// For properties marked with `resolve_language`, if the value is a non-literal
+/// expression URL (not starting with "literal:"), this function fetches the
+/// expression data from the language controller and applies the property's
+/// transform expression (or the default file decode).
+async fn resolve_language_transforms(
+    shape: &ModelShape,
+    instances: &mut [Value],
+) -> Result<(), Error> {
+    let resolve_props: Vec<&super::types::ShapeProperty> = shape
+        .properties
+        .iter()
+        .filter(|p| p.resolve_language.is_some())
+        .collect();
+
+    if resolve_props.is_empty() {
+        return Ok(());
+    }
+
+    let controller = crate::languages::LanguageController::global_instance();
+
+    for instance in instances.iter_mut() {
+        for prop in &resolve_props {
+            // Compute the "resolved" focus value for the transform:
+            //   - String that parses as a language expression URL → fetch via controller
+            //   - Anything else (already-decoded literal string, object, etc.) → use as-is
+            let current = instance[&prop.name].clone();
+            let resolved: Option<Value> = match &current {
+                Value::String(uri) if !uri.starts_with("literal:") => {
+                    match crate::languages::LanguageController::parse_expr_url(uri) {
+                        Ok((lang, expr_addr)) => {
+                            match controller.get_expression(&lang, &expr_addr).await {
+                                Ok(Some(expr_json)) => {
+                                    let data =
+                                        expr_json.get("data").cloned().unwrap_or(Value::Null);
+                                    Some(match &data {
+                                        Value::String(s) => serde_json::from_str(s).unwrap_or(data),
+                                        _ => data,
+                                    })
+                                }
+                                // Not a fetchable expression — fall back to the raw value
+                                _ => Some(current.clone()),
+                            }
+                        }
+                        Err(_) => Some(current.clone()),
+                    }
+                }
+                Value::Object(_) => Some(current.clone()),
+                Value::String(_) => Some(current.clone()),
+                Value::Null => None,
+                _ => Some(current.clone()),
+            };
+
+            if let Some(resolved) = resolved {
+                let default_transform = super::types::default_file_decode();
+                let transform = prop.transform.as_ref().unwrap_or(&default_transform);
+                instance[&prop.name] = eval_transform(transform, &resolved, &resolved);
+            }
+        }
+    }
+    Ok(())
 }

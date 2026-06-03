@@ -1,6 +1,7 @@
 import { Ad4mModel } from "./Ad4mModel";
 import { isIncludeProjection } from "./types";
 import { Model, Property, Optional, ReadOnly, HasMany, HasOne, Flag } from "./decorators";
+import { path } from "../shacl/builders";
 
 describe("Ad4mModel.getModelMetadata()", () => {
   it("should extract basic model metadata with className", () => {
@@ -79,24 +80,23 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.relations.local.local).toBe(true);
   });
 
-  it("should extract transform function from property metadata", () => {
+  it("should support NodeExpression transforms in properties", () => {
+    // Transforms are now NodeExpression objects, not callable functions
+    // The fileToDataUri and other builders are exported from @coasys/ad4m
+    const transform = path("test://prefix");
+
     @Model({ name: "TransformModel" })
     class TransformModel extends Ad4mModel {
-      @Optional({ 
+      @Optional({
         through: "test://data",
-        transform: (value: string) => value.toUpperCase()
+        transform
       })
       data: string = "";
     }
 
     const metadata = TransformModel.getModelMetadata();
-    
-    // Assert transform is a function
-    expect(typeof metadata.properties.data.transform).toBe("function");
-    
-    // Test the transform function
-    const transformed = metadata.properties.data.transform!("test");
-    expect(transformed).toBe("TEST");
+    expect(metadata.properties.data).toBeDefined();
+    expect(metadata.properties.data.transform).toEqual(transform);
   });
 
   it("should extract custom getter and setter from property metadata", () => {
@@ -645,8 +645,7 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
     jest.clearAllMocks();
   });
 
-  it("should use SPARQL when engine is 'sparql' in findAll()", async () => {
-    // modelQuery returns already-hydrated instances from the Rust executor
+  it("routes findAll() through modelQuery", async () => {
     mockPerspective.modelQuery.mockResolvedValue({
       instances: [
         { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
@@ -654,27 +653,12 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
       totalCount: 1
     });
 
-    const results = await Recipe.findAll(mockPerspective, {}, 'sparql');
+    const results = await Recipe.findAll(mockPerspective);
 
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
     expect(results[0].name).toBe("Pasta");
-  });
-
-  it("should route through modelQuery when engine is 'prolog' in findAll() (prolog is now no-op)", async () => {
-    mockPerspective.modelQuery.mockResolvedValue({
-      instances: [
-        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
-      ],
-      totalCount: 1
-    });
-
-    const results = await Recipe.findAll(mockPerspective, {}, false);
-    
-    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.infer).not.toHaveBeenCalled();
-    expect(results).toHaveLength(1);
   });
 
   it("should use SPARQL when engine is 'sparql' in findAllAndCount()", async () => {
@@ -737,7 +721,7 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
     expect(count).toBe(10);
   });
 
-  it("should use SPARQL when engine is 'sparql' in ModelQueryBuilder.get()", async () => {
+  it("routes ModelQueryBuilder.get() through modelQuery", async () => {
     mockPerspective.modelQuery.mockResolvedValue({
       instances: [
         { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
@@ -747,7 +731,6 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
 
     const results = await Recipe.query(mockPerspective)
       .where({ name: "Pasta" })
-      .engine('sparql')
       .get();
 
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
@@ -756,26 +739,7 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
     expect(results[0].name).toBe("Pasta");
   });
 
-  it("should use modelQuery when .engine('prolog') is called (engine is now a no-op)", async () => {
-    mockPerspective.modelQuery.mockResolvedValue({
-      instances: [
-        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
-      ],
-      totalCount: 1
-    });
-
-    const results = await Recipe.query(mockPerspective)
-      .where({ name: "Pasta" })
-      .engine('prolog')
-      .get();
-    
-    // engine('prolog') is now a no-op — everything goes through modelQuery
-    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.infer).not.toHaveBeenCalled();
-    expect(results).toHaveLength(1);
-  });
-
-  it("should use SPARQL when engine is 'sparql' in ModelQueryBuilder.count()", async () => {
+  it("routes ModelQueryBuilder.count() through modelQuery", async () => {
     mockPerspective.modelQuery.mockResolvedValue({
       instances: [],
       totalCount: 3
@@ -783,7 +747,6 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
 
     const count = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 4 } })
-      .engine('sparql')
       .count();
 
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
@@ -791,7 +754,7 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
     expect(count).toBe(3);
   });
 
-  it("should use SPARQL when engine is 'sparql' in ModelQueryBuilder.paginate()", async () => {
+  it("routes ModelQueryBuilder.paginate() through modelQuery", async () => {
     mockPerspective.modelQuery.mockResolvedValue({
       instances: [
         { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
@@ -801,7 +764,6 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
 
     const page = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 3 } })
-      .engine('sparql')
       .paginate(10, 1);
 
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
@@ -917,7 +879,6 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     // Count recipes with rating > 3 using ModelQueryBuilder
     const count = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 3 } })
-      .engine('sparql')
       .count();
     
     expect(count).toBe(2);
@@ -936,7 +897,6 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     // Count using ModelQueryBuilder
     const count = await Recipe.query(mockPerspective)
       .where({ timestamp: { between: [startTimestamp, endTimestamp] } })
-      .engine('sparql')
       .count();
     
     expect(count).toBe(3);
@@ -1330,8 +1290,8 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
     const mockPerspective = {
       uuid: "test-uuid",
       client: mockClient,
-      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string, shapeJson?: string) => {
-        return mockClient.modelSubscribe("test-uuid", className, queryJson, shapeJson);
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
       }),
       getLinks: jest.fn().mockResolvedValue([]),
       modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
@@ -1388,8 +1348,8 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     const mockPerspective = {
       uuid: "test-uuid",
       client: mockClient,
-      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string, shapeJson?: string) => {
-        return mockClient.modelSubscribe("test-uuid", className, queryJson, shapeJson);
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
       }),
       modelQuery: jest.fn().mockResolvedValue({ instances: [{ id: "item1", type: "test://paginate" }], totalCount: 42 }),
     } as any;
@@ -1445,8 +1405,8 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     const mockPerspective = {
       uuid: "test-uuid",
       client: mockClient,
-      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string, shapeJson?: string) => {
-        return mockClient.modelSubscribe("test-uuid", className, queryJson, shapeJson);
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
       }),
       modelQuery: jest.fn().mockImplementation(async () => {
         modelQueryCallCount++;
@@ -1530,8 +1490,8 @@ describe("ModelQueryBuilder keepalive recovery", () => {
       uuid: "test-uuid",
       client: mockClient,
       modelSubscribe: jest.fn().mockImplementation(
-        async (className: string, queryJson: string, shapeJson?: string) =>
-          mockClient.modelSubscribe("test-uuid", className, queryJson, shapeJson)
+        async (className: string, queryJson: string) =>
+          mockClient.modelSubscribe("test-uuid", className, queryJson)
       ),
       modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
       getLinks: jest.fn().mockResolvedValue([]),
@@ -1821,7 +1781,7 @@ describe("deepQuery — getter evaluation", () => {
   let sparqlCalls: string[];
   const mockPerspective: any = {
     uuid: "test-uuid",
-    modelQuery: jest.fn(async (className: string, queryJson: string, shapeJson: string) => {
+    modelQuery: jest.fn(async (className: string, queryJson: string) => {
       // Return a basic result for the single-instance getData() path
       const query = JSON.parse(queryJson);
       const id = query?.where?.id;
@@ -1833,7 +1793,7 @@ describe("deepQuery — getter evaluation", () => {
       }
       return { instances: [], totalCount: 0 };
     }),
-    evaluateGetters: jest.fn(async (className: string, instanceIds: string[], shapeJson: string, propertyNames?: string[]) => {
+    evaluateGetters: jest.fn(async (className: string, instanceIds: string[], propertyNames?: string[]) => {
       // Return empty results by default — tests can override this mock
       const result: Record<string, Record<string, any>> = {};
       return result;
@@ -1890,7 +1850,7 @@ describe("deepQuery — getter evaluation", () => {
 
       // Should make exactly 1 RPC call via perspective.evaluateGetters
       expect(mockPerspective.evaluateGetters).toHaveBeenCalledTimes(1);
-      const [className, instanceIds, shapeJson, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
+      const [className, instanceIds, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
       expect(className).toBe("DeepQueryTestMessage");
       expect(instanceIds).toEqual(["flux://msg-0", "flux://msg-1"]);
       expect(propertyNames).toEqual(["replyingTo"]);
@@ -1904,7 +1864,7 @@ describe("deepQuery — getter evaluation", () => {
       await DeepQueryTestMessage.evaluateGetters(instances, mockPerspective);
 
       expect(mockPerspective.evaluateGetters).toHaveBeenCalledTimes(1);
-      const [className, instanceIds, shapeJson, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
+      const [className, instanceIds, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
       expect(className).toBe("DeepQueryTestMessage");
       expect(instanceIds).toEqual(["flux://msg-0", "flux://msg-1"]);
       expect(propertyNames).toBeUndefined();
@@ -2254,7 +2214,7 @@ describe("IncludeProjection type guard and key splitting", () => {
     expect(qi.include?.comments).toBe(true);
   });
 
-  it("enriches projection with targetShape when relation target is registered", async () => {
+  it("tags projection with targetClassName when relation target is registered", async () => {
     await Post.findAll(mockPerspective, {
       include: {
         $signalCount: { from: "signals", count: true },
@@ -2264,12 +2224,11 @@ describe("IncludeProjection type guard and key splitting", () => {
     const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
     const qi = JSON.parse(queryJson);
 
-    // targetShape should have been injected from the Signal model
-    // ($ prefix is required for projection enrichment to apply)
-    expect(qi.projections?.$signalCount?.targetShape?.className).toBe("Signal");
+    // targetClassName drives the executor's cache lookup for the target shape.
+    expect(qi.projections?.$signalCount?.targetClassName).toBe("Signal");
   });
 
-  it("leaves targetShape absent when relation has no target decorator", async () => {
+  it("leaves targetClassName absent when relation has no target decorator", async () => {
     await Post.findAll(mockPerspective, {
       include: {
         $commentCount: { from: "comments", count: true },
@@ -2279,8 +2238,8 @@ describe("IncludeProjection type guard and key splitting", () => {
     const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
     const qi = JSON.parse(queryJson);
 
-    // 'comments' HasMany has no target() thunk → no targetShape
-    expect(qi.projections?.$commentCount?.targetShape).toBeUndefined();
+    // 'comments' HasMany has no target() thunk → no targetClassName
+    expect(qi.projections?.$commentCount?.targetClassName).toBeUndefined();
   });
 
   // --- result passthrough ---
