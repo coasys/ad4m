@@ -140,10 +140,8 @@ portpicker = "0.1.1"
 deno_error = "0.5.6"
 thiserror = "2.0.12"
 
-# Holograph substrate (Step 6) — pulled into the executor's workspace so
-# the `holograph` crate's `kitsune2_transport_tx5` / `kitsune2_gossip`
-# transport selection compiles. The executor `holograph_wires.rs` glue
-# that consumes these lives in PR-C.
+# Holograph substrate (Step 6) — bring the substrate into the executor's
+# workspace and add the small ecosystem the wire surface + transports need.
 holograph = { path = "crates/holograph" }
 kitsune2_api = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
 kitsune2_core = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }

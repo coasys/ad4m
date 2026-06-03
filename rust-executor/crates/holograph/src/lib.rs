@@ -25,7 +25,7 @@ pub use integration_queue::{
 pub use op_store::{EnvelopeDecoder, KvOpStore};
 pub use retriever_kitsune::{KitsuneRetreiver, KitsuneRetreiverState};
 pub use space::{
-    ChannelNotifier, EmittedOp, HolographSpace, HolographSpaceConfig, HolographSpaceHandler,
-    K2DynSpaceTarget, K2FetcherAdapter, K2OpStoreShim, K2PeerPickerAdapter, LocalCommitTarget,
-    TelepresenceNotification,
+    holograph_envelope_decoder, ChannelNotifier, EmittedOp, HolographSpace, HolographSpaceConfig,
+    HolographSpaceHandler, K2DynSpaceTarget, K2FetcherAdapter, K2OpStoreShim, K2PeerPickerAdapter,
+    LocalCommitTarget, TelepresenceNotification,
 };
