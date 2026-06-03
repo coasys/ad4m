@@ -136,7 +136,11 @@ impl RecordingNotifier {
         self.received.lock().unwrap().len()
     }
     fn last_id(&self) -> Option<OpId> {
-        self.received.lock().unwrap().last().map(|(id, _, _)| id.clone())
+        self.received
+            .lock()
+            .unwrap()
+            .last()
+            .map(|(id, _, _)| id.clone())
     }
 }
 
@@ -203,7 +207,11 @@ async fn on_local_commit_stores_informs_publishes() {
     let h = build_space();
     let (bytes, op_id) = make_envelope(b"local-commit", vec![]);
 
-    let returned = h.space.on_local_commit(bytes.clone()).await.expect("commit");
+    let returned = h
+        .space
+        .on_local_commit(bytes.clone())
+        .await
+        .expect("commit");
     assert_eq!(returned, op_id);
 
     assert_eq!(h.op_store.op_count_blocking(), 1);
@@ -211,7 +219,10 @@ async fn on_local_commit_stores_informs_publishes() {
     assert_eq!(h.notify.last_id().unwrap(), op_id);
 
     assert_eq!(h.commit_target.inform_count(), 1);
-    assert_eq!(h.commit_target.last_informed().unwrap(), vec![op_id.clone()]);
+    assert_eq!(
+        h.commit_target.last_informed().unwrap(),
+        vec![op_id.clone()]
+    );
     assert_eq!(h.commit_target.publish_count(), 1);
     assert_eq!(h.commit_target.last_published().unwrap(), vec![op_id]);
 }
@@ -395,11 +406,7 @@ async fn holograph_op_store_full_passthrough_surface() {
 
     // slice_hash round-trip via the wrapper.
     wrapper
-        .store_slice_hash(
-            kitsune2_api::DhtArc::FULL,
-            0,
-            Bytes::from_static(b"hash0"),
-        )
+        .store_slice_hash(kitsune2_api::DhtArc::FULL, 0, Bytes::from_static(b"hash0"))
         .await
         .unwrap();
     let h0 = wrapper

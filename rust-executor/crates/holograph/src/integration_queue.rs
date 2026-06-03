@@ -60,12 +60,7 @@ use crate::op_store::{EnvelopeDecoder, KvOpStore};
 /// origin so every peer derives the same `StoredOp{op_id, created_at}`
 /// pair for gossip.
 pub trait NotifyUp: Send + Sync + std::fmt::Debug + 'static {
-    fn emit_perspective_diff(
-        &self,
-        op_id: OpId,
-        created_at: Timestamp,
-        envelope_bytes: Bytes,
-    );
+    fn emit_perspective_diff(&self, op_id: OpId, created_at: Timestamp, envelope_bytes: Bytes);
 }
 
 /// What the queue needs from K2's fetch module. Trait surface matches
@@ -345,13 +340,9 @@ impl HolographIntegrationQueue {
                 // Re-derive timestamp for the promoted child — it lives
                 // in its envelope bytes, which we've held in the
                 // pending tree.
-                let (_re_id, child_ts) =
-                    (self.decode_envelope)(child_envelope.as_ref())?;
-                self.notify.emit_perspective_diff(
-                    child_id.clone(),
-                    child_ts,
-                    child_envelope,
-                );
+                let (_re_id, child_ts) = (self.decode_envelope)(child_envelope.as_ref())?;
+                self.notify
+                    .emit_perspective_diff(child_id.clone(), child_ts, child_envelope);
                 worklist.push_back(child_id);
             }
         }
