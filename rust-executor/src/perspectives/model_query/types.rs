@@ -278,7 +278,7 @@ pub(super) enum SortKey {
 
 /// Transform expression for property values (SHACL-AF Node Expression).
 /// Applied in the Rust executor during hydration for resolveLanguage properties.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub(crate) enum TransformExpression {
     Focus,

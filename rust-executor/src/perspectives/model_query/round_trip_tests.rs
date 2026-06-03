@@ -377,8 +377,52 @@ fn round_trip_preserves_transform_expression() {
         .iter()
         .find(|p| p.name == "image")
         .expect("image property");
-    assert!(
-        prop.transform.is_some(),
-        "transform should survive SHACL round-trip"
+
+    // Deep-compare the structure — `is_some()` would still pass if a future
+    // regression mangled the expression body during serialize → store → parse.
+    let expected = super::types::TransformExpression::Concat {
+        args: vec![
+            super::types::TransformExpression::Literal {
+                value: serde_json::Value::String("data:image/png;base64,".to_string()),
+            },
+            super::types::TransformExpression::Focus,
+        ],
+    };
+    assert_eq!(
+        prop.transform.as_ref(),
+        Some(&expected),
+        "transform structure should survive SHACL round-trip without information loss",
+    );
+}
+
+/// Regression guard for the empty-string preservation half of the
+/// transform-round-trip fix.  Before that fix, `resolveLanguage: ""` was
+/// dropped on the floor by JS truthiness in both `buildSHACL` and
+/// `SHACLShape.toLinks()`.  The Rust pipeline must also preserve it
+/// end-to-end so language-expression resolution can be opted into without
+/// hard-coding a language address.
+#[test]
+fn round_trip_preserves_empty_resolve_language() {
+    let shacl_json = r#"{
+        "target_class": "ns://ImagePost",
+        "properties": [
+            {
+                "path": "image://data",
+                "name": "image",
+                "datatype": "xsd://string",
+                "resolve_language": ""
+            }
+        ]
+    }"#;
+    let shape = round_trip("ImagePost", shacl_json);
+    let prop = shape
+        .properties
+        .iter()
+        .find(|p| p.name == "image")
+        .expect("image property");
+    assert_eq!(
+        prop.resolve_language.as_deref(),
+        Some(""),
+        "empty-string resolveLanguage must survive SHACL round-trip (not be coerced to None)",
     );
 }
