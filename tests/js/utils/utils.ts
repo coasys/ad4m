@@ -151,6 +151,17 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
     return {proxyUrl, bootstrapUrl, relayUrl, process: servicesProcess};
 }
 
+export interface StartExecutorOptions {
+    /** Extra env vars merged into `process.env` for the spawned executor. */
+    env?: Record<string, string>;
+    /**
+     * Skip the `rmSync(dataPath)` + `init` wipe before spawn. Set to false on
+     * restarts so sled state and pre-installed Language bundles survive a
+     * kill/respawn cycle (used by holograph-link.test.ts's restart test).
+     */
+    initData?: boolean;
+}
+
 export async function startExecutor(dataPath: string,
     bootstrapSeedPath: string,
     apiPort: number,
@@ -163,6 +174,7 @@ export async function startExecutor(dataPath: string,
     relayUrl?: string,
     enableMcp: boolean = false,
     mcpPort?: number,
+    extra: StartExecutorOptions = {},
 ): Promise<ChildProcess> {
     const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
 
@@ -177,17 +189,22 @@ export async function startExecutor(dataPath: string,
         console.log(`Using shortened executor data path: ${effectiveDataPath}`);
     }
     let executorProcess = null as ChildProcess | null;
-    rmSync(dataPath, { recursive: true, force: true })
-    rmSync(effectiveDataPath, { recursive: true, force: true })
-    execSync(`${command} init --data-path ${effectiveDataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
+    const initData = extra.initData !== false;
+    if (initData) {
+        rmSync(dataPath, { recursive: true, force: true })
+        rmSync(effectiveDataPath, { recursive: true, force: true })
+        execSync(`${command} init --data-path ${effectiveDataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
 
-    // Symlink legacy dataPath → effectiveDataPath so test helpers that
-    // reference the original path (e.g. injectPublishingAgent.js) still work.
-    if (effectiveDataPath !== dataPath) {
-        mkdirSync(path.dirname(dataPath), { recursive: true });
-        symlinkSync(effectiveDataPath, dataPath);
+        // Symlink legacy dataPath → effectiveDataPath so test helpers that
+        // reference the original path (e.g. injectPublishingAgent.js) still work.
+        if (effectiveDataPath !== dataPath) {
+            mkdirSync(path.dirname(dataPath), { recursive: true });
+            symlinkSync(effectiveDataPath, dataPath);
+        }
+    } else {
+        console.log("Reusing existing data dir (skipping wipe + init)");
     }
-    
+
     console.log("Starting executor")
 
     console.log("USING LOCAL BOOTSTRAP & PROXY URL: ", bootstrapUrl, proxyUrl);
@@ -219,7 +236,10 @@ export async function startExecutor(dataPath: string,
     if (mcpPort) { args.push('--mcp-port', String(mcpPort)); }
     if (adminCredential) { args.push('--admin-credential', adminCredential); }
 
-    executorProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const spawnEnv = extra.env
+        ? { ...process.env, ...extra.env } as NodeJS.ProcessEnv
+        : process.env;
+    executorProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], env: spawnEnv });
     let executorReady = new Promise<void>((resolve, reject) => {
         // REST branch no longer emits the old `listening on http://127.0.0.1:<port>`
         // marker consistently. Accept either the legacy marker or the REST startup log so tests
