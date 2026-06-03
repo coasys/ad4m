@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use uuid::Uuid;
@@ -10,24 +12,80 @@ use crate::types::{Neighbourhood, Perspective, PerspectiveHandle, PerspectiveSta
 
 /// Spike package identity for the holograph-link Language. The
 /// canonical AD4M content-address (`hash("@coasys/holograph-link@<v>")`)
-/// is the address every neighborhood that defaults to holograph-link
-/// will reference. v1 uses 0.1.0 to match
+/// is the package-id-derived default that callers fall back to when
+/// `HOLOGRAPH_LINK_BUNDLE_PATH` is unset. v1 uses 0.1.0 to match
 /// `bootstrap-languages/holograph-link/package.json`.
 pub const HOLOGRAPH_LINK_PACKAGE_ID: &str = "@coasys/holograph-link@0.1.0";
 
-/// Compute the canonical AD4M address for the holograph-link Language.
-/// Matches the `hash()` host function in `js_core/utils_extension.rs`
-/// (SHA-256 -> CIDv1 -> base58btc with the `Qm` prefix), so the
-/// address is the same whether produced from Rust here or from the
-/// JS-side `hash(...)` call.
-pub fn holograph_link_default_address() -> String {
+/// AD4M content-address algorithm: SHA-256 -> CIDv1 (raw codec) ->
+/// base58btc -> "Qm" prefix. Same shape as
+/// `LanguageController::calculate_language_hash`, so a bundle hashed
+/// here matches what `install_language` content-checks against.
+fn ad4m_content_address(bytes: &[u8]) -> String {
     use cid::Cid;
     use multibase::Base;
     use multihash::{Code, MultihashDigest};
-    let multihash = Code::Sha2_256.digest(HOLOGRAPH_LINK_PACKAGE_ID.as_bytes());
+    let multihash = Code::Sha2_256.digest(bytes);
     let cid = Cid::new_v1(0, multihash);
     let encoded = multibase::encode(Base::Base58Btc, cid.to_bytes());
     format!("Qm{}", encoded)
+}
+
+/// Compute the canonical AD4M address from `HOLOGRAPH_LINK_PACKAGE_ID`.
+/// Stable per spike-version; used as the fallback when no bundle path
+/// is configured. NOT installable directly — see
+/// `holograph_link_resolved_address` for the bundle-content variant.
+pub fn holograph_link_default_address() -> String {
+    ad4m_content_address(HOLOGRAPH_LINK_PACKAGE_ID.as_bytes())
+}
+
+/// Resolve to the installable holograph-link address.
+///
+/// When `HOLOGRAPH_LINK_BUNDLE_PATH` points at the built bundle, the
+/// returned address is the bundle's AD4M content hash — matches what
+/// `install_language` expects, so a publish that resolves through here
+/// installs cleanly. The result is cached process-wide; rebuilding the
+/// bundle requires a process restart to pick up the new hash.
+///
+/// When `HOLOGRAPH_LINK_BUNDLE_PATH` is unset (typical for unit
+/// tests / smoke tests that never reach `install_language`), the
+/// package-id-derived address is returned.
+pub fn holograph_link_resolved_address() -> String {
+    static CACHED: OnceLock<String> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            let Ok(path) = std::env::var("HOLOGRAPH_LINK_BUNDLE_PATH") else {
+                let addr = holograph_link_default_address();
+                log::warn!(
+                    "[holograph] HOLOGRAPH_LINK_BUNDLE_PATH unset; default-switch \
+                     will substitute the package-id-derived address {} which \
+                     will not pass install_language's content-hash check",
+                    addr
+                );
+                return addr;
+            };
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let addr = ad4m_content_address(&bytes);
+                    log::info!(
+                        "[holograph] HOLOGRAPH_LINK_BUNDLE_PATH={} -> resolved address {}",
+                        path,
+                        addr
+                    );
+                    addr
+                }
+                Err(e) => {
+                    log::error!(
+                        "[holograph] HOLOGRAPH_LINK_BUNDLE_PATH={} unreadable ({}); \
+                         falling back to package-id address (will not install)",
+                        path,
+                        e
+                    );
+                    holograph_link_default_address()
+                }
+            }
+        })
+        .clone()
 }
 
 /// True when the runtime should substitute the holograph-link Language
@@ -57,7 +115,7 @@ pub fn resolve_link_language(requested: Option<String>) -> Result<String, AnyErr
         return Ok(addr);
     }
     if holograph_default_enabled() {
-        let addr = holograph_link_default_address();
+        let addr = holograph_link_resolved_address();
         log::info!(
             "[holograph] Substituting holograph-link as default link_language: {}",
             addr

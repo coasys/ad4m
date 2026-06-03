@@ -128,7 +128,18 @@ describe("holograph-link Language end-to-end (single conductor)", function () {
             undefined,
             false,
             undefined,
-            { env: { HOLOGRAPH_DEFAULT_NEIGHBORHOOD: "1" } },
+            {
+                env: {
+                    HOLOGRAPH_DEFAULT_NEIGHBORHOOD: "1",
+                    // Step 8 Gap C hook: resolve_link_language reads
+                    // this once at first call, computes the bundle's
+                    // AD4M content hash, and substitutes that address
+                    // for empty linkLanguage publishes. Without it the
+                    // substitution falls back to a package-id-derived
+                    // address that install_language can't install.
+                    HOLOGRAPH_LINK_BUNDLE_PATH: HOLOGRAPH_BUNDLE_PATH,
+                },
+            },
         );
 
         // Pre-install the bundle now that startExecutor has run `init`
@@ -158,19 +169,22 @@ describe("holograph-link Language end-to-end (single conductor)", function () {
     let aliceUuid: string;
     let neighbourhoodUrl: string;
 
-    it("publishFromPerspective(holographAddress) installs and binds the language", async () => {
+    it("publishFromPerspective(undefined) resolves via the env-default switch", async () => {
         const perspective = await client!.perspective.add("holograph-alice-1");
         aliceUuid = perspective.uuid;
 
-        // We pass the bundle's content address explicitly. The Step 6d
-        // env-default-switch (resolve_link_language with empty input)
-        // is unit-tested separately; wiring it through the JS path
-        // requires resolve_link_language to itself read the bundle and
-        // derive the content hash on demand — that's PR-B work because
-        // the bundle path needs config plumbing.
+        // No explicit linkLanguage. The Step 8 Gap C hook reads
+        // HOLOGRAPH_LINK_BUNDLE_PATH, derives the bundle's AD4M
+        // content hash, and substitutes that as the link_language.
+        // install_language then finds the pre-installed bundle at
+        // <data>/ad4m/languages/<contentHash>/bundle.js and loads it
+        // cleanly.
         neighbourhoodUrl = await client!.neighbourhood.publishFromPerspective(
             aliceUuid,
-            holographAddress,
+            // @ts-expect-error — client typings insist on a string;
+            // Rust accepts Option<String> and routes undefined / empty
+            // through resolve_link_language. PR-C updates the typings.
+            undefined,
             new Perspective([]),
         );
 
@@ -181,7 +195,8 @@ describe("holograph-link Language end-to-end (single conductor)", function () {
         const all = await client!.perspective.all();
         const alice = all.find((p) => p.uuid === aliceUuid);
         expect(alice, "alice perspective present").to.exist;
-        expect(alice!.neighbourhood?.linkLanguage).to.equal(holographAddress);
+        // NeighbourhoodExpression wraps the Neighbourhood under `data`.
+        expect(alice!.neighbourhood?.data?.linkLanguage).to.equal(holographAddress);
     });
 
     it("Alice's own addLink round-trips through the subscriber loop", async () => {
