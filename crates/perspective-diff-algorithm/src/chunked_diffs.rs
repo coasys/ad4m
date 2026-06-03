@@ -13,7 +13,43 @@
 //! `integrity::PerspectiveDiff` and `algorithm::PerspectiveDiff` at the
 //! boundary.
 
-use crate::diff_types::{LinkExpression, PerspectiveDiff};
+use crate::diff_types::{LinkExpression, PerspectiveDiff, PerspectiveDiffEntryReference};
+use crate::errors::AlgoResult;
+use crate::retriever::WorkspaceRetriever;
+
+/// Aggregate the diff carried (inline or as chunk hashes) by a
+/// `PerspectiveDiffEntryReference`. Resolves at most one level of
+/// nested chunking — the same shape `Workspace::handle_parents`
+/// already uses internally.
+///
+/// Step 13b-D (snapshots extraction): promoted from
+/// `Workspace::handle_parents` so `snapshots::generate_snapshot` can
+/// reuse it without duplicating the chunk-loading logic.
+pub fn load_diff_aggregated<R: WorkspaceRetriever>(
+    entry: &PerspectiveDiffEntryReference,
+) -> AlgoResult<PerspectiveDiff> {
+    if !entry.is_chunked() {
+        return Ok(entry.diff.clone());
+    }
+    let chunk_hashes = entry.diff_chunks.clone().unwrap_or_default();
+    let mut chunks: Vec<PerspectiveDiff> = Vec::with_capacity(chunk_hashes.len());
+    for h in &chunk_hashes {
+        let entry = R::get_p_diff_reference(h)?;
+        let inline = if entry.is_chunked() {
+            // Nested chunking: fan out + flatten.
+            let mut subchunks: Vec<PerspectiveDiff> = Vec::new();
+            for sub_h in entry.diff_chunks.unwrap_or_default() {
+                let sub_entry = R::get_p_diff_reference(&sub_h)?;
+                subchunks.push(sub_entry.diff);
+            }
+            ChunkedDiffs::from_chunks(u16::MAX, subchunks).into_aggregated_diff()
+        } else {
+            entry.diff
+        };
+        chunks.push(inline);
+    }
+    Ok(ChunkedDiffs::from_chunks(u16::MAX, chunks).into_aggregated_diff())
+}
 
 /// Splits an unbounded list of additions/removals into bounded chunks
 /// of at most `max_changes_per_chunk` items each.
