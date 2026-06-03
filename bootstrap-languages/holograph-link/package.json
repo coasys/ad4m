@@ -4,6 +4,7 @@
   "main": "index.js",
   "scripts": {
     "build": "deno run --allow-all esbuild.ts",
+    "pretest": "deno run --allow-all esbuild.ts",
     "test": "deno test --allow-all tests/smoke.test.ts",
     "integration-test": "node ../../test-runner/build/cli.js --test ./integration-test.js --bundle \"./build/bundle.js\" --meta '{\"name\":\"holograph-link\",\"description\":\"AD4M LinkLanguage backed by the Kitsune2-substrate holograph runtime\",\"sourceCodeLink\":\"https://github.com/coasys/ad4m\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'"
   },
