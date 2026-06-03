@@ -82,10 +82,10 @@ fn parse_literal_fn(args: &[Term]) -> Option<Term> {
         Some(Literal::new_simple_literal(rest).into())
     } else if let Some(rest) = body.strip_prefix("json:") {
         let decoded = urlencoding::decode(rest).unwrap_or_else(|_| rest.into());
-        // Back-compat: legacy data may still contain signed-envelope literals from
-        // before the Channel V refactor (Jun 2026). New writes use plain literal:
-        // forms — see resolve_property_value. For JSON literals that look like a
-        // signed envelope (have a "data" field), extract it for content matching.
+        // Unwrap signed-expression envelopes (`{author, timestamp, data, proof}`)
+        // so WHERE filters can compare against the inner content. Required for
+        // pre-migration link stores and for the small set of expressions that
+        // are themselves stored as `literal:json:` (e.g. entanglement proofs).
         if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&decoded) {
             if let Some(data) = json_val.get("data") {
                 let data_str = match data {
@@ -1121,24 +1121,21 @@ impl SparqlStore {
         Ok(count)
     }
 
-    /// Migrate signed expression envelopes to plain literal values.
+    /// Rewrite link targets shaped like `literal:json:<signed_envelope>` to the
+    /// plain typed form of their inner `.data` value (`literal:string:` /
+    /// `:number:` / `:boolean:` / `:json:`).
     ///
-    /// Old literal-language writes stored values as `literal:json:<signed_envelope>`
-    /// where the envelope was `{author, timestamp, data, proof}`. The provenance is
-    /// redundant with the RDF 1.2 reifier metadata — the Channel V refactor (Jun 2026)
-    /// stops emitting envelopes for property writes. This migration extracts the
-    /// `.data` field from any existing envelope and stores it as a plain
-    /// `literal:string:X`, `literal:number:X`, `literal:boolean:X`, or
-    /// `literal:json:X` value.
-    ///
-    /// Since the target IRI changes, we must rebuild both the direct triple and
-    /// the reifier (whose IRI is a hash of source+pred+target+author+ts).
+    /// Per-link provenance lives on the RDF 1.2 reifier; the envelope-on-target
+    /// form duplicates that and produces non-deterministic IRIs (the envelope
+    /// signature varies per write) which exact-match WHERE filters can't index.
+    /// The reifier IRI hashes the target, so rewriting the target requires
+    /// rebuilding both the direct triple and the reifier with all its metadata.
     pub fn migrate_signed_envelopes_to_plain_literals(&self) -> Result<usize, Error> {
         if self.migration_version() >= 3 {
             return Ok(0);
         }
 
-        log::info!("Channel V refactor: migrating signed-envelope literals to plain form");
+        log::info!("Migrating signed-envelope literal targets to plain literal form");
 
         use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 

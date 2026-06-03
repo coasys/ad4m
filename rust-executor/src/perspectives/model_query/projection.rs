@@ -289,9 +289,10 @@ pub(super) fn build_projection_where_patterns(
 
     // Resolve the target class's shape through the perspective cache so we
     // can translate property names in the projection's where-clause into the
-    // predicate IRIs they map to in the store.  We also track whether each
-    // property is literal-encoded (`resolve_language: literal`) so V5 can
-    // emit direct IRI matches against the deterministic `literal:*:X` form.
+    // predicate IRIs they map to in the store. The second tuple element
+    // records whether each property carries `resolve_language` so the
+    // condition branches below know to compare against the encoded
+    // `literal:*:` IRI form instead of going through `fn/parse_literal`.
     let (pred_lookup, resolution_failed) = if let Some(ref target_name) = proj.target_class_name {
         match resolver.get_shape(target_name) {
             Ok(target_shape) => {
@@ -389,11 +390,10 @@ pub(super) fn build_projection_where_patterns(
         match condition {
             WhereCondition::String(val) => {
                 if is_literal_prop {
-                    // V5: direct IRI match against the deterministic
-                    // `literal:string:<percent-encoded>` IRI — POS-index friendly.
-                    // Use a VALUES set so we can also include the raw-IRI form for
-                    // properties whose constructor stored a raw URI on a shape that
-                    // declares `resolveLanguage: literal` (mirrors V4 behavior).
+                    // Match the encoded `literal:string:` form, plus the raw IRI
+                    // form when the value is itself a valid absolute IRI — same
+                    // dual-shape that the model-query where-clause emits for
+                    // constructor-seeded raw URIs on literal properties.
                     let encoded = literal_percent_encode(val);
                     let mut iris = vec![format!("<literal:string:{encoded}>")];
                     if looks_like_absolute_iri(val) {
