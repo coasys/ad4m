@@ -200,8 +200,14 @@ pub struct JoinNeighbourhoodRequest {
 pub struct PublishNeighbourhoodRequest {
     #[serde(alias = "perspectiveUUID")]
     pub perspective_uuid: String,
-    #[serde(alias = "linkLanguage")]
-    pub link_language: String,
+    /// Optional since Step 6 of the holograph spike: when omitted (or
+    /// empty) AND `HOLOGRAPH_DEFAULT_NEIGHBORHOOD=1`, the executor
+    /// substitutes the holograph-link Language address. Without the
+    /// env flag, omitting this field returns an explicit error so
+    /// pre-spike callers see a clear failure rather than a silent
+    /// substitution.
+    #[serde(alias = "linkLanguage", default)]
+    pub link_language: Option<String>,
     pub meta: crate::types::Perspective,
 }
 
