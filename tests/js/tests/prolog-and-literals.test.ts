@@ -2396,24 +2396,35 @@ describe("Prolog + Literals", () => {
                         // Small delay to ensure subscription is fully registered before triggering changes
                         await sleep(500);
 
-                        // Add models
+                        // Add the first model and synchronize on its dispatch before
+                        // saving the second. The underlying change-detection SPARQL is
+                        // `LIMIT 1`, so back-to-back saves can produce a single
+                        // re-fetch that races against the second save's commit and
+                        // leaves `results.length` stuck at 1. Waiting between saves
+                        // makes each one trigger its own dispatch deterministically.
                         const model1 = new TestModel(perspective);
                         model1.name = "Test 1";
                         model1.status = "active";
                         await model1.save();
+
+                        await waitForCondition(
+                            () => pageCallback.called && pageCallback.lastCall.args[0].results.length >= 1,
+                            {
+                                timeoutMs: 30000,
+                                errorMessage: 'Paginate callback did not see first model save'
+                            }
+                        );
 
                         const model2 = new TestModel(perspective);
                         model2.name = "Test 2";
                         model2.status = "active";
                         await model2.save();
 
-                        // Wait for subscription updates with proper condition checking
-                        // Use longer timeout for CI environments which may be slower
                         await waitForCondition(
-                            () => pageCallback.called && pageCallback.lastCall.args[0].results.length >= 2,
+                            () => pageCallback.lastCall.args[0].results.length >= 2,
                             {
-                                timeoutMs: 60000,
-                                errorMessage: 'Paginate callback was not called with expected results after model saves'
+                                timeoutMs: 30000,
+                                errorMessage: 'Paginate callback did not see second model save'
                             }
                         );
 
