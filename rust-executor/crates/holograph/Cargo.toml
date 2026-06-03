@@ -32,6 +32,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", 
 # is parked for PR-B.
 perspective_diff_sync = { path = "../../../bootstrap-languages/p-diff-sync/hc-dna/zomes/perspective_diff_sync" }
 perspective_diff_sync_integrity = { path = "../../../bootstrap-languages/p-diff-sync/hc-dna/zomes/perspective_diff_sync_integrity" }
+perspective-diff-algorithm = { path = "../../../crates/perspective-diff-algorithm" }
 hdk = { version = "0.7.0-dev.10", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys" }
 holo_hash = { version = "0.7.0-dev.6", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys" }
 holochain_serialized_bytes = "=0.0.56"

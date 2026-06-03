@@ -34,7 +34,12 @@ use sha2::{Digest, Sha256};
 use std::sync::RwLock;
 use tokio::runtime::Runtime;
 
+use perspective_diff_algorithm as algo;
 use perspective_diff_sync::errors::{SocialContextError, SocialContextResult};
+use perspective_diff_sync::link_adapter::conversions::{
+    entry_ref_from_algo, entry_ref_to_algo, hash_from_algo, hash_ref_to_algo, hash_to_algo,
+    local_hash_ref_to_algo,
+};
 use perspective_diff_sync::retriever::PerspectiveDiffRetreiver;
 use perspective_diff_sync_integrity::{
     EntryTypes, HashReference, LocalHashReference, PerspectiveDiffEntryReference,
@@ -369,6 +374,70 @@ impl PerspectiveDiffRetreiver for KitsuneRetreiver {
             .insert(b"latest", buf)
             .map_err(|_| Self::err("sled put latest"))?;
         Ok(())
+    }
+}
+
+// Step 13b-C phase 2 bridge — see the same impl on `HolochainRetreiver`
+// and `MockPerspectiveGraph`. Snapshots aren't recorded on the K2 path
+// for the spike (SPIKE §1.5 narrowing), so `get_snapshot_by_target`
+// returns `Ok(None)`.
+impl algo::WorkspaceRetriever for KitsuneRetreiver {
+    fn get_p_diff_reference(
+        hash: &algo::Hash,
+    ) -> algo::AlgoResult<algo::PerspectiveDiffEntryReference> {
+        let h = hash_from_algo(hash);
+        let entry = <Self as PerspectiveDiffRetreiver>::get(h)
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(entry_ref_to_algo(entry))
+    }
+
+    fn get_snapshot_by_target(
+        _target_hash: &algo::Hash,
+    ) -> algo::AlgoResult<Option<algo::Snapshot>> {
+        Ok(None)
+    }
+}
+
+// Step 13b-D — round-trips through the existing
+// `PerspectiveDiffRetreiver::create_entry`, which writes the entry to
+// the K2 OpStore and returns the deterministic content-hash.
+impl algo::SnapshotRetriever for KitsuneRetreiver {
+    fn create_diff_entry(
+        entry: algo::PerspectiveDiffEntryReference,
+    ) -> algo::AlgoResult<algo::Hash> {
+        let integrity = entry_ref_from_algo(entry);
+        let hash = <Self as PerspectiveDiffRetreiver>::create_entry(
+            perspective_diff_sync_integrity::EntryTypes::PerspectiveDiffEntryReference(integrity),
+        )
+        .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(hash_to_algo(&hash))
+    }
+}
+
+// Step 13b-E — forwards to the existing sled-backed
+// `PerspectiveDiffRetreiver` revision methods.
+impl algo::RevisionsRetriever for KitsuneRetreiver {
+    fn current_revision() -> algo::AlgoResult<Option<algo::LocalHashReference>> {
+        let rev = <Self as PerspectiveDiffRetreiver>::current_revision()
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(rev.map(local_hash_ref_to_algo))
+    }
+
+    fn latest_revision() -> algo::AlgoResult<Option<algo::HashReference>> {
+        let rev = <Self as PerspectiveDiffRetreiver>::latest_revision()
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(rev.map(hash_ref_to_algo))
+    }
+
+    fn update_current_revision(
+        hash: algo::Hash,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> algo::AlgoResult<()> {
+        <Self as PerspectiveDiffRetreiver>::update_current_revision(
+            hash_from_algo(&hash),
+            timestamp,
+        )
+        .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
     }
 }
 
