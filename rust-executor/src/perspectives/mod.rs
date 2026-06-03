@@ -119,7 +119,6 @@ pub fn initialize_from_db() {
                 Err(e) => log::warn!("Reifier migration for {}: {}", handle_clone.uuid, e),
             }
 
-            // Run signed-envelope → plain-literal migration (Channel V refactor, idempotent)
             match p
                 .sparql_store
                 .migrate_signed_envelopes_to_plain_literals()

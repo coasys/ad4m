@@ -513,16 +513,12 @@ pub(super) fn build_query_patterns(
                 match condition {
                     WhereCondition::String(val) => {
                         if is_literal_prop {
-                            // V4: Equality on a literal-encoded property compares against the
-                            // deterministic `literal:string:<percent-encoded>` IRI emitted by
-                            // `resolve_property_value`. Emitting a direct IRI match lets
-                            // Oxigraph use the POS index instead of evaluating
-                            // `fn/parse_literal` per row.
-                            //
-                            // If the where-value is also a valid raw IRI, a UNION covers the
-                            // case where the constructor stored a raw URI on a property whose
-                            // shape declares `resolveLanguage: literal` (e.g. enum-like state
-                            // initial values).
+                            // Match the deterministic `literal:string:<encoded>` form of the
+                            // value directly against the indexed object position. UNION the
+                            // raw-IRI form when the where-value itself parses as an absolute
+                            // IRI — constructors can seed a literal-resolveLanguage property
+                            // with a raw URI (enum-style initial values) which the storage
+                            // layer preserves as-is.
                             let encoded = literal_percent_encode(val);
                             if looks_like_absolute_iri(val) {
                                 where_patterns.push(format!(
@@ -550,9 +546,8 @@ pub(super) fn build_query_patterns(
                     }
                     WhereCondition::Number(n) => {
                         if is_literal_prop {
-                            // V4: direct IRI match against `literal:number:<N>` for
-                            // index-friendly equality. Non-finite values are dropped
-                            // (the FILTER(false) path matches no rows).
+                            // Non-finite filter values cannot be stored as a `literal:number:`
+                            // target, so emit a never-matching pattern instead of a malformed IRI.
                             if let Some(num_str) = format_literal_number(*n) {
                                 where_patterns.push(format!(
                                     "    ?source <{}> <literal:number:{num_str}> .",
@@ -572,7 +567,6 @@ pub(super) fn build_query_patterns(
                     }
                     WhereCondition::Bool(b) => {
                         if is_literal_prop {
-                            // V4: direct IRI match against `literal:boolean:true|false`.
                             where_patterns.push(format!(
                                 "    ?source <{}> <literal:boolean:{b}> .",
                                 prop.predicate
@@ -588,9 +582,8 @@ pub(super) fn build_query_patterns(
                     }
                     WhereCondition::StringArray(vals) => {
                         if is_literal_prop {
-                            // V4: VALUES of `literal:string:<encoded>` IRIs → POS probe per IRI.
-                            // Also include raw-IRI forms for values that parse as valid IRIs
-                            // (mirrors the single-String UNION above).
+                            // Same shape as the single-value String branch above, expanded
+                            // into a VALUES set: one or two IRIs per input value.
                             let mut iris: Vec<String> = Vec::with_capacity(vals.len() * 2);
                             for v in vals {
                                 iris.push(format!(
@@ -626,7 +619,8 @@ pub(super) fn build_query_patterns(
                     }
                     WhereCondition::NumberArray(vals) => {
                         if is_literal_prop {
-                            // V4: VALUES of `literal:number:<N>` IRIs. Non-finite values are dropped.
+                            // Non-finite values are silently dropped from the VALUES set; if
+                            // none remain, fall through to a never-matching pattern.
                             let iris = vals
                                 .iter()
                                 .filter_map(|n| {

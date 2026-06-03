@@ -47,14 +47,10 @@ export function parseSparqlCount(result: CountBinding[] | undefined | null): num
 /**
  * Decode a `Literal`-encoded SPARQL binding back to a plain string.
  *
- * Mirrors Flux's local `parseLit` helper. Returns `''` for `undefined`/empty
- * input. Falls through to the raw value if decoding fails (defensive — the
- * binding may already be a plain string for unwrapped properties).
- *
- * Channel V values (link-property literals) are stored as plain
- * `literal:string:` / `:number:` / `:boolean:` / `:json:` URIs and decode
- * straight to their primitive form. Only `literal:json:` payloads return
- * objects, which we JSON-stringify for display.
+ * Returns `''` for `undefined`/empty input. Falls through to the raw value
+ * if decoding fails — bindings against properties without `resolveLanguage`
+ * are already raw URIs and should pass through unchanged. `literal:json:`
+ * objects are JSON-stringified for display.
  */
 export function parseLit(val: string | undefined | null): string {
   if (val === undefined || val === null || val === '') return '';
