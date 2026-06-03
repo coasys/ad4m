@@ -89,6 +89,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             ?getter ?hasValue ?className
             ?relationKind ?targetClassName
             ?whereFilter ?wherePredicates ?filterEnabled
+            ?transform
         WHERE {{
             <{shape_uri}> <sh://property> ?propUri .
             ?propUri <sh://path> ?path .
@@ -107,6 +108,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             OPTIONAL {{ ?propUri <ad4m://whereFilter> ?whereFilter . }}
             OPTIONAL {{ ?propUri <ad4m://wherePredicates> ?wherePredicates . }}
             OPTIONAL {{ ?propUri <ad4m://filter> ?filterEnabled . }}
+            OPTIONAL {{ ?propUri <ad4m://transform> ?transform . }}
         }}
         "#
     );
@@ -158,6 +160,10 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         let where_filter = parse_where_filter_literal(first["whereFilter"].as_str());
         let where_predicates = parse_where_predicates_literal(first["wherePredicates"].as_str());
         let filter_enabled = parse_bool_literal_target(first["filterEnabled"].as_str());
+        let transform = first["transform"].as_str().and_then(|raw| {
+            let json_str = decode_literal_string_target(raw);
+            serde_json::from_str::<super::types::TransformExpression>(&json_str).ok()
+        });
 
         let min_count = parse_count_literal(first["minCount"].as_str());
         let max_count = parse_count_literal(first["maxCount"].as_str());
@@ -245,12 +251,10 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 getter: getter.clone(),
                 where_filter: where_filter.clone(),
                 where_predicates: where_predicates.clone(),
+                transform: transform.clone(),
             });
 
             let resolved_target_class_name = target_class_name.clone().unwrap_or_else(|| {
-                // Fall back to extracting from the sh:class URI suffix and
-                // normalising away a trailing `Shape` suffix so the value
-                // matches the bare class names used to key the shape cache.
                 target_class_uri
                     .as_deref()
                     .map(extract_class_local_name)
@@ -286,6 +290,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 getter,
                 where_filter,
                 where_predicates,
+                transform,
             });
         }
     }
@@ -490,6 +495,7 @@ pub(crate) fn parse_where_filter(val: &Value) -> Option<BTreeMap<String, WhereCo
 /// SHACL writers.
 #[cfg(test)]
 pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Error> {
+    use super::types::TransformExpression;
     let meta: Value =
         serde_json::from_str(json).map_err(|e| anyhow!("Failed to parse shape JSON: {}", e))?;
 
@@ -512,6 +518,19 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
             let datatype = prop_meta["datatype"].as_str().map(|s| s.to_string());
             let getter = prop_meta["getter"].as_str().map(|s| s.to_string());
 
+            let transform = prop_meta
+                .get("transform")
+                .map(|v| {
+                    serde_json::from_value::<TransformExpression>(v.clone()).map_err(|e| {
+                        deno_core::anyhow::anyhow!(
+                            "Failed to parse transform for property '{}': {}",
+                            name,
+                            e
+                        )
+                    })
+                })
+                .transpose()?;
+
             properties.push(ShapeProperty {
                 name: name.clone(),
                 predicate,
@@ -526,6 +545,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 getter,
                 where_filter: None,
                 where_predicates: None,
+                transform,
             });
         }
     }
@@ -572,6 +592,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 getter,
                 where_filter,
                 where_predicates,
+                transform: None,
             });
 
             if rel_meta.get("targetShape").is_some() || rel_meta.get("targetClassName").is_some() {

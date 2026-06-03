@@ -20,6 +20,7 @@ pub fn prop(name: &str, predicate: &str) -> ShapeProperty {
         getter: None,
         where_filter: None,
         where_predicates: None,
+        transform: None,
     }
 }
 
@@ -39,6 +40,7 @@ pub fn relation(name: &str, predicate: &str) -> ShapeProperty {
         getter: None,
         where_filter: None,
         where_predicates: None,
+        transform: None,
     }
 }
 
@@ -58,6 +60,7 @@ pub fn flag(name: &str, predicate: &str, initial: &str) -> ShapeProperty {
         getter: None,
         where_filter: None,
         where_predicates: None,
+        transform: None,
     }
 }
 
@@ -128,14 +131,14 @@ impl ShapeResolver for StaticShapeResolver {
 /// Test wrapper preserving the legacy `(store, class_name, query, Some(shape_json))`
 /// invocation pattern.  Builds a one-shot `StaticShapeResolver` from the
 /// shape JSON and delegates to the production `execute_model_query`.
-pub fn execute_model_query_from_json(
+pub async fn execute_model_query_from_json(
     store: &crate::perspectives::sparql_store::SparqlStore,
     class_name: &str,
     query_input: &super::types::ModelQueryInput,
     shape_json: &str,
 ) -> Result<super::types::ModelQueryResult, Error> {
     let (resolver, shape) = StaticShapeResolver::from_json(class_name, shape_json)?;
-    super::query::execute_model_query(store, shape.as_ref(), query_input, &resolver)
+    super::query::execute_model_query(store, shape.as_ref(), query_input, &resolver).await
 }
 
 /// Test wrapper for `evaluate_getters_batch` that takes shape JSON.

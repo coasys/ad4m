@@ -1,4 +1,5 @@
 import { SHACLShape, SHACLPropertyShape, AD4MAction } from './SHACLShape';
+import { concat, literal, focus } from './builders';
 
 describe('SHACLShape', () => {
   describe('toLinks()', () => {
@@ -599,6 +600,67 @@ describe('SHACLShape', () => {
       expect(prop.whereFilter).toEqual({ status: 'active' });
       expect(prop.wherePredicates).toEqual({ status: 'ns://status' });
       expect(prop.filter).toBe(false);
+    });
+  });
+
+  describe('transform property emission', () => {
+    it('emits an ad4m://transform link when transform is a NodeExpression', () => {
+      const shape = new SHACLShape('ns://ImagePost');
+      shape.addProperty({
+        name: 'image',
+        path: 'image://data',
+        datatype: 'xsd://string',
+        resolveLanguage: '',
+        transform: concat(literal('data:image/png;base64,'), focus()),
+      });
+
+      const links = shape.toLinks();
+      const transformLinks = links.filter(l => l.predicate === 'ad4m://transform');
+      expect(transformLinks).toHaveLength(1);
+
+      // Payload must be a SHACL-serialized NodeExpression, never raw JS.
+      const target = transformLinks[0].target;
+      expect(target.startsWith('literal:string:')).toBe(true);
+      const json = target.replace(/^literal:string:/, '');
+      expect(() => JSON.parse(json)).not.toThrow();
+      expect(JSON.parse(json)).toEqual({
+        type: 'concat',
+        args: [
+          { type: 'literal', value: 'data:image/png;base64,' },
+          { type: 'focus' },
+        ],
+      });
+    });
+
+    // Regression guard for the `typeof prop.transform === 'object'` clause
+    // added alongside the SHACL-source-of-truth round-trip fix.  Legacy model
+    // decorators still declare JS-function transforms (e.g. the pre-DSL
+    // `transform: (data) => ...` form).  Those cannot be represented as a
+    // SHACL-AF Node Expression and must be silently dropped during link
+    // emission — never coerced through `JSON.stringify`, which would write a
+    // bogus `literal:string:undefined` triple and corrupt the store.
+    it('silently drops function-typed transforms (no ad4m://transform link emitted)', () => {
+      const shape = new SHACLShape('ns://LegacyModel');
+      shape.addProperty({
+        name: 'image',
+        path: 'ns://image',
+        datatype: 'xsd://string',
+        // Legacy JS-function form, still found in pre-migration model classes.
+        // Cast through `any` because the public type only permits NodeExpression.
+        transform: ((data: any) => `data:image/png;base64,${data}`) as any,
+      });
+
+      const links = shape.toLinks();
+      const transformLinks = links.filter(l => l.predicate === 'ad4m://transform');
+      expect(transformLinks).toHaveLength(0);
+
+      // Defensive: nothing in the emitted link set should carry the string
+      // "undefined" or a serialized function — that would indicate an
+      // accidental JSON.stringify of the function value.
+      for (const link of links) {
+        expect(link.target).not.toMatch(/^literal:string:undefined$/);
+        expect(link.target).not.toMatch(/^literal:string:.*function/);
+      }
     });
   });
 });

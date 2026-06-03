@@ -577,11 +577,8 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
                 }
             }
         }
-        "surreal" => Err(WsRpcError::bad_request(
-            "SurrealDB query engine not available. Use 'sparql'.",
-        )),
         other => Err(WsRpcError::bad_request(format!(
-            "Unknown query engine: {}. Use 'sparql' or 'surreal'.",
+            "Unknown query engine: {}. Use 'sparql'.",
             other
         ))),
     }
@@ -751,7 +748,7 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     })?)
 }
 
-async fn subscribe_surreal_query(
+async fn subscribe_sparql_query(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
@@ -764,7 +761,7 @@ async fn subscribe_surreal_query(
 
     let _ = get_perspective_with_access(&uuid, &ctx).await?;
     Err(WsRpcError::not_implemented(
-        "subscribe_surreal_query not yet implemented",
+        "subscribe_sparql_query not yet implemented",
     ))
 }
 
@@ -901,18 +898,16 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
-    // Run synchronous SPARQL-backed model query on a blocking thread with timeout
-    // to avoid blocking the async runtime (same pattern as query_sparql handler).
+    // Run async model query with timeout
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        tokio::task::spawn_blocking(move || perspective.model_query(&class_name, &query_json)),
+        perspective.model_query(&class_name, &query_json),
     )
     .await;
 
     match result {
-        Ok(Ok(Ok(json))) => Ok(Value::String(json)),
-        Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
-        Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
+        Ok(Ok(json)) => Ok(Value::String(json)),
+        Ok(Err(e)) => Err(WsRpcError::internal(e.to_string())),
         Err(_) => {
             log::warn!("Model query timed out after {}s", SPARQL_QUERY_TIMEOUT_SECS);
             Err(WsRpcError {
@@ -1046,7 +1041,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.subscribeQuery", subscribe_query);
     map.register("perspective.keepAliveQuery", keep_alive_query);
     map.register("perspective.disposeQuery", dispose_query);
-    map.register("perspective.subscribeSparql", subscribe_surreal_query);
+    map.register("perspective.subscribeSparql", subscribe_sparql_query);
     map.register("perspective.keepAliveSparql", keep_alive_query);
     map.register("perspective.disposeSparql", dispose_query);
     map.register("perspective.modelQuery", model_query_handler);
