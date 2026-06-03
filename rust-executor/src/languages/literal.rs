@@ -32,8 +32,16 @@ pub fn literal_encode(value: &JsonValue) -> String {
 /// Decode a literal URL expression part back into a JSON value.
 ///
 /// Mirrors the TypeScript `Literal.fromUrl("literal://<expression_part>").get()` behavior.
-/// If the decoded value is not an object (i.e., is a primitive), wraps it in a standard
-/// expression envelope with `author`, `timestamp`, `data`, and `proof` fields.
+/// Primitives (`string:` / `number:` / `boolean:`) decode to their raw JSON value.
+/// Objects decoded from `json:` payloads pass through unchanged — if they happen to
+/// be a Channel-E signed-expression envelope (`{author, timestamp, data, proof}`)
+/// the caller is responsible for interpreting that shape.
+///
+/// Note: this used to wrap primitives in a synthetic `{author: "<unknown>", …}`
+/// envelope. That conflated Channel V (link-property values; provenance lives on
+/// the link reifier) with Channel E (signed expressions). See
+/// ~/.sovereign/membranes/coasys/research/literal-encoding-and-sparql-pushdown-2026-06-03.md
+/// §9.1 (V6) for the audit.
 pub fn literal_decode(expression_part: &str) -> Result<JsonValue, LanguageError> {
     let value = if let Some(rest) = expression_part.strip_prefix("string:") {
         let decoded = percent_decode_str(rest).decode_utf8().map_err(|e| {
@@ -86,27 +94,11 @@ pub fn literal_decode(expression_part: &str) -> Result<JsonValue, LanguageError>
         serde_json::from_str(&decoded).unwrap_or(JsonValue::String(decoded.to_string()))
     };
 
-    // If the value is already an object (e.g., a full expression), return it as-is.
-    // Otherwise, wrap it in a standard expression envelope.
-    if value.is_object() {
-        Ok(value)
-    } else {
-        let mut envelope = serde_json::Map::new();
-        envelope.insert(
-            "author".to_string(),
-            JsonValue::String("<unknown>".to_string()),
-        );
-        envelope.insert(
-            "timestamp".to_string(),
-            JsonValue::String("<unknown>".to_string()),
-        );
-        envelope.insert("data".to_string(), value);
-        envelope.insert(
-            "proof".to_string(),
-            JsonValue::Object(serde_json::Map::new()),
-        );
-        Ok(JsonValue::Object(envelope))
-    }
+    // Return the decoded value as-is. Objects (which may be legitimate signed-expression
+    // envelopes from Channel E callers) pass through unchanged; primitives are returned
+    // raw — the synthetic-envelope wrapper that used to live here was removed as part of
+    // the Channel V / Channel E separation.
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -119,8 +111,8 @@ mod tests {
         let encoded = literal_encode(&value);
         assert!(encoded.starts_with("string:"));
         let decoded = literal_decode(&encoded).unwrap();
-        // Primitives get wrapped in an envelope
-        assert_eq!(decoded["data"], value);
+        // Primitives now round-trip as raw values (no synthetic envelope).
+        assert_eq!(decoded, value);
     }
 
     #[test]
@@ -129,7 +121,7 @@ mod tests {
         let encoded = literal_encode(&value);
         assert!(encoded.starts_with("number:"));
         let decoded = literal_decode(&encoded).unwrap();
-        assert_eq!(decoded["data"], value);
+        assert_eq!(decoded, value);
     }
 
     #[test]
@@ -138,7 +130,7 @@ mod tests {
         let encoded = literal_encode(&value);
         assert!(encoded.starts_with("boolean:"));
         let decoded = literal_decode(&encoded).unwrap();
-        assert_eq!(decoded["data"], value);
+        assert_eq!(decoded, value);
     }
 
     #[test]
