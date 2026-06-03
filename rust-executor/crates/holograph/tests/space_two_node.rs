@@ -1,15 +1,21 @@
 //! Step 4d end-to-end: two `HolographSpace`s wired to real K2 modules
-//! (mem bootstrap + mem transport + core gossip stub) gossip an op
-//! across the in-process "network".
+//! (mem transport + mem peer store + core fetch/publish) propagate an
+//! op across the in-process "network".
 //!
 //! Alice commits an envelope; Bob's `ChannelNotifier` receives an
 //! `EmittedOp` for it within a generous timeout.  Then Alice commits a
 //! second envelope listing the first as a parent; Bob's queue confirms
 //! the parent is present and cascade-promotes the child.
 //!
-//! No real K2 fork — the test uses `kitsune2_core::default_test_builder`
-//! (MemTransport, MemBootstrap, MemPeerStore, CoreGossipStub, etc.)
-//! with our `K2OpStoreShim` substituted into the op-store slot.
+//! Peer discovery is manual (cross-registering agent infos via
+//! `peer_store().insert`), matching the pattern K2's own
+//! `core_space::test` uses for two-node tests. Mem bootstrap is not in
+//! the picture here — we just want to exercise our publish/fetch
+//! round-trip through the K2 transport, not test K2's discovery layer.
+//!
+//! No real K2 fork — uses `kitsune2_core::default_test_builder`
+//! (MemTransport, MemPeerStore, CoreFetch, CorePublish, CoreGossipStub,
+//! etc.) with our `K2OpStoreShim` substituted into the op-store slot.
 
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -17,11 +23,11 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use kitsune2_api::{
-    Builder, Config, DhtArc, DynLocalAgent, DynOpStore, DynSpaceHandler, K2Error, K2Result,
-    KitsuneHandler, OpStoreFactory, SpaceId, Timestamp,
+    BoxFut, Builder, Config, DhtArc, DynKitsuneHandler, DynLocalAgent, DynOpStore,
+    DynSpaceHandler, K2Error, K2Result, KitsuneHandler, OpStoreFactory, SpaceId, Timestamp, Url,
 };
 use kitsune2_core::default_test_builder;
-use kitsune2_test_utils::agent::{TestLocalAgent, TestVerifier};
+use kitsune2_test_utils::agent::{AgentBuilder, TestLocalAgent, TestVerifier};
 
 use holograph::{
     ArcPolicy, ChannelNotifier, EmittedOp, EnvelopeDecoder, HolographSpace, HolographSpaceConfig,
@@ -106,15 +112,22 @@ impl OpStoreFactory for ShimFactory {
     }
 }
 
-/// Minimal KitsuneHandler that hands K2 a `HolographSpaceHandler` on
-/// `create_space`. Holds an `Arc<HolographSpaceHandler>` slot the test
-/// fills in so we can also reach the recv_notify receiver if needed.
+/// Minimal KitsuneHandler that:
+/// - Captures `new_listening_address(this_url)` so the test can learn
+///   our K2 URL (needed to build cross-side agent infos).
+/// - Hands K2 a `HolographSpaceHandler` on `create_space`.
 #[derive(Debug)]
 struct Handler {
     space_handler: Arc<HolographSpaceHandler>,
+    url_tx: tokio::sync::mpsc::UnboundedSender<Url>,
 }
 
 impl KitsuneHandler for Handler {
+    fn new_listening_address(&self, this_url: Url) -> BoxFut<'static, ()> {
+        let _ = self.url_tx.send(this_url);
+        Box::pin(async move {})
+    }
+
     fn create_space(
         &self,
         _space_id: SpaceId,
@@ -133,16 +146,15 @@ impl KitsuneHandler for Handler {
 struct Node {
     name: &'static str,
     space: Arc<HolographSpace>,
-    /// Drained by the test to observe emitted ops.
     emitted_rx: tokio::sync::mpsc::UnboundedReceiver<EmittedOp>,
-    /// Holds K2 lifetimes so the test can keep them alive.
+    url: Url,
+    agent: DynLocalAgent,
     _kitsune: kitsune2_api::DynKitsune,
-    _dyn_space: kitsune2_api::DynSpace,
-    _agent: DynLocalAgent,
+    dyn_space: kitsune2_api::DynSpace,
     _dir: tempfile::TempDir,
 }
 
-async fn build_node(name: &'static str, mem_bootstrap_test_id: String) -> Node {
+async fn build_node(name: &'static str) -> Node {
     let dir = tempfile::tempdir().unwrap();
 
     let op_store = KvOpStore::open(
@@ -160,53 +172,43 @@ async fn build_node(name: &'static str, mem_bootstrap_test_id: String) -> Node {
         Arc::new(StdMutex::new(None));
 
     let (handler, _telepresence_rx) = HolographSpaceHandler::new();
+    let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel::<Url>();
 
-    // Start from K2's default test builder (mem transport + mem bootstrap
-    // + core gossip stub) and substitute our op-store factory.
-    let mut builder = Builder {
+    let kitsune = Builder {
         verifier: Arc::new(TestVerifier),
         op_store: Arc::new(ShimFactory {
             op_store: Arc::clone(&op_store),
             shim_slot: Arc::clone(&shim_slot),
         }),
         ..default_test_builder()
-    };
+    }
+    .with_default_config()
+    .unwrap()
+    .build()
+    .await
+    .unwrap();
 
-    // Bind all nodes in the same mem-bootstrap "test instance" so they
-    // discover each other in-process.
-    use kitsune2_core::factories::MemBootstrapModConfig;
-    builder
-        .config
-        .set_module_config(&MemBootstrapModConfig {
-            mem_bootstrap: kitsune2_core::factories::MemBootstrapConfig {
-                test_id: mem_bootstrap_test_id,
-                poll_freq_ms: 100,
-            },
-        })
-        .unwrap();
-
-    let kitsune = builder
-        .with_default_config()
-        .unwrap()
-        .build()
-        .await
-        .unwrap();
-
-    let kitsune_handler: Arc<dyn KitsuneHandler> = Arc::new(Handler {
+    let kitsune_handler: DynKitsuneHandler = Arc::new(Handler {
         space_handler: Arc::clone(&handler),
+        url_tx,
     });
     kitsune.register_handler(kitsune_handler).await.unwrap();
 
-    // Build the space — this calls our ShimFactory::create which fills
-    // shim_slot.
     let dyn_space = kitsune.space(test_space_id(), None).await.unwrap();
+
+    // K2 emits new_listening_address shortly after transport is bound;
+    // that's how we learn our URL.
+    let url = tokio::time::timeout(Duration::from_secs(5), url_rx.recv())
+        .await
+        .expect("timed out waiting for local URL")
+        .expect("url channel closed");
+
     let shim = shim_slot
         .lock()
         .unwrap()
         .clone()
         .expect("ShimFactory should have populated the slot");
 
-    // Wire holograph above the K2 modules.
     let fetcher = K2FetcherAdapter::new(dyn_space.fetch().clone());
     let peer_picker = K2PeerPickerAdapter::new(dyn_space.peer_store().clone());
     let (notifier, emitted_rx) = ChannelNotifier::new();
@@ -224,32 +226,46 @@ async fn build_node(name: &'static str, mem_bootstrap_test_id: String) -> Node {
         tokio::runtime::Handle::current(),
     ));
 
-    // Install the queue into the K2-facing shim so inbound ops route
-    // through the integration pipeline.
     shim.install_queue(Arc::clone(space.queue()));
 
-    // Join a local agent on full arc so this node participates in gossip
-    // for everything.
     let agent = Arc::new(TestLocalAgent::default()) as DynLocalAgent;
     agent.set_cur_storage_arc(DhtArc::FULL);
     agent.set_tgt_storage_arc_hint(DhtArc::FULL);
     dyn_space.local_agent_join(agent.clone()).await.unwrap();
 
-    tracing::info!(node = name, "node built and joined");
+    tracing::info!(node = name, %url, "node built and joined");
 
     Node {
         name,
         space,
         emitted_rx,
+        url,
+        agent,
         _kitsune: kitsune,
-        _dyn_space: dyn_space,
-        _agent: agent,
+        dyn_space,
         _dir: dir,
     }
 }
 
-/// Wait for the receiver to produce an `EmittedOp` matching `expect`
-/// within `timeout`. Polls every 100ms.
+/// Cross-register: insert `other`'s agent info (with `other`'s URL and a
+/// FULL storage arc) into `self_node`'s peer_store, so this side knows
+/// where to reach the other side via K2 publish/fetch.
+async fn cross_register(self_node: &Node, other: &Node) {
+    let info = AgentBuilder {
+        url: Some(Some(other.url.clone())),
+        storage_arc: Some(DhtArc::FULL),
+        space_id: Some(test_space_id()),
+        ..Default::default()
+    }
+    .build(other.agent.clone());
+    self_node
+        .dyn_space
+        .peer_store()
+        .insert(vec![info])
+        .await
+        .unwrap();
+}
+
 async fn wait_for_emit(
     node: &mut Node,
     expect: &kitsune2_api::OpId,
@@ -282,42 +298,24 @@ async fn wait_for_emit(
     }
 }
 
-/// Boot two nodes. Alice commits an envelope; Bob's notifier receives
-/// it.  Then Alice commits a child whose parent is the first op; Bob's
-/// queue ingests the child, recognizes the parent is present, and
-/// promotes it.
+/// Two `HolographSpace`s on the same in-process K2 mem-transport network.
+/// Alice commits → Bob's notifier receives. Then Alice commits a child
+/// whose parent is the first op → Bob receives and cascade-promotes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_node_commit_propagates_via_real_k2() {
     let _ = tracing_subscriber::fmt::try_init();
-    // Per-test mem-bootstrap id so this test doesn't see ghosts from
-    // other tests sharing the same process.
-    let mem_id = format!(
-        "holograph-two-node-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
 
-    let mut alice = build_node("alice", mem_id.clone()).await;
-    let mut bob = build_node("bob", mem_id.clone()).await;
+    let mut alice = build_node("alice").await;
+    let mut bob = build_node("bob").await;
 
-    // Force the mem bootstrap to poll immediately so both peers learn
-    // about each other promptly.
-    kitsune2_core::factories::MemBootstrapFactory::trigger_immediate_poll();
+    // Cross-register peer infos so publish_ops on either side can find
+    // the other peer's URL.
+    cross_register(&alice, &bob).await;
+    cross_register(&bob, &alice).await;
 
-    // Give the bootstrap loop a moment to insert each side into the
-    // other's peer store. The mem bootstrap poll_freq is 100ms so a
-    // short wait should be plenty.
-    tokio::time::sleep(Duration::from_millis(800)).await;
-
-    // Sanity: Bob should know about Alice and vice versa via the mem
-    // bootstrap (each node's peer store has both agents).
-    let bob_peers = bob._dyn_space.peer_store().get_all().await.unwrap();
-    assert!(
-        bob_peers.iter().any(|p| !p.is_tombstone),
-        "Bob should know at least one peer after bootstrap"
-    );
+    // Give K2 a beat to register the peer infos and set up direct
+    // connections via mem transport.
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // -------- Commit 1: root envelope --------
     let (root_bytes, root_id) = make_envelope(b"alice-root", vec![]);
@@ -329,13 +327,13 @@ async fn two_node_commit_propagates_via_real_k2() {
     assert_eq!(returned, root_id);
 
     // Alice's own notifier emits straight away because on_local_commit
-    // goes through her queue.
+    // routes through her queue locally.
     let alice_emit = wait_for_emit(&mut alice, &root_id, Duration::from_secs(5))
         .await
         .expect("alice should self-emit the local commit");
     assert_eq!(alice_emit.envelope_bytes, root_bytes);
 
-    // Bob should receive the root via K2 publish_ops (eager hint to peers).
+    // Bob should receive the root via K2 publish_ops + fetch round-trip.
     let bob_emit = wait_for_emit(&mut bob, &root_id, Duration::from_secs(30))
         .await
         .expect("bob should receive alice's root envelope within 30s");
@@ -343,30 +341,26 @@ async fn two_node_commit_propagates_via_real_k2() {
     assert_eq!(bob_emit.envelope_bytes, root_bytes);
 
     // -------- Commit 2: child envelope with parent = root --------
-    let (child_bytes, child_id) =
-        make_envelope(b"alice-child", vec![root_id.clone()]);
+    let (child_bytes, child_id) = make_envelope(b"alice-child", vec![root_id.clone()]);
     alice
         .space
         .on_local_commit(child_bytes.clone())
         .await
         .expect("alice commit child");
 
-    // Alice should self-emit.
     let _alice_child_emit = wait_for_emit(&mut alice, &child_id, Duration::from_secs(5))
         .await
         .expect("alice should self-emit the child");
 
-    // Bob's queue should:
-    //   1. Receive the child via publish_ops.
-    //   2. See parent_id == root_id is already in its op-store.
-    //   3. Take the all-parents-present branch → store + emit.
-    let bob_child_emit =
-        wait_for_emit(&mut bob, &child_id, Duration::from_secs(30))
-            .await
-            .expect("bob should receive alice's child envelope within 30s");
+    // Bob's queue:
+    //   1. Receives the child via publish_ops + fetch.
+    //   2. Sees parent_id == root_id is already in its op-store.
+    //   3. Takes the all-parents-present branch → store + emit.
+    let bob_child_emit = wait_for_emit(&mut bob, &child_id, Duration::from_secs(30))
+        .await
+        .expect("bob should receive alice's child envelope within 30s");
     assert_eq!(bob_child_emit.envelope_bytes, child_bytes);
 
-    // Bob's op-store now holds both ops.
     assert_eq!(bob.space.op_count(), 2);
     assert_eq!(alice.space.op_count(), 2);
 }
