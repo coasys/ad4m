@@ -9082,6 +9082,7 @@ dependencies = [
  "holo_hash",
  "holochain_serialized_bytes",
  "kitsune2_api",
+ "kitsune2_core",
  "once_cell",
  "perspective_diff_sync",
  "perspective_diff_sync_integrity",

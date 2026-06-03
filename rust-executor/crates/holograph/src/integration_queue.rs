@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use kitsune2_api::{K2Error, K2Result, OpId, OpStore, Url};
+use kitsune2_api::{K2Error, K2Result, OpId, OpStore, Timestamp, Url};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -54,10 +54,18 @@ use crate::envelope::OpEnvelope;
 use crate::op_store::{EnvelopeDecoder, KvOpStore};
 
 /// Sink for "this op is integration-ready; propagate it to subscribers."
-/// Step 4 will plug AD4M's perspective-diff emit here. Tests use a
-/// recording stub.
+/// Step 4 plugs both AD4M's perspective-diff emit and K2's
+/// `Space::inform_ops_stored` (gossip bookkeeping) here. `created_at` is
+/// the envelope's authoring timestamp — propagated unchanged from the
+/// origin so every peer derives the same `StoredOp{op_id, created_at}`
+/// pair for gossip.
 pub trait NotifyUp: Send + Sync + std::fmt::Debug + 'static {
-    fn emit_perspective_diff(&self, op_id: OpId, envelope_bytes: Bytes);
+    fn emit_perspective_diff(
+        &self,
+        op_id: OpId,
+        created_at: Timestamp,
+        envelope_bytes: Bytes,
+    );
 }
 
 /// What the queue needs from K2's fetch module. Trait surface matches
@@ -246,7 +254,7 @@ impl HolographIntegrationQueue {
 
         // 3. Op-id derivation via the same decoder KvOpStore uses,
         //    so an op identified here is the same op identified there.
-        let (op_id, _ts) = (self.decode_envelope)(envelope_bytes.as_ref())?;
+        let (op_id, created_at) = (self.decode_envelope)(envelope_bytes.as_ref())?;
 
         // 4. Arc filter. Sharding-ready commitment 1.
         if !self.arc_policy.target_arc().contains(op_id.loc()) {
@@ -275,7 +283,7 @@ impl HolographIntegrationQueue {
         if missing.is_empty() {
             // All parents present (or no parents) → store + notify +
             // cascade.
-            self.store_and_promote(op_id.clone(), envelope_bytes)
+            self.store_and_promote(op_id.clone(), created_at, envelope_bytes)
                 .await?;
             Ok(Some(op_id))
         } else {
@@ -296,7 +304,12 @@ impl HolographIntegrationQueue {
     /// cascade-promote any pending ops that were waiting on `op_id`.
     /// The cascade is a worklist, not recursion — long chains stay
     /// stack-safe.
-    async fn store_and_promote(&self, op_id: OpId, envelope_bytes: Bytes) -> K2Result<()> {
+    async fn store_and_promote(
+        &self,
+        op_id: OpId,
+        created_at: Timestamp,
+        envelope_bytes: Bytes,
+    ) -> K2Result<()> {
         // Delegate raw storage to KvOpStore. It re-decodes, but the
         // closure-injected EnvelopeDecoder will produce the same
         // op-id we computed above.
@@ -312,7 +325,7 @@ impl HolographIntegrationQueue {
         }
 
         self.notify
-            .emit_perspective_diff(op_id.clone(), envelope_bytes);
+            .emit_perspective_diff(op_id.clone(), created_at, envelope_bytes);
 
         // Cascade worklist: every newly-stored op-id may unblock
         // pending entries waiting on it as a parent.
@@ -329,8 +342,16 @@ impl HolographIntegrationQueue {
                 if stored.is_empty() {
                     continue;
                 }
-                self.notify
-                    .emit_perspective_diff(child_id.clone(), child_envelope);
+                // Re-derive timestamp for the promoted child — it lives
+                // in its envelope bytes, which we've held in the
+                // pending tree.
+                let (_re_id, child_ts) =
+                    (self.decode_envelope)(child_envelope.as_ref())?;
+                self.notify.emit_perspective_diff(
+                    child_id.clone(),
+                    child_ts,
+                    child_envelope,
+                );
                 worklist.push_back(child_id);
             }
         }
