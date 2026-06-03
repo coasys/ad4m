@@ -196,16 +196,43 @@ impl LocalCommitTarget for K2DynSpaceTarget {
             let agents = space.peer_store().get_all().await?;
             let publish = space.publish();
             let me = space.current_url();
+            tracing::info!(
+                target: "holograph",
+                "publish_ops_to_peers: op_ids={} peers={} self_url={:?}",
+                op_ids.len(),
+                agents.len(),
+                me.as_ref().map(|u| u.to_string()),
+            );
+            let mut sent = 0usize;
+            let mut skipped_self = 0usize;
+            let mut skipped_no_url = 0usize;
             for agent in agents {
+                let agent_url = agent.url.clone();
                 if let Some(my_url) = &me {
                     if agent.url.as_ref() == Some(my_url) {
+                        skipped_self += 1;
                         continue;
                     }
                 }
-                if let Some(target) = agent.url.clone() {
+                if let Some(target) = agent_url {
+                    tracing::info!(
+                        target: "holograph",
+                        "publish_ops_to_peers: -> {}",
+                        target
+                    );
                     publish.publish_ops(op_ids.clone(), target).await?;
+                    sent += 1;
+                } else {
+                    skipped_no_url += 1;
                 }
             }
+            tracing::info!(
+                target: "holograph",
+                "publish_ops_to_peers: sent={} skipped_self={} skipped_no_url={}",
+                sent,
+                skipped_self,
+                skipped_no_url,
+            );
             Ok(())
         })
     }
