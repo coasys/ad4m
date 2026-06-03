@@ -19,7 +19,10 @@ use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, ParentScope, SortKey,
     SparqlPagination, WhereCondition,
 };
-use super::utils::{escape_sparql_string, validate_iri};
+use super::utils::{
+    escape_sparql_string, format_literal_number, literal_percent_encode, looks_like_absolute_iri,
+    validate_iri,
+};
 
 /// Build a targeted reifier timestamp probe for the pagination sub-query.
 ///
@@ -561,13 +564,28 @@ pub(super) fn build_query_patterns(
                 match condition {
                     WhereCondition::String(val) => {
                         if is_literal_prop {
-                            let var = format!("?_pw_{safe_name}");
-                            where_patterns
-                                .push(format!("    ?source <{}> {var} .", prop.predicate));
-                            where_patterns.push(format!(
-                                "    FILTER(STR(<ad4m://fn/parse_literal>({var})) = \"{}\")",
-                                escape_sparql_string(val)
-                            ));
+                            // V4: Equality on a literal-encoded property compares against the
+                            // deterministic `literal:string:<percent-encoded>` IRI emitted by
+                            // `resolve_property_value`. Emitting a direct IRI match lets
+                            // Oxigraph use the POS index instead of evaluating
+                            // `fn/parse_literal` per row.
+                            //
+                            // If the where-value is also a valid raw IRI, a UNION covers the
+                            // case where the constructor stored a raw URI on a property whose
+                            // shape declares `resolveLanguage: literal` (e.g. enum-like state
+                            // initial values).
+                            let encoded = literal_percent_encode(val);
+                            if looks_like_absolute_iri(val) {
+                                where_patterns.push(format!(
+                                    "    {{ ?source <{0}> <literal:string:{encoded}> . }} UNION {{ ?source <{0}> <{val}> . }}",
+                                    prop.predicate
+                                ));
+                            } else {
+                                where_patterns.push(format!(
+                                    "    ?source <{}> <literal:string:{encoded}> .",
+                                    prop.predicate
+                                ));
+                            }
                         } else if validate_iri(val).is_ok() {
                             where_patterns
                                 .push(format!("    ?source <{}> <{val}> .", prop.predicate));
@@ -582,42 +600,115 @@ pub(super) fn build_query_patterns(
                         }
                     }
                     WhereCondition::Number(n) => {
-                        let var = format!("?_pw_{safe_name}");
-                        where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
-                        where_patterns.push(format!(
-                            "    FILTER(STR(<ad4m://fn/parse_literal>({var})) = \"{n}\")"
-                        ));
+                        if is_literal_prop {
+                            // V4: direct IRI match against `literal:number:<N>` for
+                            // index-friendly equality. Non-finite values are dropped
+                            // (the FILTER(false) path matches no rows).
+                            if let Some(num_str) = format_literal_number(*n) {
+                                where_patterns.push(format!(
+                                    "    ?source <{}> <literal:number:{num_str}> .",
+                                    prop.predicate
+                                ));
+                            } else {
+                                where_patterns.push("    FILTER(false)".to_string());
+                            }
+                        } else {
+                            let var = format!("?_pw_{safe_name}");
+                            where_patterns
+                                .push(format!("    ?source <{}> {var} .", prop.predicate));
+                            where_patterns.push(format!(
+                                "    FILTER(STR(<ad4m://fn/parse_literal>({var})) = \"{n}\")"
+                            ));
+                        }
                     }
                     WhereCondition::Bool(b) => {
-                        let var = format!("?_pw_{safe_name}");
-                        where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
-                        where_patterns.push(format!(
-                            "    FILTER(STR(<ad4m://fn/parse_literal>({var})) = \"{b}\")"
-                        ));
+                        if is_literal_prop {
+                            // V4: direct IRI match against `literal:boolean:true|false`.
+                            where_patterns.push(format!(
+                                "    ?source <{}> <literal:boolean:{b}> .",
+                                prop.predicate
+                            ));
+                        } else {
+                            let var = format!("?_pw_{safe_name}");
+                            where_patterns
+                                .push(format!("    ?source <{}> {var} .", prop.predicate));
+                            where_patterns.push(format!(
+                                "    FILTER(STR(<ad4m://fn/parse_literal>({var})) = \"{b}\")"
+                            ));
+                        }
                     }
                     WhereCondition::StringArray(vals) => {
-                        let values_list = vals
-                            .iter()
-                            .map(|v| format!("\"{}\"", escape_sparql_string(v)))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        let var = format!("?_pw_{safe_name}");
-                        where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
-                        where_patterns.push(format!(
-                            "    FILTER(STR(<ad4m://fn/parse_literal>({var})) IN ({values_list}))"
-                        ));
+                        if is_literal_prop {
+                            // V4: VALUES of `literal:string:<encoded>` IRIs → POS probe per IRI.
+                            // Also include raw-IRI forms for values that parse as valid IRIs
+                            // (mirrors the single-String UNION above).
+                            let mut iris: Vec<String> = Vec::with_capacity(vals.len() * 2);
+                            for v in vals {
+                                iris.push(format!(
+                                    "<literal:string:{}>",
+                                    literal_percent_encode(v)
+                                ));
+                                if looks_like_absolute_iri(v) {
+                                    iris.push(format!("<{v}>"));
+                                }
+                            }
+                            let iv_var = format!("?_iv_{safe_name}");
+                            where_patterns.push(format!(
+                                "    VALUES {iv_var} {{ {} }}",
+                                iris.join(" ")
+                            ));
+                            where_patterns.push(format!(
+                                "    ?source <{}> {iv_var} .",
+                                prop.predicate
+                            ));
+                        } else {
+                            let values_list = vals
+                                .iter()
+                                .map(|v| format!("\"{}\"", escape_sparql_string(v)))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let var = format!("?_pw_{safe_name}");
+                            where_patterns
+                                .push(format!("    ?source <{}> {var} .", prop.predicate));
+                            where_patterns.push(format!(
+                                "    FILTER(STR(<ad4m://fn/parse_literal>({var})) IN ({values_list}))"
+                            ));
+                        }
                     }
                     WhereCondition::NumberArray(vals) => {
-                        let values_list = vals
-                            .iter()
-                            .map(|n| format!("\"{n}\""))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        let var = format!("?_pw_{safe_name}");
-                        where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
-                        where_patterns.push(format!(
-                            "    FILTER(STR(<ad4m://fn/parse_literal>({var})) IN ({values_list}))"
-                        ));
+                        if is_literal_prop {
+                            // V4: VALUES of `literal:number:<N>` IRIs. Non-finite values are dropped.
+                            let iris = vals
+                                .iter()
+                                .filter_map(|n| {
+                                    format_literal_number(*n)
+                                        .map(|s| format!("<literal:number:{s}>"))
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            if iris.is_empty() {
+                                where_patterns.push("    FILTER(false)".to_string());
+                            } else {
+                                let iv_var = format!("?_iv_{safe_name}");
+                                where_patterns.push(format!("    VALUES {iv_var} {{ {iris} }}"));
+                                where_patterns.push(format!(
+                                    "    ?source <{}> {iv_var} .",
+                                    prop.predicate
+                                ));
+                            }
+                        } else {
+                            let values_list = vals
+                                .iter()
+                                .map(|n| format!("\"{n}\""))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let var = format!("?_pw_{safe_name}");
+                            where_patterns
+                                .push(format!("    ?source <{}> {var} .", prop.predicate));
+                            where_patterns.push(format!(
+                                "    FILTER(STR(<ad4m://fn/parse_literal>({var})) IN ({values_list}))"
+                            ));
+                        }
                     }
                     WhereCondition::Ops(ops) => {
                         let var = format!("?_pw_{safe_name}");

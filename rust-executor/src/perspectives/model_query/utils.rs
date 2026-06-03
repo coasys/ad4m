@@ -6,7 +6,6 @@
 //! coercion helpers used by the filtering engine.
 
 use deno_core::anyhow::{anyhow, Error};
-#[cfg(test)]
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde_json::Value;
 
@@ -19,9 +18,25 @@ use serde_json::Value;
 /// Uses `NON_ALPHANUMERIC` percent-encoding, matching `literal_encode` in
 /// `languages/literal.rs`.  `urlencoding::encode` uses RFC 3986 unreserved
 /// chars (keeps `.-_~`), which diverges from the storage encoding.
-#[cfg(test)]
 pub(super) fn literal_percent_encode(s: &str) -> String {
     utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+}
+
+/// Format a finite f64 for the `literal:number:` IRI tail, mirroring
+/// `literal_encode` in `languages/literal.rs`: integers render without a
+/// fractional part (e.g. `42`), floats use `{}` formatting (e.g. `3.14`).
+///
+/// Returns `None` if the value is non-finite (NaN or +/- infinity) — these
+/// are rejected so we never emit a malformed IRI into the SPARQL.
+pub(super) fn format_literal_number(n: f64) -> Option<String> {
+    if !n.is_finite() {
+        return None;
+    }
+    if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
+        Some(format!("{}", n as i64))
+    } else {
+        Some(format!("{n}"))
+    }
 }
 
 /// Escape a string value for use inside a SPARQL string literal (double-quoted).
@@ -31,6 +46,29 @@ pub(super) fn escape_sparql_string(s: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+/// Cheap check: is this value plausibly an absolute IRI? Used by the
+/// index-friendly WHERE builders (V4/V5) to decide whether to add a
+/// raw-IRI fallback alongside the `literal:string:` direct probe.
+///
+/// Requires (a) `validate_iri` passes (no chars that would break the
+/// SPARQL IRIREF token), and (b) the value contains a `:` and starts with
+/// an ASCII letter — a minimal proxy for "has a URI scheme". This rejects
+/// bare strings like `"active"` that would otherwise produce the
+/// un-parseable IRIREF `<active>`.
+pub(super) fn looks_like_absolute_iri(s: &str) -> bool {
+    if validate_iri(s).is_err() {
+        return false;
+    }
+    let Some(colon_idx) = s.find(':') else {
+        return false;
+    };
+    if colon_idx == 0 {
+        return false;
+    }
+    let first = s.as_bytes()[0];
+    first.is_ascii_alphabetic()
 }
 
 /// Validate a value for use inside an IRI `<…>`.  Rejects characters that
