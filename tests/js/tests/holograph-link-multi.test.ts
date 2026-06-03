@@ -195,6 +195,14 @@ describe("holograph-link Language end-to-end (two conductors via Iroh)", functio
     });
 
     it("Bob receives Alice's commit through Iroh within 15s", async () => {
+        // Settle delay: CoreBootstrap polling needs time on iroh to
+        // converge after Bob's join so Alice's publish_ops_to_peers
+        // sees Bob in her peer_store. Without this, Alice's first
+        // commit publishes to peers=1 (herself only) and the diff
+        // never reaches Bob. Empirically the asymmetric discovery
+        // window can stretch past 10s on loopback; pad to 15s.
+        await sleep(15_000);
+
         const got: string[] = [];
         await bob!.client.perspective.addPerspectiveLinkAddedListener(bobUuid, [
             (l) => got.push(`${l.data.source}->${l.data.target}`),
