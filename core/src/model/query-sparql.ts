@@ -422,8 +422,8 @@ function buildSPARQLWhereFilters(
 
     // For literal-stored properties, push equality/IN/NOT filters to SPARQL using
     // <ad4m://fn/parse_literal>() which extracts the raw value from literal: IRIs.
-    // The correct SPARQL syntax is <ad4m://fn/parse_literal>(?var) — NOT fn::parse_literal
-    // (which was SurrealDB syntax that Oxigraph rejects at parse time).
+    // Use IRI form <ad4m://fn/parse_literal>(?var); the namespaced form
+    // fn::parse_literal is invalid SPARQL and Oxigraph rejects it at parse time.
     // Comparison operators (gt/lt/gte/lte/between/contains) remain JS-only because
     // parse_literal returns strings and numeric/date comparisons would be unreliable.
     // JS post-filter in instancesFromQueryResult remains as a safety net for all cases.
