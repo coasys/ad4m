@@ -37,6 +37,7 @@ import {
     holographLatestRevision,
     holographCloseNeighborhood,
     EmittedOpWire,
+    WireDiff,
 } from "@coasys/ad4m-ldk";
 
 // =============================================================================
@@ -64,84 +65,52 @@ const localAgents = new Set<string>();
 // Helpers
 // =============================================================================
 
-function envelopeToBase64(bytes: Uint8Array): string {
-    let s = "";
-    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-    return btoa(s);
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-    const bin = atob(b64);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-}
-
-/**
- * Encode a `PerspectiveDiff` as the substrate's `OpEnvelope` CBOR shape.
- * Step 5 ships a minimal encoder good enough for the smoke test; Step 6
- * will likely move this into Rust so the JS side hands raw diff JSON
- * across and the substrate owns serialization. Until then we encode the
- * diff as a JSON payload — the substrate is opaque-bytes for v1.
- */
-function encodeEnvelope(diff: PerspectiveDiff): Uint8Array {
-    const payload = new TextEncoder().encode(JSON.stringify({
-        additions: diff.additions || [],
-        removals: diff.removals || [],
-    }));
-    // The Rust side decodes the envelope; for Step 5 we send the
-    // payload directly. The real production path passes through
-    // `OpEnvelope::new_at(...)` on the Rust side once the host fn
-    // accepts a raw diff and does the envelope wrap there.
-    return payload;
-}
-
-function asssertHandle(): number {
+function assertHandle(): number {
     if (handle == null) {
         throw new Error("[holograph-link] init() must be called before any other Language method");
     }
     return handle;
 }
 
+/** Convert a Language-facing PerspectiveDiff into the substrate's WireDiff
+ *  shape. Step 6e moved envelope (CBOR + timestamp + signature) construction
+ *  to Rust, so the wire takes typed diff data directly. */
+function toWireDiff(diff: PerspectiveDiff): WireDiff {
+    return {
+        additions: diff.additions || [],
+        removals: diff.removals || [],
+    };
+}
+
+function fromWireDiff(w: WireDiff): PerspectiveDiff {
+    const out = new PerspectiveDiff();
+    out.additions = w.additions || [];
+    out.removals = w.removals || [];
+    return out;
+}
+
 async function runSubscriberLoop(): Promise<void> {
     while (subscriberAbort && !subscriberAbort.signal.aborted) {
         try {
-            const next: EmittedOpWire | null = await holographNextEmitted(asssertHandle());
+            const next: EmittedOpWire | null = await holographNextEmitted(assertHandle());
             if (!next) {
-                // Step 6's implementation awaits the underlying mpsc
-                // receiver, so this path won't actually return null
-                // except at shutdown. Step 5 stub returns
-                // NotImplemented immediately — surface the error to
-                // tests and exit the loop cleanly.
+                // The Rust side awaits the underlying mpsc receiver so
+                // a null return means the channel closed (i.e., the
+                // neighborhood is being torn down). Exit the loop.
                 return;
             }
-            const envBytes = base64ToBytes(next.envelope_b64);
-            const diff = decodeEnvelope(envBytes);
+            const diff = fromWireDiff(next.diff);
             if (linkCallback) linkCallback(diff);
             emitPerspectiveDiff(diff);
         } catch (e: any) {
-            // NotImplemented during Step 5 stub is fine — Step 6 fills in.
             const msg = String(e && e.message ? e.message : e);
-            if (msg.indexOf("not yet implemented") >= 0 || msg.indexOf("__holographDelegate__") >= 0) {
+            if (msg.indexOf("__holographDelegate__") >= 0) {
                 console.warn("[holograph-link] subscriber loop ending: " + msg);
                 return;
             }
             console.error("[holograph-link] subscriber loop error:", e);
             return;
         }
-    }
-}
-
-function decodeEnvelope(bytes: Uint8Array): PerspectiveDiff {
-    try {
-        const text = new TextDecoder().decode(bytes);
-        const parsed = JSON.parse(text);
-        const diff = new PerspectiveDiff();
-        diff.additions = parsed.additions || [];
-        diff.removals = parsed.removals || [];
-        return diff;
-    } catch (_) {
-        return new PerspectiveDiff();
     }
 }
 
@@ -179,14 +148,17 @@ const language = defineLanguage({
         const _agentSign: typeof agentSign = agentSign;
         void _agentSign;
 
-        // Join the local agent. The agent key is derived from the DID
-        // server-side; for Step 5 we hand across the DID string bytes
-        // and let the Rust side own the key derivation.
+        // Join the local agent. The agent key is the DID bytes
+        // base64-encoded; the Rust side maps it onto a K2 AgentId
+        // (full plumbing arrives in Step 7).
         const didBytes = new TextEncoder().encode(myDid);
+        let didB64 = "";
+        for (let i = 0; i < didBytes.length; i++) didB64 += String.fromCharCode(didBytes[i]);
+        didB64 = btoa(didB64);
         try {
-            await holographJoinAgent(handle, envelopeToBase64(didBytes));
+            await holographJoinAgent(handle, didB64);
         } catch (e) {
-            console.warn("[holograph-link] holographJoinAgent skipped (Step 5 stub):", String(e));
+            console.warn("[holograph-link] holographJoinAgent failed:", String(e));
         }
 
         // Spawn the subscriber loop on the next microtask so init()
@@ -227,7 +199,7 @@ const language = defineLanguage({
 
         async render() {
             try {
-                const result = await holographRender(asssertHandle());
+                const result = await holographRender(assertHandle());
                 return { links: result.links || [] };
             } catch (e) {
                 // Step 5 stub path; the runtime tolerates an empty render.
@@ -238,7 +210,7 @@ const language = defineLanguage({
 
         async currentRevision() {
             try {
-                return await holographCurrentRevision(asssertHandle());
+                return await holographCurrentRevision(assertHandle());
             } catch (_) {
                 return null;
             }
@@ -247,8 +219,10 @@ const language = defineLanguage({
 
     commit: {
         async commit(diff: PerspectiveDiff) {
-            const envelopeBytes = encodeEnvelope(diff);
-            return await holographCommit(asssertHandle(), envelopeToBase64(envelopeBytes));
+            // Rust side wraps the diff in an OpEnvelope (CBOR + timestamp
+            // + signature) before storing. We just hand the typed diff
+            // across the wire.
+            return await holographCommit(assertHandle(), toWireDiff(diff));
         },
     },
 
@@ -348,7 +322,7 @@ export function linkSyncAddSyncStateChangeCallback(callback: (state: string) => 
  */
 export async function perspectiveSyncLatestRevision(): Promise<string | null> {
     try {
-        return await holographLatestRevision(asssertHandle());
+        return await holographLatestRevision(assertHandle());
     } catch (_) {
         return null;
     }
