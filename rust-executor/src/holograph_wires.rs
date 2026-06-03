@@ -303,13 +303,32 @@ impl HolographRuntime {
 
         shim.install_queue(Arc::clone(space.queue()));
 
-        // Local-agent join — v1 spins up a sentinel TestLocalAgent with
-        // FULL storage arc. Step 7 will replace this with a real
-        // AD4M-DID-bound agent identity.
-        let agent: DynLocalAgent =
-            Arc::new(kitsune2_test_utils::agent::TestLocalAgent::default()) as DynLocalAgent;
+        // Local-agent join. For the cross-process (Tx5) path we need a
+        // process-unique AgentId — TestLocalAgent::default() uses a
+        // static counter so every fresh process starts at "test-1" and
+        // the bootstrap server can't tell two conductors apart. The
+        // in-process tests (Step 4d / Step 6f) still want TestLocalAgent
+        // because they pair with TestVerifier in the same Builder.
+        //
+        // Production identity (AD4M DID-bound) is PR-B / morning work.
+        let agent: DynLocalAgent = if std::env::var("HOLOGRAPH_SBD_URL").is_ok() {
+            Arc::new(kitsune2_core::Ed25519LocalAgent::default()) as DynLocalAgent
+        } else {
+            Arc::new(kitsune2_test_utils::agent::TestLocalAgent::default()) as DynLocalAgent
+        };
         agent.set_cur_storage_arc(DhtArc::FULL);
         agent.set_tgt_storage_arc_hint(DhtArc::FULL);
+        // AgentId Display invokes HoloHash-shaped decoding (only valid
+        // for 32-byte ids); print the raw byte length + an URL-safe
+        // base64 of the bytes instead so this works for both
+        // TestLocalAgent (13B) and Ed25519LocalAgent (32B).
+        let agent_b64 = url_safe_b64_no_pad(agent.agent().as_ref());
+        log::info!(
+            "[holograph] local agent join: agent_id_b64={} ({}B) cross_process={}",
+            agent_b64,
+            agent.agent().as_ref().len(),
+            std::env::var("HOLOGRAPH_SBD_URL").is_ok(),
+        );
         dyn_space
             .local_agent_join(agent.clone())
             .await
@@ -520,7 +539,11 @@ async fn build_dyn_space_inner(
             .map(|v| v.trim() == "1")
             .unwrap_or(false);
         let b = Builder {
-            verifier: Arc::new(TestVerifier),
+            // Ed25519 pair (verifier+agent) so cross-process signing
+            // round-trips; TestVerifier only accepts the literal
+            // TEST_SIG constant which Ed25519LocalAgent doesn't
+            // produce.
+            verifier: Arc::new(kitsune2_core::Ed25519Verifier),
             op_store: shim_factory,
             transport: Tx5TransportFactory::create(),
             bootstrap: CoreBootstrapFactory::create(),
@@ -545,10 +568,20 @@ async fn build_dyn_space_inner(
             url.replace("ws://", "http://")
                 .replace("wss://", "https://")
         });
+        // Default backoff_min_ms is 5000 (production-safe); for the
+        // spike's loopback test we tighten it to 500ms so two
+        // conductors converge inside the 15s test deadline. Production
+        // / non-test consumers can override via env if they need the
+        // default again.
+        let backoff_min_ms = std::env::var("HOLOGRAPH_BOOTSTRAP_BACKOFF_MIN_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(500u32);
         b.config
             .set_module_config(&CoreBootstrapModConfig {
                 core_bootstrap: CoreBootstrapConfig {
                     server_url: Some(boot_server.clone()),
+                    backoff_min_ms,
                     ..Default::default()
                 },
             })
