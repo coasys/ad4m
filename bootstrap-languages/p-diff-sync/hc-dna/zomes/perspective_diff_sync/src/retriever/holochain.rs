@@ -8,7 +8,9 @@ use perspective_diff_sync_integrity::{
 
 use super::PerspectiveDiffRetreiver;
 use crate::errors::{SocialContextError, SocialContextResult};
-use crate::link_adapter::conversions::{entry_ref_to_algo, hash_from_algo, snapshot_to_algo};
+use crate::link_adapter::conversions::{
+    entry_ref_from_algo, entry_ref_to_algo, hash_from_algo, hash_to_algo, snapshot_to_algo,
+};
 use crate::utils::dedup;
 use crate::Hash;
 use perspective_diff_algorithm as algo;
@@ -205,6 +207,22 @@ impl algo::WorkspaceRetriever for HolochainRetreiver {
             .ok_or(algo::AlgoError::Retriever("snapshot entry empty".into()))?;
 
         Ok(Some(snapshot_to_algo(snapshot)))
+    }
+}
+
+// Step 13b-D: write-side surface for `snapshots::generate_snapshot`.
+// Persists a chunk-diff entry and returns its action-hash for the
+// algo crate to reference from the new `Snapshot`.
+impl algo::SnapshotRetriever for HolochainRetreiver {
+    fn create_diff_entry(
+        entry: algo::PerspectiveDiffEntryReference,
+    ) -> algo::AlgoResult<algo::Hash> {
+        let integrity = entry_ref_from_algo(entry);
+        let hash = <Self as PerspectiveDiffRetreiver>::create_entry(
+            EntryTypes::PerspectiveDiffEntryReference(integrity),
+        )
+        .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(hash_to_algo(&hash))
     }
 }
 
