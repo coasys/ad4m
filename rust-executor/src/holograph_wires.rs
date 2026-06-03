@@ -169,6 +169,11 @@ struct NeighborhoodState {
     /// could in principle race (in practice the JS subscriber loop is
     /// single-flight, but we want correctness regardless).
     receiver: Mutex<mpsc::UnboundedReceiver<EmittedOp>>,
+    /// Live K2 space handle. Step 6b stored this implicitly via the
+    /// adapters; Step 9 keeps it here so `join_agent` can call
+    /// `current_url()` to publish the conductor's reachable address
+    /// (Tx5 transport) instead of returning a placeholder.
+    dyn_space: kitsune2_api::DynSpace,
 }
 
 // ----- the runtime -----
@@ -319,6 +324,7 @@ impl HolographRuntime {
         let state = Arc::new(NeighborhoodState {
             space,
             receiver: Mutex::new(receiver),
+            dyn_space: dyn_space.clone(),
         });
         self.neighborhoods.insert(handle, state);
         Ok(handle)
@@ -378,13 +384,23 @@ impl HolographRuntime {
     /// own sentinel agent at `create_neighborhood` time, so this is
     /// effectively a no-op for the spike — Step 7 will plumb the AD4M
     /// DID through.
+    ///
+    /// Returns the reachable URL the K2 transport published for this
+    /// node (Tx5 path: `ws://sbd:port/<peer-id>`; mem path: the
+    /// placeholder `ws://holograph-local:0` because mem transport
+    /// isn't process-routable). The JS test harness uses this URL to
+    /// cross-register peers between conductors.
     pub async fn join_agent(
         &self,
         handle: HolographHandle,
         _agent_key_b64: String,
     ) -> HolographWireResult<String> {
-        let _state = self.state(handle)?;
-        Ok("ws://holograph-local:0".to_string())
+        let state = self.state(handle)?;
+        Ok(state
+            .dyn_space
+            .current_url()
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "ws://holograph-local:0".to_string()))
     }
 
     pub async fn current_revision(
@@ -408,12 +424,17 @@ impl HolographRuntime {
     }
 }
 
-/// Build a K2 `DynSpace` for our `HolographRuntime` neighborhood. Uses
-/// the same `kitsune2_core::default_test_builder` Step 4d's two-node
-/// test uses (mem transport + mem peer store + core fetch/publish +
-/// stub gossip), with our `op_store` factory wired in. Production
-/// substitutes Iroh/Tx5 + the real K2 bootstrap once we exit the spike
-/// (PR-B / Step 8 territory).
+/// Build a K2 `DynSpace` for our `HolographRuntime` neighborhood.
+///
+/// Two transport modes, selected by env at first call:
+///   * `HOLOGRAPH_SBD_URL=<wss://sbd-url>` → Tx5 (WebRTC via SBD signal
+///     server). Cross-process; suitable for two-conductor JS tests.
+///   * unset → mem transport (in-process only). Used by Step 4d /
+///     Step 6f Rust integration tests so they keep running fast and
+///     deterministic.
+///
+/// `HOLOGRAPH_SBD_PLAINTEXT=1` allows `ws://` instead of `wss://` —
+/// the test harness's bootstrap-srv ships plaintext on loopback.
 async fn build_dyn_space(
     runtime: Arc<Runtime>,
     op_store: Arc<KvOpStore>,
@@ -427,6 +448,51 @@ async fn build_dyn_space(
         .map_err(|e| substrate(format!("spawn dyn_space build: {e}")))?
 }
 
+#[derive(Debug)]
+struct ShimFactory {
+    #[allow(dead_code)]
+    op_store: Arc<KvOpStore>,
+    shim: Arc<K2OpStoreShim>,
+}
+impl OpStoreFactory for ShimFactory {
+    fn default_config(&self, _: &mut Config) -> K2Result<()> {
+        Ok(())
+    }
+    fn validate_config(&self, _: &Config) -> K2Result<()> {
+        Ok(())
+    }
+    fn create(
+        &self,
+        _builder: Arc<Builder>,
+        _space_id: SpaceId,
+    ) -> futures::future::BoxFuture<'static, K2Result<DynOpStore>> {
+        let shim = Arc::clone(&self.shim);
+        Box::pin(async move {
+            let dyn_store: DynOpStore = shim;
+            Ok(dyn_store)
+        })
+    }
+}
+
+#[derive(Debug)]
+struct NoopSpaceHandler;
+impl kitsune2_api::SpaceHandler for NoopSpaceHandler {}
+
+#[derive(Debug)]
+struct NoopKitsuneHandler;
+impl KitsuneHandler for NoopKitsuneHandler {
+    fn create_space(
+        &self,
+        _: SpaceId,
+        _: Option<&Config>,
+    ) -> futures::future::BoxFuture<'_, K2Result<DynSpaceHandler>> {
+        Box::pin(async move {
+            let s: DynSpaceHandler = Arc::new(NoopSpaceHandler);
+            Ok(s)
+        })
+    }
+}
+
 async fn build_dyn_space_inner(
     op_store: Arc<KvOpStore>,
     shim: Arc<K2OpStoreShim>,
@@ -435,61 +501,77 @@ async fn build_dyn_space_inner(
     use kitsune2_core::default_test_builder;
     use kitsune2_test_utils::agent::TestVerifier;
 
-    #[derive(Debug)]
-    struct ShimFactory {
-        op_store: Arc<KvOpStore>,
-        shim: Arc<K2OpStoreShim>,
-    }
-    impl OpStoreFactory for ShimFactory {
-        fn default_config(&self, _: &mut Config) -> K2Result<()> {
-            Ok(())
+    let sbd_url = std::env::var("HOLOGRAPH_SBD_URL").ok();
+    let boot_url = std::env::var("HOLOGRAPH_BOOTSTRAP_URL").ok();
+    let shim_factory = Arc::new(ShimFactory { op_store, shim });
+
+    let builder = if let Some(url) = sbd_url.as_deref() {
+        // Cross-process path: Tx5 transport (WebRTC via SBD signal
+        // server) + CoreBootstrap (peer discovery via
+        // kitsune2-bootstrap-srv). Both URLs come from the JS test
+        // harness's `runHcLocalServices` helper, which spawns one
+        // bootstrap-srv that doubles as SBD signal.
+        use kitsune2_core::factories::CoreBootstrapFactory;
+        use kitsune2_core::factories::{CoreBootstrapConfig, CoreBootstrapModConfig};
+        use kitsune2_transport_tx5::{
+            Tx5TransportConfig, Tx5TransportFactory, Tx5TransportModConfig,
+        };
+        let allow_plain = std::env::var("HOLOGRAPH_SBD_PLAINTEXT")
+            .map(|v| v.trim() == "1")
+            .unwrap_or(false);
+        let b = Builder {
+            verifier: Arc::new(TestVerifier),
+            op_store: shim_factory,
+            transport: Tx5TransportFactory::create(),
+            bootstrap: CoreBootstrapFactory::create(),
+            gossip: kitsune2_gossip::K2GossipFactory::create(),
+            ..default_test_builder()
         }
-        fn validate_config(&self, _: &Config) -> K2Result<()> {
-            Ok(())
-        }
-        fn create(
-            &self,
-            _builder: Arc<Builder>,
-            _space_id: SpaceId,
-        ) -> futures::future::BoxFuture<'static, K2Result<DynOpStore>> {
-            let shim = Arc::clone(&self.shim);
-            let _op_store = Arc::clone(&self.op_store);
-            Box::pin(async move {
-                let dyn_store: DynOpStore = shim;
-                Ok(dyn_store)
+        .with_default_config()
+        .map_err(substrate)?;
+        b.config
+            .set_module_config(&Tx5TransportModConfig {
+                tx5_transport: Tx5TransportConfig {
+                    signal_allow_plain_text: allow_plain,
+                    server_url: url.to_string(),
+                    ..Default::default()
+                },
             })
-        }
-    }
-
-    #[derive(Debug)]
-    struct NoopSpaceHandler;
-    impl kitsune2_api::SpaceHandler for NoopSpaceHandler {}
-
-    #[derive(Debug)]
-    struct NoopKitsuneHandler;
-    impl KitsuneHandler for NoopKitsuneHandler {
-        fn create_space(
-            &self,
-            _: SpaceId,
-            _: Option<&Config>,
-        ) -> futures::future::BoxFuture<'_, K2Result<DynSpaceHandler>> {
-            Box::pin(async move {
-                let s: DynSpaceHandler = Arc::new(NoopSpaceHandler);
-                Ok(s)
+            .map_err(substrate)?;
+        // CoreBootstrap requires server_url to be set for spaces; falls
+        // back to the SBD URL if no separate bootstrap URL was provided
+        // (the kitsune2-bootstrap-srv exposes both on the same port).
+        let boot_server = boot_url.clone().unwrap_or_else(|| {
+            url.replace("ws://", "http://")
+                .replace("wss://", "https://")
+        });
+        b.config
+            .set_module_config(&CoreBootstrapModConfig {
+                core_bootstrap: CoreBootstrapConfig {
+                    server_url: Some(boot_server.clone()),
+                    ..Default::default()
+                },
             })
+            .map_err(substrate)?;
+        log::info!(
+            "[holograph] DynSpace built with Tx5 (sbd={}, plain={}) + CoreBootstrap (server={})",
+            url,
+            allow_plain,
+            boot_server
+        );
+        b
+    } else {
+        log::debug!("[holograph] HOLOGRAPH_SBD_URL unset; using mem transport");
+        Builder {
+            verifier: Arc::new(TestVerifier),
+            op_store: shim_factory,
+            ..default_test_builder()
         }
-    }
+        .with_default_config()
+        .map_err(substrate)?
+    };
 
-    let kitsune = Builder {
-        verifier: Arc::new(TestVerifier),
-        op_store: Arc::new(ShimFactory { op_store, shim }),
-        ..default_test_builder()
-    }
-    .with_default_config()
-    .map_err(substrate)?
-    .build()
-    .await
-    .map_err(substrate)?;
+    let kitsune = builder.build().await.map_err(substrate)?;
     kitsune
         .register_handler(Arc::new(NoopKitsuneHandler) as DynKitsuneHandler)
         .await
