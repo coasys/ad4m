@@ -98,7 +98,7 @@ These are always available regardless of SDNA:
 
 | Tool                            | Description                               |
 | ------------------------------- | ----------------------------------------- |
-| `ad4m_generate_waker_query`     | Generate SurrealQL for waker subscription |
+| `ad4m_generate_waker_query`     | Generate SPARQL for waker subscription    |
 | `ad4m_get_mention_waker_config` | Get waker config for tracking mentions    |
 
 **Auth Tools (no auth required):**

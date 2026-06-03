@@ -137,7 +137,7 @@ export function buildSHACL(
             propShape.writable = propMeta.writable;
         }
 
-        if (propMeta.resolveLanguage) {
+        if (propMeta.resolveLanguage != null) {
             propShape.resolveLanguage = propMeta.resolveLanguage;
         }
 
@@ -146,6 +146,11 @@ export function buildSHACL(
         // reading raw links via `propMeta.through`.
         if (propMeta.getter) {
             propShape.getter = propMeta.getter;
+        }
+
+        // Serializable transform expression (SHACL-AF Node Expression)
+        if (propMeta.transform) {
+            propShape.transform = propMeta.transform;
         }
 
         // ── Setter actions ──────────────────────────────────────────────

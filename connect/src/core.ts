@@ -1,4 +1,6 @@
 import { isEmbedded, setLocal, getLocal, removeLocal, checkConnection, wsUrlToHttpBase } from './utils';
+import { PostMessageWebSocket } from './PostMessageWebSocket';
+import { makePostMessageFetch } from './PostMessageFetch';
 import { Ad4mClient, VerificationRequestResult } from "@coasys/ad4m";
 import autoBind from "auto-bind";
 
@@ -346,8 +348,21 @@ export default class Ad4mConnect extends EventTarget {
           return;
         }
 
-        // Verify origin is in allowlist (if configured)
-        if (this.options.allowedOrigins && this.options.allowedOrigins.length > 0) {
+        // Verify origin is in allowlist (if configured).
+        // In proxy mode the parent sees ALL GraphQL traffic, so the allowlist is the
+        // only gate against a malicious site embedding this app — enforce it strictly.
+        if (event.data.proxy) {
+          if (!this.options.allowedOrigins || this.options.allowedOrigins.length === 0) {
+            console.error('[Ad4m Connect] proxy mode requires allowedOrigins to be configured. Rejecting AD4M_CONFIG to prevent arbitrary sites from embedding this app.');
+            this.rejectEmbedded(new Error('proxy mode requires allowedOrigins'));
+            return;
+          }
+          if (!event.origin || !this.options.allowedOrigins.includes(event.origin)) {
+            console.warn('[Ad4m Connect] Rejected AD4M_CONFIG from unauthorized origin:', event.origin);
+            this.rejectEmbedded(new Error(`Unauthorized origin: ${event.origin}`));
+            return;
+          }
+        } else if (this.options.allowedOrigins && this.options.allowedOrigins.length > 0) {
           if (!event.origin || !this.options.allowedOrigins.includes(event.origin)) {
             console.warn('[Ad4m Connect] Rejected AD4M_CONFIG from unauthorized origin:', event.origin);
             this.rejectEmbedded(new Error(`Unauthorized origin: ${event.origin}`));
@@ -355,11 +370,64 @@ export default class Ad4mConnect extends EventTarget {
           }
         }
 
-        console.log('[Ad4m Connect] Received AD4M_CONFIG from parent:', { port: event.data.port, hasToken: !!event.data.token });
+        console.log('[Ad4m Connect] Received AD4M_CONFIG from parent:', { port: event.data.port, hasToken: !!event.data.token, proxy: !!event.data.proxy });
         
+        // Validate and normalize token (optional but must be string if present)
+        const { token: rawToken } = event.data;
+        const normalizedToken = rawToken !== undefined && rawToken !== null && typeof rawToken === 'string' 
+          ? rawToken 
+          : '';
+
+        // ── Proxy mode ───────────────────────────────────────────────────────
+        // Parent sends proxy: true when the host application will open the real
+        // WebSocket to the AD4M daemon and proxy frames via postMessage.
+        // The URL/port fields are not needed in this path.
+        if (event.data.proxy) {
+          try {
+            this.token = normalizedToken;
+            if (normalizedToken) {
+              setLocal('ad4m-token', normalizedToken);
+            } else {
+              removeLocal('ad4m-token');
+            }
+
+            // Use the verified origin of the AD4M_CONFIG sender so postMessage
+            // frames are never delivered to an unexpected parent origin.
+            // Refuse to proceed if the origin is opaque (sandboxed iframe without
+            // allow-same-origin) — falling back to '*' would re-introduce the
+            // wildcard vulnerability for sensitive JSON-RPC frames.
+            if (!event.origin || event.origin === 'null') {
+              throw new Error('AD4M proxy mode requires a non-opaque parent origin. Ensure the host iframe is not sandboxed without allow-same-origin.');
+            }
+            const parentOrigin = event.origin;
+            // Must be a real constructor class — graphql-ws calls `new webSocketImpl(url)`.
+            // Arrow functions cannot be called with `new`, so we use a class expression here.
+            class WsImpl extends PostMessageWebSocket {
+              constructor(url: string) { super(url, parentOrigin); }
+            }
+
+            const fetchImpl = makePostMessageFetch(parentOrigin);
+
+            this.notifyConnectionChange('connecting');
+            this.ad4mClient = new Ad4mClient(
+              'http://proxy', // URL ignored by PostMessageWebSocket; HTTP requests are proxied via fetchImpl
+              normalizedToken,
+              false,          // defer subscriptions until auth confirmed
+              { webSocketImpl: WsImpl as unknown as new (url: string) => WebSocket, fetchImpl }
+            );
+            this.notifyConnectionChange('connected');
+            await this.checkAuth();
+          } catch (error) {
+            console.error('[Ad4m Connect] Failed to initialize proxy client from AD4M_CONFIG:', error);
+            this.rejectEmbedded(error as Error);
+          }
+          return;
+        }
+
+        // ── Direct mode (desktop / local where PNA is not an issue) ──────────
         // Validate and normalize port
-        const { port: rawPort, token: rawToken } = event.data;
-        
+        const { port: rawPort } = event.data;
+
         if (rawPort === undefined || rawPort === null) {
           const error = new Error('AD4M_CONFIG missing required field: port');
           console.error('[Ad4m Connect]', error.message);
@@ -374,11 +442,6 @@ export default class Ad4mConnect extends EventTarget {
           this.rejectEmbedded(error);
           return;
         }
-        
-        // Validate and normalize token (optional but must be string if present)
-        const normalizedToken = rawToken !== undefined && rawToken !== null && typeof rawToken === 'string' 
-          ? rawToken 
-          : '';
         
         try {
           // Set connection details from parent (after successful validation)
@@ -412,17 +475,14 @@ export default class Ad4mConnect extends EventTarget {
     
     // Request AD4M config from parent window
     console.log('[Ad4m Connect] Requesting AD4M config from parent window');
-    // Determine the actual parent origin for postMessage targeting.
-    // Prefer document.referrer (the real parent), validated against allowedOrigins.
-    // Fall back to '*' only when no origin information is available.
-    let parentOrigin = '*';
-    const referrerOrigin = document.referrer ? new URL(document.referrer).origin : null;
-    if (referrerOrigin && this.options.allowedOrigins?.includes(referrerOrigin)) {
-      parentOrigin = referrerOrigin;
-    } else if (this.options.allowedOrigins && this.options.allowedOrigins.length === 1) {
-      parentOrigin = this.options.allowedOrigins[0];
-    }
-    window.parent.postMessage({ type: 'REQUEST_AD4M_CONFIG' }, parentOrigin);
+    // REQUEST_AD4M_CONFIG carries no sensitive data — it is a pure handshake
+    // signal asking the parent to respond with credentials. We use '*' because
+    // at this point we don't yet know which of the allowedOrigins the parent is
+    // actually at (e.g. WE dev:web and dev:electron run on different ports, both
+    // listed in allowedOrigins). Security is enforced on the *incoming* side:
+    // the AD4M_CONFIG listener below validates event.origin against
+    // allowedOrigins before accepting any credentials.
+    window.parent.postMessage({ type: 'REQUEST_AD4M_CONFIG' }, '*');
   }
 
   // Local authentication

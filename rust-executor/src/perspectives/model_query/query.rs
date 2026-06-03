@@ -6,6 +6,7 @@
 //! [`ShapeResolver`] that recursive include resolution uses to look up
 //! target-class shapes (themselves cached).
 
+use super::eval_transform::eval_transform;
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
 use super::hydration::{filter_properties, group_results_by_source, hydrate_instances};
@@ -34,13 +35,13 @@ use serde_json::Value;
 /// * `resolver` — Used to resolve target-class shapes for recursive
 ///   `include` resolution.  Typically a cache-backed resolver living on
 ///   the `PerspectiveInstance`.
-pub fn execute_model_query(
+pub async fn execute_model_query(
     store: &SparqlStore,
     shape: &ModelShape,
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
 ) -> Result<ModelQueryResult, Error> {
-    execute_model_query_inner(store, shape, query_input, resolver, 0)
+    execute_model_query_inner(store, shape, query_input, resolver, 0).await
 }
 
 /// Inner implementation with recursion depth tracking.
@@ -48,7 +49,7 @@ pub fn execute_model_query(
 /// The `depth` parameter prevents infinite cycles when resolving nested
 /// `include` relations (e.g. A includes B which includes A).  If depth
 /// exceeds [`MAX_INCLUDE_DEPTH`], an empty result is returned.
-pub(super) fn execute_model_query_inner(
+pub(super) async fn execute_model_query_inner(
     store: &SparqlStore,
     shape: &ModelShape,
     query_input: &ModelQueryInput,
@@ -144,14 +145,14 @@ pub(super) fn execute_model_query_inner(
 
     let raw_results: Vec<Value> = match query_plan {
         InstanceQueryPlan::Single(sparql) => {
-            let result_json = store.query(&sparql)?;
+            let result_json = store.query_async(&sparql).await?;
             serde_json::from_str(&result_json)?
         }
         InstanceQueryPlan::TwoPhase {
             pagination_subquery,
             predicate_filter,
         } => {
-            let page_json = store.query(&pagination_subquery)?;
+            let page_json = store.query_async(&pagination_subquery).await?;
             let page_results: Vec<Value> = serde_json::from_str(&page_json)?;
 
             if page_results.is_empty() {
@@ -178,7 +179,7 @@ pub(super) fn execute_model_query_inner(
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
 }}"#
                     );
-                    let result_json = store.query(&property_sparql)?;
+                    let result_json = store.query_async(&property_sparql).await?;
                     serde_json::from_str(&result_json)?
                 }
             }
@@ -187,6 +188,9 @@ pub(super) fn execute_model_query_inner(
 
     let grouped = group_results_by_source(&raw_results, shape);
     let mut instances = hydrate_instances(shape, &grouped);
+
+    // Apply transform expressions for resolveLanguage properties
+    resolve_language_transforms(&shape, &mut instances).await?;
 
     // Resolve reverse relations
     let reverse_rels: Vec<(String, String, bool)> = shape
@@ -271,7 +275,8 @@ pub(super) fn execute_model_query_inner(
     // Eager-load included relations
     if let Some(ref include) = query_input.include {
         if !paginated.is_empty() && !shape.include_relations.is_empty() {
-            resolve_includes_recursive(store, &mut paginated, include, shape, resolver, depth)?;
+            resolve_includes_recursive(store, &mut paginated, include, shape, resolver, depth)
+                .await?;
         }
     }
 
@@ -302,11 +307,76 @@ pub(super) fn execute_model_query_inner(
             shape,
             resolver,
             depth,
-        )?;
+        )
+        .await?;
     }
 
     Ok(ModelQueryResult {
         instances: final_instances,
         total_count,
     })
+}
+
+/// Apply transform expressions to resolveLanguage properties.
+///
+/// For properties marked with `resolve_language`, if the value is a non-literal
+/// expression URL (not starting with "literal:"), this function fetches the
+/// expression data from the language controller and applies the property's
+/// transform expression (or the default file decode).
+async fn resolve_language_transforms(
+    shape: &ModelShape,
+    instances: &mut [Value],
+) -> Result<(), Error> {
+    let resolve_props: Vec<&super::types::ShapeProperty> = shape
+        .properties
+        .iter()
+        .filter(|p| p.resolve_language.is_some())
+        .collect();
+
+    if resolve_props.is_empty() {
+        return Ok(());
+    }
+
+    let controller = crate::languages::LanguageController::global_instance();
+
+    for instance in instances.iter_mut() {
+        for prop in &resolve_props {
+            // Compute the "resolved" focus value for the transform:
+            //   - String that parses as a language expression URL → fetch via controller
+            //   - Anything else (already-decoded literal string, object, etc.) → use as-is
+            let current = instance[&prop.name].clone();
+            let resolved: Option<Value> = match &current {
+                Value::String(uri) if !uri.starts_with("literal:") => {
+                    match crate::languages::LanguageController::parse_expr_url(uri) {
+                        Ok((lang, expr_addr)) => {
+                            match controller.get_expression(&lang, &expr_addr).await {
+                                Ok(Some(expr_json)) => {
+                                    let data =
+                                        expr_json.get("data").cloned().unwrap_or(Value::Null);
+                                    Some(match &data {
+                                        Value::String(s) => serde_json::from_str(s).unwrap_or(data),
+                                        _ => data,
+                                    })
+                                }
+                                // Not a fetchable expression — fall back to the raw value
+                                _ => Some(current.clone()),
+                            }
+                        }
+                        Err(_) => Some(current.clone()),
+                    }
+                }
+                Value::Object(_) => Some(current.clone()),
+                Value::String(_) => Some(current.clone()),
+                Value::Null => None,
+                _ => Some(current.clone()),
+            };
+
+            if let Some(resolved) = resolved {
+                let default_transform = super::types::default_file_decode();
+                let transform = prop.transform.as_ref().unwrap_or(&default_transform);
+                instance[&prop.name] = eval_transform(transform, &resolved, &resolved);
+            }
+        }
+    }
+    Ok(())
 }

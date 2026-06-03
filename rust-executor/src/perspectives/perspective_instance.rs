@@ -2875,7 +2875,7 @@ impl PerspectiveInstance {
 
     /// Execute a model query — the executor-side replacement for
     /// SPARQL-build → hydrate → JS-filter → JS-sort → JS-paginate.
-    pub fn model_query(
+    pub async fn model_query(
         &self,
         class_name: &str,
         query_json: &str,
@@ -2890,7 +2890,8 @@ impl PerspectiveInstance {
             shape.as_ref(),
             &query_input,
             &resolver,
-        )?;
+        )
+        .await?;
 
         serde_json::to_string(&result).map_err(|e| {
             deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
@@ -4420,7 +4421,7 @@ impl PerspectiveInstance {
         user_email: Option<String>,
     ) -> Result<(String, String), AnyError> {
         // 1. Run the initial model query
-        let initial_result = self.model_query(&class_name, &query_json)?;
+        let initial_result = self.model_query(&class_name, &query_json).await?;
 
         // 2. Build trigger SPARQL from shape predicates resolved through the cache.
         let trigger_predicates =
@@ -4633,7 +4634,10 @@ impl PerspectiveInstance {
 
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL
                 let result_string = if let Some(ref params) = model_params {
-                    match self_clone.model_query(&params.class_name, &params.query_json) {
+                    match self_clone
+                        .model_query(&params.class_name, &params.query_json)
+                        .await
+                    {
                         Ok(r) => r,
                         Err(e) => {
                             log::error!("Model subscription query failed: {}", e);
@@ -6086,6 +6090,7 @@ mod tests {
         );
         let result_json = perspective
             .model_query("TaskBoard", &query_json)
+            .await
             .expect("model_query");
         let result: serde_json::Value = serde_json::from_str(&result_json).expect("parse result");
         let instances = result["instances"].as_array().expect("instances array");
@@ -6184,6 +6189,7 @@ mod tests {
         );
         let result_json = perspective
             .model_query("BlogPost", &query_json)
+            .await
             .expect("model_query");
         let result: serde_json::Value = serde_json::from_str(&result_json).expect("parse result");
         let instances = result["instances"].as_array().expect("instances array");
@@ -6259,6 +6265,7 @@ mod tests {
         // First query warms the cache (load_shape fires once).
         let result_json = perspective
             .model_query("Recipe", "{}")
+            .await
             .expect("first query");
         assert!(result_json.contains("\"instances\""));
 
