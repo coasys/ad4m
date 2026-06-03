@@ -14,6 +14,7 @@ pub mod envelope;
 pub mod integration_queue;
 pub mod op_store;
 pub mod retriever_kitsune;
+pub mod space;
 
 pub use config::{ArcPolicy, LocFnPolicy, SpaceConfig, ValidationRegime};
 pub use envelope::{EnvelopeError, OpEnvelope};
@@ -23,3 +24,8 @@ pub use integration_queue::{
 };
 pub use op_store::{EnvelopeDecoder, KvOpStore};
 pub use retriever_kitsune::{KitsuneRetreiver, KitsuneRetreiverState};
+pub use space::{
+    ChannelNotifier, EmittedOp, HolographSpace, HolographSpaceConfig, HolographSpaceHandler,
+    K2DynSpaceTarget, K2FetcherAdapter, K2OpStoreShim, K2PeerPickerAdapter, LocalCommitTarget,
+    TelepresenceNotification,
+};

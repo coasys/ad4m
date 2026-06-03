@@ -22,12 +22,15 @@ use crate::op_store::{EnvelopeDecoder, KvOpStore};
 
 #[derive(Debug, Default)]
 struct MockNotifier {
-    received: StdMutex<Vec<(OpId, Bytes)>>,
+    received: StdMutex<Vec<(OpId, Timestamp, Bytes)>>,
 }
 
 impl NotifyUp for MockNotifier {
-    fn emit_perspective_diff(&self, op_id: OpId, envelope_bytes: Bytes) {
-        self.received.lock().unwrap().push((op_id, envelope_bytes));
+    fn emit_perspective_diff(&self, op_id: OpId, created_at: Timestamp, envelope_bytes: Bytes) {
+        self.received
+            .lock()
+            .unwrap()
+            .push((op_id, created_at, envelope_bytes));
     }
 }
 
@@ -37,7 +40,7 @@ impl MockNotifier {
             .lock()
             .unwrap()
             .iter()
-            .map(|(id, _)| id.clone())
+            .map(|(id, _, _)| id.clone())
             .collect()
     }
 }
