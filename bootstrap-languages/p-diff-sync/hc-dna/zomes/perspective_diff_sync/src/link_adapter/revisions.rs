@@ -1,32 +1,34 @@
+//! HDK-side shim onto the algorithm-crate `revisions` module.
+//!
+//! Step 13b-E (wake-16): the substrate-agnostic revision-pointer
+//! wrappers now live in `perspective_diff_algorithm::revisions`. This
+//! module keeps the legacy import path (`link_adapter::revisions::...`)
+//! working for `pull.rs`, `render.rs`, and `lib.rs`, while preserving
+//! the original signatures (return `Option<integrity::LocalHashReference>`
+//! so callers don't need to bridge mirror types yet).
+//!
+//! The HDK-flavored profiling debug logs that used to live here are
+//! gone — they were noise. Functional behaviour is unchanged.
+
 use chrono::{DateTime, Utc};
-use hdk::prelude::debug;
+use perspective_diff_algorithm as algo;
 use perspective_diff_sync_integrity::LocalHashReference;
 
 use crate::errors::SocialContextResult;
+use crate::link_adapter::conversions::{hash_to_algo, local_hash_ref_from_algo};
 use crate::retriever::PerspectiveDiffRetreiver;
-use crate::utils::get_now;
 use crate::Hash;
 
-pub fn update_current_revision<Retriever: PerspectiveDiffRetreiver>(
+pub fn update_current_revision<Retriever: PerspectiveDiffRetreiver + algo::RevisionsRetriever>(
     hash: Hash,
     timestamp: DateTime<Utc>,
 ) -> SocialContextResult<()> {
-    debug!("===PerspectiveDiffSync.update_current_revision(): Function start");
-    let now = get_now()?.time();
-    let res = Retriever::update_current_revision(hash, timestamp);
-    let after = get_now()?.time();
-    debug!("===PerspectiveDiffSync.update_current_revision() - Profiling: Took: {} to update current_revision", (after - now).num_milliseconds());
-    res
+    algo::revisions::update_current_revision::<Retriever>(hash_to_algo(&hash), timestamp)?;
+    Ok(())
 }
 
-//Latest revision as seen from our local state
-pub fn current_revision<Retriever: PerspectiveDiffRetreiver>(
+pub fn current_revision<Retriever: PerspectiveDiffRetreiver + algo::RevisionsRetriever>(
 ) -> SocialContextResult<Option<LocalHashReference>> {
-    //debug!("===PerspectiveDiffSync.current_revision(): Function start");
-    //let now = get_now()?.time();
-    let rev = Retriever::current_revision()?;
-    // debug!("===PerspectiveDiffSync.current_revision(): rev = {:?}", rev);
-    //let after = get_now()?.time();
-    //debug!("===PerspectiveDiffSync.current_revision() - Profiling: Took: {} to get the current_revision", (after - now).num_milliseconds());
-    Ok(rev)
+    let rev = algo::revisions::current_revision::<Retriever>()?;
+    Ok(rev.map(local_hash_ref_from_algo))
 }

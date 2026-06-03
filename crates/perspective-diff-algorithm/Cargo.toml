@@ -11,6 +11,7 @@ name = "perspective_diff_algorithm"
 path = "src/lib.rs"
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 petgraph = "0.6"

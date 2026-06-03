@@ -24,17 +24,18 @@ pub mod chunked_diffs;
 pub mod diff_types;
 pub mod errors;
 pub mod retriever;
+pub mod revisions;
 pub mod snapshots;
 pub mod topo_sort;
 pub mod workspace;
 
 pub use chunked_diffs::{load_diff_aggregated, ChunkedDiffs};
 pub use diff_types::{
-    null_node, ExpressionProof, Hash, LinkExpression, PerspectiveDiff,
-    PerspectiveDiffEntryReference, Snapshot, Triple,
+    null_node, ExpressionProof, Hash, HashReference, LinkExpression, LocalHashReference,
+    PerspectiveDiff, PerspectiveDiffEntryReference, Snapshot, Triple,
 };
 pub use errors::{AlgoError, AlgoResult};
-pub use retriever::{SnapshotRetriever, WorkspaceRetriever};
+pub use retriever::{RevisionsRetriever, SnapshotRetriever, WorkspaceRetriever};
 pub use snapshots::generate_snapshot;
 pub use workspace::Workspace;
 

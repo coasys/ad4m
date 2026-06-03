@@ -37,7 +37,8 @@ use tokio::runtime::Runtime;
 use perspective_diff_algorithm as algo;
 use perspective_diff_sync::errors::{SocialContextError, SocialContextResult};
 use perspective_diff_sync::link_adapter::conversions::{
-    entry_ref_from_algo, entry_ref_to_algo, hash_from_algo, hash_to_algo,
+    entry_ref_from_algo, entry_ref_to_algo, hash_from_algo, hash_ref_to_algo, hash_to_algo,
+    local_hash_ref_to_algo,
 };
 use perspective_diff_sync::retriever::PerspectiveDiffRetreiver;
 use perspective_diff_sync_integrity::{
@@ -410,6 +411,33 @@ impl algo::SnapshotRetriever for KitsuneRetreiver {
         )
         .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
         Ok(hash_to_algo(&hash))
+    }
+}
+
+// Step 13b-E — forwards to the existing sled-backed
+// `PerspectiveDiffRetreiver` revision methods.
+impl algo::RevisionsRetriever for KitsuneRetreiver {
+    fn current_revision() -> algo::AlgoResult<Option<algo::LocalHashReference>> {
+        let rev = <Self as PerspectiveDiffRetreiver>::current_revision()
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(rev.map(local_hash_ref_to_algo))
+    }
+
+    fn latest_revision() -> algo::AlgoResult<Option<algo::HashReference>> {
+        let rev = <Self as PerspectiveDiffRetreiver>::latest_revision()
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(rev.map(hash_ref_to_algo))
+    }
+
+    fn update_current_revision(
+        hash: algo::Hash,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> algo::AlgoResult<()> {
+        <Self as PerspectiveDiffRetreiver>::update_current_revision(
+            hash_from_algo(&hash),
+            timestamp,
+        )
+        .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
     }
 }
 

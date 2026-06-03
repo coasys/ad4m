@@ -13,7 +13,7 @@ use crate::retriever::PerspectiveDiffRetreiver;
 use crate::utils::get_now;
 use crate::Hash;
 
-fn merge<Retriever: PerspectiveDiffRetreiver>(
+fn merge<Retriever: PerspectiveDiffRetreiver + algo::RevisionsRetriever>(
     latest: Hash,
     current: Hash,
 ) -> SocialContextResult<Hash> {
@@ -56,7 +56,9 @@ fn merge<Retriever: PerspectiveDiffRetreiver>(
     Ok(merge_entry_reference_hash)
 }
 
-pub fn pull<Retriever: PerspectiveDiffRetreiver + algo::WorkspaceRetriever>(
+pub fn pull<
+    Retriever: PerspectiveDiffRetreiver + algo::WorkspaceRetriever + algo::RevisionsRetriever,
+>(
     emit: bool,
     theirs: Hash,
     is_scribe: bool,
@@ -253,7 +255,7 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver + algo::WorkspaceRetriever>(
     })
 }
 
-pub fn handle_broadcast<Retriever: PerspectiveDiffRetreiver>(
+pub fn handle_broadcast<Retriever: PerspectiveDiffRetreiver + algo::RevisionsRetriever>(
     broadcast: HashBroadcast,
 ) -> SocialContextResult<()> {
     // debug!("===PerspectiveDiffSync.fast_forward_signal(): Function start");

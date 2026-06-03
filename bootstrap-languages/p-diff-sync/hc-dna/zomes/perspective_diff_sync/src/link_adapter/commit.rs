@@ -1,5 +1,6 @@
 //use chrono::Timelike;
 use hdk::prelude::*;
+use perspective_diff_algorithm as algo;
 use perspective_diff_sync_integrity::{
     EntryTypes, HashBroadcast, LinkTypes, LocalHashReference, PerspectiveDiff,
     PerspectiveDiffEntryReference,
@@ -19,7 +20,7 @@ use crate::{Hash, CHUNK_SIZE, ENABLE_SIGNALS, SNAPSHOT_INTERVAL};
 /// Holochain's 4MB entry size limit.
 const CHUNKING_THRESHOLD: usize = 500;
 
-pub fn commit<Retriever: PerspectiveDiffRetreiver>(
+pub fn commit<Retriever: PerspectiveDiffRetreiver + algo::RevisionsRetriever>(
     diff: PerspectiveDiff,
     my_did: String,
 ) -> SocialContextResult<HoloHash<holo_hash::hash_type::Action>> {
@@ -245,7 +246,7 @@ pub fn add_active_agent_link<Retriever: PerspectiveDiffRetreiver>() -> SocialCon
     Ok(())
 }
 
-pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>(
+pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver + algo::RevisionsRetriever>(
     my_did: &str,
 ) -> SocialContextResult<Option<Hash>> {
     //debug!("Running broadcast_current");
