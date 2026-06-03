@@ -1,4 +1,6 @@
 import { Link } from "../links/Links";
+import type { NodeExpression } from "./NodeExpression";
+import { isNodeExpression } from "./NodeExpression";
 
 /**
  * Extract namespace from a URI
@@ -179,6 +181,34 @@ export interface SHACLPropertyShape {
    *  Each entry has a `value` (the RDF term) and an optional `label` (human-readable name).
    *  Standard SHACL `sh:in` only defines values; labels are an AD4M extension. */
   in?: Array<{ value: string; label?: string }>;
+
+  /** AD4M-specific: kind of relation this property describes.
+   *  Drives direction (forward/reverse), scalar-vs-collection rendering,
+   *  and default max-count. */
+  relationKind?: 'hasMany' | 'hasOne' | 'belongsToOne' | 'belongsToMany';
+
+  /** AD4M-specific: target class name (local-name) for a relation property.
+   *  Complements `class` (the SHACL node-shape URI) by providing the bare
+   *  model class name used by the executor to look up the target shape
+   *  through the perspective's shape cache. */
+  targetClassName?: string;
+
+  /** AD4M-specific: post-getter where-clause filter for a relation property. */
+  whereFilter?: any;
+
+  /** AD4M-specific: predicate-IRI lookup map for `whereFilter` keys
+   *  (property name → predicate URI on the target class). */
+  wherePredicates?: Record<string, string>;
+
+  /** AD4M-specific: whether conformance/type filtering is enabled for this
+   *  relation.  `false` opts out of DB-level type filtering while keeping
+   *  hydration via `include`. */
+  filter?: boolean;
+
+  /** AD4M-specific: Transform expression (SHACL-AF Node Expression).
+   *  Applied to resolved property values in the Rust model query engine.
+   *  Only used for properties with resolveLanguage set. */
+  transform?: NodeExpression;
 }
 
 /**
@@ -494,7 +524,7 @@ export class SHACLShape {
         });
       }
 
-      if (prop.resolveLanguage) {
+      if (prop.resolveLanguage != null) {
         links.push({
           source: propShapeId,
           predicate: "ad4m://resolveLanguage",
@@ -556,6 +586,54 @@ export class SHACLShape {
           source: propShapeId,
           predicate: "sh://in",
           target: `literal:string:${JSON.stringify(prop.in)}`
+        });
+      }
+
+      if (prop.relationKind) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://relationKind",
+          target: `literal:string:${prop.relationKind}`
+        });
+      }
+
+      if (prop.targetClassName) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://targetClassName",
+          target: `literal:string:${prop.targetClassName}`
+        });
+      }
+
+      if (prop.whereFilter !== undefined && prop.whereFilter !== null) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://whereFilter",
+          target: `literal:string:${JSON.stringify(prop.whereFilter)}`
+        });
+      }
+
+      if (prop.wherePredicates && Object.keys(prop.wherePredicates).length > 0) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://wherePredicates",
+          target: `literal:string:${JSON.stringify(prop.wherePredicates)}`
+        });
+      }
+
+      if (prop.filter !== undefined) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://filter",
+          target: `literal:${prop.filter}`
+        });
+      }
+
+      if (prop.transform && typeof prop.transform === 'object') {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://transform",
+          target: `literal:string:${JSON.stringify(prop.transform)}`
         });
       }
     }
@@ -800,6 +878,80 @@ export class SHACLShape {
         }
       }
 
+      const relationKindLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://relationKind"
+      );
+      if (relationKindLink) {
+        const val = relationKindLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
+        if (val === 'hasMany' || val === 'hasOne' || val === 'belongsToOne' || val === 'belongsToMany') {
+          prop.relationKind = val;
+        }
+      }
+
+      const targetClassNameLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://targetClassName"
+      );
+      if (targetClassNameLink) {
+        prop.targetClassName = targetClassNameLink.target.replace(
+          /^literal:\/\/string:|^literal:string:/, ''
+        );
+      }
+
+      const whereFilterLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://whereFilter"
+      );
+      if (whereFilterLink) {
+        try {
+          const jsonStr = whereFilterLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
+          prop.whereFilter = JSON.parse(jsonStr);
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+
+      const wherePredicatesLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://wherePredicates"
+      );
+      if (wherePredicatesLink) {
+        try {
+          const jsonStr = wherePredicatesLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
+          prop.wherePredicates = JSON.parse(jsonStr);
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+
+      const filterLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://filter"
+      );
+      if (filterLink) {
+        let val = filterLink.target.replace(/^literal:\/\/|^literal:/, '');
+        if (val.startsWith('boolean:')) val = val.substring(8);
+        prop.filter = val === 'true';
+      }
+
+      const transformLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://transform"
+      );
+      if (transformLink) {
+        const jsonStr = transformLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
+        try {
+          const parsed = JSON.parse(jsonStr);
+          if (!isNodeExpression(parsed)) {
+            throw new Error(
+              `Invalid transform for property ${propShapeId}: ` +
+              `payload is not a valid NodeExpression. Received: ${jsonStr}`
+            );
+          }
+          prop.transform = parsed;
+        } catch (e) {
+          throw new Error(
+            `Failed to deserialize transform for property ${propShapeId}: ` +
+            `${e instanceof Error ? e.message : String(e)}. Payload: ${jsonStr}`
+          );
+        }
+      }
+
       shape.addProperty(prop);
     }
     
@@ -838,6 +990,12 @@ export class SHACLShape {
         conformance_conditions: p.conformanceConditions,
         class: p.class,
         in: p.in,
+        relation_kind: p.relationKind,
+        target_class_name: p.targetClassName,
+        where_filter: p.whereFilter,
+        where_predicates: p.wherePredicates,
+        filter: p.filter,
+        transform: p.transform,
       })),
       constructor_actions: this.constructor_actions,
       destructor_actions: this.destructor_actions,
@@ -853,6 +1011,14 @@ export class SHACLShape {
       : new SHACLShape(json.target_class);
     
     for (const p of json.properties || []) {
+      // Validate transform if present
+      if (p.transform && !isNodeExpression(p.transform)) {
+        throw new Error(
+          `Invalid transform for property ${p.name}: ` +
+          `payload is not a valid NodeExpression. Received: ${JSON.stringify(p.transform)}`
+        );
+      }
+
       shape.addProperty({
         path: p.path,
         name: p.name,
@@ -874,6 +1040,12 @@ export class SHACLShape {
         conformanceConditions: p.conformance_conditions,
         class: p.class,
         in: p.in,
+        relationKind: p.relation_kind,
+        targetClassName: p.target_class_name,
+        whereFilter: p.where_filter,
+        wherePredicates: p.where_predicates,
+        filter: p.filter,
+        transform: p.transform,
       });
     }
     

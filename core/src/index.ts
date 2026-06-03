@@ -16,6 +16,7 @@ export * from "./Literal";
 export * from "./perspectives/Perspective";
 export * from "./perspectives/PerspectiveHandle";
 export * from "./perspectives/PerspectiveProxy";
+export * from "./perspectives/SparqlBindings";
 export * from "./perspectives/WakerSubscriptionManager";
 export * from "./perspectives/PerspectiveDiff";
 export * from "./perspectives/LinkQuery";
@@ -33,6 +34,9 @@ export * from "./runtime/RuntimeTypes"
 export { Model as AIModel, ModelApi, TokenizerSource, LocalModel, ModelType, ModelApiInput, TokenizerSourceInput, LocalModelInput, ModelInput, VoiceActivityParamsInput } from "./ai/AITypes"
 export * from './shacl/SHACLShape'
 export { SHACLFlow, FlowState, FlowTransition, LinkPattern, FlowableCondition } from './shacl/SHACLFlow'
+export * from './shacl/NodeExpression'
+export * from './shacl/builders'
+export { fileToDataUri } from './shacl/index'
 export * from "./generated/api";
 export { RpcError } from "./apiClient";
 /** @deprecated Use `RpcError` instead. */

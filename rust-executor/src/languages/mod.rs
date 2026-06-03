@@ -103,11 +103,13 @@ impl LanguageController {
     }
 
     pub fn global_instance() -> LanguageController {
-        LANGUAGE_CONTROLLER_INSTANCE
-            .lock()
-            .unwrap()
+        let mut instance = LANGUAGE_CONTROLLER_INSTANCE.lock().unwrap();
+        if instance.is_none() {
+            *instance = Some(LanguageController::new());
+        }
+        instance
             .as_ref()
-            .expect("LanguageController not initialized")
+            .expect("LanguageController initialization failed")
             .clone()
     }
 

@@ -895,24 +895,19 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
 
     let class_name = params.require_str("class_name")?;
     let query_json = params.require_str("query_json")?;
-    let shape_json = params.opt_str("shape_json");
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
-    // Run synchronous SPARQL-backed model query on a blocking thread with timeout
-    // to avoid blocking the async runtime (same pattern as query_sparql handler).
+    // Run async model query with timeout
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        tokio::task::spawn_blocking(move || {
-            perspective.model_query(&class_name, &query_json, shape_json.as_deref())
-        }),
+        perspective.model_query(&class_name, &query_json),
     )
     .await;
 
     match result {
-        Ok(Ok(Ok(json))) => Ok(Value::String(json)),
-        Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
-        Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
+        Ok(Ok(json)) => Ok(Value::String(json)),
+        Ok(Err(e)) => Err(WsRpcError::internal(e.to_string())),
         Err(_) => {
             log::warn!("Model query timed out after {}s", SPARQL_QUERY_TIMEOUT_SECS);
             Err(WsRpcError {
@@ -935,7 +930,6 @@ async fn evaluate_getters_handler(
     .map_err(|e| WsRpcError::forbidden(e))?;
 
     let class_name = params.require_str("class_name")?;
-    let shape_json = params.opt_str("shape_json");
 
     // Parse instance_ids array
     let instance_ids: Vec<String> = params
@@ -965,12 +959,7 @@ async fn evaluate_getters_handler(
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || {
-            perspective.evaluate_getters(
-                &class_name,
-                &instance_ids,
-                property_names.as_deref(),
-                shape_json.as_deref(),
-            )
+            perspective.evaluate_getters(&class_name, &instance_ids, property_names.as_deref())
         }),
     )
     .await;
@@ -1008,13 +997,12 @@ async fn model_subscribe_handler(
 
     let class_name = params.require_str("class_name")?;
     let query_json = params.require_str("query_json")?;
-    let shape_json = params.opt_str("shape_json");
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let user_email = ctx.user_email.clone();
     let (subscription_id, result_string) = perspective
-        .model_subscribe_and_query(class_name, query_json, shape_json, user_email)
+        .model_subscribe_and_query(class_name, query_json, user_email)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 

@@ -43,14 +43,23 @@ interface PendingCall {
 export class ApiClient {
     private baseUrl: string
     private token?: string
+    private readonly _webSocketImpl?: new (url: string) => WebSocket
+    private readonly _fetchImpl?: typeof fetch
 
-    constructor(baseUrl: string, token?: string) {
+    constructor(baseUrl: string, token?: string, webSocketImpl?: new (url: string) => WebSocket, fetchImpl?: typeof fetch) {
         this.baseUrl = baseUrl
         this.token = token
+        this._webSocketImpl = webSocketImpl
+        this._fetchImpl = fetchImpl
     }
 
     getBaseUrl(): string { return this.baseUrl }
     getToken(): string | undefined { return this.token }
+
+    /** Perform an HTTP request, using an injected fetch implementation if provided. */
+    doFetch(url: string, init: RequestInit): Promise<Response> {
+        return this._fetchImpl ? this._fetchImpl(url, init) : fetch(url, init)
+    }
 
     setToken(token: string) {
         this.token = token
@@ -78,7 +87,7 @@ export class ApiClient {
     }
 
     private _ensureWs(): void {
-        if (this._ws && (this._ws.readyState === WebSocket.OPEN || this._ws.readyState === WebSocket.CONNECTING)) {
+        if (this._ws && (this._ws.readyState === 1 /* OPEN */ || this._ws.readyState === 0 /* CONNECTING */)) {
             return
         }
         // Prevent duplicate connections from concurrent callers
@@ -91,7 +100,8 @@ export class ApiClient {
         })
 
         const url = this._getWsUrl()
-        const ws = new WebSocket(url)
+        const WsImpl = this._webSocketImpl ?? WebSocket
+        const ws = new WsImpl(url)
         this._ws = ws
 
         ws.onopen = () => {
@@ -160,7 +170,7 @@ export class ApiClient {
     private _startPing(): void {
         this._stopPing()
         this._wsPingTimer = setInterval(() => {
-            if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+            if (this._ws && this._ws.readyState === 1 /* OPEN */) {
                 this._ws.send(JSON.stringify({ type: 'ping' }))
             }
         }, 30_000)
@@ -220,7 +230,7 @@ export class ApiClient {
                 timer,
             })
 
-            if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+            if (this._ws && this._ws.readyState === 1 /* OPEN */) {
                 this._ws.send(JSON.stringify(message))
             } else {
                 this._pendingCalls.delete(id)

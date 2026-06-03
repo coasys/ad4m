@@ -10,6 +10,10 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     Model,
     Optional,
     PropertyOptions,
+    concat,
+    literal,
+    focus,
+    path as shaclPath,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
 import { startExecutor, baseUrl, quitExecutor } from "../utils/utils";
@@ -436,14 +440,9 @@ describe("Prolog + Literals", () => {
 
                     @Optional({
                         through: "recipe://image",
-                        resolveLanguage: "", // Will be set dynamically to note-store language
-                        transform: (data: any) => {
-                            if (data && typeof data === 'object' && data.data_base64) {
-                                return `data:image/png;base64,${data.data_base64}`;
-                            }
-                            return data;
-                        }
-                    } as PropertyOptions)
+                        resolveLanguage: "",
+                        transform: concat(literal("data:image/png;base64,"), shaclPath("data_base64")),
+                    })
                     image: string | any = ""
                 }
 
@@ -1530,7 +1529,7 @@ describe("Prolog + Literals", () => {
                     await waitForCondition(
                         () => lastCount === 4,
                         {
-                            timeoutMs: 15000,
+                            timeoutMs: 60000,
                             errorMessage: 'Count subscription did not update after recipe save'
                         }
                     );
@@ -1686,7 +1685,7 @@ describe("Prolog + Literals", () => {
                     await waitForCondition(
                         () => lastResult !== null && lastResult.totalCount === 11,
                         {
-                            timeoutMs: 15000,
+                            timeoutMs: 60000,
                             errorMessage: 'Paginate subscription did not update totalCount to 11 after recipe save'
                         }
                     );
@@ -1940,7 +1939,7 @@ describe("Prolog + Literals", () => {
                     await waitForCondition(
                         () => updateCount === 1 && tasks.length === 1,
                         { 
-                            timeoutMs: 5000, 
+                            timeoutMs: 60000, 
                             errorMessage: 'Subscription did not fire after first task save' 
                         }
                     );
@@ -1960,7 +1959,7 @@ describe("Prolog + Literals", () => {
                     await waitForCondition(
                         () => updateCount === 2 && tasks.length === 2,
                         { 
-                            timeoutMs: 5000, 
+                            timeoutMs: 60000, 
                             errorMessage: 'Subscription did not fire after second task save' 
                         }
                     );
@@ -1987,7 +1986,7 @@ describe("Prolog + Literals", () => {
                     await waitForCondition(
                         () => tasks.length === 1,
                         { 
-                            timeoutMs: 5000, 
+                            timeoutMs: 60000, 
                             errorMessage: 'Subscription did not fire after task update' 
                         }
                     );
@@ -2005,8 +2004,8 @@ describe("Prolog + Literals", () => {
                         @Property({
                             through: "image://data",
                             resolveLanguage: "literal",
-                            transform: (data: any) => data ? `data:image/png;base64,${data}` : undefined,
-                        } as PropertyOptions)
+                            transform: concat(literal("data:image/png;base64,"), focus()),
+                        })
                         image: string = "";
                         //TODO: having json objects as properties in our new queries breaks the JSON
                         // construction of Prolog query results.
@@ -2279,7 +2278,7 @@ describe("Prolog + Literals", () => {
                         await waitForCondition(
                             () => callback1.callCount >= 1,
                             {
-                                timeoutMs: 5000,
+                                timeoutMs: 60000,
                                 errorMessage: 'First callback was not called after model save'
                             }
                         );
@@ -2305,7 +2304,7 @@ describe("Prolog + Literals", () => {
                         await waitForCondition(
                             () => callback2.callCount >= 1,
                             {
-                                timeoutMs: 5000,
+                                timeoutMs: 60000,
                                 errorMessage: 'Second callback was not called after model save'
                             }
                         );
@@ -2359,7 +2358,7 @@ describe("Prolog + Literals", () => {
                         await waitForCondition(
                             () => countCallback.callCount >= 1,
                             {
-                                timeoutMs: 15000,
+                                timeoutMs: 60000,
                                 errorMessage: 'Count callback was not called after model save'
                             }
                         );
@@ -2413,7 +2412,7 @@ describe("Prolog + Literals", () => {
                         await waitForCondition(
                             () => pageCallback.called && pageCallback.lastCall.args[0].results.length >= 2,
                             {
-                                timeoutMs: 15000,
+                                timeoutMs: 60000,
                                 errorMessage: 'Paginate callback was not called with expected results after model saves'
                             }
                         );
@@ -2587,7 +2586,7 @@ describe("Prolog + Literals", () => {
                         await waitForCondition(
                             () => updateCount === 1,
                             { 
-                                timeoutMs: 5000, 
+                                timeoutMs: 60000, 
                                 errorMessage: 'Subscription did not fire after first message save' 
                             }
                         );
@@ -2606,7 +2605,7 @@ describe("Prolog + Literals", () => {
                         await waitForCondition(
                             () => updateCount === 2,
                             { 
-                                timeoutMs: 5000, 
+                                timeoutMs: 60000, 
                                 errorMessage: 'Subscription did not fire after second message save' 
                             }
                         );

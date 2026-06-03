@@ -156,7 +156,7 @@ export class AIClient {
             typedAudio.byteOffset + typedAudio.byteLength
         );
 
-        const response = await fetch(`${baseUrl}/api/v1/ai/transcription/feed`, {
+        const response = await this.#apiClient.doFetch(`${baseUrl}/api/v1/ai/transcription/feed`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/octet-stream',

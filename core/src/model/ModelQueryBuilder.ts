@@ -10,6 +10,7 @@ import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import type {
   Where, Order, IncludeMap, Query,
   ResultsWithTotalCount, PaginationResult,
+  TypedWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
 } from "./types";
 
 /** Query builder for Ad4mModel queries.
@@ -80,8 +81,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * })
    * ```
    */
-  where(conditions: Where): ModelQueryBuilder<T> {
-    this.queryParams.where = conditions;
+  where(conditions: TypedWhere<T>): ModelQueryBuilder<T> {
+    this.queryParams.where = conditions as Where;
     return this;
   }
 
@@ -96,8 +97,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * .order({ createdAt: "DESC" })
    * ```
    */
-  order(orderBy: Order): ModelQueryBuilder<T> {
-    this.queryParams.order = orderBy;
+  order(orderBy: TypedOrder<T>): ModelQueryBuilder<T> {
+    this.queryParams.order = orderBy as Order;
     return this;
   }
 
@@ -218,8 +219,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * .properties(["name", "description", "rating"])
    * ```
    */
-  properties(properties: string[]): ModelQueryBuilder<T> {
-    this.queryParams.properties = properties;
+  properties(properties: PropertyKeysOf<T>[] | string[]): ModelQueryBuilder<T> {
+    this.queryParams.properties = properties as string[];
     return this;
   }
 
@@ -272,21 +273,13 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    *   .run();
    * ```
    */
-  include(map: IncludeMap): ModelQueryBuilder<T> {
-    this.queryParams.include = map;
+  include(map: TypedIncludeMap<T>): ModelQueryBuilder<T> {
+    this.queryParams.include = map as IncludeMap;
     return this;
   }
 
   overrideModelClassName(className: string): ModelQueryBuilder<T> {
     this.modelClassName = className;
-    return this;
-  }
-
-  /**
-   * Sets the query engine to use.
-   * @deprecated Prolog engine has been removed. All queries use SPARQL/Rust.
-   */
-  engine(_eng: 'sparql' | 'prolog'): ModelQueryBuilder<T> {
     return this;
   }
 
@@ -377,15 +370,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
     const ctor = this.ctor;
 
-    // Build the model query params (className, queryJson, shapeJson)
-    const { className, queryJson, shapeJson } = (ctor as any).prepareModelQueryParams(
+    // Build the model query params (className, queryJson).  The executor
+    // resolves the shape from the perspective's SHACL triples.
+    const { className, queryJson } = (ctor as any).prepareModelQueryParams(
       this.queryParams, this.modelClassName
     );
 
     // Register model subscription via Rust — this builds trigger SPARQL internally,
     // registers the subscription, and runs the initial query in one call.
     const { subscriptionId, result: initialModelResult } = await this.perspective.modelSubscribe(
-      className, queryJson, shapeJson
+      className, queryJson
     );
 
     // Convert JSON instances to model class instances
@@ -393,15 +387,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       return (ctor as any).parseModelResult(this.perspective, raw, this.queryParams.include, this.queryParams.properties);
     };
 
-    // Resolve non-literal (file-language) properties — handles both raw URI strings
-    // and already-resolved FileData objects returned by the Rust executor.
-    const resolveAndReturn = async (instances: T[]): Promise<T[]> => {
-      await (ctor as any).resolveNonLiteralProps(this.perspective, instances);
-      return instances;
-    };
-
-    // Parse initial results (with non-literal resolution)
-    const initialResults = await resolveAndReturn(parseResults(initialModelResult));
+    // Transforms are now applied by the Rust executor during hydration
+    const initialResults = parseResults(initialModelResult);
 
     // Track last emitted result fingerprint to suppress duplicate callbacks
     let lastResultFingerprint: string | null = null;
@@ -419,20 +406,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       subscriptionId,
       (rawResult: any) => {
         try {
-          const parsed = parseResults(rawResult);
-          console.debug(`[ModelQueryBuilder.subscribe] Update received for ${subscriptionId}: ${parsed.length} instances`);
-          resolveAndReturn(parsed).then((results) => {
-            const fp = buildFingerprint(results);
-            if (fp === lastResultFingerprint) {
-              console.debug(`[ModelQueryBuilder.subscribe] Fingerprint unchanged, skipping callback`);
-              return;
-            }
-            console.debug(`[ModelQueryBuilder.subscribe] Fingerprint changed, calling callback with ${results.length} results`);
-            lastResultFingerprint = fp;
-            callback(results);
-          }).catch((e) => {
-            console.error('Model subscription update resolve error:', e);
-          });
+          const results = parseResults(rawResult);
+          console.debug(`[ModelQueryBuilder.subscribe] Update received for ${subscriptionId}: ${results.length} instances`);
+          const fp = buildFingerprint(results);
+          if (fp === lastResultFingerprint) {
+            console.debug(`[ModelQueryBuilder.subscribe] Fingerprint unchanged, skipping callback`);
+            return;
+          }
+          console.debug(`[ModelQueryBuilder.subscribe] Fingerprint changed, calling callback with ${results.length} results`);
+          lastResultFingerprint = fp;
+          callback(results);
         } catch (e) {
           console.error('Model subscription update parse error:', e);
         }
@@ -558,12 +541,12 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     this.dispose();
 
     const countParams = { ...this.queryParams, limit: 0 };
-    const { className, queryJson, shapeJson } = (this.ctor as any).prepareModelQueryParams(
+    const { className, queryJson } = (this.ctor as any).prepareModelQueryParams(
       countParams, this.modelClassName
     );
 
     const { subscriptionId, result: initialModelResult } = await this.perspective.modelSubscribe(
-      className, queryJson, shapeJson
+      className, queryJson
     );
 
     const parseCount = (raw: any): number => {
@@ -712,12 +695,12 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const subscriptionParams = { ...(this.queryParams || {}) };
     delete subscriptionParams.limit;
     delete subscriptionParams.offset;
-    const { className, queryJson, shapeJson } = (ctor as any).prepareModelQueryParams(
+    const { className, queryJson } = (ctor as any).prepareModelQueryParams(
       subscriptionParams, this.modelClassName
     );
 
     const { subscriptionId } = await this.perspective.modelSubscribe(
-      className, queryJson, shapeJson
+      className, queryJson
     );
 
     // Build the paginated query for Rust endpoint (count: true fetches both results and totalCount in one call)
