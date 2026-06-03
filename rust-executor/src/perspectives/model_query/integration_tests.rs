@@ -3354,19 +3354,15 @@ async fn test_full_model_query_ops_contains_with_pagination() {
     );
 }
 
-/// Helper: create a signed-envelope literal IRI (mimics what expression.create("literal", value)
-/// produces in production). The signed envelope is JSON with {author, timestamp, data, proof}.
-fn signed_envelope_literal(value: &str) -> String {
+/// Helper: create a legacy signed-envelope literal IRI — models the pre-migration
+/// data shape that older databases still contain on disk. New writes use plain
+/// `literal:string:X` form; the migration step converts envelopes → plain form
+/// on first boot. Tests that exercise the migration path use this helper to
+/// seed envelope-shaped data before calling `migrate_signed_envelopes_to_plain_literals`.
+fn legacy_envelope_literal(value: &str) -> String {
     signed_envelope_literal_with_ts(value, "2024-01-01T00:00:00.000Z")
 }
 
-/// Same as [`signed_envelope_literal`] but with a caller-supplied embedded
-/// envelope timestamp. Needed for sort regression tests: `signed_envelope_literal`
-/// hardcodes the same timestamp for every call, so fixtures built from it never
-/// actually diverge on that field — which would mask a bug where sort extraction
-/// accidentally reads the envelope's `timestamp` instead of its `data` value
-/// (since a *shared* timestamp prefix contributes nothing to string comparison,
-/// real-world envelopes have distinct per-write timestamps).
 fn signed_envelope_literal_with_ts(value: &str, timestamp: &str) -> String {
     let envelope = serde_json::json!({
         "author": "did:key:zQ3shTestAgent",
@@ -3383,12 +3379,13 @@ fn signed_envelope_literal_with_ts(value: &str, timestamp: &str) -> String {
     format!("literal:json:{}", literal_percent_encode(&json_str))
 }
 
-/// Regression test for signed-envelope literals with fn/parse_literal WHERE clauses.
-/// Exercises the exact pattern used by paginateSubscribe: model query with WHERE
-/// filtering on a literal property, pagination (limit/offset), and count=true,
-/// where stored values are signed expression envelopes (literal:json:{signed}).
+/// Regression test for legacy signed-envelope literals: insert envelope-form data,
+/// run the migration, then verify the model query (WHERE + pagination + count)
+/// returns the correct results against the migrated plain-literal form. This
+/// guards the back-compat path for stores that haven't yet migrated when the
+/// new executor boots.
 #[tokio::test]
-async fn test_signed_envelope_where_paginate_count() {
+async fn test_legacy_envelope_migrated_then_paginate_count() {
     let store = SparqlStore::new(None).unwrap();
     let ts_base = 1700000000000i64;
 
@@ -3408,7 +3405,7 @@ async fn test_signed_envelope_where_paginate_count() {
             .add_link(&make_link(
                 uri,
                 "ns://status",
-                &signed_envelope_literal(status),
+                &legacy_envelope_literal(status),
                 &ts,
             ))
             .unwrap();
@@ -3416,11 +3413,21 @@ async fn test_signed_envelope_where_paginate_count() {
             .add_link(&make_link(
                 uri,
                 "ns://name",
-                &signed_envelope_literal(name),
+                &legacy_envelope_literal(name),
                 &ts,
             ))
             .unwrap();
     }
+
+    // T4: simulate first-boot migration converting envelope-form data to plain literals.
+    // After migration the new index-friendly WHERE (V4) can probe the POS index.
+    let migrated = store
+        .migrate_signed_envelopes_to_plain_literals()
+        .expect("migration should succeed");
+    assert!(
+        migrated > 0,
+        "expected migration to rewrite at least one envelope, got {migrated}"
+    );
 
     let shape_json = r#"{
         "className": "Task",
@@ -3468,11 +3475,12 @@ async fn test_signed_envelope_where_paginate_count() {
         "Second item by timestamp"
     );
 
-    // Verify hydration: name should be the unwrapped data, not the full signed envelope
+    // Verify hydration: after migration the stored target is `literal:string:active`,
+    // and parse_literal_value decodes it back to the plain "active" string.
     assert_eq!(
         result.instances[0]["status"].as_str().unwrap(),
         "active",
-        "Status should be unwrapped from signed envelope"
+        "Status should be plain literal post-migration"
     );
 
     // Page 2: offset 2
@@ -3505,14 +3513,16 @@ async fn test_signed_envelope_where_paginate_count() {
     );
 }
 
-/// Regression: mixed literal formats (plain + signed envelope) coexist in the same query.
-/// This can happen during migration or when different code paths create links.
+/// Regression: mixed legacy data (some plain literals already written, some
+/// still in envelope form) all get rewritten to plain form by the migration,
+/// after which the new index-friendly WHERE (V4) finds everything via direct
+/// IRI match. Also exercises `contains` which routes through `fn/parse_literal`.
 #[tokio::test]
-async fn test_mixed_plain_and_signed_envelope_where() {
+async fn test_legacy_mixed_migrated_then_contains() {
     let store = SparqlStore::new(None).unwrap();
     let ts_base = 1700000000000i64;
 
-    // Item 1: plain literal (old format)
+    // Item 1: plain literal (already in new form on disk)
     store
         .add_link(&make_link(
             "test://old",
@@ -3530,7 +3540,7 @@ async fn test_mixed_plain_and_signed_envelope_where() {
         ))
         .unwrap();
 
-    // Item 2: signed envelope (new format)
+    // Item 2: legacy signed envelope (pre-migration)
     store
         .add_link(&make_link(
             "test://new",
@@ -3543,10 +3553,16 @@ async fn test_mixed_plain_and_signed_envelope_where() {
         .add_link(&make_link(
             "test://new",
             "ns://body",
-            &signed_envelope_literal("hello signed"),
+            &legacy_envelope_literal("hello signed"),
             &format!("{}", ts_base + 1),
         ))
         .unwrap();
+
+    // Run migration: envelope-form rows become plain literals; pre-existing
+    // plain literals are untouched.
+    store
+        .migrate_signed_envelopes_to_plain_literals()
+        .expect("migration should succeed");
 
     let shape_json = r#"{
         "className": "Msg",
@@ -3557,7 +3573,8 @@ async fn test_mixed_plain_and_signed_envelope_where() {
         "relations": {}
     }"#;
 
-    // Query with contains "hello" — should match both formats
+    // Query with contains "hello" — `contains` still uses fn/parse_literal, so
+    // it works against the plain-literal form post-migration.
     let mut wc = BTreeMap::new();
     wc.insert(
         "body".to_string(),
@@ -3579,14 +3596,14 @@ async fn test_mixed_plain_and_signed_envelope_where() {
     .await
     .unwrap();
 
-    assert_eq!(result.instances.len(), 2, "Both formats should match");
+    assert_eq!(result.instances.len(), 2, "Both items should match");
     assert_eq!(result.instances[0]["body"].as_str().unwrap(), "hello plain");
     assert_eq!(
         result.instances[1]["body"].as_str().unwrap(),
         "hello signed"
     );
 
-    // Exact match on signed envelope value
+    // Exact equality on the migrated value — V4 emits a direct IRI probe.
     let mut wc2 = BTreeMap::new();
     wc2.insert(
         "body".to_string(),
@@ -3604,11 +3621,187 @@ async fn test_mixed_plain_and_signed_envelope_where() {
     .await
     .unwrap();
 
-    assert_eq!(result2.instances.len(), 1, "Exact match on signed envelope");
+    assert_eq!(
+        result2.instances.len(),
+        1,
+        "Exact match on migrated literal"
+    );
     assert_eq!(
         result2.instances[0]["body"].as_str().unwrap(),
         "hello signed"
     );
+}
+
+/// Parallel to `test_legacy_envelope_migrated_then_paginate_count` — same data
+/// shape, but inserted as plain `literal:string:X` from the start (no migration).
+/// Verifies V4's direct IRI match finds the data via POS-index probe without
+/// going through `fn/parse_literal`.
+#[tokio::test]
+async fn test_plain_literal_where_paginate_count() {
+    let store = SparqlStore::new(None).unwrap();
+    let ts_base = 1700000000000i64;
+
+    let items = vec![
+        ("test://item-1", "active", "Alpha"),
+        ("test://item-2", "active", "Beta"),
+        ("test://item-3", "inactive", "Gamma"),
+        ("test://item-4", "active", "Delta"),
+    ];
+    for (i, (uri, status, name)) in items.iter().enumerate() {
+        let ts = format!("{}", ts_base + i as i64);
+        store
+            .add_link(&make_link(uri, "ns://type", "ns://task", &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                uri,
+                "ns://status",
+                &signed_literal(status),
+                &ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(uri, "ns://name", &signed_literal(name), &ts))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Task",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://task" },
+            "status": { "predicate": "ns://status", "required": false, "resolveLanguage": "literal" },
+            "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "status".to_string(),
+        WhereCondition::String("active".to_string()),
+    );
+    let result = execute_model_query_from_json(
+        &store,
+        "Task",
+        &ModelQueryInput {
+            where_clause: Some(wc.clone()),
+            limit: Some(2),
+            offset: Some(0),
+            order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+            count: Some(true),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 2, "Page should have 2 items");
+    assert_eq!(result.total_count, 3, "Total active items should be 3");
+    assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Alpha");
+    assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Beta");
+    assert_eq!(result.instances[0]["status"].as_str().unwrap(), "active");
+
+    let result2 = execute_model_query_from_json(
+        &store,
+        "Task",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            limit: Some(2),
+            offset: Some(2),
+            order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+            count: Some(true),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result2.instances.len(), 1);
+    assert_eq!(result2.total_count, 3);
+    assert_eq!(result2.instances[0]["name"].as_str().unwrap(), "Delta");
+}
+
+/// Parallel to `test_legacy_mixed_migrated_then_contains` for the plain-literal
+/// storage path. Confirms `contains` (which still routes through
+/// `fn/parse_literal` for substring semantics) works correctly on plain
+/// `literal:string:X` IRIs.
+#[tokio::test]
+async fn test_plain_literal_contains_works_on_fn_parse_literal_path() {
+    let store = SparqlStore::new(None).unwrap();
+    let ts_base = 1700000000000i64;
+
+    store
+        .add_link(&make_link(
+            "test://a",
+            "ns://type",
+            "ns://msg",
+            &format!("{ts_base}"),
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "test://a",
+            "ns://body",
+            &signed_literal("hello world"),
+            &format!("{ts_base}"),
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link(
+            "test://b",
+            "ns://type",
+            "ns://msg",
+            &format!("{}", ts_base + 1),
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "test://b",
+            "ns://body",
+            &signed_literal("goodbye world"),
+            &format!("{}", ts_base + 1),
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "Msg",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://msg" },
+            "body": { "predicate": "ns://body", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "body".to_string(),
+        WhereCondition::Ops(WhereOps {
+            contains: Some(Value::String("hello".to_string())),
+            ..Default::default()
+        }),
+    );
+    let result = execute_model_query_from_json(
+        &store,
+        "Msg",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.instances.len(),
+        1,
+        "contains 'hello' should match only one row"
+    );
+    assert_eq!(result.instances[0]["body"].as_str().unwrap(), "hello world");
 }
 
 // -----------------------------------------------------------------------
