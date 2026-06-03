@@ -1,18 +1,18 @@
-//! Substrate-agnostic retriever trait for the workspace / pull / commit
-//! algorithm modules.
+//! Substrate-agnostic retriever traits for the workspace / pull / commit /
+//! snapshots algorithm modules.
 //!
 //! p-diff-sync's `PerspectiveDiffRetreiver` still owns the HDK-flavored
 //! methods (`current_revision` / `latest_revision` / `update_*` / etc.);
-//! this trait carves out just the read methods the in-crate algorithm
-//! needs and bridges from the algorithm mirror types (`Hash`,
+//! these traits carve out just the surface the in-crate algorithm
+//! needs and bridge from the algorithm mirror types (`Hash`,
 //! `PerspectiveDiffEntryReference`, `Snapshot`) — the HDK-side adapter
 //! converts the integrity-zome types to these on the way through.
 
 use crate::diff_types::{Hash, PerspectiveDiffEntryReference, Snapshot};
 use crate::errors::AlgoResult;
 
-/// The minimum surface the in-crate `Workspace` builder needs from any
-/// substrate.
+/// The minimum read-side surface the in-crate `Workspace` builder needs
+/// from any substrate.
 pub trait WorkspaceRetriever {
     /// Look up a `PerspectiveDiffEntryReference` by its hash.
     fn get_p_diff_reference(hash: &Hash) -> AlgoResult<PerspectiveDiffEntryReference>;
@@ -22,4 +22,18 @@ pub trait WorkspaceRetriever {
     /// get + to_app_option::<Snapshot>` chain; on the holograph side it
     /// reads the snapshot keyed by the entry's op-id.
     fn get_snapshot_by_target(target_hash: &Hash) -> AlgoResult<Option<Snapshot>>;
+}
+
+/// Adds the write capability needed by the `snapshots` module.
+///
+/// Step 13b-D split off as a sibling of `WorkspaceRetriever` so the
+/// workspace tests and Workspace-only callers (`render`, the BFS unit
+/// tests) don't have to wire a write surface they never exercise.
+/// All three substrates (Holochain, Mock, Kitsune) implement both.
+pub trait SnapshotRetriever: WorkspaceRetriever {
+    /// Persist a `PerspectiveDiffEntryReference` to the substrate and
+    /// return the hash it can later be fetched by via
+    /// `get_p_diff_reference`. `snapshots::generate_snapshot` calls this
+    /// to write each chunk-diff entry the snapshot points at.
+    fn create_diff_entry(entry: PerspectiveDiffEntryReference) -> AlgoResult<Hash>;
 }
