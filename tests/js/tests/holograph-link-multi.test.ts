@@ -1,19 +1,25 @@
 /**
- * Step 9 — holograph-link Language two-conductor end-to-end test.
+ * Step 9-11 — holograph-link Language two-conductor end-to-end test.
  *
  * Single-conductor proof lives in `holograph-link.test.ts`; this file
  * extends to two AD4M conductors (Alice + Bob) in separate processes,
- * synced via Tx5 transport against a local SBD signal server. Together
- * with the single-conductor test it closes SPIKE §2.5 exit checks #4
- * and #6 (cross-node propagation + JS-driven integration test).
+ * synced via Iroh transport against a local kitsune2-bootstrap-srv
+ * (the same binary serves both K2 bootstrap AND the iroh relay).
+ * Together with the single-conductor test it closes SPIKE §2.5 exit
+ * checks #4 and #6 (cross-node propagation + JS-driven integration
+ * test).
+ *
+ * Wake 11 swapped Tx5/SBD for Iroh to match the rest of the AD4M repo
+ * (which uses Holochain's `transport-iroh` feature). The conductor env
+ * gates the transport by `HOLOGRAPH_IROH_RELAY_URL`.
  *
  * What this file proves on top of the single-conductor scaffold:
  *   - Two AD4M conductors with `HOLOGRAPH_DEFAULT_NEIGHBORHOOD=1` and
- *     `HOLOGRAPH_SBD_URL=<bootstrap-srv>` reach each other end-to-end
- *     via the Tx5/SBD path swapped in by `holograph_wires::
- *     build_dyn_space_inner`.
+ *     `HOLOGRAPH_IROH_RELAY_URL=<bootstrap-srv>/relay` reach each
+ *     other end-to-end via the Iroh path swapped in by
+ *     `holograph_wires::build_dyn_space_inner`.
  *   - Alice publishes a neighbourhood; Bob joins via the returned URL;
- *     Alice's commits flow through Tx5 → Bob's perspective subscriber.
+ *     Alice's commits flow through Iroh → Bob's perspective subscriber.
  *   - Bidirectional: Bob commits back; Alice's subscriber observes it.
  */
 
@@ -78,11 +84,11 @@ interface Conductor {
     dataPath: string;
 }
 
-describe("holograph-link Language end-to-end (two conductors via Tx5)", function () {
+describe("holograph-link Language end-to-end (two conductors via Iroh)", function () {
     this.timeout(300_000);
 
     let holographAddress: string;
-    let sbdUrl: string;
+    let irohRelayUrl: string;
     let bootstrapUrl: string;
     let localServicesProcess: ChildProcess | null = null;
     let alice: Conductor | null = null;
@@ -110,12 +116,12 @@ describe("holograph-link Language end-to-end (two conductors via Tx5)", function
                 env: {
                     HOLOGRAPH_DEFAULT_NEIGHBORHOOD: "1",
                     HOLOGRAPH_LINK_BUNDLE_PATH: HOLOGRAPH_BUNDLE_PATH,
-                    HOLOGRAPH_SBD_URL: sbdUrl,
-                    HOLOGRAPH_SBD_PLAINTEXT: "1",
+                    HOLOGRAPH_IROH_RELAY_URL: irohRelayUrl,
+                    HOLOGRAPH_IROH_PLAINTEXT: "1",
                     HOLOGRAPH_BOOTSTRAP_URL: bootstrapUrl,
                     RUST_LOG:
                         process.env.HOLOGRAPH_DEBUG === "1"
-                            ? "info,kitsune2_core::factories::core_bootstrap=debug,kitsune2_transport_tx5=debug,kitsune2_gossip=debug,holograph=debug"
+                            ? "info,kitsune2_core::factories::core_bootstrap=debug,kitsune2_transport_iroh=debug,kitsune2_gossip=debug,holograph=debug"
                             : process.env.RUST_LOG ?? "info,holograph=info",
                 },
             },
@@ -129,15 +135,16 @@ describe("holograph-link Language end-to-end (two conductors via Tx5)", function
     before(async () => {
         holographAddress = computeHolographAddress();
 
-        // Boot the bootstrap-srv that doubles as the Tx5 SBD signal
-        // server. The plain-text ws:// URL on loopback is acceptable
-        // for the spike — `signal_allow_plain_text: true` in the
-        // builder mirrors what the K2 own test harness uses.
+        // Boot the kitsune2-bootstrap-srv. Same binary serves both
+        // K2 peer discovery (`/`) AND the iroh relay (`/relay`) when
+        // compiled with the `iroh-relay` feature — that's the pattern
+        // K2's TestBootstrapSrv in test_utils uses. Plain HTTP/HTTP is
+        // OK on loopback (HOLOGRAPH_IROH_PLAINTEXT=1).
         const services = await runHcLocalServices();
         localServicesProcess = services.process;
         const port = services.bootstrapUrl!.replace("https://", "");
-        sbdUrl = `ws://${port}`;
         bootstrapUrl = `http://${port}`;
+        irohRelayUrl = `http://${port}/relay`;
 
         alice = await bootConductor("alice");
         bob = await bootConductor("bob");
@@ -187,7 +194,7 @@ describe("holograph-link Language end-to-end (two conductors via Tx5)", function
         expect(link).to.equal(holographAddress);
     });
 
-    it("Bob receives Alice's commit through Tx5 within 15s", async () => {
+    it("Bob receives Alice's commit through Iroh within 15s", async () => {
         const got: string[] = [];
         await bob!.client.perspective.addPerspectiveLinkAddedListener(bobUuid, [
             (l) => got.push(`${l.data.source}->${l.data.target}`),
