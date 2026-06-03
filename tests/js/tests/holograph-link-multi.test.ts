@@ -87,6 +87,7 @@ describe("holograph-link Language end-to-end (two conductors via Tx5)", function
     let localServicesProcess: ChildProcess | null = null;
     let alice: Conductor | null = null;
     let bob: Conductor | null = null;
+    let charlie: Conductor | null = null;
 
     async function bootConductor(name: string): Promise<Conductor> {
         const [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
@@ -112,6 +113,10 @@ describe("holograph-link Language end-to-end (two conductors via Tx5)", function
                     HOLOGRAPH_SBD_URL: sbdUrl,
                     HOLOGRAPH_SBD_PLAINTEXT: "1",
                     HOLOGRAPH_BOOTSTRAP_URL: bootstrapUrl,
+                    RUST_LOG:
+                        process.env.HOLOGRAPH_DEBUG === "1"
+                            ? "info,kitsune2_core::factories::core_bootstrap=debug,kitsune2_transport_tx5=debug,kitsune2_gossip=debug,holograph=debug"
+                            : process.env.RUST_LOG ?? "info,holograph=info",
                 },
             },
         );
@@ -139,6 +144,10 @@ describe("holograph-link Language end-to-end (two conductors via Tx5)", function
     });
 
     after(async () => {
+        if (charlie) {
+            await gracefulShutdown(charlie.process, "charlie");
+            deregisterPorts([charlie.apiPort, charlie.hcAdminPort, charlie.hcAppPort]);
+        }
         if (alice) {
             await gracefulShutdown(alice.process, "alice");
             deregisterPorts([alice.apiPort, alice.hcAdminPort, alice.hcAppPort]);
@@ -188,7 +197,7 @@ describe("holograph-link Language end-to-end (two conductors via Tx5)", function
             target: "holograph://alice/b",
             predicate: "holograph://multi/edge",
         });
-        const deadline = Date.now() + 60_000;
+        const deadline = Date.now() + 15_000;
         while (got.length === 0 && Date.now() < deadline) {
             await sleep(200);
         }
@@ -206,10 +215,41 @@ describe("holograph-link Language end-to-end (two conductors via Tx5)", function
             target: "holograph://bob/d",
             predicate: "holograph://multi/edge",
         });
-        const deadline = Date.now() + 60_000;
+        const deadline = Date.now() + 15_000;
         while (got.length === 0 && Date.now() < deadline) {
             await sleep(200);
         }
         expect(got.length, "Alice saw Bob's link").to.be.greaterThan(0);
+    });
+
+    it("late-join Charlie sees historical diffs via gossip catch-up", async () => {
+        // Charlie boots AFTER Alice and Bob have exchanged the two
+        // commits above. He should catch up via K2 gossip on first
+        // join — no fresh commits required.
+        charlie = await bootConductor("charlie");
+        const joined = await charlie.client.neighbourhood.joinFromUrl(neighbourhoodUrl);
+        const charlieUuid = joined.uuid;
+
+        // Subscribe before any commits could be missed; gossip pushes
+        // historical ops asynchronously after join.
+        const got: string[] = [];
+        await charlie.client.perspective.addPerspectiveLinkAddedListener(charlieUuid, [
+            (l) => got.push(`${l.data.source}->${l.data.target}`),
+        ]);
+
+        // Wait up to 30s for gossip to catch up. The two prior commits
+        // (alice/a->b, bob/c->d) should both surface. K2's gossip and
+        // publish paths can both deliver the same op, so dedupe before
+        // asserting set-equality.
+        const deadline = Date.now() + 30_000;
+        const unique = () => Array.from(new Set(got));
+        while (unique().length < 2 && Date.now() < deadline) {
+            await sleep(250);
+        }
+        const uniques = unique().slice().sort();
+        expect(uniques).to.deep.equal([
+            "holograph://alice/a->holograph://alice/b",
+            "holograph://bob/c->holograph://bob/d",
+        ]);
     });
 });
