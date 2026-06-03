@@ -20,7 +20,12 @@
 //! move") and `.spike-status/step-1.5-status.md` for the deferred-work
 //! list.
 
+pub mod chunked_diffs;
+pub mod diff_types;
 pub mod topo_sort;
+
+pub use chunked_diffs::ChunkedDiffs;
+pub use diff_types::{ExpressionProof, LinkExpression, PerspectiveDiff, Triple};
 
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt::{Debug, Display};
