@@ -299,7 +299,7 @@ describe("Prolog + Literals", () => {
                 let links = await perspective!.get(new LinkQuery({source: todo.id, predicate: "todo://has_title"}))
                 expect(links.length).to.equal(1)
                 let literal = Literal.fromUrl(links[0].data.target).get()
-                expect(literal.data).to.equal("new title")
+                expect(literal).to.equal("new title")
             })
 
             it("can easily be initialized with PerspectiveProxy.ensureSDNASubjectClass()", async () => {
@@ -646,7 +646,7 @@ describe("Prolog + Literals", () => {
                     let links = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://resolve"}))
                     expect(links.length).to.equal(1)
                     let literal = Literal.fromUrl(links[0].data.target).get()
-                    expect(literal.data).to.equal(recipe.resolve)
+                    expect(literal).to.equal(recipe.resolve)
 
                     const recipe3 = new Recipe(perspective!, root);
                     await recipe3.get();
@@ -707,8 +707,8 @@ describe("Prolog + Literals", () => {
 
                     let linksResolve = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://resolve"}))
                     expect(linksResolve.length).to.equal(1)
-                    let expression = Literal.fromUrl(linksResolve[0].data.target).get()
-                    expect(expression.data).to.equal(longName)
+                    let literal = Literal.fromUrl(linksResolve[0].data.target).get()
+                    expect(literal).to.equal(longName)
 
                     const recipe2 = new Recipe(perspective!, root)
                     await recipe2.get()
