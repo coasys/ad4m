@@ -36,7 +36,9 @@ use tokio::runtime::Runtime;
 
 use perspective_diff_algorithm as algo;
 use perspective_diff_sync::errors::{SocialContextError, SocialContextResult};
-use perspective_diff_sync::link_adapter::conversions::{entry_ref_to_algo, hash_from_algo};
+use perspective_diff_sync::link_adapter::conversions::{
+    entry_ref_from_algo, entry_ref_to_algo, hash_from_algo, hash_to_algo,
+};
 use perspective_diff_sync::retriever::PerspectiveDiffRetreiver;
 use perspective_diff_sync_integrity::{
     EntryTypes, HashReference, LocalHashReference, PerspectiveDiffEntryReference,
@@ -392,6 +394,22 @@ impl algo::WorkspaceRetriever for KitsuneRetreiver {
         _target_hash: &algo::Hash,
     ) -> algo::AlgoResult<Option<algo::Snapshot>> {
         Ok(None)
+    }
+}
+
+// Step 13b-D — round-trips through the existing
+// `PerspectiveDiffRetreiver::create_entry`, which writes the entry to
+// the K2 OpStore and returns the deterministic content-hash.
+impl algo::SnapshotRetriever for KitsuneRetreiver {
+    fn create_diff_entry(
+        entry: algo::PerspectiveDiffEntryReference,
+    ) -> algo::AlgoResult<algo::Hash> {
+        let integrity = entry_ref_from_algo(entry);
+        let hash = <Self as PerspectiveDiffRetreiver>::create_entry(
+            perspective_diff_sync_integrity::EntryTypes::PerspectiveDiffEntryReference(integrity),
+        )
+        .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(hash_to_algo(&hash))
     }
 }
 

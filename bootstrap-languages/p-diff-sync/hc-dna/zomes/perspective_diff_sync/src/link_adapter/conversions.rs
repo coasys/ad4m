@@ -124,7 +124,6 @@ pub fn snapshot_to_algo(s: Snapshot) -> algo::Snapshot {
     }
 }
 
-#[allow(dead_code)]
 pub fn snapshot_from_algo(s: algo::Snapshot) -> Snapshot {
     Snapshot {
         diff_chunks: s.diff_chunks.iter().map(hash_from_algo).collect(),
