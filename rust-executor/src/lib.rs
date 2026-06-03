@@ -8,6 +8,7 @@ pub mod entanglement_service;
 mod globals;
 pub mod helpers;
 pub mod holochain_service;
+pub mod holograph_wires;
 pub mod js_core;
 pub mod mcp;
 pub mod perspectives;

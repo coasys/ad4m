@@ -397,3 +397,59 @@ export function storageListKeys(prefix) {
     }
     return out;
 }
+
+// ============================================================================
+// Holograph (Spec section 7.8 -- OPTIONAL EXTENSION)
+// ============================================================================
+//
+// The holograph-link Language module imports these to drive a
+// HolographSpace-backed neighborhood (sled + Kitsune2). The runtime
+// installs a per-isolate delegate on globalThis.__holographDelegate__
+// whose methods match the surface in
+// `rust-executor/src/holograph_wires.rs::HolographDelegate`.
+//
+// Step 5 ships the JS surface + a Rust stub that always returns
+// "NotImplemented"; Step 6 swaps in the real wiring. Languages can
+// therefore IMPORT these functions today; runtime CALLS throw
+// "[ad4m:host] holograph wire not yet implemented (Step 5 stub)" until
+// Step 6 lands.
+
+function holographDelegate() {
+    var d = globalThis.__holographDelegate__;
+    if (!d) {
+        throw new Error(
+            "[ad4m:host] __holographDelegate__ is not installed. " +
+            "The holograph extension is only usable on runtimes that " +
+            "install the per-isolate delegate (rust-executor's " +
+            "holograph_wires module, scheduled to land in Step 6 of the " +
+            "holograph spike). Languages targeting the holograph " +
+            "substrate must be prepared for these imports to throw."
+        );
+    }
+    return d;
+}
+
+export function holographCreateNeighborhood(spaceId, storageDir) {
+    return holographDelegate().createNeighborhood(spaceId, storageDir);
+}
+export function holographCommit(handle, envelopeB64) {
+    return holographDelegate().commit(handle, envelopeB64);
+}
+export function holographRender(handle) {
+    return holographDelegate().render(handle);
+}
+export function holographNextEmitted(handle) {
+    return holographDelegate().nextEmitted(handle);
+}
+export function holographJoinAgent(handle, agentKeyB64) {
+    return holographDelegate().joinAgent(handle, agentKeyB64);
+}
+export function holographCurrentRevision(handle) {
+    return holographDelegate().currentRevision(handle);
+}
+export function holographLatestRevision(handle) {
+    return holographDelegate().latestRevision(handle);
+}
+export function holographCloseNeighborhood(handle) {
+    return holographDelegate().closeNeighborhood(handle);
+}
