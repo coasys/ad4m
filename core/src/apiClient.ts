@@ -44,15 +44,22 @@ export class ApiClient {
     private baseUrl: string
     private token?: string
     private readonly _webSocketImpl?: new (url: string) => WebSocket
+    private readonly _fetchImpl?: typeof fetch
 
-    constructor(baseUrl: string, token?: string, webSocketImpl?: new (url: string) => WebSocket) {
+    constructor(baseUrl: string, token?: string, webSocketImpl?: new (url: string) => WebSocket, fetchImpl?: typeof fetch) {
         this.baseUrl = baseUrl
         this.token = token
         this._webSocketImpl = webSocketImpl
+        this._fetchImpl = fetchImpl
     }
 
     getBaseUrl(): string { return this.baseUrl }
     getToken(): string | undefined { return this.token }
+
+    /** Perform an HTTP request, using an injected fetch implementation if provided. */
+    doFetch(url: string, init: RequestInit): Promise<Response> {
+        return this._fetchImpl ? this._fetchImpl(url, init) : fetch(url, init)
+    }
 
     setToken(token: string) {
         this.token = token

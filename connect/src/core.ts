@@ -1,5 +1,6 @@
 import { isEmbedded, setLocal, getLocal, removeLocal, checkConnection, wsUrlToHttpBase } from './utils';
 import { PostMessageWebSocket } from './PostMessageWebSocket';
+import { makePostMessageFetch } from './PostMessageFetch';
 import { Ad4mClient, VerificationRequestResult } from "@coasys/ad4m";
 import autoBind from "auto-bind";
 
@@ -405,12 +406,14 @@ export default class Ad4mConnect extends EventTarget {
               constructor(url: string) { super(url, parentOrigin); }
             }
 
+            const fetchImpl = makePostMessageFetch(parentOrigin);
+
             this.notifyConnectionChange('connecting');
             this.ad4mClient = new Ad4mClient(
-              'http://proxy', // URL ignored by PostMessageWebSocket
+              'http://proxy', // URL ignored by PostMessageWebSocket; HTTP requests are proxied via fetchImpl
               normalizedToken,
               false,          // defer subscriptions until auth confirmed
-              { webSocketImpl: WsImpl as unknown as new (url: string) => WebSocket }
+              { webSocketImpl: WsImpl as unknown as new (url: string) => WebSocket, fetchImpl }
             );
             this.notifyConnectionChange('connected');
             await this.checkAuth();
