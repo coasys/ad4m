@@ -3,6 +3,7 @@ use deno_runtime::snapshot::create_runtime_snapshot;
 use rust_executor::entanglement_service::entanglement_service_extension::entanglement_service;
 use rust_executor::holochain_service::holochain_service_extension::holochain_service;
 use rust_executor::js_core::agent_extension::agent_service;
+use rust_executor::js_core::holograph_service_extension::holograph_service;
 use rust_executor::js_core::languages_extension::language_service;
 use rust_executor::js_core::pubsub_extension::pubsub_service;
 use rust_executor::js_core::signature_extension::signature_service;
@@ -26,6 +27,7 @@ fn main() {
         entanglement_service::init(),
         runtime_service::init(),
         language_service::init(),
+        holograph_service::init(),
     ];
 
     create_runtime_snapshot(snapshot_path, SnapshotOptions::default(), extensions);

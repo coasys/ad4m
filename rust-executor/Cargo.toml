@@ -26,6 +26,10 @@ path = "src/lib.rs"
 name = "generate_snapshot"
 path = "src/bin/generate_snapshot.rs"
 
+[[bin]]
+name = "print_holograph_address"
+path = "src/bin/print_holograph_address.rs"
+
 [features]
 # Pass metal and cuda features (set through build.rs) through to kalosm
 default = []
