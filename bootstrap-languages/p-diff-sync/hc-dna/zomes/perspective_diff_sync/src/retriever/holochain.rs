@@ -8,8 +8,11 @@ use perspective_diff_sync_integrity::{
 
 use super::PerspectiveDiffRetreiver;
 use crate::errors::{SocialContextError, SocialContextResult};
+use crate::link_adapter::conversions::{entry_ref_to_algo, hash_from_algo, snapshot_to_algo};
 use crate::utils::dedup;
 use crate::Hash;
+use perspective_diff_algorithm as algo;
+use perspective_diff_sync_integrity::LinkTypes as IntegrityLinkTypes;
 
 pub struct HolochainRetreiver;
 
@@ -141,6 +144,67 @@ impl PerspectiveDiffRetreiver for HolochainRetreiver {
         )?;
 
         Ok(())
+    }
+}
+
+// Step 13b-C phase 2: bridge `HolochainRetreiver` over to the
+// algorithm-crate's `WorkspaceRetriever` trait so
+// `perspective_diff_algorithm::Workspace` can drive its BFS through HDK.
+//
+// The methods re-shape calls + types: `algo::Hash` ↔ `HoloHash<Action>`,
+// `algo::PerspectiveDiffEntryReference` ← integrity, etc. Conversion
+// helpers live in `crate::link_adapter::conversions`.
+impl algo::WorkspaceRetriever for HolochainRetreiver {
+    fn get_p_diff_reference(
+        hash: &algo::Hash,
+    ) -> algo::AlgoResult<algo::PerspectiveDiffEntryReference> {
+        let h = hash_from_algo(hash);
+        let entry = <Self as PerspectiveDiffRetreiver>::get(h)
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(entry_ref_to_algo(entry))
+    }
+
+    fn get_snapshot_by_target(
+        target_hash: &algo::Hash,
+    ) -> algo::AlgoResult<Option<algo::Snapshot>> {
+        // Replicates `Workspace::get_snapshot` from the pre-13b-C HDK
+        // body: fetch the entry-ref at `target_hash`, compute its
+        // content hash, query for `Snapshot` links with the
+        // "snapshot" tag prefix, then deref the first link's target.
+        let action_hash = hash_from_algo(target_hash);
+        let entry_ref = <Self as PerspectiveDiffRetreiver>::get(action_hash)
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        let entry_hash = hash_entry(entry_ref)
+            .map_err(|e| algo::AlgoError::Retriever(format!("hash_entry: {}", e)))?;
+        let query = LinkQuery::try_new(entry_hash, IntegrityLinkTypes::Snapshot)
+            .map_err(|e| algo::AlgoError::Retriever(format!("LinkQuery: {}", e)))?
+            .tag_prefix(LinkTag::new("snapshot"));
+        let mut snapshot_links = get_links(query, GetStrategy::Local)
+            .map_err(|e| algo::AlgoError::Retriever(format!("get_links: {}", e)))?;
+
+        if snapshot_links.is_empty() {
+            return Ok(None);
+        }
+
+        let target =
+            snapshot_links
+                .remove(0)
+                .target
+                .into_entry_hash()
+                .ok_or(algo::AlgoError::Retriever(
+                    "snapshot link target not an entry_hash".into(),
+                ))?;
+        let snapshot = get(target, GetOptions::network())
+            .map_err(|e| algo::AlgoError::Retriever(format!("get snapshot: {}", e)))?
+            .ok_or(algo::AlgoError::Retriever(
+                "snapshot entry not found".into(),
+            ))?
+            .entry()
+            .to_app_option::<perspective_diff_sync_integrity::Snapshot>()
+            .map_err(|e| algo::AlgoError::Retriever(format!("snapshot decode: {}", e)))?
+            .ok_or(algo::AlgoError::Retriever("snapshot entry empty".into()))?;
+
+        Ok(Some(snapshot_to_algo(snapshot)))
     }
 }
 

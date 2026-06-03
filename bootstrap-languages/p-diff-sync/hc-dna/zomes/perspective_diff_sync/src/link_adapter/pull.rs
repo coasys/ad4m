@@ -1,12 +1,14 @@
 use hdk::prelude::*;
+use perspective_diff_algorithm as algo;
 use perspective_diff_sync_integrity::{
     EntryTypes, HashBroadcast, PerspectiveDiff, PerspectiveDiffEntryReference, PullResult,
 };
 
 use crate::errors::SocialContextResult;
 use crate::link_adapter::chunked_diffs::load_diff_from_entry;
+use crate::link_adapter::conversions::{entry_ref_from_algo, hash_to_algo};
 use crate::link_adapter::revisions::{current_revision, update_current_revision};
-use crate::link_adapter::workspace::{Workspace, NULL_NODE};
+use crate::link_adapter::workspace::Workspace;
 use crate::retriever::PerspectiveDiffRetreiver;
 use crate::utils::get_now;
 use crate::Hash;
@@ -54,7 +56,7 @@ fn merge<Retriever: PerspectiveDiffRetreiver>(
     Ok(merge_entry_reference_hash)
 }
 
-pub fn pull<Retriever: PerspectiveDiffRetreiver>(
+pub fn pull<Retriever: PerspectiveDiffRetreiver + algo::WorkspaceRetriever>(
     emit: bool,
     theirs: Hash,
     is_scribe: bool,
@@ -80,9 +82,25 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
 
     let mut workspace = Workspace::new();
 
+    let theirs_algo = hash_to_algo(&theirs);
+
     if current.is_none() {
-        workspace.collect_only_from_latest::<Retriever>(theirs.clone())?;
-        let diff = workspace.squashed_diff::<Retriever>()?;
+        workspace.collect_only_from_latest::<Retriever>(theirs_algo.clone())?;
+        let squashed = workspace.squashed_diff();
+        // Convert algo `PerspectiveDiff` back to the integrity-zome shape
+        // expected by `emit_signal`.
+        let diff = PerspectiveDiff {
+            additions: squashed
+                .additions
+                .into_iter()
+                .map(crate::link_adapter::conversions::link_from_algo)
+                .collect(),
+            removals: squashed
+                .removals
+                .into_iter()
+                .map(crate::link_adapter::conversions::link_from_algo)
+                .collect(),
+        };
         update_current_revision::<Retriever>(theirs, get_now()?)?;
         emit_signal(diff.clone())?;
         return Ok(PullResult {
@@ -92,12 +110,16 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
     }
 
     let current = current.expect("current missing handled above");
+    let current_hash_algo = hash_to_algo(&current.hash);
 
-    workspace.build_diffs::<Retriever>(theirs.clone(), current.hash.clone())?;
+    workspace.build_diffs::<Retriever>(theirs_algo.clone(), current_hash_algo.clone())?;
 
     // First check if we are actually ahead of them -> we don't have to do anything
     // they will have to merge with / or fast-forward to our current
-    if workspace.all_ancestors(&current.hash)?.contains(&theirs) {
+    if workspace
+        .all_ancestors(&current_hash_algo)?
+        .contains(&theirs_algo)
+    {
         debug!("===PerspectiveDiffSync.pull(): We are ahead of them. They will have to pull/fast-forward. Exiting without change...");
         return Ok(PullResult {
             diff: PerspectiveDiff::default(),
@@ -105,7 +127,9 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
         });
     }
 
-    let fast_forward_possible = workspace.all_ancestors(&theirs)?.contains(&current.hash);
+    let fast_forward_possible = workspace
+        .all_ancestors(&theirs_algo)?
+        .contains(&current_hash_algo);
 
     // If we can't fast forward, we have to merge
     // but if we are not a scribe, we can't merge
@@ -119,21 +143,25 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
     }
 
     //Get all the diffs which exist between current and the last ancestor that we got
-    let seen_diffs = workspace.all_ancestors(&current.hash)?;
+    let seen_diffs = workspace.all_ancestors(&current_hash_algo)?;
     // println!("SEEN DIFFS: {:#?}", seen_diffs);
 
-    //Get all the diffs in the graph which we havent seen
-    let unseen_diffs = if seen_diffs.len() > 0 {
-        let diffs = workspace
+    //Get all the diffs in the graph which we havent seen. Filter is on the
+    // algorithm-crate mirror types; we convert each kept entry back to the
+    // integrity-zome `PerspectiveDiffEntryReference` so `load_diff_from_entry`
+    // can consume it.
+    let algo_null = algo::null_node();
+    let unseen_diffs: Vec<(Hash, PerspectiveDiffEntryReference)> = if seen_diffs.len() > 0 {
+        workspace
             .sorted_diffs
             .clone()
             .expect("should be unseen diffs after build_diffs() call")
             .into_iter()
             .filter(|val| {
-                if val.0 == NULL_NODE() {
+                if val.0 == algo_null {
                     return false;
                 };
-                if val.0 == current.hash {
+                if val.0 == current_hash_algo {
                     return false;
                 };
                 if seen_diffs.contains(&val.0) {
@@ -141,15 +169,26 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
                 };
                 true
             })
-            .collect::<Vec<(Hash, PerspectiveDiffEntryReference)>>();
-        diffs
+            .map(|(h, entry)| {
+                (
+                    crate::link_adapter::conversions::hash_from_algo(&h),
+                    entry_ref_from_algo(entry),
+                )
+            })
+            .collect()
     } else {
         workspace
             .sorted_diffs
             .expect("should be unseen diffs after build_diffs() call")
             .into_iter()
-            .filter(|val| val.0 != NULL_NODE() && val.0 != current.hash)
-            .collect::<Vec<(Hash, PerspectiveDiffEntryReference)>>()
+            .filter(|val| val.0 != algo_null && val.0 != current_hash_algo)
+            .map(|(h, entry)| {
+                (
+                    crate::link_adapter::conversions::hash_from_algo(&h),
+                    entry_ref_from_algo(entry),
+                )
+            })
+            .collect()
     };
 
     let (diffs, current_revision) = if fast_forward_possible {

@@ -12,9 +12,11 @@ use std::sync::Mutex;
 
 use super::PerspectiveDiffRetreiver;
 use crate::errors::{SocialContextError, SocialContextResult};
+use crate::link_adapter::conversions::{entry_ref_to_algo, hash_from_algo};
 use crate::link_adapter::workspace::NULL_NODE;
 use crate::utils::create_link_expression;
 use crate::Hash;
+use perspective_diff_algorithm as algo;
 
 #[derive(Debug)]
 pub struct MockPerspectiveGraph {
@@ -104,6 +106,30 @@ impl PerspectiveDiffRetreiver for MockPerspectiveGraph {
             .expect("Could not get lock on LATEST_REVISION");
         *revision = Some(hash);
         Ok(())
+    }
+}
+
+// Step 13b-C phase 2: bridge to the algorithm-crate's `WorkspaceRetriever`
+// trait. Conversions take the algo `Hash` → HoloHash via the existing
+// integrity-zome retrieval, then return the algo mirror entry-ref.
+//
+// The mock graph never carries Snapshot links — the workspace tests
+// that need snapshots are the holochain-side `snapshots::tests`, not
+// the algorithm-crate's BFS tests. Return `Ok(None)` for snapshots.
+impl algo::WorkspaceRetriever for MockPerspectiveGraph {
+    fn get_p_diff_reference(
+        hash: &algo::Hash,
+    ) -> algo::AlgoResult<algo::PerspectiveDiffEntryReference> {
+        let h = hash_from_algo(hash);
+        let entry = <Self as PerspectiveDiffRetreiver>::get(h)
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(entry_ref_to_algo(entry))
+    }
+
+    fn get_snapshot_by_target(
+        _target_hash: &algo::Hash,
+    ) -> algo::AlgoResult<Option<algo::Snapshot>> {
+        Ok(None)
     }
 }
 
@@ -425,6 +451,7 @@ fn can_create_graph_from_dot() {
 
 #[test]
 fn example_test() {
+    use crate::link_adapter::conversions::hash_to_algo;
     use crate::link_adapter::workspace::Workspace;
 
     fn update() {
@@ -459,8 +486,8 @@ fn example_test() {
 
     let mut workspace = Workspace::new();
     let res = workspace.collect_until_common_ancestor::<MockPerspectiveGraph>(
-        ActionHash::from_raw_36(vec![5; 36]),
-        ActionHash::from_raw_36(vec![4; 36]),
+        hash_to_algo(&ActionHash::from_raw_36(vec![5; 36])),
+        hash_to_algo(&ActionHash::from_raw_36(vec![4; 36])),
     );
     println!("Got result: {:#?}", res);
 }
