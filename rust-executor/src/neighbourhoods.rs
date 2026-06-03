@@ -8,6 +8,67 @@ use crate::perspectives::{add_perspective, all_perspectives, get_perspective, up
 use crate::types::*;
 use crate::types::{Neighbourhood, Perspective, PerspectiveHandle, PerspectiveState};
 
+/// Spike package identity for the holograph-link Language. The
+/// canonical AD4M content-address (`hash("@coasys/holograph-link@<v>")`)
+/// is the address every neighborhood that defaults to holograph-link
+/// will reference. v1 uses 0.1.0 to match
+/// `bootstrap-languages/holograph-link/package.json`.
+pub const HOLOGRAPH_LINK_PACKAGE_ID: &str = "@coasys/holograph-link@0.1.0";
+
+/// Compute the canonical AD4M address for the holograph-link Language.
+/// Matches the `hash()` host function in `js_core/utils_extension.rs`
+/// (SHA-256 -> CIDv1 -> base58btc with the `Qm` prefix), so the
+/// address is the same whether produced from Rust here or from the
+/// JS-side `hash(...)` call.
+pub fn holograph_link_default_address() -> String {
+    use cid::Cid;
+    use multibase::Base;
+    use multihash::{Code, MultihashDigest};
+    let multihash = Code::Sha2_256.digest(HOLOGRAPH_LINK_PACKAGE_ID.as_bytes());
+    let cid = Cid::new_v1(0, multihash);
+    let encoded = multibase::encode(Base::Base58Btc, cid.to_bytes());
+    format!("Qm{}", encoded)
+}
+
+/// True when the runtime should substitute the holograph-link Language
+/// for neighborhoods published without an explicit `link_language`.
+/// Gated by the `HOLOGRAPH_DEFAULT_NEIGHBORHOOD=1` env flag per
+/// SPIKE.md §2.2 Step 6.
+pub fn holograph_default_enabled() -> bool {
+    std::env::var("HOLOGRAPH_DEFAULT_NEIGHBORHOOD")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// Resolve the effective link-language address for a publish request.
+///
+/// - `Some(addr)` non-empty: caller-supplied address wins.
+/// - empty or `None`: substitute the holograph-link default if and
+///   only if `HOLOGRAPH_DEFAULT_NEIGHBORHOOD=1`. Otherwise return an
+///   `Err` so the caller can surface "link_language required" to the
+///   client (matching pre-Step-6 behavior).
+pub fn resolve_link_language(requested: Option<String>) -> Result<String, AnyError> {
+    let trimmed = requested
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    if let Some(addr) = trimmed {
+        return Ok(addr);
+    }
+    if holograph_default_enabled() {
+        let addr = holograph_link_default_address();
+        log::info!(
+            "[holograph] Substituting holograph-link as default link_language: {}",
+            addr
+        );
+        return Ok(addr);
+    }
+    Err(anyhow!(
+        "link_language is required (set HOLOGRAPH_DEFAULT_NEIGHBORHOOD=1 to default to holograph-link)"
+    ))
+}
+
 pub async fn _neighbourhood_publish_from_perspective(
     uuid: &str,
     link_language: String,
@@ -206,4 +267,100 @@ pub async fn install_neighbourhood_with_context(
     );
 
     Ok(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- Helper to scope env mutations to one test --------------
+    // std::env::set_var is process-global; if we run tests in
+    // parallel, the env state interleaves. Cargo's default test
+    // harness runs in parallel; these tests must run with
+    // --test-threads=1. The Step-6 cargo command does that.
+
+    fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        f();
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn holograph_link_default_address_is_stable_qm() {
+        let addr = holograph_link_default_address();
+        assert!(
+            addr.starts_with("Qm"),
+            "expected Qm-prefixed CID, got {addr}"
+        );
+        // Stable across runs because the input string is fixed.
+        let addr2 = holograph_link_default_address();
+        assert_eq!(addr, addr2);
+    }
+
+    #[test]
+    fn holograph_default_disabled_by_default() {
+        with_env("HOLOGRAPH_DEFAULT_NEIGHBORHOOD", None, || {
+            assert!(!holograph_default_enabled());
+        });
+    }
+
+    #[test]
+    fn holograph_default_enabled_with_flag_one() {
+        with_env("HOLOGRAPH_DEFAULT_NEIGHBORHOOD", Some("1"), || {
+            assert!(holograph_default_enabled());
+        });
+    }
+
+    #[test]
+    fn holograph_default_disabled_with_flag_other_value() {
+        with_env("HOLOGRAPH_DEFAULT_NEIGHBORHOOD", Some("0"), || {
+            assert!(!holograph_default_enabled());
+        });
+        with_env("HOLOGRAPH_DEFAULT_NEIGHBORHOOD", Some("true"), || {
+            assert!(!holograph_default_enabled());
+        });
+    }
+
+    #[test]
+    fn resolve_passes_through_explicit_address() {
+        with_env("HOLOGRAPH_DEFAULT_NEIGHBORHOOD", Some("1"), || {
+            // Even with the env flag on, an explicit address wins.
+            let addr = resolve_link_language(Some("QmExplicit123".to_string())).unwrap();
+            assert_eq!(addr, "QmExplicit123");
+        });
+    }
+
+    #[test]
+    fn resolve_substitutes_default_when_flag_set_and_empty_input() {
+        with_env("HOLOGRAPH_DEFAULT_NEIGHBORHOOD", Some("1"), || {
+            let addr = resolve_link_language(None).unwrap();
+            assert_eq!(addr, holograph_link_default_address());
+
+            let addr2 = resolve_link_language(Some("".to_string())).unwrap();
+            assert_eq!(addr2, holograph_link_default_address());
+
+            let addr3 = resolve_link_language(Some("   ".to_string())).unwrap();
+            assert_eq!(addr3, holograph_link_default_address());
+        });
+    }
+
+    #[test]
+    fn resolve_errors_when_flag_unset_and_empty_input() {
+        with_env("HOLOGRAPH_DEFAULT_NEIGHBORHOOD", None, || {
+            let err = resolve_link_language(None).unwrap_err().to_string();
+            assert!(err.contains("link_language is required"), "got: {err}");
+
+            let err2 = resolve_link_language(Some("".to_string()))
+                .unwrap_err()
+                .to_string();
+            assert!(err2.contains("link_language is required"));
+        });
+    }
 }

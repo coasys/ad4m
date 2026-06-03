@@ -180,7 +180,7 @@ fn parse_publish_neighbourhood_request() {
     });
     let req: PublishNeighbourhoodRequest = serde_json::from_value(json).unwrap();
     assert_eq!(req.perspective_uuid, "test-uuid");
-    assert_eq!(req.link_language, "Qm12345");
+    assert_eq!(req.link_language.as_deref(), Some("Qm12345"));
 }
 
 #[test]
