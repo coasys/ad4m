@@ -4020,7 +4020,21 @@ impl PerspectiveInstance {
             .await?;
 
         if let Some(resolve_language) = resolve_language {
-            // Create an expression for the value
+            // For the built-in "literal" language, encode the value directly into a
+            // deterministic plain URI (`literal:string:X` / `:number:` / `:boolean:` / `:json:`).
+            // The link reifier is the canonical source of provenance — the signed-envelope
+            // shape is for Channel E (`expression.create(value, "literal")`) callers, not
+            // for property storage. Skipping the language controller here is the Channel V
+            // short-circuit; see
+            // ~/.sovereign/membranes/coasys/research/literal-encoding-and-sparql-pushdown-2026-06-03.md
+            // §9.1 (V1) for the audit.
+            if resolve_language == "literal" {
+                let encoded = crate::languages::literal_encode(value);
+                return Ok(format!("literal:{}", encoded));
+            }
+
+            // Real language controllers (note, image, etc.) — Channel E. Keep the
+            // signed-expression path so the produced URL carries its own provenance.
             let controller = crate::languages::LanguageController::global_instance();
             let agent_context = context.clone();
             match controller
