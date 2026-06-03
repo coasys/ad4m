@@ -22,14 +22,23 @@
 
 pub mod chunked_diffs;
 pub mod diff_types;
+pub mod errors;
+pub mod retriever;
 pub mod topo_sort;
+pub mod workspace;
 
 pub use chunked_diffs::ChunkedDiffs;
-pub use diff_types::{ExpressionProof, LinkExpression, PerspectiveDiff, Triple};
+pub use diff_types::{
+    null_node, ExpressionProof, Hash, LinkExpression, PerspectiveDiff,
+    PerspectiveDiffEntryReference, Snapshot, Triple,
+};
+pub use errors::{AlgoError, AlgoResult};
+pub use retriever::WorkspaceRetriever;
+pub use workspace::Workspace;
 
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt::{Debug, Display};
-use std::hash::Hash;
+use std::hash::Hash as StdHash;
 
 /// Marker trait for substrate-specific op identifiers.
 ///
@@ -43,7 +52,7 @@ use std::hash::Hash;
 /// long as the identifier is cheap to clone, totally ordered, hashable,
 /// and round-trippable through serde.
 pub trait OpId:
-    Clone + Eq + Ord + Hash + Debug + Display + Serialize + DeserializeOwned + Send + Sync + 'static
+    Clone + Eq + Ord + StdHash + Debug + Display + Serialize + DeserializeOwned + Send + Sync + 'static
 {
 }
 
@@ -51,7 +60,7 @@ impl<T> OpId for T where
     T: Clone
         + Eq
         + Ord
-        + Hash
+        + StdHash
         + Debug
         + Display
         + Serialize
