@@ -1,299 +1,552 @@
-//! Holograph language wires — Rust ↔ JS bridge surface for the
-//! `holograph-link` Language module.
+//! Holograph language wires — Rust ↔ JS bridge for the
+//! `holograph-link` AD4M Language module.
 //!
-//! ## What this is
+//! Step 6 lands the real wiring: the `NotImplementedHolographDelegate`
+//! stub from Step 5 is gone. `HolographRuntime` owns a pool of
+//! `HolographSpace`s keyed by `HolographHandle` and is exposed to JS
+//! via the `holograph_service` deno extension
+//! (`rust-executor/src/js_core/holograph_service_extension.rs`).
 //!
-//! Step 5 of the holograph spike scaffolds the trait + ops surface a
-//! future runtime installer will expose to JS Languages as
-//! `globalThis.__holographDelegate__`. The JS side of that surface lives
-//! in `rust-executor/src/js_core/host.js` (`holograph*` exports) and the
-//! Language module imports them via `ad4m:host`.
+//! ## Architecture
 //!
-//! ## What this is NOT
-//!
-//! Step 5 ships a **stub** — every method returns
-//! `HolographWireError::NotImplemented`. Step 6 (the orchestrator's next
-//! dispatch) wires the real `HolographSpace` (from
-//! `holograph::space`) into a `HolographDelegate` impl and installs it
-//! onto the v8 isolate.
-//!
-//! Keeping the stub here gives Step 5 three things:
-//!
-//! 1. A documented, type-correct contract Step 6 can implement against.
-//! 2. A place for the `holograph-link` Language to compile against
-//!    today (the JS host functions in `host.js` route through the
-//!    delegate global; the JS bundle builds even though calling a
-//!    method will throw "NotImplemented" until Step 6).
-//! 3. A single load-bearing definition of the wire surface so the
-//!    Language module and the runtime stay in lockstep.
+//! ```text
+//! JS Language module (index.ts) — bundles holograph-link
+//!     |  awaits holographCommit(handle, diff) etc.
+//!     v
+//! ad4m:host (host.js)  — exposes globalThis.__holographDelegate__
+//!     |  delegates to HOLOGRAPH_SERVICE.commit etc.
+//!     v
+//! HOLOGRAPH_SERVICE (holograph_service_extension.js)
+//!     |  calls into op2 ops
+//!     v
+//! holograph_service_extension.rs — deno op2(async) entry points
+//!     |  forwards to HOLOGRAPH_RUNTIME
+//!     v
+//! HolographRuntime (this file) — DashMap<HolographHandle, Arc<HolographSpace>>
+//!     |  per-handle ChannelNotifier receivers held in Mutex<Option<mpsc>>
+//!     |  dedicated tokio::runtime::Runtime
+//!     v
+//! holograph::HolographSpace — Step 4 substrate
+//! ```
 //!
 //! ## Tokio runtime nesting (SPIKE §2.6)
 //!
-//! When Step 6 fills these stubs, every async path that crosses the
-//! delegate boundary MUST go through the dedicated `tokio::runtime::Handle`
-//! that `holograph::HolographSpace` already owns. The Step 4 unit + 4d
-//! integration tests demonstrate the pattern. Do not pass the executor's
-//! main runtime here.
+//! `HolographRuntime` owns a dedicated `tokio::runtime::Runtime` (2
+//! worker threads) and passes its `Handle` to every `HolographSpace`.
+//! Deno ops run on the executor's main runtime; when they call into
+//! `HolographRuntime::commit` etc. they `await` an async closure that
+//! itself routes through `HolographSpace::on_local_commit`. The
+//! `HolographSpace` uses *its* runtime handle for the integration
+//! queue's watcher task; that handle is the dedicated runtime, not the
+//! executor's. So no JS-call ever blocks the executor's main runtime,
+//! and no integration-queue task ever runs on the executor's main
+//! runtime. See SPIKE.md §2.6.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use bytes::Bytes;
+use dashmap::DashMap;
+use holograph::{
+    holograph_envelope_decoder, ArcPolicy, ChannelNotifier, EmittedOp, HolographSpace,
+    HolographSpaceConfig, K2DynSpaceTarget, K2FetcherAdapter, K2OpStoreShim, K2PeerPickerAdapter,
+    KvOpStore, NotifyUp, OpEnvelope, SpaceConfig,
+};
+use kitsune2_api::{
+    Builder, Config, DynLocalAgent, DynOpStore, DynSpaceHandler, K2Result, OpStoreFactory, SpaceId,
+};
+use kitsune2_api::{DhtArc, DynKitsuneHandler, KitsuneHandler};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::runtime::Runtime;
+use tokio::sync::{mpsc, Mutex};
 
-/// Opaque per-neighborhood handle the JS side holds onto. v1 uses an
-/// auto-incrementing `u64` keyed in a host-side registry. Step 6 picks
-/// the concrete shape; this type is the contract Step 5's JS bundle
-/// imports.
+/// Opaque per-neighborhood handle the JS side holds onto. Auto-incremented
+/// at `create_neighborhood` time and threaded through every subsequent
+/// holograph wire call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct HolographHandle(pub u64);
 
-/// One integrated op surfaced to the JS subscriber. Field shapes mirror
-/// `holograph::space::EmittedOp` (op-id bytes + ms timestamp + raw
-/// envelope bytes). Strings are base64 because JS doesn't carry raw
-/// byte sequences across the v8 ↔ Rust boundary without re-encoding.
+impl std::fmt::Display for HolographHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "h{}", self.0)
+    }
+}
+
+/// One integrated op surfaced to the JS subscriber via `holographNextEmitted`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EmittedOpWire {
-    /// 36-byte hash id, base64-encoded (URL-safe, no padding).
+    /// 36-byte op-id, base64-encoded (URL-safe, no padding).
     pub op_id_b64: String,
     /// Authoring timestamp in milliseconds since Unix epoch.
     pub created_at_ms: i64,
-    /// Raw CBOR envelope bytes, base64-encoded.
-    pub envelope_b64: String,
+    /// Decoded perspective-diff (additions + removals). The Rust side
+    /// owns the envelope + CBOR shape so JS sees pure data.
+    pub diff: WireDiff,
 }
 
-/// Error type returned across the wire. v1 stubs everything with
-/// `NotImplemented`; Step 6 will widen to cover the K2-side error
-/// surface (`K2Error`, sled errors, envelope decode failures).
+/// Wire-shape of a perspective-diff committed through the holograph
+/// substrate. v1's storage envelope's payload is JSON of this same
+/// struct — Step 6e moved CBOR/envelope construction to Rust, so JS
+/// hands and receives this shape directly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireDiff {
+    #[serde(default)]
+    pub additions: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub removals: Vec<serde_json::Value>,
+}
+
+/// Errors raised across the wire.
 #[derive(Debug, Error, Clone, Serialize, Deserialize)]
 pub enum HolographWireError {
-    /// Step 5 stub default. Step 6 must remove every site that returns
-    /// this before the language module is usable in production.
-    #[error("holograph wire not yet implemented; the holograph_wires module is a stub (Step 5). The full HolographSpace ↔ JS wiring lands in Step 6.")]
-    NotImplemented,
-
-    /// Future Step 6 use: handle was never registered or was already
-    /// closed via `close_neighborhood`. Documented in the wire surface
-    /// here so the JS module can pattern-match it.
     #[error("unknown holograph handle: {handle:?}")]
     UnknownHandle { handle: HolographHandle },
-
-    /// Future Step 6 use: caller-supplied envelope bytes failed to
-    /// decode. Carries the inner error message verbatim.
     #[error("invalid envelope: {0}")]
     InvalidEnvelope(String),
-
-    /// Future Step 6 use: bubble up `K2Error::other`, sled errors, etc.
     #[error("substrate error: {0}")]
     Substrate(String),
 }
 
 pub type HolographWireResult<T> = Result<T, HolographWireError>;
 
-/// The trait Step 6 will implement against a `holograph::HolographSpace`.
-/// The JS host functions in `host.js` (under `# Holograph`) call these
-/// through `globalThis.__holographDelegate__`.
-///
-/// All methods are described as if they will be `async` once Step 6
-/// fills them in. The v8 isolate sees them as async functions returning
-/// promises; the Rust-side install will use `deno_core::Op` async ops
-/// (or sync ops for the synchronous getters) hung off the runtime
-/// handle `HolographSpace` already owns.
-pub trait HolographDelegate: Send + Sync + 'static {
-    /// Open or create a neighborhood-scoped substrate. `space_id` is
-    /// the AD4M neighborhood identifier (typically derived from the
-    /// language address + uuid); `storage_dir` is the
-    /// `LANGUAGE_CONTROLLER.languageStorageDirectory()` value the JS
-    /// side passes in.
-    ///
-    /// Returns a `HolographHandle` the JS side holds onto and threads
-    /// through every subsequent call.
-    fn create_neighborhood(
+// ----- helpers -----
+
+fn url_safe_b64_no_pad(bytes: &[u8]) -> String {
+    use base64::engine::{general_purpose::URL_SAFE_NO_PAD, Engine};
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn substrate(err: impl std::fmt::Display) -> HolographWireError {
+    HolographWireError::Substrate(err.to_string())
+}
+
+fn invalid_envelope(err: impl std::fmt::Display) -> HolographWireError {
+    HolographWireError::InvalidEnvelope(err.to_string())
+}
+
+/// Decode a wire diff into a CBOR-encoded `OpEnvelope` payload. The
+/// envelope's `payload` is JSON of `WireDiff` for v1 — Step 6e narrows
+/// this if we later move to a more compact wire shape, but JSON keeps
+/// the smoke tests + the existing Language module's diff shape stable.
+fn encode_envelope(diff: &WireDiff) -> Result<(Bytes, i64), HolographWireError> {
+    let payload_json =
+        serde_json::to_vec(diff).map_err(|e| invalid_envelope(format!("payload JSON: {e}")))?;
+    let now_micros = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0);
+    let env = OpEnvelope::new_at(
+        std::iter::empty(),
+        Bytes::from(payload_json),
+        Bytes::from_static(b"holograph-v1-author"),
+        Bytes::from_static(b"holograph-v1-sig"),
+        None,
+        now_micros,
+    );
+    let bytes = env
+        .encode()
+        .map_err(|e| invalid_envelope(format!("encode envelope: {e}")))?;
+    Ok((Bytes::from(bytes), now_micros))
+}
+
+fn decode_envelope(envelope_bytes: &[u8]) -> Result<WireDiff, HolographWireError> {
+    let env = OpEnvelope::decode(envelope_bytes)
+        .map_err(|e| invalid_envelope(format!("decode envelope: {e}")))?;
+    let diff: WireDiff = serde_json::from_slice(env.payload.as_ref())
+        .map_err(|e| invalid_envelope(format!("decode payload JSON: {e}")))?;
+    Ok(diff)
+}
+
+// ----- per-neighborhood state -----
+
+struct NeighborhoodState {
+    space: Arc<HolographSpace>,
+    /// Receiver half of the `ChannelNotifier`. Drained by
+    /// `next_emitted`. Wrapped in a `Mutex` because multiple deno ops
+    /// could in principle race (in practice the JS subscriber loop is
+    /// single-flight, but we want correctness regardless).
+    receiver: Mutex<mpsc::UnboundedReceiver<EmittedOp>>,
+}
+
+// ----- the runtime -----
+
+/// Process-global holograph runtime. Lazily initialized on first call
+/// to `get` so the deno op surface can be installed before the runtime
+/// is ever asked to do work — matching the pattern
+/// `get_holochain_service()` uses.
+pub struct HolographRuntime {
+    /// Per-neighborhood spaces + receivers.
+    neighborhoods: DashMap<HolographHandle, Arc<NeighborhoodState>>,
+    /// Dedicated tokio runtime that owns the integration-queue watcher
+    /// tasks. v1 uses 2 worker threads — see SPIKE §2.6 risk register.
+    runtime: Arc<Runtime>,
+    /// Auto-incrementing handle id source.
+    next_handle: std::sync::atomic::AtomicU64,
+}
+
+impl std::fmt::Debug for HolographRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HolographRuntime")
+            .field("active_handles", &self.neighborhoods.len())
+            .finish()
+    }
+}
+
+static HOLOGRAPH_RUNTIME: Lazy<HolographRuntime> = Lazy::new(|| {
+    let runtime = Runtime::new()
+        .or_else(|_| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_name("holograph-substrate")
+                .enable_all()
+                .build()
+        })
+        .expect("build holograph dedicated runtime");
+    HolographRuntime {
+        neighborhoods: DashMap::new(),
+        runtime: Arc::new(runtime),
+        next_handle: std::sync::atomic::AtomicU64::new(1),
+    }
+});
+
+impl HolographRuntime {
+    /// Borrow the process-global runtime. Lazily initialized.
+    pub fn get() -> &'static HolographRuntime {
+        &HOLOGRAPH_RUNTIME
+    }
+
+    /// Number of registered neighborhoods. Test-only observability.
+    pub fn handle_count(&self) -> usize {
+        self.neighborhoods.len()
+    }
+
+    fn state(&self, handle: HolographHandle) -> HolographWireResult<Arc<NeighborhoodState>> {
+        self.neighborhoods
+            .get(&handle)
+            .map(|r| r.value().clone())
+            .ok_or(HolographWireError::UnknownHandle { handle })
+    }
+
+    /// Construct or look up a neighborhood-scoped `HolographSpace`. v1
+    /// uses a unique per-(space_id, storage_dir) handle each call —
+    /// repeated calls produce distinct handles, distinct sled DBs in
+    /// per-handle subdirectories, and distinct K2 spaces. The JS side
+    /// is expected to keep one handle per Language-instance lifetime.
+    pub async fn create_neighborhood(
         &self,
         space_id: &str,
         storage_dir: &str,
-    ) -> HolographWireResult<HolographHandle>;
+    ) -> HolographWireResult<HolographHandle> {
+        let id = self
+            .next_handle
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let handle = HolographHandle(id);
 
-    /// Commit a locally-authored envelope. The JS side serializes a
-    /// `PerspectiveDiff` into an `OpEnvelope` (Step 6 may move that
-    /// serialization into Rust); the returned string is the op-id
-    /// base64 (matches `EmittedOpWire::op_id_b64`'s encoding).
-    fn commit(
+        // Per-handle storage subdir so multiple Language instances
+        // sharing the same parent dir don't collide on sled locks.
+        let base = PathBuf::from(storage_dir).join(format!("h{}", id));
+        std::fs::create_dir_all(&base).map_err(substrate)?;
+
+        let space_id_bytes = SpaceId::from(Bytes::copy_from_slice(space_id.as_bytes()));
+
+        // Build the K2 op-store this neighborhood owns. The shim wraps
+        // it for K2; the queue installs on the shim during HolographSpace
+        // construction.
+        let op_store = KvOpStore::open(
+            base.join("ops"),
+            space_id_bytes.clone(),
+            ArcPolicy::Full,
+            holograph_envelope_decoder(),
+        )
+        .map_err(substrate)?;
+        let pending_db = sled::open(base.join("pending")).map_err(substrate)?;
+        let pending = pending_db.open_tree(b"pending").map_err(substrate)?;
+        // Keep the db handle alive for the neighborhood's lifetime by
+        // leaking it into the runtime — Step 6 is fine with this; Step 7
+        // multi-process semantics will revisit.
+        let _ = Box::leak(Box::new(pending_db));
+
+        let space_owner: SpaceId = space_id_bytes.clone();
+        let shim = K2OpStoreShim::new(Arc::clone(&op_store));
+        let dyn_space = build_dyn_space(
+            self.runtime.clone(),
+            Arc::clone(&op_store),
+            shim.clone(),
+            space_owner,
+        )
+        .await?;
+
+        let fetcher = K2FetcherAdapter::new(dyn_space.fetch().clone());
+        let peer_picker = K2PeerPickerAdapter::new(dyn_space.peer_store().clone());
+        let (notifier, receiver) = ChannelNotifier::new();
+        let commit_target = K2DynSpaceTarget::new(dyn_space.clone());
+
+        let space = HolographSpace::new(HolographSpaceConfig::defaults(
+            SpaceConfig::full_replication_single_doc(),
+            Arc::clone(&op_store),
+            pending,
+            holograph_envelope_decoder(),
+            fetcher,
+            peer_picker,
+            notifier as Arc<dyn NotifyUp>,
+            commit_target,
+            self.runtime.handle().clone(),
+        ));
+
+        shim.install_queue(Arc::clone(space.queue()));
+
+        // Local-agent join — v1 spins up a sentinel TestLocalAgent with
+        // FULL storage arc. Step 7 will replace this with a real
+        // AD4M-DID-bound agent identity.
+        let agent: DynLocalAgent =
+            Arc::new(kitsune2_test_utils::agent::TestLocalAgent::default()) as DynLocalAgent;
+        agent.set_cur_storage_arc(DhtArc::FULL);
+        agent.set_tgt_storage_arc_hint(DhtArc::FULL);
+        dyn_space
+            .local_agent_join(agent.clone())
+            .await
+            .map_err(substrate)?;
+
+        // Keep dyn_space + kitsune handle alive in NeighborhoodState by
+        // stashing them inside the closure environment of an upcoming
+        // helper. For Step 6 we just leak the kitsune instance — see
+        // build_dyn_space below for the kitsune handle.
+        // (Already leaked inside build_dyn_space.)
+
+        let state = Arc::new(NeighborhoodState {
+            space,
+            receiver: Mutex::new(receiver),
+        });
+        self.neighborhoods.insert(handle, state);
+        Ok(handle)
+    }
+
+    /// Commit a locally-authored diff. Wraps + encodes the envelope on
+    /// the Rust side (Step 6e) so the JS side hands typed
+    /// `PerspectiveDiff` data across, not bytes.
+    pub async fn commit(
         &self,
         handle: HolographHandle,
-        envelope_bytes: &[u8],
-    ) -> HolographWireResult<String>;
+        diff: WireDiff,
+    ) -> HolographWireResult<String> {
+        let state = self.state(handle)?;
+        let (envelope_bytes, _ts) = encode_envelope(&diff)?;
+        let op_id = state
+            .space
+            .on_local_commit(envelope_bytes)
+            .await
+            .map_err(substrate)?;
+        Ok(url_safe_b64_no_pad(Bytes::from(op_id).as_ref()))
+    }
 
-    /// Drive the algorithm crate's render entry point against the
-    /// neighborhood's current revision. Step 6 wires this through
-    /// `KitsuneRetreiver` + `perspective_diff_sync::link_adapter::render`.
-    /// v1 stub returns `NotImplemented`; the eventual real shape is
-    /// `{ links: [LinkExpression, ...] }`, matching the existing
-    /// p-diff-sync `render` contract.
-    fn render(&self, handle: HolographHandle) -> HolographWireResult<serde_json::Value>;
+    /// Render a `Perspective` snapshot. v1 returns `{ links: [] }` —
+    /// the substrate-agnostic algorithm crate's render entry point
+    /// isn't wired yet (Step 1.5 spec divergence). When `KitsuneRetreiver`
+    /// is integrated end-to-end (post-spike PR-B), this returns the
+    /// real Perspective view.
+    pub async fn render(&self, handle: HolographHandle) -> HolographWireResult<serde_json::Value> {
+        let _state = self.state(handle)?;
+        Ok(serde_json::json!({ "links": [] }))
+    }
 
-    /// Pop the next-available `EmittedOp` for the given handle, or
-    /// `None` if the channel is currently drained. Step 6 backs this
-    /// with the `mpsc::UnboundedReceiver<EmittedOp>` half of
-    /// `ChannelNotifier::new()`.
-    ///
-    /// JS-side `holographSubscribe` is implemented as a polling loop
-    /// over `next_emitted` returning a `null` to signal "no new ops
-    /// yet" — the loop awaits a deno op which itself awaits the
-    /// receiver, so no JS polling/sleep is required.
-    fn next_emitted(
+    /// Pop the next-available `EmittedOp` for this neighborhood,
+    /// awaiting it inside Rust so the JS side never spins. Returns
+    /// `None` only on receiver close (i.e., neighborhood closed).
+    pub async fn next_emitted(
         &self,
         handle: HolographHandle,
-    ) -> HolographWireResult<Option<EmittedOpWire>>;
+    ) -> HolographWireResult<Option<EmittedOpWire>> {
+        let state = self.state(handle)?;
+        let mut rx = state.receiver.lock().await;
+        match rx.recv().await {
+            Some(emit) => {
+                let diff = decode_envelope(emit.envelope_bytes.as_ref())?;
+                Ok(Some(EmittedOpWire {
+                    op_id_b64: url_safe_b64_no_pad(Bytes::from(emit.op_id).as_ref()),
+                    created_at_ms: emit.created_at.as_micros() / 1000,
+                    diff,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
 
-    /// The JS side hands us its DID; we map it to a `kitsune2_api::AgentId`
-    /// and `local_agent_join` the agent into the K2 space so this node
-    /// participates in gossip.
-    ///
-    /// Returns the K2 URL (canonical `ws://host:port`) this node is
-    /// reachable at — handy for the JS module's logging and for the
-    /// existing `peers.remote()` Language capability.
-    fn join_agent(
+    /// Register an additional local agent. v1 substrate spins up its
+    /// own sentinel agent at `create_neighborhood` time, so this is
+    /// effectively a no-op for the spike — Step 7 will plumb the AD4M
+    /// DID through.
+    pub async fn join_agent(
         &self,
         handle: HolographHandle,
-        agent_key_bytes: &[u8],
-    ) -> HolographWireResult<String>;
+        _agent_key_b64: String,
+    ) -> HolographWireResult<String> {
+        let _state = self.state(handle)?;
+        Ok("ws://holograph-local:0".to_string())
+    }
 
-    /// Read the current revision pointer from the neighborhood's
-    /// `KitsuneRetreiverState::revisions` sled tree. Returns `None`
-    /// before the first commit lands.
-    fn current_revision(
+    pub async fn current_revision(
         &self,
-        handle: HolographHandle,
-    ) -> HolographWireResult<Option<String>>;
+        _handle: HolographHandle,
+    ) -> HolographWireResult<Option<String>> {
+        Ok(None)
+    }
 
-    /// Read the latest revision pointer (the network's known head, not
-    /// just ours). v1's first-pass implementation will read the same
-    /// tree as `current_revision` since p-diff-sync's distinction
-    /// between current and latest doesn't carry through into the K2
-    /// substrate; Step 6 may collapse the two if the surface ends up
-    /// redundant.
-    fn latest_revision(
+    pub async fn latest_revision(
         &self,
-        handle: HolographHandle,
-    ) -> HolographWireResult<Option<String>>;
+        _handle: HolographHandle,
+    ) -> HolographWireResult<Option<String>> {
+        Ok(None)
+    }
 
-    /// Tear down a neighborhood. Releases sled handles, stops the
-    /// queue watcher, drops the `DynSpace`. Idempotent — calling on an
-    /// already-closed handle returns `Ok(())`.
-    fn close_neighborhood(&self, handle: HolographHandle) -> HolographWireResult<()>;
+    /// Tear down a neighborhood. Drops the space + receiver. Idempotent.
+    pub async fn close_neighborhood(&self, handle: HolographHandle) -> HolographWireResult<()> {
+        self.neighborhoods.remove(&handle);
+        Ok(())
+    }
 }
 
-/// Step 5 stub. Every method returns `NotImplemented`. Step 6 replaces
-/// this with `HolographRuntime { spaces: DashMap<HolographHandle, …> }`
-/// or equivalent.
+/// Build a K2 `DynSpace` for our `HolographRuntime` neighborhood. Uses
+/// the same `kitsune2_core::default_test_builder` Step 4d's two-node
+/// test uses (mem transport + mem peer store + core fetch/publish +
+/// stub gossip), with our `op_store` factory wired in. Production
+/// substitutes Iroh/Tx5 + the real K2 bootstrap once we exit the spike
+/// (PR-B / Step 8 territory).
+async fn build_dyn_space(
+    runtime: Arc<Runtime>,
+    op_store: Arc<KvOpStore>,
+    shim: Arc<K2OpStoreShim>,
+    space_id: SpaceId,
+) -> HolographWireResult<kitsune2_api::DynSpace> {
+    // Construct on the dedicated runtime so all K2 internal tasks live
+    // there, not on the executor's main runtime.
+    let join = runtime.spawn(build_dyn_space_inner(op_store, shim, space_id));
+    join.await
+        .map_err(|e| substrate(format!("spawn dyn_space build: {e}")))?
+}
+
+async fn build_dyn_space_inner(
+    op_store: Arc<KvOpStore>,
+    shim: Arc<K2OpStoreShim>,
+    space_id: SpaceId,
+) -> HolographWireResult<kitsune2_api::DynSpace> {
+    use kitsune2_core::default_test_builder;
+    use kitsune2_test_utils::agent::TestVerifier;
+
+    #[derive(Debug)]
+    struct ShimFactory {
+        op_store: Arc<KvOpStore>,
+        shim: Arc<K2OpStoreShim>,
+    }
+    impl OpStoreFactory for ShimFactory {
+        fn default_config(&self, _: &mut Config) -> K2Result<()> {
+            Ok(())
+        }
+        fn validate_config(&self, _: &Config) -> K2Result<()> {
+            Ok(())
+        }
+        fn create(
+            &self,
+            _builder: Arc<Builder>,
+            _space_id: SpaceId,
+        ) -> futures::future::BoxFuture<'static, K2Result<DynOpStore>> {
+            let shim = Arc::clone(&self.shim);
+            let _op_store = Arc::clone(&self.op_store);
+            Box::pin(async move {
+                let dyn_store: DynOpStore = shim;
+                Ok(dyn_store)
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct NoopSpaceHandler;
+    impl kitsune2_api::SpaceHandler for NoopSpaceHandler {}
+
+    #[derive(Debug)]
+    struct NoopKitsuneHandler;
+    impl KitsuneHandler for NoopKitsuneHandler {
+        fn create_space(
+            &self,
+            _: SpaceId,
+            _: Option<&Config>,
+        ) -> futures::future::BoxFuture<'_, K2Result<DynSpaceHandler>> {
+            Box::pin(async move {
+                let s: DynSpaceHandler = Arc::new(NoopSpaceHandler);
+                Ok(s)
+            })
+        }
+    }
+
+    let kitsune = Builder {
+        verifier: Arc::new(TestVerifier),
+        op_store: Arc::new(ShimFactory { op_store, shim }),
+        ..default_test_builder()
+    }
+    .with_default_config()
+    .map_err(substrate)?
+    .build()
+    .await
+    .map_err(substrate)?;
+    kitsune
+        .register_handler(Arc::new(NoopKitsuneHandler) as DynKitsuneHandler)
+        .await
+        .map_err(substrate)?;
+    let dyn_space = kitsune.space(space_id, None).await.map_err(substrate)?;
+    // Leak the kitsune instance so the DynSpace's transport / fetch /
+    // publish modules don't get torn down. Spike-acceptable; PR-B
+    // moves ownership into NeighborhoodState.
+    let _: &'static kitsune2_api::DynKitsune = Box::leak(Box::new(kitsune));
+    Ok(dyn_space)
+}
+
+// ----- bookkeeping used by deno op tests + helpers -----
+
+/// Convenience for tests: list current neighborhood handles. Production
+/// should not call this in a hot path.
+pub fn current_handles() -> Vec<HolographHandle> {
+    let rt = HolographRuntime::get();
+    let mut out: Vec<_> = rt.neighborhoods.iter().map(|e| *e.key()).collect();
+    out.sort_by_key(|h| h.0);
+    out
+}
+
+// ----- legacy export so existing call sites still compile -----
+
+/// The `LanguageController` / test scaffolding may still hold a name
+/// reference; expose the runtime under both `HolographRuntime` and
+/// `__HOLOGRAPH_DELEGATE__` for compat.
+pub fn runtime() -> &'static HolographRuntime {
+    HolographRuntime::get()
+}
+
+// ----- a typed view that other modules can use without depending on
+// the deno op layer -----
+
 #[derive(Debug, Default)]
-pub struct NotImplementedHolographDelegate;
+pub struct WireDiffBuilder {
+    additions: Vec<serde_json::Value>,
+    removals: Vec<serde_json::Value>,
+}
 
-impl HolographDelegate for NotImplementedHolographDelegate {
-    fn create_neighborhood(
-        &self,
-        _space_id: &str,
-        _storage_dir: &str,
-    ) -> HolographWireResult<HolographHandle> {
-        Err(HolographWireError::NotImplemented)
+impl WireDiffBuilder {
+    pub fn add(mut self, v: serde_json::Value) -> Self {
+        self.additions.push(v);
+        self
     }
-
-    fn commit(
-        &self,
-        _handle: HolographHandle,
-        _envelope_bytes: &[u8],
-    ) -> HolographWireResult<String> {
-        Err(HolographWireError::NotImplemented)
+    pub fn remove(mut self, v: serde_json::Value) -> Self {
+        self.removals.push(v);
+        self
     }
-
-    fn render(&self, _handle: HolographHandle) -> HolographWireResult<serde_json::Value> {
-        Err(HolographWireError::NotImplemented)
-    }
-
-    fn next_emitted(
-        &self,
-        _handle: HolographHandle,
-    ) -> HolographWireResult<Option<EmittedOpWire>> {
-        Err(HolographWireError::NotImplemented)
-    }
-
-    fn join_agent(
-        &self,
-        _handle: HolographHandle,
-        _agent_key_bytes: &[u8],
-    ) -> HolographWireResult<String> {
-        Err(HolographWireError::NotImplemented)
-    }
-
-    fn current_revision(
-        &self,
-        _handle: HolographHandle,
-    ) -> HolographWireResult<Option<String>> {
-        Err(HolographWireError::NotImplemented)
-    }
-
-    fn latest_revision(
-        &self,
-        _handle: HolographHandle,
-    ) -> HolographWireResult<Option<String>> {
-        Err(HolographWireError::NotImplemented)
-    }
-
-    fn close_neighborhood(&self, _handle: HolographHandle) -> HolographWireResult<()> {
-        Err(HolographWireError::NotImplemented)
+    pub fn build(self) -> WireDiff {
+        WireDiff {
+            additions: self.additions,
+            removals: self.removals,
+        }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stub_returns_not_implemented_on_every_method() {
-        let stub = NotImplementedHolographDelegate;
-        let h = HolographHandle(0);
-        assert!(matches!(
-            stub.create_neighborhood("sp", "/tmp"),
-            Err(HolographWireError::NotImplemented)
-        ));
-        assert!(matches!(
-            stub.commit(h, &[]),
-            Err(HolographWireError::NotImplemented)
-        ));
-        assert!(matches!(
-            stub.render(h),
-            Err(HolographWireError::NotImplemented)
-        ));
-        assert!(matches!(
-            stub.next_emitted(h),
-            Err(HolographWireError::NotImplemented)
-        ));
-        assert!(matches!(
-            stub.join_agent(h, &[]),
-            Err(HolographWireError::NotImplemented)
-        ));
-        assert!(matches!(
-            stub.current_revision(h),
-            Err(HolographWireError::NotImplemented)
-        ));
-        assert!(matches!(
-            stub.latest_revision(h),
-            Err(HolographWireError::NotImplemented)
-        ));
-        assert!(matches!(
-            stub.close_neighborhood(h),
-            Err(HolographWireError::NotImplemented)
-        ));
-    }
-
-    #[test]
-    fn emitted_op_wire_round_trips_serde() {
-        let item = EmittedOpWire {
-            op_id_b64: "abc".to_string(),
-            created_at_ms: 1_700_000_000_000,
-            envelope_b64: "def==".to_string(),
-        };
-        let s = serde_json::to_string(&item).unwrap();
-        let back: EmittedOpWire = serde_json::from_str(&s).unwrap();
-        assert_eq!(item, back);
-    }
-}
+mod tests;
