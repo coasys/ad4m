@@ -194,7 +194,11 @@ function createHolographDelegate(languageAddress) {
             handle = await globalThis.HOLOGRAPH_SERVICE.createNeighborhood(spaceId, storageDir);
             return handle;
         },
-        async commit(diff) {
+        // host.js's `holographCommit(handle, diff)` forwards both args
+        // for the raw-handle shape; this delegate uses its own captured
+        // handle (set by createNeighborhood). Accept the extra handle
+        // positionally so `diff` lands in the right slot.
+        async commit(_handleArg, diff) {
             if (handle == null) {
                 throw new Error(
                     `[${languageAddress}] holograph: commit called before createNeighborhood`
@@ -202,27 +206,30 @@ function createHolographDelegate(languageAddress) {
             }
             return await globalThis.HOLOGRAPH_SERVICE.commit(handle, diff);
         },
-        async render() {
+        // For all single-handle methods host.js passes (handle); we
+        // accept the positional arg but use the captured handle as
+        // source of truth. Multi-arg methods (joinAgent) likewise.
+        async render(_handleArg) {
             if (handle == null) return { links: [] };
             return await globalThis.HOLOGRAPH_SERVICE.render(handle);
         },
-        async nextEmitted() {
+        async nextEmitted(_handleArg) {
             if (handle == null) return null;
             return await globalThis.HOLOGRAPH_SERVICE.nextEmitted(handle);
         },
-        async joinAgent(agentKeyB64) {
+        async joinAgent(_handleArg, agentKeyB64) {
             if (handle == null) return null;
             return await globalThis.HOLOGRAPH_SERVICE.joinAgent(handle, agentKeyB64);
         },
-        async currentRevision() {
+        async currentRevision(_handleArg) {
             if (handle == null) return null;
             return await globalThis.HOLOGRAPH_SERVICE.currentRevision(handle);
         },
-        async latestRevision() {
+        async latestRevision(_handleArg) {
             if (handle == null) return null;
             return await globalThis.HOLOGRAPH_SERVICE.latestRevision(handle);
         },
-        async closeNeighborhood() {
+        async closeNeighborhood(_handleArg) {
             if (handle == null) return;
             const h = handle;
             handle = null;

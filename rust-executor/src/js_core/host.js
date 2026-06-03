@@ -432,8 +432,8 @@ function holographDelegate() {
 export function holographCreateNeighborhood(spaceId, storageDir) {
     return holographDelegate().createNeighborhood(spaceId, storageDir);
 }
-export function holographCommit(handle, envelopeB64) {
-    return holographDelegate().commit(handle, envelopeB64);
+export function holographCommit(handle, diff) {
+    return holographDelegate().commit(handle, diff);
 }
 export function holographRender(handle) {
     return holographDelegate().render(handle);
