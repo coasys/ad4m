@@ -54,7 +54,12 @@ type Hash = HoloHash<hash_type::Action>;
 /// Tag bytes appended to a SHA-256 digest to produce a 36-byte
 /// `HoloHash<Action>`-shaped value. Matches `MockPerspectiveGraph`'s
 /// scheme (its `create_entry` does the same) so test fixtures map 1:1.
-const HASH_TAG: [u8; 4] = [0xdb, 0xdb, 0xdb, 0xdb];
+///
+/// Wake-19 E2: this is now an alias for
+/// `envelope::ANCESTRY_OP_TAG` — Head ops use `envelope::HEAD_OP_TAG`
+/// so the loc-callback can route by trailer without decoding the
+/// payload.
+const HASH_TAG: [u8; 4] = crate::envelope::ANCESTRY_OP_TAG;
 
 /// The process-global registered state. Installed once at substrate
 /// construction time (Step 4 will wire `HolographSpace` to call this);
@@ -133,14 +138,24 @@ impl KitsuneRetreiverState {
 }
 
 /// Holochain-style 36-byte hash over `bytes` (SHA-256 + 4 tag bytes).
-fn hash_bytes(bytes: &[u8]) -> [u8; 36] {
+///
+/// Wake-19 E2 — the trailing 4 bytes are picked from
+/// `envelope::ANCESTRY_OP_TAG` / `HEAD_OP_TAG` so the K2
+/// `loc_callback` can route an op without decoding the envelope.
+fn hash_bytes_with_tag(bytes: &[u8], tag: [u8; 4]) -> [u8; 36] {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let digest = hasher.finalize();
     let mut out = [0u8; 36];
     out[..32].copy_from_slice(&digest);
-    out[32..].copy_from_slice(&HASH_TAG);
+    out[32..].copy_from_slice(&tag);
     out
+}
+
+/// Legacy entry-point — Ancestry tag. Kept for the `create_entry`
+/// path which still hashes raw integrity payload bytes.
+fn hash_bytes(bytes: &[u8]) -> [u8; 36] {
+    hash_bytes_with_tag(bytes, HASH_TAG)
 }
 
 fn hash_to_op_id(hash: &Hash) -> OpId {
@@ -153,14 +168,31 @@ fn op_id_to_hash(op_id: &OpId) -> Hash {
 }
 
 /// The envelope decoder Holograph spaces install on their `KvOpStore`.
-/// op_id is `sha256(envelope.payload) || [0xdb;4]` so the same payload
-/// always hashes to the same id — matches `create_entry`'s hashing.
-/// Timestamp is read from the envelope's `created_at_micros` field.
+///
+/// Wake-19 E2: op-id derivation now depends on `env.op_class`.
+///
+/// - **Ancestry**: `sha256(env.payload) || ANCESTRY_OP_TAG ([0xdb;4])`.
+///   This is byte-stable with the pre-Wake-19 derivation so existing
+///   ops keep the same op-id across the upgrade.
+/// - **Head**: `sha256(envelope_bytes) || HEAD_OP_TAG ([0xa1;4])` —
+///   hashes the *whole envelope* so distinct Head ops (same target
+///   ancestry, different author / timestamp) get distinct op-ids.
+///   The `HEAD_OP_TAG` trailer is what the loc-callback inspects
+///   to route Head ops to the fixed sector.
+///
+/// Timestamp is read from `env.created_at_micros` unchanged.
 pub fn holograph_envelope_decoder() -> EnvelopeDecoder {
     Arc::new(|bytes: &[u8]| -> Result<(OpId, Timestamp), K2Error> {
         let env =
             OpEnvelope::decode(bytes).map_err(|e| K2Error::other_src("decode envelope", e))?;
-        let id_bytes = hash_bytes(env.payload.as_ref());
+        let id_bytes = match env.op_class {
+            crate::envelope::OpClass::Ancestry => {
+                hash_bytes_with_tag(env.payload.as_ref(), crate::envelope::ANCESTRY_OP_TAG)
+            }
+            crate::envelope::OpClass::Head => {
+                hash_bytes_with_tag(bytes, crate::envelope::HEAD_OP_TAG)
+            }
+        };
         let op_id = OpId::from(Bytes::copy_from_slice(&id_bytes));
         let ts = Timestamp::from_micros(env.created_at_micros);
         Ok((op_id, ts))

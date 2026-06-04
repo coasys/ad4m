@@ -64,6 +64,41 @@ pub const ANCESTRY_OP_TAG: [u8; 4] = [0xdb, 0xdb, 0xdb, 0xdb];
 /// relies on the value.
 pub const HEAD_OP_TAG: [u8; 4] = [0xa1, 0xa1, 0xa1, 0xa1];
 
+/// Wake-19 E2 — `OpId::set_loc_callback` impl. Routes Head ops to
+/// the fixed loc-0 sector (so every peer whose arc covers loc=0
+/// replicates them) and falls back to K2's default xor-fold for
+/// Ancestry ops (whose loc spreads across the ring naturally).
+///
+/// LocCb signature is `fn(&Bytes) -> u32`. It only ever sees the
+/// raw op-id bytes — not the envelope payload — so the routing
+/// decision has to be encoded in the op-id trailer. Op-ids are
+/// 36 bytes (`SHA-256 + 4-byte tag`); we read bytes 32..36.
+pub fn holograph_loc_callback(op_id_bytes: &bytes::Bytes) -> u32 {
+    if op_id_bytes.len() >= 36 && op_id_bytes[32..36] == HEAD_OP_TAG {
+        // Head ops live in the fixed loc-0 sector.
+        return 0;
+    }
+    // Default xor-fold (matches K2's `default_loc`). Reimplemented
+    // here so we don't have to reach into a `pub(crate)` symbol from
+    // the K2 api crate.
+    let mut out = [0u8; 4];
+    for (i, b) in op_id_bytes.iter().enumerate() {
+        out[i % 4] ^= b;
+    }
+    u32::from_le_bytes(out)
+}
+
+/// Install the holograph loc-callback into K2. Safe to call multiple
+/// times (subsequent calls are no-ops; K2's `set_loc_callback` is a
+/// one-shot OnceLock setter).
+///
+/// Returns `true` if this call won the OnceLock race (i.e., the
+/// callback was just installed by us), `false` if K2 already had a
+/// callback set — including by a previous call to this very function.
+pub fn install_loc_callback() -> bool {
+    kitsune2_api::OpId::set_loc_callback(holograph_loc_callback)
+}
+
 /// Errors that can come out of envelope encode/decode.
 #[derive(Debug, Error)]
 pub enum EnvelopeError {
@@ -357,6 +392,36 @@ mod tests {
              a divergence here means existing op-ids will change after \
              upgrading."
         );
+    }
+
+    /// Wake-19 E2 — `holograph_loc_callback` routes Head-tagged op-ids
+    /// to loc=0 and falls through to the default xor-fold otherwise.
+    #[test]
+    fn loc_callback_routes_head_to_zero() {
+        // Build an op-id whose trailing 4 bytes match `HEAD_OP_TAG`.
+        let mut head_bytes = vec![0u8; 36];
+        head_bytes[..32].copy_from_slice(&[7u8; 32]);
+        head_bytes[32..].copy_from_slice(&HEAD_OP_TAG);
+        let head_loc = holograph_loc_callback(&Bytes::from(head_bytes));
+        assert_eq!(head_loc, 0, "Head ops route to loc=0");
+
+        // Same payload bytes, Ancestry tag — should NOT be loc=0.
+        let mut anc_bytes = vec![0u8; 36];
+        anc_bytes[..32].copy_from_slice(&[7u8; 32]);
+        anc_bytes[32..].copy_from_slice(&ANCESTRY_OP_TAG);
+        let anc_loc = holograph_loc_callback(&Bytes::from(anc_bytes.clone()));
+        assert_ne!(
+            anc_loc, 0,
+            "Ancestry ops fall through to xor-fold, which for non-zero \
+             input shouldn't collide with 0"
+        );
+
+        // Sanity: xor-fold matches K2's default impl.
+        let mut expected = [0u8; 4];
+        for (i, b) in anc_bytes.iter().enumerate() {
+            expected[i % 4] ^= b;
+        }
+        assert_eq!(anc_loc, u32::from_le_bytes(expected));
     }
 
     /// Wake-19 E1 — a Head envelope round-trips with `head_pointer`

@@ -201,6 +201,21 @@ impl std::fmt::Debug for HolographRuntime {
 }
 
 static HOLOGRAPH_RUNTIME: Lazy<HolographRuntime> = Lazy::new(|| {
+    // Wake-19 E2: install the holograph loc-callback once, before any
+    // K2 space is constructed. Idempotent: if K2 already locked in
+    // its default (e.g., because another path called `OpId::loc()`
+    // before we got here), this returns false and we log a warning;
+    // K2's API gives us no way to unlock + replace.
+    if !holograph::install_loc_callback() {
+        tracing::warn!(
+            target: "holograph",
+            "OpId::set_loc_callback returned false — K2 OpId loc already \
+             initialised before holograph could install its callback. Head \
+             ops will route via the default xor-fold instead of fixed loc=0. \
+             Sharded-mode replication of Heads will be wrong; v1 FULL-arc \
+             setups are unaffected."
+        );
+    }
     let runtime = Runtime::new()
         .or_else(|_| {
             tokio::runtime::Builder::new_multi_thread()

@@ -19,7 +19,10 @@ pub mod space;
 pub use config::{
     resolve_iroh_relay, ArcPolicy, FetchFallbackPolicy, LocFnPolicy, SpaceConfig, ValidationRegime,
 };
-pub use envelope::{EnvelopeError, OpEnvelope};
+pub use envelope::{
+    holograph_loc_callback, install_loc_callback, EnvelopeError, OpClass, OpEnvelope,
+    ANCESTRY_OP_TAG, HEAD_OP_TAG,
+};
 pub use integration_queue::{
     AlwaysValid, HolographIntegrationQueue, IntegrationQueueConfig, NotifyUp, OpFetcher,
     PeerPicker, SigVerifier,
