@@ -6139,10 +6139,13 @@ mod tests {
             .await
             .expect("add TaskBoard");
 
-        let board = "literal:string:test_board";
-        let active1 = "literal:string:active1";
-        let active2 = "literal:string:active2";
-        let done1 = "literal:string:done1";
+        // IDs used in subject position must be real IRIs — typed-literal
+        // storage strips `literal:string:` wrappers from object position, so
+        // a value used as both subject and target wouldn't round-trip.
+        let board = "ad4m://test_board";
+        let active1 = "ad4m://active1";
+        let active2 = "ad4m://active2";
+        let done1 = "ad4m://done1";
         let signed_active = "literal:string:active";
         let signed_done = "literal:string:done";
         let signed_title = "literal:string:t";
@@ -6255,13 +6258,16 @@ mod tests {
             .await
             .expect("add_sdna");
 
-        let post_root = "literal:string:test_post_root";
-        let parent_root = "literal:string:test_parent_root";
+        // `literal:string:` URIs are wire-format encodings of typed string
+        // values; round-tripping them through typed-literal storage
+        // re-encodes `_` as `%5F` per `literal_encode`'s canonical output.
+        let post_root = "literal:string:test%5Fpost%5Froot";
+        let parent_root = "literal:string:test%5Fparent%5Froot";
 
         // Title link makes the post a BlogPost instance (structural conformance)
         for (src, pred, tgt) in &[
-            (post_root, "blog://title", "literal:string:my_post"),
-            (parent_root, "blog://title", "literal:string:my_parent"),
+            (post_root, "blog://title", "literal:string:my%5Fpost"),
+            (parent_root, "blog://title", "literal:string:my%5Fparent"),
             (post_root, "blog://reply_to", parent_root),
         ] {
             let link = DecoratedLinkExpression {
