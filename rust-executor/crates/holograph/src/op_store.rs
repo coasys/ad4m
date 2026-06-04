@@ -334,6 +334,17 @@ impl KvOpStore {
         self.current_heads.len() as u64
     }
 
+    /// Synchronously read the raw envelope bytes for `op_id` from the
+    /// sled `ops` tree, or `None` if not present. Used by the head
+    /// dominance walk to find an Ancestry op's parents without going
+    /// through the async OpStore trait.
+    pub fn get_op_bytes_blocking(&self, op_id: &OpId) -> Option<Bytes> {
+        let key = opid_bytes(op_id);
+        let v = self.ops.get(&key).ok().flatten()?;
+        let rec: OpRecord = ciborium::from_reader(v.as_ref()).ok()?;
+        Some(Bytes::from(rec.op_data))
+    }
+
     fn target_arc(&self) -> DhtArc {
         self.arc_policy.target_arc()
     }

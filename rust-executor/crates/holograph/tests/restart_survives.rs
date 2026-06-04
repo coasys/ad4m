@@ -153,7 +153,13 @@ async fn restart_survives_state_100_ops_3_agents() {
             all_ids.push(op_id);
             all_bytes.push(bytes);
         }
-        assert_eq!(space.op_count(), 100, "all 100 ops persisted in phase 1");
+        // Wake-19 E4: each Ancestry commit auto-publishes a matching
+        // Head, doubling the op count to 200.
+        assert_eq!(
+            space.op_count(),
+            200,
+            "100 Ancestry + 100 auto-Head ops persisted in phase 1"
+        );
 
         // Phase 2: graceful shutdown drains + flushes.
         let remaining = space.shutdown().await.expect("shutdown");
@@ -174,8 +180,8 @@ async fn restart_survives_state_100_ops_3_agents() {
 
     assert_eq!(
         reopened.op_count_blocking(),
-        100,
-        "all 100 ops still present after restart"
+        200,
+        "all 200 ops (100 Ancestry + 100 Head) still present after restart"
     );
 
     // Spot-check every op individually: retrieve_ops round-trips bytes.
