@@ -17,7 +17,10 @@ use serde_json::Value;
 ///
 /// Uses `NON_ALPHANUMERIC` percent-encoding, matching `literal_encode` in
 /// `languages/literal.rs`.  `urlencoding::encode` uses RFC 3986 unreserved
-/// chars (keeps `.-_~`), which diverges from the storage encoding.
+/// chars (keeps `.-_~`), which diverges from the storage encoding.  Kept
+/// around for integration tests that synthesise wire-form targets directly;
+/// production code now uses typed-literal storage.
+#[allow(dead_code)]
 pub(super) fn literal_percent_encode(s: &str) -> String {
     utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
 }

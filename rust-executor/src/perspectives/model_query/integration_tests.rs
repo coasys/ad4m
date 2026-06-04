@@ -461,21 +461,23 @@ async fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
         .unwrap();
 
     // Child via shared predicate
+    let shared_child_iri = signed_literal("shared_child");
     store
         .add_link(&make_link(
             parent,
             "test://has_child",
-            "literal:string:shared_child",
+            &shared_child_iri,
             "1700000000001",
         ))
         .unwrap();
 
     // Child via unique predicate
+    let special_child_iri = signed_literal("special_child");
     store
         .add_link(&make_link(
             parent,
             "test://has_special",
-            "literal:string:special_child",
+            &special_child_iri,
             "1700000000002",
         ))
         .unwrap();
@@ -523,9 +525,9 @@ async fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
     assert_eq!(beta.len(), 1, "beta should have 1 child");
     assert_eq!(special.len(), 1, "special should have 1 child");
 
-    assert_eq!(alpha[0].as_str().unwrap(), "literal:string:shared_child");
-    assert_eq!(beta[0].as_str().unwrap(), "literal:string:shared_child");
-    assert_eq!(special[0].as_str().unwrap(), "literal:string:special_child");
+    assert_eq!(alpha[0].as_str().unwrap(), shared_child_iri);
+    assert_eq!(beta[0].as_str().unwrap(), shared_child_iri);
+    assert_eq!(special[0].as_str().unwrap(), special_child_iri);
 }
 
 // --- IncludeProjection helpers ---
@@ -601,7 +603,7 @@ async fn test_build_projection_where_patterns_with_target_shape() {
     );
     assert!(
         patterns.contains("FILTER"),
-        "expected FILTER with fn/parse_literal, got: {patterns}"
+        "expected FILTER on STR(?var), got: {patterns}"
     );
 }
 
@@ -1120,10 +1122,13 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
     let store = SparqlStore::new(None).unwrap();
     let ts = "2024-01-01T00:00:00Z";
 
-    let board = "literal:string:board1";
-    let task1 = "literal:string:task-active-1";
-    let task2 = "literal:string:task-active-2";
-    let task3 = "literal:string:task-done";
+    // Use real IRI shapes for instance IDs — `literal:string:` is a wire
+    // encoding for typed-literal *values*, not for identifiers, so a value
+    // used as a triple subject must be a real IRI.
+    let board = "ad4m://board1";
+    let task1 = "ad4m://task-active-1";
+    let task2 = "ad4m://task-active-2";
+    let task3 = "ad4m://task-done";
 
     // Board -> Task links
     store
@@ -3392,8 +3397,11 @@ async fn test_legacy_envelope_migrated_then_paginate_count() {
         store
             .add_link(&make_link(uri, "ns://type", "ns://task", &ts))
             .unwrap();
+        // Bypass the typed-literal translation so the envelope-shaped target
+        // lands as a NamedNode IRI — the only shape the v3 migration looks
+        // for.  Simulates data written by pre-typed-literal builds.
         store
-            .add_link(&make_link(
+            .add_link_with_raw_iri_target(&make_link(
                 uri,
                 "ns://status",
                 &legacy_envelope_literal(status),
@@ -3401,7 +3409,7 @@ async fn test_legacy_envelope_migrated_then_paginate_count() {
             ))
             .unwrap();
         store
-            .add_link(&make_link(
+            .add_link_with_raw_iri_target(&make_link(
                 uri,
                 "ns://name",
                 &legacy_envelope_literal(name),
@@ -3506,7 +3514,7 @@ async fn test_legacy_envelope_migrated_then_paginate_count() {
 
 /// Mixed envelope-form and plain-form rows in the same store all become
 /// queryable after one migration pass, including via the `contains` filter
-/// (which still routes through `fn/parse_literal`).
+/// (which runs natively over typed-literal storage).
 #[tokio::test]
 async fn test_legacy_mixed_migrated_then_contains() {
     let store = SparqlStore::new(None).unwrap();
@@ -3540,7 +3548,7 @@ async fn test_legacy_mixed_migrated_then_contains() {
         ))
         .unwrap();
     store
-        .add_link(&make_link(
+        .add_link_with_raw_iri_target(&make_link(
             "test://new",
             "ns://body",
             &legacy_envelope_literal("hello signed"),
@@ -3561,8 +3569,8 @@ async fn test_legacy_mixed_migrated_then_contains() {
         "relations": {}
     }"#;
 
-    // Query with contains "hello" — `contains` still uses fn/parse_literal, so
-    // it works against the plain-literal form post-migration.
+    // Query with contains "hello" — `contains` uses STR(?val) over the typed
+    // literal directly, so it works against the post-migration storage form.
     let mut wc = BTreeMap::new();
     wc.insert(
         "body".to_string(),
@@ -3706,11 +3714,11 @@ async fn test_plain_literal_where_paginate_count() {
     assert_eq!(result2.instances[0]["name"].as_str().unwrap(), "Delta");
 }
 
-/// Guards that the `contains` filter — which can't reduce to a direct IRI
-/// equality and so still goes through `fn/parse_literal` for substring
-/// semantics — keeps matching plain `literal:string:` targets correctly.
+/// Guards that the `contains` filter — which doesn't reduce to a direct
+/// equality lookup — keeps matching plain literal targets correctly.  Now
+/// runs as `CONTAINS(LCASE(STR(?val)), …)` over the typed literal directly.
 #[tokio::test]
-async fn test_plain_literal_contains_works_on_fn_parse_literal_path() {
+async fn test_plain_literal_contains_filter() {
     let store = SparqlStore::new(None).unwrap();
     let ts_base = 1700000000000i64;
 
@@ -4253,8 +4261,9 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
     //   }
     // where signalTypeId is a @Property stored via literal_encode, and the WHERE
     // filter value is the plain decoded form (what the TS caller passes).
-    // The fn/parse_literal FILTER decodes the stored literal:string:X IRI back to "X"
-    // for comparison — so caller passes "like_type_id123", not "literal:string:like_type_id123".
+    // The WHERE builder emits a typed-literal match (`"X"^^xsd:string`) for
+    // the stored value — so caller passes "like_type_id123", not
+    // "literal:string:like_type_id123".
     let store = SparqlStore::new(None).unwrap();
 
     let parent_a = "test://parent/a";
@@ -4329,8 +4338,8 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
     };
     resolver.register("Signal", signal_shape);
 
-    // Filter passes the plain decoded value — fn/parse_literal in SPARQL decodes
-    // the stored literal:string:like_type_id123 IRI back to "like_type_id123".
+    // Filter passes the plain decoded value — the WHERE builder emits a
+    // typed-literal match against the storage form `"like_type_id123"^^xsd:string`.
     let mut wc = BTreeMap::new();
     wc.insert(
         "signalTypeId".to_string(),
@@ -4388,115 +4397,3 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
     );
 }
 
-// -----------------------------------------------------------------------------
-// Indexed-WHERE benchmark
-// -----------------------------------------------------------------------------
-//
-// `cargo test --release --lib perspectives::model_query::integration_tests::bench`
-//
-// Compares two equivalent SPARQL queries against the same `literal:string:`
-// data: an indexed direct-IRI probe vs. a `fn/parse_literal`-wrapped FILTER.
-// The former is what the WHERE builders now emit; the latter is the shape
-// they emitted before. Both queries find the same rows; the difference is
-// whether Oxigraph's planner can use the POS index.
-
-#[test]
-fn bench_indexed_iri_vs_fn_parse_literal_filter() {
-    use std::time::Instant;
-
-    // Skip in debug builds — comparing per-row function call to an index probe
-    // is meaningless without optimisations.
-    if cfg!(debug_assertions) {
-        eprintln!("(bench skipped — run with --release)");
-        return;
-    }
-
-    // Toggle scale with WT_BENCH_LINKS; 10k by default.
-    let n_links: usize = std::env::var("WT_BENCH_LINKS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10_000);
-
-    let store = SparqlStore::new(None).unwrap();
-    let pred = "ns://body";
-    let target_value = "needle";
-    let stored_target = format!("literal:string:{}", literal_percent_encode(target_value));
-
-    // Seed N rows; only the last carries the matching target.
-    let needle_idx = n_links - 1;
-    for i in 0..n_links {
-        let source = format!("test://row/{i}");
-        store
-            .add_link(&make_link(
-                &source,
-                "ns://type",
-                "ns://row",
-                &format!("{}", 1_700_000_000_000_i64 + i as i64),
-            ))
-            .unwrap();
-        let target = if i == needle_idx {
-            stored_target.clone()
-        } else {
-            format!(
-                "literal:string:{}",
-                literal_percent_encode(&format!("row-{i}"))
-            )
-        };
-        store
-            .add_link(&make_link(
-                &source,
-                pred,
-                &target,
-                &format!("{}", 1_700_000_000_000_i64 + i as i64),
-            ))
-            .unwrap();
-    }
-
-    let indexed = format!("SELECT ?source WHERE {{ ?source <{pred}> <{stored_target}> . }}");
-    let filtered = format!(
-        "SELECT ?source WHERE {{ \
-            ?source <{pred}> ?t . \
-            FILTER(STR(<ad4m://fn/parse_literal>(?t)) = \"{target_value}\") \
-        }}"
-    );
-
-    // Warm-up — touch every triple under both query plans before timing.
-    let _ = store.query(&indexed).unwrap();
-    let _ = store.query(&filtered).unwrap();
-
-    let runs = 5;
-    let mut indexed_total = std::time::Duration::ZERO;
-    let mut filtered_total = std::time::Duration::ZERO;
-    let expected = format!("test://row/{needle_idx}");
-
-    for _ in 0..runs {
-        let start = Instant::now();
-        let r = store.query(&indexed).unwrap();
-        indexed_total += start.elapsed();
-        let rows: Vec<Value> = serde_json::from_str(&r).unwrap();
-        assert_eq!(rows.len(), 1, "indexed query must return exactly 1 row");
-        assert_eq!(
-            rows[0]["source"].as_str(),
-            Some(expected.as_str()),
-            "indexed query must return only the needle source",
-        );
-
-        let start = Instant::now();
-        let r = store.query(&filtered).unwrap();
-        filtered_total += start.elapsed();
-        let rows: Vec<Value> = serde_json::from_str(&r).unwrap();
-        assert_eq!(rows.len(), 1, "filtered query must return exactly 1 row");
-        assert_eq!(
-            rows[0]["source"].as_str(),
-            Some(expected.as_str()),
-            "filtered query must return only the needle source",
-        );
-    }
-
-    let indexed_us = (indexed_total.as_secs_f64() * 1_000_000.0) / runs as f64;
-    let filtered_us = (filtered_total.as_secs_f64() * 1_000_000.0) / runs as f64;
-    let speedup = filtered_us / indexed_us;
-    eprintln!(
-        "[bench] n={n_links}  indexed={indexed_us:.1}µs  fn_parse_literal_filter={filtered_us:.1}µs  speedup={speedup:.1}x"
-    );
-}
