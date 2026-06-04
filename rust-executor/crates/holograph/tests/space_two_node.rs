@@ -23,8 +23,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use kitsune2_api::{
-    BoxFut, Builder, Config, DhtArc, DynKitsuneHandler, DynLocalAgent, DynOpStore,
-    DynSpaceHandler, K2Error, K2Result, KitsuneHandler, OpStoreFactory, SpaceId, Timestamp, Url,
+    BoxFut, Builder, Config, DhtArc, DynKitsuneHandler, DynLocalAgent, DynOpStore, DynSpaceHandler,
+    K2Error, K2Result, KitsuneHandler, OpStoreFactory, SpaceId, Timestamp, Url,
 };
 use kitsune2_core::default_test_builder;
 use kitsune2_test_utils::agent::{AgentBuilder, TestLocalAgent, TestVerifier};
@@ -41,18 +41,20 @@ use holograph::{
 /// decoder in `retriever_kitsune`.
 fn envelope_decoder() -> EnvelopeDecoder {
     use sha2::{Digest, Sha256};
-    Arc::new(|bytes: &[u8]| -> Result<(kitsune2_api::OpId, Timestamp), K2Error> {
-        let env = OpEnvelope::decode(bytes).map_err(|e| K2Error::other_src("decode", e))?;
-        let mut hasher = Sha256::new();
-        hasher.update(env.payload.as_ref());
-        let digest = hasher.finalize();
-        let mut id_bytes = [0u8; 36];
-        id_bytes[..32].copy_from_slice(&digest);
-        id_bytes[32..].copy_from_slice(&[0xdb, 0xdb, 0xdb, 0xdb]);
-        let op_id = kitsune2_api::OpId::from(Bytes::copy_from_slice(&id_bytes));
-        let ts = Timestamp::from_micros(env.created_at_micros);
-        Ok((op_id, ts))
-    })
+    Arc::new(
+        |bytes: &[u8]| -> Result<(kitsune2_api::OpId, Timestamp), K2Error> {
+            let env = OpEnvelope::decode(bytes).map_err(|e| K2Error::other_src("decode", e))?;
+            let mut hasher = Sha256::new();
+            hasher.update(env.payload.as_ref());
+            let digest = hasher.finalize();
+            let mut id_bytes = [0u8; 36];
+            id_bytes[..32].copy_from_slice(&digest);
+            id_bytes[32..].copy_from_slice(&[0xdb, 0xdb, 0xdb, 0xdb]);
+            let op_id = kitsune2_api::OpId::from(Bytes::copy_from_slice(&id_bytes));
+            let ts = Timestamp::from_micros(env.created_at_micros);
+            Ok((op_id, ts))
+        },
+    )
 }
 
 fn make_envelope(payload: &[u8], parents: Vec<kitsune2_api::OpId>) -> (Bytes, kitsune2_api::OpId) {
@@ -168,8 +170,7 @@ async fn build_node(name: &'static str) -> Node {
     let pending_db = sled::open(dir.path().join("pending")).unwrap();
     let pending = pending_db.open_tree(b"pending").unwrap();
 
-    let shim_slot: Arc<StdMutex<Option<Arc<K2OpStoreShim>>>> =
-        Arc::new(StdMutex::new(None));
+    let shim_slot: Arc<StdMutex<Option<Arc<K2OpStoreShim>>>> = Arc::new(StdMutex::new(None));
 
     let (handler, _telepresence_rx) = HolographSpaceHandler::new();
     let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel::<Url>();
@@ -288,12 +289,7 @@ async fn wait_for_emit(
                 tracing::debug!(node = node.name, "unrelated emit, continuing");
             }
             Ok(None) => return Err(format!("{}: notifier channel closed", node.name)),
-            Err(_) => {
-                return Err(format!(
-                    "{}: timeout waiting for op-id emit",
-                    node.name
-                ))
-            }
+            Err(_) => return Err(format!("{}: timeout waiting for op-id emit", node.name)),
         }
     }
 }
