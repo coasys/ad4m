@@ -6,6 +6,7 @@
 //! coercion helpers used by the filtering engine.
 
 use deno_core::anyhow::{anyhow, Error};
+#[cfg(test)]
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde_json::Value;
 
@@ -13,14 +14,13 @@ use serde_json::Value;
 // SPARQL injection prevention helpers
 // ---------------------------------------------------------------------------
 
-/// Encode a string for use in a `literal:string:…` IRI.
-///
-/// Uses `NON_ALPHANUMERIC` percent-encoding, matching `literal_encode` in
-/// `languages/literal.rs`.  `urlencoding::encode` uses RFC 3986 unreserved
-/// chars (keeps `.-_~`), which diverges from the storage encoding.  Kept
-/// around for integration tests that synthesise wire-form targets directly;
-/// production code now uses typed-literal storage.
-#[allow(dead_code)]
+/// Encode a string for use in a `literal:string:…` IRI, using
+/// `NON_ALPHANUMERIC` percent-encoding to match `literal_encode` in
+/// `languages/literal.rs`. (`urlencoding::encode` keeps RFC 3986's
+/// `.-_~`, which diverges from the storage encoding.) Test-only —
+/// production paths construct typed RDF literals instead of synthesising
+/// the URI form by hand.
+#[cfg(test)]
 pub(super) fn literal_percent_encode(s: &str) -> String {
     utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
 }
