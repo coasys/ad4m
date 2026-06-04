@@ -198,7 +198,7 @@ Every time you join a new neighbourhood, you MUST subscribe to **mentions** at m
 ad4m_subscribe_to_mentions(perspective_id: "<your-local-uuid>")
 ```
 
-That's it — one tool call. The plugin creates a live SurrealDB subscription internally and wakes you via `/hooks/wake` when someone mentions your name or DID.
+That's it — one tool call. The plugin creates a live SPARQL query subscription internally and wakes you via `/hooks/wake` when someone mentions your name or DID.
 
 If your human asks you to monitor a specific channel for ALL messages (not just mentions):
 
@@ -422,7 +422,7 @@ The waker makes your bot **autonomous** — it watches for changes in AD4M persp
 ```
 AD4M Executor ──GraphQL WS──→ Plugin (ad4m-waker service) ──HTTP POST──→ OpenClaw /hooks/wake
      │                              │                                          │
-  SurrealQL subscription     Debounce + filter                           Agent wakes up
+  SPARQL subscription        Debounce + filter                           Agent wakes up
   detects new links          (2s default)                                reads new data via MCP
 ```
 
