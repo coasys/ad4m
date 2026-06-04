@@ -121,10 +121,29 @@ pub(super) fn strip_trailing_limit(query: &str) -> String {
     trimmed.to_string()
 }
 
+/// Extract the body of an ASK getter (between the outermost `{` and `}`),
+/// replacing the `<Base>` placeholder with `?source` so the body can be
+/// inlined under a parent query that binds `?source` itself.  Returns
+/// `None` if the getter doesn't contain a balanced `{...}` pair.
+pub(super) fn extract_ask_body(ask: &str) -> Option<String> {
+    let normalized = ask.replace("<Base>", "?source");
+    let open = normalized.find('{')?;
+    let close = normalized.rfind('}')?;
+    if close <= open {
+        return None;
+    }
+    Some(normalized[open + 1..close].trim().to_string())
+}
+
 /// Convert an `ASK` getter to a batched `SELECT` returning matching source IRIs.
 ///
 /// Replaces `<Base>` with `?source`, extracts the body between `{ }`, and
 /// wraps it in `SELECT ?source WHERE { VALUES ?source { ... } <body> }`.
+///
+/// Retained for backward compatibility and integration tests; the live
+/// query path now folds every ASK getter into a single fused SELECT via
+/// [`extract_ask_body`] and `BIND(EXISTS{...})`.
+#[allow(dead_code)]
 pub(super) fn convert_ask_to_batched_select(ask: &str, values_clause: &str) -> String {
     let normalized = ask.replace("<Base>", "?source");
     if let (Some(open), Some(close)) = (normalized.find('{'), normalized.rfind('}')) {
@@ -217,37 +236,110 @@ pub(super) fn evaluate_getters(
         instance_iris.len()
     );
 
+    // Fuse every ASK getter for this query into a single SELECT.  Each
+    // getter contributes a `BIND(EXISTS { <body> } AS ?_g_<i>)` column;
+    // the result has one row per VALUES'd source IRI with every getter's
+    // boolean answer.  Saves G-1 round trips when a shape declares
+    // multiple ASK getters.  SELECT getters fall through to their per-
+    // getter query because the multi-row binding shape can't be folded
+    // into the same fused query without join-explosion risk.
+    let mut ask_props: Vec<&ShapeProperty> = Vec::new();
+    let mut ask_bodies: Vec<String> = Vec::new();
     for prop in &getter_props {
         let getter = prop.getter.as_ref().unwrap();
-        let upper = getter.trim().to_uppercase();
+        if !getter.trim().to_uppercase().starts_with("ASK") {
+            continue;
+        }
+        let body = match extract_ask_body(getter) {
+            Some(b) => b,
+            None => continue,
+        };
+        ask_props.push(prop);
+        ask_bodies.push(body);
+    }
 
-        if upper.starts_with("ASK") {
-            let batched = convert_ask_to_batched_select(getter, &values_clause);
-            match store.query_values(&batched) {
-                Ok(rows) => {
-                    let matched: std::collections::HashSet<&str> = rows
-                        .iter()
-                        .filter_map(|row| row.get("source").and_then(|v| v.as_str()))
-                        .collect();
-                    for inst in instances.iter_mut() {
-                        let id_owned = inst
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        if let Some(id) = id_owned {
-                            if let Some(obj) = inst.as_object_mut() {
+    if !ask_props.is_empty() {
+        let mut binds = String::new();
+        for (i, body) in ask_bodies.iter().enumerate() {
+            binds.push_str(&format!(
+                "    BIND(EXISTS {{ {body} }} AS ?_g_{i})\n"
+            ));
+        }
+        let column_list: String = (0..ask_props.len())
+            .map(|i| format!("?_g_{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let fused = format!(
+            "SELECT ?source {column_list} WHERE {{\n    VALUES ?source {{ {values_clause} }}\n{binds}}}"
+        );
+
+        match store.query_values(&fused) {
+            Ok(rows) => {
+                // Bin rows by ?source so we can attach the result per
+                // instance.  When EXISTS evaluates inside a BIND under a
+                // VALUES-bound ?source, each source yields exactly one row.
+                let mut per_source: HashMap<String, Vec<Option<bool>>> = HashMap::new();
+                for row in &rows {
+                    let source = match row.get("source").and_then(|v| v.as_str()) {
+                        Some(s) => s.to_string(),
+                        None => continue,
+                    };
+                    let mut vals: Vec<Option<bool>> = Vec::with_capacity(ask_props.len());
+                    for i in 0..ask_props.len() {
+                        let key = format!("_g_{i}");
+                        // Oxigraph emits booleans as literal "true" / "false"
+                        // strings via the JSON serializer.
+                        let v = row.get(&key).and_then(|v| match v {
+                            Value::Bool(b) => Some(*b),
+                            Value::String(s) => match s.as_str() {
+                                "true" => Some(true),
+                                "false" => Some(false),
+                                _ => None,
+                            },
+                            _ => None,
+                        });
+                        vals.push(v);
+                    }
+                    per_source.insert(source, vals);
+                }
+                for inst in instances.iter_mut() {
+                    let id_owned = inst
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    if let Some(id) = id_owned {
+                        let vals = per_source.get(&id).cloned().unwrap_or_else(|| {
+                            vec![Some(false); ask_props.len()]
+                        });
+                        if let Some(obj) = inst.as_object_mut() {
+                            for (i, prop) in ask_props.iter().enumerate() {
                                 obj.insert(
                                     prop.name.clone(),
-                                    Value::Bool(matched.contains(id.as_str())),
+                                    Value::Bool(vals.get(i).copied().flatten().unwrap_or(false)),
                                 );
                             }
                         }
                     }
                 }
-                Err(e) => {
-                    log::warn!("Batched ASK getter failed for '{}': {}", prop.name, e);
-                }
             }
+            Err(e) => {
+                log::warn!(
+                    "Fused ASK-getter SPARQL failed ({} getters): {}",
+                    ask_props.len(),
+                    e
+                );
+            }
+        }
+    }
+
+    // Fall through to per-getter execution for SELECT getters; ASK getters
+    // were handled by the fused SELECT above and skip the loop below.
+    for prop in &getter_props {
+        let getter = prop.getter.as_ref().unwrap();
+        let upper = getter.trim().to_uppercase();
+
+        if upper.starts_with("ASK") {
+            continue;
         } else if upper.starts_with("SELECT") {
             let batched = inject_values_into_select(getter, &values_clause);
 
