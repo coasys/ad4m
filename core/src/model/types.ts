@@ -136,6 +136,24 @@ export type Query = {
    * queries where getter-backed properties are not needed.
    */
   deepQuery?: boolean;
+  /**
+   * When true (default), the main instance SPARQL joins each property triple
+   * against its RDF 1.2 reifier metadata so the result instances carry
+   * `author`, `createdAt`, `updatedAt`, and the executor can apply
+   * last-write-wins disambiguation on scalar properties.  Adds ~3.4x the
+   * per-row SPARQL cost on scan-all queries.
+   *
+   * When set to `false`, the executor:
+   *   - drops the reifier-metadata join entirely from both the Single and
+   *     TwoPhase property fetches,
+   *   - leaves `author`, `createdAt`, `updatedAt` unset on hydrated instances,
+   *   - degrades scalar-property hydration from last-write-wins-by-timestamp
+   *     to last-row-wins-by-insertion-order.
+   *
+   * Set to `false` on read-only / append-only call sites that don't surface
+   * link-level metadata in the UI.
+   */
+  withMetadata?: boolean;
 };
 
 /**
@@ -272,6 +290,7 @@ export type TypedRelationSubQuery<U extends Ad4mModel> = {
   include?: TypedIncludeMap<U>;
   limit?: number;
   offset?: number;
+  withMetadata?: boolean;
 };
 
 /** Projection — `from` must be a real relation on T; `where`/`order` constrained to that target.
@@ -333,6 +352,7 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   limit?: number;
   count?: boolean;
   deepQuery?: boolean;
+  withMetadata?: boolean;
 };
 
 export type TypedQuery<T extends Ad4mModel> =
