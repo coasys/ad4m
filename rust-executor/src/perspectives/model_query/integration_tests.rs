@@ -4392,3 +4392,95 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         "list with limit:1 should return the hydrated like signal id, got {got}"
     );
 }
+
+// -----------------------------------------------------------------------------
+// Indexed-WHERE benchmark
+// -----------------------------------------------------------------------------
+//
+// `cargo test --release --lib perspectives::model_query::integration_tests::bench`
+//
+// Compares two equivalent SPARQL queries against the same `literal:string:`
+// data: an indexed direct-IRI probe vs. a `fn/parse_literal`-wrapped FILTER.
+// The former is what the WHERE builders now emit; the latter is the shape
+// they emitted before. Both queries find the same rows; the difference is
+// whether Oxigraph's planner can use the POS index.
+
+#[test]
+fn bench_indexed_iri_vs_fn_parse_literal_filter() {
+    use std::time::Instant;
+
+    // Skip in debug builds — comparing per-row function call to an index probe
+    // is meaningless without optimisations.
+    if cfg!(debug_assertions) {
+        eprintln!("(bench skipped — run with --release)");
+        return;
+    }
+
+    // Toggle scale with WT_BENCH_LINKS; 10k by default.
+    let n_links: usize = std::env::var("WT_BENCH_LINKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10_000);
+
+    let store = SparqlStore::new(None).unwrap();
+    let pred = "ns://body";
+    let target_value = "needle";
+    let stored_target = format!(
+        "literal:string:{}",
+        literal_percent_encode(target_value)
+    );
+
+    // Seed N rows; only the last carries the matching target.
+    let needle_idx = n_links - 1;
+    for i in 0..n_links {
+        let source = format!("test://row/{i}");
+        store
+            .add_link(&make_link(&source, "ns://type", "ns://row", &format!("{}", 1_700_000_000_000_i64 + i as i64)))
+            .unwrap();
+        let target = if i == needle_idx {
+            stored_target.clone()
+        } else {
+            format!("literal:string:{}", literal_percent_encode(&format!("row-{i}")))
+        };
+        store
+            .add_link(&make_link(&source, pred, &target, &format!("{}", 1_700_000_000_000_i64 + i as i64)))
+            .unwrap();
+    }
+
+    let indexed = format!(
+        "SELECT ?source WHERE {{ ?source <{pred}> <{stored_target}> . }}"
+    );
+    let filtered = format!(
+        "SELECT ?source WHERE {{ \
+            ?source <{pred}> ?t . \
+            FILTER(STR(<ad4m://fn/parse_literal>(?t)) = \"{target_value}\") \
+        }}"
+    );
+
+    // Warm-up — touch every triple under both query plans before timing.
+    let _ = store.query(&indexed).unwrap();
+    let _ = store.query(&filtered).unwrap();
+
+    let runs = 5;
+    let mut indexed_total = std::time::Duration::ZERO;
+    let mut filtered_total = std::time::Duration::ZERO;
+
+    for _ in 0..runs {
+        let start = Instant::now();
+        let r = store.query(&indexed).unwrap();
+        indexed_total += start.elapsed();
+        assert!(r.contains(&format!("test://row/{needle_idx}")));
+
+        let start = Instant::now();
+        let r = store.query(&filtered).unwrap();
+        filtered_total += start.elapsed();
+        assert!(r.contains(&format!("test://row/{needle_idx}")));
+    }
+
+    let indexed_us = (indexed_total.as_secs_f64() * 1_000_000.0) / runs as f64;
+    let filtered_us = (filtered_total.as_secs_f64() * 1_000_000.0) / runs as f64;
+    let speedup = filtered_us / indexed_us;
+    eprintln!(
+        "[bench] n={n_links}  indexed={indexed_us:.1}µs  fn_parse_literal_filter={filtered_us:.1}µs  speedup={speedup:.1}x"
+    );
+}
