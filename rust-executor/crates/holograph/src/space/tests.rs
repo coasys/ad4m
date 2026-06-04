@@ -182,9 +182,7 @@ fn build_space() -> Harness {
         commit_target: Arc::clone(&commit_target) as Arc<dyn LocalCommitTarget>,
         sig_verifier: Arc::new(AlwaysValid),
         runtime: handle,
-        fallback_timeout: Duration::from_secs(15),
         watcher_tick: Duration::from_millis(100),
-        max_retry_peers: 3,
     };
     let space = HolographSpace::new(opts);
 

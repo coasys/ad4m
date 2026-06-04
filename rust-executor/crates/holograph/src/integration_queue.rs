@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::config::ArcPolicy;
+use crate::config::{ArcPolicy, FetchFallbackPolicy};
 use crate::envelope::OpEnvelope;
 use crate::op_store::{EnvelopeDecoder, KvOpStore};
 
@@ -61,6 +61,19 @@ use crate::op_store::{EnvelopeDecoder, KvOpStore};
 /// pair for gossip.
 pub trait NotifyUp: Send + Sync + std::fmt::Debug + 'static {
     fn emit_perspective_diff(&self, op_id: OpId, created_at: Timestamp, envelope_bytes: Bytes);
+
+    /// Wake-18 D5: notify upstream that we've given up on fetching the
+    /// missing parents for a pending op. The op is dropped from the
+    /// pending tree; upstream consumers may want to surface this as a
+    /// signal or escalate. Default no-op so older NotifyUp impls keep
+    /// working.
+    fn notify_parent_fetch_permanent_failure(
+        &self,
+        _op_id: OpId,
+        _missing_parents: Vec<OpId>,
+        _last_error: String,
+    ) {
+    }
 }
 
 /// What the queue needs from K2's fetch module. Trait surface matches
@@ -146,8 +159,10 @@ pub struct IntegrationQueueConfig {
     pub fetcher: Arc<dyn OpFetcher>,
     pub peer_picker: Arc<dyn PeerPicker>,
     pub sig_verifier: Arc<dyn SigVerifier>,
-    pub fallback_timeout: Duration,
-    pub max_retry_peers: usize,
+    /// Wake-18 D2: structured fallback policy (initial_timeout,
+    /// max_attempts, retry_budget). Replaces the previous `fallback_timeout`
+    /// + `max_retry_peers` pair.
+    pub fallback_policy: FetchFallbackPolicy,
     pub watcher_tick: Duration,
     pub runtime: tokio::runtime::Handle,
 }
@@ -161,8 +176,7 @@ pub struct HolographIntegrationQueue {
     fetcher: Arc<dyn OpFetcher>,
     peer_picker: Arc<dyn PeerPicker>,
     sig_verifier: Arc<dyn SigVerifier>,
-    fallback_timeout: Duration,
-    max_retry_peers: usize,
+    fallback_policy: FetchFallbackPolicy,
     watcher_tick: Duration,
     runtime: tokio::runtime::Handle,
     /// Coarse async lock around process/cascade. The pending tree and
@@ -177,8 +191,7 @@ impl std::fmt::Debug for HolographIntegrationQueue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HolographIntegrationQueue")
             .field("arc_policy", &self.arc_policy)
-            .field("fallback_timeout", &self.fallback_timeout)
-            .field("max_retry_peers", &self.max_retry_peers)
+            .field("fallback_policy", &self.fallback_policy)
             .field("watcher_tick", &self.watcher_tick)
             .finish()
     }
@@ -195,8 +208,7 @@ impl HolographIntegrationQueue {
             fetcher: cfg.fetcher,
             peer_picker: cfg.peer_picker,
             sig_verifier: cfg.sig_verifier,
-            fallback_timeout: cfg.fallback_timeout,
-            max_retry_peers: cfg.max_retry_peers,
+            fallback_policy: cfg.fallback_policy,
             watcher_tick: cfg.watcher_tick,
             runtime: cfg.runtime,
             gate: Mutex::new(()),
@@ -506,54 +518,127 @@ impl HolographIntegrationQueue {
     }
 
     /// One pass of the multi-peer fallback loop. Test-callable.
+    ///
+    /// Wake-18 D2/D5: each pass round-robins through arc-overlapping
+    /// peers in a single tick (instead of one peer per tick). The
+    /// policy caps both the per-entry peer count
+    /// (`max_attempts`) and total wall-clock spent on the entry
+    /// (`retry_budget`). When either cap is hit the entry is dropped
+    /// and `NotifyUp::notify_parent_fetch_permanent_failure` fires so
+    /// upstream layers (the perspective-diff emit path, AD4M Signal
+    /// surface) can react.
     pub async fn fallback_pass(&self) -> K2Result<()> {
         let _guard = self.gate.lock().await;
         let now = now_micros();
-        let timeout_micros = self.fallback_timeout.as_micros() as i64;
+        let policy = self.fallback_policy;
+        let initial_timeout_micros = policy.initial_timeout.as_micros() as i64;
+        let retry_budget_micros = policy.retry_budget.as_micros() as i64;
 
-        let mut retries: Vec<(sled::IVec, PendingEntry)> = Vec::new();
+        let mut work: Vec<(sled::IVec, PendingEntry)> = Vec::new();
         for kv in self.pending.iter() {
             let (k, v) = kv.map_err(|e| K2Error::other_src("pending.iter", e))?;
             let entry: PendingEntry = match ciborium::from_reader(v.as_ref()) {
                 Ok(e) => e,
                 Err(_) => continue,
             };
-            if (now - entry.first_seen_micros) < timeout_micros {
+            // Skip entries that haven't even hit the initial timeout —
+            // give the original source a chance to deliver first.
+            if (now - entry.first_seen_micros) < initial_timeout_micros {
                 continue;
             }
-            if entry.tried_peers.len() >= self.max_retry_peers {
-                continue;
-            }
-            retries.push((k, entry));
+            work.push((k, entry));
         }
 
-        for (k, mut entry) in retries {
-            // Pick an arc-overlap peer not in tried_peers.
-            let tried: HashSet<Url> = entry
+        for (k, mut entry) in work {
+            // Budget check — if we've spent more than retry_budget on
+            // this entry, drop it as a permanent failure.
+            let age_micros = now - entry.first_seen_micros;
+            let budget_exhausted = age_micros >= retry_budget_micros;
+            let attempts_exhausted = (entry.tried_peers.len() as u8) >= policy.max_attempts;
+
+            if budget_exhausted || attempts_exhausted {
+                self.drop_pending_permanent_failure(
+                    &k,
+                    &entry,
+                    if budget_exhausted {
+                        "retry_budget exhausted"
+                    } else {
+                        "max_attempts exhausted"
+                    },
+                )?;
+                continue;
+            }
+
+            // Wake-18 D2: round-robin all arc-overlapping peers in this
+            // tick, up to the remaining attempt budget.
+            let remaining_attempts =
+                (policy.max_attempts as usize).saturating_sub(entry.tried_peers.len());
+            let mut tried: HashSet<Url> = entry
                 .tried_peers
                 .iter()
                 .filter_map(|s| Url::from_str(s).ok())
                 .collect();
-            // Pick by the location of the FIRST missing parent — close
-            // enough for v1; v1.5 may want to pick per-parent.
+            // Location pick: use the first missing parent's loc; close
+            // enough for v1, v1.5 may want per-parent picking.
             let parent_id = bytes_to_opid(&entry.missing_parents[0]);
             let loc = parent_id.loc();
-            let alt = self.peer_picker.pick_arc_overlap_peer(loc, tried).await?;
-            let Some(alt) = alt else { continue };
 
-            // Re-request missing parents from the alt peer.
-            let missing_ops: Vec<OpId> = entry
-                .missing_parents
-                .iter()
-                .map(|b| bytes_to_opid(b))
-                .collect();
-            self.fetcher
-                .request_ops(missing_ops, alt.clone())
-                .await
-                .map_err(|e| K2Error::other_src("fetcher.request_ops fallback", e))?;
+            let mut requested_any = false;
+            let mut last_err: Option<String> = None;
+            for _ in 0..remaining_attempts {
+                let alt = self
+                    .peer_picker
+                    .pick_arc_overlap_peer(loc, tried.clone())
+                    .await?;
+                let Some(alt) = alt else { break };
 
-            entry.tried_peers.push(alt.as_str().to_string());
-            entry.first_seen_micros = now_micros();
+                let missing_ops: Vec<OpId> = entry
+                    .missing_parents
+                    .iter()
+                    .map(|b| bytes_to_opid(b))
+                    .collect();
+                match self.fetcher.request_ops(missing_ops, alt.clone()).await {
+                    Ok(()) => {
+                        // K2 accepted the request — we've now "tried"
+                        // this peer; whether the op actually arrives is
+                        // surfaced on the next process_incoming_ops call.
+                        tried.insert(alt.clone());
+                        entry.tried_peers.push(alt.as_str().to_string());
+                        requested_any = true;
+                        // First successful request_ops in this tick is
+                        // enough — give K2 a chance to actually fetch
+                        // before we burn more attempts.
+                        break;
+                    }
+                    Err(e) => {
+                        // request_ops itself failed (peer unreachable etc.).
+                        // Record the peer as tried so we don't pick it
+                        // again, log the error, move to the next peer.
+                        last_err = Some(format!("{e}"));
+                        tried.insert(alt.clone());
+                        entry.tried_peers.push(alt.as_str().to_string());
+                        tracing::warn!(
+                            "fetcher.request_ops failed against {}: {}",
+                            alt.as_str(),
+                            e
+                        );
+                    }
+                }
+            }
+
+            if !requested_any && (entry.tried_peers.len() as u8) >= policy.max_attempts {
+                // We exhausted attempts without K2 ever accepting a
+                // request — drop with permanent failure.
+                let reason = last_err.unwrap_or_else(|| {
+                    "no arc-overlap peer available within max_attempts".to_string()
+                });
+                self.drop_pending_permanent_failure(&k, &entry, &reason)?;
+                continue;
+            }
+
+            // Persist updated entry (tried_peers grew). Leave
+            // first_seen alone — retry_budget is measured from
+            // original ingest, not last-attempt time.
             let mut buf = Vec::new();
             ciborium::into_writer(&entry, &mut buf)
                 .map_err(|e| K2Error::other_src("encode pending", e))?;
@@ -562,6 +647,35 @@ impl HolographIntegrationQueue {
                 .map_err(|e| K2Error::other_src("pending.insert", e))?;
         }
 
+        Ok(())
+    }
+
+    /// Drop the pending entry and notify upstream that we've given up
+    /// on this op. Used by D5's retry-budget enforcement.
+    fn drop_pending_permanent_failure(
+        &self,
+        key: &sled::IVec,
+        entry: &PendingEntry,
+        reason: &str,
+    ) -> K2Result<()> {
+        let op_id = bytes_to_opid(key);
+        let missing_parents: Vec<OpId> = entry
+            .missing_parents
+            .iter()
+            .map(|b| bytes_to_opid(b))
+            .collect();
+        tracing::warn!(
+            "dropping pending op {:?}: {} (tried {} peers across {} micros)",
+            op_id,
+            reason,
+            entry.tried_peers.len(),
+            now_micros() - entry.first_seen_micros
+        );
+        self.notify
+            .notify_parent_fetch_permanent_failure(op_id, missing_parents, reason.to_string());
+        self.pending
+            .remove(key)
+            .map_err(|e| K2Error::other_src("pending.remove (permanent failure)", e))?;
         Ok(())
     }
 }

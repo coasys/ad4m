@@ -277,15 +277,15 @@ pub struct HolographSpaceConfig {
     pub commit_target: Arc<dyn LocalCommitTarget>,
     pub sig_verifier: Arc<dyn SigVerifier>,
     pub runtime: tokio::runtime::Handle,
-    pub fallback_timeout: std::time::Duration,
     pub watcher_tick: std::time::Duration,
-    pub max_retry_peers: usize,
 }
 
 impl HolographSpaceConfig {
-    /// Sensible-default builder opts: `AlwaysValid` sig verifier, 15s
-    /// fallback timeout, 1s watcher tick, 3 retry peers. Tests and
-    /// production usually start from this.
+    /// Sensible-default builder opts: `AlwaysValid` sig verifier, 1s
+    /// watcher tick. Fetch-fallback timings come from
+    /// `SpaceConfig::fetch_fallback_policy` (defaults: 5s/3-peers/30s,
+    /// see `FetchFallbackPolicy::default`). Tests and production
+    /// usually start from this.
     #[allow(clippy::too_many_arguments)]
     pub fn defaults(
         config: SpaceConfig,
@@ -309,9 +309,7 @@ impl HolographSpaceConfig {
             commit_target,
             sig_verifier: Arc::new(AlwaysValid),
             runtime,
-            fallback_timeout: std::time::Duration::from_secs(15),
             watcher_tick: std::time::Duration::from_secs(1),
-            max_retry_peers: 3,
         }
     }
 }
@@ -353,8 +351,7 @@ impl HolographSpace {
             fetcher: cfg.fetcher,
             peer_picker: cfg.peer_picker,
             sig_verifier: cfg.sig_verifier,
-            fallback_timeout: cfg.fallback_timeout,
-            max_retry_peers: cfg.max_retry_peers,
+            fallback_policy: cfg.config.fetch_fallback_policy,
             watcher_tick: cfg.watcher_tick,
             runtime: cfg.runtime,
         });
