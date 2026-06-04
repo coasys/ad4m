@@ -169,6 +169,11 @@ struct NeighborhoodState {
     /// could in principle race (in practice the JS subscriber loop is
     /// single-flight, but we want correctness regardless).
     receiver: Mutex<mpsc::UnboundedReceiver<EmittedOp>>,
+    /// Live K2 space handle. Step 6b stored this implicitly via the
+    /// adapters; Step 9 keeps it here so `join_agent` can call
+    /// `current_url()` to publish the conductor's reachable address
+    /// (Iroh transport) instead of returning a placeholder.
+    dyn_space: kitsune2_api::DynSpace,
 }
 
 // ----- the runtime -----
@@ -298,13 +303,33 @@ impl HolographRuntime {
 
         shim.install_queue(Arc::clone(space.queue()));
 
-        // Local-agent join — v1 spins up a sentinel TestLocalAgent with
-        // FULL storage arc. Step 7 will replace this with a real
-        // AD4M-DID-bound agent identity.
-        let agent: DynLocalAgent =
-            Arc::new(kitsune2_test_utils::agent::TestLocalAgent::default()) as DynLocalAgent;
+        // Local-agent join. For the cross-process (Iroh) path we need
+        // a process-unique AgentId — TestLocalAgent::default() uses a
+        // static counter so every fresh process starts at "test-1" and
+        // the bootstrap server can't tell two conductors apart. The
+        // in-process tests (Step 4d / Step 6f) still want TestLocalAgent
+        // because they pair with TestVerifier in the same Builder.
+        //
+        // Production identity (AD4M DID-bound) is PR-B / morning work.
+        let cross_process = std::env::var("HOLOGRAPH_IROH_RELAY_URL").is_ok();
+        let agent: DynLocalAgent = if cross_process {
+            Arc::new(kitsune2_core::Ed25519LocalAgent::default()) as DynLocalAgent
+        } else {
+            Arc::new(kitsune2_test_utils::agent::TestLocalAgent::default()) as DynLocalAgent
+        };
         agent.set_cur_storage_arc(DhtArc::FULL);
         agent.set_tgt_storage_arc_hint(DhtArc::FULL);
+        // AgentId Display invokes HoloHash-shaped decoding (only valid
+        // for 32-byte ids); print the raw byte length + an URL-safe
+        // base64 of the bytes instead so this works for both
+        // TestLocalAgent (13B) and Ed25519LocalAgent (32B).
+        let agent_b64 = url_safe_b64_no_pad(agent.agent().as_ref());
+        log::info!(
+            "[holograph] local agent join: agent_id_b64={} ({}B) cross_process={}",
+            agent_b64,
+            agent.agent().as_ref().len(),
+            cross_process,
+        );
         dyn_space
             .local_agent_join(agent.clone())
             .await
@@ -319,6 +344,7 @@ impl HolographRuntime {
         let state = Arc::new(NeighborhoodState {
             space,
             receiver: Mutex::new(receiver),
+            dyn_space: dyn_space.clone(),
         });
         self.neighborhoods.insert(handle, state);
         Ok(handle)
@@ -378,13 +404,23 @@ impl HolographRuntime {
     /// own sentinel agent at `create_neighborhood` time, so this is
     /// effectively a no-op for the spike — Step 7 will plumb the AD4M
     /// DID through.
+    ///
+    /// Returns the reachable URL the K2 transport published for this
+    /// node (Iroh path: a node-id URL exposed via the iroh relay; mem
+    /// path: the placeholder `ws://holograph-local:0` because mem
+    /// transport isn't process-routable). The JS test harness uses
+    /// this URL to cross-register peers between conductors.
     pub async fn join_agent(
         &self,
         handle: HolographHandle,
         _agent_key_b64: String,
     ) -> HolographWireResult<String> {
-        let _state = self.state(handle)?;
-        Ok("ws://holograph-local:0".to_string())
+        let state = self.state(handle)?;
+        Ok(state
+            .dyn_space
+            .current_url()
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "ws://holograph-local:0".to_string()))
     }
 
     pub async fn current_revision(
@@ -408,12 +444,21 @@ impl HolographRuntime {
     }
 }
 
-/// Build a K2 `DynSpace` for our `HolographRuntime` neighborhood. Uses
-/// the same `kitsune2_core::default_test_builder` Step 4d's two-node
-/// test uses (mem transport + mem peer store + core fetch/publish +
-/// stub gossip), with our `op_store` factory wired in. Production
-/// substitutes Iroh/Tx5 + the real K2 bootstrap once we exit the spike
-/// (PR-B / Step 8 territory).
+/// Build a K2 `DynSpace` for our `HolographRuntime` neighborhood.
+///
+/// Two transport modes, selected by env at first call:
+///   * `HOLOGRAPH_IROH_RELAY_URL=<http(s)://relay/relay>` → Iroh
+///     transport (QUIC; the `kitsune2-bootstrap-srv` binary doubles as
+///     the iroh relay at `<addr>/relay`). Cross-process; suitable for
+///     two-conductor JS tests. Matches the rest of the ad4m repo
+///     which uses Holochain's `transport-iroh` feature.
+///   * unset → mem transport (in-process only). Used by Step 4d /
+///     Step 6f Rust integration tests so they keep running fast and
+///     deterministic.
+///
+/// `HOLOGRAPH_IROH_PLAINTEXT=1` allows `http://` relays instead of
+/// `https://` — the test harness's bootstrap-srv ships plaintext on
+/// loopback.
 async fn build_dyn_space(
     runtime: Arc<Runtime>,
     op_store: Arc<KvOpStore>,
@@ -427,6 +472,51 @@ async fn build_dyn_space(
         .map_err(|e| substrate(format!("spawn dyn_space build: {e}")))?
 }
 
+#[derive(Debug)]
+struct ShimFactory {
+    #[allow(dead_code)]
+    op_store: Arc<KvOpStore>,
+    shim: Arc<K2OpStoreShim>,
+}
+impl OpStoreFactory for ShimFactory {
+    fn default_config(&self, _: &mut Config) -> K2Result<()> {
+        Ok(())
+    }
+    fn validate_config(&self, _: &Config) -> K2Result<()> {
+        Ok(())
+    }
+    fn create(
+        &self,
+        _builder: Arc<Builder>,
+        _space_id: SpaceId,
+    ) -> futures::future::BoxFuture<'static, K2Result<DynOpStore>> {
+        let shim = Arc::clone(&self.shim);
+        Box::pin(async move {
+            let dyn_store: DynOpStore = shim;
+            Ok(dyn_store)
+        })
+    }
+}
+
+#[derive(Debug)]
+struct NoopSpaceHandler;
+impl kitsune2_api::SpaceHandler for NoopSpaceHandler {}
+
+#[derive(Debug)]
+struct NoopKitsuneHandler;
+impl KitsuneHandler for NoopKitsuneHandler {
+    fn create_space(
+        &self,
+        _: SpaceId,
+        _: Option<&Config>,
+    ) -> futures::future::BoxFuture<'_, K2Result<DynSpaceHandler>> {
+        Box::pin(async move {
+            let s: DynSpaceHandler = Arc::new(NoopSpaceHandler);
+            Ok(s)
+        })
+    }
+}
+
 async fn build_dyn_space_inner(
     op_store: Arc<KvOpStore>,
     shim: Arc<K2OpStoreShim>,
@@ -435,61 +525,93 @@ async fn build_dyn_space_inner(
     use kitsune2_core::default_test_builder;
     use kitsune2_test_utils::agent::TestVerifier;
 
-    #[derive(Debug)]
-    struct ShimFactory {
-        op_store: Arc<KvOpStore>,
-        shim: Arc<K2OpStoreShim>,
-    }
-    impl OpStoreFactory for ShimFactory {
-        fn default_config(&self, _: &mut Config) -> K2Result<()> {
-            Ok(())
+    let relay_url = std::env::var("HOLOGRAPH_IROH_RELAY_URL").ok();
+    let boot_url = std::env::var("HOLOGRAPH_BOOTSTRAP_URL").ok();
+    let shim_factory = Arc::new(ShimFactory { op_store, shim });
+
+    let builder = if let Some(url) = relay_url.as_deref() {
+        // Cross-process path: Iroh transport (QUIC + relay-assisted
+        // hole-punching) + CoreBootstrap (peer discovery via
+        // kitsune2-bootstrap-srv). The kitsune2-bootstrap-srv binary
+        // doubles as the iroh relay at `<addr>/relay` (per K2's
+        // test_utils::bootstrap::TestBootstrapSrv pattern).
+        use kitsune2_core::factories::CoreBootstrapFactory;
+        use kitsune2_core::factories::{CoreBootstrapConfig, CoreBootstrapModConfig};
+        use kitsune2_transport_iroh::{
+            IrohTransportConfig, IrohTransportFactory, IrohTransportModConfig,
+        };
+        let allow_plain = std::env::var("HOLOGRAPH_IROH_PLAINTEXT")
+            .map(|v| v.trim() == "1")
+            .unwrap_or(false);
+        let b = Builder {
+            // Ed25519 pair (verifier+agent) so cross-process signing
+            // round-trips; TestVerifier only accepts the literal
+            // TEST_SIG constant which Ed25519LocalAgent doesn't
+            // produce.
+            verifier: Arc::new(kitsune2_core::Ed25519Verifier),
+            op_store: shim_factory,
+            transport: IrohTransportFactory::create(),
+            bootstrap: CoreBootstrapFactory::create(),
+            gossip: kitsune2_gossip::K2GossipFactory::create(),
+            ..default_test_builder()
         }
-        fn validate_config(&self, _: &Config) -> K2Result<()> {
-            Ok(())
-        }
-        fn create(
-            &self,
-            _builder: Arc<Builder>,
-            _space_id: SpaceId,
-        ) -> futures::future::BoxFuture<'static, K2Result<DynOpStore>> {
-            let shim = Arc::clone(&self.shim);
-            let _op_store = Arc::clone(&self.op_store);
-            Box::pin(async move {
-                let dyn_store: DynOpStore = shim;
-                Ok(dyn_store)
+        .with_default_config()
+        .map_err(substrate)?;
+        b.config
+            .set_module_config(&IrohTransportModConfig {
+                iroh_transport: IrohTransportConfig {
+                    relay_url: Some(url.to_string()),
+                    relay_allow_plain_text: allow_plain,
+                    ..Default::default()
+                },
             })
-        }
-    }
-
-    #[derive(Debug)]
-    struct NoopSpaceHandler;
-    impl kitsune2_api::SpaceHandler for NoopSpaceHandler {}
-
-    #[derive(Debug)]
-    struct NoopKitsuneHandler;
-    impl KitsuneHandler for NoopKitsuneHandler {
-        fn create_space(
-            &self,
-            _: SpaceId,
-            _: Option<&Config>,
-        ) -> futures::future::BoxFuture<'_, K2Result<DynSpaceHandler>> {
-            Box::pin(async move {
-                let s: DynSpaceHandler = Arc::new(NoopSpaceHandler);
-                Ok(s)
+            .map_err(substrate)?;
+        // CoreBootstrap requires server_url to be set for spaces; for
+        // a typical spike test setup the bootstrap server lives at the
+        // same host:port as the relay (just without the `/relay` path
+        // segment).
+        let boot_server = boot_url.clone().unwrap_or_else(|| {
+            // Strip trailing "/relay" if present so we get the root URL
+            // of the bootstrap-srv.
+            url.trim_end_matches("/relay").to_string()
+        });
+        // Default backoff_min_ms is 5000 (production-safe); for the
+        // spike's loopback test we tighten it to 500ms so two
+        // conductors converge inside the 15s test deadline. Production
+        // / non-test consumers can override via env if they need the
+        // default again.
+        let backoff_min_ms = std::env::var("HOLOGRAPH_BOOTSTRAP_BACKOFF_MIN_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(500u32);
+        b.config
+            .set_module_config(&CoreBootstrapModConfig {
+                core_bootstrap: CoreBootstrapConfig {
+                    server_url: Some(boot_server.clone()),
+                    backoff_min_ms,
+                    ..Default::default()
+                },
             })
+            .map_err(substrate)?;
+        log::info!(
+            "[holograph] DynSpace built with Iroh (relay={}, plain={}) + CoreBootstrap (server={})",
+            url,
+            allow_plain,
+            boot_server
+        );
+        b
+    } else {
+        log::debug!("[holograph] HOLOGRAPH_IROH_RELAY_URL unset; using mem transport");
+        Builder {
+            verifier: Arc::new(TestVerifier),
+            op_store: shim_factory,
+            ..default_test_builder()
         }
-    }
+        .with_default_config()
+        .map_err(substrate)?
+    };
 
-    let kitsune = Builder {
-        verifier: Arc::new(TestVerifier),
-        op_store: Arc::new(ShimFactory { op_store, shim }),
-        ..default_test_builder()
-    }
-    .with_default_config()
-    .map_err(substrate)?
-    .build()
-    .await
-    .map_err(substrate)?;
+    let kitsune = builder.build().await.map_err(substrate)?;
     kitsune
         .register_handler(Arc::new(NoopKitsuneHandler) as DynKitsuneHandler)
         .await

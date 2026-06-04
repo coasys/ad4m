@@ -357,6 +357,7 @@ async function initLanguage(contextJson) {
     const languageAddress = context.Holochain.__languageAddress;
 
     const holochainDelegate = createHolochainDelegate(languageAddress);
+    const holographDelegate = createHolographDelegate(languageAddress);
     const ad4mSignal = createAd4mSignal(languageAddress);
 
     // Build an agent proxy that delegates to the global AGENT ops.
@@ -378,6 +379,7 @@ async function initLanguage(contextJson) {
 
     // Set globals for non-serializable delegates (WASM languages access these via globalThis)
     globalThis.__holochainDelegate__ = holochainDelegate;
+    globalThis.__holographDelegate__ = holographDelegate;
     globalThis.__ad4mSignal__ = ad4mSignal;
     globalThis.__agentProxy__ = agentProxy;
 
@@ -483,4 +485,5 @@ async function initLanguage(contextJson) {
 
 globalThis.initLanguage = initLanguage;
 globalThis.createHolochainDelegate = createHolochainDelegate;
+globalThis.createHolographDelegate = createHolographDelegate;
 globalThis.createAd4mSignal = createAd4mSignal;
