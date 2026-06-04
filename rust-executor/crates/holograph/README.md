@@ -6,7 +6,7 @@ with a sled-backed `KvOpStore` + `HolographIntegrationQueue` +
 `HolographSpace`, driving the same `Workspace` / `Snapshot` algorithm
 crate that the HDK retriever does.
 
-This crate is part of the five-PR Holograph stack:
+This crate is part of the six-PR Holograph stack:
 
 - **PR-A** — algorithm crate extraction (substrate-neutral DAG ops)
 - **PR-B** — this crate
@@ -14,6 +14,7 @@ This crate is part of the five-PR Holograph stack:
 - **PR-D** — production polish (sled recovery, fetch fallback,
   graceful shutdown, restart-survives, iroh relay env hook)
 - **PR-E** — two op classes (Ancestry vs Head, sharding-ready)
+- **PR-F** — `SHARDED_MODE.md` design doc (v1.5 / v2 plan)
 
 ## Op classes
 
@@ -128,3 +129,10 @@ let remaining = space.shutdown().await?;  // graceful drain + flush
 `Drop for HolographSpace` is the safety net for "process exit before
 shutdown was called" — best-effort synchronous flush, logged on error,
 never panics.
+
+## Further reading
+
+- **`SHARDED_MODE.md`** — design doc for the v1.5 / v2 sharded-mode work
+  that picks up where this crate's v1 leaves off. Covers the validation
+  regime, multi-document routing, receipt model, and the constraints
+  v1's code already locks in.
