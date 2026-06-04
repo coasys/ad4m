@@ -148,6 +148,22 @@ pub fn initialize_from_db() {
                 }
             }
 
+            match p.sparql_store.migrate_iri_literals_to_typed_literals() {
+                Ok(count) if count > 0 => {
+                    log::info!(
+                        "🔄 Typed-literal migration for {}: {} IRI-shaped targets converted",
+                        handle_clone.uuid,
+                        count
+                    );
+                }
+                Ok(_) => {} // Already migrated or nothing to migrate
+                Err(e) => log::warn!(
+                    "Typed-literal migration for {}: {}",
+                    handle_clone.uuid,
+                    e
+                ),
+            }
+
             // Rebuild SPARQL index from existing links
             // Skip SPARQL rebuild if persistent store already has data
             if p.sparql_store.has_data() {

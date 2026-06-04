@@ -213,19 +213,11 @@ impl Ad4mMcpHandler {
             .collect();
 
         // Build CONTAINS conditions for mention matching.
-        // Use fn::parse_literal to decode literal:// targets:
-        // - literal:string: targets are URL-decoded to plain text
-        // - literal:json: signed expressions are decoded and only the "data"
-        //   field is returned, so author/timestamp metadata doesn't match
-        // This ensures we match against the actual message content, not metadata.
+        // Typed-literal targets carry their value directly in the lexical
+        // form, so `STR(?target)` yields the text we want to substring-match.
         let mention_conditions: Vec<String> = all_terms
             .iter()
-            .map(|t| {
-                format!(
-                    "CONTAINS(LCASE(STR(<ad4m://fn/parse_literal>(?target))), \"{}\")",
-                    t
-                )
-            })
+            .map(|t| format!("CONTAINS(LCASE(STR(?target)), \"{}\")", t))
             .collect();
 
         let mention_predicate = format!("({})", mention_conditions.join(" || "));
