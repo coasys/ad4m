@@ -6,13 +6,66 @@ with a sled-backed `KvOpStore` + `HolographIntegrationQueue` +
 `HolographSpace`, driving the same `Workspace` / `Snapshot` algorithm
 crate that the HDK retriever does.
 
-This crate is part of the four-PR Holograph stack:
+This crate is part of the five-PR Holograph stack:
 
 - **PR-A** — algorithm crate extraction (substrate-neutral DAG ops)
 - **PR-B** — this crate
 - **PR-C** — AD4M `holograph-link` Language + JS wires
 - **PR-D** — production polish (sled recovery, fetch fallback,
   graceful shutdown, restart-survives, iroh relay env hook)
+- **PR-E** — two op classes (Ancestry vs Head, sharding-ready)
+
+## Op classes
+
+Wake-19 splits ops into two classes:
+
+- **Ancestry** — the diff payload op, identified by content hash of
+  the payload. Routed by the default xor-fold location, so the
+  op-ids spread evenly across the DHT ring. In v1.5 sharded mode,
+  each peer holds an arc-slice of Ancestry ops proportional to its
+  declared storage arc.
+- **Head** — a tiny pointer announcing "this Ancestry op-id is a
+  current leaf of the DAG." Routed by the
+  installed `OpId::set_loc_callback` to a **fixed loc-0 sector** so
+  every peer whose arc covers location 0 replicates every Head.
+  This keeps `current_heads()` a constant-time read for late joiners
+  without forcing every peer to hold the entire Ancestry DAG.
+
+The class is encoded in two places:
+
+1. The CBOR `OpEnvelope.op_class` field (`Ancestry` is the default
+   and is `skip_serializing_if`-elided so the wire shape stays
+   byte-stable with pre-Wake-19 envelopes).
+2. The trailing 4 bytes of the 36-byte op-id —
+   `ANCESTRY_OP_TAG = [0xdb; 4]` (matching the legacy v1 trailer) or
+   `HEAD_OP_TAG = [0xa1; 4]`. K2's `LocCb` only sees the raw op-id
+   bytes, never the envelope payload, so the trailer is what the
+   loc-callback inspects.
+
+### K2 arc-coverage caveat
+
+The Head routing strategy assumes **every peer's declared storage arc
+covers loc=0**. K2's `DhtArc::FULL = Arc(0, u32::MAX)` does, so v1's
+FULL-arc deployments are fine.
+
+A v1.5 peer declaring something like `Arc(u32::MAX / 2, u32::MAX)`
+(an upper-half-only arc that excludes loc=0) **would not replicate
+Heads** and would fail to learn the current leaves from gossip. v1.5
+sharded mode must therefore guarantee every peer's storage-arc
+claim includes loc=0 — either via an explicit "Head sector" minimum
+arc, or by computing per-peer `tgt_storage_arc` so loc=0 is always
+covered.
+
+Two viable approaches when we get there:
+
+1. **Mandatory Head sector** — every peer's `tgt_storage_arc` is
+   either FULL or `Arc::full_with_head_sector()` (a tiny guaranteed
+   sub-arc around 0). Cost: ~1 LOC change in the arc-claim policy.
+2. **Per-peer Head loc** — pick the Head loc as
+   `(peer_pubkey_hash mod u32)` so each peer is its own gossip
+   target for its own Heads. Different shape; needs more design.
+
+v1.5 will pick option 1. Documented in `SPIKE.md` parking lot.
 
 ## Configuration
 

@@ -92,9 +92,7 @@ fn build_space(dir: &std::path::Path, handle: tokio::runtime::Handle) -> Arc<Hol
     )
     .expect("open op_store");
     let pending_db = sled::open(dir.join("pending")).expect("open pending");
-    let pending = pending_db
-        .open_tree(b"pending")
-        .expect("open pending tree");
+    let pending = pending_db.open_tree(b"pending").expect("open pending tree");
 
     let cfg = HolographSpaceConfig {
         config: SpaceConfig {
@@ -185,7 +183,10 @@ async fn sibling_commits_keep_both_heads() {
 
     // Root.
     let (root_bytes, root_id) = ancestry(0, vec![]);
-    space.on_local_commit(root_bytes).await.expect("commit root");
+    space
+        .on_local_commit(root_bytes)
+        .await
+        .expect("commit root");
 
     // Sibling A.
     let (a_bytes, a_id) = ancestry(1, vec![root_id.clone()]);
@@ -259,7 +260,10 @@ async fn legacy_ancestry_gossip_does_not_auto_publish_head() {
     // and our local substrate must NOT synthesize one from a peer's
     // op — Heads are only auto-published on `on_local_commit`.
     let accepted = space
-        .process_incoming_ops(vec![legacy_bytes], Some(Url::from_str("ws://peer:1").unwrap()))
+        .process_incoming_ops(
+            vec![legacy_bytes],
+            Some(Url::from_str("ws://peer:1").unwrap()),
+        )
         .await
         .expect("process_incoming_ops");
     assert_eq!(accepted.len(), 1);

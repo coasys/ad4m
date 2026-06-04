@@ -255,10 +255,8 @@ impl KvOpStore {
         // Walk back from `ancestry_op` to collect every Ancestry op on
         // its parent-chain (up to `max_walk_hops`). Any current Head
         // whose target is in this set is dominated by the new Head.
-        let mut visited: std::collections::HashSet<Vec<u8>> =
-            std::collections::HashSet::new();
-        let mut queue: std::collections::VecDeque<OpId> =
-            std::collections::VecDeque::new();
+        let mut visited: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<OpId> = std::collections::VecDeque::new();
         queue.push_back(ancestry_op.clone());
         let mut hops = 0usize;
         while let Some(node) = queue.pop_front() {
@@ -1007,7 +1005,9 @@ mod tests {
         };
 
         // Register the older Head pointing at `root` first.
-        let reg1 = store.register_head(&h_root, &root, 100, parents_for).unwrap();
+        let reg1 = store
+            .register_head(&h_root, &root, 100, parents_for)
+            .unwrap();
         assert_eq!(reg1.dominated_count, 0, "first Head dominates nothing");
         assert_eq!(store.current_heads_count(), 1);
 
@@ -1044,11 +1044,15 @@ mod tests {
             }
         };
 
-        let r1 = store.register_head(&h_left, &left, 100, parents_for).unwrap();
+        let r1 = store
+            .register_head(&h_left, &left, 100, parents_for)
+            .unwrap();
         assert_eq!(r1.dominated_count, 0);
         // h_right walks right → root; root != left, so h_left is NOT
         // dominated. (left is not on right's parent walk and vice versa.)
-        let r2 = store.register_head(&h_right, &right, 100, parents_for).unwrap();
+        let r2 = store
+            .register_head(&h_right, &right, 100, parents_for)
+            .unwrap();
         assert_eq!(r2.dominated_count, 0, "siblings don't dominate each other");
         assert_eq!(store.current_heads_count(), 2);
 

@@ -207,13 +207,12 @@ static HOLOGRAPH_RUNTIME: Lazy<HolographRuntime> = Lazy::new(|| {
     // before we got here), this returns false and we log a warning;
     // K2's API gives us no way to unlock + replace.
     if !holograph::install_loc_callback() {
-        tracing::warn!(
-            target: "holograph",
-            "OpId::set_loc_callback returned false — K2 OpId loc already \
-             initialised before holograph could install its callback. Head \
-             ops will route via the default xor-fold instead of fixed loc=0. \
-             Sharded-mode replication of Heads will be wrong; v1 FULL-arc \
-             setups are unaffected."
+        log::warn!(
+            "[holograph] OpId::set_loc_callback returned false — K2 OpId loc \
+             already initialised before holograph could install its callback. \
+             Head ops will route via the default xor-fold instead of fixed \
+             loc=0. Sharded-mode replication of Heads will be wrong; v1 \
+             FULL-arc setups are unaffected."
         );
     }
     let runtime = Runtime::new()
