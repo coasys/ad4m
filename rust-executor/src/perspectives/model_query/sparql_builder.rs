@@ -613,7 +613,12 @@ pub(super) fn build_query_patterns(
                 match condition {
                     WhereCondition::String(val) => {
                         if validate_iri(val).is_ok() {
-                            where_patterns.push(format!("    FILTER(?source = <{val}>)"));
+                            // Use VALUES ?source instead of FILTER(?source = <iri>):
+                            // the planner can pin ?source to the bound IRI before
+                            // joining with the rest of the WHERE, which on Oxigraph's
+                            // 0.5 planner is materially cheaper at scale than a
+                            // post-join FILTER.
+                            where_patterns.push(format!("    VALUES ?source {{ <{val}> }}"));
                         } else {
                             where_patterns.push(format!(
                                 "    FILTER(STR(?source) = \"{}\")",
