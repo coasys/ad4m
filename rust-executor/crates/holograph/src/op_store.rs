@@ -174,6 +174,26 @@ impl KvOpStore {
         self.ops.len() as u64
     }
 
+    /// Async flush — pushes every dirty page to disk and fsyncs. Called
+    /// from `HolographSpace::shutdown` to make sure the snapshot is
+    /// durable before the process exits.
+    pub async fn flush_async(&self) -> K2Result<()> {
+        self.db
+            .flush_async()
+            .await
+            .map(|_| ())
+            .map_err(|e| K2Error::other_src("KvOpStore::flush_async", e))
+    }
+
+    /// Best-effort synchronous flush. The `Drop` impl on `HolographSpace`
+    /// uses this from contexts that can't await.
+    pub fn flush_blocking(&self) -> K2Result<()> {
+        self.db
+            .flush()
+            .map(|_| ())
+            .map_err(|e| K2Error::other_src("KvOpStore::flush", e))
+    }
+
     fn target_arc(&self) -> DhtArc {
         self.arc_policy.target_arc()
     }
