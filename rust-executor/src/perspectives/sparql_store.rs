@@ -59,10 +59,18 @@ fn parse_literal_fn(args: &[Term]) -> Option<Term> {
     if args.len() != 1 {
         return None;
     }
-    // Extract the string value from either a Literal or a NamedNode.
-    // AD4M stores link targets as NamedNodes (via NamedNode::new_unchecked),
-    // so we need to handle both cases for `fn::parse_literal` to be useful
-    // in SPARQL queries that operate on link targets.
+    // A typed RDF literal already carries its value in the lexical form and
+    // its type in the datatype IRI; once writes move to native literals,
+    // `fn/parse_literal` is a no-op pass-through for them.
+    if let Term::Literal(l) = &args[0] {
+        let dt = l.datatype().as_str();
+        if dt != "http://www.w3.org/2001/XMLSchema#string"
+            && !dt.is_empty()
+            && !l.value().starts_with("literal:")
+        {
+            return Some(args[0].clone());
+        }
+    }
     let val = match &args[0] {
         Term::Literal(l) => l.value().to_string(),
         Term::NamedNode(n) => n.as_str().to_string(),
