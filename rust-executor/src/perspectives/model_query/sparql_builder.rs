@@ -238,9 +238,10 @@ pub(super) fn build_predicate_filter_for_property_fetch(shape: &ModelShape) -> S
 /// 150–300 ms on the medium-tier benchmark because the planner walks every
 /// reifier when matching the triple-term pattern, so the production pipeline
 /// keeps the per-row Rust fold in `hydrate_one` (which sees every link the
-/// main property query returns).  This builder is exercised by unit tests
-/// and is kept available so a future planner improvement can flip the
+/// main property query returns).  This builder is exercised by integration
+/// tests and is kept available so a future planner improvement can flip the
 /// aggregate back on without re-deriving the WHERE shape.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn build_aggregate_sparql(
     shape: &ModelShape,
     query: &ModelQueryInput,
