@@ -22,6 +22,48 @@ use kitsune2_api::OpId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Wake-19 E1: two op classes — `Ancestry` carries the diff payload and
+/// rides the hash-derived location, `Head` is a tiny pointer to a
+/// current-leaf Ancestry op that lives in a fixed location-zero sector
+/// so every peer replicates it.
+///
+/// The op-class lives in the envelope so v1.5's sharded mode can route
+/// the two classes differently without changing the data layer. v1 has
+/// FULL arc everywhere so the routing distinction is a no-op today; the
+/// `OpId::set_loc_callback` installed by the executor inspects the
+/// op-id's trailing tag (`HEAD_OP_TAG` vs `ANCESTRY_OP_TAG`) and only
+/// fires the loc-0 path on Head ops. v1.5 sharded peers see the same
+/// scaffolding light up.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum OpClass {
+    /// The diff payload op. Carries parents + diff bytes. v1's
+    /// only-existing class before this PR; default for backward
+    /// compatibility (legacy envelopes without an `op_class` field
+    /// decode to this variant).
+    #[default]
+    Ancestry,
+    /// Pointer-to-ancestry op announcing "this peer considers
+    /// `head_pointer` the current head." Replicated FULL across the
+    /// arc so every peer can answer `current_heads()` without a full
+    /// op scan.
+    Head,
+}
+
+/// Trailing-4-byte tag baked into the op-id so the K2 loc-callback can
+/// route an op without decoding the envelope payload (LocCb only sees
+/// the raw op-id bytes — see `kitsune2_api::id::LocCb`).
+///
+/// `ANCESTRY_OP_TAG` matches the legacy v1 tag (`[0xdb; 4]`) so the
+/// op-ids of every existing Ancestry op stay identical across the
+/// upgrade.
+pub const ANCESTRY_OP_TAG: [u8; 4] = [0xdb, 0xdb, 0xdb, 0xdb];
+
+/// Distinct trailer for Head ops. Pattern chosen for visual
+/// distinguishability from `ANCESTRY_OP_TAG` in hex dumps. The
+/// loc-callback only checks this exact byte pattern; nothing else
+/// relies on the value.
+pub const HEAD_OP_TAG: [u8; 4] = [0xa1, 0xa1, 0xa1, 0xa1];
+
 /// Errors that can come out of envelope encode/decode.
 #[derive(Debug, Error)]
 pub enum EnvelopeError {
@@ -53,10 +95,35 @@ pub struct OpEnvelope {
     /// this `None`; v1.5 sharded mode populates it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc_id: Option<Bytes>,
+    /// Wake-19 E1 — op class. `Ancestry` (the diff payload) or `Head`
+    /// (pointer to a current-leaf Ancestry op). Defaults to `Ancestry`
+    /// when decoding a legacy envelope without this field. The
+    /// `skip_serializing_if = is_ancestry` keeps legacy envelopes
+    /// byte-stable: an Ancestry envelope serialized by the new code
+    /// hashes to the same bytes as one serialized by the old code
+    /// (modulo the also-skip-on-default `head_pointer`).
+    #[serde(default, skip_serializing_if = "OpClass::is_ancestry")]
+    pub op_class: OpClass,
+    /// Wake-19 E1 — only `Some` when `op_class == Head`. Names the
+    /// Ancestry op-id this Head announces as the current leaf.
+    /// `skip_serializing_if = is_none` keeps Ancestry envelopes
+    /// byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_pointer: Option<Bytes>,
+}
+
+impl OpClass {
+    /// Used by `skip_serializing_if` so a default-`Ancestry` envelope
+    /// doesn't emit the `op_class` field — keeps the on-the-wire shape
+    /// byte-stable with pre-Wake-19 envelopes.
+    pub fn is_ancestry(&self) -> bool {
+        matches!(self, OpClass::Ancestry)
+    }
 }
 
 impl OpEnvelope {
-    /// Build an envelope from typed `OpId` parents.
+    /// Build an Ancestry envelope from typed `OpId` parents. Wake-19
+    /// E1: defaults `op_class = Ancestry`, `head_pointer = None`.
     pub fn new(
         parents: impl IntoIterator<Item = OpId>,
         payload: Bytes,
@@ -71,6 +138,8 @@ impl OpEnvelope {
             signature,
             created_at_micros: 0,
             doc_id,
+            op_class: OpClass::Ancestry,
+            head_pointer: None,
         }
     }
 
@@ -90,7 +159,37 @@ impl OpEnvelope {
             signature,
             created_at_micros,
             doc_id,
+            op_class: OpClass::Ancestry,
+            head_pointer: None,
         }
+    }
+
+    /// Wake-19 E1 — build a `Head` envelope pointing at `ancestry_op_id`.
+    /// Payload is empty (the pointer + author + signature is the entire
+    /// payload). Parents is empty because the Head is a free-standing
+    /// announcement, not part of the diff DAG.
+    pub fn new_head(
+        ancestry_op_id: OpId,
+        author_pubkey: Bytes,
+        signature: Bytes,
+        created_at_micros: i64,
+    ) -> Self {
+        Self {
+            parents: Vec::new(),
+            payload: Bytes::new(),
+            author_pubkey,
+            signature,
+            created_at_micros,
+            doc_id: None,
+            op_class: OpClass::Head,
+            head_pointer: Some(Bytes::from(ancestry_op_id)),
+        }
+    }
+
+    /// View the `head_pointer` as a typed `OpId`. Returns `None` for
+    /// Ancestry envelopes.
+    pub fn head_pointer_op_id(&self) -> Option<OpId> {
+        self.head_pointer.as_ref().map(|b| OpId::from(b.clone()))
     }
 
     /// View parents as typed `OpId`s.
@@ -172,5 +271,114 @@ mod tests {
     fn malformed_bytes_error() {
         let result = OpEnvelope::decode(&[0xff, 0x00, 0x42]);
         assert!(matches!(result, Err(EnvelopeError::Decode(_))));
+    }
+
+    /// Wake-19 E1 + E5 — a pre-Wake-19 envelope (encoded with the old
+    /// field set, *without* `op_class` or `head_pointer`) must decode
+    /// to `op_class = Ancestry`, `head_pointer = None`.
+    ///
+    /// We construct the legacy bytes by serialising a private struct
+    /// with only the pre-E1 fields so the test isn't entangled with
+    /// the current OpEnvelope's serde shape.
+    #[test]
+    fn legacy_pre_class_envelope_decodes_as_ancestry() {
+        #[derive(serde::Serialize)]
+        struct LegacyOpEnvelope {
+            parents: Vec<Bytes>,
+            payload: Bytes,
+            author_pubkey: Bytes,
+            signature: Bytes,
+            #[serde(default)]
+            created_at_micros: i64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            doc_id: Option<Bytes>,
+        }
+
+        let legacy = LegacyOpEnvelope {
+            parents: vec![Bytes::from_static(b"parent-id")],
+            payload: Bytes::from_static(b"diff-bytes"),
+            author_pubkey: Bytes::from_static(b"pk"),
+            signature: Bytes::from_static(b"sg"),
+            created_at_micros: 1_700_000_000_000_000,
+            doc_id: None,
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&legacy, &mut buf).expect("encode legacy");
+
+        let decoded = OpEnvelope::decode(&buf).expect("decode legacy");
+        assert_eq!(decoded.op_class, OpClass::Ancestry);
+        assert!(decoded.head_pointer.is_none());
+        assert!(decoded.head_pointer_op_id().is_none());
+        assert_eq!(decoded.parents.len(), 1);
+        assert_eq!(decoded.payload, Bytes::from_static(b"diff-bytes"));
+    }
+
+    /// Wake-19 E1 — a fresh-encoded Ancestry envelope is *byte-stable*
+    /// against the legacy serialised form. This is what keeps Ancestry
+    /// op-ids identical across the upgrade: the SHA-256 input doesn't
+    /// change, so neither does the op-id.
+    #[test]
+    fn ancestry_envelope_bytes_match_legacy_shape() {
+        #[derive(serde::Serialize)]
+        struct LegacyOpEnvelope {
+            parents: Vec<Bytes>,
+            payload: Bytes,
+            author_pubkey: Bytes,
+            signature: Bytes,
+            #[serde(default)]
+            created_at_micros: i64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            doc_id: Option<Bytes>,
+        }
+        let legacy = LegacyOpEnvelope {
+            parents: vec![Bytes::from_static(b"p")],
+            payload: Bytes::from_static(b"x"),
+            author_pubkey: Bytes::from_static(b"pk"),
+            signature: Bytes::from_static(b"sg"),
+            created_at_micros: 42,
+            doc_id: None,
+        };
+        let mut legacy_buf = Vec::new();
+        ciborium::into_writer(&legacy, &mut legacy_buf).expect("encode legacy");
+
+        let modern = OpEnvelope::new_at(
+            [opid(b"p")],
+            Bytes::from_static(b"x"),
+            Bytes::from_static(b"pk"),
+            Bytes::from_static(b"sg"),
+            None,
+            42,
+        );
+        let modern_buf = modern.encode().expect("encode modern");
+
+        assert_eq!(
+            legacy_buf, modern_buf,
+            "Ancestry envelope serialisation must stay byte-stable; \
+             a divergence here means existing op-ids will change after \
+             upgrading."
+        );
+    }
+
+    /// Wake-19 E1 — a Head envelope round-trips with `head_pointer`
+    /// populated.
+    #[test]
+    fn head_envelope_round_trip() {
+        let env = OpEnvelope::new_head(
+            opid(b"target-ancestry-op"),
+            Bytes::from_static(b"pk"),
+            Bytes::from_static(b"sg"),
+            1_700_000_000_000_000,
+        );
+        assert_eq!(env.op_class, OpClass::Head);
+        let bytes = env.encode().expect("encode");
+        let decoded = OpEnvelope::decode(&bytes).expect("decode");
+        assert_eq!(decoded, env);
+        assert_eq!(
+            decoded.head_pointer_op_id().unwrap(),
+            opid(b"target-ancestry-op")
+        );
+        // Sanity: head has no diff payload.
+        assert!(decoded.payload.is_empty());
+        assert!(decoded.parents.is_empty());
     }
 }
