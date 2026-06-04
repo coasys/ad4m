@@ -368,8 +368,17 @@ impl HolographSpace {
             runtime: cfg.runtime,
         });
         queue.start_watcher();
+        // Wake-18 D6: if SpaceConfig didn't carry an explicit relay
+        // URL, resolve from env. The resolved value is folded back
+        // into the stored config so downstream consumers
+        // (`HolographSpace::config()`) see one canonical surface and
+        // never have to reach for `std::env::var` themselves.
+        let mut config = cfg.config;
+        if config.iroh_relay_url.is_none() {
+            config.iroh_relay_url = crate::config::resolve_iroh_relay();
+        }
         Arc::new(Self {
-            config: cfg.config,
+            config,
             queue,
             op_store: cfg.op_store,
             decode_envelope: cfg.decode_envelope,

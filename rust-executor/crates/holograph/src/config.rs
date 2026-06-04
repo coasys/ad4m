@@ -120,11 +120,50 @@ pub struct SpaceConfig {
     /// the authoring peer goes silent. v1 default is 5s/3-peers/30s
     /// (see `FetchFallbackPolicy::default`).
     pub fetch_fallback_policy: FetchFallbackPolicy,
+    /// Optional iroh relay URL override (Wake-18 D6). When `Some`,
+    /// holograph passes it to `IrohTransportFactory` via the
+    /// `IrohTransportModConfig.relay_url` slot. When `None` (the
+    /// default), the K2 `transport_iroh` factory picks its own relay.
+    ///
+    /// `HolographSpace::new` resolves this lazily from the
+    /// `HOLOGRAPH_IROH_RELAY` env var (preferred) or
+    /// `HOLOGRAPH_IROH_RELAY_URL` (back-compat alias) if the field is
+    /// `None` — see [`resolve_iroh_relay`].
+    #[serde(default)]
+    pub iroh_relay_url: Option<String>,
+}
+
+/// Read the iroh relay URL from the process environment.
+///
+/// Wake-18 D6: surfaces the relay override as a structured config
+/// knob. Checks `HOLOGRAPH_IROH_RELAY` first (the canonical name
+/// going forward), then `HOLOGRAPH_IROH_RELAY_URL` (the older name
+/// used inside `holograph_wires.rs`). Empty strings are treated as
+/// unset.
+pub fn resolve_iroh_relay() -> Option<String> {
+    fn nonempty(v: String) -> Option<String> {
+        let t = v.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    }
+    std::env::var("HOLOGRAPH_IROH_RELAY")
+        .ok()
+        .and_then(nonempty)
+        .or_else(|| {
+            std::env::var("HOLOGRAPH_IROH_RELAY_URL")
+                .ok()
+                .and_then(nonempty)
+        })
 }
 
 impl SpaceConfig {
     /// The v1 default — full arc, single-doc, signature+parent validation,
-    /// 5s gossip cadence, default 5s/3-peers/30s fetch fallback.
+    /// 5s gossip cadence, default 5s/3-peers/30s fetch fallback, no
+    /// pre-set iroh relay URL (resolved from env at space-construction
+    /// time if needed).
     pub fn full_replication_single_doc() -> Self {
         Self {
             arc_policy: ArcPolicy::Full,
@@ -132,6 +171,7 @@ impl SpaceConfig {
             validation_regime: ValidationRegime::SignatureAndParentsOnly,
             gossip_initiate_interval_ms: Some(5_000),
             fetch_fallback_policy: FetchFallbackPolicy::default(),
+            iroh_relay_url: None,
         }
     }
 
@@ -169,6 +209,73 @@ mod tests {
             SpaceConfig::default(),
             SpaceConfig::full_replication_single_doc()
         );
+    }
+
+    /// Wake-18 D6 — `resolve_iroh_relay` respects both env names with
+    /// `HOLOGRAPH_IROH_RELAY` winning over `HOLOGRAPH_IROH_RELAY_URL`,
+    /// and treats whitespace-only strings as unset.
+    ///
+    /// Uses a mutex against `cargo test`'s default thread pool: env
+    /// reads are process-global, so two tests poking the same vars
+    /// concurrently would race. We serialize against a local mutex
+    /// rather than `--test-threads=1` so the rest of the suite stays
+    /// parallel.
+    #[test]
+    fn resolve_iroh_relay_prefers_short_name() {
+        // Use a leaked Mutex<()> to serialize env mutations across
+        // both env tests in this module.
+        static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = GUARD.lock().unwrap();
+
+        // Snapshot the env so we can restore.
+        let prev_short = std::env::var("HOLOGRAPH_IROH_RELAY").ok();
+        let prev_long = std::env::var("HOLOGRAPH_IROH_RELAY_URL").ok();
+
+        // Neither set → None.
+        unsafe {
+            std::env::remove_var("HOLOGRAPH_IROH_RELAY");
+            std::env::remove_var("HOLOGRAPH_IROH_RELAY_URL");
+        }
+        assert_eq!(resolve_iroh_relay(), None);
+
+        // Only long set.
+        unsafe {
+            std::env::set_var("HOLOGRAPH_IROH_RELAY_URL", "https://long/relay");
+        }
+        assert_eq!(
+            resolve_iroh_relay(),
+            Some("https://long/relay".to_string())
+        );
+
+        // Both set → short wins.
+        unsafe {
+            std::env::set_var("HOLOGRAPH_IROH_RELAY", "https://short/relay");
+        }
+        assert_eq!(
+            resolve_iroh_relay(),
+            Some("https://short/relay".to_string())
+        );
+
+        // Whitespace-only → treat as unset, fall through.
+        unsafe {
+            std::env::set_var("HOLOGRAPH_IROH_RELAY", "   ");
+        }
+        assert_eq!(
+            resolve_iroh_relay(),
+            Some("https://long/relay".to_string())
+        );
+
+        // Restore.
+        unsafe {
+            match prev_short {
+                Some(v) => std::env::set_var("HOLOGRAPH_IROH_RELAY", v),
+                None => std::env::remove_var("HOLOGRAPH_IROH_RELAY"),
+            }
+            match prev_long {
+                Some(v) => std::env::set_var("HOLOGRAPH_IROH_RELAY_URL", v),
+                None => std::env::remove_var("HOLOGRAPH_IROH_RELAY_URL"),
+            }
+        }
     }
 
     #[test]
