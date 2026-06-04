@@ -21,9 +21,25 @@ use super::types::{
     ModelQueryInput, ModelShape, OrderDirection, ProjectionInput, ShapeResolver, WhereCondition,
 };
 use super::utils::{
-    escape_sparql_string, format_literal_number, literal_percent_encode, looks_like_absolute_iri,
-    validate_iri,
+    escape_sparql_string, format_literal_number, looks_like_absolute_iri, validate_iri,
 };
+
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
+
+/// Render a finite f64 as a typed-literal SPARQL term, mirroring the storage
+/// layer's `xsd:integer` / `xsd:decimal` split.
+fn typed_number_literal(n: f64) -> Option<String> {
+    let s = format_literal_number(n)?;
+    let dt = if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
+        XSD_INTEGER
+    } else {
+        XSD_DECIMAL
+    };
+    Some(format!("\"{s}\"^^<{dt}>"))
+}
 use crate::perspectives::sparql_store::SparqlStore;
 
 /// Resolve all projections for a set of parent instances.
@@ -382,60 +398,65 @@ pub(super) fn build_projection_where_patterns(
         match condition {
             WhereCondition::String(val) => {
                 if is_literal_prop {
-                    // Match the encoded `literal:string:` form, plus the raw IRI
-                    // form when the value is itself a valid absolute IRI — same
-                    // dual-shape that the model-query where-clause emits for
-                    // constructor-seeded raw URIs on literal properties.
-                    let encoded = literal_percent_encode(val);
-                    let mut iris = vec![format!("<literal:string:{encoded}>")];
+                    let escaped = escape_sparql_string(val);
+                    let mut items = vec![format!("\"{escaped}\"^^<{XSD_STRING}>")];
                     if looks_like_absolute_iri(val) {
-                        iris.push(format!("<{val}>"));
+                        items.push(format!("<{val}>"));
                     }
-                    patterns.push(format!("    VALUES ?{var} {{ {} }}\n", iris.join(" ")));
+                    patterns.push(format!(
+                        "    VALUES ?{var} {{ {} }}\n",
+                        items.join(" ")
+                    ));
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                 } else {
                     let escaped = escape_sparql_string(val);
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                     patterns.push(format!(
-                        "    FILTER(STR(<ad4m://fn/parse_literal>(?{var})) = \"{escaped}\")\n",
+                        "    FILTER(STR(?{var}) = \"{escaped}\")\n",
                     ));
                 }
             }
             WhereCondition::Bool(b) => {
                 if is_literal_prop {
-                    patterns.push(format!("    ?t <{pred}> <literal:boolean:{b}> .\n"));
+                    patterns.push(format!(
+                        "    ?t <{pred}> \"{b}\"^^<{XSD_BOOLEAN}> .\n"
+                    ));
                 } else {
                     let bval = if *b { "true" } else { "false" };
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                     patterns.push(format!(
-                        "    FILTER(STR(<ad4m://fn/parse_literal>(?{var})) = \"{bval}\")\n",
+                        "    FILTER(STR(?{var}) = \"{bval}\")\n",
                     ));
                 }
             }
             WhereCondition::Number(n) => {
                 if is_literal_prop {
-                    if let Some(num_str) = format_literal_number(*n) {
-                        patterns.push(format!("    ?t <{pred}> <literal:number:{num_str}> .\n"));
+                    if let Some(typed) = typed_number_literal(*n) {
+                        patterns.push(format!("    ?t <{pred}> {typed} .\n"));
                     } else {
                         patterns.push("    FILTER(false)\n".to_string());
                     }
                 } else {
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                     patterns.push(format!(
-                        "    FILTER(STR(<ad4m://fn/parse_literal>(?{var})) = \"{n}\")\n",
+                        "    FILTER(STR(?{var}) = \"{n}\")\n",
                     ));
                 }
             }
             WhereCondition::StringArray(vals) => {
                 if is_literal_prop {
-                    let mut iris: Vec<String> = Vec::with_capacity(vals.len() * 2);
+                    let mut items: Vec<String> = Vec::with_capacity(vals.len() * 2);
                     for v in vals {
-                        iris.push(format!("<literal:string:{}>", literal_percent_encode(v)));
+                        let escaped = escape_sparql_string(v);
+                        items.push(format!("\"{escaped}\"^^<{XSD_STRING}>"));
                         if looks_like_absolute_iri(v) {
-                            iris.push(format!("<{v}>"));
+                            items.push(format!("<{v}>"));
                         }
                     }
-                    patterns.push(format!("    VALUES ?{var} {{ {} }}\n", iris.join(" ")));
+                    patterns.push(format!(
+                        "    VALUES ?{var} {{ {} }}\n",
+                        items.join(" ")
+                    ));
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                 } else {
                     let list = vals
@@ -445,23 +466,23 @@ pub(super) fn build_projection_where_patterns(
                         .join(", ");
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                     patterns.push(format!(
-                        "    FILTER(STR(<ad4m://fn/parse_literal>(?{var})) IN ({list}))\n",
+                        "    FILTER(STR(?{var}) IN ({list}))\n",
                     ));
                 }
             }
             WhereCondition::NumberArray(vals) => {
                 if is_literal_prop {
-                    let iris = vals
+                    let items: Vec<String> = vals
                         .iter()
-                        .filter_map(|n| {
-                            format_literal_number(*n).map(|s| format!("<literal:number:{s}>"))
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    if iris.is_empty() {
+                        .filter_map(|n| typed_number_literal(*n))
+                        .collect();
+                    if items.is_empty() {
                         patterns.push("    FILTER(false)\n".to_string());
                     } else {
-                        patterns.push(format!("    VALUES ?{var} {{ {iris} }}\n"));
+                        patterns.push(format!(
+                            "    VALUES ?{var} {{ {} }}\n",
+                            items.join(" ")
+                        ));
                         patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                     }
                 } else {
@@ -472,7 +493,7 @@ pub(super) fn build_projection_where_patterns(
                         .join(", ");
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                     patterns.push(format!(
-                        "    FILTER(STR(<ad4m://fn/parse_literal>(?{var})) IN ({list}))\n",
+                        "    FILTER(STR(?{var}) IN ({list}))\n",
                     ));
                 }
             }
