@@ -242,10 +242,7 @@ mod tests {
         unsafe {
             std::env::set_var("HOLOGRAPH_IROH_RELAY_URL", "https://long/relay");
         }
-        assert_eq!(
-            resolve_iroh_relay(),
-            Some("https://long/relay".to_string())
-        );
+        assert_eq!(resolve_iroh_relay(), Some("https://long/relay".to_string()));
 
         // Both set → short wins.
         unsafe {
@@ -260,10 +257,7 @@ mod tests {
         unsafe {
             std::env::set_var("HOLOGRAPH_IROH_RELAY", "   ");
         }
-        assert_eq!(
-            resolve_iroh_relay(),
-            Some("https://long/relay".to_string())
-        );
+        assert_eq!(resolve_iroh_relay(), Some("https://long/relay".to_string()));
 
         // Restore.
         unsafe {

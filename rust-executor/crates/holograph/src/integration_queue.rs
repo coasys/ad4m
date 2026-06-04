@@ -671,8 +671,11 @@ impl HolographIntegrationQueue {
             entry.tried_peers.len(),
             now_micros() - entry.first_seen_micros
         );
-        self.notify
-            .notify_parent_fetch_permanent_failure(op_id, missing_parents, reason.to_string());
+        self.notify.notify_parent_fetch_permanent_failure(
+            op_id,
+            missing_parents,
+            reason.to_string(),
+        );
         self.pending
             .remove(key)
             .map_err(|e| K2Error::other_src("pending.remove (permanent failure)", e))?;

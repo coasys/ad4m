@@ -431,7 +431,10 @@ async fn shutdown_flushes_and_rejects_new_commits() {
 
     // Commit one op so the store + DB has something to flush.
     let (envelope_bytes, _op_id) = make_envelope(b"shutdown-test", vec![]);
-    h.space.on_local_commit(envelope_bytes).await.expect("commit");
+    h.space
+        .on_local_commit(envelope_bytes)
+        .await
+        .expect("commit");
     assert_eq!(h.op_store.op_count_blocking(), 1);
 
     // Shutdown — no pending ops, so the drain completes immediately.

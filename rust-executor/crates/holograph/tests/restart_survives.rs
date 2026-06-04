@@ -22,9 +22,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use holograph::{
-    holograph_envelope_decoder, ArcPolicy, EnvelopeDecoder, FetchFallbackPolicy,
-    HolographSpace, HolographSpaceConfig, KvOpStore, LocalCommitTarget, NotifyUp, OpEnvelope,
-    OpFetcher, PeerPicker, SpaceConfig,
+    holograph_envelope_decoder, ArcPolicy, EnvelopeDecoder, FetchFallbackPolicy, HolographSpace,
+    HolographSpaceConfig, KvOpStore, LocalCommitTarget, NotifyUp, OpEnvelope, OpFetcher,
+    PeerPicker, SpaceConfig,
 };
 use kitsune2_api::{K2Result, OpId, SpaceId, StoredOp, Url};
 
@@ -77,10 +77,7 @@ fn space_id() -> SpaceId {
     SpaceId::from(Bytes::from_static(b"restart-test"))
 }
 
-fn open_space_at(
-    path: &std::path::Path,
-    handle: tokio::runtime::Handle,
-) -> Arc<HolographSpace> {
+fn open_space_at(path: &std::path::Path, handle: tokio::runtime::Handle) -> Arc<HolographSpace> {
     let op_store = KvOpStore::open(
         path.join("ops"),
         space_id(),
@@ -89,9 +86,7 @@ fn open_space_at(
     )
     .expect("open op_store");
     let pending_db = sled::open(path.join("pending")).expect("open pending");
-    let pending = pending_db
-        .open_tree(b"pending")
-        .expect("open pending tree");
+    let pending = pending_db.open_tree(b"pending").expect("open pending tree");
 
     let cfg = HolographSpaceConfig {
         config: SpaceConfig {

@@ -474,8 +474,7 @@ impl HolographSpace {
             .store(true, std::sync::atomic::Ordering::Release);
         self.queue.stop_watcher();
 
-        let drain_deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let drain_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut remaining = self.queue.pending_len();
         while remaining > 0 && std::time::Instant::now() < drain_deadline {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
