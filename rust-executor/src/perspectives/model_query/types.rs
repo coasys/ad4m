@@ -238,6 +238,16 @@ pub struct ModelQueryInput {
     pub offset: Option<usize>,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// When `Some(true)`, force the executor to compute `total_count`
+    /// regardless of whether pagination is applied; this also enables the
+    /// "fast path" that returns only the count when `limit == 0`.
+    /// When `Some(false)`, skip the COUNT round trip entirely — the
+    /// returned `total_count` falls back to `instances.len()`, which equals
+    /// the materialised page size, not the unpaginated total.
+    /// When `None` (default), back-compat behaviour: fire COUNT whenever
+    /// pagination is applied. Most paginated UIs do read `total_count`, so
+    /// the default is conservative; opt out on call sites where the count
+    /// is genuinely unused.
     #[serde(default)]
     pub count: Option<bool>,
     /// When true, evaluate **property** getters (@Property with `getter`) during
@@ -246,6 +256,26 @@ pub struct ModelQueryInput {
     /// batched VALUES queries (O(M) cost).  Set to false to skip them.
     #[serde(default, rename = "deepQuery")]
     pub deep_query: Option<bool>,
+    /// When true (default), the main instance SPARQL joins each property
+    /// triple against its RDF 1.2 reifier metadata so that hydration can
+    /// emit `author`, `createdAt`, `updatedAt`, and apply last-write-wins
+    /// disambiguation on scalar properties.  The join adds three triple
+    /// patterns per result row (`rdf:reifies` + `ad4m:author` +
+    /// `ad4m:timestamp`) — empirically ~3.4× the per-row SPARQL cost on
+    /// scan-all queries vs the raw equivalent.
+    ///
+    /// When set to `false`, the executor:
+    ///   - drops the reifier-metadata join entirely from both the Single
+    ///     and TwoPhase property fetches,
+    ///   - leaves `author`, `createdAt`, `updatedAt` unset on hydrated
+    ///     instances,
+    ///   - degrades scalar-property hydration from last-write-wins-by-
+    ///     timestamp to last-row-wins-by-insertion-order.
+    ///
+    /// Set to `false` on read-only / append-only call sites that don't
+    /// surface link-level metadata in the UI.
+    #[serde(default, rename = "withMetadata")]
+    pub with_metadata: Option<bool>,
 }
 
 /// Result returned by the model query endpoint.
@@ -257,9 +287,11 @@ pub struct ModelQueryResult {
 }
 
 /// Parameters for SPARQL-side pagination (pushed ORDER BY + LIMIT + OFFSET).
+///
+/// `sort_keys` is in priority order — the first key drives the primary sort,
+/// later keys break ties.  Single-key pagination uses a `Vec` of length 1.
 pub(super) struct SparqlPagination {
-    pub(super) sort_key: SortKey,
-    pub(super) direction: OrderDirection,
+    pub(super) sort_keys: Vec<(SortKey, OrderDirection)>,
     pub(super) offset: Option<usize>,
     pub(super) limit: Option<usize>,
 }

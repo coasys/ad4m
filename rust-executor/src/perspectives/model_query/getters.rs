@@ -223,9 +223,8 @@ pub(super) fn evaluate_getters(
 
         if upper.starts_with("ASK") {
             let batched = convert_ask_to_batched_select(getter, &values_clause);
-            match store.query(&batched) {
-                Ok(result_json) => {
-                    let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
+            match store.query_values(&batched) {
+                Ok(rows) => {
                     let matched: std::collections::HashSet<&str> = rows
                         .iter()
                         .filter_map(|row| row.get("source").and_then(|v| v.as_str()))
@@ -252,10 +251,8 @@ pub(super) fn evaluate_getters(
         } else if upper.starts_with("SELECT") {
             let batched = inject_values_into_select(getter, &values_clause);
 
-            match store.query(&batched) {
-                Ok(result_json) => {
-                    let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
-
+            match store.query_values(&batched) {
+                Ok(rows) => {
                     let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
                     for row in &rows {
                         let source = match row.get("source").and_then(|v| v.as_str()) {
@@ -386,47 +383,110 @@ pub(super) fn apply_where_filter_to_relation(
         .map(|t| (t.to_string(), true))
         .collect();
 
+    // Fold the per-predicate value fetches into one query:
+    //   SELECT ?source ?predicate ?val WHERE {
+    //     VALUES ?source { … }
+    //     VALUES ?predicate { <p1> <p2> … }
+    //     ?source ?predicate ?val .
+    //   }
+    //
+    // Saves N - 1 round trips compared with the previous one-query-per-
+    // predicate loop, at the cost of binning rows by predicate in Rust.
+    let mut predicate_to_condition: HashMap<String, Vec<&super::types::WhereCondition>> =
+        HashMap::new();
+    let mut safe_predicate_iris: Vec<String> = Vec::new();
+    let mut skipped_props: Vec<&String> = Vec::new();
     for (prop_name, condition) in where_filter {
         let predicate = match where_predicates.get(prop_name) {
             Some(p) => p,
-            None => continue,
+            None => {
+                skipped_props.push(prop_name);
+                continue;
+            }
         };
-        if validate_iri(predicate).is_err() {
-            continue;
+        match validate_iri(predicate) {
+            Ok(safe) => {
+                let safe = safe.to_string();
+                if !predicate_to_condition.contains_key(&safe) {
+                    safe_predicate_iris.push(safe.clone());
+                }
+                predicate_to_condition
+                    .entry(safe)
+                    .or_default()
+                    .push(condition);
+            }
+            Err(_) => {
+                skipped_props.push(prop_name);
+            }
         }
+    }
+
+    if !safe_predicate_iris.is_empty() {
+        let predicate_values = safe_predicate_iris
+            .iter()
+            .map(|p| format!("<{p}>"))
+            .collect::<Vec<_>>()
+            .join(" ");
 
         let query = format!(
-            "SELECT ?source ?val WHERE {{ VALUES ?source {{ {} }} ?source <{}> ?val . }}",
-            values_clause, predicate
+            "SELECT ?source ?predicate ?val WHERE {{ \
+             VALUES ?source {{ {values_clause} }} \
+             VALUES ?predicate {{ {predicate_values} }} \
+             ?source ?predicate ?val . }}"
         );
 
-        let result_json = store.query(&query)?;
-        let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
+        let rows = store.query_values(&query).unwrap_or_default();
 
-        let mut target_vals: HashMap<String, Value> = HashMap::new();
+        // Bin observed values: (target, predicate) → value (kept first occurrence).
+        let mut target_pred_vals: HashMap<(String, String), Value> = HashMap::new();
         for row in &rows {
-            if let (Some(source), Some(val_str)) = (
+            if let (Some(source), Some(predicate), Some(val_str)) = (
                 row.get("source").and_then(|v| v.as_str()),
+                row.get("predicate").and_then(|v| v.as_str()),
                 row.get("val").and_then(|v| v.as_str()),
             ) {
-                target_vals.insert(source.to_string(), parse_literal_value(val_str));
+                let key = (source.to_string(), predicate.to_string());
+                target_pred_vals
+                    .entry(key)
+                    .or_insert_with(|| parse_literal_value(val_str));
             }
         }
 
+        // Evaluate every condition against every target.  A predicate may
+        // carry multiple conditions if the same SHACL key declares more
+        // than one filter against the same predicate IRI.
         for (target_id, pass) in target_pass.iter_mut() {
             if !*pass {
                 continue;
             }
-            match target_vals.get(target_id) {
-                Some(val) => {
-                    if !matches_condition(val, condition) {
+            for (predicate, conditions) in &predicate_to_condition {
+                let key = (target_id.clone(), predicate.clone());
+                match target_pred_vals.get(&key) {
+                    Some(val) => {
+                        for condition in conditions {
+                            if !matches_condition(val, condition) {
+                                *pass = false;
+                                break;
+                            }
+                        }
+                    }
+                    None => {
                         *pass = false;
                     }
                 }
-                None => {
-                    *pass = false;
+                if !*pass {
+                    break;
                 }
             }
+        }
+    }
+
+    // Properties with no resolvable predicate (or invalid IRI) force a
+    // hard fail to preserve the prior semantics — the relation cannot be
+    // proven to match the filter so the target is dropped.
+    if !skipped_props.is_empty() {
+        for pass in target_pass.values_mut() {
+            *pass = false;
         }
     }
 

@@ -83,6 +83,136 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape) -> String {
     )
 }
 
+/// Build the pagination sub-query for TwoPhase plans, supporting arbitrary
+/// multi-key ORDER BY across reifier-timestamp and scalar-property keys.
+///
+/// The sub-query always returns `?source` for each matching instance plus
+/// one or more sort columns:
+///   - reifier-timestamp keys contribute a single `?_first_ts` column,
+///   - each property key contributes `?_sort_num_i` + `?_sort_str_i` via
+///     SAMPLE aggregation under `GROUP BY ?source`.
+///
+/// When the sort spec contains any property keys, the sub-query uses
+/// `GROUP BY ?source` (required for SAMPLE).  When it's pure-timestamp,
+/// it uses `SELECT DISTINCT` for efficiency.
+fn build_pagination_subquery(
+    shape: &ModelShape,
+    pg: &SparqlPagination,
+    conformance: &str,
+    where_extra: &str,
+) -> String {
+    let needs_timestamp = pg
+        .sort_keys
+        .iter()
+        .any(|(k, _)| matches!(k, SortKey::Timestamp));
+    let property_keys: Vec<(usize, &str, OrderDirection)> = pg
+        .sort_keys
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (k, d))| match k {
+            SortKey::Property(p) => Some((i, p.as_str(), *d)),
+            SortKey::Timestamp => None,
+        })
+        .collect();
+
+    let mut select_columns = vec!["?source".to_string()];
+    let mut probe = String::new();
+    let mut optionals = String::new();
+
+    if needs_timestamp {
+        let ts_probe = build_timestamp_probe(shape);
+        probe.push_str(&format!("            {ts_probe}\n"));
+        // ?_first_ts is bare in the timestamp-only case; under GROUP BY we
+        // need to wrap it in SAMPLE so SPARQL accepts the projection.
+        if property_keys.is_empty() {
+            select_columns.push("?_first_ts".to_string());
+        } else {
+            select_columns.push("(SAMPLE(?_first_ts) AS ?_first_ts)".to_string());
+        }
+    }
+
+    for (i, predicate, _) in &property_keys {
+        let raw = format!("?_sort_raw_{i}");
+        let sv = format!("?_sort_str_{i}");
+        let nv = format!("?_sort_num_{i}");
+        // STR() returns the lexical form for a typed literal and the IRI
+        // text for a NamedNode — either way we get a comparable value.
+        // xsd:double yields the numeric sort key when the value parses as
+        // a number, NULL otherwise.
+        optionals.push_str(&format!(
+            "            OPTIONAL {{ ?source <{predicate}> {raw} . BIND(STR({raw}) AS {sv}) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR({raw})) AS {nv}) }}\n"
+        ));
+        select_columns.push(format!("(SAMPLE({nv}) AS ?_sort_num_{i})"));
+        select_columns.push(format!("(SAMPLE({sv}) AS ?_sort_str_{i})"));
+    }
+
+    let order_by_terms: Vec<String> = pg
+        .sort_keys
+        .iter()
+        .enumerate()
+        .map(|(i, (key, dir))| match key {
+            SortKey::Timestamp => match dir {
+                OrderDirection::ASC => "ASC(?_first_ts)".to_string(),
+                OrderDirection::DESC => "DESC(?_first_ts)".to_string(),
+            },
+            SortKey::Property(_) => {
+                let d = match dir {
+                    OrderDirection::ASC => "ASC",
+                    OrderDirection::DESC => "DESC",
+                };
+                // Push unbound (NULL) values to the end regardless of dir,
+                // sort numeric column first, fall back to string column.
+                format!(
+                    "ASC(IF(BOUND(?_sort_str_{i}), 0, 1)) {d}(?_sort_num_{i}) {d}(?_sort_str_{i})"
+                )
+            }
+        })
+        .collect();
+
+    let mut suffix = String::new();
+    if !order_by_terms.is_empty() {
+        suffix.push_str("\n    ORDER BY ");
+        suffix.push_str(&order_by_terms.join(" "));
+    }
+    if let Some(offset) = pg.offset {
+        if offset > 0 {
+            suffix.push_str(&format!("\n    OFFSET {offset}"));
+        }
+    }
+    if let Some(limit) = pg.limit {
+        suffix.push_str(&format!("\n    LIMIT {limit}"));
+    }
+
+    if property_keys.is_empty() {
+        // Pure-timestamp (or no sort keys) → DISTINCT, no GROUP BY
+        format!(
+            r#"SELECT DISTINCT {cols} WHERE {{
+{conformance}
+{where_extra}
+{probe}        }}{suffix}"#,
+            cols = select_columns.join(" "),
+            conformance = conformance,
+            where_extra = where_extra,
+            probe = probe,
+            suffix = suffix,
+        )
+    } else {
+        // Property sort → GROUP BY ?source for SAMPLE
+        format!(
+            r#"SELECT {cols} WHERE {{
+{conformance}
+{where_extra}
+{probe}{optionals}        }} GROUP BY ?source{suffix}"#,
+            cols = select_columns.join(" "),
+            conformance = conformance,
+            where_extra = where_extra,
+            probe = probe,
+            optionals = optionals,
+            suffix = suffix,
+        )
+    }
+}
+
 /// Build the SPARQL query (or two-phase plan) that retrieves instance rows.
 ///
 /// Returns an [`InstanceQueryPlan`]:
@@ -117,62 +247,8 @@ pub(super) fn build_instance_sparql(
         format!("    VALUES ?predicate {{ {values} }}\n")
     };
 
-    let pagination_suffix = if let Some(pg) = sparql_pagination {
-        let mut suffix = String::new();
-        match &pg.sort_key {
-            SortKey::Timestamp => match pg.direction {
-                OrderDirection::DESC => suffix.push_str("\n    ORDER BY DESC(?_first_ts)"),
-                OrderDirection::ASC => suffix.push_str("\n    ORDER BY ASC(?_first_ts)"),
-            },
-            SortKey::Property(_) => {
-                let dir = match pg.direction {
-                    OrderDirection::DESC => "DESC",
-                    OrderDirection::ASC => "ASC",
-                };
-                suffix.push_str(&format!(
-                    "\n    ORDER BY ASC(IF(BOUND(?_sort_str), 0, 1)) {dir}(?_sort_num) {dir}(?_sort_str)"
-                ));
-            }
-        }
-        if let Some(offset) = pg.offset {
-            if offset > 0 {
-                suffix.push_str(&format!("\n    OFFSET {offset}"));
-            }
-        }
-        if let Some(limit) = pg.limit {
-            suffix.push_str(&format!("\n    LIMIT {limit}"));
-        }
-        suffix
-    } else {
-        String::new()
-    };
-
     if let Some(pg) = sparql_pagination {
-        let subquery_body = match &pg.sort_key {
-            SortKey::Timestamp => {
-                let ts_probe = build_timestamp_probe(shape);
-                format!(
-                    r#"SELECT DISTINCT ?source ?_first_ts WHERE {{
-{conformance}
-{where_extra}
-            {ts_probe}
-        }}{pagination_suffix}"#
-                )
-            }
-            SortKey::Property(predicate) => {
-                // STR() returns the lexical form for a typed literal and the
-                // IRI text for a NamedNode — either way we get a comparable
-                // value for the sort.  The xsd:double cast yields the numeric
-                // sort key when the value parses as a number.
-                format!(
-                    r#"SELECT DISTINCT ?source (SAMPLE(?_nv) AS ?_sort_num) (SAMPLE(?_sv) AS ?_sort_str) WHERE {{
-{conformance}
-{where_extra}
-            OPTIONAL {{ ?source <{predicate}> ?_sort_raw . BIND(STR(?_sort_raw) AS ?_sv) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(?_sort_raw)) AS ?_nv) }}
-        }} GROUP BY ?source{pagination_suffix}"#
-                )
-            }
-        };
+        let subquery_body = build_pagination_subquery(shape, pg, &conformance, &where_extra);
         // The two-phase property fetch derives its own predicate filter via
         // `build_predicate_filter_for_property_fetch(shape)` in query.rs.
         let _ = predicate_filter;
@@ -188,8 +264,10 @@ pub(super) fn build_instance_sparql(
         // aggregate. The per-row Rust fold over already-fetched rows is
         // cheaper than the planner cliff, and stays correct as long as
         // every reifier's timestamp is returned (which it is).
-        InstanceQueryPlan::Single(format!(
-            r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+        let with_metadata = query.with_metadata.unwrap_or(true);
+        let sparql = if with_metadata {
+            format!(
+                r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
 {where_extra}
 {predicate_filter}    ?source ?predicate ?target .
@@ -198,7 +276,22 @@ pub(super) fn build_instance_sparql(
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
 }}"#
-        ))
+            )
+        } else {
+            // No reifier-metadata join: the caller opted out of
+            // author/createdAt/updatedAt and accepts last-row-wins-by-
+            // insertion-order hydration. Saves three triple-pattern matches
+            // per result row.
+            format!(
+                r#"SELECT ?source ?predicate ?target WHERE {{
+{conformance}
+{where_extra}
+{predicate_filter}    ?source ?predicate ?target .
+    FILTER(isIRI(?source) && isIRI(?predicate))
+}}"#
+            )
+        };
+        InstanceQueryPlan::Single(sparql)
     }
 }
 
@@ -284,6 +377,45 @@ pub(super) fn build_count_sparql(shape: &ModelShape, query: &ModelQueryInput) ->
 /// simple string values), a collection relation (with string/array values),
 /// or a known scalar property.  When this returns `false`, post-hydration
 /// Rust-side filtering is required for the remaining conditions.
+/// Returns the upper-bound size of the matching `?source` set implied by
+/// the WHERE clause's id/base equality conditions, or `None` if no such
+/// bound exists.
+///
+/// Used by the query planner to detect cases where TwoPhase pagination is
+/// pure overhead: when WHERE pins `id` to a single IRI (returns Some(1))
+/// or to a finite `StringArray` (returns Some(len)), the source set is
+/// already bounded by the WHERE filter alone and the timestamp probe in
+/// phase 1 adds work without changing the result.
+pub(super) fn where_clause_max_source_count(query: &ModelQueryInput) -> Option<usize> {
+    let wc = query.where_clause.as_ref()?;
+    let mut min: Option<usize> = None;
+    for (prop_name, condition) in wc {
+        if prop_name != "id" && prop_name != "base" {
+            continue;
+        }
+        let cap = match condition {
+            WhereCondition::String(_)
+            | WhereCondition::Number(_)
+            | WhereCondition::Bool(_) => Some(1),
+            WhereCondition::StringArray(arr) => Some(arr.len()),
+            WhereCondition::NumberArray(arr) => Some(arr.len()),
+            // `Ops` (gt/lt/between/contains/not) can match an unbounded set.
+            WhereCondition::Ops(_) => None,
+        };
+        if let Some(cap) = cap {
+            min = Some(min.map(|m| m.min(cap)).unwrap_or(cap));
+        }
+    }
+    min
+}
+
+/// Cheap variant of [`where_clause_max_source_count`] that just answers
+/// "is the result set provably bounded by WHERE?" without computing the
+/// exact bound.
+pub(super) fn where_clause_caps_result_size(query: &ModelQueryInput) -> bool {
+    where_clause_max_source_count(query).is_some()
+}
+
 pub(super) fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) -> bool {
     let Some(ref wc) = query.where_clause else {
         return true;

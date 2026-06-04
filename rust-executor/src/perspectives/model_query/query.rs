@@ -14,7 +14,8 @@ use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
     all_where_pushable, build_count_sparql, build_instance_sparql,
-    build_predicate_filter_for_property_fetch,
+    build_predicate_filter_for_property_fetch, where_clause_caps_result_size,
+    where_clause_max_source_count,
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection,
@@ -71,12 +72,15 @@ pub(super) async fn execute_model_query_inner(
         });
     }
 
-    // Fast path: COUNT-only
-    let is_count_only = query_input.limit == Some(0);
+    // Fast path: COUNT-only.  Engaged when the caller sets `limit: 0`
+    // (zero rows) AND either explicitly asked for count (`count: true`) or
+    // didn't opt out (`count: None`, the back-compat default).  Skipped
+    // when the caller explicitly set `count: false` (they want neither
+    // rows nor count — return both empty).
+    let is_count_only = query_input.limit == Some(0) && query_input.count != Some(false);
     if is_count_only && all_where_pushable(query_input, shape) {
         if let Some(sparql) = build_count_sparql(shape, query_input) {
-            let result_json = store.query(&sparql)?;
-            let results: Vec<Value> = serde_json::from_str(&result_json)?;
+            let results = store.query_values(&sparql)?;
             let count = results
                 .first()
                 .and_then(|r| {
@@ -93,50 +97,76 @@ pub(super) async fn execute_model_query_inner(
         }
     }
 
-    // Full pipeline
-    let can_push_pagination = all_where_pushable(query_input, shape) && {
-        match &query_input.order {
-            None => true,
-            Some(order) => {
-                order.len() == 1
-                    && (order[0].0 == "timestamp"
-                        || order[0].0 == "createdAt"
-                        || order[0].0 == "updatedAt"
-                        || shape.properties.iter().any(|p| {
-                            p.name == order[0].0 && !p.is_collection && !p.predicate.is_empty()
-                        }))
-            }
-        }
+    // Full pipeline.
+    //
+    // Multi-key sorts are pushed too: every key has to be either a
+    // reifier-timestamp synonym (`timestamp`/`createdAt`/`updatedAt`) or a
+    // scalar property in the shape with a non-empty predicate.  If any
+    // key fails that test, fall back to the post-hydration Rust sort.
+    let order_keys_pushable = match &query_input.order {
+        None => true,
+        Some(order) => order.iter().all(|(name, _)| {
+            name == "timestamp"
+                || name == "createdAt"
+                || name == "updatedAt"
+                || shape
+                    .properties
+                    .iter()
+                    .any(|p| p.name == *name && !p.is_collection && !p.predicate.is_empty())
+        }),
     };
+    let can_push_pagination = all_where_pushable(query_input, shape) && order_keys_pushable;
+
+    // When WHERE includes a uniquely-selective `id`/`base` equality, the
+    // result set is bounded a priori — at most 1 row for `String`, at most
+    // |arr| rows for `StringArray`.  In that case the TwoPhase pagination
+    // plan is wasted work: phase 1's timestamp probe + ORDER BY scans the
+    // reifier index for every candidate source, but there's nothing to
+    // sort over and nothing to cut.  Detect it and fall through to the
+    // Single plan, which applies LIMIT/OFFSET in the Rust post-step.
+    //
+    // This handles the common "fetch one row by id" pattern — flux's
+    // `SemanticRelationship.findAll({ where: { expression: id }, limit: 1 })`
+    // and equivalents — where the WHERE narrows to a single source IRI but
+    // the limit hint still forces TwoPhase under the old policy.
+    let where_is_uniquely_selective = where_clause_caps_result_size(query_input);
+    let pagination_would_be_no_op = where_is_uniquely_selective
+        && query_input.offset.unwrap_or(0) == 0
+        && match query_input.limit {
+            None => true,
+            Some(n) => n >= where_clause_max_source_count(query_input).unwrap_or(usize::MAX),
+        };
 
     let sparql_pagination =
-        if can_push_pagination && (query_input.limit.is_some() || query_input.offset.is_some()) {
-            let direction = query_input
-                .order
-                .as_ref()
-                .and_then(|o| o.first())
-                .map(|(_, d)| *d)
-                .unwrap_or(OrderDirection::ASC);
-            let sort_key = match &query_input.order {
-                None => SortKey::Timestamp,
-                Some(order) => {
-                    let key = &order[0].0;
-                    if key == "timestamp" || key == "createdAt" || key == "updatedAt" {
-                        SortKey::Timestamp
-                    } else if let Some(prop) = shape
-                        .properties
-                        .iter()
-                        .find(|p| p.name == *key && !p.is_collection && !p.predicate.is_empty())
-                    {
-                        SortKey::Property(prop.predicate.clone())
-                    } else {
-                        SortKey::Timestamp
-                    }
-                }
+        if !pagination_would_be_no_op
+            && can_push_pagination
+            && (query_input.limit.is_some() || query_input.offset.is_some())
+        {
+            let sort_keys: Vec<(SortKey, OrderDirection)> = match &query_input.order {
+                None => vec![(SortKey::Timestamp, OrderDirection::ASC)],
+                Some(order) => order
+                    .iter()
+                    .map(|(name, dir)| {
+                        let key = if name == "timestamp"
+                            || name == "createdAt"
+                            || name == "updatedAt"
+                        {
+                            SortKey::Timestamp
+                        } else if let Some(prop) =
+                            shape.properties.iter().find(|p| {
+                                p.name == *name && !p.is_collection && !p.predicate.is_empty()
+                            })
+                        {
+                            SortKey::Property(prop.predicate.clone())
+                        } else {
+                            SortKey::Timestamp
+                        };
+                        (key, *dir)
+                    })
+                    .collect(),
             };
             Some(SparqlPagination {
-                sort_key,
-                direction,
+                sort_keys,
                 offset: query_input.offset,
                 limit: query_input.limit,
             })
@@ -147,15 +177,11 @@ pub(super) async fn execute_model_query_inner(
     let query_plan = build_instance_sparql(shape, query_input, sparql_pagination.as_ref());
 
     let raw_results: Vec<Value> = match query_plan {
-        InstanceQueryPlan::Single(sparql) => {
-            let result_json = store.query_async(&sparql).await?;
-            serde_json::from_str(&result_json)?
-        }
+        InstanceQueryPlan::Single(sparql) => store.query_values_async(&sparql).await?,
         InstanceQueryPlan::TwoPhase {
             pagination_subquery,
         } => {
-            let page_json = store.query_async(&pagination_subquery).await?;
-            let page_results: Vec<Value> = serde_json::from_str(&page_json)?;
+            let page_results = store.query_values_async(&pagination_subquery).await?;
 
             if page_results.is_empty() {
                 vec![]
@@ -176,8 +202,10 @@ pub(super) async fn execute_model_query_inner(
                     // SPARQL subquery hit a planner cliff in benchmarks —
                     // see the comment in `build_instance_sparql`).
                     let predicate_filter = build_predicate_filter_for_property_fetch(shape);
-                    let property_sparql = format!(
-                        r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+                    let with_metadata = query_input.with_metadata.unwrap_or(true);
+                    let property_sparql = if with_metadata {
+                        format!(
+                            r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
     VALUES ?source {{ {source_values} }}
 {predicate_filter}    ?source ?predicate ?target .
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
@@ -185,9 +213,17 @@ pub(super) async fn execute_model_query_inner(
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
 }}"#
-                    );
-                    let result_json = store.query_async(&property_sparql).await?;
-                    serde_json::from_str(&result_json)?
+                        )
+                    } else {
+                        format!(
+                            r#"SELECT ?source ?predicate ?target WHERE {{
+    VALUES ?source {{ {source_values} }}
+{predicate_filter}    ?source ?predicate ?target .
+    FILTER(isIRI(?predicate))
+}}"#
+                        )
+                    };
+                    store.query_values_async(&property_sparql).await?
                 }
             }
         }
@@ -228,11 +264,23 @@ pub(super) async fn execute_model_query_inner(
         }
     }
 
-    // Calculate total count
-    let total_count = if sparql_pagination.is_some() {
+    // Calculate total count.
+    //
+    // The COUNT round-trip fires only when the caller asks for it:
+    //   - `count: Some(true)`  → always fire (even without pagination)
+    //   - `count: None`        → fire when pagination is applied (back-compat)
+    //   - `count: Some(false)` → never fire; `total_count = instances.len()`
+    //
+    // The previous behaviour was equivalent to `count: None`, so existing
+    // callers that don't pass `count` see no change.
+    let want_count = match query_input.count {
+        Some(true) => true,
+        Some(false) => false,
+        None => sparql_pagination.is_some(),
+    };
+    let total_count = if want_count {
         if let Some(count_sparql) = build_count_sparql(shape, query_input) {
-            let result_json = store.query(&count_sparql)?;
-            let results: Vec<Value> = serde_json::from_str(&result_json)?;
+            let results = store.query_values(&count_sparql)?;
             results
                 .first()
                 .and_then(|r| {
@@ -357,56 +405,94 @@ async fn resolve_language_transforms(
 
     let controller = crate::languages::LanguageController::global_instance();
 
-    for instance in instances.iter_mut() {
+    // Pass 1: walk every (instance, resolve-language prop) pair and decide
+    // whether it needs a `get_expression` lookup.  Collect the unique
+    // (lang, expr_addr) pairs so we can fetch them in parallel — the
+    // previous implementation awaited each call sequentially.
+    let mut fetch_jobs: std::collections::HashMap<(String, String), Option<Value>> =
+        std::collections::HashMap::new();
+    let mut already_resolved: std::collections::HashMap<usize, Vec<(String, Value)>> =
+        std::collections::HashMap::new();
+
+    for (inst_idx, instance) in instances.iter().enumerate() {
         for prop in &resolve_props {
-            // Compute the "resolved" focus value for the transform:
-            //   - String that parses as a language expression URL → fetch via controller
-            //   - Anything else (already-decoded literal string, object, etc.) → use as-is
+            let current = instance[&prop.name].clone();
+            let mut record_resolved = |val: Value| {
+                already_resolved
+                    .entry(inst_idx)
+                    .or_default()
+                    .push((prop.name.clone(), val));
+            };
+            match &current {
+                Value::String(uri) if !uri.starts_with("literal:") => {
+                    match crate::languages::LanguageController::parse_expr_url(uri) {
+                        Ok((lang, expr_addr)) => {
+                            fetch_jobs.entry((lang, expr_addr)).or_insert(None);
+                        }
+                        Err(_) => record_resolved(current),
+                    }
+                }
+                Value::Object(_) | Value::String(_) => record_resolved(current),
+                Value::Null => {}
+                _ => record_resolved(current),
+            }
+        }
+    }
+
+    // Pass 2: fire every unique `get_expression` call concurrently.  Order
+    // of the resulting `Vec` matches the order of jobs we send in.
+    if !fetch_jobs.is_empty() {
+        let pairs: Vec<(String, String)> = fetch_jobs.keys().cloned().collect();
+        let futures: Vec<_> = pairs
+            .iter()
+            .map(|(lang, addr)| controller.get_expression(lang, addr))
+            .collect();
+        let outputs = futures::future::join_all(futures).await;
+        for (pair, out) in pairs.into_iter().zip(outputs.into_iter()) {
+            let resolved = match out {
+                Ok(Some(expr_json)) => {
+                    let data = expr_json.get("data").cloned().unwrap_or(Value::Null);
+                    Some(match &data {
+                        Value::String(s) => serde_json::from_str(s).unwrap_or(data),
+                        _ => data,
+                    })
+                }
+                _ => None,
+            };
+            fetch_jobs.insert(pair, resolved);
+        }
+    }
+
+    // Pass 3: walk again and write transformed values back.  String→fetch
+    // misses (controller returned None / Err) fall back to the raw URI, as
+    // the previous implementation did.
+    for (inst_idx, instance) in instances.iter_mut().enumerate() {
+        if let Some(prefilled) = already_resolved.get(&inst_idx) {
+            for (name, val) in prefilled {
+                let prop = match resolve_props.iter().find(|p| p.name == *name) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let default_transform = super::types::default_file_decode();
+                let transform = prop.transform.as_ref().unwrap_or(&default_transform);
+                instance[name] = eval_transform(transform, val, val);
+            }
+        }
+        for prop in &resolve_props {
             let current = instance[&prop.name].clone();
             let resolved: Option<Value> = match &current {
                 Value::String(uri) if !uri.starts_with("literal:") => {
                     match crate::languages::LanguageController::parse_expr_url(uri) {
-                        Ok((lang, expr_addr)) => {
-                            // Ensure the language is loaded before attempting to fetch the
-                            // expression. The runtimes map only contains languages that have
-                            // been explicitly installed/loaded; languages referenced via
-                            // resolveLanguage (e.g. FILE_STORAGE_LANGUAGE) may not be
-                            // loaded yet at query time.
-                            if !controller.is_language_loaded(&lang).await {
-                                if let Err(e) = controller.language_by_ref(&lang).await {
-                                    log::warn!(
-                                        "resolve_language_transforms: failed to load language {} \
-                                         for property '{}': {}",
-                                        lang,
-                                        prop.name,
-                                        e
-                                    );
-                                    instance[&prop.name] = current;
-                                    continue;
-                                }
-                            }
-                            match controller.get_expression(&lang, &expr_addr).await {
-                                Ok(Some(expr_json)) => {
-                                    let data =
-                                        expr_json.get("data").cloned().unwrap_or(Value::Null);
-                                    Some(match &data {
-                                        Value::String(s) => serde_json::from_str(s).unwrap_or(data),
-                                        _ => data,
-                                    })
-                                }
-                                // Not a fetchable expression — fall back to the raw value
-                                _ => Some(current.clone()),
-                            }
-                        }
-                        Err(_) => Some(current.clone()),
+                        Ok((lang, expr_addr)) => fetch_jobs
+                            .get(&(lang, expr_addr))
+                            .cloned()
+                            .flatten()
+                            .or_else(|| Some(current.clone())),
+                        Err(_) => continue, // pre-resolved above
                     }
                 }
-                Value::Object(_) => Some(current.clone()),
-                Value::String(_) => Some(current.clone()),
-                Value::Null => None,
-                _ => Some(current.clone()),
+                _ => continue, // pre-resolved above
             };
-
             if let Some(resolved) = resolved {
                 let default_transform = super::types::default_file_decode();
                 let transform = prop.transform.as_ref().unwrap_or(&default_transform);

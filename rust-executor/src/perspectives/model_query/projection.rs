@@ -131,8 +131,7 @@ pub(super) async fn resolve_projections(
                 reifier_patterns = reifier_patterns,
             );
 
-            let result_json = store.query(&sparql)?;
-            let rows: Vec<Value> = serde_json::from_str(&result_json)?;
+            let rows = store.query_values(&sparql)?;
 
             let mut count_map: HashMap<String, u64> = HashMap::new();
             for row in &rows {
@@ -175,8 +174,7 @@ pub(super) async fn resolve_projections(
                 order_clause = order_clause,
             );
 
-            let result_json = store.query(&sparql)?;
-            let rows: Vec<Value> = serde_json::from_str(&result_json)?;
+            let rows = store.query_values(&sparql)?;
 
             let mut list_map: HashMap<String, Vec<Value>> = HashMap::new();
             for row in &rows {
