@@ -173,11 +173,21 @@ pub(super) fn build_instance_sparql(
                 )
             }
         };
+        // The two-phase property fetch derives its own predicate filter via
+        // `build_predicate_filter_for_property_fetch(shape)` in query.rs.
+        let _ = predicate_filter;
         InstanceQueryPlan::TwoPhase {
             pagination_subquery: subquery_body,
-            predicate_filter,
         }
     } else {
+        // Property rows: hydration's Rust fold handles per-scalar
+        // last-write-wins. Pushing the LWW (MAX(?ts) GROUP BY ?source
+        // ?predicate) subquery into the main SELECT was tried but regressed
+        // `test_perf_*` benchmarks by >10× — Oxigraph 0.5's planner joins
+        // the outer pattern across all triples before applying the nested
+        // aggregate. The per-row Rust fold over already-fetched rows is
+        // cheaper than the planner cliff, and stays correct as long as
+        // every reifier's timestamp is returned (which it is).
         InstanceQueryPlan::Single(format!(
             r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
@@ -190,6 +200,65 @@ pub(super) fn build_instance_sparql(
 }}"#
         ))
     }
+}
+
+/// Derive the `VALUES ?predicate { ... }` filter used by the two-phase
+/// property fetch.  Skips collection predicates that have a getter (those are
+/// resolved separately) but otherwise mirrors the single-phase filter.
+pub(super) fn build_predicate_filter_for_property_fetch(shape: &ModelShape) -> String {
+    let needed: std::collections::BTreeSet<&str> = shape
+        .properties
+        .iter()
+        .filter(|p| !p.predicate.is_empty())
+        .filter(|p| !(p.is_collection && p.getter.is_some()))
+        .map(|p| p.predicate.as_str())
+        .collect();
+    if needed.is_empty() {
+        String::new()
+    } else {
+        let values: String = needed
+            .iter()
+            .map(|p| format!("<{p}>"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("    VALUES ?predicate {{ {values} }}\n")
+    }
+}
+
+/// Build a per-source `(createdAt, updatedAt)` aggregate query using the
+/// conformance + where patterns as the source scope.  Returns `None` when
+/// both patterns are empty (the aggregate would scan every reifier — strictly
+/// worse than the Rust fold).
+///
+/// `createdAt` is the minimum reifier timestamp for any link with that source,
+/// `updatedAt` the maximum.  Reifier timestamps are stored as `xsd:dateTime`
+/// (post-v5 migration) so `MIN` / `MAX` use native datetime semantics.
+///
+/// **Note:** under Oxigraph 0.5.x the bounded-`VALUES` aggregate still costs
+/// 150–300 ms on the medium-tier benchmark because the planner walks every
+/// reifier when matching the triple-term pattern, so the production pipeline
+/// keeps the per-row Rust fold in `hydrate_one` (which sees every link the
+/// main property query returns).  This builder is exercised by unit tests
+/// and is kept available so a future planner improvement can flip the
+/// aggregate back on without re-deriving the WHERE shape.
+pub(super) fn build_aggregate_sparql(
+    shape: &ModelShape,
+    query: &ModelQueryInput,
+) -> Option<String> {
+    let (conformance, where_extra) = build_query_patterns(shape, query);
+
+    if conformance.trim().is_empty() && where_extra.trim().is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        r#"SELECT ?source (MIN(?_ts) AS ?createdAt) (MAX(?_ts) AS ?updatedAt) WHERE {{
+{conformance}
+{where_extra}
+    ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?_p ?_t )>> .
+    ?_r <ad4m://ontology/timestamp> ?_ts .
+}} GROUP BY ?source"#
+    ))
 }
 
 /// Build a COUNT SPARQL query that returns the number of conforming instances.
@@ -221,8 +290,12 @@ pub(super) fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) ->
     for (prop_name, condition) in wc {
         if prop_name == "base" || prop_name == "id" {
             match condition {
-                WhereCondition::String(_) | WhereCondition::StringArray(_) => continue,
-                _ => return false,
+                WhereCondition::String(_)
+                | WhereCondition::StringArray(_)
+                | WhereCondition::Number(_)
+                | WhereCondition::Bool(_)
+                | WhereCondition::NumberArray(_)
+                | WhereCondition::Ops(_) => continue,
             }
         }
         if shape
@@ -437,7 +510,143 @@ pub(super) fn build_query_patterns(
                             where_patterns.push(format!("    FILTER(STR(?source) IN ({ids}))"));
                         }
                     }
-                    _ => {}
+                    WhereCondition::Number(n) => {
+                        // id/base values are stored as IRIs; compare their
+                        // lexical form against the number's canonical string.
+                        if let Some(s) = format_literal_number(*n) {
+                            where_patterns
+                                .push(format!("    FILTER(STR(?source) = \"{s}\")"));
+                        } else {
+                            where_patterns.push("    FILTER(false)".to_string());
+                        }
+                    }
+                    WhereCondition::Bool(b) => {
+                        where_patterns.push(format!("    FILTER(STR(?source) = \"{b}\")"));
+                    }
+                    WhereCondition::NumberArray(vals) => {
+                        let ids: Vec<String> = vals
+                            .iter()
+                            .filter_map(|n| format_literal_number(*n))
+                            .map(|s| format!("\"{s}\""))
+                            .collect();
+                        if ids.is_empty() {
+                            where_patterns.push("    FILTER(false)".to_string());
+                        } else {
+                            where_patterns.push(format!(
+                                "    FILTER(STR(?source) IN ({}))",
+                                ids.join(", ")
+                            ));
+                        }
+                    }
+                    WhereCondition::Ops(ops) => {
+                        // Operate on the IRI's string form so range / contains
+                        // comparisons work uniformly regardless of whether the
+                        // value is a plain string or a stringified number.
+                        where_patterns.push("    BIND(STR(?source) AS ?_id_str)".to_string());
+                        let var = "?_id_str";
+                        let mut filters: Vec<String> = Vec::new();
+
+                        if let Some(ref not_val) = ops.not {
+                            match not_val {
+                                Value::String(s) => {
+                                    if validate_iri(s).is_ok() {
+                                        filters.push(format!("?source != <{s}>"));
+                                    } else {
+                                        let escaped = escape_sparql_string(s);
+                                        filters.push(format!("{var} != \"{escaped}\""));
+                                    }
+                                }
+                                Value::Number(n) => {
+                                    let f = n.as_f64().unwrap_or(0.0);
+                                    if let Some(s) = format_literal_number(f) {
+                                        filters.push(format!("{var} != \"{s}\""));
+                                    }
+                                }
+                                Value::Bool(b) => {
+                                    filters.push(format!("{var} != \"{b}\""));
+                                }
+                                Value::Array(arr) => {
+                                    let items: Vec<String> = arr
+                                        .iter()
+                                        .filter_map(|item| match item {
+                                            Value::String(s) => Some(format!(
+                                                "\"{}\"",
+                                                escape_sparql_string(s)
+                                            )),
+                                            Value::Number(n) => {
+                                                let f = n.as_f64().unwrap_or(0.0);
+                                                format_literal_number(f)
+                                                    .map(|s| format!("\"{s}\""))
+                                            }
+                                            Value::Bool(b) => Some(format!("\"{b}\"")),
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    if !items.is_empty() {
+                                        filters.push(format!(
+                                            "{var} NOT IN ({})",
+                                            items.join(", ")
+                                        ));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        if let Some(gt) = ops.gt {
+                            if let Some(s) = format_literal_number(gt) {
+                                filters.push(format!("{var} > \"{s}\""));
+                            } else {
+                                filters.push("false".to_string());
+                            }
+                        }
+                        if let Some(gte) = ops.gte {
+                            if let Some(s) = format_literal_number(gte) {
+                                filters.push(format!("{var} >= \"{s}\""));
+                            } else {
+                                filters.push("false".to_string());
+                            }
+                        }
+                        if let Some(lt) = ops.lt {
+                            if let Some(s) = format_literal_number(lt) {
+                                filters.push(format!("{var} < \"{s}\""));
+                            } else {
+                                filters.push("false".to_string());
+                            }
+                        }
+                        if let Some(lte) = ops.lte {
+                            if let Some(s) = format_literal_number(lte) {
+                                filters.push(format!("{var} <= \"{s}\""));
+                            } else {
+                                filters.push("false".to_string());
+                            }
+                        }
+                        if let Some((lo, hi)) = ops.between {
+                            match (format_literal_number(lo), format_literal_number(hi)) {
+                                (Some(lo_s), Some(hi_s)) => {
+                                    filters.push(format!(
+                                        "{var} >= \"{lo_s}\" && {var} <= \"{hi_s}\""
+                                    ));
+                                }
+                                _ => filters.push("false".to_string()),
+                            }
+                        }
+
+                        if let Some(ref contains_val) = ops.contains {
+                            let needle = match contains_val {
+                                Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            filters.push(format!(
+                                "CONTAINS(LCASE({var}), LCASE(\"{}\"))",
+                                escape_sparql_string(&needle)
+                            ));
+                        }
+
+                        if !filters.is_empty() {
+                            where_patterns.push(format!("    FILTER({})", filters.join(" && ")));
+                        }
+                    }
                 }
                 continue;
             }

@@ -12,7 +12,10 @@ use super::getters::evaluate_getters;
 use super::hydration::{filter_properties, group_results_by_source, hydrate_instances};
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
-use super::sparql_builder::{all_where_pushable, build_count_sparql, build_instance_sparql};
+use super::sparql_builder::{
+    all_where_pushable, build_count_sparql, build_instance_sparql,
+    build_predicate_filter_for_property_fetch,
+};
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection,
     ShapeResolver, SortKey, SparqlPagination,
@@ -150,7 +153,6 @@ pub(super) async fn execute_model_query_inner(
         }
         InstanceQueryPlan::TwoPhase {
             pagination_subquery,
-            predicate_filter,
         } => {
             let page_json = store.query_async(&pagination_subquery).await?;
             let page_results: Vec<Value> = serde_json::from_str(&page_json)?;
@@ -169,6 +171,11 @@ pub(super) async fn execute_model_query_inner(
                 if source_values.is_empty() {
                     vec![]
                 } else {
+                    // Property fetch keeps the wide-row shape: hydration's
+                    // Rust fold handles per-scalar last-write-wins (the LWW
+                    // SPARQL subquery hit a planner cliff in benchmarks —
+                    // see the comment in `build_instance_sparql`).
+                    let predicate_filter = build_predicate_filter_for_property_fetch(shape);
                     let property_sparql = format!(
                         r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
     VALUES ?source {{ {source_values} }}
@@ -188,6 +195,17 @@ pub(super) async fn execute_model_query_inner(
 
     let grouped = group_results_by_source(&raw_results, shape);
     let mut instances = hydrate_instances(shape, &grouped);
+
+    // createdAt / updatedAt synthesis stays in hydration's Rust fold: the
+    // main property query returns every link row for each source, so the
+    // per-row min/max over reifier timestamps observes every reifier the
+    // SPARQL aggregate would have seen — without a second round trip.  We
+    // tried pushing the aggregate (`build_aggregate_sparql` retains the
+    // builder for unit tests) but the bounded `VALUES ?source { ... }` MIN
+    // / MAX still cost ~150-300 ms on the Flux medium-tier benchmark
+    // because the planner walks every reifier in the store when matching
+    // the triple-term pattern.  The Rust fold over already-fetched rows is
+    // strictly cheaper.
 
     // Apply transform expressions for resolveLanguage properties
     resolve_language_transforms(&shape, &mut instances).await?;

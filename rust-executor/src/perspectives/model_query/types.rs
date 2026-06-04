@@ -463,13 +463,12 @@ pub trait ShapeResolver: Send + Sync {
 pub(super) enum InstanceQueryPlan {
     /// Single query -- no pagination or non-paginated query.
     Single(String),
-    /// Two-phase: (pagination_subquery, predicate_filter, conformance, where_extra).
-    /// Phase 1: execute pagination_subquery -> get source IRIs.
-    /// Phase 2: build property query with VALUES ?source { ... }.
-    TwoPhase {
-        pagination_subquery: String,
-        predicate_filter: String,
-    },
+    /// Two-phase plan for paginated queries.
+    /// Phase 1: execute `pagination_subquery` → page of source IRIs.
+    /// Phase 2: caller derives a `VALUES ?source { ... }` property query
+    /// from the shape (the property fetch shape mirrors the single-phase
+    /// scalar-LWW / collection UNION).
+    TwoPhase { pagination_subquery: String },
 }
 
 impl InstanceQueryPlan {
