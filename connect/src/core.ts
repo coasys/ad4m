@@ -12,6 +12,27 @@ const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev";
 const CREDIT_POLL_INTERVAL_MS = 60000;
 const DEFAULT_LOW_CREDIT_THRESHOLD = 10;
 
+/**
+ * Check whether `origin` is permitted by an entry in `allowedOrigins`.
+ * Supports the wildcard pattern `http://localhost:*` / `https://localhost:*`
+ * to allow any localhost port (useful in development environments where tools
+ * run on arbitrary ports). All other patterns require an exact match.
+ */
+function originAllowed(allowedOrigins: string[], origin: string): boolean {
+  return allowedOrigins.some((pattern) => {
+    if (pattern === 'http://localhost:*' || pattern === 'https://localhost:*') {
+      try {
+        const u = new URL(origin);
+        const scheme = pattern.startsWith('https') ? 'https:' : 'http:';
+        return u.hostname === 'localhost' && u.protocol === scheme;
+      } catch {
+        return false;
+      }
+    }
+    return pattern === origin;
+  });
+}
+
 export default class Ad4mConnect extends EventTarget {
   options: Ad4mConnectOptions;
   embedded: boolean;
@@ -357,13 +378,13 @@ export default class Ad4mConnect extends EventTarget {
             this.rejectEmbedded(new Error('proxy mode requires allowedOrigins'));
             return;
           }
-          if (!event.origin || !this.options.allowedOrigins.includes(event.origin)) {
+          if (!event.origin || !originAllowed(this.options.allowedOrigins, event.origin)) {
             console.warn('[Ad4m Connect] Rejected AD4M_CONFIG from unauthorized origin:', event.origin);
             this.rejectEmbedded(new Error(`Unauthorized origin: ${event.origin}`));
             return;
           }
         } else if (this.options.allowedOrigins && this.options.allowedOrigins.length > 0) {
-          if (!event.origin || !this.options.allowedOrigins.includes(event.origin)) {
+          if (!event.origin || !originAllowed(this.options.allowedOrigins, event.origin)) {
             console.warn('[Ad4m Connect] Rejected AD4M_CONFIG from unauthorized origin:', event.origin);
             this.rejectEmbedded(new Error(`Unauthorized origin: ${event.origin}`));
             return;
