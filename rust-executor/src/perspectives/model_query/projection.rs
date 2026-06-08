@@ -387,10 +387,7 @@ pub(super) fn build_projection_where_patterns(
                     if looks_like_absolute_iri(val) {
                         iris.push(format!("<{val}>"));
                     }
-                    patterns.push(format!(
-                        "    VALUES ?{var} {{ {} }}\n",
-                        iris.join(" ")
-                    ));
+                    patterns.push(format!("    VALUES ?{var} {{ {} }}\n", iris.join(" ")));
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                 } else {
                     let escaped = escape_sparql_string(val);
@@ -402,9 +399,7 @@ pub(super) fn build_projection_where_patterns(
             }
             WhereCondition::Bool(b) => {
                 if is_literal_prop {
-                    patterns.push(format!(
-                        "    ?t <{pred}> <literal:boolean:{b}> .\n"
-                    ));
+                    patterns.push(format!("    ?t <{pred}> <literal:boolean:{b}> .\n"));
                 } else {
                     let bval = if *b { "true" } else { "false" };
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
@@ -416,9 +411,7 @@ pub(super) fn build_projection_where_patterns(
             WhereCondition::Number(n) => {
                 if is_literal_prop {
                     if let Some(num_str) = format_literal_number(*n) {
-                        patterns.push(format!(
-                            "    ?t <{pred}> <literal:number:{num_str}> .\n"
-                        ));
+                        patterns.push(format!("    ?t <{pred}> <literal:number:{num_str}> .\n"));
                     } else {
                         patterns.push("    FILTER(false)\n".to_string());
                     }
@@ -438,10 +431,7 @@ pub(super) fn build_projection_where_patterns(
                             iris.push(format!("<{v}>"));
                         }
                     }
-                    patterns.push(format!(
-                        "    VALUES ?{var} {{ {} }}\n",
-                        iris.join(" ")
-                    ));
+                    patterns.push(format!("    VALUES ?{var} {{ {} }}\n", iris.join(" ")));
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                 } else {
                     let list = vals

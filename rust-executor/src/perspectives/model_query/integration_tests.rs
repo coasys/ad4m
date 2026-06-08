@@ -3641,12 +3641,7 @@ async fn test_plain_literal_where_paginate_count() {
             .add_link(&make_link(uri, "ns://type", "ns://task", &ts))
             .unwrap();
         store
-            .add_link(&make_link(
-                uri,
-                "ns://status",
-                &signed_literal(status),
-                &ts,
-            ))
+            .add_link(&make_link(uri, "ns://status", &signed_literal(status), &ts))
             .unwrap();
         store
             .add_link(&make_link(uri, "ns://name", &signed_literal(name), &ts))
@@ -4425,31 +4420,39 @@ fn bench_indexed_iri_vs_fn_parse_literal_filter() {
     let store = SparqlStore::new(None).unwrap();
     let pred = "ns://body";
     let target_value = "needle";
-    let stored_target = format!(
-        "literal:string:{}",
-        literal_percent_encode(target_value)
-    );
+    let stored_target = format!("literal:string:{}", literal_percent_encode(target_value));
 
     // Seed N rows; only the last carries the matching target.
     let needle_idx = n_links - 1;
     for i in 0..n_links {
         let source = format!("test://row/{i}");
         store
-            .add_link(&make_link(&source, "ns://type", "ns://row", &format!("{}", 1_700_000_000_000_i64 + i as i64)))
+            .add_link(&make_link(
+                &source,
+                "ns://type",
+                "ns://row",
+                &format!("{}", 1_700_000_000_000_i64 + i as i64),
+            ))
             .unwrap();
         let target = if i == needle_idx {
             stored_target.clone()
         } else {
-            format!("literal:string:{}", literal_percent_encode(&format!("row-{i}")))
+            format!(
+                "literal:string:{}",
+                literal_percent_encode(&format!("row-{i}"))
+            )
         };
         store
-            .add_link(&make_link(&source, pred, &target, &format!("{}", 1_700_000_000_000_i64 + i as i64)))
+            .add_link(&make_link(
+                &source,
+                pred,
+                &target,
+                &format!("{}", 1_700_000_000_000_i64 + i as i64),
+            ))
             .unwrap();
     }
 
-    let indexed = format!(
-        "SELECT ?source WHERE {{ ?source <{pred}> <{stored_target}> . }}"
-    );
+    let indexed = format!("SELECT ?source WHERE {{ ?source <{pred}> <{stored_target}> . }}");
     let filtered = format!(
         "SELECT ?source WHERE {{ \
             ?source <{pred}> ?t . \
