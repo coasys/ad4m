@@ -581,7 +581,9 @@ impl SparqlStore {
             Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
             Term::Literal(l) => TermRef::Literal(l.as_ref()),
             Term::BlankNode(b) => TermRef::BlankNode(b.as_ref()),
-            Term::Triple(_) => TermRef::NamedNode(NamedNodeRef::new_unchecked("ad4m://unreachable")),
+            Term::Triple(_) => {
+                TermRef::NamedNode(NamedNodeRef::new_unchecked("ad4m://unreachable"))
+            }
         });
 
         let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
@@ -979,8 +981,7 @@ impl SparqlStore {
         link: &DecoratedLinkExpression,
     ) -> Result<(), Error> {
         let source_iri = NamedNode::new_unchecked(&link.data.source);
-        let predicate_iri =
-            NamedNode::new_unchecked(link.data.predicate.as_deref().unwrap_or(""));
+        let predicate_iri = NamedNode::new_unchecked(link.data.predicate.as_deref().unwrap_or(""));
         let target_iri = NamedNode::new_unchecked(&link.data.target);
         let reifier_iri = make_reifier_iri(link);
 
@@ -3159,12 +3160,8 @@ mod tests {
         )
         .to_string();
         let target = format!("literal:json:{encoded}");
-        svc.add_link_with_raw_iri_target(&make_link(
-            "ad4m://item-1",
-            "ns://status",
-            &target,
-        ))
-        .unwrap();
+        svc.add_link_with_raw_iri_target(&make_link("ad4m://item-1", "ns://status", &target))
+            .unwrap();
 
         // v3 unwraps the envelope and (now) lands directly on typed-literal
         // storage; v4 is a no-op afterwards.
@@ -3185,7 +3182,11 @@ mod tests {
             .unwrap();
         match q.object {
             Term::Literal(ref l) => {
-                assert_eq!(l.value(), "active", "envelope data unwrapped to typed literal");
+                assert_eq!(
+                    l.value(),
+                    "active",
+                    "envelope data unwrapped to typed literal"
+                );
                 assert_eq!(
                     l.datatype().as_str(),
                     "http://www.w3.org/2001/XMLSchema#string"
