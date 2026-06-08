@@ -4456,7 +4456,8 @@ async fn test_last_write_wins_for_scalars() {
             .unwrap();
     assert_eq!(result.instances.len(), 1, "should find 1 instance");
     assert_eq!(
-        result.instances[0]["name"], json!("v3"),
+        result.instances[0]["name"],
+        json!("v3"),
         "scalar property must reflect the latest write, got {}",
         result.instances[0]
     );
@@ -4577,11 +4578,13 @@ async fn test_aggregate_createdAt_updatedAt_from_sparql() {
     assert_eq!(result.instances.len(), 1);
     let inst = &result.instances[0];
     assert_eq!(
-        inst["createdAt"], json!("1700000000000"),
+        inst["createdAt"],
+        json!("1700000000000"),
         "createdAt must be the earliest reifier timestamp, got {inst}"
     );
     assert_eq!(
-        inst["updatedAt"], json!("1700000010000"),
+        inst["updatedAt"],
+        json!("1700000010000"),
         "updatedAt must be the latest reifier timestamp, got {inst}"
     );
     assert_eq!(inst["author"], json!("did:key:test123"));
@@ -4595,7 +4598,11 @@ async fn test_aggregate_createdAt_updatedAt_from_sparql() {
         .expect("aggregate query should be produced when conformance is non-empty");
     let agg_json = store.query(&agg).unwrap();
     let agg_rows: Vec<Value> = serde_json::from_str(&agg_json).unwrap();
-    assert_eq!(agg_rows.len(), 1, "aggregate should emit one row per source");
+    assert_eq!(
+        agg_rows.len(),
+        1,
+        "aggregate should emit one row per source"
+    );
     assert_eq!(agg_rows[0]["source"].as_str().unwrap(), base);
     assert_eq!(
         agg_rows[0]["createdAt"].as_str().unwrap(),
@@ -4608,4 +4615,3 @@ async fn test_aggregate_createdAt_updatedAt_from_sparql() {
         "aggregate updatedAt mismatch — {agg_rows:?}"
     );
 }
-

@@ -139,10 +139,8 @@ pub fn resolve_reverse_relations(
         }
     }
 
-    let rel_is_single: HashMap<String, bool> = relations
-        .iter()
-        .map(|(n, _, s)| (n.clone(), *s))
-        .collect();
+    let rel_is_single: HashMap<String, bool> =
+        relations.iter().map(|(n, _, s)| (n.clone(), *s)).collect();
 
     for inst in instances.iter_mut() {
         let id = match inst["id"].as_str() {

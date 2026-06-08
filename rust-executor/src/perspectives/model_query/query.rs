@@ -137,42 +137,37 @@ pub(super) async fn execute_model_query_inner(
             Some(n) => n >= where_clause_max_source_count(query_input).unwrap_or(usize::MAX),
         };
 
-    let sparql_pagination =
-        if !pagination_would_be_no_op
-            && can_push_pagination
-            && (query_input.limit.is_some() || query_input.offset.is_some())
-        {
-            let sort_keys: Vec<(SortKey, OrderDirection)> = match &query_input.order {
-                None => vec![(SortKey::Timestamp, OrderDirection::ASC)],
-                Some(order) => order
-                    .iter()
-                    .map(|(name, dir)| {
-                        let key = if name == "timestamp"
-                            || name == "createdAt"
-                            || name == "updatedAt"
-                        {
+    let sparql_pagination = if !pagination_would_be_no_op
+        && can_push_pagination
+        && (query_input.limit.is_some() || query_input.offset.is_some())
+    {
+        let sort_keys: Vec<(SortKey, OrderDirection)> = match &query_input.order {
+            None => vec![(SortKey::Timestamp, OrderDirection::ASC)],
+            Some(order) => order
+                .iter()
+                .map(|(name, dir)| {
+                    let key =
+                        if name == "timestamp" || name == "createdAt" || name == "updatedAt" {
                             SortKey::Timestamp
-                        } else if let Some(prop) =
-                            shape.properties.iter().find(|p| {
-                                p.name == *name && !p.is_collection && !p.predicate.is_empty()
-                            })
-                        {
+                        } else if let Some(prop) = shape.properties.iter().find(|p| {
+                            p.name == *name && !p.is_collection && !p.predicate.is_empty()
+                        }) {
                             SortKey::Property(prop.predicate.clone())
                         } else {
                             SortKey::Timestamp
                         };
-                        (key, *dir)
-                    })
-                    .collect(),
-            };
-            Some(SparqlPagination {
-                sort_keys,
-                offset: query_input.offset,
-                limit: query_input.limit,
-            })
-        } else {
-            None
+                    (key, *dir)
+                })
+                .collect(),
         };
+        Some(SparqlPagination {
+            sort_keys,
+            offset: query_input.offset,
+            limit: query_input.limit,
+        })
+    } else {
+        None
+    };
 
     let query_plan = build_instance_sparql(shape, query_input, sparql_pagination.as_ref());
 

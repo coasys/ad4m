@@ -394,9 +394,9 @@ pub(super) fn where_clause_max_source_count(query: &ModelQueryInput) -> Option<u
             continue;
         }
         let cap = match condition {
-            WhereCondition::String(_)
-            | WhereCondition::Number(_)
-            | WhereCondition::Bool(_) => Some(1),
+            WhereCondition::String(_) | WhereCondition::Number(_) | WhereCondition::Bool(_) => {
+                Some(1)
+            }
             WhereCondition::StringArray(arr) => Some(arr.len()),
             WhereCondition::NumberArray(arr) => Some(arr.len()),
             // `Ops` (gt/lt/between/contains/not) can match an unbounded set.
@@ -652,8 +652,7 @@ pub(super) fn build_query_patterns(
                         // id/base values are stored as IRIs; compare their
                         // lexical form against the number's canonical string.
                         if let Some(s) = format_literal_number(*n) {
-                            where_patterns
-                                .push(format!("    FILTER(STR(?source) = \"{s}\")"));
+                            where_patterns.push(format!("    FILTER(STR(?source) = \"{s}\")"));
                         } else {
                             where_patterns.push("    FILTER(false)".to_string());
                         }
@@ -670,10 +669,8 @@ pub(super) fn build_query_patterns(
                         if ids.is_empty() {
                             where_patterns.push("    FILTER(false)".to_string());
                         } else {
-                            where_patterns.push(format!(
-                                "    FILTER(STR(?source) IN ({}))",
-                                ids.join(", ")
-                            ));
+                            where_patterns
+                                .push(format!("    FILTER(STR(?source) IN ({}))", ids.join(", ")));
                         }
                     }
                     WhereCondition::Ops(ops) => {
@@ -707,24 +704,20 @@ pub(super) fn build_query_patterns(
                                     let items: Vec<String> = arr
                                         .iter()
                                         .filter_map(|item| match item {
-                                            Value::String(s) => Some(format!(
-                                                "\"{}\"",
-                                                escape_sparql_string(s)
-                                            )),
+                                            Value::String(s) => {
+                                                Some(format!("\"{}\"", escape_sparql_string(s)))
+                                            }
                                             Value::Number(n) => {
                                                 let f = n.as_f64().unwrap_or(0.0);
-                                                format_literal_number(f)
-                                                    .map(|s| format!("\"{s}\""))
+                                                format_literal_number(f).map(|s| format!("\"{s}\""))
                                             }
                                             Value::Bool(b) => Some(format!("\"{b}\"")),
                                             _ => None,
                                         })
                                         .collect();
                                     if !items.is_empty() {
-                                        filters.push(format!(
-                                            "{var} NOT IN ({})",
-                                            items.join(", ")
-                                        ));
+                                        filters
+                                            .push(format!("{var} NOT IN ({})", items.join(", ")));
                                     }
                                 }
                                 _ => {}

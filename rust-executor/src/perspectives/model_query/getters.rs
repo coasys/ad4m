@@ -261,9 +261,7 @@ pub(super) fn evaluate_getters(
     if !ask_props.is_empty() {
         let mut binds = String::new();
         for (i, body) in ask_bodies.iter().enumerate() {
-            binds.push_str(&format!(
-                "    BIND(EXISTS {{ {body} }} AS ?_g_{i})\n"
-            ));
+            binds.push_str(&format!("    BIND(EXISTS {{ {body} }} AS ?_g_{i})\n"));
         }
         let column_list: String = (0..ask_props.len())
             .map(|i| format!("?_g_{i}"))
@@ -308,9 +306,10 @@ pub(super) fn evaluate_getters(
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
                     if let Some(id) = id_owned {
-                        let vals = per_source.get(&id).cloned().unwrap_or_else(|| {
-                            vec![Some(false); ask_props.len()]
-                        });
+                        let vals = per_source
+                            .get(&id)
+                            .cloned()
+                            .unwrap_or_else(|| vec![Some(false); ask_props.len()]);
                         if let Some(obj) = inst.as_object_mut() {
                             for (i, prop) in ask_props.iter().enumerate() {
                                 obj.insert(
