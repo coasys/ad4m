@@ -646,14 +646,10 @@ pub(super) fn build_query_patterns(
                                 }
                             }
                             let iv_var = format!("?_iv_{safe_name}");
-                            where_patterns.push(format!(
-                                "    VALUES {iv_var} {{ {} }}",
-                                iris.join(" ")
-                            ));
-                            where_patterns.push(format!(
-                                "    ?source <{}> {iv_var} .",
-                                prop.predicate
-                            ));
+                            where_patterns
+                                .push(format!("    VALUES {iv_var} {{ {} }}", iris.join(" ")));
+                            where_patterns
+                                .push(format!("    ?source <{}> {iv_var} .", prop.predicate));
                         } else {
                             let values_list = vals
                                 .iter()
@@ -685,10 +681,8 @@ pub(super) fn build_query_patterns(
                             } else {
                                 let iv_var = format!("?_iv_{safe_name}");
                                 where_patterns.push(format!("    VALUES {iv_var} {{ {iris} }}"));
-                                where_patterns.push(format!(
-                                    "    ?source <{}> {iv_var} .",
-                                    prop.predicate
-                                ));
+                                where_patterns
+                                    .push(format!("    ?source <{}> {iv_var} .", prop.predicate));
                             }
                         } else {
                             let values_list = vals
