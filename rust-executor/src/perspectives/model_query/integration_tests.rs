@@ -4615,3 +4615,195 @@ async fn test_aggregate_createdAt_updatedAt_from_sparql() {
         "aggregate updatedAt mismatch — {agg_rows:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Construct-builder (audit item I) integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_can_use_construct_default_off() {
+    // Without `useConstruct: true` the path stays off, even when every
+    // other condition is satisfied.
+    let shape = super::test_helpers::shape(
+        "Topic",
+        vec![
+            super::test_helpers::flag("type", "flux://entry_type", "flux://has_topic"),
+            super::test_helpers::prop("label", "flux://topic"),
+        ],
+    );
+    let q = ModelQueryInput {
+        with_metadata: Some(false),
+        count: Some(false),
+        ..Default::default()
+    };
+    assert!(
+        !super::construct_builder::can_use_construct(&q, &shape),
+        "can_use_construct should default off without explicit useConstruct"
+    );
+}
+
+#[test]
+fn test_can_use_construct_engages_on_simple_query() {
+    let shape = super::test_helpers::shape(
+        "Topic",
+        vec![
+            super::test_helpers::flag("type", "flux://entry_type", "flux://has_topic"),
+            super::test_helpers::prop("label", "flux://topic"),
+        ],
+    );
+    let q = ModelQueryInput {
+        with_metadata: Some(false),
+        count: Some(false),
+        use_construct: Some(true),
+        ..Default::default()
+    };
+    assert!(
+        super::construct_builder::can_use_construct(&q, &shape),
+        "can_use_construct should engage when all conditions met"
+    );
+}
+
+#[test]
+fn test_can_use_construct_disqualifies_with_metadata() {
+    let shape = super::test_helpers::shape(
+        "Topic",
+        vec![super::test_helpers::flag("type", "flux://entry_type", "flux://has_topic")],
+    );
+    let q = ModelQueryInput {
+        with_metadata: Some(true), // disqualifier #7
+        count: Some(false),
+        use_construct: Some(true),
+        ..Default::default()
+    };
+    assert!(
+        !super::construct_builder::can_use_construct(&q, &shape),
+        "withMetadata: true should disqualify the CONSTRUCT path"
+    );
+}
+
+#[test]
+fn test_can_use_construct_disqualifies_projections() {
+    let shape = super::test_helpers::shape(
+        "Topic",
+        vec![super::test_helpers::flag("type", "flux://entry_type", "flux://has_topic")],
+    );
+    let mut projections: std::collections::HashMap<String, ProjectionInput> =
+        std::collections::HashMap::new();
+    projections.insert(
+        "$nope".to_string(),
+        ProjectionInput {
+            from: "label".to_string(),
+            count: true,
+            limit: None,
+            order: None,
+            target_class_name: None,
+            where_clause: None,
+        },
+    );
+    let q = ModelQueryInput {
+        projections: Some(projections),
+        with_metadata: Some(false),
+        count: Some(false),
+        use_construct: Some(true),
+        ..Default::default()
+    };
+    assert!(
+        !super::construct_builder::can_use_construct(&q, &shape),
+        "non-empty projections should disqualify CONSTRUCT path"
+    );
+}
+
+#[tokio::test]
+async fn test_construct_path_resolves_simple_query() {
+    let store = SparqlStore::new(None).unwrap();
+
+    let t1 = "literal:string:topic1";
+    let t2 = "literal:string:topic2";
+
+    // Two Topic instances
+    store
+        .add_link(&make_link(t1, "flux://entry_type", "flux://has_topic", "1700000000000"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            t1,
+            "flux://topic",
+            &format!("literal:string:{}", literal_percent_encode("Hello")),
+            "1700000000001",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(t2, "flux://entry_type", "flux://has_topic", "1700000000002"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            t2,
+            "flux://topic",
+            &format!("literal:string:{}", literal_percent_encode("World")),
+            "1700000000003",
+        ))
+        .unwrap();
+
+    // Sanity check via the legacy pipeline
+    let shape_json = r#"{
+        "className": "Topic",
+        "properties": {
+            "type": {
+                "predicate": "flux://entry_type",
+                "required": true,
+                "flag": true,
+                "initial": "flux://has_topic"
+            },
+            "label": { "predicate": "flux://topic", "required": false }
+        },
+        "relations": {}
+    }"#;
+    let legacy = execute_model_query_from_json(
+        &store,
+        "Topic",
+        &ModelQueryInput {
+            with_metadata: Some(false),
+            count: Some(false),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(legacy.instances.len(), 2, "legacy path should find 2 topics");
+
+    // Now the CONSTRUCT path on the same store/shape — same result expected
+    let construct = execute_model_query_from_json(
+        &store,
+        "Topic",
+        &ModelQueryInput {
+            with_metadata: Some(false),
+            count: Some(false),
+            use_construct: Some(true),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        construct.instances.len(),
+        2,
+        "CONSTRUCT path should find 2 topics — same as legacy"
+    );
+
+    // Both instances should have a `label` field that matches one of the
+    // seeded values.  The walker decodes percent-encoded literals.
+    let mut labels: Vec<String> = construct
+        .instances
+        .iter()
+        .filter_map(|i| i["label"].as_str().map(|s| s.to_string()))
+        .collect();
+    labels.sort();
+    assert_eq!(
+        labels,
+        vec!["Hello".to_string(), "World".to_string()],
+        "label fields should round-trip through the wire-format decoder"
+    );
+}
+

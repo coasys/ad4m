@@ -154,6 +154,31 @@ export type Query = {
    * link-level metadata in the UI.
    */
   withMetadata?: boolean;
+  /**
+   * When `true`, ask the executor to materialise the entire query
+   * subgraph (instance triples + included relation targets + their
+   * properties, recursively) via a single SPARQL `CONSTRUCT` and
+   * reconstruct the JSON tree from the resulting graph in Rust.
+   * Collapses every forward include — at any depth — into one round
+   * trip instead of one-recursive-pipeline-per-include-per-depth.
+   *
+   * Falls back silently to the legacy recursive pipeline when the
+   * query can't be expressed as a single CONSTRUCT.  Disqualifiers
+   * (handled by the executor):
+   *   - non-empty `projections`,
+   *   - non-zero `offset`,
+   *   - per-include `where` / `order` / `limit` / `offset` / `count`,
+   *   - reverse-direction includes (`@BelongsTo`),
+   *   - property/relation getters,
+   *   - `withMetadata: true` (reifier-metadata fold not yet folded
+   *     into the CONSTRUCT body),
+   *   - `count: true` (CONSTRUCT can't aggregate).
+   *
+   * Default `undefined` / `false` engages the back-compat pipeline.
+   * Set `true` on call sites that materialise an include tree but
+   * don't need per-include constraints or link-level metadata.
+   */
+  useConstruct?: boolean;
 };
 
 /**
@@ -353,6 +378,7 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   count?: boolean;
   deepQuery?: boolean;
   withMetadata?: boolean;
+  useConstruct?: boolean;
 };
 
 export type TypedQuery<T extends Ad4mModel> =

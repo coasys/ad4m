@@ -276,6 +276,26 @@ pub struct ModelQueryInput {
     /// surface link-level metadata in the UI.
     #[serde(default, rename = "withMetadata")]
     pub with_metadata: Option<bool>,
+    /// When `Some(true)`, ask the executor to materialise the entire
+    /// query subgraph (instance triples + included relation triples +
+    /// optional reifier metadata) via a single SPARQL `CONSTRUCT` and
+    /// reconstruct the JSON tree from the resulting `Graph` in Rust.
+    /// Collapses *every* forward include — at any depth — into one round
+    /// trip instead of one-recursive-pipeline-per-include-per-depth.
+    ///
+    /// Falls back to the historical recursive SELECT pipeline when the
+    /// query cannot be expressed as a single CONSTRUCT — i.e. when the
+    /// query has projections, reverse-direction includes, per-include
+    /// `where` / `order` / `limit`, getters, or non-trivial
+    /// `withMetadata`/aggregate semantics.  The fallback is silent: the
+    /// caller's contract is unchanged; only the wall-clock improves
+    /// when the fast path engages.
+    ///
+    /// Default `None` = back-compat behaviour (recursive pipeline).
+    /// `Some(false)` is identical to `None`; included for explicit
+    /// opt-out from a config layer that defaults `useConstruct: true`.
+    #[serde(default, rename = "useConstruct")]
+    pub use_construct: Option<bool>,
 }
 
 /// Result returned by the model query endpoint.

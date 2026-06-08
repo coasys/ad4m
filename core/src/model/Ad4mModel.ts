@@ -847,6 +847,7 @@ export class Ad4mModel {
     if (query.limit !== undefined) queryInput.limit = query.limit;
     if (query.count !== undefined) queryInput.count = query.count;
     if (query.withMetadata !== undefined) queryInput.withMetadata = query.withMetadata;
+    if (query.useConstruct !== undefined) queryInput.useConstruct = query.useConstruct;
     queryInput.deepQuery = query.deepQuery ?? true;
 
     // Conformance getters, where filters, and target shapes for includes
