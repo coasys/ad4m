@@ -2,6 +2,7 @@ import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { LinkQuery } from "../perspectives/LinkQuery";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
+import { CallOptions } from "../apiClient";
 import { makeRandomId } from "./util";
 import { getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, Model } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
@@ -884,6 +885,7 @@ export class Ad4mModel {
     perspective: PerspectiveProxy,
     query: Query = {},
     classNameOverride?: string | null,
+    options?: CallOptions,
   ): Promise<ResultsWithTotalCount<T>> {
     // Delegate query input building to the shared prepareModelQueryParams
     // helper.  The executor resolves the shape from SHACL server-side.
@@ -891,7 +893,7 @@ export class Ad4mModel {
       query, classNameOverride,
     );
 
-    const result = await perspective.modelQuery(className, queryJson);
+    const result = await perspective.modelQuery(className, queryJson, options);
 
     // Convert JSON instances to model class instances, recursively constructing
     // class instances for any included relations resolved by Rust.
@@ -942,13 +944,14 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query?: Q,
+    options?: CallOptions,
   ): Promise<(T & IncludeExtras<T, IncludeOf<Q>>)[]> {
     const q = (query ?? {}) as Query;
     if (q.properties && q.properties.length === 0) {
       throw new Error("properties[] must not be empty — omit the field to return all properties, or specify at least one field name");
     }
 
-    const { results } = await this.executeModelQuery(perspective, q);
+    const { results } = await this.executeModelQuery(perspective, q, undefined, options);
     return results as (T & IncludeExtras<T, IncludeOf<Q>>)[];
   }
 
@@ -976,9 +979,10 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query?: Q,
+    options?: CallOptions,
   ): Promise<(T & IncludeExtras<T, IncludeOf<Q>>) | null> {
     const limitedQuery = { ...((query ?? {}) as Query), limit: 1 } as Q;
-    const results = await this.findAll<T, Q>(perspective, limitedQuery);
+    const results = await this.findAll<T, Q>(perspective, limitedQuery, options);
     return results[0] ?? null;
   }
 
@@ -1003,8 +1007,9 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query?: Q,
+    options?: CallOptions,
   ): Promise<ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>> {
-    const out = await this.executeModelQuery(perspective, (query ?? {}) as Query);
+    const out = await this.executeModelQuery(perspective, (query ?? {}) as Query, undefined, options);
     return out as ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>;
   }
 
@@ -1031,9 +1036,10 @@ export class Ad4mModel {
     pageSize: number,
     pageNumber: number,
     query?: Q,
+    options?: CallOptions,
   ): Promise<PaginationResult<T & IncludeExtras<T, IncludeOf<Q>>>> {
     const paginationQuery = { ...((query ?? {}) as Query), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery);
+    const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery, undefined, options);
     return { results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount, pageSize, pageNumber };
   }
 
@@ -1067,8 +1073,9 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query?: TypedQuery<T>,
+    options?: CallOptions,
   ): Promise<number> {
-    const { totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0 });
+    const { totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0 }, undefined, options);
     return totalCount;
   }
 

@@ -100,7 +100,7 @@ export class PerspectiveClient {
         return this.#apiClient.call<string|null>('perspective.publishSnapshot', { uuid })
     }
 
-    async queryLinks(uuid: string, query: LinkQuery): Promise<LinkExpression[]> {
+    async queryLinks(uuid: string, query: LinkQuery, options?: CallOptions): Promise<LinkExpression[]> {
         const params: Record<string, unknown> = { uuid }
         if (query.source) params.source = query.source
         if (query.predicate) params.predicate = query.predicate
@@ -108,11 +108,11 @@ export class PerspectiveClient {
         if (query.fromDate) params.fromDate = query.fromDate instanceof Date ? query.fromDate.toISOString() : String(query.fromDate)
         if (query.untilDate) params.untilDate = query.untilDate instanceof Date ? query.untilDate.toISOString() : String(query.untilDate)
         if (query.limit !== undefined) params.limit = query.limit
-        return this.#apiClient.call<LinkExpression[]>('perspective.queryLinks', params)
+        return this.#apiClient.call<LinkExpression[]>('perspective.queryLinks', params, options)
     }
 
-    async queryProlog(uuid: string, query: string): Promise<unknown> {
-        const result = await this.#apiClient.call<string>('perspective.queryProlog', { uuid, query })
+    async queryProlog(uuid: string, query: string, options?: CallOptions): Promise<unknown> {
+        const result = await this.#apiClient.call<string>('perspective.queryProlog', { uuid, query }, options)
         return JSON.parse(result)
     }
 
@@ -176,9 +176,9 @@ export class PerspectiveClient {
         )
     }
 
-    async modelQuery(uuid: string, className: string, queryJson: string): Promise<any> {
+    async modelQuery(uuid: string, className: string, queryJson: string, options?: CallOptions): Promise<any> {
         const resultJson = await this.#apiClient.call<string>(
-            'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson }
+            'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson }, options
         )
         return JSON.parse(resultJson)
     }

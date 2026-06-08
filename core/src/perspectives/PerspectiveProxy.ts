@@ -543,8 +543,8 @@ export class PerspectiveProxy {
      * });
      * ```
      */
-    async get(query: LinkQuery): Promise<LinkExpression[]> {
-        return await this.#client.queryLinks(this.#handle.uuid, query)
+    async get(query: LinkQuery, options?: CallOptions): Promise<LinkExpression[]> {
+        return await this.#client.queryLinks(this.#handle.uuid, query, options)
     }
 
     /**
@@ -570,8 +570,8 @@ export class PerspectiveProxy {
      * `);
      * ```
      */
-    async infer(query: string): Promise<any> {
-        return await this.#client.queryProlog(this.#handle.uuid, query)
+    async infer(query: string, options?: CallOptions): Promise<any> {
+        return await this.#client.queryProlog(this.#handle.uuid, query, options)
     }
 
     /**
@@ -615,8 +615,8 @@ export class PerspectiveProxy {
      * @param queryJson - Structured query as JSON string
      * @returns Object with `instances` array and `totalCount`
      */
-    async modelQuery(className: string, queryJson: string): Promise<{ instances: any[], totalCount: number }> {
-        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson);
+    async modelQuery(className: string, queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount: number }> {
+        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, options);
     }
 
     /**
