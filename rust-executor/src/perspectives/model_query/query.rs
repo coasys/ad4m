@@ -111,18 +111,12 @@ pub(super) async fn execute_model_query_inner(
     // doesn't fit, falls through silently to the legacy recursive
     // pipeline (same observable behaviour, slower wall-clock).
     if construct_builder::can_use_construct(query_input, shape) {
-        if let Some(sparql) = construct_builder::build_construct_sparql(
-            shape,
-            query_input,
-            resolver,
-        )? {
+        if let Some(sparql) =
+            construct_builder::build_construct_sparql(shape, query_input, resolver)?
+        {
             let triples = store.query_triples_async(&sparql).await?;
-            let instances = construct_builder::walk_graph_to_instances(
-                triples,
-                shape,
-                query_input,
-                resolver,
-            )?;
+            let instances =
+                construct_builder::walk_graph_to_instances(triples, shape, query_input, resolver)?;
             let total_count = instances.len();
             return Ok(ModelQueryResult {
                 instances,

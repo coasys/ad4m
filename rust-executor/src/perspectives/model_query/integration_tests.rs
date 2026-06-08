@@ -4667,7 +4667,11 @@ fn test_can_use_construct_engages_on_simple_query() {
 fn test_can_use_construct_disqualifies_with_metadata() {
     let shape = super::test_helpers::shape(
         "Topic",
-        vec![super::test_helpers::flag("type", "flux://entry_type", "flux://has_topic")],
+        vec![super::test_helpers::flag(
+            "type",
+            "flux://entry_type",
+            "flux://has_topic",
+        )],
     );
     let q = ModelQueryInput {
         with_metadata: Some(true), // disqualifier #7
@@ -4685,7 +4689,11 @@ fn test_can_use_construct_disqualifies_with_metadata() {
 fn test_can_use_construct_disqualifies_projections() {
     let shape = super::test_helpers::shape(
         "Topic",
-        vec![super::test_helpers::flag("type", "flux://entry_type", "flux://has_topic")],
+        vec![super::test_helpers::flag(
+            "type",
+            "flux://entry_type",
+            "flux://has_topic",
+        )],
     );
     let mut projections: std::collections::HashMap<String, ProjectionInput> =
         std::collections::HashMap::new();
@@ -4722,7 +4730,12 @@ async fn test_construct_path_resolves_simple_query() {
 
     // Two Topic instances
     store
-        .add_link(&make_link(t1, "flux://entry_type", "flux://has_topic", "1700000000000"))
+        .add_link(&make_link(
+            t1,
+            "flux://entry_type",
+            "flux://has_topic",
+            "1700000000000",
+        ))
         .unwrap();
     store
         .add_link(&make_link(
@@ -4733,7 +4746,12 @@ async fn test_construct_path_resolves_simple_query() {
         ))
         .unwrap();
     store
-        .add_link(&make_link(t2, "flux://entry_type", "flux://has_topic", "1700000000002"))
+        .add_link(&make_link(
+            t2,
+            "flux://entry_type",
+            "flux://has_topic",
+            "1700000000002",
+        ))
         .unwrap();
     store
         .add_link(&make_link(
@@ -4770,7 +4788,11 @@ async fn test_construct_path_resolves_simple_query() {
     )
     .await
     .unwrap();
-    assert_eq!(legacy.instances.len(), 2, "legacy path should find 2 topics");
+    assert_eq!(
+        legacy.instances.len(),
+        2,
+        "legacy path should find 2 topics"
+    );
 
     // Now the CONSTRUCT path on the same store/shape — same result expected
     let construct = execute_model_query_from_json(
@@ -4806,4 +4828,3 @@ async fn test_construct_path_resolves_simple_query() {
         "label fields should round-trip through the wire-format decoder"
     );
 }
-

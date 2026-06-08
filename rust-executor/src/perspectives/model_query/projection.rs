@@ -188,7 +188,9 @@ pub(super) async fn resolve_projections(
                 let n: u64 = row
                     .get(&col)
                     .and_then(|v| {
-                        v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_u64())
+                        v.as_str()
+                            .and_then(|s| s.parse().ok())
+                            .or_else(|| v.as_u64())
                     })
                     .unwrap_or(0);
                 by_parent.insert(parent, n);
@@ -228,16 +230,15 @@ pub(super) async fn resolve_projections(
 
     let list_results: Vec<Result<Vec<Value>, deno_core::anyhow::Error>> =
         futures::future::join_all(
-            list_sparqls.iter().map(|(_, sparql)| store.query_values_async(sparql)),
+            list_sparqls
+                .iter()
+                .map(|(_, sparql)| store.query_values_async(sparql)),
         )
         .await;
 
     // ---- Stage 4: attach count results to instances ----
     for rp in &count_projs {
-        let map = count_results
-            .get(&rp.key)
-            .cloned()
-            .unwrap_or_default();
+        let map = count_results.get(&rp.key).cloned().unwrap_or_default();
         for inst in instances.iter_mut() {
             if let Some(obj) = inst.as_object_mut() {
                 let id = obj
@@ -302,8 +303,7 @@ pub(super) async fn resolve_projections(
 
                     if !all_ids.is_empty() {
                         let mut sub_where = BTreeMap::new();
-                        sub_where
-                            .insert("id".to_string(), WhereCondition::StringArray(all_ids));
+                        sub_where.insert("id".to_string(), WhereCondition::StringArray(all_ids));
                         let sub_query = ModelQueryInput {
                             where_clause: Some(sub_where),
                             deep_query: Some(true),
@@ -384,10 +384,7 @@ pub(super) async fn resolve_projections(
 /// `parts` is `(safe_pred, where_patterns, reifier_patterns)` per
 /// projection in iteration order.  See [`resolve_projections`] for the
 /// surrounding pipeline.
-fn build_fused_count_sparql(
-    parts: &[(String, String, String)],
-    values_clause: &str,
-) -> String {
+fn build_fused_count_sparql(parts: &[(String, String, String)], values_clause: &str) -> String {
     let mut select_cols = String::from("?source");
     let mut option_blocks = String::new();
     for (i, (pred, wp, rp_pat)) in parts.iter().enumerate() {
@@ -697,11 +694,7 @@ mod fused_count_tests {
 
     #[test]
     fn fused_count_single_projection_is_well_formed() {
-        let parts = vec![(
-            "flux://has_tag".to_string(),
-            String::new(),
-            String::new(),
-        )];
+        let parts = vec![("flux://has_tag".to_string(), String::new(), String::new())];
         let s = build_fused_count_sparql(&parts, "<a:1> <a:2>");
         assert!(s.contains("SELECT ?source ?_count_0 WHERE"));
         assert!(s.contains("VALUES ?source { <a:1> <a:2> }"));
@@ -734,8 +727,14 @@ mod fused_count_tests {
         let s = "?source <p> ?t . FILTER(?target = <x>)";
         let out = rewrite_var(s, "?t", "?_t_0", "?parent", "?source");
         assert!(out.contains("?_t_0"), "out={out}");
-        assert!(out.contains("?target"), "`?target` should remain untouched: out={out}");
-        assert!(!out.contains("?_t_0arget"), "must not splice mid-word: out={out}");
+        assert!(
+            out.contains("?target"),
+            "`?target` should remain untouched: out={out}"
+        );
+        assert!(
+            !out.contains("?_t_0arget"),
+            "must not splice mid-word: out={out}"
+        );
     }
 
     #[test]

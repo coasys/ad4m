@@ -76,10 +76,7 @@ const MAX_CONSTRUCT_DEPTH: u8 = 16;
 ///    CONSTRUCT body doesn't support.  Falls back so the caller still gets
 ///    `total_count`.
 /// 9. **Nested include depth > MAX_CONSTRUCT_DEPTH**: defensive cap.
-pub(super) fn can_use_construct(
-    query: &ModelQueryInput,
-    shape: &ModelShape,
-) -> bool {
+pub(super) fn can_use_construct(query: &ModelQueryInput, shape: &ModelShape) -> bool {
     // (1)
     if query.use_construct != Some(true) {
         return false;
@@ -261,10 +258,7 @@ pub(super) fn build_construct_sparql(
 /// scopes the CONSTRUCT to the matching instances.  Uses the same
 /// conformance + where logic as the legacy `build_instance_sparql` so
 /// pagination / WHERE-pushdown stays consistent across the two paths.
-fn build_source_selector(
-    shape: &ModelShape,
-    query: &ModelQueryInput,
-) -> Result<String, Error> {
+fn build_source_selector(shape: &ModelShape, query: &ModelQueryInput) -> Result<String, Error> {
     let mut patterns: Vec<String> = Vec::new();
 
     // Conformance — at minimum the entry-type flag.  Mirrors the
@@ -275,10 +269,7 @@ fn build_source_selector(
                 if validate_iri(&prop.predicate).is_err() || validate_iri(initial).is_err() {
                     continue;
                 }
-                patterns.push(format!(
-                    "?source <{}> <{}> .",
-                    prop.predicate, initial
-                ));
+                patterns.push(format!("?source <{}> <{}> .", prop.predicate, initial));
             }
         }
     }
@@ -352,10 +343,7 @@ fn build_source_selector(
                     if validate_iri(val).is_ok() {
                         // Treat as IRI — same shape as id-eq but on the
                         // user-specified property predicate.
-                        patterns.push(format!(
-                            "?source <{}> <{val}> .",
-                            prop.predicate
-                        ));
+                        patterns.push(format!("?source <{}> <{val}> .", prop.predicate));
                     }
                 }
             }
@@ -426,7 +414,11 @@ fn emit_include_branches(
     }
 
     for (rel_name, val) in include {
-        let rel = match parent_shape.include_relations.iter().find(|r| r.name == *rel_name) {
+        let rel = match parent_shape
+            .include_relations
+            .iter()
+            .find(|r| r.name == *rel_name)
+        {
             Some(r) => r,
             None => continue,
         };
@@ -465,8 +457,7 @@ fn emit_include_branches(
 
         // Branch B: target's own property triples.
         {
-            let predicate_filter =
-                build_predicate_values(&target_shape.properties, "?_predicate");
+            let predicate_filter = build_predicate_values(&target_shape.properties, "?_predicate");
             let mut lines: Vec<String> = Vec::new();
             lines.push(format!("        {{ {inner_select} }}"));
             lines.push(format!(
@@ -514,10 +505,7 @@ fn build_target_conformance(shape: &ModelShape, target_var: &str) -> Vec<String>
         if prop.is_required && prop.is_flag {
             if let Some(initial) = &prop.initial_value {
                 if validate_iri(&prop.predicate).is_ok() && validate_iri(initial).is_ok() {
-                    out.push(format!(
-                        "{target_var} <{}> <{}> .",
-                        prop.predicate, initial
-                    ));
+                    out.push(format!("{target_var} <{}> <{}> .", prop.predicate, initial));
                 }
             }
         }
@@ -651,8 +639,8 @@ fn hydrate_one(
             None => continue,
         };
 
-        if prop.is_collection || (matches!(prop.direction.as_deref(), Some("forward"))
-            && !prop.is_scalar_relation)
+        if prop.is_collection
+            || (matches!(prop.direction.as_deref(), Some("forward")) && !prop.is_scalar_relation)
         {
             obj.insert(
                 prop.name.clone(),
