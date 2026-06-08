@@ -618,17 +618,14 @@ pub(super) fn build_query_patterns(
                             let escaped = escape_sparql_string(val);
                             where_patterns
                                 .push(format!("    ?source <{}> {var} .", prop.predicate));
-                            where_patterns
-                                .push(format!("    FILTER(STR({var}) = \"{escaped}\")"));
+                            where_patterns.push(format!("    FILTER(STR({var}) = \"{escaped}\")"));
                         }
                     }
                     WhereCondition::Number(n) => {
                         if is_literal_prop {
                             if let Some(typed) = typed_number_literal(*n) {
-                                where_patterns.push(format!(
-                                    "    ?source <{}> {typed} .",
-                                    prop.predicate
-                                ));
+                                where_patterns
+                                    .push(format!("    ?source <{}> {typed} .", prop.predicate));
                             } else {
                                 where_patterns.push("    FILTER(false)".to_string());
                             }
@@ -636,8 +633,7 @@ pub(super) fn build_query_patterns(
                             let var = format!("?_pw_{safe_name}");
                             where_patterns
                                 .push(format!("    ?source <{}> {var} .", prop.predicate));
-                            where_patterns
-                                .push(format!("    FILTER(STR({var}) = \"{n}\")"));
+                            where_patterns.push(format!("    FILTER(STR({var}) = \"{n}\")"));
                         }
                     }
                     WhereCondition::Bool(b) => {
@@ -650,8 +646,7 @@ pub(super) fn build_query_patterns(
                             let var = format!("?_pw_{safe_name}");
                             where_patterns
                                 .push(format!("    ?source <{}> {var} .", prop.predicate));
-                            where_patterns
-                                .push(format!("    FILTER(STR({var}) = \"{b}\")"));
+                            where_patterns.push(format!("    FILTER(STR({var}) = \"{b}\")"));
                         }
                     }
                     WhereCondition::StringArray(vals) => {
@@ -665,14 +660,10 @@ pub(super) fn build_query_patterns(
                                 }
                             }
                             let iv_var = format!("?_iv_{safe_name}");
-                            where_patterns.push(format!(
-                                "    VALUES {iv_var} {{ {} }}",
-                                items.join(" ")
-                            ));
-                            where_patterns.push(format!(
-                                "    ?source <{}> {iv_var} .",
-                                prop.predicate
-                            ));
+                            where_patterns
+                                .push(format!("    VALUES {iv_var} {{ {} }}", items.join(" ")));
+                            where_patterns
+                                .push(format!("    ?source <{}> {iv_var} .", prop.predicate));
                         } else {
                             let values_list = vals
                                 .iter()
@@ -696,14 +687,10 @@ pub(super) fn build_query_patterns(
                                 where_patterns.push("    FILTER(false)".to_string());
                             } else {
                                 let iv_var = format!("?_iv_{safe_name}");
-                                where_patterns.push(format!(
-                                    "    VALUES {iv_var} {{ {} }}",
-                                    items.join(" ")
-                                ));
-                                where_patterns.push(format!(
-                                    "    ?source <{}> {iv_var} .",
-                                    prop.predicate
-                                ));
+                                where_patterns
+                                    .push(format!("    VALUES {iv_var} {{ {} }}", items.join(" ")));
+                                where_patterns
+                                    .push(format!("    ?source <{}> {iv_var} .", prop.predicate));
                             }
                         } else {
                             let values_list = vals
@@ -731,9 +718,7 @@ pub(super) fn build_query_patterns(
                             match not_val {
                                 Value::String(s) => {
                                     let escaped = escape_sparql_string(s);
-                                    filters.push(format!(
-                                        "{var} != \"{escaped}\"^^<{XSD_STRING}>"
-                                    ));
+                                    filters.push(format!("{var} != \"{escaped}\"^^<{XSD_STRING}>"));
                                 }
                                 Value::Number(n) => {
                                     let n_f64 = n.as_f64().unwrap_or(0.0);
@@ -742,9 +727,7 @@ pub(super) fn build_query_patterns(
                                     }
                                 }
                                 Value::Bool(b) => {
-                                    filters.push(format!(
-                                        "{var} != \"{b}\"^^<{XSD_BOOLEAN}>"
-                                    ));
+                                    filters.push(format!("{var} != \"{b}\"^^<{XSD_BOOLEAN}>"));
                                 }
                                 Value::Array(arr) => {
                                     let items: Vec<String> = arr
@@ -758,17 +741,15 @@ pub(super) fn build_query_patterns(
                                                 let f = n.as_f64().unwrap_or(0.0);
                                                 typed_number_literal(f)
                                             }
-                                            Value::Bool(b) => Some(format!(
-                                                "\"{b}\"^^<{XSD_BOOLEAN}>"
-                                            )),
+                                            Value::Bool(b) => {
+                                                Some(format!("\"{b}\"^^<{XSD_BOOLEAN}>"))
+                                            }
                                             _ => None,
                                         })
                                         .collect();
                                     if !items.is_empty() {
-                                        filters.push(format!(
-                                            "{var} NOT IN ({})",
-                                            items.join(", ")
-                                        ));
+                                        filters
+                                            .push(format!("{var} NOT IN ({})", items.join(", ")));
                                     }
                                 }
                                 _ => {}

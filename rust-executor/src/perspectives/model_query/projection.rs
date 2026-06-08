@@ -415,30 +415,21 @@ pub(super) fn build_projection_where_patterns(
                     if looks_like_absolute_iri(val) {
                         items.push(format!("<{val}>"));
                     }
-                    patterns.push(format!(
-                        "    VALUES ?{var} {{ {} }}\n",
-                        items.join(" ")
-                    ));
+                    patterns.push(format!("    VALUES ?{var} {{ {} }}\n", items.join(" ")));
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                 } else {
                     let escaped = escape_sparql_string(val);
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
-                    patterns.push(format!(
-                        "    FILTER(STR(?{var}) = \"{escaped}\")\n",
-                    ));
+                    patterns.push(format!("    FILTER(STR(?{var}) = \"{escaped}\")\n",));
                 }
             }
             WhereCondition::Bool(b) => {
                 if is_literal_prop {
-                    patterns.push(format!(
-                        "    ?t <{pred}> \"{b}\"^^<{XSD_BOOLEAN}> .\n"
-                    ));
+                    patterns.push(format!("    ?t <{pred}> \"{b}\"^^<{XSD_BOOLEAN}> .\n"));
                 } else {
                     let bval = if *b { "true" } else { "false" };
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
-                    patterns.push(format!(
-                        "    FILTER(STR(?{var}) = \"{bval}\")\n",
-                    ));
+                    patterns.push(format!("    FILTER(STR(?{var}) = \"{bval}\")\n",));
                 }
             }
             WhereCondition::Number(n) => {
@@ -450,9 +441,7 @@ pub(super) fn build_projection_where_patterns(
                     }
                 } else {
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
-                    patterns.push(format!(
-                        "    FILTER(STR(?{var}) = \"{n}\")\n",
-                    ));
+                    patterns.push(format!("    FILTER(STR(?{var}) = \"{n}\")\n",));
                 }
             }
             WhereCondition::StringArray(vals) => {
@@ -465,10 +454,7 @@ pub(super) fn build_projection_where_patterns(
                             items.push(format!("<{v}>"));
                         }
                     }
-                    patterns.push(format!(
-                        "    VALUES ?{var} {{ {} }}\n",
-                        items.join(" ")
-                    ));
+                    patterns.push(format!("    VALUES ?{var} {{ {} }}\n", items.join(" ")));
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                 } else {
                     let list = vals
@@ -477,9 +463,7 @@ pub(super) fn build_projection_where_patterns(
                         .collect::<Vec<_>>()
                         .join(", ");
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
-                    patterns.push(format!(
-                        "    FILTER(STR(?{var}) IN ({list}))\n",
-                    ));
+                    patterns.push(format!("    FILTER(STR(?{var}) IN ({list}))\n",));
                 }
             }
             WhereCondition::NumberArray(vals) => {
@@ -491,10 +475,7 @@ pub(super) fn build_projection_where_patterns(
                     if items.is_empty() {
                         patterns.push("    FILTER(false)\n".to_string());
                     } else {
-                        patterns.push(format!(
-                            "    VALUES ?{var} {{ {} }}\n",
-                            items.join(" ")
-                        ));
+                        patterns.push(format!("    VALUES ?{var} {{ {} }}\n", items.join(" ")));
                         patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
                     }
                 } else {
@@ -504,9 +485,7 @@ pub(super) fn build_projection_where_patterns(
                         .collect::<Vec<_>>()
                         .join(", ");
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
-                    patterns.push(format!(
-                        "    FILTER(STR(?{var}) IN ({list}))\n",
-                    ));
+                    patterns.push(format!("    FILTER(STR(?{var}) IN ({list}))\n",));
                 }
             }
             _ => {}

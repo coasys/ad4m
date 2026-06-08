@@ -157,11 +157,7 @@ pub fn initialize_from_db() {
                     );
                 }
                 Ok(_) => {} // Already migrated or nothing to migrate
-                Err(e) => log::warn!(
-                    "Typed-literal migration for {}: {}",
-                    handle_clone.uuid,
-                    e
-                ),
+                Err(e) => log::warn!("Typed-literal migration for {}: {}", handle_clone.uuid, e),
             }
 
             // Rebuild SPARQL index from existing links
