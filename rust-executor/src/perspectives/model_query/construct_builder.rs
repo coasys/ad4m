@@ -209,26 +209,35 @@ pub(super) fn build_construct_sparql(
     query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
 ) -> Result<Option<String>, Error> {
-    let mut construct_lines: Vec<String> = Vec::new();
-    let mut where_lines: Vec<String> = Vec::new();
+    // Single CONSTRUCT template: `?_subject ?_predicate ?_object .`
+    // Each UNION branch BINDs those three to produce the triples for one
+    // subgraph layer (top-level instance properties, the parent→target
+    // link for each include, the target's own properties, recursively
+    // for nested includes).  Branches don't share bindings — that's the
+    // key fix: the previous "wide WHERE with OPTIONAL" shape produced an
+    // M×N cross-product per source, which on Oxigraph 0.5.x is O(seconds)
+    // even when M and N are small.
 
-    // Inner pagination/scope: SELECT DISTINCT ?source { conformance + where }
-    // LIMIT N.  This is what restricts the CONSTRUCT to the relevant page.
     let inner_select = build_source_selector(shape, query)?;
-    where_lines.push(format!("    {{ {inner_select} }}"));
+    let mut union_branches: Vec<String> = Vec::new();
 
-    // Main instance triples
-    construct_lines.push("    ?source ?_p ?_o .".to_string());
-    let predicate_filter = build_predicate_values(&shape.properties, "?_p");
-    where_lines.push("    ?source ?_p ?_o .".to_string());
-    if let Some(filter) = predicate_filter {
-        where_lines.push(format!("    {filter}"));
+    // Branch 0: top-level instance triples.
+    {
+        let predicate_filter = build_predicate_values(&shape.properties, "?_predicate");
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(format!("        {{ {inner_select} }}"));
+        lines.push("        ?source ?_predicate ?_object .".to_string());
+        if let Some(filter) = predicate_filter {
+            lines.push(format!("        {filter}"));
+        }
+        lines.push("        BIND(?source AS ?_subject)".to_string());
+        union_branches.push(format!("    {{\n{}\n    }}", lines.join("\n")));
     }
 
-    // Recursively emit includes
+    // Recursive include branches.
     if let Some(include) = &query.include {
         let mut counter: usize = 0;
-        emit_includes(
+        emit_include_branches(
             shape,
             include,
             "?source",
@@ -236,16 +245,15 @@ pub(super) fn build_construct_sparql(
             &mut counter,
             0,
             resolver,
-            &mut construct_lines,
-            &mut where_lines,
+            &inner_select,
+            &mut union_branches,
         )?;
     }
 
-    let construct_body = construct_lines.join("\n");
-    let where_body = where_lines.join("\n");
+    let where_body = union_branches.join("\n    UNION\n");
 
     Ok(Some(format!(
-        "CONSTRUCT {{\n{construct_body}\n}}\nWHERE {{\n{where_body}\n}}"
+        "CONSTRUCT {{ ?_subject ?_predicate ?_object . }}\nWHERE {{\n{where_body}\n}}"
     )))
 }
 
@@ -295,24 +303,61 @@ fn build_source_selector(
         }
     }
 
-    // WHERE-clause pushdown: only `id` / `base` equality flavours are
-    // supported here.  Anything else => `can_use_construct` should have
-    // returned false; we'd have fallen back already.  This is the same
-    // subset the legacy `all_where_pushable` handles for the unique-id case.
+    // WHERE-clause pushdown.  Three flavours are supported in the inner
+    // SELECT — anything else makes `can_use_construct` return false:
+    //   1. `id` / `base` equality (`String` or `StringArray`) → VALUES ?source
+    //   2. `id` / `base` Ops (`String(IRI in set)` etc.)  → not handled here yet
+    //   3. scalar-property equality (`String` value) where the property is a
+    //      declared scalar @Property on the shape → adds `?source <pred> <value>`
+    //
+    // Everything else falls into post-hydration Rust filtering in the
+    // legacy pipeline; the CONSTRUCT path bails (`can_use_construct`
+    // returns false) so behaviour stays correct.
     if let Some(wc) = &query.where_clause {
-        if let Some(WhereCondition::String(iri)) = wc.get("id") {
-            if validate_iri(iri).is_ok() {
-                patterns.push(format!("VALUES ?source {{ <{iri}> }}"));
+        for (prop_name, condition) in wc {
+            if prop_name == "id" || prop_name == "base" {
+                match condition {
+                    WhereCondition::String(iri) if validate_iri(iri).is_ok() => {
+                        patterns.push(format!("VALUES ?source {{ <{iri}> }}"));
+                    }
+                    WhereCondition::StringArray(arr) => {
+                        let safe: Vec<String> = arr
+                            .iter()
+                            .filter(|s| validate_iri(s).is_ok())
+                            .map(|s| format!("<{s}>"))
+                            .collect();
+                        if !safe.is_empty() {
+                            patterns.push(format!("VALUES ?source {{ {} }}", safe.join(" ")));
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
             }
-        }
-        if let Some(WhereCondition::StringArray(arr)) = wc.get("id") {
-            let safe: Vec<String> = arr
+            // Scalar-property equality: find the named property on the
+            // shape and emit an `?source <pred> <value>` constraint.  The
+            // value form depends on the property's datatype — for `String`
+            // values that look like absolute IRIs we emit a NamedNode
+            // pattern; otherwise we fall back to the typed-literal form
+            // the storage layer round-trips through.
+            let prop_opt = shape
+                .properties
                 .iter()
-                .filter(|s| validate_iri(s).is_ok())
-                .map(|s| format!("<{s}>"))
-                .collect();
-            if !safe.is_empty() {
-                patterns.push(format!("VALUES ?source {{ {} }}", safe.join(" ")));
+                .find(|p| p.name == *prop_name && !p.is_flag && !p.is_collection);
+            if let Some(prop) = prop_opt {
+                if validate_iri(&prop.predicate).is_err() {
+                    continue;
+                }
+                if let WhereCondition::String(val) = condition {
+                    if validate_iri(val).is_ok() {
+                        // Treat as IRI — same shape as id-eq but on the
+                        // user-specified property predicate.
+                        patterns.push(format!(
+                            "?source <{}> <{val}> .",
+                            prop.predicate
+                        ));
+                    }
+                }
             }
         }
     }
@@ -345,10 +390,24 @@ fn build_predicate_values(props: &[ShapeProperty], var: &str) -> Option<String> 
     }
 }
 
-/// Recursively emit the CONSTRUCT body + WHERE OPTIONAL blocks for a single
-/// level of `include`.  Calls itself for nested includes.
+/// Recursively emit one or more UNION branches for an include map.
+///
+/// Each include produces *two* branches:
+///   - **parent→target link**: one CONSTRUCT triple per matched edge.
+///   - **target properties**: one CONSTRUCT triple per matched target
+///     property triple.
+///
+/// Both branches are gated by the SAME `?source` restriction (the inner
+/// SELECT shared across branches) so the planner can hash-join once and
+/// then emit each branch independently.  Nested includes recurse into
+/// their own branches in turn — depth N includes produce 2N branches
+/// each rooted on the same `?source` restriction.
+///
+/// The shared `inner_select` is duplicated into each branch as a
+/// `{ … }` sub-pattern; Oxigraph 0.5.x dedups identical sub-queries at
+/// plan time so the actual conformance scan runs once.
 #[allow(clippy::too_many_arguments)]
-fn emit_includes(
+fn emit_include_branches(
     parent_shape: &ModelShape,
     include: &HashMap<String, IncludeValue>,
     parent_var: &str,
@@ -356,8 +415,8 @@ fn emit_includes(
     counter: &mut usize,
     depth: u8,
     resolver: &dyn ShapeResolver,
-    construct_lines: &mut Vec<String>,
-    where_lines: &mut Vec<String>,
+    inner_select: &str,
+    union_branches: &mut Vec<String>,
 ) -> Result<(), Error> {
     if depth >= MAX_CONSTRUCT_DEPTH {
         log::warn!(
@@ -377,49 +436,58 @@ fn emit_includes(
 
         let target_shape = match resolver.get_shape(&rel.target_class_name) {
             Ok(s) => s,
-            Err(_) => continue, // missing shape — skip this branch silently
+            Err(_) => continue,
         };
 
         let idx = *counter;
         *counter += 1;
         let target_var = format!("?{prefix}_{idx}_t");
-        let target_pred_var = format!("?{prefix}_{idx}_p");
-        let target_obj_var = format!("?{prefix}_{idx}_o");
 
-        // CONSTRUCT: link parent → target, then target → its properties
-        construct_lines.push(format!(
-            "    {parent_var} <{}> {target_var} .",
-            rel.predicate
-        ));
-        construct_lines.push(format!(
-            "    {target_var} {target_pred_var} {target_obj_var} ."
-        ));
+        let target_conformance = build_target_conformance(target_shape.as_ref(), &target_var);
 
-        // WHERE: wrap the include in OPTIONAL so a missing relation
-        // doesn't drop the parent.  Conformance filter on the target via
-        // its entry-type flag if one exists.
-        let mut opt_lines: Vec<String> = Vec::new();
-        opt_lines.push(format!(
-            "        {parent_var} <{}> {target_var} .",
-            rel.predicate
-        ));
-
-        let target_conformance =
-            build_target_conformance(target_shape.as_ref(), &target_var);
-        for line in target_conformance {
-            opt_lines.push(format!("        {line}"));
-        }
-        opt_lines.push(format!(
-            "        {target_var} {target_pred_var} {target_obj_var} ."
-        ));
-        if let Some(filter) = build_predicate_values(&target_shape.properties, &target_pred_var) {
-            opt_lines.push(format!("        {filter}"));
+        // Branch A: parent→target link itself.
+        {
+            let mut lines: Vec<String> = Vec::new();
+            lines.push(format!("        {{ {inner_select} }}"));
+            lines.push(format!(
+                "        {parent_var} <{}> {target_var} .",
+                rel.predicate
+            ));
+            for line in &target_conformance {
+                lines.push(format!("        {line}"));
+            }
+            lines.push(format!(
+                "        BIND({parent_var} AS ?_subject) BIND(<{}> AS ?_predicate) BIND({target_var} AS ?_object)",
+                rel.predicate
+            ));
+            union_branches.push(format!("    {{\n{}\n    }}", lines.join("\n")));
         }
 
-        // Nested includes
+        // Branch B: target's own property triples.
+        {
+            let predicate_filter =
+                build_predicate_values(&target_shape.properties, "?_predicate");
+            let mut lines: Vec<String> = Vec::new();
+            lines.push(format!("        {{ {inner_select} }}"));
+            lines.push(format!(
+                "        {parent_var} <{}> {target_var} .",
+                rel.predicate
+            ));
+            for line in &target_conformance {
+                lines.push(format!("        {line}"));
+            }
+            lines.push(format!("        {target_var} ?_predicate ?_object ."));
+            if let Some(filter) = predicate_filter {
+                lines.push(format!("        {filter}"));
+            }
+            lines.push(format!("        BIND({target_var} AS ?_subject)"));
+            union_branches.push(format!("    {{\n{}\n    }}", lines.join("\n")));
+        }
+
+        // Nested includes (recurse).
         if let IncludeValue::SubQuery(sq) = val {
             if let Some(nested) = &sq.include {
-                emit_includes(
+                emit_include_branches(
                     target_shape.as_ref(),
                     nested,
                     &target_var,
@@ -427,14 +495,11 @@ fn emit_includes(
                     counter,
                     depth + 1,
                     resolver,
-                    construct_lines,
-                    where_lines,
+                    inner_select,
+                    union_branches,
                 )?;
             }
         }
-
-        let opt_body = opt_lines.join("\n");
-        where_lines.push(format!("    OPTIONAL {{\n{opt_body}\n    }}"));
     }
     Ok(())
 }
