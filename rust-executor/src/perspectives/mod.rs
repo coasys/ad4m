@@ -119,10 +119,7 @@ pub fn initialize_from_db() {
                 Err(e) => log::warn!("Reifier migration for {}: {}", handle_clone.uuid, e),
             }
 
-            match p
-                .sparql_store
-                .migrate_signed_envelopes_to_plain_literals()
-            {
+            match p.sparql_store.migrate_signed_envelopes_to_plain_literals() {
                 Ok(count) if count > 0 => {
                     log::info!(
                         "🔄 Signed-envelope migration for {}: {} envelopes converted",
@@ -131,11 +128,7 @@ pub fn initialize_from_db() {
                     );
                 }
                 Ok(_) => {} // Already migrated or nothing to migrate
-                Err(e) => log::warn!(
-                    "Signed-envelope migration for {}: {}",
-                    handle_clone.uuid,
-                    e
-                ),
+                Err(e) => log::warn!("Signed-envelope migration for {}: {}", handle_clone.uuid, e),
             }
 
             // Rebuild SPARQL index from existing links
