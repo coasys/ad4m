@@ -156,6 +156,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tokio-stream",
+ "tokio-util",
  "tower 0.5.3",
  "tower-http",
  "tower-service",

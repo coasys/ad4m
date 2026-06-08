@@ -1,4 +1,4 @@
-import { ApiClient, RpcError } from "../apiClient";
+import { ApiClient, CallOptions, RpcError } from "../apiClient";
 import { ExpressionRendered } from "../expression/Expression";
 import { ExpressionClient } from "../expression/ExpressionClient";
 import { Link, LinkExpressionInput, LinkExpression, LinkMutations, LinkExpressionMutations } from "../links/Links";
@@ -116,8 +116,8 @@ export class PerspectiveClient {
         return JSON.parse(result)
     }
 
-    async querySparql<T = any>(uuid: string, query: string): Promise<T> {
-        const result = await this.#apiClient.call<string>('perspective.querySparql', { uuid, engine: 'sparql', query })
+    async querySparql<T = any>(uuid: string, query: string, options?: CallOptions): Promise<T> {
+        const result = await this.#apiClient.call<string>('perspective.querySparql', { uuid, engine: 'sparql', query }, options)
         return JSON.parse(result) as T
     }
 

@@ -550,18 +550,47 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 
     match engine.as_str() {
         "sparql" => {
-            // Run the synchronous SPARQL query on a blocking thread with a timeout
-            // so it doesn't block the async runtime or hang indefinitely.
-            let result = tokio::time::timeout(
-                Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-                tokio::task::spawn_blocking(move || perspective.sparql_query(query)),
-            )
-            .await;
+            // Run the synchronous SPARQL query on a blocking thread with a
+            // hard timeout (so the executor doesn't hang indefinitely on
+            // a pathological query) and a soft cancellation token (so the
+            // client can abort with `request.cancel`).
+            //
+            // When `ctx.cancel_token` is present (always true under the
+            // WS dispatcher), we use `sparql_query_cancellable` which
+            // races the eval against `cancel.cancelled()`.  When it's
+            // None (internal callers / tests), fall back to the
+            // historical timeout + spawn_blocking shape.
+            let timeout = Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS);
+            let result = if let Some(cancel) = ctx.cancel_token.clone() {
+                tokio::time::timeout(timeout, perspective.sparql_query_cancellable(query, cancel))
+                    .await
+            } else {
+                let join = tokio::task::spawn_blocking(move || perspective.sparql_query(query));
+                tokio::time::timeout(timeout, async move {
+                    join.await
+                        .map_err(|e| deno_core::anyhow::anyhow!("Task join error: {}", e))?
+                })
+                .await
+            };
 
             match result {
-                Ok(Ok(Ok(json))) => Ok(serde_json::to_value(json)?),
-                Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
-                Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
+                Ok(Ok(json)) => Ok(serde_json::to_value(json)?),
+                Ok(Err(e)) => {
+                    // Surface client cancellation as 499 so the dispatcher
+                    // doesn't have to special-case it — same wire shape as
+                    // the racing branch in `ws_rpc::handle_ws`.  Other
+                    // errors (anyhow string, including "query cancelled")
+                    // surface as 500 unless we recognise the cancel marker.
+                    let msg = e.to_string();
+                    if msg.contains("query cancelled") {
+                        Err(WsRpcError {
+                            code: 499,
+                            message: "Request cancelled by client".to_string(),
+                        })
+                    } else {
+                        Err(WsRpcError::internal(msg))
+                    }
+                }
                 Err(_) => {
                     log::warn!(
                         "SPARQL query timed out after {}s",

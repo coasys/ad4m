@@ -19,6 +19,24 @@ export class RpcError extends Error {
     }
 }
 
+/** Options accepted by [`ApiClient.call`]. */
+export interface CallOptions {
+    /**
+     * AbortSignal that, when fired, sends a `request.cancel` to the
+     * executor and rejects the call with a DOMException (`name === 'AbortError'`).
+     *
+     * Use this for long-running operations like `querySparql` so a UI
+     * teardown or a newer query supersession can stop the in-flight one
+     * without paying the network + deserialise tax on its result.
+     *
+     * Cancellation is best-effort on the executor: the SPARQL evaluation
+     * itself isn't preempted (Oxigraph can't be interrupted), but the
+     * reply is discarded and the network traffic + JSON parsing on the
+     * client are skipped.
+     */
+    signal?: AbortSignal
+}
+
 /** Default RPC call timeout in milliseconds (30 seconds). */
 const DEFAULT_TIMEOUT_MS = 30_000
 
@@ -207,9 +225,17 @@ export class ApiClient {
      * Send an RPC call over the WebSocket connection.
      * @param type - The operation type (e.g. 'agent.get', 'perspective.all')
      * @param params - Optional parameters to include in the message
+     * @param options - Optional call options (e.g. AbortSignal for cancellation)
      * @returns Promise that resolves with the result from the server
      */
-    async call<T>(type: string, params?: Record<string, unknown>): Promise<T> {
+    async call<T>(type: string, params?: Record<string, unknown>, options?: CallOptions): Promise<T> {
+        // Fast-path: if the caller already aborted, bail out before
+        // opening the socket. Matches fetch()'s behaviour.
+        const signal = options?.signal
+        if (signal?.aborted) {
+            throw new DOMException('Aborted', 'AbortError')
+        }
+
         await this._ready()
 
         const id = nextId()
@@ -219,22 +245,67 @@ export class ApiClient {
         const message: Record<string, unknown> = { id, type, params: params || {} }
 
         return new Promise<T>((resolve, reject) => {
+            let abortHandler: (() => void) | null = null
+
+            const cleanup = () => {
+                if (signal && abortHandler) {
+                    signal.removeEventListener('abort', abortHandler)
+                    abortHandler = null
+                }
+            }
+
             const timer = setTimeout(() => {
                 this._pendingCalls.delete(id)
+                cleanup()
                 reject(new RpcError(408, `RPC call '${type}' timed out after ${DEFAULT_TIMEOUT_MS}ms`))
             }, DEFAULT_TIMEOUT_MS)
 
+            // Wrap resolve/reject so we always clean up the abort listener.
             this._pendingCalls.set(id, {
-                resolve: resolve as (value: unknown) => void,
-                reject,
+                resolve: (value: unknown) => { cleanup(); resolve(value as T) },
+                reject: (reason: unknown) => { cleanup(); reject(reason) },
                 timer,
             })
+
+            if (signal) {
+                abortHandler = () => {
+                    // Drop the pending entry first so the late server
+                    // reply (if any) routes to the event subscribers,
+                    // not to a stale resolver.
+                    this._pendingCalls.delete(id)
+                    clearTimeout(timer)
+                    cleanup()
+
+                    // Best-effort `request.cancel` — the executor will
+                    // race the cancellation token against the in-flight
+                    // handler. If the socket is already gone there's
+                    // nothing useful we can send; the client side is
+                    // still aborted either way.
+                    if (this._ws && this._ws.readyState === 1 /* OPEN */) {
+                        try {
+                            this._ws.send(JSON.stringify({
+                                id: nextId(),
+                                type: 'request.cancel',
+                                params: { targetId: id },
+                            }))
+                        } catch (e) {
+                            // Swallow — the user-visible failure mode is the
+                            // AbortError below; a socket send failure here
+                            // doesn't change client semantics.
+                        }
+                    }
+
+                    reject(new DOMException('Aborted', 'AbortError'))
+                }
+                signal.addEventListener('abort', abortHandler, { once: true })
+            }
 
             if (this._ws && this._ws.readyState === 1 /* OPEN */) {
                 this._ws.send(JSON.stringify(message))
             } else {
                 this._pendingCalls.delete(id)
                 clearTimeout(timer)
+                cleanup()
                 reject(new RpcError(503, 'WebSocket not connected'))
             }
         })
