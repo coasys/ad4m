@@ -407,6 +407,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         init_prolog_service().await;
     }
 
+    {
+        info!("Initializing SFU service...");
+        match crate::sfu::SfuService::start(crate::sfu::server::SfuServerConfig::default()).await {
+            Ok(svc) => info!("SFU service ready on UDP {}", svc.local_addr()),
+            Err(e) => warn!("SFU service failed to start: {}", e),
+        }
+    }
+
     find_and_set_port(&mut config.port, 4000, "REST API");
     find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");
     find_and_set_port(&mut config.hc_app_port, 1337, "Holochain app");
