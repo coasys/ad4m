@@ -409,7 +409,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     {
         info!("Initializing SFU service...");
-        match crate::sfu::SfuService::start(crate::sfu::server::SfuServerConfig::default()).await {
+        let gossip: std::sync::Arc<dyn crate::sfu::CascadeGossip> = build_sfu_gossip(&config).await;
+        match crate::sfu::SfuService::start(
+            crate::sfu::server::SfuServerConfig::default(),
+            gossip,
+        )
+        .await
+        {
             Ok(svc) => info!("SFU service ready on UDP {}", svc.local_addr()),
             Err(e) => warn!("SFU service failed to start: {}", e),
         }
@@ -637,4 +643,56 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             .unwrap();
         runtime.block_on(api::start_server(config)).unwrap();
     })
+}
+
+/// Build the cascade-gossip transport based on the SFU-related fields
+/// of [`Ad4mConfig`].  Returns a [`NoopGossip`] when cascade is
+/// unconfigured, a [`TcpGossip`] when `sfu_cascade_listen` is set, or
+/// falls back to no-op (with a warning) if the requested transport
+/// fails to bind.
+async fn build_sfu_gossip(config: &Ad4mConfig) -> std::sync::Arc<dyn crate::sfu::CascadeGossip> {
+    let max = config.sfu_max_participants_per_node.unwrap_or(8);
+    let local_did = match config.sfu_local_did.clone() {
+        Some(did) => did,
+        None => {
+            return std::sync::Arc::new(crate::sfu::NoopGossip::new("self".to_string(), max));
+        }
+    };
+    let Some(listen) = config.sfu_cascade_listen.as_ref() else {
+        return std::sync::Arc::new(crate::sfu::NoopGossip::new(local_did, max));
+    };
+    let bind_addr: std::net::SocketAddr = match listen.parse() {
+        Ok(addr) => addr,
+        Err(e) => {
+            warn!("SFU cascade listen `{}` parse error: {} — running standalone", listen, e);
+            return std::sync::Arc::new(crate::sfu::NoopGossip::new(local_did, max));
+        }
+    };
+    let peers: Vec<crate::sfu::GossipPeer> = config
+        .sfu_cascade_peers
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|entry| {
+            let (did, addr) = entry.split_once('=')?;
+            let addr: std::net::SocketAddr = addr.parse().ok()?;
+            Some(crate::sfu::GossipPeer {
+                did: did.to_string(),
+                addr,
+            })
+        })
+        .collect();
+    info!(
+        "SFU cascade: local_did={}, listen={}, {} peer(s)",
+        local_did,
+        bind_addr,
+        peers.len()
+    );
+    match crate::sfu::TcpGossip::start(local_did.clone(), max, bind_addr, peers).await {
+        Ok(g) => g as std::sync::Arc<dyn crate::sfu::CascadeGossip>,
+        Err(e) => {
+            warn!("SFU cascade gossip failed to start: {} — running standalone", e);
+            std::sync::Arc::new(crate::sfu::NoopGossip::new(local_did, max))
+        }
+    }
 }

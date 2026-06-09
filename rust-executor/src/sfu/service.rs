@@ -7,12 +7,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use log::info;
+use log::{debug, info, warn};
 use once_cell::sync::OnceCell;
 use str0m::change::SdpOffer;
 use tokio::sync::RwLock;
 
-use super::cascade::CascadeManager;
+use super::cascade::{CascadeManager, CascadeSignal};
+use super::gossip::{CascadeGossip, GossipTarget};
 use super::room::{ParticipantId, RoomError, RoomId, RoomManager, SfuRoom};
 use super::server::{SfuCommand, SfuPeer, SfuServer, SfuServerConfig};
 
@@ -36,29 +37,113 @@ pub struct SfuService {
     configs: Arc<RwLock<HashMap<String, SfuConfig>>>,
     /// Cascade manager for multi-node SFU deployments.
     cascade_manager: Arc<RwLock<Option<CascadeManager>>>,
+    /// Pluggable cluster-gossip transport.  Always present — single-node
+    /// deployments pass a `NoopGossip` so the cascade plumbing stays
+    /// uniform and the redirect logic falls through to "no peers".
+    gossip: Arc<dyn CascadeGossip>,
 }
 
 impl SfuService {
     /// Start the SFU service and set the global instance.
-    pub async fn start(config: SfuServerConfig) -> Result<Arc<Self>, String> {
+    ///
+    /// `gossip` is the cluster transport — a [`NoopGossip`] for
+    /// single-node executors, a [`TcpGossip`] (or future
+    /// `HolochainGossip` / etc.) for cascade-enabled deployments.
+    /// On startup the service spawns an inbound loop that pumps
+    /// incoming [`CascadeSignal`]s into the local
+    /// [`CascadeManager`], so production discovery and
+    /// announce-driven load updates happen entirely through the
+    /// transport layer with no admin RPC needed.
+    pub async fn start(
+        config: SfuServerConfig,
+        gossip: Arc<dyn CascadeGossip>,
+    ) -> Result<Arc<Self>, String> {
         let server = SfuServer::start(config)
             .await
             .map_err(|e| format!("Failed to start SFU server: {}", e))?;
 
         info!("SFU service started on {}", server.local_addr);
 
+        // Pre-create the CascadeManager so the service has a single
+        // consistent view; cascade is effectively no-op when the
+        // gossip is a NoopGossip (Send/Receive go nowhere).
+        let cascade_manager = CascadeManager::new(
+            gossip.local_did().to_string(),
+            server.local_addr,
+            gossip.max_participants_per_node(),
+        );
+
         let service = Arc::new(Self {
             server,
             rooms: Arc::new(RwLock::new(RoomManager::new())),
             configs: Arc::new(RwLock::new(HashMap::new())),
-            cascade_manager: Arc::new(RwLock::new(None)),
+            cascade_manager: Arc::new(RwLock::new(Some(cascade_manager))),
+            gossip: Arc::clone(&gossip),
         });
+
+        if let Some(rx) = gossip.take_inbound() {
+            let svc = Arc::clone(&service);
+            tokio::spawn(async move {
+                svc.run_gossip_inbound(rx).await;
+            });
+        }
 
         SFU_SERVICE
             .set(service.clone())
             .map_err(|_| "SFU service already initialized".to_string())?;
 
         Ok(service)
+    }
+
+    /// Pump inbound signals from the gossip transport into the
+    /// CascadeManager.  Runs for the lifetime of the executor.
+    async fn run_gossip_inbound(
+        self: Arc<Self>,
+        mut rx: tokio::sync::mpsc::Receiver<CascadeSignal>,
+    ) {
+        while let Some(signal) = rx.recv().await {
+            let mut cascade_lock = self.cascade_manager.write().await;
+            let Some(mgr) = cascade_lock.as_mut() else {
+                debug!("SFU gossip inbound: no CascadeManager, dropping signal");
+                continue;
+            };
+            match signal {
+                CascadeSignal::Announce {
+                    did,
+                    room_id,
+                    participant_count,
+                    capacity_hint,
+                } => {
+                    mgr.handle_sfu_announce(did, room_id, participant_count, capacity_hint);
+                }
+                CascadeSignal::Leave { did, room_id: _ } => {
+                    mgr.remove_node(&did);
+                }
+                CascadeSignal::PipeOffer { .. } | CascadeSignal::PipeAnswer { .. } => {
+                    // Pipe transport plumbing is wired in cascade.rs;
+                    // this dispatcher just hands the signal off.  When
+                    // pipe support is finished end-to-end (see plan
+                    // Phase E), uncomment the dispatch.
+                    debug!("SFU gossip inbound: pipe signal received (unhandled)");
+                }
+            }
+        }
+    }
+
+    /// Broadcast our local room-state update.  Called from the
+    /// participant add/remove path; pushes an Announce through the
+    /// gossip transport so peers can keep cross-node counts fresh.
+    async fn announce_room(&self, room_id: &str, participant_count: u32) {
+        let capacity_hint = self.gossip.max_participants_per_node();
+        let signal = CascadeSignal::Announce {
+            did: self.gossip.local_did().to_string(),
+            room_id: room_id.to_string(),
+            participant_count,
+            capacity_hint,
+        };
+        if let Err(e) = self.gossip.send(GossipTarget::Broadcast, signal).await {
+            warn!("SFU announce_room failed: {}", e);
+        }
     }
 
     pub fn is_available() -> bool {
@@ -68,75 +153,6 @@ impl SfuService {
     /// Get the local address of the SFU server.
     pub fn local_addr(&self) -> std::net::SocketAddr {
         self.server.local_addr
-    }
-
-    /// Enable cascade mode and seed the CascadeManager with a set of
-    /// known peer nodes.  Wind tunnel / admin entry point — production
-    /// cascade discovery is via the gossip layer on top of the
-    /// neighbourhood DNA.
-    ///
-    /// `peers` is a list of `(did, addr)` tuples for every other SFU
-    /// node in the cluster.  Each is registered as a `SfuNodeInfo` for
-    /// every active room (and the empty `""` room as a catch-all when
-    /// no rooms exist yet).
-    pub async fn enable_cascade(
-        &self,
-        local_did: String,
-        max_participants_per_node: u32,
-        peers: Vec<(String, std::net::SocketAddr)>,
-    ) -> Result<(), String> {
-        use super::cascade::SfuNodeInfo;
-        let mut cascade_lock = self.cascade_manager.write().await;
-        let mgr = cascade_lock.get_or_insert_with(|| {
-            super::cascade::CascadeManager::new(
-                local_did.clone(),
-                self.server.local_addr,
-                max_participants_per_node,
-            )
-        });
-
-        // Catch-all room id "" so pick_redirect_node sees these peers
-        // even before the room is created.
-        let known = &mut mgr.known_nodes_mut();
-        let bucket = known.entry(String::new()).or_default();
-        // Re-seed: drop the existing entries (so an enable_cascade with
-        // an empty peer list correctly partitions the node from its
-        // peers) and rewrite.
-        bucket.clear();
-        for (did, _addr) in &peers {
-            if *did == local_did {
-                continue;
-            }
-            bucket.insert(
-                did.clone(),
-                SfuNodeInfo {
-                    did: did.clone(),
-                    participant_count: 0,
-                    capacity_hint: max_participants_per_node,
-                },
-            );
-        }
-        Ok(())
-    }
-
-    /// Push a participant-count update for a remote SFU node.  In
-    /// production this happens via the gossip announce path; for the
-    /// wind tunnel's static cluster we expose it as an admin RPC
-    /// (`sfu.cascadeAnnounce`) so the harness can keep each node's
-    /// view of its peers fresh without standing up a gossip layer.
-    pub async fn cascade_announce(
-        &self,
-        remote_did: String,
-        room_id: String,
-        participant_count: u32,
-    ) -> Result<(), String> {
-        let mut cascade_lock = self.cascade_manager.write().await;
-        let mgr = cascade_lock
-            .as_mut()
-            .ok_or_else(|| "cascade not enabled on this node".to_string())?;
-        let capacity_hint = mgr.max_participants_per_node();
-        mgr.handle_sfu_announce(remote_did, room_id, participant_count, capacity_hint);
-        Ok(())
     }
 
     // ---- Room management ----
@@ -279,8 +295,11 @@ impl SfuService {
             .await
             .map_err(|e| format!("Failed to add peer to SFU: {}", e))?;
 
-        // Build stream mapping from existing participants in the room
-        let stream_mapping = {
+        // Build stream mapping from existing participants in the room.
+        // While we're holding a read lock, also snapshot the room's
+        // local participant count so we can announce it via gossip
+        // after the lock drops.
+        let (stream_mapping, local_count) = {
             let rooms = self.rooms.read().await;
             if let Some(room) = rooms.get_room(&room_id) {
                 let mut mapping: Vec<String> = room
@@ -292,11 +311,13 @@ impl SfuService {
                 for (did, _remote) in &room.remote_participants {
                     mapping.push(format!("remote-{}:{}", did, did));
                 }
-                mapping
+                (mapping, room.participant_count() as u32)
             } else {
-                Vec::new()
+                (Vec::new(), 0)
             }
         };
+
+        self.announce_room(&room_id.to_string(), local_count).await;
 
         Ok(CallSessionInfo {
             room_name: room_name.to_string(),
@@ -331,6 +352,11 @@ impl SfuService {
             .ok_or_else(|| "Agent not in room".to_string())?;
 
         let is_empty = room.remove_participant(&pid);
+        let local_count = if is_empty {
+            0
+        } else {
+            room.participant_count() as u32
+        };
 
         // Notify event loop
         let _ = self
@@ -343,6 +369,9 @@ impl SfuService {
         if is_empty {
             rooms.destroy_room(&room_id).ok();
         }
+        drop(rooms);
+
+        self.announce_room(&room_id.to_string(), local_count).await;
 
         Ok(true)
     }

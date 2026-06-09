@@ -48,6 +48,7 @@ tokio = { version = "1.25.0", features = ["full"] }
 # WebRTC SFU — str0m is a pure-Rust sans-I/O WebRTC stack. We drive the
 # event loop ourselves over a UDP socket in `rust-executor/src/sfu`.
 str0m = "0.9"
+async-trait = "0.1"
 url = "2.3.1"
 urlencoding = "2.1"
 percent-encoding = "2"

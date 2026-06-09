@@ -12,6 +12,7 @@
 //! transports.
 
 pub mod cascade;
+pub mod gossip;
 pub mod relay;
 pub mod room;
 pub mod server;
@@ -19,5 +20,6 @@ pub mod types;
 
 mod service;
 
+pub use gossip::{tcp::GossipPeer, tcp::TcpGossip, CascadeGossip, GossipTarget, NoopGossip};
 pub use service::{get_sfu_service, SfuService};
 pub use types::{CallSessionInfo, SfuConfig, SfuParticipantInfo, SfuRoomInfo};
