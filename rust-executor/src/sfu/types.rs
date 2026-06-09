@@ -28,6 +28,28 @@ pub struct SfuConfig {
     /// Max participants per SFU node in cascaded mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_participants_per_node: Option<u32>,
+    /// ICE servers (STUN + TURN) the SFU advertises to clients.  Empty
+    /// means "use whatever defaults the client ships with".  Clients
+    /// MUST treat this as authoritative when present — running the
+    /// TURN credential lifecycle from the SFU lets the host application
+    /// rotate keys without redeploying clients.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ice_servers: Vec<IceServer>,
+}
+
+/// One ICE server entry as understood by browser `RTCConfiguration` —
+/// mirrors the WebIDL shape so clients can pass it through unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IceServer {
+    /// One or more URLs (`stun:`, `turn:`, `turns:`).
+    pub urls: Vec<String>,
+    /// TURN username, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// TURN long-term credential, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
 }
 
 fn default_mode() -> String {
@@ -49,6 +71,7 @@ impl Default for SfuConfig {
             max_mesh_participants: default_max_mesh(),
             sfu_peers: Vec::new(),
             max_participants_per_node: None,
+            ice_servers: Vec::new(),
         }
     }
 }

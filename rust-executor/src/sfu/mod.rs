@@ -22,4 +22,4 @@ mod service;
 
 pub use gossip::{tcp::GossipPeer, tcp::TcpGossip, CascadeGossip, GossipTarget, NoopGossip};
 pub use service::{get_sfu_service, SfuService};
-pub use types::{CallSessionInfo, SfuConfig, SfuParticipantInfo, SfuRoomInfo};
+pub use types::{CallSessionInfo, IceServer, SfuConfig, SfuParticipantInfo, SfuRoomInfo};

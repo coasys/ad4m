@@ -11,6 +11,15 @@ export type SfuMode = "mesh" | "designated" | "gateway" | "cascaded"
  * Per-neighbourhood SFU configuration.  Stored on the Social DNA so it
  * travels with the perspective.
  */
+export interface IceServer {
+    /** STUN or TURN URLs. */
+    urls: string[]
+    /** TURN username (long-term credential). */
+    username?: string
+    /** TURN credential / password. */
+    credential?: string
+}
+
 export interface SfuConfig {
     /** `"mesh"` | `"designated"` | `"gateway"` | `"cascaded"` */
     mode: SfuMode
@@ -24,6 +33,13 @@ export interface SfuConfig {
     sfuPeers: string[]
     /** Max participants per SFU node in cascaded mode. */
     maxParticipantsPerNode?: number
+    /**
+     * ICE servers the SFU advertises to clients.  When set, clients
+     * MUST use these instead of their hardcoded defaults so the host
+     * application can rotate TURN credentials without a client
+     * redeploy.  An empty array means "use the SDK defaults".
+     */
+    iceServers?: IceServer[]
 }
 
 /** Snapshot of an active SFU room. */
