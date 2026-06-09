@@ -444,7 +444,7 @@ impl SfuServer {
                         sdp_offer: sdp_offer_json,
                     };
                     if let Ok(payload_json) = serde_json::to_string(&payload) {
-                        crate::pubsub::get_global_pubsub().publish_sync(
+                        crate::pubsub::get_global_pubsub_sync().publish_sync(
                             &crate::pubsub::SFU_CALL_RENEGOTIATION_OFFER_TOPIC,
                             &payload_json,
                         );
