@@ -348,6 +348,12 @@ impl CascadeManager {
         &mut self.known_nodes
     }
 
+    /// Read the configured capacity per node — used as the
+    /// `capacity_hint` on announce-driven node info updates.
+    pub fn max_participants_per_node(&self) -> u32 {
+        self.max_participants_per_node
+    }
+
     /// Pick the least-loaded SFU node for a new participant.
     /// Returns None if this local node should accept the participant.
     ///

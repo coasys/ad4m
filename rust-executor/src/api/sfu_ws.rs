@@ -288,6 +288,27 @@ async fn enable_cascade(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     Ok(Value::Bool(true))
 }
 
+/// Admin-only: push a participant-count update into a node's
+/// CascadeManager.  Wind tunnel uses this to keep static cluster
+/// state fresh without standing up a gossip layer.
+async fn cascade_announce(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden("admin credential required".to_string()));
+    }
+    let remote_did = params.require_str("remoteDid")?;
+    let room_id = params.require_str("roomId")?;
+    let participant_count = params
+        .get("participantCount")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| WsRpcError::bad_request("participantCount required"))?
+        as u32;
+    service()?
+        .cascade_announce(remote_did, room_id, participant_count)
+        .await
+        .map_err(WsRpcError::internal)?;
+    Ok(Value::Bool(true))
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -303,4 +324,5 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("sfu.sfuPeerForNeighbourhood", sfu_peer_for_neighbourhood);
     map.register("sfu.sfuPeersForNeighbourhood", sfu_peers_for_neighbourhood);
     map.register("sfu.enableCascade", enable_cascade);
+    map.register("sfu.cascadeAnnounce", cascade_announce);
 }

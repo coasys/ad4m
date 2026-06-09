@@ -99,6 +99,10 @@ impl SfuService {
         // even before the room is created.
         let known = &mut mgr.known_nodes_mut();
         let bucket = known.entry(String::new()).or_default();
+        // Re-seed: drop the existing entries (so an enable_cascade with
+        // an empty peer list correctly partitions the node from its
+        // peers) and rewrite.
+        bucket.clear();
         for (did, _addr) in &peers {
             if *did == local_did {
                 continue;
@@ -112,6 +116,26 @@ impl SfuService {
                 },
             );
         }
+        Ok(())
+    }
+
+    /// Push a participant-count update for a remote SFU node.  In
+    /// production this happens via the gossip announce path; for the
+    /// wind tunnel's static cluster we expose it as an admin RPC
+    /// (`sfu.cascadeAnnounce`) so the harness can keep each node's
+    /// view of its peers fresh without standing up a gossip layer.
+    pub async fn cascade_announce(
+        &self,
+        remote_did: String,
+        room_id: String,
+        participant_count: u32,
+    ) -> Result<(), String> {
+        let mut cascade_lock = self.cascade_manager.write().await;
+        let mgr = cascade_lock
+            .as_mut()
+            .ok_or_else(|| "cascade not enabled on this node".to_string())?;
+        let capacity_hint = mgr.max_participants_per_node();
+        mgr.handle_sfu_announce(remote_did, room_id, participant_count, capacity_hint);
         Ok(())
     }
 
