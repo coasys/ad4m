@@ -134,19 +134,37 @@ impl TcpGossip {
 impl CascadeGossip for TcpGossip {
     async fn send(&self, target: GossipTarget, signal: CascadeSignal) -> Result<(), String> {
         let outbound = self.outbound.lock().await;
+        let variant = match &signal {
+            CascadeSignal::Announce { .. } => "Announce",
+            CascadeSignal::Leave { .. } => "Leave",
+            CascadeSignal::PipeOffer { .. } => "PipeOffer",
+            CascadeSignal::PipeAnswer { .. } => "PipeAnswer",
+        };
         match target {
             GossipTarget::Broadcast => {
+                let recipients: Vec<&String> = outbound.keys().collect();
+                info!(
+                    "TcpGossip[{}] broadcast {} to {} peer(s): {:?}",
+                    self.local_did,
+                    variant,
+                    recipients.len(),
+                    recipients
+                );
                 for tx in outbound.values() {
                     let _ = tx.try_send(signal.clone());
                 }
             }
             GossipTarget::PeerDid(did) => {
                 if let Some(tx) = outbound.get(&did) {
+                    info!(
+                        "TcpGossip[{}] directed {} to {}",
+                        self.local_did, variant, did
+                    );
                     let _ = tx.try_send(signal);
                 } else {
-                    debug!(
-                        "TcpGossip[{}] no outbound for {} — dropping",
-                        self.local_did, did
+                    info!(
+                        "TcpGossip[{}] no outbound for {} — {} dropped",
+                        self.local_did, did, variant
                     );
                 }
             }
@@ -181,6 +199,13 @@ async fn reader_loop(socket: TcpStream, inbound_tx: mpsc::Sender<CascadeSignal>)
             Ok(0) => return, // peer closed
             Ok(_) => match serde_json::from_str::<CascadeSignal>(line.trim()) {
                 Ok(signal) => {
+                    let variant = match &signal {
+                        CascadeSignal::Announce { .. } => "Announce",
+                        CascadeSignal::Leave { .. } => "Leave",
+                        CascadeSignal::PipeOffer { .. } => "PipeOffer",
+                        CascadeSignal::PipeAnswer { .. } => "PipeAnswer",
+                    };
+                    info!("TcpGossip reader: inbound {} signal", variant);
                     if inbound_tx.send(signal).await.is_err() {
                         return; // SfuService dropped the receiver
                     }
@@ -205,7 +230,7 @@ async fn connect_loop(did: String, addr: SocketAddr, outbound: OutboundMap) {
     loop {
         match TcpStream::connect(addr).await {
             Ok(mut socket) => {
-                debug!("TcpGossip connected to {} @ {}", did, addr);
+                info!("TcpGossip connected to {} @ {}", did, addr);
                 let (tx, mut rx) = mpsc::channel::<CascadeSignal>(64);
                 {
                     let mut guard = outbound.lock().await;
