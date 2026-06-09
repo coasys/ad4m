@@ -3,7 +3,7 @@
 //! A room maps 1:1 to a call session within a neighbourhood.
 //! Rooms are keyed by (neighbourhood URL, room ID).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;

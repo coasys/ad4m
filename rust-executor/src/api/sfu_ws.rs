@@ -164,7 +164,9 @@ async fn sfu_peer_for_neighbourhood(
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let neighbourhood_url = params.require_str("neighbourhoodUrl")?;
-    let peer = service()?.sfu_peer_for_neighbourhood(&neighbourhood_url).await;
+    let peer = service()?
+        .sfu_peer_for_neighbourhood(&neighbourhood_url)
+        .await;
     Ok(serde_json::to_value(peer)?)
 }
 

@@ -6,12 +6,11 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::Instant;
 
-use log::{debug, info, warn};
+use log::{debug, info};
 use str0m::change::SdpOffer;
 use str0m::media::{MediaData, MediaKind, Mid};
-use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
+use str0m::{Candidate, Rtc};
 
 use super::room::RoomId;
 
@@ -157,7 +156,7 @@ impl CascadeManager {
             return Err("Pipe transport already exists".to_string());
         }
 
-        let mut rtc = Rtc::builder().build(Instant::now());
+        let mut rtc = Rtc::builder().build();
         let candidate = Candidate::host(self.local_addr, "udp")
             .map_err(|e| format!("Failed to create candidate: {}", e))?;
         rtc.add_local_candidate(candidate);
@@ -201,7 +200,7 @@ impl CascadeManager {
         let offer: SdpOffer = serde_json::from_str(sdp_offer_json)
             .map_err(|e| format!("Invalid pipe SDP offer: {}", e))?;
 
-        let mut rtc = Rtc::builder().build(Instant::now());
+        let mut rtc = Rtc::builder().build();
         let candidate = Candidate::host(self.local_addr, "udp")
             .map_err(|e| format!("Failed to create candidate: {}", e))?;
         rtc.add_local_candidate(candidate);

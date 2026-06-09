@@ -6,16 +6,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
-use log::{error, info, warn};
+use log::info;
 use once_cell::sync::OnceCell;
 use str0m::change::SdpOffer;
-use str0m::Rtc;
 use tokio::sync::RwLock;
 
 use super::cascade::CascadeManager;
-use super::room::{ParticipantId, ParticipantInfo, RoomError, RoomId, RoomManager, SfuRoom};
+use super::room::{ParticipantId, RoomError, RoomId, RoomManager, SfuRoom};
 use super::server::{SfuCommand, SfuPeer, SfuServer, SfuServerConfig};
 
 /// Global SFU service instance.

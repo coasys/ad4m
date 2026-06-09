@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
@@ -13,7 +12,6 @@ use str0m::net::Protocol;
 use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use tokio::sync::Mutex;
 
 use super::relay::MediaRelay;
 use super::room::{ParticipantId, RoomId};
@@ -107,7 +105,7 @@ impl SfuServer {
         offer: SdpOffer,
         local_addr: SocketAddr,
     ) -> Result<(Rtc, String), String> {
-        let mut rtc = Rtc::builder().build(Instant::now());
+        let mut rtc = Rtc::builder().build();
 
         let candidate = Candidate::host(local_addr, "udp")
             .map_err(|e| format!("Failed to create host candidate: {}", e))?;
