@@ -231,6 +231,12 @@ impl SfuServer {
                             };
                         if let Err(e) = peer.rtc.sdp_api().accept_answer(pending, answer) {
                             warn!("SFU: accept_answer for {} failed: {:?}", participant_id, e);
+                        } else {
+                            info!(
+                                "SFU: server-offer answer accepted for {} ({} outbound tracks live)",
+                                participant_id,
+                                peer.tracks_out.len()
+                            );
                         }
                     }
                     Ok(SfuCommand::Shutdown) => {
