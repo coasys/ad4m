@@ -67,7 +67,13 @@ pub struct TurnServer {
 impl Default for SfuServerConfig {
     fn default() -> Self {
         Self {
-            bind_addr: "0.0.0.0:0".parse().unwrap(),
+            // Bind to loopback so str0m accepts the bound socket address
+            // as a `Candidate::host` (str0m rejects 0.0.0.0 with "invalid
+            // ip 0.0.0.0" — it can't be used as a candidate IP).
+            // Production deployments should override this with the
+            // executor's public/LAN IP; the wind tunnel + local-dev case
+            // wants 127.0.0.1.
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
             stun_servers: vec!["stun:stun.l.google.com:19302".to_string()],
             turn_servers: vec![],
         }
