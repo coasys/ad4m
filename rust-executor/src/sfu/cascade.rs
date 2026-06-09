@@ -395,6 +395,35 @@ impl CascadeManager {
             .map(|n| !n.is_empty())
             .unwrap_or(false)
     }
+
+    /// Our local DID (used by gossip dispatch to filter self-targeted signals).
+    pub fn local_did(&self) -> &str {
+        &self.local_did
+    }
+
+    /// Is there an active pipe to `remote_did` for `room_id`?
+    pub fn has_pipe(&self, room_id: &str, remote_did: &str) -> bool {
+        self.pipes
+            .contains_key(&(room_id.to_string(), remote_did.to_string()))
+    }
+
+    /// Count of fully-established pipes (offer + answer round-trip
+    /// complete).  Used by the wind tunnel to assert the Phase E e2e
+    /// pipe handshake landed.
+    pub fn established_pipe_count(&self) -> usize {
+        self.pipes.values().filter(|p| p.established).count()
+    }
+
+    /// All `(room_id, remote_did)` keys for established pipes — for
+    /// the `sfu.cascadePipeStatus` query so the wind tunnel can verify
+    /// which specific node-pairs have a live pipe.
+    pub fn established_pipes(&self) -> Vec<(String, String)> {
+        self.pipes
+            .iter()
+            .filter(|(_, p)| p.established)
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
 }
 
 #[cfg(test)]

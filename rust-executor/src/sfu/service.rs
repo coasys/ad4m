@@ -102,32 +102,144 @@ impl SfuService {
         mut rx: tokio::sync::mpsc::Receiver<CascadeSignal>,
     ) {
         while let Some(signal) = rx.recv().await {
-            let mut cascade_lock = self.cascade_manager.write().await;
-            let Some(mgr) = cascade_lock.as_mut() else {
-                debug!("SFU gossip inbound: no CascadeManager, dropping signal");
-                continue;
+            // Outbound signals produced as a side-effect of processing
+            // the inbound one — drained outside the cascade lock so we
+            // don't deadlock against the gossip transport.
+            let mut outbound: Vec<(GossipTarget, CascadeSignal)> = Vec::new();
+
+            // Resolve local-room state up front for the Announce branch
+            // so we never hold the cascade lock + rooms lock at the same
+            // time.  Cheap: a single HashMap read.
+            let pre_has_room = if let CascadeSignal::Announce { ref room_id, .. } = signal {
+                self.local_has_room(room_id).await
+            } else {
+                false
             };
-            match signal {
-                CascadeSignal::Announce {
-                    did,
-                    room_id,
-                    participant_count,
-                    capacity_hint,
-                } => {
-                    mgr.handle_sfu_announce(did, room_id, participant_count, capacity_hint);
+
+            {
+                let mut cascade_lock = self.cascade_manager.write().await;
+                let Some(mgr) = cascade_lock.as_mut() else {
+                    debug!("SFU gossip inbound: no CascadeManager, dropping signal");
+                    continue;
+                };
+                match signal {
+                    CascadeSignal::Announce {
+                        did,
+                        room_id,
+                        participant_count,
+                        capacity_hint,
+                    } => {
+                        let remote_did = did.clone();
+                        mgr.handle_sfu_announce(
+                            did,
+                            room_id.clone(),
+                            participant_count,
+                            capacity_hint,
+                        );
+
+                        // Auto-establish pipe if we have local participants
+                        // in this room and don't yet have a pipe to the
+                        // announcer.  Tie-break by DID order so only ONE
+                        // side initiates: the lexically-higher DID is the
+                        // dialer; the other waits for the offer.
+                        if pre_has_room
+                            && mgr.local_did() > remote_did.as_str()
+                            && !mgr.has_pipe(&room_id, &remote_did)
+                        {
+                            let (nh_url, room_name) =
+                                room_id.split_once(':').unwrap_or((&room_id, "default"));
+                            let room = RoomId::new(nh_url, room_name);
+                            match mgr.establish_pipe(&remote_did, &room) {
+                                Ok(offer_signal) => {
+                                    info!(
+                                        "SFU cascade: initiating pipe to {} for room {}",
+                                        remote_did, room_id
+                                    );
+                                    outbound
+                                        .push((GossipTarget::PeerDid(remote_did), offer_signal));
+                                }
+                                Err(e) => {
+                                    debug!(
+                                        "SFU cascade: establish_pipe to {} skipped: {}",
+                                        remote_did, e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    CascadeSignal::Leave { did, room_id: _ } => {
+                        mgr.remove_node(&did);
+                    }
+                    CascadeSignal::PipeOffer {
+                        from_did,
+                        to_did,
+                        room_id,
+                        sdp_offer,
+                    } => {
+                        if to_did != mgr.local_did() {
+                            debug!(
+                                "SFU cascade: PipeOffer not addressed to us (to={}), ignoring",
+                                to_did
+                            );
+                        } else {
+                            match mgr.handle_pipe_offer(&from_did, &room_id, &sdp_offer) {
+                                Ok(answer_signal) => {
+                                    info!(
+                                        "SFU cascade: pipe answer ready for {} (room {})",
+                                        from_did, room_id
+                                    );
+                                    outbound.push((GossipTarget::PeerDid(from_did), answer_signal));
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "SFU cascade: handle_pipe_offer failed for {}: {}",
+                                        from_did, e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    CascadeSignal::PipeAnswer {
+                        from_did,
+                        to_did,
+                        room_id,
+                        sdp_answer,
+                    } => {
+                        if to_did != mgr.local_did() {
+                            debug!(
+                                "SFU cascade: PipeAnswer not addressed to us (to={}), ignoring",
+                                to_did
+                            );
+                        } else if let Err(e) =
+                            mgr.handle_pipe_answer(&from_did, &room_id, &sdp_answer)
+                        {
+                            warn!(
+                                "SFU cascade: handle_pipe_answer failed for {}: {}",
+                                from_did, e
+                            );
+                        }
+                    }
                 }
-                CascadeSignal::Leave { did, room_id: _ } => {
-                    mgr.remove_node(&did);
-                }
-                CascadeSignal::PipeOffer { .. } | CascadeSignal::PipeAnswer { .. } => {
-                    // Pipe transport plumbing is wired in cascade.rs;
-                    // this dispatcher just hands the signal off.  When
-                    // pipe support is finished end-to-end (see plan
-                    // Phase E), uncomment the dispatch.
-                    debug!("SFU gossip inbound: pipe signal received (unhandled)");
+            }
+
+            for (target, signal) in outbound {
+                if let Err(e) = self.gossip.send(target, signal).await {
+                    debug!("SFU cascade: gossip send failed: {}", e);
                 }
             }
         }
+    }
+
+    /// Returns true if this node has at least one participant in `room_id`.
+    /// Used by the cascade auto-establish logic so we only build pipes for
+    /// rooms we're actively serving.
+    async fn local_has_room(&self, room_id_str: &str) -> bool {
+        let (nh_url, room_name) = room_id_str
+            .split_once(':')
+            .unwrap_or((room_id_str, "default"));
+        let room_id = RoomId::new(nh_url, room_name);
+        let rooms = self.rooms.read().await;
+        rooms.get_room(&room_id).is_some()
     }
 
     /// Broadcast our local room-state update.  Called from the
@@ -380,21 +492,13 @@ impl SfuService {
     /// Consume an SDP answer that the client produced in response to a
     /// server-pushed renegotiation offer.  Routes the answer back to
     /// the appropriate participant's Rtc transport via the SFU event
-    /// loop so the str0m state machine can apply it.
-    ///
-    /// Today this is the wiring path — the offer-generation side that
-    /// publishes to `SFU_CALL_RENEGOTIATION_OFFER_TOPIC` is queued
-    /// alongside `Phase E` (cross-node pipe transport) and lights up
-    /// the same str0m sdp_api dance, so we expose the typed surface
-    /// now and the server-side fanout follows.  Wind tunnel scenarios
-    /// still pre-allocate recv-only transceivers as a workaround for
-    /// the inbound side.
+    /// loop so the str0m state machine can apply it through `sdp_api()`.
     pub async fn call_answer_server_offer(
         &self,
         neighbourhood_url: &str,
         room_name: &str,
         agent_did: &str,
-        _sdp_answer_json: &str,
+        sdp_answer_json: &str,
     ) -> Result<bool, String> {
         let room_id = RoomId::new(neighbourhood_url, room_name);
         let rooms = self.rooms.read().await;
@@ -407,18 +511,38 @@ impl SfuService {
             .find(|(_, p)| p.agent_did == agent_did)
             .map(|(pid, _)| pid.clone())
             .ok_or_else(|| "Agent not in room".to_string())?;
-        // Forward the answer to the SFU event loop so it can apply
-        // through str0m.  The loop currently logs the event; full
-        // sdp_api consumption is the focused follow-up.
         let _ = self
             .server
             .command_tx
             .send(SfuCommand::ApplyServerAnswer {
                 participant_id: pid,
-                sdp_answer_json: _sdp_answer_json.to_string(),
+                sdp_answer_json: sdp_answer_json.to_string(),
             })
             .await;
         Ok(true)
+    }
+
+    /// Number of fully-established pipe transports to other SFU nodes
+    /// across all rooms.  Used by the wind tunnel cascade scenarios to
+    /// assert that auto-establish + the gossip-driven offer/answer
+    /// round-trip lights up node-to-node pipes.
+    pub async fn cascade_established_pipe_count(&self) -> usize {
+        let cascade = self.cascade_manager.read().await;
+        cascade
+            .as_ref()
+            .map(|mgr| mgr.established_pipe_count())
+            .unwrap_or(0)
+    }
+
+    /// Detailed list of established pipes as `(room_id, remote_did)`
+    /// tuples.  Lets scenarios verify which specific node-pairs are
+    /// connected.
+    pub async fn cascade_established_pipes(&self) -> Vec<(String, String)> {
+        let cascade = self.cascade_manager.read().await;
+        cascade
+            .as_ref()
+            .map(|mgr| mgr.established_pipes())
+            .unwrap_or_default()
     }
 
     /// Set the quality preference for a participant's received video streams.

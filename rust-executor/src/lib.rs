@@ -410,11 +410,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     {
         info!("Initializing SFU service...");
         let gossip: std::sync::Arc<dyn crate::sfu::CascadeGossip> = build_sfu_gossip(&config).await;
-        match crate::sfu::SfuService::start(
-            crate::sfu::server::SfuServerConfig::default(),
-            gossip,
-        )
-        .await
+        match crate::sfu::SfuService::start(crate::sfu::server::SfuServerConfig::default(), gossip)
+            .await
         {
             Ok(svc) => info!("SFU service ready on UDP {}", svc.local_addr()),
             Err(e) => warn!("SFU service failed to start: {}", e),
@@ -664,7 +661,10 @@ async fn build_sfu_gossip(config: &Ad4mConfig) -> std::sync::Arc<dyn crate::sfu:
     let bind_addr: std::net::SocketAddr = match listen.parse() {
         Ok(addr) => addr,
         Err(e) => {
-            warn!("SFU cascade listen `{}` parse error: {} — running standalone", listen, e);
+            warn!(
+                "SFU cascade listen `{}` parse error: {} — running standalone",
+                listen, e
+            );
             return std::sync::Arc::new(crate::sfu::NoopGossip::new(local_did, max));
         }
     };
@@ -691,7 +691,10 @@ async fn build_sfu_gossip(config: &Ad4mConfig) -> std::sync::Arc<dyn crate::sfu:
     match crate::sfu::TcpGossip::start(local_did.clone(), max, bind_addr, peers).await {
         Ok(g) => g as std::sync::Arc<dyn crate::sfu::CascadeGossip>,
         Err(e) => {
-            warn!("SFU cascade gossip failed to start: {} — running standalone", e);
+            warn!(
+                "SFU cascade gossip failed to start: {} — running standalone",
+                e
+            );
             std::sync::Arc::new(crate::sfu::NoopGossip::new(local_did, max))
         }
     }

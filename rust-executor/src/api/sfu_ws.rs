@@ -219,6 +219,33 @@ async fn call_answer_server_offer(
     Ok(Value::Bool(ok))
 }
 
+/// Read-only query: how many SFU↔SFU pipe transports are fully
+/// established right now.  The cascade scenarios poll this to assert
+/// the gossip-driven offer/answer round-trip lit up.
+async fn cascade_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+        .map_err(WsRpcError::forbidden)?;
+    let svc = service()?;
+    let established_count = svc.cascade_established_pipe_count().await;
+    let pipes = svc.cascade_established_pipes().await;
+    let pipe_list: Vec<Value> = pipes
+        .into_iter()
+        .map(|(room_id, remote_did)| {
+            let mut o = serde_json::Map::new();
+            o.insert("roomId".to_string(), Value::String(room_id));
+            o.insert("remoteDid".to_string(), Value::String(remote_did));
+            Value::Object(o)
+        })
+        .collect();
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "establishedCount".to_string(),
+        Value::Number(serde_json::Number::from(established_count)),
+    );
+    out.insert("pipes".to_string(), Value::Array(pipe_list));
+    Ok(Value::Object(out))
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -233,4 +260,5 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("sfu.setConfig", set_config);
     map.register("sfu.sfuPeerForNeighbourhood", sfu_peer_for_neighbourhood);
     map.register("sfu.sfuPeersForNeighbourhood", sfu_peers_for_neighbourhood);
+    map.register("sfu.cascadeStatus", cascade_status);
 }
