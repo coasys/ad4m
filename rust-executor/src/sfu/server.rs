@@ -1,7 +1,7 @@
 //! SFU server — manages the shared UDP socket, str0m Rtc instances,
 //! and the Sans I/O event loop driven by tokio.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -230,10 +230,7 @@ impl SfuServer {
                                 }
                             };
                         if let Err(e) = peer.rtc.sdp_api().accept_answer(pending, answer) {
-                            warn!(
-                                "SFU: accept_answer for {} failed: {:?}",
-                                participant_id, e
-                            );
+                            warn!("SFU: accept_answer for {} failed: {:?}", participant_id, e);
                         }
                     }
                     Ok(SfuCommand::Shutdown) => {
@@ -382,73 +379,145 @@ impl SfuServer {
                 }
             }
 
-            // Propagate freshly-opened inbound tracks: for each track
-            // that peer X just opened, every OTHER peer Y in the same
-            // room needs an outbound m-line so the relay has somewhere
-            // to forward to.  We add the outbound transceiver via
-            // str0m's sdp_api, then publish the resulting offer to the
-            // SFU renegotiation-offer topic targeted at Y's DID.  Y's
-            // client applies it and replies via sfu.callAnswerServerOffer
-            // (handled in the ApplyServerAnswer command).
+            // Propagate freshly-opened inbound tracks bidirectionally.
             //
-            // str0m only allows one in-flight change at a time per
-            // peer, so we skip peers with a pending offer; the next
-            // tick (or after the answer lands) will retry.
+            // When peer X opens a new inbound track, the SFU needs to
+            // (a) plumb that track outbound on every OTHER peer Y so Y
+            // receives it, AND (b) plumb every OTHER peer's existing
+            // inbound tracks outbound on X so X receives them.  Without
+            // (b) the newly-joined peer never gets forwarded media.
+            //
+            // We collect the per-target (kind, origin_pid, origin_mid)
+            // triples first, then materialise the add_media + publish
+            // for each target.  str0m only allows one in-flight change
+            // per peer, so we skip targets that already have a pending
+            // offer; the next tick (after the answer lands) will retry.
+            //
+            // Identify "new" peers in this tick — peers that opened at
+            // least one inbound track.  These are the peers that need
+            // both (a) outbound on others and (b) outbound for others'
+            // existing tracks on themselves.
+            let mut adds_per_target: HashMap<ParticipantId, Vec<(MediaKind, ParticipantId, Mid)>> =
+                HashMap::new();
+            let mut new_peers: HashSet<ParticipantId> = HashSet::new();
+            for (origin_pid, _mid, _kind) in &tracks_opened {
+                new_peers.insert(origin_pid.clone());
+            }
+
+            // (a) For each freshly-opened track, every OTHER peer in
+            // the same room gets an outbound m-line for it.
             for (origin_pid, mid, kind) in &tracks_opened {
                 let Some(origin_peer) = peers.get(origin_pid) else {
                     continue;
                 };
                 let room_id = origin_peer.room_id.clone();
-                let other_pids: Vec<ParticipantId> = peers
-                    .iter()
-                    .filter(|(pid, p)| {
-                        *pid != origin_pid
-                            && p.room_id == room_id
-                            && p.pending_offer.is_none()
-                    })
-                    .map(|(pid, _)| pid.clone())
-                    .collect();
-
-                for target_pid in other_pids {
-                    let Some(target_peer) = peers.get_mut(&target_pid) else {
+                for (target_pid, target_peer) in peers.iter() {
+                    if target_pid == origin_pid {
                         continue;
-                    };
-                    let mut api = target_peer.rtc.sdp_api();
-                    let new_mid = api.add_media(
-                        *kind,
-                        str0m::media::Direction::SendOnly,
-                        None,
-                        None,
-                        None,
-                    );
-                    let Some((offer, pending)) = api.apply() else {
+                    }
+                    if target_peer.room_id != room_id {
                         continue;
-                    };
-                    target_peer.tracks_out.insert(new_mid, (origin_pid.clone(), *mid));
-                    target_peer.pending_offer = Some(pending);
+                    }
+                    adds_per_target
+                        .entry(target_pid.clone())
+                        .or_default()
+                        .push((*kind, origin_pid.clone(), *mid));
+                }
+            }
 
-                    let sdp_offer_json = match serde_json::to_string(&offer) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            warn!(
-                                "SFU: serialise renegotiation offer for {} failed: {}",
-                                target_pid, e
-                            );
+            // (b) For each newly-joined peer, plumb every OTHER peer's
+            // pre-existing inbound tracks outbound on the new peer.
+            // This covers the asymmetric case where Y was already in
+            // the room when X joined.  We skip tracks_in entries that
+            // were opened in *this* tick because (a) already handled
+            // them, but checking is cheap and idempotency saves a bug.
+            for new_pid in &new_peers {
+                let Some(new_peer) = peers.get(new_pid) else {
+                    continue;
+                };
+                let room_id = new_peer.room_id.clone();
+                for (other_pid, other_peer) in peers.iter() {
+                    if other_pid == new_pid {
+                        continue;
+                    }
+                    if other_peer.room_id != room_id {
+                        continue;
+                    }
+                    for (other_mid, other_kind) in &other_peer.tracks_in {
+                        // Skip if this triple was already added via (a).
+                        let already_added = adds_per_target
+                            .get(new_pid)
+                            .map(|v| {
+                                v.iter()
+                                    .any(|(_, opid, omid)| opid == other_pid && omid == other_mid)
+                            })
+                            .unwrap_or(false);
+                        if already_added {
                             continue;
                         }
-                    };
-                    let payload = crate::sfu::SfuCallRenegotiationOffer {
-                        target_did: target_peer.agent_did.clone(),
-                        neighbourhood_url: room_id.neighbourhood_url.clone(),
-                        room_name: room_id.room_name.clone(),
-                        sdp_offer: sdp_offer_json,
-                    };
-                    if let Ok(payload_json) = serde_json::to_string(&payload) {
-                        crate::pubsub::get_global_pubsub_sync().publish_sync(
-                            &crate::pubsub::SFU_CALL_RENEGOTIATION_OFFER_TOPIC,
-                            &payload_json,
-                        );
+                        adds_per_target.entry(new_pid.clone()).or_default().push((
+                            *other_kind,
+                            other_pid.clone(),
+                            *other_mid,
+                        ));
                     }
+                }
+            }
+
+            // Materialise per-target.  One sdp_api batch per target
+            // peer so a single offer carries every new outbound m-line
+            // (str0m permits exactly one in-flight change at a time).
+            for (target_pid, additions) in adds_per_target.into_iter() {
+                let Some(target_peer) = peers.get_mut(&target_pid) else {
+                    continue;
+                };
+                if target_peer.pending_offer.is_some() {
+                    continue;
+                }
+                let room_id = target_peer.room_id.clone();
+                let mut api = target_peer.rtc.sdp_api();
+                let mut new_outbound: Vec<(Mid, ParticipantId, Mid)> = Vec::new();
+                for (kind, origin_pid, origin_mid) in &additions {
+                    let new_mid =
+                        api.add_media(*kind, str0m::media::Direction::SendOnly, None, None, None);
+                    new_outbound.push((new_mid, origin_pid.clone(), *origin_mid));
+                }
+                let Some((offer, pending)) = api.apply() else {
+                    continue;
+                };
+                for (new_mid, origin_pid, origin_mid) in new_outbound {
+                    target_peer
+                        .tracks_out
+                        .insert(new_mid, (origin_pid, origin_mid));
+                }
+                target_peer.pending_offer = Some(pending);
+                info!(
+                    "SFU: peer {} renegotiation offer prepared ({} new outbound m-lines)",
+                    target_pid,
+                    additions.len()
+                );
+
+                let sdp_offer_json = match serde_json::to_string(&offer) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(
+                            "SFU: serialise renegotiation offer for {} failed: {}",
+                            target_pid, e
+                        );
+                        continue;
+                    }
+                };
+                let payload = crate::sfu::SfuCallRenegotiationOffer {
+                    target_did: target_peer.agent_did.clone(),
+                    neighbourhood_url: room_id.neighbourhood_url.clone(),
+                    room_name: room_id.room_name.clone(),
+                    sdp_offer: sdp_offer_json,
+                };
+                if let Ok(payload_json) = serde_json::to_string(&payload) {
+                    crate::pubsub::get_global_pubsub_sync().publish_sync(
+                        &crate::pubsub::SFU_CALL_RENEGOTIATION_OFFER_TOPIC,
+                        &payload_json,
+                    );
                 }
             }
 
