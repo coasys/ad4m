@@ -355,25 +355,22 @@ impl CascadeManager {
     /// the catch-all empty-string entry (populated by
     /// `SfuService::enable_cascade` for statically-configured clusters
     /// that haven't gone through the gossip announce path yet).
+    ///
+    /// Rule: when the local node has capacity, accept.  When at
+    /// capacity, redirect to the least-loaded peer that still has
+    /// headroom.  No proactive rebalancing — that requires fresher
+    /// cross-node count visibility than the static `enable_cascade`
+    /// path provides, and the wind tunnel cycle tests caught a
+    /// pingpong between under-loaded peers when the threshold was
+    /// active.
     pub fn pick_redirect_node(&self, room_id: &str, local_count: u32) -> Option<&SfuNodeInfo> {
+        if local_count < self.max_participants_per_node {
+            return None;
+        }
         let nodes = self
             .known_nodes
             .get(room_id)
             .or_else(|| self.known_nodes.get(""))?;
-        if local_count < self.max_participants_per_node {
-            // We have capacity — only redirect if a remote node is significantly less loaded
-            let least_loaded = nodes
-                .values()
-                .filter(|n| n.participant_count + 1 <= n.capacity_hint)
-                .min_by_key(|n| n.participant_count)?;
-
-            if least_loaded.participant_count + 2 < local_count {
-                return Some(least_loaded);
-            }
-            return None;
-        }
-
-        // We're at capacity — must redirect
         nodes
             .values()
             .filter(|n| n.participant_count < n.capacity_hint)
