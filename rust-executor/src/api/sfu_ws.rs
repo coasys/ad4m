@@ -41,6 +41,29 @@ fn map_room_err(e: impl ToString) -> WsRpcError {
     WsRpcError::internal(e.to_string())
 }
 
+/// Resolve the caller's DID for SFU operations.
+///
+/// In the multi-user flow `ctx.user_did` is set from the per-user JWT
+/// (`runtime.createUser` / `runtime.loginUser`).  In single-user / admin
+/// flows there is no per-user JWT and `user_did` is None; the executor
+/// is acting on behalf of *its own* main agent.  When the caller
+/// authenticated with the admin credential, fall back to the
+/// executor-agent DID (`crate::agent::did()`).  Without this fallback,
+/// every `sfu.*` call from a single-user executor + admin connection
+/// fails with "Caller DID not resolved from token" — the wind tunnel's
+/// failure mode for T1/T2/M*/F*/S* before this fallback existed.
+fn caller_did(ctx: &RequestContext) -> Result<String, WsRpcError> {
+    if let Some(did) = ctx.user_did.clone() {
+        return Ok(did);
+    }
+    if ctx.is_admin_credential {
+        return Ok(crate::agent::did());
+    }
+    Err(WsRpcError::unauthorized(
+        "Caller DID not resolved from token",
+    ))
+}
+
 // ── Room management ────────────────────────────────────────────────────────
 
 async fn start_room(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -82,10 +105,7 @@ async fn call_join(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     let neighbourhood_url = params.require_str("neighbourhoodUrl")?;
     let room_name = params.require_str("roomName")?;
     let sdp_offer = params.require_str("sdpOffer")?;
-    let agent_did = ctx
-        .user_did
-        .clone()
-        .ok_or_else(|| WsRpcError::unauthorized("Caller DID not resolved from token"))?;
+    let agent_did = caller_did(&ctx)?;
     // Membership is enforced server-side by the SFU; the
     // is_neighbourhood_member flag here is the caller's claim that the
     // executor has already joined the neighbourhood (true when the
@@ -102,10 +122,7 @@ async fn call_leave(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
         .map_err(WsRpcError::forbidden)?;
     let neighbourhood_url = params.require_str("neighbourhoodUrl")?;
     let room_name = params.require_str("roomName")?;
-    let agent_did = ctx
-        .user_did
-        .clone()
-        .ok_or_else(|| WsRpcError::unauthorized("Caller DID not resolved from token"))?;
+    let agent_did = caller_did(&ctx)?;
     let ok = service()?
         .call_leave(&neighbourhood_url, &room_name, &agent_did)
         .await
@@ -122,10 +139,7 @@ async fn call_set_quality_preference(
     let neighbourhood_url = params.require_str("neighbourhoodUrl")?;
     let room_name = params.require_str("roomName")?;
     let preference = params.require_str("preference")?;
-    let agent_did = ctx
-        .user_did
-        .clone()
-        .ok_or_else(|| WsRpcError::unauthorized("Caller DID not resolved from token"))?;
+    let agent_did = caller_did(&ctx)?;
     let ok = service()?
         .call_set_quality_preference(&neighbourhood_url, &room_name, &agent_did, &preference)
         .await
@@ -200,10 +214,7 @@ async fn call_answer_server_offer(
     let neighbourhood_url = params.require_str("neighbourhoodUrl")?;
     let room_name = params.require_str("roomName")?;
     let _sdp_answer = params.require_str("sdpAnswer")?;
-    let _agent_did = ctx
-        .user_did
-        .clone()
-        .ok_or_else(|| WsRpcError::unauthorized("Caller DID not resolved from token"))?;
+    let _agent_did = caller_did(&ctx)?;
     // The current SfuService surface accepts the answer through the
     // peer's pre-existing Rtc transport rather than as a separate
     // method.  Wired through the cascade path; the explicit RPC is
