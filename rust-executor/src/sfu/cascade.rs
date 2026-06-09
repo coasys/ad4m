@@ -161,9 +161,13 @@ impl CascadeManager {
             .map_err(|e| format!("Failed to create candidate: {}", e))?;
         rtc.add_local_candidate(candidate);
 
-        // Create offer via SDP API — the remote side will add media lines on accept
-        let (offer, pending) = rtc
-            .sdp_api()
+        // Create offer via SDP API.  str0m 0.9 requires at least one queued
+        // change before `apply()` produces an offer, so we open a control
+        // data channel for the pipe transport.  Real media transceivers are
+        // added later as participants arrive in the cascaded room.
+        let mut sdp_api = rtc.sdp_api();
+        let _control_channel = sdp_api.add_channel("pipe-control".to_string());
+        let (offer, pending) = sdp_api
             .apply()
             .ok_or_else(|| "Failed to create pipe offer: no changes to apply".to_string())?;
 
