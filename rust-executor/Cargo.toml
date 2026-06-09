@@ -45,6 +45,9 @@ deno_snapshots = {version = "0.19.0", git = "https://github.com/coasys/deno.git"
 sys_traits = "=0.1.9"
 # deno_runtime = {version = "0.162.0", path = "../../deno/runtime"}
 tokio = { version = "1.25.0", features = ["full"] }
+# WebRTC SFU — str0m is a pure-Rust sans-I/O WebRTC stack. We drive the
+# event loop ourselves over a UDP socket in `rust-executor/src/sfu`.
+str0m = "0.9"
 url = "2.3.1"
 urlencoding = "2.1"
 percent-encoding = "2"

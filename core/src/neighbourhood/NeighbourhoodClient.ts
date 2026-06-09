@@ -6,6 +6,12 @@ import { Perspective, PerspectiveUnsignedInput } from "../perspectives/Perspecti
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 import type { JoinNeighbourhoodRequest, PublishNeighbourhoodRequest } from "../generated/api"
+import type {
+    CallSessionInfo,
+    SfuConfig,
+    SfuQualityPreference,
+    SfuRoomInfo,
+} from "./SfuTypes"
 
 export class NeighbourhoodClient {
     #apiClient: ApiClient
@@ -126,5 +132,83 @@ export class NeighbourhoodClient {
                 }
             }
         }
+    }
+
+    // ── SFU (Selective Forwarding Unit) ─────────────────────────────────
+    //
+    // These wrap the `sfu.*` WS RPC handlers in
+    // `rust-executor/src/api/sfu_ws.rs`.  The transport is the same
+    // shared `ApiClient`; the only twist is that `callJoin` returns a
+    // structured `CallSessionInfo` (SDP answer + optional cascade
+    // redirect + stream mapping).
+
+    async sfuStartRoom(neighbourhoodUrl: string, roomName: string): Promise<SfuRoomInfo> {
+        return this.#apiClient.call<SfuRoomInfo>("sfu.startRoom", { neighbourhoodUrl, roomName })
+    }
+
+    async sfuStopRoom(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.stopRoom", { neighbourhoodUrl, roomName })
+    }
+
+    async sfuListRooms(): Promise<SfuRoomInfo[]> {
+        return this.#apiClient.call<SfuRoomInfo[]>("sfu.listRooms", {})
+    }
+
+    async sfuCallJoin(
+        neighbourhoodUrl: string,
+        roomName: string,
+        sdpOffer: string,
+    ): Promise<CallSessionInfo> {
+        return this.#apiClient.call<CallSessionInfo>("sfu.callJoin", {
+            neighbourhoodUrl,
+            roomName,
+            sdpOffer,
+        })
+    }
+
+    async sfuCallLeave(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.callLeave", { neighbourhoodUrl, roomName })
+    }
+
+    async sfuCallSetQualityPreference(
+        neighbourhoodUrl: string,
+        roomName: string,
+        preference: SfuQualityPreference,
+    ): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.callSetQualityPreference", {
+            neighbourhoodUrl,
+            roomName,
+            preference,
+        })
+    }
+
+    async sfuCallAnswerServerOffer(
+        neighbourhoodUrl: string,
+        roomName: string,
+        sdpAnswer: string,
+    ): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.callAnswerServerOffer", {
+            neighbourhoodUrl,
+            roomName,
+            sdpAnswer,
+        })
+    }
+
+    async sfuGetConfig(neighbourhoodUrl: string): Promise<SfuConfig> {
+        return this.#apiClient.call<SfuConfig>("sfu.getConfig", { neighbourhoodUrl })
+    }
+
+    async sfuSetConfig(neighbourhoodUrl: string, config: SfuConfig): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.setConfig", { neighbourhoodUrl, config })
+    }
+
+    async sfuPeerForNeighbourhood(neighbourhoodUrl: string): Promise<string | null> {
+        return this.#apiClient.call<string | null>("sfu.sfuPeerForNeighbourhood", {
+            neighbourhoodUrl,
+        })
+    }
+
+    async sfuPeersForNeighbourhood(neighbourhoodUrl: string): Promise<string[]> {
+        return this.#apiClient.call<string[]>("sfu.sfuPeersForNeighbourhood", { neighbourhoodUrl })
     }
 }

@@ -13,6 +13,7 @@ pub mod mcp;
 pub mod perspectives;
 mod prolog_service;
 pub mod runtime_service;
+pub mod sfu;
 pub mod unyt_service;
 pub mod user_management;
 pub mod utils;

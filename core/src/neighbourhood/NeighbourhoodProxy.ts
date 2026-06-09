@@ -2,6 +2,12 @@ import { DID } from "../DID";
 import { OnlineAgent } from "../language/Language";
 import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "../perspectives/Perspective";
 import { NeighbourhoodClient } from "./NeighbourhoodClient";
+import type {
+    CallSessionInfo,
+    SfuConfig,
+    SfuQualityPreference,
+    SfuRoomInfo,
+} from "./SfuTypes";
 
 export class NeighbourhoodProxy {
     #client: NeighbourhoodClient
@@ -54,5 +60,72 @@ export class NeighbourhoodProxy {
 
     removeSignalHandler(handler: (payload: PerspectiveExpression) => void) {
         this.#client.removeSignalHandler(this.#pID, handler)
+    }
+
+    // ── SFU (Selective Forwarding Unit) ─────────────────────────────────
+    //
+    // Thin pass-through to `NeighbourhoodClient.sfu*`.  Each method takes
+    // the neighbourhood URL explicitly — the proxy is per-perspective,
+    // not per-neighbourhood, and the URL is owned by the consumer (Flux's
+    // call context, the WE UI, etc).
+
+    async sfuConfig(neighbourhoodUrl: string): Promise<SfuConfig> {
+        return await this.#client.sfuGetConfig(neighbourhoodUrl)
+    }
+
+    async setSfuConfig(neighbourhoodUrl: string, config: SfuConfig): Promise<boolean> {
+        return await this.#client.sfuSetConfig(neighbourhoodUrl, config)
+    }
+
+    async sfuPeer(neighbourhoodUrl: string): Promise<string | null> {
+        return await this.#client.sfuPeerForNeighbourhood(neighbourhoodUrl)
+    }
+
+    async sfuPeers(neighbourhoodUrl: string): Promise<string[]> {
+        return await this.#client.sfuPeersForNeighbourhood(neighbourhoodUrl)
+    }
+
+    async sfuStartRoom(neighbourhoodUrl: string, roomName: string): Promise<SfuRoomInfo> {
+        return await this.#client.sfuStartRoom(neighbourhoodUrl, roomName)
+    }
+
+    async sfuStopRoom(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
+        return await this.#client.sfuStopRoom(neighbourhoodUrl, roomName)
+    }
+
+    async sfuListRooms(): Promise<SfuRoomInfo[]> {
+        return await this.#client.sfuListRooms()
+    }
+
+    async callJoin(
+        neighbourhoodUrl: string,
+        roomName: string,
+        sdpOffer: string,
+    ): Promise<CallSessionInfo> {
+        return await this.#client.sfuCallJoin(neighbourhoodUrl, roomName, sdpOffer)
+    }
+
+    async callLeave(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
+        return await this.#client.sfuCallLeave(neighbourhoodUrl, roomName)
+    }
+
+    async callSetQualityPreference(
+        neighbourhoodUrl: string,
+        roomName: string,
+        preference: SfuQualityPreference,
+    ): Promise<boolean> {
+        return await this.#client.sfuCallSetQualityPreference(
+            neighbourhoodUrl,
+            roomName,
+            preference,
+        )
+    }
+
+    async callAnswerServerOffer(
+        neighbourhoodUrl: string,
+        roomName: string,
+        sdpAnswer: string,
+    ): Promise<boolean> {
+        return await this.#client.sfuCallAnswerServerOffer(neighbourhoodUrl, roomName, sdpAnswer)
     }
 }
