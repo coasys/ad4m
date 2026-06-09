@@ -240,6 +240,54 @@ async fn call_answer_server_offer(
     Ok(Value::Bool(true))
 }
 
+// ── Cascade admin (test/dev only) ──────────────────────────────────────────
+
+/// Statically seed cascade peers without the gossip layer.  Admin
+/// only.  Wind tunnel uses this to set up multi-node cascade tests
+/// (T3 / T4 / S2 / S3) on a single host without needing the full DNA
+/// + neighbourhood discovery chain.
+///
+/// Params:
+/// - `localDid`: this executor's identifier in the cluster.
+/// - `maxParticipantsPerNode`: capacity hint published to peers.
+/// - `peers`: array of `{did, addr}` objects for the other SFU nodes.
+async fn enable_cascade(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden("admin credential required".to_string()));
+    }
+    let local_did = params.require_str("localDid")?;
+    let max_per_node = params
+        .get("maxParticipantsPerNode")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| WsRpcError::bad_request("maxParticipantsPerNode required"))?
+        as u32;
+    let peers_value = params.require("peers")?;
+    let peers_arr = peers_value
+        .as_array()
+        .ok_or_else(|| WsRpcError::bad_request("peers must be an array"))?;
+    let mut peers: Vec<(String, std::net::SocketAddr)> = Vec::new();
+    for p in peers_arr {
+        let did = p
+            .get("did")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WsRpcError::bad_request("each peer needs `did`"))?
+            .to_string();
+        let addr_str = p
+            .get("addr")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WsRpcError::bad_request("each peer needs `addr`"))?;
+        let addr: std::net::SocketAddr = addr_str.parse().map_err(|e: std::net::AddrParseError| {
+            WsRpcError::bad_request(format!("addr `{}` parse: {}", addr_str, e))
+        })?;
+        peers.push((did, addr));
+    }
+    service()?
+        .enable_cascade(local_did, max_per_node, peers)
+        .await
+        .map_err(WsRpcError::internal)?;
+    Ok(Value::Bool(true))
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -254,4 +302,5 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("sfu.setConfig", set_config);
     map.register("sfu.sfuPeerForNeighbourhood", sfu_peer_for_neighbourhood);
     map.register("sfu.sfuPeersForNeighbourhood", sfu_peers_for_neighbourhood);
+    map.register("sfu.enableCascade", enable_cascade);
 }

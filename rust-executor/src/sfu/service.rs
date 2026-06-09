@@ -70,6 +70,51 @@ impl SfuService {
         self.server.local_addr
     }
 
+    /// Enable cascade mode and seed the CascadeManager with a set of
+    /// known peer nodes.  Wind tunnel / admin entry point — production
+    /// cascade discovery is via the gossip layer on top of the
+    /// neighbourhood DNA.
+    ///
+    /// `peers` is a list of `(did, addr)` tuples for every other SFU
+    /// node in the cluster.  Each is registered as a `SfuNodeInfo` for
+    /// every active room (and the empty `""` room as a catch-all when
+    /// no rooms exist yet).
+    pub async fn enable_cascade(
+        &self,
+        local_did: String,
+        max_participants_per_node: u32,
+        peers: Vec<(String, std::net::SocketAddr)>,
+    ) -> Result<(), String> {
+        use super::cascade::SfuNodeInfo;
+        let mut cascade_lock = self.cascade_manager.write().await;
+        let mgr = cascade_lock.get_or_insert_with(|| {
+            super::cascade::CascadeManager::new(
+                local_did.clone(),
+                self.server.local_addr,
+                max_participants_per_node,
+            )
+        });
+
+        // Catch-all room id "" so pick_redirect_node sees these peers
+        // even before the room is created.
+        let known = &mut mgr.known_nodes_mut();
+        let bucket = known.entry(String::new()).or_default();
+        for (did, _addr) in &peers {
+            if *did == local_did {
+                continue;
+            }
+            bucket.insert(
+                did.clone(),
+                SfuNodeInfo {
+                    did: did.clone(),
+                    participant_count: 0,
+                    capacity_hint: max_participants_per_node,
+                },
+            );
+        }
+        Ok(())
+    }
+
     // ---- Room management ----
 
     /// Create or get an SFU room for a neighbourhood call.

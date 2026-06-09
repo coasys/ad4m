@@ -341,12 +341,27 @@ impl CascadeManager {
             .unwrap_or_default()
     }
 
+    /// Mutable access to the known-nodes map.  Used by SfuService's
+    /// admin-only `enable_cascade` to seed a static peer set without
+    /// going through the announce/gossip path.
+    pub fn known_nodes_mut(&mut self) -> &mut HashMap<String, HashMap<String, SfuNodeInfo>> {
+        &mut self.known_nodes
+    }
+
     /// Pick the least-loaded SFU node for a new participant.
     /// Returns None if this local node should accept the participant.
+    ///
+    /// Looks up nodes under the specific `room_id` first, falls back to
+    /// the catch-all empty-string entry (populated by
+    /// `SfuService::enable_cascade` for statically-configured clusters
+    /// that haven't gone through the gossip announce path yet).
     pub fn pick_redirect_node(&self, room_id: &str, local_count: u32) -> Option<&SfuNodeInfo> {
+        let nodes = self
+            .known_nodes
+            .get(room_id)
+            .or_else(|| self.known_nodes.get(""))?;
         if local_count < self.max_participants_per_node {
             // We have capacity — only redirect if a remote node is significantly less loaded
-            let nodes = self.known_nodes.get(room_id)?;
             let least_loaded = nodes
                 .values()
                 .filter(|n| n.participant_count + 1 <= n.capacity_hint)
@@ -359,7 +374,6 @@ impl CascadeManager {
         }
 
         // We're at capacity — must redirect
-        let nodes = self.known_nodes.get(room_id)?;
         nodes
             .values()
             .filter(|n| n.participant_count < n.capacity_hint)
