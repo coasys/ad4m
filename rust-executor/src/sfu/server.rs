@@ -17,6 +17,17 @@ use super::relay::MediaRelay;
 use super::room::{ParticipantId, RoomId};
 
 /// A connected WebRTC peer managed by the SFU server.
+///
+/// Two flavours share this struct so the event loop can drive them
+/// uniformly:
+///
+/// - **Client peer** — `is_pipe = false`. `agent_did` is the user's
+///   DID; renegotiation offers go out via the events_ws pubsub topic
+///   for the client's events subscription to receive.
+/// - **Pipe peer** — `is_pipe = true`. Represents the local end of a
+///   pipe transport to a remote SFU node. `agent_did` is the remote
+///   node's DID; renegotiation offers go out via the cascade gossip
+///   transport instead of pubsub so the remote node receives them.
 pub struct SfuPeer {
     pub id: ParticipantId,
     pub room_id: RoomId,
@@ -31,6 +42,10 @@ pub struct SfuPeer {
     /// `sfu.callAnswerServerOffer` to land before we can renegotiate
     /// again — str0m doesn't allow multiple in-flight changes.
     pub pending_offer: Option<str0m::change::SdpPendingOffer>,
+    /// True for cross-node pipe transports — see [`SfuPeer`] docs.
+    /// Affects how renegotiation offers are routed and how forward
+    /// loops treat the participant.
+    pub is_pipe: bool,
 }
 
 impl std::fmt::Debug for SfuPeer {
@@ -42,6 +57,7 @@ impl std::fmt::Debug for SfuPeer {
             .field("tracks_in", &self.tracks_in.len())
             .field("tracks_out", &self.tracks_out.len())
             .field("pending_offer", &self.pending_offer.is_some())
+            .field("is_pipe", &self.is_pipe)
             .finish()
     }
 }
@@ -66,6 +82,21 @@ pub enum SfuCommand {
     ApplyServerAnswer {
         participant_id: ParticipantId,
         sdp_answer_json: String,
+    },
+    /// A remote SFU sent a renegotiation offer over the cascade
+    /// gossip transport, addressed to our local end of an existing
+    /// pipe.  The event loop applies the offer through the pipe's
+    /// `sdp_api()`, produces an answer, and republishes it to
+    /// `SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC` so the cascade router
+    /// can ship it back over gossip.
+    ApplyPipeRenegotiationOffer {
+        participant_id: ParticipantId,
+        sdp_offer_json: String,
+        /// DID of the remote SFU that sent the offer.  Echoed back so
+        /// the answer can be addressed correctly.
+        remote_did: String,
+        /// String form of the [`crate::sfu::room::RoomId`].
+        room_id: String,
     },
     /// Shut down the SFU server.
     Shutdown,
@@ -237,6 +268,70 @@ impl SfuServer {
                                 participant_id,
                                 peer.tracks_out.len()
                             );
+                        }
+                    }
+                    Ok(SfuCommand::ApplyPipeRenegotiationOffer {
+                        participant_id,
+                        sdp_offer_json,
+                        remote_did,
+                        room_id,
+                    }) => {
+                        let Some(peer) = peers.get_mut(&participant_id) else {
+                            debug!(
+                                "SFU: ApplyPipeRenegotiationOffer for unknown participant {}",
+                                participant_id
+                            );
+                            continue;
+                        };
+                        if !peer.is_pipe {
+                            warn!(
+                                "SFU: ApplyPipeRenegotiationOffer landed on non-pipe peer {} — dropping",
+                                participant_id
+                            );
+                            continue;
+                        }
+                        let offer: SdpOffer = match serde_json::from_str(&sdp_offer_json) {
+                            Ok(o) => o,
+                            Err(e) => {
+                                warn!(
+                                    "SFU: ApplyPipeRenegotiationOffer parse failed for {}: {}",
+                                    participant_id, e
+                                );
+                                continue;
+                            }
+                        };
+                        match peer.rtc.sdp_api().accept_offer(offer) {
+                            Ok(answer) => match serde_json::to_string(&answer) {
+                                Ok(answer_json) => {
+                                    let payload = crate::sfu::SfuPipeRenegotiationAnswer {
+                                        remote_did,
+                                        room_id,
+                                        sdp_answer: answer_json,
+                                    };
+                                    if let Ok(payload_json) = serde_json::to_string(&payload) {
+                                        crate::pubsub::get_global_pubsub_sync().publish_sync(
+                                            &crate::pubsub::SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC,
+                                            &payload_json,
+                                        );
+                                    }
+                                    info!(
+                                        "SFU: pipe renegotiation answer published for {}",
+                                        participant_id
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(
+                                            "SFU: serialize pipe renegotiation answer for {} failed: {}",
+                                            participant_id, e
+                                        );
+                                }
+                            },
+                            Err(e) => {
+                                warn!(
+                                    "SFU: accept_offer for pipe {} failed: {:?}",
+                                    participant_id, e
+                                );
+                            }
                         }
                     }
                     Ok(SfuCommand::Shutdown) => {
@@ -513,17 +608,37 @@ impl SfuServer {
                         continue;
                     }
                 };
-                let payload = crate::sfu::SfuCallRenegotiationOffer {
-                    target_did: target_peer.agent_did.clone(),
-                    neighbourhood_url: room_id.neighbourhood_url.clone(),
-                    room_name: room_id.room_name.clone(),
-                    sdp_offer: sdp_offer_json,
-                };
-                if let Ok(payload_json) = serde_json::to_string(&payload) {
-                    crate::pubsub::get_global_pubsub_sync().publish_sync(
-                        &crate::pubsub::SFU_CALL_RENEGOTIATION_OFFER_TOPIC,
-                        &payload_json,
-                    );
+                if target_peer.is_pipe {
+                    // Pipe-bound renegotiation — route through the
+                    // cascade gossip layer to the remote SFU instead
+                    // of the events_ws fanout (no client lives on the
+                    // far end).  The SfuService subscribes to this
+                    // topic and ships the offer as
+                    // CascadeSignal::PipeOffer.
+                    let payload = crate::sfu::SfuPipeRenegotiationOffer {
+                        remote_did: target_peer.agent_did.clone(),
+                        room_id: room_id.to_string(),
+                        sdp_offer: sdp_offer_json,
+                    };
+                    if let Ok(payload_json) = serde_json::to_string(&payload) {
+                        crate::pubsub::get_global_pubsub_sync().publish_sync(
+                            &crate::pubsub::SFU_PIPE_RENEGOTIATION_OFFER_TOPIC,
+                            &payload_json,
+                        );
+                    }
+                } else {
+                    let payload = crate::sfu::SfuCallRenegotiationOffer {
+                        target_did: target_peer.agent_did.clone(),
+                        neighbourhood_url: room_id.neighbourhood_url.clone(),
+                        room_name: room_id.room_name.clone(),
+                        sdp_offer: sdp_offer_json,
+                    };
+                    if let Ok(payload_json) = serde_json::to_string(&payload) {
+                        crate::pubsub::get_global_pubsub_sync().publish_sync(
+                            &crate::pubsub::SFU_CALL_RENEGOTIATION_OFFER_TOPIC,
+                            &payload_json,
+                        );
+                    }
                 }
             }
 

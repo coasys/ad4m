@@ -139,6 +139,19 @@ lazy_static::lazy_static! {
     /// the relay's set of outbound tracks changes (a new peer joins
     /// the same room).  Payload is a JSON [`crate::sfu::types::SfuCallRenegotiationOffer`].
     pub static ref SFU_CALL_RENEGOTIATION_OFFER_TOPIC: String = "sfu-call-renegotiation-offer-topic".to_owned();
+    /// SFU emits a fresh SDP offer for a *pipe-bound* renegotiation
+    /// (the local end of an inter-SFU pipe transport gained outbound
+    /// tracks and needs the remote SFU to renegotiate).  Payload is a
+    /// JSON [`crate::sfu::types::SfuPipeRenegotiationOffer`].  Consumed
+    /// only by the SFU service's internal cascade router — never fans
+    /// out to clients.
+    pub static ref SFU_PIPE_RENEGOTIATION_OFFER_TOPIC: String = "sfu-pipe-renegotiation-offer-topic".to_owned();
+    /// Counterpart of [`SFU_PIPE_RENEGOTIATION_OFFER_TOPIC`] — the SFU
+    /// event loop publishes an SDP answer for a pipe-renegotiation
+    /// offer it just received and applied.  The cascade router relays
+    /// it back over gossip.  Payload is a JSON
+    /// [`crate::sfu::types::SfuPipeRenegotiationAnswer`].
+    pub static ref SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC: String = "sfu-pipe-renegotiation-answer-topic".to_owned();
 }
 
 /// Per-user dirty set for batched credit change notifications.

@@ -114,6 +114,37 @@ pub struct SfuCallRenegotiationOffer {
     pub sdp_offer: String,
 }
 
+/// Internal payload: the SFU event loop emits a fresh SDP offer for a
+/// *pipe-bound* renegotiation (its local end of an inter-SFU pipe
+/// gained outbound tracks).  The cascade router translates the topic
+/// publish into a `CascadeSignal::PipeOffer` and ships it via gossip
+/// to `remote_did`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SfuPipeRenegotiationOffer {
+    /// DID of the remote SFU node to send this offer to.
+    pub remote_did: String,
+    /// String form of the [`crate::sfu::room::RoomId`].
+    pub room_id: String,
+    /// JSON-encoded `RTCSessionDescriptionInit`.
+    pub sdp_offer: String,
+}
+
+/// Internal payload: the SFU event loop emits an SDP answer for a
+/// pipe-renegotiation offer it received and applied.  The cascade
+/// router translates the publish into a `CascadeSignal::PipeAnswer`
+/// and ships it via gossip back to `remote_did`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SfuPipeRenegotiationAnswer {
+    /// DID of the remote SFU node to send this answer to.
+    pub remote_did: String,
+    /// String form of the [`crate::sfu::room::RoomId`].
+    pub room_id: String,
+    /// JSON-encoded `RTCSessionDescriptionInit`.
+    pub sdp_answer: String,
+}
+
 /// Result of a `call_join` — SDP answer + optional cascade redirect +
 /// stream mapping for the joining peer.
 #[derive(Debug, Clone, Serialize, Deserialize)]

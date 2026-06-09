@@ -88,11 +88,105 @@ impl SfuService {
             });
         }
 
+        // Pump pipe-renegotiation pubsub topics → gossip.  Phase F
+        // routes media negotiation across the cluster: when the SFU
+        // event loop wants to add an outbound track to a pipe-bound
+        // peer it publishes the offer to a dedicated topic and waits
+        // for the answer to come back on its counterpart.  We bridge
+        // both directions to the cascade gossip transport here so the
+        // event loop doesn't need to know about CascadeGossip.
+        {
+            let svc = Arc::clone(&service);
+            tokio::spawn(async move {
+                svc.run_pipe_renegotiation_offer_bridge().await;
+            });
+        }
+        {
+            let svc = Arc::clone(&service);
+            tokio::spawn(async move {
+                svc.run_pipe_renegotiation_answer_bridge().await;
+            });
+        }
+
         SFU_SERVICE
             .set(service.clone())
             .map_err(|_| "SFU service already initialized".to_string())?;
 
         Ok(service)
+    }
+
+    /// Subscribe to `SFU_PIPE_RENEGOTIATION_OFFER_TOPIC` and translate
+    /// each publish into a `CascadeSignal::PipeOffer` directed at the
+    /// remote SFU.  Runs for the lifetime of the executor.
+    async fn run_pipe_renegotiation_offer_bridge(self: Arc<Self>) {
+        let pubsub = crate::pubsub::get_global_pubsub().await;
+        let mut rx = pubsub
+            .subscribe(&crate::pubsub::SFU_PIPE_RENEGOTIATION_OFFER_TOPIC)
+            .await;
+        loop {
+            let msg = match rx.recv().await {
+                Ok(m) => m,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            };
+            let payload: crate::sfu::SfuPipeRenegotiationOffer = match serde_json::from_str(&msg) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("SFU pipe-reneg offer bridge: parse error: {}", e);
+                    continue;
+                }
+            };
+            let signal = CascadeSignal::PipeOffer {
+                from_did: self.gossip.local_did().to_string(),
+                to_did: payload.remote_did.clone(),
+                room_id: payload.room_id,
+                sdp_offer: payload.sdp_offer,
+            };
+            if let Err(e) = self
+                .gossip
+                .send(GossipTarget::PeerDid(payload.remote_did), signal)
+                .await
+            {
+                debug!("SFU pipe-reneg offer bridge: gossip send failed: {}", e);
+            }
+        }
+    }
+
+    /// Subscribe to `SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC` and translate
+    /// each publish into a `CascadeSignal::PipeAnswer` directed at the
+    /// remote SFU.  Runs for the lifetime of the executor.
+    async fn run_pipe_renegotiation_answer_bridge(self: Arc<Self>) {
+        let pubsub = crate::pubsub::get_global_pubsub().await;
+        let mut rx = pubsub
+            .subscribe(&crate::pubsub::SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC)
+            .await;
+        loop {
+            let msg = match rx.recv().await {
+                Ok(m) => m,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            };
+            let payload: crate::sfu::SfuPipeRenegotiationAnswer = match serde_json::from_str(&msg) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("SFU pipe-reneg answer bridge: parse error: {}", e);
+                    continue;
+                }
+            };
+            let signal = CascadeSignal::PipeAnswer {
+                from_did: self.gossip.local_did().to_string(),
+                to_did: payload.remote_did.clone(),
+                room_id: payload.room_id,
+                sdp_answer: payload.sdp_answer,
+            };
+            if let Err(e) = self
+                .gossip
+                .send(GossipTarget::PeerDid(payload.remote_did), signal)
+                .await
+            {
+                debug!("SFU pipe-reneg answer bridge: gossip send failed: {}", e);
+            }
+        }
     }
 
     /// Pump inbound signals from the gossip transport into the
@@ -106,6 +200,27 @@ impl SfuService {
             // the inbound one — drained outside the cascade lock so we
             // don't deadlock against the gossip transport.
             let mut outbound: Vec<(GossipTarget, CascadeSignal)> = Vec::new();
+            // Pipe-side SFU peers produced when we either initiate or
+            // accept a pipe handshake; we hand each one off to the SFU
+            // server's event loop via `SfuCommand::AddPeer` once the
+            // cascade lock is released.
+            let mut new_pipe_peers: Vec<SfuPeer> = Vec::new();
+            // Pipes whose remote answered our offer.  Once we know the
+            // ParticipantId of the dialer-side pipe peer we route the
+            // SDP answer into the SFU event loop the same way client
+            // peers' answers flow (`SfuCommand::ApplyServerAnswer`).
+            let mut pipe_answers: Vec<(ParticipantId, String)> = Vec::new();
+            // Pipes to tear down because the remote sent a Leave.
+            let mut pipes_to_drop: Vec<ParticipantId> = Vec::new();
+            // Pipe-side renegotiation offers — when a remote SFU
+            // resends a PipeOffer for an existing pipe (e.g. it added
+            // outbound tracks for a freshly-joined peer), the event
+            // loop applies the offer and publishes the answer back
+            // through the SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC bridge.
+            // Tuple: (local pipe participant_id, sdp_offer_json,
+            //         remote_did, room_id_str).
+            let mut pipe_renegotiation_offers: Vec<(ParticipantId, String, String, String)> =
+                Vec::new();
 
             // Resolve local-room state up front for the Announce branch
             // so we never hold the cascade lock + rooms lock at the same
@@ -155,11 +270,12 @@ impl SfuService {
                                 room_id.rsplit_once(':').unwrap_or((&room_id, "default"));
                             let room = RoomId::new(nh_url, room_name);
                             match mgr.establish_pipe(&remote_did, &room) {
-                                Ok(offer_signal) => {
+                                Ok((pipe_peer, offer_signal)) => {
                                     info!(
                                         "SFU cascade: initiating pipe to {} for room {}",
                                         remote_did, room_id
                                     );
+                                    new_pipe_peers.push(pipe_peer);
                                     outbound
                                         .push((GossipTarget::PeerDid(remote_did), offer_signal));
                                 }
@@ -174,8 +290,13 @@ impl SfuService {
                     }
                     CascadeSignal::Leave { did, room_id } => {
                         // Targeted: remove only this (room, did) pair so
-                        // other rooms the remote serves stay intact.
-                        mgr.remove_node_from_room(&room_id, &did);
+                        // other rooms the remote serves stay intact.  If
+                        // we had a pipe SfuPeer for that pair, the
+                        // returned ParticipantId tells the event loop
+                        // which entry to drop.
+                        if let Some(pid) = mgr.remove_node_from_room(&room_id, &did) {
+                            pipes_to_drop.push(pid);
+                        }
                     }
                     CascadeSignal::PipeOffer {
                         from_did,
@@ -188,13 +309,25 @@ impl SfuService {
                                 "SFU cascade: PipeOffer not addressed to us (to={}), ignoring",
                                 to_did
                             );
+                        } else if let Some(meta) = mgr.pipe_meta(&room_id, &from_did) {
+                            // Renegotiation against an existing pipe —
+                            // dispatch the offer into the event loop so
+                            // it can apply it against the live pipe RTC
+                            // and emit the answer via the pubsub bridge.
+                            pipe_renegotiation_offers.push((
+                                meta.participant_id.clone(),
+                                sdp_offer,
+                                from_did,
+                                room_id,
+                            ));
                         } else {
                             match mgr.handle_pipe_offer(&from_did, &room_id, &sdp_offer) {
-                                Ok(answer_signal) => {
+                                Ok((pipe_peer, answer_signal)) => {
                                     info!(
                                         "SFU cascade: pipe answer ready for {} (room {})",
                                         from_did, room_id
                                     );
+                                    new_pipe_peers.push(pipe_peer);
                                     outbound.push((GossipTarget::PeerDid(from_did), answer_signal));
                                 }
                                 Err(e) => {
@@ -217,15 +350,74 @@ impl SfuService {
                                 "SFU cascade: PipeAnswer not addressed to us (to={}), ignoring",
                                 to_did
                             );
-                        } else if let Err(e) =
-                            mgr.handle_pipe_answer(&from_did, &room_id, &sdp_answer)
-                        {
-                            warn!(
-                                "SFU cascade: handle_pipe_answer failed for {}: {}",
-                                from_did, e
-                            );
+                        } else {
+                            match mgr.handle_pipe_answer(&from_did, &room_id, &sdp_answer) {
+                                Ok((pid, answer_json)) => {
+                                    pipe_answers.push((pid, answer_json));
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "SFU cascade: handle_pipe_answer failed for {}: {}",
+                                        from_did, e
+                                    );
+                                }
+                            }
                         }
                     }
+                }
+            }
+
+            // Dispatch the pipe-side SFU peers we just minted into the
+            // event loop so its tick can drive the str0m state machine
+            // forward (ICE, SDP, media).
+            for peer in new_pipe_peers {
+                if let Err(e) = self.server.command_tx.send(SfuCommand::AddPeer(peer)).await {
+                    warn!("SFU cascade: failed to enqueue pipe peer: {}", e);
+                }
+            }
+            // For dialer-side answer application — the pipe peer is
+            // already in the event loop's peers map; the answer goes
+            // through the same ApplyServerAnswer code path client peers
+            // use.
+            for (pid, sdp_answer_json) in pipe_answers {
+                if let Err(e) = self
+                    .server
+                    .command_tx
+                    .send(SfuCommand::ApplyServerAnswer {
+                        participant_id: pid,
+                        sdp_answer_json,
+                    })
+                    .await
+                {
+                    warn!("SFU cascade: failed to enqueue pipe answer: {}", e);
+                }
+            }
+            for pid in pipes_to_drop {
+                if let Err(e) = self
+                    .server
+                    .command_tx
+                    .send(SfuCommand::RemovePeer(pid))
+                    .await
+                {
+                    warn!("SFU cascade: failed to enqueue pipe removal: {}", e);
+                }
+            }
+            for (participant_id, sdp_offer_json, remote_did, room_id) in pipe_renegotiation_offers {
+                if let Err(e) = self
+                    .server
+                    .command_tx
+                    .send(SfuCommand::ApplyPipeRenegotiationOffer {
+                        participant_id,
+                        sdp_offer_json,
+                        remote_did,
+                        room_id,
+                    })
+                    .await
+                {
+                    warn!(
+                        "SFU cascade: failed to enqueue pipe renegotiation offer: {}",
+                        e
+                    );
                 }
             }
 
@@ -410,6 +602,7 @@ impl SfuService {
             tracks_in: HashMap::new(),
             tracks_out: HashMap::new(),
             pending_offer: None,
+            is_pipe: false,
         };
 
         self.server

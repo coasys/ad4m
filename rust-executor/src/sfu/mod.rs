@@ -24,5 +24,5 @@ pub use gossip::{tcp::GossipPeer, tcp::TcpGossip, CascadeGossip, GossipTarget, N
 pub use service::{get_sfu_service, SfuService};
 pub use types::{
     CallSessionInfo, IceServer, SfuCallRenegotiationOffer, SfuConfig, SfuParticipantInfo,
-    SfuRoomInfo,
+    SfuPipeRenegotiationAnswer, SfuPipeRenegotiationOffer, SfuRoomInfo,
 };

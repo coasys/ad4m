@@ -1,18 +1,33 @@
 //! Cascaded SFU — manages pipe transports between SFU nodes in a cluster.
 //!
 //! When multiple executor nodes act as SFU peers for the same neighbourhood,
-//! they establish str0m peer connections ("pipe transports") between each other
-//! to relay media tracks across the cluster.
+//! they establish str0m peer connections ("pipe transports") between each
+//! other to relay media tracks across the cluster.
+//!
+//! ## Ownership of pipe RTC instances
+//!
+//! Pipe transports are str0m [`Rtc`] peer connections, but unlike client
+//! peers they have no human on the far end — they're SFU↔SFU bridges.
+//! The RTC itself lives in the SFU server's `peers: HashMap<ParticipantId,
+//! SfuPeer>` map (flagged with `is_pipe = true`) so the event loop drives
+//! it uniformly with client peers.  The [`CascadeManager`] only retains
+//! [`PipeMeta`] — the bookkeeping needed to:
+//!
+//! - look up the pipe's `ParticipantId` by `(room_id, remote_did)` when an
+//!   inbound signal arrives;
+//! - know whether the SDP round-trip has completed
+//!   (`established` flag);
+//! - prune entries when the gossip layer reports a remote node leaving.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
-use log::{debug, info};
+use log::info;
 use str0m::change::SdpOffer;
-use str0m::media::{MediaData, MediaKind, Mid};
 use str0m::{Candidate, Rtc};
 
-use super::room::RoomId;
+use super::room::{ParticipantId, RoomId};
+use super::server::SfuPeer;
 
 /// Represents a remote SFU node in the cascade cluster.
 #[derive(Debug, Clone)]
@@ -22,30 +37,19 @@ pub struct SfuNodeInfo {
     pub capacity_hint: u32,
 }
 
-/// A pipe transport — a str0m peer connection to a remote SFU node.
-pub struct PipeTransport {
+/// Bookkeeping for an inter-SFU pipe transport — see the module docs.
+///
+/// The actual [`Rtc`] lives in the server `peers` map under
+/// [`participant_id`].  We hold this metadata in `CascadeManager` so
+/// gossip-driven flows (`handle_pipe_answer`, `remove_node`,
+/// auto-establish) can resolve a pipe by `(room_id, remote_did)`
+/// without having to walk the peers map.
+#[derive(Debug, Clone)]
+pub struct PipeMeta {
     pub remote_did: String,
-    pub rtc: Rtc,
     pub room_id: RoomId,
-    /// Tracks being received from the remote SFU (mid -> kind)
-    pub tracks_in: HashMap<Mid, MediaKind>,
-    /// Tracks being sent to the remote SFU (local mid -> source mid)
-    pub tracks_out: HashMap<Mid, Mid>,
+    pub participant_id: ParticipantId,
     pub established: bool,
-    /// Pending SDP offer awaiting answer (stored between establish_pipe and handle_pipe_answer)
-    pub pending_offer: Option<str0m::change::SdpPendingOffer>,
-}
-
-impl std::fmt::Debug for PipeTransport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PipeTransport")
-            .field("remote_did", &self.remote_did)
-            .field("room_id", &self.room_id)
-            .field("established", &self.established)
-            .field("tracks_in", &self.tracks_in.len())
-            .field("tracks_out", &self.tracks_out.len())
-            .finish()
-    }
 }
 
 /// Messages used for SFU cluster discovery and pipe transport signalling.
@@ -84,8 +88,10 @@ pub enum CascadeSignal {
 
 /// Manages the cascade cluster for a single SFU node.
 ///
-/// Tracks known peer SFU nodes, manages pipe transports, and handles
-/// forwarding decisions for cross-node media relay.
+/// Tracks known peer SFU nodes, the bookkeeping side of pipe transports
+/// (the RTC instances themselves live in the server peers map — see
+/// [`PipeMeta`]), and handles forwarding decisions for cross-node media
+/// relay.
 pub struct CascadeManager {
     /// Our DID
     local_did: String,
@@ -93,8 +99,10 @@ pub struct CascadeManager {
     local_addr: SocketAddr,
     /// Known SFU nodes per room: room_id_str -> (did -> node_info)
     known_nodes: HashMap<String, HashMap<String, SfuNodeInfo>>,
-    /// Active pipe transports: (room_id_str, remote_did) -> PipeTransport
-    pipes: HashMap<(String, String), PipeTransport>,
+    /// Active pipe transport metadata keyed by `(room_id_str, remote_did)`.
+    /// The actual `Rtc` lives in the server `peers` map under
+    /// `meta.participant_id`.
+    pipes: HashMap<(String, String), PipeMeta>,
     /// Max participants this node will accept per room
     max_participants_per_node: u32,
 }
@@ -143,12 +151,19 @@ impl CascadeManager {
         );
     }
 
-    /// Create an SDP offer to establish a pipe transport to a remote SFU node.
+    /// Create an SDP offer to establish a pipe transport to a remote SFU
+    /// node.  Returns the freshly-built [`SfuPeer`] (with pending offer
+    /// already queued on the RTC) for the caller to insert into the
+    /// server peers map, plus the [`CascadeSignal::PipeOffer`] to ship
+    /// over gossip.
+    ///
+    /// CascadeManager records bookkeeping in [`PipeMeta`] so subsequent
+    /// inbound signals can be routed back to the right participant.
     pub fn establish_pipe(
         &mut self,
         remote_did: &str,
         room_id: &RoomId,
-    ) -> Result<CascadeSignal, String> {
+    ) -> Result<(SfuPeer, CascadeSignal), String> {
         let room_key = room_id.to_string();
         let pipe_key = (room_key.clone(), remote_did.to_string());
 
@@ -161,10 +176,11 @@ impl CascadeManager {
             .map_err(|e| format!("Failed to create candidate: {}", e))?;
         rtc.add_local_candidate(candidate);
 
-        // Create offer via SDP API.  str0m 0.9 requires at least one queued
-        // change before `apply()` produces an offer, so we open a control
-        // data channel for the pipe transport.  Real media transceivers are
-        // added later as participants arrive in the cascaded room.
+        // Create offer via SDP API.  str0m 0.9 requires at least one
+        // queued change before `apply()` produces an offer, so we open
+        // a control data channel for the pipe transport.  Media
+        // transceivers are added later via the renegotiation pipeline
+        // when local peers add tracks.
         let mut sdp_api = rtc.sdp_api();
         let _control_channel = sdp_api.add_channel("pipe-control".to_string());
         let (offer, pending) = sdp_api
@@ -174,33 +190,49 @@ impl CascadeManager {
         let sdp_offer = serde_json::to_string(&offer)
             .map_err(|e| format!("Failed to serialize offer: {}", e))?;
 
-        let pipe = PipeTransport {
-            remote_did: remote_did.to_string(),
-            rtc,
+        let participant_id = ParticipantId::next();
+        let peer = SfuPeer {
+            id: participant_id.clone(),
             room_id: room_id.clone(),
+            agent_did: remote_did.to_string(),
+            rtc,
             tracks_in: HashMap::new(),
             tracks_out: HashMap::new(),
-            established: false,
             pending_offer: Some(pending),
+            is_pipe: true,
         };
 
-        self.pipes.insert(pipe_key, pipe);
+        self.pipes.insert(
+            pipe_key,
+            PipeMeta {
+                remote_did: remote_did.to_string(),
+                room_id: room_id.clone(),
+                participant_id,
+                established: false,
+            },
+        );
 
-        Ok(CascadeSignal::PipeOffer {
-            from_did: self.local_did.clone(),
-            to_did: remote_did.to_string(),
-            room_id: room_key,
-            sdp_offer,
-        })
+        Ok((
+            peer,
+            CascadeSignal::PipeOffer {
+                from_did: self.local_did.clone(),
+                to_did: remote_did.to_string(),
+                room_id: room_key,
+                sdp_offer,
+            },
+        ))
     }
 
-    /// Handle an incoming pipe offer from a remote SFU node.
+    /// Handle an incoming pipe offer from a remote SFU node.  Builds the
+    /// pipe-side [`SfuPeer`] (answer already applied) for the caller to
+    /// insert into the server peers map, plus the
+    /// [`CascadeSignal::PipeAnswer`] to ship back over gossip.
     pub fn handle_pipe_offer(
         &mut self,
         from_did: &str,
         room_id: &str,
         sdp_offer_json: &str,
-    ) -> Result<CascadeSignal, String> {
+    ) -> Result<(SfuPeer, CascadeSignal), String> {
         let offer: SdpOffer = serde_json::from_str(sdp_offer_json)
             .map_err(|e| format!("Invalid pipe SDP offer: {}", e))?;
 
@@ -219,108 +251,78 @@ impl CascadeManager {
 
         // Parse room_id from the string format
         // `{neighbourhood_url}:{room_name}`.  Neighbourhood URLs
-        // contain their own `://`, so split on the LAST `:` to
-        // recover the actual boundary.
+        // contain their own `://`, so split on the LAST `:`.
         let (nh_url, room_name) = room_id.rsplit_once(':').unwrap_or((room_id, "default"));
+        let parsed_room = RoomId::new(nh_url, room_name);
 
-        let pipe = PipeTransport {
-            remote_did: from_did.to_string(),
+        let participant_id = ParticipantId::next();
+        let peer = SfuPeer {
+            id: participant_id.clone(),
+            room_id: parsed_room.clone(),
+            agent_did: from_did.to_string(),
             rtc,
-            room_id: RoomId::new(nh_url, room_name),
             tracks_in: HashMap::new(),
             tracks_out: HashMap::new(),
-            established: true,
             pending_offer: None,
+            is_pipe: true,
         };
 
         let pipe_key = (room_id.to_string(), from_did.to_string());
-        self.pipes.insert(pipe_key, pipe);
+        self.pipes.insert(
+            pipe_key,
+            PipeMeta {
+                remote_did: from_did.to_string(),
+                room_id: parsed_room,
+                participant_id,
+                established: true,
+            },
+        );
 
-        Ok(CascadeSignal::PipeAnswer {
-            from_did: self.local_did.clone(),
-            to_did: from_did.to_string(),
-            room_id: room_id.to_string(),
-            sdp_answer,
-        })
+        Ok((
+            peer,
+            CascadeSignal::PipeAnswer {
+                from_did: self.local_did.clone(),
+                to_did: from_did.to_string(),
+                room_id: room_id.to_string(),
+                sdp_answer,
+            },
+        ))
     }
 
-    /// Handle an incoming pipe answer from a remote SFU node.
+    /// Handle an incoming pipe answer from a remote SFU node.  Returns
+    /// the local pipe's `ParticipantId` and the raw answer JSON so the
+    /// caller can dispatch
+    /// `SfuCommand::ApplyServerAnswer { participant_id, sdp_answer_json }`
+    /// to the SFU event loop (the pipe's RTC lives in the peers map).
     pub fn handle_pipe_answer(
         &mut self,
         from_did: &str,
         room_id: &str,
         sdp_answer_json: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(ParticipantId, String), String> {
         let pipe_key = (room_id.to_string(), from_did.to_string());
-        let pipe = self
+        let meta = self
             .pipes
             .get_mut(&pipe_key)
             .ok_or_else(|| "No pending pipe transport for this node".to_string())?;
-
-        let answer: str0m::change::SdpAnswer = serde_json::from_str(sdp_answer_json)
-            .map_err(|e| format!("Invalid pipe SDP answer: {}", e))?;
-
-        let pending = pipe
-            .pending_offer
-            .take()
-            .ok_or_else(|| "No pending offer for this pipe transport".to_string())?;
-
-        pipe.rtc
-            .sdp_api()
-            .accept_answer(pending, answer)
-            .map_err(|e| format!("Failed to accept pipe answer: {}", e))?;
-
-        pipe.established = true;
+        meta.established = true;
         info!(
             "Pipe transport established to SFU node {} for room {}",
             from_did, room_id
         );
-
-        Ok(())
-    }
-
-    /// Forward media data to all pipe transports for a room, excluding the origin node.
-    pub fn forward_to_pipes(
-        &mut self,
-        room_id: &str,
-        data: &MediaData,
-        exclude_node: Option<&str>,
-    ) {
-        for ((pipe_room, pipe_did), pipe) in self.pipes.iter_mut() {
-            if pipe_room != room_id {
-                continue;
-            }
-            if let Some(exclude) = exclude_node {
-                if pipe_did == exclude {
-                    continue; // Don't forward back to origin SFU node
-                }
-            }
-            if !pipe.established || !pipe.rtc.is_alive() {
-                continue;
-            }
-
-            // Find matching outgoing track on the pipe
-            for (&out_mid, _) in &pipe.tracks_out {
-                if let Some(writer) = pipe.rtc.writer(out_mid) {
-                    if let Err(e) =
-                        writer.write(data.pt, data.network_time, data.time, data.data.clone())
-                    {
-                        debug!("Failed to forward to pipe {}: {:?}", pipe_did, e);
-                    }
-                    break;
-                }
-            }
-        }
+        Ok((meta.participant_id.clone(), sdp_answer_json.to_string()))
     }
 
     /// Remove an SFU node from the cluster (handles sfu-leave).
-    pub fn remove_node(&mut self, did: &str) {
+    /// Returns the list of `ParticipantId`s of pipes that were removed
+    /// so the caller can dispatch `SfuCommand::RemovePeer` for each.
+    pub fn remove_node(&mut self, did: &str) -> Vec<ParticipantId> {
         // Remove from known nodes
         for nodes in self.known_nodes.values_mut() {
             nodes.remove(did);
         }
 
-        // Remove and disconnect pipe transports
+        // Remove pipe metadata for this DID across all rooms.
         let keys_to_remove: Vec<_> = self
             .pipes
             .keys()
@@ -328,18 +330,20 @@ impl CascadeManager {
             .cloned()
             .collect();
 
+        let mut removed_pids = Vec::new();
         for key in keys_to_remove {
-            if let Some(mut pipe) = self.pipes.remove(&key) {
-                pipe.rtc.disconnect();
+            if let Some(meta) = self.pipes.remove(&key) {
                 info!("Removed pipe transport to SFU node {}", did);
+                removed_pids.push(meta.participant_id);
             }
         }
+        removed_pids
     }
 
     /// Targeted leave: drop just the `(room, did)` entry instead of
-    /// purging the node from every room.  Used when a remote node
-    /// vacates a specific room (its other rooms may still be active).
-    pub fn remove_node_from_room(&mut self, room_id: &str, did: &str) {
+    /// purging the node from every room.  Returns the removed pipe's
+    /// `ParticipantId` if there was one.
+    pub fn remove_node_from_room(&mut self, room_id: &str, did: &str) -> Option<ParticipantId> {
         if let Some(nodes) = self.known_nodes.get_mut(room_id) {
             nodes.remove(did);
             if nodes.is_empty() {
@@ -347,12 +351,14 @@ impl CascadeManager {
             }
         }
         let key = (room_id.to_string(), did.to_string());
-        if let Some(mut pipe) = self.pipes.remove(&key) {
-            pipe.rtc.disconnect();
+        if let Some(meta) = self.pipes.remove(&key) {
             info!(
                 "Removed pipe transport to SFU node {} for room {}",
                 did, room_id
             );
+            Some(meta.participant_id)
+        } else {
+            None
         }
     }
 
@@ -406,9 +412,21 @@ impl CascadeManager {
             .min_by_key(|n| n.participant_count)
     }
 
-    /// Get mutable access to all pipe transports (for driving in the event loop).
-    pub fn pipes_mut(&mut self) -> impl Iterator<Item = (&(String, String), &mut PipeTransport)> {
-        self.pipes.iter_mut()
+    /// Lookup pipe metadata by `(room_id, remote_did)`.  The pipe's
+    /// `Rtc` lives in the server peers map under `meta.participant_id`.
+    pub fn pipe_meta(&self, room_id: &str, remote_did: &str) -> Option<&PipeMeta> {
+        self.pipes
+            .get(&(room_id.to_string(), remote_did.to_string()))
+    }
+
+    /// All pipes for a given `room_id` — caller iterates the
+    /// `ParticipantId`s to find the corresponding `SfuPeer`s in the
+    /// server peers map.
+    pub fn pipes_for_room(&self, room_id: &str) -> Vec<&PipeMeta> {
+        self.pipes
+            .values()
+            .filter(|m| m.room_id.to_string() == room_id)
+            .collect()
     }
 
     /// Check if we're in cascaded mode for a room (have known peer nodes).
@@ -502,8 +520,11 @@ mod tests {
         let mut node_b = CascadeManager::new("did:key:nodeB".into(), test_addr(10004), 8);
         let room_id = RoomId::new("test-nh", "room1");
 
-        // node_a creates pipe offer
-        let offer_signal = node_a.establish_pipe("did:key:nodeB", &room_id).unwrap();
+        // node_a creates pipe offer (also returns the dialer-side SfuPeer
+        // that the SFU server would normally insert into its peers map).
+        let (peer_a, offer_signal) = node_a.establish_pipe("did:key:nodeB", &room_id).unwrap();
+        assert!(peer_a.is_pipe);
+        assert_eq!(peer_a.agent_did, "did:key:nodeB");
         let sdp_offer = match &offer_signal {
             CascadeSignal::PipeOffer {
                 sdp_offer,
@@ -518,10 +539,13 @@ mod tests {
             _ => panic!("Expected PipeOffer signal"),
         };
 
-        // node_b handles offer, produces answer
-        let answer_signal = node_b
+        // node_b handles offer, produces answer (and the receiver-side
+        // SfuPeer).
+        let (peer_b, answer_signal) = node_b
             .handle_pipe_offer("did:key:nodeA", &room_id.to_string(), &sdp_offer)
             .unwrap();
+        assert!(peer_b.is_pipe);
+        assert_eq!(peer_b.agent_did, "did:key:nodeA");
         let sdp_answer = match &answer_signal {
             CascadeSignal::PipeAnswer {
                 sdp_answer,
@@ -536,10 +560,13 @@ mod tests {
             _ => panic!("Expected PipeAnswer signal"),
         };
 
-        // node_a handles answer
-        node_a
+        // node_a handles answer (returns the participant_id to look up
+        // the pipe SfuPeer in the server peers map).
+        let (apply_pid, apply_sdp) = node_a
             .handle_pipe_answer("did:key:nodeB", &room_id.to_string(), &sdp_answer)
             .unwrap();
+        assert_eq!(apply_pid, peer_a.id);
+        assert_eq!(apply_sdp, sdp_answer);
 
         // Duplicate pipe should error
         assert!(node_a.establish_pipe("did:key:nodeB", &room_id).is_err());
@@ -554,8 +581,9 @@ mod tests {
         node_a.handle_sfu_announce("did:key:nodeB".into(), room_id.to_string(), 2, 8);
         assert_eq!(node_a.nodes_for_room(&room_id.to_string()).len(), 1);
 
-        // Remove node_b
-        node_a.remove_node("did:key:nodeB");
+        // Remove node_b — no pipes registered so the returned Vec is empty.
+        let removed = node_a.remove_node("did:key:nodeB");
+        assert!(removed.is_empty());
         assert_eq!(node_a.nodes_for_room(&room_id.to_string()).len(), 0);
         assert!(!node_a.is_cascaded(&room_id.to_string()));
     }
@@ -589,12 +617,15 @@ mod tests {
     }
 
     #[test]
-    fn test_cascade_forward_excludes_origin() {
-        let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10009), 8);
+    fn test_cascade_pipe_meta_lookup() {
+        let mgr = CascadeManager::new("did:key:local".into(), test_addr(10009), 8);
         let room_id = RoomId::new("test-nh", "room1");
 
-        // With no pipes, forward_to_pipes should just be a no-op (no panic)
-        assert!(!mgr.is_cascaded(&room_id.to_string()));
+        // No pipes registered → lookup returns None and pipes_for_room is empty.
+        assert!(mgr
+            .pipe_meta(&room_id.to_string(), "did:key:remote")
+            .is_none());
+        assert!(mgr.pipes_for_room(&room_id.to_string()).is_empty());
     }
 
     #[test]
