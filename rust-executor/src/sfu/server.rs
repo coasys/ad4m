@@ -17,7 +17,6 @@ use super::relay::MediaRelay;
 use super::room::{ParticipantId, RoomId};
 
 /// A connected WebRTC peer managed by the SFU server.
-#[derive(Debug)]
 pub struct SfuPeer {
     pub id: ParticipantId,
     pub room_id: RoomId,
@@ -27,6 +26,24 @@ pub struct SfuPeer {
     pub tracks_in: HashMap<Mid, MediaKind>,
     /// Maps outgoing Mid (media we send to the peer) to the source (origin participant, origin mid)
     pub tracks_out: HashMap<Mid, (ParticipantId, Mid)>,
+    /// Pending server-initiated SDP renegotiation.  When `Some`, we
+    /// already issued an offer to this peer and are waiting for their
+    /// `sfu.callAnswerServerOffer` to land before we can renegotiate
+    /// again — str0m doesn't allow multiple in-flight changes.
+    pub pending_offer: Option<str0m::change::SdpPendingOffer>,
+}
+
+impl std::fmt::Debug for SfuPeer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SfuPeer")
+            .field("id", &self.id)
+            .field("room_id", &self.room_id)
+            .field("agent_did", &self.agent_did)
+            .field("tracks_in", &self.tracks_in.len())
+            .field("tracks_out", &self.tracks_out.len())
+            .field("pending_offer", &self.pending_offer.is_some())
+            .finish()
+    }
 }
 
 /// Commands sent to the SFU event loop from the GraphQL API / signalling layer.
@@ -187,22 +204,35 @@ impl SfuServer {
                         participant_id,
                         sdp_answer_json,
                     }) => {
-                        // The renegotiation-offer fanout that publishes
-                        // to the SFU_CALL_RENEGOTIATION_OFFER_TOPIC is
-                        // staged for the str0m sdp_api work below.  For
-                        // now we acknowledge so the client side of the
-                        // pipeline is exercised end-to-end; the actual
-                        // sdp_api.accept_answer call lands in the same
-                        // change as offer generation.
-                        debug!(
-                            "SFU: ApplyServerAnswer received for {} ({}B)",
-                            participant_id,
-                            sdp_answer_json.len()
-                        );
-                        if !peers.contains_key(&participant_id) {
+                        let Some(peer) = peers.get_mut(&participant_id) else {
                             debug!(
                                 "SFU: ApplyServerAnswer for unknown participant {}",
                                 participant_id
+                            );
+                            continue;
+                        };
+                        let Some(pending) = peer.pending_offer.take() else {
+                            debug!(
+                                "SFU: ApplyServerAnswer for {} with no pending offer",
+                                participant_id
+                            );
+                            continue;
+                        };
+                        let answer: str0m::change::SdpAnswer =
+                            match serde_json::from_str(&sdp_answer_json) {
+                                Ok(a) => a,
+                                Err(e) => {
+                                    warn!(
+                                        "SFU: ApplyServerAnswer parse failed for {}: {}",
+                                        participant_id, e
+                                    );
+                                    continue;
+                                }
+                            };
+                        if let Err(e) = peer.rtc.sdp_api().accept_answer(pending, answer) {
+                            warn!(
+                                "SFU: accept_answer for {} failed: {:?}",
+                                participant_id, e
                             );
                         }
                     }
@@ -348,6 +378,76 @@ impl SfuServer {
                                 );
                             }
                         }
+                    }
+                }
+            }
+
+            // Propagate freshly-opened inbound tracks: for each track
+            // that peer X just opened, every OTHER peer Y in the same
+            // room needs an outbound m-line so the relay has somewhere
+            // to forward to.  We add the outbound transceiver via
+            // str0m's sdp_api, then publish the resulting offer to the
+            // SFU renegotiation-offer topic targeted at Y's DID.  Y's
+            // client applies it and replies via sfu.callAnswerServerOffer
+            // (handled in the ApplyServerAnswer command).
+            //
+            // str0m only allows one in-flight change at a time per
+            // peer, so we skip peers with a pending offer; the next
+            // tick (or after the answer lands) will retry.
+            for (origin_pid, mid, kind) in &tracks_opened {
+                let Some(origin_peer) = peers.get(origin_pid) else {
+                    continue;
+                };
+                let room_id = origin_peer.room_id.clone();
+                let other_pids: Vec<ParticipantId> = peers
+                    .iter()
+                    .filter(|(pid, p)| {
+                        *pid != origin_pid
+                            && p.room_id == room_id
+                            && p.pending_offer.is_none()
+                    })
+                    .map(|(pid, _)| pid.clone())
+                    .collect();
+
+                for target_pid in other_pids {
+                    let Some(target_peer) = peers.get_mut(&target_pid) else {
+                        continue;
+                    };
+                    let mut api = target_peer.rtc.sdp_api();
+                    let new_mid = api.add_media(
+                        *kind,
+                        str0m::media::Direction::SendOnly,
+                        None,
+                        None,
+                        None,
+                    );
+                    let Some((offer, pending)) = api.apply() else {
+                        continue;
+                    };
+                    target_peer.tracks_out.insert(new_mid, (origin_pid.clone(), *mid));
+                    target_peer.pending_offer = Some(pending);
+
+                    let sdp_offer_json = match serde_json::to_string(&offer) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            warn!(
+                                "SFU: serialise renegotiation offer for {} failed: {}",
+                                target_pid, e
+                            );
+                            continue;
+                        }
+                    };
+                    let payload = crate::sfu::SfuCallRenegotiationOffer {
+                        target_did: target_peer.agent_did.clone(),
+                        neighbourhood_url: room_id.neighbourhood_url.clone(),
+                        room_name: room_id.room_name.clone(),
+                        sdp_offer: sdp_offer_json,
+                    };
+                    if let Ok(payload_json) = serde_json::to_string(&payload) {
+                        crate::pubsub::get_global_pubsub().publish_sync(
+                            &crate::pubsub::SFU_CALL_RENEGOTIATION_OFFER_TOPIC,
+                            &payload_json,
+                        );
                     }
                 }
             }

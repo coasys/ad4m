@@ -287,6 +287,7 @@ impl SfuService {
             rtc,
             tracks_in: HashMap::new(),
             tracks_out: HashMap::new(),
+            pending_offer: None,
         };
 
         self.server
