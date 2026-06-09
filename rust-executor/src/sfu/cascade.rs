@@ -336,6 +336,26 @@ impl CascadeManager {
         }
     }
 
+    /// Targeted leave: drop just the `(room, did)` entry instead of
+    /// purging the node from every room.  Used when a remote node
+    /// vacates a specific room (its other rooms may still be active).
+    pub fn remove_node_from_room(&mut self, room_id: &str, did: &str) {
+        if let Some(nodes) = self.known_nodes.get_mut(room_id) {
+            nodes.remove(did);
+            if nodes.is_empty() {
+                self.known_nodes.remove(room_id);
+            }
+        }
+        let key = (room_id.to_string(), did.to_string());
+        if let Some(mut pipe) = self.pipes.remove(&key) {
+            pipe.rtc.disconnect();
+            info!(
+                "Removed pipe transport to SFU node {} for room {}",
+                did, room_id
+            );
+        }
+    }
+
     /// Get known SFU nodes for a room (for the sfuNodesForRoom query).
     pub fn nodes_for_room(&self, room_id: &str) -> Vec<SfuNodeInfo> {
         self.known_nodes

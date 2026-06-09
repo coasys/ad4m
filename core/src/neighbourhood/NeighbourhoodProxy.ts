@@ -128,4 +128,22 @@ export class NeighbourhoodProxy {
     ): Promise<boolean> {
         return await this.#client.sfuCallAnswerServerOffer(neighbourhoodUrl, roomName, sdpAnswer)
     }
+
+    /**
+     * Subscribe to server-pushed renegotiation offers for `targetDid`.
+     * Returns an unsubscribe function.  See
+     * `NeighbourhoodClient.subscribeSfuCallRenegotiationOffer` for the
+     * underlying mechanism.
+     */
+    subscribeCallRenegotiationOffer(
+        targetDid: string,
+        callback: (payload: {
+            targetDid: string
+            neighbourhoodUrl: string
+            roomName: string
+            sdpOffer: string
+        }) => void,
+    ): () => void {
+        return this.#client.subscribeSfuCallRenegotiationOffer(targetDid, callback)
+    }
 }

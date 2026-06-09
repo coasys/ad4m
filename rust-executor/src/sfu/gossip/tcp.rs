@@ -143,7 +143,7 @@ impl CascadeGossip for TcpGossip {
         match target {
             GossipTarget::Broadcast => {
                 let recipients: Vec<&String> = outbound.keys().collect();
-                info!(
+                debug!(
                     "TcpGossip[{}] broadcast {} to {} peer(s): {:?}",
                     self.local_did,
                     variant,
@@ -156,13 +156,13 @@ impl CascadeGossip for TcpGossip {
             }
             GossipTarget::PeerDid(did) => {
                 if let Some(tx) = outbound.get(&did) {
-                    info!(
+                    debug!(
                         "TcpGossip[{}] directed {} to {}",
                         self.local_did, variant, did
                     );
                     let _ = tx.try_send(signal);
                 } else {
-                    info!(
+                    debug!(
                         "TcpGossip[{}] no outbound for {} — {} dropped",
                         self.local_did, did, variant
                     );
@@ -205,7 +205,7 @@ async fn reader_loop(socket: TcpStream, inbound_tx: mpsc::Sender<CascadeSignal>)
                         CascadeSignal::PipeOffer { .. } => "PipeOffer",
                         CascadeSignal::PipeAnswer { .. } => "PipeAnswer",
                     };
-                    info!("TcpGossip reader: inbound {} signal", variant);
+                    debug!("TcpGossip reader: inbound {} signal", variant);
                     if inbound_tx.send(signal).await.is_err() {
                         return; // SfuService dropped the receiver
                     }
@@ -230,7 +230,7 @@ async fn connect_loop(did: String, addr: SocketAddr, outbound: OutboundMap) {
     loop {
         match TcpStream::connect(addr).await {
             Ok(mut socket) => {
-                info!("TcpGossip connected to {} @ {}", did, addr);
+                debug!("TcpGossip connected to {} @ {}", did, addr);
                 let (tx, mut rx) = mpsc::channel::<CascadeSignal>(64);
                 {
                     let mut guard = outbound.lock().await;

@@ -211,4 +211,43 @@ export class NeighbourhoodClient {
     async sfuPeersForNeighbourhood(neighbourhoodUrl: string): Promise<string[]> {
         return this.#apiClient.call<string[]>("sfu.sfuPeersForNeighbourhood", { neighbourhoodUrl })
     }
+
+    /**
+     * Subscribe to server-pushed SFU SDP renegotiation offers.  The
+     * server publishes `sfu-call-renegotiation-offer` events on the
+     * events_ws every time the relay's outbound track set changes for
+     * `targetDid`.  Callers apply the offer to their `RTCPeerConnection`,
+     * generate an answer, and post it via `sfuCallAnswerServerOffer`.
+     *
+     * The events_ws fanout already filters per-DID; this subscription
+     * additionally double-filters on `targetDid` for safety.  Returns
+     * an unsubscribe function.
+     */
+    subscribeSfuCallRenegotiationOffer(
+        targetDid: string,
+        callback: (payload: {
+            targetDid: string
+            neighbourhoodUrl: string
+            roomName: string
+            sdpOffer: string
+        }) => void,
+    ): () => void {
+        return this.#apiClient.subscribe((data: any) => {
+            if (data?.type !== "sfu-call-renegotiation-offer") return
+            const payload = data as {
+                type: string
+                targetDid: string
+                neighbourhoodUrl: string
+                roomName: string
+                sdpOffer: string
+            }
+            if (payload.targetDid !== targetDid) return
+            callback({
+                targetDid: payload.targetDid,
+                neighbourhoodUrl: payload.neighbourhoodUrl,
+                roomName: payload.roomName,
+                sdpOffer: payload.sdpOffer,
+            })
+        })
+    }
 }

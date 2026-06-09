@@ -172,8 +172,10 @@ impl SfuService {
                             }
                         }
                     }
-                    CascadeSignal::Leave { did, room_id: _ } => {
-                        mgr.remove_node(&did);
+                    CascadeSignal::Leave { did, room_id } => {
+                        // Targeted: remove only this (room, did) pair so
+                        // other rooms the remote serves stay intact.
+                        mgr.remove_node_from_room(&room_id, &did);
                     }
                     CascadeSignal::PipeOffer {
                         from_did,
@@ -492,7 +494,23 @@ impl SfuService {
         }
         drop(rooms);
 
+        // Always re-announce the fresh local count (lets healthy peers
+        // refresh their view).  If the room is now empty on this node,
+        // also send a directed Leave so peers prune their
+        // `known_nodes` entry for this (room, did) tuple — without
+        // Leave, the lifetime of a known_nodes entry is bounded only
+        // by the next non-zero Announce from us, which for a vacated
+        // room will never come.
         self.announce_room(&room_id.to_string(), local_count).await;
+        if is_empty {
+            let signal = CascadeSignal::Leave {
+                did: self.gossip.local_did().to_string(),
+                room_id: room_id.to_string(),
+            };
+            if let Err(e) = self.gossip.send(GossipTarget::Broadcast, signal).await {
+                warn!("SFU call_leave: gossip Leave broadcast failed: {}", e);
+            }
+        }
 
         Ok(true)
     }
