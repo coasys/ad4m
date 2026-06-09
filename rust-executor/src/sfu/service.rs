@@ -146,8 +146,13 @@ impl SfuService {
                             && mgr.local_did() > remote_did.as_str()
                             && !mgr.has_pipe(&room_id, &remote_did)
                         {
+                            // RoomId::Display formats as
+                            // `{neighbourhood_url}:{room_name}`; the
+                            // neighbourhood URL itself contains `:` (e.g.
+                            // `windtunnel://t6`), so split on the LAST
+                            // colon to recover the boundary.
                             let (nh_url, room_name) =
-                                room_id.split_once(':').unwrap_or((&room_id, "default"));
+                                room_id.rsplit_once(':').unwrap_or((&room_id, "default"));
                             let room = RoomId::new(nh_url, room_name);
                             match mgr.establish_pipe(&remote_did, &room) {
                                 Ok(offer_signal) => {
@@ -234,8 +239,11 @@ impl SfuService {
     /// Used by the cascade auto-establish logic so we only build pipes for
     /// rooms we're actively serving.
     async fn local_has_room(&self, room_id_str: &str) -> bool {
+        // RoomId::Display = `{neighbourhood_url}:{room_name}`, and
+        // the neighbourhood URL has its own scheme separator (`://`),
+        // so split on the LAST colon.
         let (nh_url, room_name) = room_id_str
-            .split_once(':')
+            .rsplit_once(':')
             .unwrap_or((room_id_str, "default"));
         let room_id = RoomId::new(nh_url, room_name);
         let rooms = self.rooms.read().await;

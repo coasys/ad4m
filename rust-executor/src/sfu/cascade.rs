@@ -217,8 +217,11 @@ impl CascadeManager {
         let sdp_answer = serde_json::to_string(&answer)
             .map_err(|e| format!("Failed to serialize pipe answer: {}", e))?;
 
-        // Parse room_id from the string format "neighbourhood_url:room_name"
-        let (nh_url, room_name) = room_id.split_once(':').unwrap_or((room_id, "default"));
+        // Parse room_id from the string format
+        // `{neighbourhood_url}:{room_name}`.  Neighbourhood URLs
+        // contain their own `://`, so split on the LAST `:` to
+        // recover the actual boundary.
+        let (nh_url, room_name) = room_id.rsplit_once(':').unwrap_or((room_id, "default"));
 
         let pipe = PipeTransport {
             remote_did: from_did.to_string(),
