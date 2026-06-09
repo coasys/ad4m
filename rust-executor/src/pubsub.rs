@@ -135,6 +135,10 @@ lazy_static::lazy_static! {
     pub static ref PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC: String = "perspective-query-subscription-topic".to_owned();
     pub static ref HOSTING_USER_INFO_CHANGED_TOPIC: String = "hosting-user-info-changed-topic".to_owned();
     pub static ref COMPUTE_LOG_UPDATED_TOPIC: String = "compute-log-updated-topic".to_owned();
+    /// SFU pushes a fresh SDP offer to one specific participant when
+    /// the relay's set of outbound tracks changes (a new peer joins
+    /// the same room).  Payload is a JSON [`crate::sfu::types::SfuCallRenegotiationOffer`].
+    pub static ref SFU_CALL_RENEGOTIATION_OFFER_TOPIC: String = "sfu-call-renegotiation-offer-topic".to_owned();
 }
 
 /// Per-user dirty set for batched credit change notifications.

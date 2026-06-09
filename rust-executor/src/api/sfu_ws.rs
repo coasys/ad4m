@@ -210,19 +210,13 @@ async fn call_answer_server_offer(
         .map_err(WsRpcError::forbidden)?;
     let neighbourhood_url = params.require_str("neighbourhoodUrl")?;
     let room_name = params.require_str("roomName")?;
-    let _sdp_answer = params.require_str("sdpAnswer")?;
-    let _agent_did = caller_did(&ctx)?;
-    // The current SfuService surface accepts the answer through the
-    // peer's pre-existing Rtc transport rather than as a separate
-    // method.  Wired through the cascade path; the explicit RPC is
-    // available so clients have a typed endpoint to call when they
-    // generate an answer in response to a server-pushed renegotiation
-    // offer.  Returns true once the service has consumed the answer.
-    //
-    // For now this is a thin acknowledgement; full plumbing into the
-    // server loop is a follow-up that touches `sfu/server.rs`.
-    let _ = (neighbourhood_url, room_name);
-    Ok(Value::Bool(true))
+    let sdp_answer = params.require_str("sdpAnswer")?;
+    let agent_did = caller_did(&ctx)?;
+    let ok = service()?
+        .call_answer_server_offer(&neighbourhood_url, &room_name, &agent_did, &sdp_answer)
+        .await
+        .map_err(map_room_err)?;
+    Ok(Value::Bool(ok))
 }
 
 // ── Registration ────────────────────────────────────────────────────────────

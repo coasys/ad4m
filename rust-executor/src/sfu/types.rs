@@ -96,6 +96,24 @@ pub struct SfuParticipantInfo {
     pub is_active_speaker: bool,
 }
 
+/// Server-pushed SDP offer delivered to one specific participant when
+/// the SFU needs them to renegotiate — typically because a new peer
+/// joined the same room and the relay now has additional outbound
+/// tracks to forward.  The client applies this as a remote offer,
+/// generates an answer, and posts the answer via
+/// `sfu.callAnswerServerOffer`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SfuCallRenegotiationOffer {
+    /// DID of the participant this offer is addressed to.  Used by the
+    /// events_ws fanout to filter per-user.
+    pub target_did: String,
+    pub neighbourhood_url: String,
+    pub room_name: String,
+    /// JSON-encoded `RTCSessionDescriptionInit` for the new offer.
+    pub sdp_offer: String,
+}
+
 /// Result of a `call_join` — SDP answer + optional cascade redirect +
 /// stream mapping for the joining peer.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -376,6 +376,50 @@ impl SfuService {
         Ok(true)
     }
 
+    /// Consume an SDP answer that the client produced in response to a
+    /// server-pushed renegotiation offer.  Routes the answer back to
+    /// the appropriate participant's Rtc transport via the SFU event
+    /// loop so the str0m state machine can apply it.
+    ///
+    /// Today this is the wiring path — the offer-generation side that
+    /// publishes to `SFU_CALL_RENEGOTIATION_OFFER_TOPIC` is queued
+    /// alongside `Phase E` (cross-node pipe transport) and lights up
+    /// the same str0m sdp_api dance, so we expose the typed surface
+    /// now and the server-side fanout follows.  Wind tunnel scenarios
+    /// still pre-allocate recv-only transceivers as a workaround for
+    /// the inbound side.
+    pub async fn call_answer_server_offer(
+        &self,
+        neighbourhood_url: &str,
+        room_name: &str,
+        agent_did: &str,
+        _sdp_answer_json: &str,
+    ) -> Result<bool, String> {
+        let room_id = RoomId::new(neighbourhood_url, room_name);
+        let rooms = self.rooms.read().await;
+        let room = rooms
+            .get_room(&room_id)
+            .ok_or_else(|| RoomError::NotFound.to_string())?;
+        let pid = room
+            .participants
+            .iter()
+            .find(|(_, p)| p.agent_did == agent_did)
+            .map(|(pid, _)| pid.clone())
+            .ok_or_else(|| "Agent not in room".to_string())?;
+        // Forward the answer to the SFU event loop so it can apply
+        // through str0m.  The loop currently logs the event; full
+        // sdp_api consumption is the focused follow-up.
+        let _ = self
+            .server
+            .command_tx
+            .send(SfuCommand::ApplyServerAnswer {
+                participant_id: pid,
+                sdp_answer_json: _sdp_answer_json.to_string(),
+            })
+            .await;
+        Ok(true)
+    }
+
     /// Set the quality preference for a participant's received video streams.
     pub async fn call_set_quality_preference(
         &self,

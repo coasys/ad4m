@@ -20,6 +20,23 @@ export interface IceServer {
     credential?: string
 }
 
+/**
+ * Server-pushed SDP offer.  When a new peer joins a room the SFU
+ * regenerates an offer per existing participant with the new outbound
+ * tracks added.  Clients listen for the `sfu-call-renegotiation-offer`
+ * event over the events WS, apply the SDP as a remote description,
+ * generate an answer, and post the answer through
+ * `sfu.callAnswerServerOffer`.
+ */
+export interface SfuCallRenegotiationOffer {
+    /** DID of the participant this offer is addressed to. */
+    targetDid: string
+    neighbourhoodUrl: string
+    roomName: string
+    /** JSON-encoded `RTCSessionDescriptionInit`. */
+    sdpOffer: string
+}
+
 export interface SfuConfig {
     /** `"mesh"` | `"designated"` | `"gateway"` | `"cascaded"` */
     mode: SfuMode

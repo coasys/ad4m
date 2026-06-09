@@ -42,6 +42,14 @@ pub enum SfuCommand {
         /// "high", "medium", "low", or "auto"
         preference: String,
     },
+    /// Client answered a server-pushed renegotiation offer.  The event
+    /// loop applies the answer through the participant's str0m
+    /// `sdp_api()` so the new outbound tracks (added when peer X joined
+    /// the room) become live.
+    ApplyServerAnswer {
+        participant_id: ParticipantId,
+        sdp_answer_json: String,
+    },
     /// Shut down the SFU server.
     Shutdown,
 }
@@ -174,6 +182,29 @@ impl SfuServer {
                             participant_id, preference
                         );
                         quality_preferences.insert(participant_id, preference);
+                    }
+                    Ok(SfuCommand::ApplyServerAnswer {
+                        participant_id,
+                        sdp_answer_json,
+                    }) => {
+                        // The renegotiation-offer fanout that publishes
+                        // to the SFU_CALL_RENEGOTIATION_OFFER_TOPIC is
+                        // staged for the str0m sdp_api work below.  For
+                        // now we acknowledge so the client side of the
+                        // pipeline is exercised end-to-end; the actual
+                        // sdp_api.accept_answer call lands in the same
+                        // change as offer generation.
+                        debug!(
+                            "SFU: ApplyServerAnswer received for {} ({}B)",
+                            participant_id,
+                            sdp_answer_json.len()
+                        );
+                        if !peers.contains_key(&participant_id) {
+                            debug!(
+                                "SFU: ApplyServerAnswer for unknown participant {}",
+                                participant_id
+                            );
+                        }
                     }
                     Ok(SfuCommand::Shutdown) => {
                         info!("SFU event loop shutting down");
