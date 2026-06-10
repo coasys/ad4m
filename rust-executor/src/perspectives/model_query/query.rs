@@ -349,6 +349,24 @@ async fn resolve_language_transforms(
                 Value::String(uri) if !uri.starts_with("literal:") => {
                     match crate::languages::LanguageController::parse_expr_url(uri) {
                         Ok((lang, expr_addr)) => {
+                            // Ensure the language is loaded before attempting to fetch the
+                            // expression. The runtimes map only contains languages that have
+                            // been explicitly installed/loaded; languages referenced via
+                            // resolveLanguage (e.g. FILE_STORAGE_LANGUAGE) may not be
+                            // loaded yet at query time.
+                            if !controller.is_language_loaded(&lang).await {
+                                if let Err(e) = controller.language_by_ref(&lang).await {
+                                    log::warn!(
+                                        "resolve_language_transforms: failed to load language {} \
+                                         for property '{}': {}",
+                                        lang,
+                                        prop.name,
+                                        e
+                                    );
+                                    instance[&prop.name] = current;
+                                    continue;
+                                }
+                            }
                             match controller.get_expression(&lang, &expr_addr).await {
                                 Ok(Some(expr_json)) => {
                                     let data =
