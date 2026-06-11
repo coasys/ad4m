@@ -160,6 +160,83 @@ fn status_str(status: &Option<LinkStatus>) -> &'static str {
     }
 }
 
+/// Back-compat SPARQL function for legacy notification triggers and SDNA
+/// queries that still call `<ad4m://fn/parse_literal>(?target)`.
+///
+/// The typed-literal storage layer means callers can usually just use
+/// `STR(?target)` for `xsd:string` / `xsd:integer` / `xsd:decimal` /
+/// `xsd:boolean` values directly, but signed-expression envelopes still
+/// land in the store as `"{author,timestamp,data,proof}"^^ad4m:json` and
+/// `STR` returns the full JSON rather than the inner `data` field. The
+/// shim preserves that envelope-unwrapping behaviour for queries that
+/// depend on it (e.g. Flux mention detection), and also keeps the old
+/// `literal:string:` / `literal:json:` NamedNode forms working in case
+/// any pre-migration link store still feeds them through.
+fn parse_literal_fn(args: &[Term]) -> Option<Term> {
+    use percent_encoding::percent_decode_str;
+    if args.len() != 1 {
+        return None;
+    }
+    match &args[0] {
+        Term::Literal(l) => {
+            let dt = l.datatype().as_str();
+            if dt == ONT_JSON {
+                if let Ok(json_val) = serde_json::from_str::<Value>(l.value()) {
+                    if let Some(data) = json_val.get("data") {
+                        let data_str = match data {
+                            Value::String(s) => s.clone(),
+                            other => serde_json::to_string(other).unwrap_or_default(),
+                        };
+                        return Some(Literal::new_simple_literal(data_str).into());
+                    }
+                }
+                return Some(Literal::new_simple_literal(l.value()).into());
+            }
+            // xsd:string / xsd:integer / xsd:decimal / xsd:boolean — the
+            // lexical form is already the parsed value.
+            Some(Literal::new_simple_literal(l.value()).into())
+        }
+        Term::NamedNode(n) => {
+            let val = n.as_str();
+            let body = match val.strip_prefix("literal:") {
+                Some(b) => b,
+                None => return Some(args[0].clone()),
+            };
+            if let Some(rest) = body.strip_prefix("string:") {
+                let decoded = percent_decode_str(rest)
+                    .decode_utf8()
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| rest.to_string());
+                return Some(Literal::new_simple_literal(decoded).into());
+            }
+            if let Some(rest) = body.strip_prefix("number:") {
+                return Some(Literal::new_simple_literal(rest).into());
+            }
+            if let Some(rest) = body.strip_prefix("boolean:") {
+                return Some(Literal::new_simple_literal(rest).into());
+            }
+            if let Some(rest) = body.strip_prefix("json:") {
+                let decoded = percent_decode_str(rest)
+                    .decode_utf8()
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| rest.to_string());
+                if let Ok(json_val) = serde_json::from_str::<Value>(&decoded) {
+                    if let Some(data) = json_val.get("data") {
+                        let data_str = match data {
+                            Value::String(s) => s.clone(),
+                            other => serde_json::to_string(other).unwrap_or(decoded.clone()),
+                        };
+                        return Some(Literal::new_simple_literal(data_str).into());
+                    }
+                }
+                return Some(Literal::new_simple_literal(decoded).into());
+            }
+            Some(args[0].clone())
+        }
+        _ => Some(args[0].clone()),
+    }
+}
+
 fn strip_html_fn(args: &[Term]) -> Option<Term> {
     if args.len() != 1 {
         return None;
@@ -805,10 +882,15 @@ impl SparqlStore {
     }
 
     fn sparql_evaluator(&self) -> SparqlEvaluator {
-        SparqlEvaluator::new().with_custom_function(
-            NamedNode::new_unchecked("ad4m://fn/strip_html"),
-            strip_html_fn,
-        )
+        SparqlEvaluator::new()
+            .with_custom_function(
+                NamedNode::new_unchecked("ad4m://fn/strip_html"),
+                strip_html_fn,
+            )
+            .with_custom_function(
+                NamedNode::new_unchecked("ad4m://fn/parse_literal"),
+                parse_literal_fn,
+            )
     }
 
     fn link_from_solution(
