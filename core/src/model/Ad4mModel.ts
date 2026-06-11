@@ -1091,7 +1091,18 @@ export class Ad4mModel {
     }
 
     if (resolveLanguage) {
-      value = await this._perspective.createExpression(value, resolveLanguage);
+      // For the built-in "literal" resolver we produce the deterministic
+      // `literal:string:` / `:number:` / `:boolean:` / `:json:` URL directly
+      // instead of round-tripping through `createExpression`. The Rust
+      // mirror of this bypass lives in `resolve_property_value` — without
+      // both sides, the same value would land as `literal:json:<signed
+      // envelope>` on writes through this path, defeating the indexed
+      // equality lookups the WHERE builders now use.
+      if (resolveLanguage === "literal") {
+        value = Literal.from(value).toUrl();
+      } else {
+        value = await this._perspective.createExpression(value, resolveLanguage);
+      }
     }
 
     await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value }], batchId);
