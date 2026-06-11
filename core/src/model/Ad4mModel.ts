@@ -438,7 +438,16 @@ export class Ad4mModel {
    * ```
    */
   constructor(perspective: PerspectiveProxy, baseExpression?: string) {
-    this._baseExpression = baseExpression ? baseExpression : Literal.from(makeRandomId(24)).toUrl();
+    // Use a dedicated `ad4m://obj/<id>` scheme for auto-generated
+    // baseExpressions instead of `Literal.from(...).toUrl()`'s
+    // `literal:string:<id>`. After typed-literal storage lands, the storage
+    // layer translates any `literal:string:X` target into a typed
+    // `"X"^^xsd:string` literal — which is correct for property values but
+    // wrong for relation targets (which must remain NamedNode IRIs). Using
+    // a distinct scheme keeps auto-generated instance IDs unambiguously
+    // IRIs, so relation links like `<post> --has_comment--> <comment-id>`
+    // round-trip correctly through the SPARQL store.
+    this._baseExpression = baseExpression ? baseExpression : `ad4m://obj/${makeRandomId(24)}`;
     this._perspective = perspective;
   }
 
