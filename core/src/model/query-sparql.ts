@@ -91,8 +91,14 @@ function looksLikeUri(value: string): boolean {
  * Convert a JS value to its literal: IRI form, matching how the Rust executor
  * stores property values that don't have a resolveLanguage set.
  * Strings that already look like URIs are returned as-is.
+ *
+ * Exported so write-side helpers (e.g. `Ad4mModel.setProperty`'s literal
+ * resolveLanguage bypass) can keep their on-disk form aligned with what
+ * `queryToSPARQL()` filters against — otherwise the same value can be
+ * stored as `<literal:string:https%3A...>` from one path while WHERE
+ * builders probe `<https://example.com>` from the other.
  */
-function valueToLiteralIri(value: any): string {
+export function valueToLiteralIri(value: any): string {
   if (typeof value === 'string') {
     if (looksLikeUri(value)) return value;
     return Literal.from(value).toUrl();
