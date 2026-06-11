@@ -1235,8 +1235,30 @@ impl LanguageController {
             None => return Ok(None),
         };
 
-        // Create temp directory for DNA templating operations
-        let temp_templating_path = std::env::temp_dir().join(source_language_hash);
+        // Create a unique temp directory for this templating call.
+        //
+        // Earlier this function used `temp_dir().join(source_language_hash)`,
+        // which meant every concurrent template-and-publish of the same
+        // source language hit the same `/tmp/<hash>/` path. Two integration
+        // tests in `tests/js/tests/neighbourhood.ts` ("can be created by
+        // Alice and joined by Bob" and "shared link created by Alice
+        // received by Bob") each call `applyTemplateAndPublish` against the
+        // shared `perspective-diff-sync` hash, and CI workers run them back-
+        // to-back. When a second call started while the first was still in
+        // the unpack→edit→pack pipeline, the second call's
+        // `fs::remove_dir_all` at the top wiped the first's working
+        // directory mid-process, and the first's eventual `pack_happ` blew
+        // up with `'/tmp/<hash>/happ/happ.yaml': No such file or directory`.
+        // That failure has been a long-standing flake on the
+        // `integration-tests-js` job.
+        //
+        // A per-call UUID suffix keeps each invocation on its own dir, so
+        // concurrent templates can't race on the same path. The cleanup at
+        // the end of the function still removes the per-call dir, and an
+        // earlier-failing call leaves a uniquely-named orphan rather than
+        // poisoning the next one.
+        let temp_templating_path =
+            std::env::temp_dir().join(format!("{}-{}", source_language_hash, uuid::Uuid::new_v4()));
         if temp_templating_path.exists() {
             let _ = fs::remove_dir_all(&temp_templating_path);
         }
