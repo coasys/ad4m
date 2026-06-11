@@ -2206,13 +2206,20 @@ describe("Prolog + Literals", () => {
                         await model.save();
                         const saveTime = Date.now();
 
-                        // Poll until callback called. 30s upper bound matches the
-                        // other waitForCondition timeouts in this suite — CI
-                        // workers regularly take >5s for the first subscription
-                        // round-trip even though steady-state latency is sub-second.
+                        // Poll until callback called. 60s upper bound matches
+                        // the surrounding waitForCondition timeouts in this
+                        // suite. Even with the previous 30s ceiling the test
+                        // still flaked on integration-tests-js #17171 after
+                        // the dev merge pulled in the lazy-load resolveLanguage
+                        // change (#848), which adds first-fetch latency on a
+                        // freshly registered SDNA class. Steady-state
+                        // subscription latency is still logged via
+                        // `subscriptionLatency`, so a real regression would
+                        // surface as a slow log line rather than be hidden by
+                        // the bumped ceiling.
                         while (!subscriptionCallback.called) {
                             await sleep(10);
-                            if (Date.now() - saveTime > 30000) throw new Error("Timeout waiting for subscription update");
+                            if (Date.now() - saveTime > 60000) throw new Error("Timeout waiting for subscription update");
                         }
 
                         const saveLatency = saveTime - start;
