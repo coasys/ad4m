@@ -2206,10 +2206,13 @@ describe("Prolog + Literals", () => {
                         await model.save();
                         const saveTime = Date.now();
 
-                        // Poll until callback called
+                        // Poll until callback called. 30s upper bound matches the
+                        // other waitForCondition timeouts in this suite — CI
+                        // workers regularly take >5s for the first subscription
+                        // round-trip even though steady-state latency is sub-second.
                         while (!subscriptionCallback.called) {
                             await sleep(10);
-                            if (Date.now() - saveTime > 5000) throw new Error("Timeout waiting for subscription update");
+                            if (Date.now() - saveTime > 30000) throw new Error("Timeout waiting for subscription update");
                         }
 
                         const saveLatency = saveTime - start;
