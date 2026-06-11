@@ -1140,6 +1140,77 @@ impl SparqlStore {
             .map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
     }
 
+    /// Execute a read-only SPARQL `CONSTRUCT` query and return triples as
+    /// `(subject, predicate, object)` wire-format strings.
+    ///
+    /// Subjects and predicates are returned as bare IRIs (no angle
+    /// brackets); object terms are passed through
+    /// [`storage_term_to_target_string`] so typed RDF literals round-trip
+    /// back to the `literal:string:foo` / `literal:number:42` etc. form
+    /// the SDK and the `model_query` hydrator expect.  This is the entry
+    /// point the CONSTRUCT-based subgraph-hydration path
+    /// (`model_query/construct_builder.rs`) uses to materialise the
+    /// entire query subgraph in one round trip.
+    ///
+    /// Boolean and Solutions results are rejected — this method is
+    /// CONSTRUCT-shaped only.
+    pub fn query_triples(
+        &self,
+        query_string: &str,
+    ) -> Result<Vec<(String, String, String)>, Error> {
+        validate_readonly_query(query_string)?;
+
+        let results = self
+            .sparql_evaluator()
+            .parse_query(query_string)
+            .map_err(|e| anyhow!("Failed to parse SPARQL CONSTRUCT query: {}", e))?
+            .on_store(&self.store)
+            .execute()
+            .map_err(|e| {
+                let truncated = &query_string[..query_string.len().min(500)];
+                anyhow!("SPARQL CONSTRUCT failed: {}\nQuery: {}", e, truncated)
+            })?;
+
+        let triples = match results {
+            QueryResults::Graph(g) => g,
+            QueryResults::Solutions(_) => {
+                return Err(anyhow!(
+                    "query_triples expected a CONSTRUCT/DESCRIBE query but got SELECT/ASK Solutions"
+                ));
+            }
+            QueryResults::Boolean(_) => {
+                return Err(anyhow!(
+                    "query_triples expected a CONSTRUCT/DESCRIBE query but got ASK Boolean"
+                ));
+            }
+        };
+
+        let mut out: Vec<(String, String, String)> = Vec::new();
+        for triple_result in triples {
+            let triple = triple_result?;
+            let subject = match triple.subject {
+                NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
+                NamedOrBlankNode::BlankNode(b) => format!("_:{}", b.as_str()),
+            };
+            let predicate = triple.predicate.as_str().to_string();
+            let object = storage_term_to_target_string(&triple.object);
+            out.push((subject, predicate, object));
+        }
+        Ok(out)
+    }
+
+    /// Async wrapper around [`query_triples`](Self::query_triples).
+    pub async fn query_triples_async(
+        &self,
+        query_string: &str,
+    ) -> Result<Vec<(String, String, String)>, Error> {
+        let store = self.clone();
+        let query = query_string.to_string();
+        tokio::task::spawn_blocking(move || store.query_triples(&query))
+            .await
+            .map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
+    }
+
     /// Async wrapper around `query()` that runs the blocking SPARQL operation
     /// on a dedicated thread pool to avoid blocking the tokio runtime.
     pub async fn query_async(&self, query_string: &str) -> Result<String, Error> {

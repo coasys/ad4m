@@ -6,6 +6,7 @@
 //! [`ShapeResolver`] that recursive include resolution uses to look up
 //! target-class shapes (themselves cached).
 
+use super::construct_builder;
 use super::eval_transform::eval_transform;
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
@@ -93,6 +94,33 @@ pub(super) async fn execute_model_query_inner(
             return Ok(ModelQueryResult {
                 instances: vec![],
                 total_count: count,
+            });
+        }
+    }
+
+    // CONSTRUCT-based subgraph hydration fast-path.  When the caller opts
+    // in via `useConstruct: true` and the query shape is one
+    // `construct_builder::can_use_construct` accepts (see that function
+    // for the disqualifier list), materialise the entire subgraph in
+    // one round trip and reconstruct the JSON tree in Rust.
+    //
+    // This is audit item **I** from
+    // `flux/docs/sparql-to-ad4m-model-migration.md` — the "perfectly
+    // elegant Ad4mModel → SPARQL pipeline" endpoint.  Round-trip count
+    // collapses to 1 regardless of include depth.  When the fast-path
+    // doesn't fit, falls through silently to the legacy recursive
+    // pipeline (same observable behaviour, slower wall-clock).
+    if construct_builder::can_use_construct(query_input, shape) {
+        if let Some(sparql) =
+            construct_builder::build_construct_sparql(shape, query_input, resolver)?
+        {
+            let triples = store.query_triples_async(&sparql).await?;
+            let instances =
+                construct_builder::walk_graph_to_instances(triples, shape, query_input, resolver)?;
+            let total_count = instances.len();
+            return Ok(ModelQueryResult {
+                instances,
+                total_count,
             });
         }
     }
