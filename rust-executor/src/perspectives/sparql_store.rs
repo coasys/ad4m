@@ -1137,7 +1137,7 @@ impl SparqlStore {
 
         log::info!("Migrating signed-envelope literal targets to plain literal form");
 
-        use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
+        use percent_encoding::percent_decode_str;
 
         let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
         let ont_author = NamedNodeRef::new_unchecked(ONT_AUTHOR);
@@ -1218,24 +1218,14 @@ impl SparqlStore {
                 _ => continue, // Not a signed envelope, leave as-is
             };
 
-            // Encode the data field as a plain literal
-            let new_target = match &data {
-                serde_json::Value::String(s) => {
-                    let encoded = utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();
-                    format!("literal:string:{}", encoded)
-                }
-                serde_json::Value::Number(n) => {
-                    format!("literal:number:{}", n)
-                }
-                serde_json::Value::Bool(b) => {
-                    format!("literal:boolean:{}", b)
-                }
-                _ => {
-                    let json_str = serde_json::to_string(&data).unwrap_or_default();
-                    let encoded = utf8_percent_encode(&json_str, NON_ALPHANUMERIC).to_string();
-                    format!("literal:json:{}", encoded)
-                }
-            };
+            // Encode the inner `data` field as a plain literal IRI using the
+            // same canonical encoder that fresh writes flow through
+            // (`perspective_instance::link_target_for_value` → `literal_encode`).
+            // Hand-rolling the format here used to drift (e.g. integer-shaped
+            // floats landed as `literal:number:1.0` while the WHERE builders
+            // probed `literal:number:1`), causing migrated rows to silently
+            // miss equality filters.
+            let new_target = format!("literal:{}", crate::languages::literal_encode(&data));
 
             if new_target == old_target {
                 continue; // No change needed

@@ -67,14 +67,16 @@ pub(super) fn looks_like_absolute_iri(s: &str) -> bool {
 }
 
 /// Validate a value for use inside an IRI `<…>`.  Rejects characters that
-/// would break or inject into a SPARQL IRI token.
+/// would break or inject into a SPARQL IRI token, including all control and
+/// whitespace characters (e.g. `\n`, `\r`, `\t`, U+00A0) which `validate_iri`
+/// previously let through and which would emit malformed `<…>` IRIREFs.
 pub(super) fn validate_iri(s: &str) -> Result<&str, Error> {
-    if s.contains('>')
+    if s.chars().any(|c| c.is_control() || c.is_whitespace())
+        || s.contains('>')
         || s.contains('<')
         || s.contains('{')
         || s.contains('}')
         || s.contains('"')
-        || s.contains(' ')
     {
         return Err(anyhow!("Invalid IRI component: '{}'", s));
     }

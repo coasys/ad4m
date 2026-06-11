@@ -119,6 +119,13 @@ pub fn initialize_from_db() {
                 Err(e) => log::warn!("Reifier migration for {}: {}", handle_clone.uuid, e),
             }
 
+            // Signed-envelope → plain-literal migration. The new indexed WHERE
+            // path probes `literal:*` targets directly, so if this migration
+            // fails midway through the perspective is left with a mix of legacy
+            // signed-envelope targets and new plain-literal targets — equality
+            // filters would then silently miss the unmigrated rows. Skip
+            // initialising the perspective on error so the next executor restart
+            // can retry the migration cleanly rather than serving stale results.
             match p.sparql_store.migrate_signed_envelopes_to_plain_literals() {
                 Ok(count) if count > 0 => {
                     log::info!(
@@ -128,7 +135,17 @@ pub fn initialize_from_db() {
                     );
                 }
                 Ok(_) => {} // Already migrated or nothing to migrate
-                Err(e) => log::warn!("Signed-envelope migration for {}: {}", handle_clone.uuid, e),
+                Err(e) => {
+                    log::error!(
+                        "Signed-envelope migration failed for {}: {} — \
+                         skipping perspective init to avoid mixing legacy and \
+                         migrated link targets under the new indexed WHERE path. \
+                         Will retry on next executor restart.",
+                        handle_clone.uuid,
+                        e
+                    );
+                    return;
+                }
             }
 
             // Rebuild SPARQL index from existing links

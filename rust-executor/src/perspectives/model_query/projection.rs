@@ -290,9 +290,10 @@ pub(super) fn build_projection_where_patterns(
     // Resolve the target class's shape through the perspective cache so we
     // can translate property names in the projection's where-clause into the
     // predicate IRIs they map to in the store. The second tuple element
-    // records whether each property carries `resolve_language` so the
-    // condition branches below know to compare against the encoded
-    // `literal:*:` IRI form instead of going through `fn/parse_literal`.
+    // records whether each property carries `resolveLanguage: "literal"` —
+    // only that resolver stores deterministic `literal:*:` targets that we
+    // can probe directly. Other resolvers wrap values in author-signed
+    // expression IRIs, so we fall back to `fn/parse_literal` for those.
     let (pred_lookup, resolution_failed) = if let Some(ref target_name) = proj.target_class_name {
         match resolver.get_shape(target_name) {
             Ok(target_shape) => {
@@ -301,7 +302,10 @@ pub(super) fn build_projection_where_patterns(
                     if !p.predicate.is_empty() {
                         map.insert(
                             p.name.clone(),
-                            (p.predicate.clone(), p.resolve_language.is_some()),
+                            (
+                                p.predicate.clone(),
+                                p.resolve_language.as_deref() == Some("literal"),
+                            ),
                         );
                     }
                 }

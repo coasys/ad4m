@@ -4467,17 +4467,30 @@ fn bench_indexed_iri_vs_fn_parse_literal_filter() {
     let runs = 5;
     let mut indexed_total = std::time::Duration::ZERO;
     let mut filtered_total = std::time::Duration::ZERO;
+    let expected = format!("test://row/{needle_idx}");
 
     for _ in 0..runs {
         let start = Instant::now();
         let r = store.query(&indexed).unwrap();
         indexed_total += start.elapsed();
-        assert!(r.contains(&format!("test://row/{needle_idx}")));
+        let rows: Vec<Value> = serde_json::from_str(&r).unwrap();
+        assert_eq!(rows.len(), 1, "indexed query must return exactly 1 row");
+        assert_eq!(
+            rows[0]["source"].as_str(),
+            Some(expected.as_str()),
+            "indexed query must return only the needle source",
+        );
 
         let start = Instant::now();
         let r = store.query(&filtered).unwrap();
         filtered_total += start.elapsed();
-        assert!(r.contains(&format!("test://row/{needle_idx}")));
+        let rows: Vec<Value> = serde_json::from_str(&r).unwrap();
+        assert_eq!(rows.len(), 1, "filtered query must return exactly 1 row");
+        assert_eq!(
+            rows[0]["source"].as_str(),
+            Some(expected.as_str()),
+            "filtered query must return only the needle source",
+        );
     }
 
     let indexed_us = (indexed_total.as_secs_f64() * 1_000_000.0) / runs as f64;
