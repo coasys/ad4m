@@ -970,7 +970,25 @@ impl SparqlStore {
 
     /// Execute an arbitrary read-only SPARQL SELECT query, returning a JSON string.
     /// All data lives in the default graph — no union graph needed.
+    ///
+    /// Internally delegates to [`query_values`](Self::query_values) and
+    /// serialises the resulting `Vec<Value>` once.  Hot paths that don't
+    /// need the string form should call `query_values` directly to skip
+    /// the round trip.
     pub fn query(&self, query_string: &str) -> Result<String, Error> {
+        let rows = self.query_values(query_string)?;
+        Ok(serde_json::to_string(&rows)?)
+    }
+
+    /// Execute a read-only SPARQL query and return its solutions as a
+    /// `Vec<serde_json::Value>` directly, without the
+    /// `Solutions → JSON string → from_str → Vec<Value>` round trip the
+    /// historical [`query`](Self::query) method incurred.
+    ///
+    /// Used by the model-query pipeline to skip a serialise/parse round
+    /// trip per SPARQL call.  Boolean and Graph results are wrapped in a
+    /// one-row Vec to keep the return shape uniform with SELECT.
+    pub fn query_values(&self, query_string: &str) -> Result<Vec<Value>, Error> {
         validate_readonly_query(query_string)?;
 
         let results = self
@@ -1026,11 +1044,11 @@ impl SparqlStore {
                     }
                     rows.push(Value::Object(row));
                 }
-                Ok(serde_json::to_string(&rows)?)
+                Ok(rows)
             }
-            QueryResults::Boolean(b) => Ok(serde_json::to_string(&b)?),
+            QueryResults::Boolean(b) => Ok(vec![Value::Bool(b)]),
             QueryResults::Graph(triples) => {
-                let mut rows: Vec<serde_json::Map<String, Value>> = Vec::new();
+                let mut rows: Vec<Value> = Vec::new();
                 for triple_result in triples {
                     let triple = triple_result?;
                     let mut row = serde_json::Map::new();
@@ -1046,9 +1064,9 @@ impl SparqlStore {
                         "object".to_string(),
                         Value::String(triple.object.to_string()),
                     );
-                    rows.push(row);
+                    rows.push(Value::Object(row));
                 }
-                Ok(serde_json::to_string(&rows)?)
+                Ok(rows)
             }
         }
     }
@@ -1108,6 +1126,18 @@ impl SparqlStore {
             ))?;
         }
         Ok(())
+    }
+
+    /// Async wrapper around [`query_values`](Self::query_values) — the
+    /// preferred async entry point for callers that want a `Vec<Value>`
+    /// directly.  Saves a JSON serialise + parse round trip per call vs
+    /// chaining the legacy `query_async()` through `from_str`.
+    pub async fn query_values_async(&self, query_string: &str) -> Result<Vec<Value>, Error> {
+        let store = self.clone();
+        let query = query_string.to_string();
+        tokio::task::spawn_blocking(move || store.query_values(&query))
+            .await
+            .map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
     }
 
     /// Async wrapper around `query()` that runs the blocking SPARQL operation

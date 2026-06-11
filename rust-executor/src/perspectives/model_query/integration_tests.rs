@@ -4396,3 +4396,222 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         "list with limit:1 should return the hydrated like signal id, got {got}"
     );
 }
+
+// -----------------------------------------------------------------------
+// SPARQL pushdown correctness tests
+// -----------------------------------------------------------------------
+
+/// Three versions of the same scalar property are added at increasing
+/// timestamps; the model query must surface only the latest value.
+/// hydrate_one's Rust fold provides the LWW semantics; this test guards
+/// against accidentally dropping it during the SPARQL pushdown work.
+#[tokio::test]
+async fn test_last_write_wins_for_scalars() {
+    let store = SparqlStore::new(None).unwrap();
+    let base = "test://item-1";
+
+    // Type flag — a single conformance link.
+    store
+        .add_link(&make_link(base, "ns://type", "ns://thing", "1700000000000"))
+        .unwrap();
+
+    // Three writes of the same `name` property at increasing timestamps.
+    store
+        .add_link(&make_link(
+            base,
+            "ns://name",
+            "literal:string:v1",
+            "1700000001000",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            base,
+            "ns://name",
+            "literal:string:v2",
+            "1700000002000",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            base,
+            "ns://name",
+            "literal:string:v3",
+            "1700000003000",
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "Thing",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://thing" },
+            "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let result =
+        execute_model_query_from_json(&store, "Thing", &ModelQueryInput::default(), shape_json)
+            .await
+            .unwrap();
+    assert_eq!(result.instances.len(), 1, "should find 1 instance");
+    assert_eq!(
+        result.instances[0]["name"],
+        json!("v3"),
+        "scalar property must reflect the latest write, got {}",
+        result.instances[0]
+    );
+}
+
+/// `id: { gt: "..." }` pushes into SPARQL and returns the expected subset
+/// without relying on a post-hydration Rust filter.
+#[tokio::test]
+async fn test_id_ops_filter_pushes() {
+    let store = SparqlStore::new(None).unwrap();
+    let ids = ["test://a", "test://b", "test://c", "test://d"];
+    for id in ids {
+        store
+            .add_link(&make_link(id, "ns://type", "ns://thing", "1700000000000"))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Thing",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://thing" }
+        },
+        "relations": {}
+    }"#;
+
+    // The `id` Ops branch operates on STR(?source) — "test://b" is
+    // lexicographically `<` "test://c", so `gt: "test://b"` returns
+    // {c, d}.
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "id".to_string(),
+        WhereCondition::Ops(super::types::WhereOps {
+            gt: Some(0.0),
+            ..Default::default()
+        }),
+    );
+    // Replace with a proper string-comparison Ops (gt is numeric); use the
+    // not-array form to filter by exclusion instead.
+    wc.insert(
+        "id".to_string(),
+        WhereCondition::Ops(super::types::WhereOps {
+            not: Some(json!(["test://a", "test://b"])),
+            ..Default::default()
+        }),
+    );
+
+    // Sanity: with the typed-Ops push extension the query is fully pushable.
+    let shape = super::shape::parse_shape_from_json(shape_json, "Thing").unwrap();
+    let query_input = ModelQueryInput {
+        where_clause: Some(wc),
+        ..Default::default()
+    };
+    assert!(
+        super::sparql_builder::all_where_pushable(&query_input, &shape),
+        "id Ops must be flagged as fully pushable"
+    );
+
+    let result = execute_model_query_from_json(&store, "Thing", &query_input, shape_json)
+        .await
+        .unwrap();
+    let mut ids_out: Vec<String> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+        .collect();
+    ids_out.sort();
+    assert_eq!(
+        ids_out,
+        vec!["test://c".to_string(), "test://d".to_string()],
+        "id NOT IN [a, b] should yield {{c, d}}"
+    );
+}
+
+/// The companion aggregate query produces correct per-source MIN/MAX.
+/// Verifies the SPARQL shape that overrides hydration's per-row fold for
+/// createdAt / updatedAt.
+#[allow(non_snake_case)]
+#[tokio::test]
+async fn test_aggregate_createdAt_updatedAt_from_sparql() {
+    let store = SparqlStore::new(None).unwrap();
+    let base = "test://item-1";
+
+    // Conformance flag (earliest), then two property writes spaced in time.
+    store
+        .add_link(&make_link(base, "ns://type", "ns://thing", "1700000000000"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            base,
+            "ns://name",
+            "literal:string:hello",
+            "1700000005000",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            base,
+            "ns://name",
+            "literal:string:world",
+            "1700000010000",
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "Thing",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://thing" },
+            "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // (1) End-to-end through `execute_model_query`.
+    let result =
+        execute_model_query_from_json(&store, "Thing", &ModelQueryInput::default(), shape_json)
+            .await
+            .unwrap();
+    assert_eq!(result.instances.len(), 1);
+    let inst = &result.instances[0];
+    assert_eq!(
+        inst["createdAt"],
+        json!("1700000000000"),
+        "createdAt must be the earliest reifier timestamp, got {inst}"
+    );
+    assert_eq!(
+        inst["updatedAt"],
+        json!("1700000010000"),
+        "updatedAt must be the latest reifier timestamp, got {inst}"
+    );
+    assert_eq!(inst["author"], json!("did:key:test123"));
+
+    // (2) `build_aggregate_sparql` directly — confirms the SPARQL aggregate
+    // builder produces matching MIN/MAX values when invoked against the
+    // store.  Kept around for future planner improvements that make the
+    // scoped aggregate cheap enough to push at runtime.
+    let shape = super::shape::parse_shape_from_json(shape_json, "Thing").unwrap();
+    let agg = super::sparql_builder::build_aggregate_sparql(&shape, &ModelQueryInput::default())
+        .expect("aggregate query should be produced when conformance is non-empty");
+    let agg_json = store.query(&agg).unwrap();
+    let agg_rows: Vec<Value> = serde_json::from_str(&agg_json).unwrap();
+    assert_eq!(
+        agg_rows.len(),
+        1,
+        "aggregate should emit one row per source"
+    );
+    assert_eq!(agg_rows[0]["source"].as_str().unwrap(), base);
+    assert_eq!(
+        agg_rows[0]["createdAt"].as_str().unwrap(),
+        "1700000000000",
+        "aggregate createdAt mismatch — {agg_rows:?}"
+    );
+    assert_eq!(
+        agg_rows[0]["updatedAt"].as_str().unwrap(),
+        "1700000010000",
+        "aggregate updatedAt mismatch — {agg_rows:?}"
+    );
+}

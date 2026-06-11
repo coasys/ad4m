@@ -58,8 +58,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         "#
     );
 
-    let result_json = store.query(&query)?;
-    let results: Vec<Value> = serde_json::from_str(&result_json)?;
+    let results = store.query_values(&query)?;
 
     if results.is_empty() {
         return Err(anyhow!(
@@ -113,8 +112,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         "#
     );
 
-    let props_json = store.query(&props_query)?;
-    let prop_results: Vec<Value> = serde_json::from_str(&props_json)?;
+    let prop_results = store.query_values(&props_query)?;
 
     // Property shapes can fan into multiple rows because their `rdf://type`
     // may appear more than once (e.g. both sh:PropertyShape and a marker
@@ -324,8 +322,7 @@ fn initial_value_from_constructor(
         LIMIT 1
         "#
     );
-    let shape_result_json = store.query(&shape_query).ok()?;
-    let shape_rows: Vec<Value> = serde_json::from_str(&shape_result_json).ok()?;
+    let shape_rows = store.query_values(&shape_query).ok()?;
     let shape_uri = shape_rows.first()?["shapeUri"].as_str()?.to_string();
 
     let safe_shape = escape_sparql_string(&shape_uri);
@@ -337,8 +334,7 @@ fn initial_value_from_constructor(
         LIMIT 1
         "#
     );
-    let ctor_result_json = store.query(&ctor_query).ok()?;
-    let ctor_rows: Vec<Value> = serde_json::from_str(&ctor_result_json).ok()?;
+    let ctor_rows = store.query_values(&ctor_query).ok()?;
     let ctor_literal = ctor_rows.first()?["ctor"].as_str()?.to_string();
 
     let ctor_json = decode_literal_string_target(&ctor_literal);

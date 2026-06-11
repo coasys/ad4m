@@ -27,10 +27,23 @@ use crate::perspectives::sparql_store::SparqlStore;
 
 /// Resolve reverse relations (`@BelongsTo`) for all instances in a batch.
 ///
-/// For each `(name, predicate, is_single)` relation, executes a single
-/// batched SPARQL query: `?source <pred> ?target` with `VALUES ?target { ... }`
-/// containing all instance IDs.  The results are attached to each instance
-/// as either a scalar (for `belongsToOne`) or an array (for `belongsToMany`).
+/// All reverse predicates are folded into a single SPARQL round-trip via
+/// `VALUES ?predicate { … }` over the union of relation predicates and
+/// `VALUES ?target { … }` over the instance IRIs:
+///
+/// ```sparql
+/// SELECT ?source ?predicate ?target WHERE {
+///     VALUES ?target { <inst1> <inst2> … }
+///     VALUES ?predicate { <pred1> <pred2> … }
+///     ?source ?predicate ?target .
+/// }
+/// ```
+///
+/// Rust then bins each result row by `?predicate` and attaches the
+/// per-relation source list to each instance (scalar for `belongsToOne`,
+/// array for `belongsToMany`).  Saves `R - 1` round trips for a shape
+/// with R reverse predicates compared with the previous one-query-per-
+/// predicate loop.
 pub fn resolve_reverse_relations(
     store: &SparqlStore,
     instances: &mut [Value],
@@ -50,49 +63,100 @@ pub fn resolve_reverse_relations(
         return Ok(());
     }
 
-    let values_clause = instance_iris
+    let target_values = instance_iris
         .iter()
         .map(|id| format!("<{id}>"))
         .collect::<Vec<_>>()
         .join(" ");
 
+    // Map IRI-validated predicate → list of (rel_name, is_single).  A single
+    // predicate may back multiple relation names (polymorphic-on-predicate),
+    // so the same row gets fanned out to all matching relations.
+    let mut predicate_to_relations: HashMap<String, Vec<(String, bool)>> = HashMap::new();
+    let mut safe_predicate_iris: Vec<String> = Vec::new();
+    let mut all_relation_names: Vec<String> = Vec::new();
     for (rel_name, predicate, is_single) in relations {
-        let safe_pred = match validate_iri(predicate) {
-            Ok(p) => p,
+        all_relation_names.push(rel_name.clone());
+        match validate_iri(predicate) {
+            Ok(safe) => {
+                let safe = safe.to_string();
+                if !predicate_to_relations.contains_key(&safe) {
+                    safe_predicate_iris.push(safe.clone());
+                }
+                predicate_to_relations
+                    .entry(safe)
+                    .or_default()
+                    .push((rel_name.clone(), *is_single));
+            }
             Err(_) => continue,
-        };
+        }
+    }
+
+    let mut by_relation: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+    for rel_name in &all_relation_names {
+        by_relation.insert(rel_name.clone(), HashMap::new());
+    }
+
+    if !safe_predicate_iris.is_empty() {
+        let predicate_values = safe_predicate_iris
+            .iter()
+            .map(|p| format!("<{p}>"))
+            .collect::<Vec<_>>()
+            .join(" ");
 
         let sparql = format!(
-            "SELECT ?source ?target WHERE {{ VALUES ?target {{ {} }} ?source <{safe_pred}> ?target . }}",
-            values_clause
+            "SELECT ?source ?predicate ?target WHERE {{ \
+             VALUES ?target {{ {target_values} }} \
+             VALUES ?predicate {{ {predicate_values} }} \
+             ?source ?predicate ?target . }}"
         );
-        let result_json = store.query(&sparql)?;
-        let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
-        let mut target_to_sources: HashMap<String, Vec<String>> = HashMap::new();
+        let rows = store.query_values(&sparql)?;
+
         for row in &rows {
-            let source = row["source"].as_str().unwrap_or("");
-            let target = row["target"].as_str().unwrap_or("");
-            if !source.is_empty() && !target.is_empty() {
-                target_to_sources
-                    .entry(target.to_string())
-                    .or_default()
-                    .push(source.to_string());
+            let source = match row["source"].as_str() {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => continue,
+            };
+            let predicate = match row["predicate"].as_str() {
+                Some(p) if !p.is_empty() => p.to_string(),
+                _ => continue,
+            };
+            let target = match row["target"].as_str() {
+                Some(t) if !t.is_empty() => t.to_string(),
+                _ => continue,
+            };
+            if let Some(rels) = predicate_to_relations.get(&predicate) {
+                for (rel_name, _) in rels {
+                    by_relation
+                        .entry(rel_name.clone())
+                        .or_default()
+                        .entry(target.clone())
+                        .or_default()
+                        .push(source.clone());
+                }
             }
         }
+    }
 
-        for inst in instances.iter_mut() {
-            let id = match inst["id"].as_str() {
-                Some(id) => id,
-                None => continue,
-            };
+    let rel_is_single: HashMap<String, bool> =
+        relations.iter().map(|(n, _, s)| (n.clone(), *s)).collect();
 
-            let source_ids: Vec<Value> = target_to_sources
-                .get(id)
+    for inst in instances.iter_mut() {
+        let id = match inst["id"].as_str() {
+            Some(id) => id.to_string(),
+            None => continue,
+        };
+
+        for rel_name in &all_relation_names {
+            let source_ids: Vec<Value> = by_relation
+                .get(rel_name)
+                .and_then(|map| map.get(&id))
                 .map(|sources| sources.iter().map(|s| Value::String(s.clone())).collect())
                 .unwrap_or_default();
 
-            if *is_single {
+            let is_single = rel_is_single.get(rel_name).copied().unwrap_or(false);
+            if is_single {
                 let val = source_ids.first().cloned().unwrap_or(Value::Null);
                 inst.as_object_mut()
                     .map(|obj| obj.insert(rel_name.clone(), val));
@@ -294,8 +358,7 @@ async fn resolve_reverse_include(
     let sparql = format!(
         "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . FILTER(?target IN ({id_list})) }}"
     );
-    let result_json = store.query(&sparql)?;
-    let rows: Vec<Value> = serde_json::from_str(&result_json)?;
+    let rows = store.query_values(&sparql)?;
 
     let mut sources_by_target: HashMap<String, Vec<String>> = HashMap::new();
     for row in &rows {
