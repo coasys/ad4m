@@ -359,8 +359,13 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("can constrain collection entries through 'where' clause", async () => {
-                    let root = Literal.from("Collection where test").toUrl()
-                    let messageEntry = Literal.from("test message").toUrl()
+                    // IDs use a dedicated `ad4m://test/` scheme so that the
+                    // typed-literal storage layer keeps them as NamedNode IRIs
+                    // — `literal:string:X` URIs would otherwise be stripped to
+                    // `"X"^^xsd:string` typed literals, which can't be subjects
+                    // for the subsequent `?target <type> <…>` conformance probe.
+                    let root = "ad4m://test/collection-where-test"
+                    let messageEntry = "ad4m://test/collection-where-test-msg"
                     
                     // Create todo with entries already set
                     let todo = new Todo(perspective!, root)
@@ -602,11 +607,15 @@ describe("Prolog + Literals", () => {
                     // Wait for SHACL metadata to be indexed
                     await sleep(500);
 
-                    let root = Literal.from("Active record SPARQL condition test").toUrl();
+                    // See note on the SPARQL collection-where test above —
+                    // use a NamedNode-friendly `ad4m://test/` ID scheme so the
+                    // typed-literal storage doesn't strip these to xsd:string
+                    // literals when they appear as link targets.
+                    let root = "ad4m://test/sparql-condition-root";
                     const recipe = new RecipeWithSparqlFilter(perspective!, root);
 
-                    let entry1 = Literal.from("entry with ingredient").toUrl();
-                    let entry2 = Literal.from("entry without ingredient").toUrl();
+                    let entry1 = "ad4m://test/sparql-condition-entry1";
+                    let entry2 = "ad4m://test/sparql-condition-entry2";
 
                     recipe.entries = [entry1, entry2];
                     recipe.name = "Condition test";
@@ -2813,10 +2822,14 @@ describe("Prolog + Literals", () => {
                 });
 
                 it("should filter collection by type with class reference", async () => {
-                    const articleRoot = Literal.from("Article for isInstance test").toUrl();
-                    const validComment1 = Literal.from("Valid comment 1").toUrl();
-                    const validComment2 = Literal.from("Valid comment 2").toUrl();
-                    const invalidItem = Literal.from("Invalid item").toUrl();
+                    // See note above — IDs use `ad4m://test/` so the
+                    // typed-literal storage doesn't turn link targets into
+                    // xsd:string literals that can't be subjects under the
+                    // type-filter conformance probe.
+                    const articleRoot = "ad4m://test/typefilter-article-class-ref";
+                    const validComment1 = "ad4m://test/typefilter-valid-comment-1";
+                    const validComment2 = "ad4m://test/typefilter-valid-comment-2";
+                    const invalidItem = "ad4m://test/typefilter-invalid-item";
 
                     const article = new Article(perspective!, articleRoot);
                     article.title = "Test Article";
@@ -2864,9 +2877,9 @@ describe("Prolog + Literals", () => {
                 });
 
                 it("should filter collection by type with string class name", async () => {
-                    const articleRoot = Literal.from("Article for string isInstance test").toUrl();
-                    const validComment = Literal.from("Valid comment").toUrl();
-                    const invalidItem = Literal.from("Invalid item").toUrl();
+                    const articleRoot = "ad4m://test/typefilter-article-string-name";
+                    const validComment = "ad4m://test/typefilter-valid-comment-strname";
+                    const invalidItem = "ad4m://test/typefilter-invalid-item-strname";
 
                     const article = new ArticleWithString(perspective!, articleRoot);
                     article.title = "Test Article with String";
@@ -2902,14 +2915,15 @@ describe("Prolog + Literals", () => {
                 });
 
                 it("should filter results in findAll() by type", async () => {
-                    // Create two articles
-                    const article1Root = Literal.from("Article 1 for findAll isInstance").toUrl();
-                    const article2Root = Literal.from("Article 2 for findAll isInstance").toUrl();
-                    
-                    const comment1 = Literal.from("Comment 1").toUrl();
-                    const invalid1 = Literal.from("Invalid 1").toUrl();
-                    const comment2 = Literal.from("Comment 2").toUrl();
-                    const invalid2 = Literal.from("Invalid 2").toUrl();
+                    // Create two articles — IDs use `ad4m://test/` so
+                    // typed-literal storage keeps them as NamedNode IRIs.
+                    const article1Root = "ad4m://test/typefilter-findall-article-1";
+                    const article2Root = "ad4m://test/typefilter-findall-article-2";
+
+                    const comment1 = "ad4m://test/typefilter-findall-comment-1";
+                    const invalid1 = "ad4m://test/typefilter-findall-invalid-1";
+                    const comment2 = "ad4m://test/typefilter-findall-comment-2";
+                    const invalid2 = "ad4m://test/typefilter-findall-invalid-2";
 
                     // Create articles
                     const article1 = new Article(perspective!, article1Root);
