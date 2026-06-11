@@ -998,8 +998,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     });
 
     // ========================================================================
-    // 5b. Resolve Language — verify properties with resolve_language produce
-    //     proper literal:json: expressions instead of literal:string:
+    // 5b. Resolve Language — properties with resolveLanguage: "literal" must
+    //     produce deterministic literal:boolean: / literal:number: /
+    //     literal:string: targets (NOT the legacy literal:json:<envelope> form).
+    //     Per-link provenance lives on the RDF 1.2 reifier, so wrapping each
+    //     property value in a signed expression envelope duplicates that and
+    //     defeats indexed equality lookups in the WHERE builder.
     // ========================================================================
 
     describe("5b. Resolve Language for Boolean/String Properties", function() {
@@ -1019,7 +1023,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             console.log("channel_create with booleans:", resultStr);
         });
 
-        it("should store boolean properties as literal:json: expressions, not literal:string:", async function() {
+        it("should store boolean properties as deterministic literal:boolean: targets", async function() {
             // Query the raw links to verify the encoding format
             var links = await callMcpTool(MCP_BASE_URL,'query_links', {
                 perspective_id: perspectiveUuid,
@@ -1028,17 +1032,18 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             console.log("isConversation links:", JSON.stringify(links));
 
-            // The target should be a literal:json: expression (signed expression),
-            // NOT literal:string:false
+            // The target should be the deterministic literal:boolean: form.
+            // The legacy literal:json:<signed envelope> form is no longer
+            // produced — provenance is carried by the reifier instead.
             var linksArr = Array.isArray(links) ? links : (links.links || []);
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("isConversation target:", target);
-            expect(target).to.not.include("literal:string:false");
-            expect(target).to.include("literal:json:");
+            expect(target).to.not.include("literal:json:");
+            expect(target).to.equal("literal:boolean:false");
         });
 
-        it("should store string properties as literal:json: expressions when resolve_language is set", async function() {
+        it("should store string properties as deterministic literal:string: targets when resolve_language is set", async function() {
             var links = await callMcpTool(MCP_BASE_URL,'query_links', {
                 perspective_id: perspectiveUuid,
                 source: resolveTestChannelAddr,
@@ -1050,8 +1055,9 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("name target:", target);
-            // Should be a signed expression (literal:json:) not a raw string literal
-            expect(target).to.include("literal:json:");
+            // Deterministic literal:string:<percent-encoded> form, not a signed envelope.
+            expect(target).to.not.include("literal:json:");
+            expect(target).to.match(/^literal:string:/);
         });
 
         it("should resolve boolean values via channel_set_isconversation", async function() {
@@ -1062,7 +1068,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             expect(result.success).to.be.true;
 
-            // Verify the stored link target is a proper expression
+            // Verify the stored link target is the deterministic literal:boolean: form.
             var links = await callMcpTool(MCP_BASE_URL,'query_links', {
                 perspective_id: perspectiveUuid,
                 source: resolveTestChannelAddr,
@@ -1072,8 +1078,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("Updated isConversation target:", target);
-            expect(target).to.not.include("literal:string:true");
-            expect(target).to.include("literal:json:");
+            expect(target).to.not.include("literal:json:");
+            expect(target).to.equal("literal:boolean:true");
         });
 
         it("should resolve string values via set_subject_property with resolve_language", async function() {
@@ -1086,7 +1092,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             expect(result.success).to.be.true;
 
-            // Verify the stored link target uses literal:json: (signed expression)
+            // Verify the stored link target is the deterministic literal:string: form.
             var links = await callMcpTool(MCP_BASE_URL,'query_links', {
                 perspective_id: perspectiveUuid,
                 source: resolveTestChannelAddr,
@@ -1096,7 +1102,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("description target:", target);
-            expect(target).to.include("literal:json:");
+            expect(target).to.not.include("literal:json:");
+            expect(target).to.match(/^literal:string:/);
         });
 
         it("should resolve boolean values via channel_update (dynamic update)", async function() {
@@ -1116,8 +1123,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("Updated isPinned target:", target);
-            expect(target).to.not.include("literal:string:false");
-            expect(target).to.include("literal:json:");
+            expect(target).to.not.include("literal:json:");
+            expect(target).to.equal("literal:boolean:false");
         });
     });
 
