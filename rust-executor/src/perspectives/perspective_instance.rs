@@ -4028,6 +4028,21 @@ impl PerspectiveInstance {
             // SPARQL WHERE filters. Provenance for the link as a whole already
             // lives on the reifier; the literal payload doesn't need its own.
             if resolve_language == "literal" {
+                // Mirror the no-resolveLanguage branch below + the TS-side
+                // `valueToLiteralIri`: strings that already carry a URI
+                // scheme are stored as-is so they round-trip through the
+                // WHERE builders' `<…>` IRI probes without wrapping. Other
+                // values flow through the canonical `literal_encode` so
+                // migrated rows and fresh writes share one IRI shape.
+                if let serde_json::Value::String(s) = value {
+                    static URI_SCHEME_RE: std::sync::OnceLock<regex::Regex> =
+                        std::sync::OnceLock::new();
+                    let re = URI_SCHEME_RE
+                        .get_or_init(|| regex::Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-._]*:").unwrap());
+                    if re.is_match(s) {
+                        return Ok(s.clone());
+                    }
+                }
                 let encoded = crate::languages::literal_encode(value);
                 return Ok(format!("literal:{}", encoded));
             }

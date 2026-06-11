@@ -11,7 +11,7 @@ import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSON
 import type { SHACLShape } from "../shacl/SHACLShape";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
-import { buildSPARQLQuery } from "./query-sparql";
+import { buildSPARQLQuery, valueToLiteralIri } from "./query-sparql";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import {
   normalizeValue,
@@ -1098,8 +1098,13 @@ export class Ad4mModel {
       // both sides, the same value would land as `literal:json:<signed
       // envelope>` on writes through this path, defeating the indexed
       // equality lookups the WHERE builders now use.
+      //
+      // Route through `valueToLiteralIri` (also used by `queryToSPARQL`)
+      // so URI-shaped strings stay raw on both write AND read: writing
+      // `"https://example.com"` keeps it as `<https://example.com>`,
+      // matching what WHERE filters generate for the same value.
       if (resolveLanguage === "literal") {
-        value = Literal.from(value).toUrl();
+        value = valueToLiteralIri(value);
       } else {
         value = await this._perspective.createExpression(value, resolveLanguage);
       }
