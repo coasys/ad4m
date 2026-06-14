@@ -7,7 +7,9 @@ use super::projection::{
 };
 use super::shape::parse_shape_from_json;
 use super::sparql_builder::build_instance_sparql;
-use super::test_helpers::{evaluate_getters_batch_from_json, execute_model_query_from_json};
+use super::test_helpers::{
+    evaluate_getters_batch_from_json, execute_model_query_from_json, StaticShapeResolver,
+};
 use super::types::{ModelShape, ShapeProperty};
 use super::utils::literal_percent_encode;
 use super::*;
@@ -4826,5 +4828,526 @@ async fn test_construct_path_resolves_simple_query() {
         labels,
         vec!["Hello".to_string(), "World".to_string()],
         "label fields should round-trip through the wire-format decoder"
+    );
+}
+
+// ── Sort by projection count ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_sort_by_projection_count_desc() {
+    // Three posts with 0, 2, and 5 likes respectively.
+    // Query with order: [["$likeCount", "DESC"]] + limit to trigger TwoPhase.
+    // Expected order: 5 likes → 2 likes → 0 likes.
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    struct Post<'a> {
+        id: &'a str,
+        likes: usize,
+    }
+    let posts = [
+        Post {
+            id: "test://post/zero",
+            likes: 0,
+        },
+        Post {
+            id: "test://post/five",
+            likes: 5,
+        },
+        Post {
+            id: "test://post/two",
+            likes: 2,
+        },
+    ];
+
+    for post in &posts {
+        // Conformance flag
+        store
+            .add_link(&make_link(post.id, "ns://type", "ns://post", ts))
+            .unwrap();
+        // Likes
+        for i in 0..post.likes {
+            let like = format!("{}like{}", post.id, i);
+            store
+                .add_link(&make_link(post.id, "ns://has-like", &like, ts))
+                .unwrap();
+        }
+    }
+
+    let post_shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://post" }
+        },
+        "relations": {
+            "likes": { "predicate": "ns://has-like" }
+        }
+    }"#;
+
+    // Build a projection: $likeCount = count of "likes" relation
+    let mut projections = HashMap::new();
+    projections.insert(
+        "$likeCount".to_string(),
+        ProjectionInput {
+            from: "likes".to_string(),
+            count: true,
+            target_class_name: None,
+            where_clause: None,
+            limit: None,
+            order: None,
+        },
+    );
+
+    let result = execute_model_query_from_json(
+        &store,
+        "Post",
+        &ModelQueryInput {
+            projections: Some(projections),
+            order: Some(vec![("$likeCount".to_string(), OrderDirection::DESC)]),
+            limit: Some(10),
+            ..Default::default()
+        },
+        post_shape_json,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 3, "should return all 3 posts");
+
+    let like_counts: Vec<u64> = result
+        .instances
+        .iter()
+        .map(|i| i["$likeCount"].as_u64().unwrap_or(0))
+        .collect();
+    assert_eq!(
+        like_counts,
+        vec![5, 2, 0],
+        "posts should be ordered by like count DESC: got {like_counts:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_sort_by_projection_count_asc() {
+    // Same data as above; ascending order should give 0 → 2 → 5.
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let data = [("test://p/a", 3usize), ("test://p/b", 0), ("test://p/c", 7)];
+    for (id, count) in &data {
+        store
+            .add_link(&make_link(id, "ns://type", "ns://post", ts))
+            .unwrap();
+        for i in 0..*count {
+            store
+                .add_link(&make_link(id, "ns://has-like", &format!("{id}like{i}"), ts))
+                .unwrap();
+        }
+    }
+
+    let shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://post" }
+        },
+        "relations": { "likes": { "predicate": "ns://has-like" } }
+    }"#;
+
+    let mut projections = HashMap::new();
+    projections.insert(
+        "$likeCount".to_string(),
+        ProjectionInput {
+            from: "likes".to_string(),
+            count: true,
+            target_class_name: None,
+            where_clause: None,
+            limit: None,
+            order: None,
+        },
+    );
+
+    let result = execute_model_query_from_json(
+        &store,
+        "Post",
+        &ModelQueryInput {
+            projections: Some(projections),
+            order: Some(vec![("$likeCount".to_string(), OrderDirection::ASC)]),
+            limit: Some(10),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 3);
+    let like_counts: Vec<u64> = result
+        .instances
+        .iter()
+        .map(|i| i["$likeCount"].as_u64().unwrap_or(0))
+        .collect();
+    assert_eq!(
+        like_counts,
+        vec![0, 3, 7],
+        "ASC count sort: got {like_counts:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_sort_by_projection_count_with_pagination() {
+    // Verify that LIMIT + offset are respected when sorting by projection count.
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let data = [
+        ("test://p/1", 10usize),
+        ("test://p/2", 1),
+        ("test://p/3", 5),
+        ("test://p/4", 3),
+        ("test://p/5", 8),
+    ];
+    for (id, count) in &data {
+        store
+            .add_link(&make_link(id, "ns://type", "ns://post", ts))
+            .unwrap();
+        for i in 0..*count {
+            store
+                .add_link(&make_link(id, "ns://has-like", &format!("{id}like{i}"), ts))
+                .unwrap();
+        }
+    }
+
+    let shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://post" }
+        },
+        "relations": { "likes": { "predicate": "ns://has-like" } }
+    }"#;
+
+    let mut projections = HashMap::new();
+    projections.insert(
+        "$likeCount".to_string(),
+        ProjectionInput {
+            from: "likes".to_string(),
+            count: true,
+            target_class_name: None,
+            where_clause: None,
+            limit: None,
+            order: None,
+        },
+    );
+
+    // Ask for page 1 (top-2 by likes DESC): should be 10 and 8
+    let result = execute_model_query_from_json(
+        &store,
+        "Post",
+        &ModelQueryInput {
+            projections: Some(projections.clone()),
+            order: Some(vec![("$likeCount".to_string(), OrderDirection::DESC)]),
+            limit: Some(2),
+            offset: None,
+            count: Some(true),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 2, "page size should be 2");
+    assert_eq!(result.total_count, 5, "total should be 5");
+    let page1: Vec<u64> = result
+        .instances
+        .iter()
+        .map(|i| i["$likeCount"].as_u64().unwrap_or(0))
+        .collect();
+    assert_eq!(page1, vec![10, 8], "page 1 DESC: got {page1:?}");
+}
+
+// ── Sort by relation property ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_sort_by_relation_property_asc() {
+    // Three posts each linked to a location with a different name.
+    // Query posts ordered by location.name ASC.
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    struct Fixture<'a> {
+        post_id: &'a str,
+        loc_id: &'a str,
+        loc_name: &'a str,
+    }
+    let fixtures = [
+        Fixture {
+            post_id: "test://post/c",
+            loc_id: "test://loc/c",
+            loc_name: "Zebra City",
+        },
+        Fixture {
+            post_id: "test://post/a",
+            loc_id: "test://loc/a",
+            loc_name: "Alpha Town",
+        },
+        Fixture {
+            post_id: "test://post/b",
+            loc_id: "test://loc/b",
+            loc_name: "Middle Place",
+        },
+    ];
+
+    for f in &fixtures {
+        // Post conformance flag
+        store
+            .add_link(&make_link(f.post_id, "ns://type", "ns://post", ts))
+            .unwrap();
+        // Post → location relation
+        store
+            .add_link(&make_link(f.post_id, "ns://has-location", f.loc_id, ts))
+            .unwrap();
+        // Location conformance flag
+        store
+            .add_link(&make_link(f.loc_id, "ns://type", "ns://location", ts))
+            .unwrap();
+        // Location name property (stored as a literal IRI)
+        let name_iri = format!("literal:string:{}", literal_percent_encode(f.loc_name));
+        store
+            .add_link(&make_link(f.loc_id, "ns://loc-name", &name_iri, ts))
+            .unwrap();
+    }
+
+    // Register both shapes in a shared resolver.
+    let resolver = StaticShapeResolver::new();
+
+    let post_shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://post" }
+        },
+        "relations": {
+            "location": {
+                "predicate": "ns://has-location",
+                "targetClassName": "Location",
+                "kind": "hasOne"
+            }
+        }
+    }"#;
+    let loc_shape_json = r#"{
+        "className": "Location",
+        "properties": {
+            "type":    { "predicate": "ns://type",     "required": true, "flag": true, "initial": "ns://location" },
+            "name":    { "predicate": "ns://loc-name", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let post_shape = parse_shape_from_json(post_shape_json, "Post").unwrap();
+    let loc_shape = parse_shape_from_json(loc_shape_json, "Location").unwrap();
+    resolver.register("Post", post_shape.clone());
+    resolver.register("Location", loc_shape);
+
+    let result = super::query::execute_model_query(
+        &store,
+        &post_shape,
+        &ModelQueryInput {
+            order: Some(vec![("location.name".to_string(), OrderDirection::ASC)]),
+            limit: Some(10),
+            ..Default::default()
+        },
+        &resolver,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 3, "should return all 3 posts");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["test://post/a", "test://post/b", "test://post/c"],
+        "posts should be ordered by location name ASC: got {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_sort_by_relation_property_desc() {
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let fixtures = [
+        ("test://post/x", "test://loc/x", "Cherry"),
+        ("test://post/y", "test://loc/y", "Apple"),
+        ("test://post/z", "test://loc/z", "Mango"),
+    ];
+    for (post_id, loc_id, loc_name) in &fixtures {
+        store
+            .add_link(&make_link(post_id, "ns://type", "ns://post2", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(post_id, "ns://has-location", loc_id, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(loc_id, "ns://type", "ns://location2", ts))
+            .unwrap();
+        let name_iri = format!("literal:string:{}", literal_percent_encode(loc_name));
+        store
+            .add_link(&make_link(loc_id, "ns://loc-name2", &name_iri, ts))
+            .unwrap();
+    }
+
+    let resolver = StaticShapeResolver::new();
+    let post_shape_json = r#"{
+        "className": "Post2",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://post2" }
+        },
+        "relations": {
+            "location": { "predicate": "ns://has-location", "targetClassName": "Location2", "kind": "hasOne" }
+        }
+    }"#;
+    let loc_shape_json = r#"{
+        "className": "Location2",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://location2" },
+            "name": { "predicate": "ns://loc-name2", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+    let post_shape = parse_shape_from_json(post_shape_json, "Post2").unwrap();
+    let loc_shape = parse_shape_from_json(loc_shape_json, "Location2").unwrap();
+    resolver.register("Post2", post_shape.clone());
+    resolver.register("Location2", loc_shape);
+
+    let result = super::query::execute_model_query(
+        &store,
+        &post_shape,
+        &ModelQueryInput {
+            order: Some(vec![("location.name".to_string(), OrderDirection::DESC)]),
+            limit: Some(10),
+            ..Default::default()
+        },
+        &resolver,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 3);
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    // DESC: Mango > Cherry > Apple
+    assert_eq!(
+        ids,
+        vec!["test://post/z", "test://post/x", "test://post/y"],
+        "posts should be ordered by location name DESC: got {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_sort_by_relation_property_with_missing_relation() {
+    // Some posts lack a location. They should sort to the end (null last).
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    // post/a: has location "Beta"
+    // post/b: has location "Alpha"
+    // post/c: no location
+    store
+        .add_link(&make_link("test://post3/a", "ns://type", "ns://post3", ts))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "test://post3/a",
+            "ns://has-location3",
+            "test://loc3/a",
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "test://loc3/a",
+            "ns://loc-name3",
+            &format!("literal:string:{}", literal_percent_encode("Beta")),
+            ts,
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link("test://post3/b", "ns://type", "ns://post3", ts))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "test://post3/b",
+            "ns://has-location3",
+            "test://loc3/b",
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "test://loc3/b",
+            "ns://loc-name3",
+            &format!("literal:string:{}", literal_percent_encode("Alpha")),
+            ts,
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link("test://post3/c", "ns://type", "ns://post3", ts))
+        .unwrap();
+    // post3/c deliberately has no has-location3 link
+
+    let resolver = StaticShapeResolver::new();
+    let post_shape_json = r#"{
+        "className": "Post3",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://post3" }
+        },
+        "relations": {
+            "location": { "predicate": "ns://has-location3", "targetClassName": "Location3", "kind": "hasOne" }
+        }
+    }"#;
+    let loc_shape_json = r#"{
+        "className": "Location3",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://location" },
+            "name": { "predicate": "ns://loc-name3", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+    let post_shape = parse_shape_from_json(post_shape_json, "Post3").unwrap();
+    let loc_shape = parse_shape_from_json(loc_shape_json, "Location3").unwrap();
+    resolver.register("Post3", post_shape.clone());
+    resolver.register("Location3", loc_shape);
+
+    let result = super::query::execute_model_query(
+        &store,
+        &post_shape,
+        &ModelQueryInput {
+            order: Some(vec![("location.name".to_string(), OrderDirection::ASC)]),
+            limit: Some(10),
+            ..Default::default()
+        },
+        &resolver,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 3);
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    // Alpha < Beta < (no location → null → end)
+    assert_eq!(
+        ids,
+        vec!["test://post3/b", "test://post3/a", "test://post3/c"],
+        "post without location should sort to end: got {ids:?}"
     );
 }
