@@ -322,6 +322,14 @@ pub(super) enum SortKey {
     Timestamp,
     /// Sort by a property value extracted from its literal IRI.
     Property(String), // predicate IRI
+    /// Sort by a projection count — uses `COUNT(DISTINCT ?_proj_t_i)` in the
+    /// GROUP BY pagination subquery.  The string is the relation predicate IRI
+    /// used to reach the counted items.
+    Projection(String), // relation predicate IRI
+    /// Sort by a scalar property on a directly-related model instance.
+    /// Emits a double-OPTIONAL join in the pagination subquery:
+    /// `?source <rel_pred> ?_rel . ?_rel <prop_pred> ?_sort_val`.
+    RelationProperty { rel_pred: String, prop_pred: String },
 }
 
 // ---------------------------------------------------------------------------

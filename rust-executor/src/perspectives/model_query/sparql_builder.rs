@@ -111,9 +111,37 @@ fn build_pagination_subquery(
         .enumerate()
         .filter_map(|(i, (k, d))| match k {
             SortKey::Property(p) => Some((i, p.as_str(), *d)),
-            SortKey::Timestamp => None,
+            _ => None,
         })
         .collect();
+    // Projection count keys — COUNT(DISTINCT ?_proj_t_i) via OPTIONAL join.
+    let projection_keys: Vec<(usize, &str, OrderDirection)> = pg
+        .sort_keys
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (k, d))| match k {
+            SortKey::Projection(pred) => Some((i, pred.as_str(), *d)),
+            _ => None,
+        })
+        .collect();
+    // Relation-property keys — double-OPTIONAL join for ?source → ?rel → ?val.
+    let relation_property_keys: Vec<(usize, &str, &str, OrderDirection)> = pg
+        .sort_keys
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (k, d))| match k {
+            SortKey::RelationProperty {
+                rel_pred,
+                prop_pred,
+            } => Some((i, rel_pred.as_str(), prop_pred.as_str(), *d)),
+            _ => None,
+        })
+        .collect();
+
+    // GROUP BY is required when any non-timestamp sort key is present.
+    let needs_group_by = !property_keys.is_empty()
+        || !projection_keys.is_empty()
+        || !relation_property_keys.is_empty();
 
     let mut select_columns = vec!["?source".to_string()];
     let mut probe = String::new();
@@ -124,7 +152,7 @@ fn build_pagination_subquery(
         probe.push_str(&format!("            {ts_probe}\n"));
         // ?_first_ts is bare in the timestamp-only case; under GROUP BY we
         // need to wrap it in SAMPLE so SPARQL accepts the projection.
-        if property_keys.is_empty() {
+        if !needs_group_by {
             select_columns.push("?_first_ts".to_string());
         } else {
             select_columns.push("(SAMPLE(?_first_ts) AS ?_first_ts)".to_string());
@@ -144,6 +172,30 @@ fn build_pagination_subquery(
         ));
         select_columns.push(format!("(SAMPLE({nv}) AS ?_sort_num_{i})"));
         select_columns.push(format!("(SAMPLE({sv}) AS ?_sort_str_{i})"));
+    }
+
+    // Projection count sort: OPTIONAL join + COUNT(DISTINCT) aggregate.
+    // A source with no linked targets contributes COUNT = 0 (not unbound),
+    // so no nulls-to-end handling is needed in the ORDER BY term.
+    for (i, pred, _) in &projection_keys {
+        optionals.push_str(&format!(
+            "            OPTIONAL {{ ?source <{pred}> ?_proj_t_{i} . }}\n"
+        ));
+        select_columns.push(format!("(COUNT(DISTINCT ?_proj_t_{i}) AS ?_proj_sort_{i})"));
+    }
+
+    // Relation-property sort: double-OPTIONAL to reach ?source → ?rel → ?val.
+    // Outer OPTIONAL guards against missing relation; inner guards against
+    // a related instance that lacks the property.
+    for (i, rel_pred, prop_pred, _) in &relation_property_keys {
+        let rp_raw = format!("?_rp_raw_{i}");
+        let rp_str = format!("?_rp_str_{i}");
+        let rp_num = format!("?_rp_num_{i}");
+        optionals.push_str(&format!(
+            "            OPTIONAL {{ ?source <{rel_pred}> ?_rel_{i} . OPTIONAL {{ ?_rel_{i} <{prop_pred}> {rp_raw} . BIND(STR({rp_raw}) AS {rp_str}) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR({rp_raw})) AS {rp_num}) }} }}\n"
+        ));
+        select_columns.push(format!("(SAMPLE({rp_num}) AS ?_rp_num_{i})"));
+        select_columns.push(format!("(SAMPLE({rp_str}) AS ?_rp_str_{i})"));
     }
 
     let order_by_terms: Vec<String> = pg
@@ -166,6 +218,22 @@ fn build_pagination_subquery(
                     "ASC(IF(BOUND(?_sort_str_{i}), 0, 1)) {d}(?_sort_num_{i}) {d}(?_sort_str_{i})"
                 )
             }
+            SortKey::Projection(_) => {
+                let d = match dir {
+                    OrderDirection::ASC => "ASC",
+                    OrderDirection::DESC => "DESC",
+                };
+                // COUNT returns 0 for unmatched groups so no null-guard needed.
+                format!("{d}(?_proj_sort_{i})")
+            }
+            SortKey::RelationProperty { .. } => {
+                let d = match dir {
+                    OrderDirection::ASC => "ASC",
+                    OrderDirection::DESC => "DESC",
+                };
+                // Same nulls-to-end + numeric-first logic as Property.
+                format!("ASC(IF(BOUND(?_rp_str_{i}), 0, 1)) {d}(?_rp_num_{i}) {d}(?_rp_str_{i})")
+            }
         })
         .collect();
 
@@ -183,7 +251,7 @@ fn build_pagination_subquery(
         suffix.push_str(&format!("\n    LIMIT {limit}"));
     }
 
-    if property_keys.is_empty() {
+    if !needs_group_by {
         // Pure-timestamp (or no sort keys) → DISTINCT, no GROUP BY
         format!(
             r#"SELECT DISTINCT {cols} WHERE {{
@@ -197,7 +265,7 @@ fn build_pagination_subquery(
             suffix = suffix,
         )
     } else {
-        // Property sort → GROUP BY ?source for SAMPLE
+        // Property/Projection/RelationProperty sort → GROUP BY ?source
         format!(
             r#"SELECT {cols} WHERE {{
 {conformance}
@@ -1107,4 +1175,199 @@ pub(super) fn build_query_patterns(
     let where_extra = where_patterns.join("\n");
 
     (conformance, where_extra)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perspectives::model_query::test_helpers::{flag, prop, shape};
+
+    fn make_pg(sort_keys: Vec<(SortKey, OrderDirection)>) -> SparqlPagination {
+        SparqlPagination {
+            sort_keys,
+            offset: None,
+            limit: Some(10),
+        }
+    }
+
+    #[test]
+    fn test_pagination_subquery_projection_sort_contains_count_distinct() {
+        let s = shape(
+            "Post",
+            vec![
+                flag("type", "test://type", "test://post"),
+                prop("title", "test://title"),
+            ],
+        );
+        // projection key at index 0, timestamp key absent
+        let pg = make_pg(vec![(
+            SortKey::Projection("test://has-like".to_string()),
+            OrderDirection::DESC,
+        )]);
+        let (conformance, where_extra) = build_query_patterns(&s, &ModelQueryInput::default());
+        let sparql = build_pagination_subquery(&s, &pg, &conformance, &where_extra);
+
+        assert!(
+            sparql.contains("COUNT(DISTINCT ?_proj_t_0)"),
+            "should emit COUNT(DISTINCT) for projection sort: {sparql}"
+        );
+        assert!(
+            sparql.contains("?_proj_sort_0"),
+            "should project ?_proj_sort_0: {sparql}"
+        );
+        assert!(
+            sparql.contains("OPTIONAL { ?source <test://has-like> ?_proj_t_0"),
+            "should join via predicate OPTIONAL: {sparql}"
+        );
+        assert!(
+            sparql.contains("GROUP BY ?source"),
+            "should use GROUP BY for count aggregate: {sparql}"
+        );
+        assert!(
+            sparql.contains("DESC(?_proj_sort_0)"),
+            "ORDER BY should use DESC: {sparql}"
+        );
+        assert!(
+            !sparql.contains("SELECT DISTINCT"),
+            "DISTINCT is incompatible with GROUP BY aggregate: {sparql}"
+        );
+    }
+
+    #[test]
+    fn test_pagination_subquery_projection_sort_asc() {
+        let s = shape("Post", vec![flag("type", "test://type", "test://post")]);
+        let pg = make_pg(vec![(
+            SortKey::Projection("test://has-comment".to_string()),
+            OrderDirection::ASC,
+        )]);
+        let (conformance, where_extra) = build_query_patterns(&s, &ModelQueryInput::default());
+        let sparql = build_pagination_subquery(&s, &pg, &conformance, &where_extra);
+        assert!(
+            sparql.contains("ASC(?_proj_sort_0)"),
+            "ORDER BY should use ASC: {sparql}"
+        );
+    }
+
+    #[test]
+    fn test_pagination_subquery_relation_property_sort_contains_double_optional() {
+        let s = shape(
+            "Post",
+            vec![
+                flag("type", "test://type", "test://post"),
+                prop("title", "test://title"),
+            ],
+        );
+        let pg = make_pg(vec![(
+            SortKey::RelationProperty {
+                rel_pred: "test://has-location".to_string(),
+                prop_pred: "test://location-name".to_string(),
+            },
+            OrderDirection::ASC,
+        )]);
+        let (conformance, where_extra) = build_query_patterns(&s, &ModelQueryInput::default());
+        let sparql = build_pagination_subquery(&s, &pg, &conformance, &where_extra);
+
+        assert!(
+            sparql.contains("?source <test://has-location> ?_rel_0"),
+            "outer OPTIONAL should join via relation predicate: {sparql}"
+        );
+        assert!(
+            sparql.contains("?_rel_0 <test://location-name> ?_rp_raw_0"),
+            "inner OPTIONAL should join via property predicate: {sparql}"
+        );
+        assert!(
+            sparql.contains("SAMPLE(?_rp_num_0)") && sparql.contains("SAMPLE(?_rp_str_0)"),
+            "should project SAMPLE of numeric and string sort columns: {sparql}"
+        );
+        assert!(
+            sparql.contains("ASC(IF(BOUND(?_rp_str_0), 0, 1))"),
+            "ORDER BY should push nulls to end: {sparql}"
+        );
+        assert!(
+            sparql.contains("GROUP BY ?source"),
+            "should use GROUP BY: {sparql}"
+        );
+    }
+
+    #[test]
+    fn test_pagination_subquery_relation_property_sort_desc() {
+        let s = shape("Post", vec![flag("type", "test://type", "test://post")]);
+        let pg = make_pg(vec![(
+            SortKey::RelationProperty {
+                rel_pred: "test://has-location".to_string(),
+                prop_pred: "test://location-name".to_string(),
+            },
+            OrderDirection::DESC,
+        )]);
+        let (conformance, where_extra) = build_query_patterns(&s, &ModelQueryInput::default());
+        let sparql = build_pagination_subquery(&s, &pg, &conformance, &where_extra);
+        assert!(
+            sparql.contains("DESC(?_rp_num_0)") && sparql.contains("DESC(?_rp_str_0)"),
+            "ORDER BY should use DESC: {sparql}"
+        );
+    }
+
+    #[test]
+    fn test_pagination_subquery_projection_and_property_combined() {
+        // Multi-key sort: property first, then projection count as tiebreaker
+        let s = shape(
+            "Post",
+            vec![
+                flag("type", "test://type", "test://post"),
+                prop("title", "test://title"),
+            ],
+        );
+        let pg = make_pg(vec![
+            (
+                SortKey::Property("test://title".to_string()),
+                OrderDirection::ASC,
+            ),
+            (
+                SortKey::Projection("test://has-like".to_string()),
+                OrderDirection::DESC,
+            ),
+        ]);
+        let (conformance, where_extra) = build_query_patterns(&s, &ModelQueryInput::default());
+        let sparql = build_pagination_subquery(&s, &pg, &conformance, &where_extra);
+
+        // Property key at i=0
+        assert!(
+            sparql.contains("?_sort_str_0"),
+            "property sort column: {sparql}"
+        );
+        // Projection key at i=1
+        assert!(
+            sparql.contains("COUNT(DISTINCT ?_proj_t_1)"),
+            "projection count at i=1: {sparql}"
+        );
+        assert!(
+            sparql.contains("DESC(?_proj_sort_1)"),
+            "DESC on projection key: {sparql}"
+        );
+    }
+
+    #[test]
+    fn test_pagination_subquery_timestamp_with_projection_uses_group_by() {
+        // When a projection key is present alongside a timestamp key,
+        // the subquery must use GROUP BY (not SELECT DISTINCT).
+        let s = shape("Post", vec![flag("type", "test://type", "test://post")]);
+        let pg = make_pg(vec![
+            (SortKey::Timestamp, OrderDirection::ASC),
+            (
+                SortKey::Projection("test://has-like".to_string()),
+                OrderDirection::DESC,
+            ),
+        ]);
+        let (conformance, where_extra) = build_query_patterns(&s, &ModelQueryInput::default());
+        let sparql = build_pagination_subquery(&s, &pg, &conformance, &where_extra);
+
+        assert!(
+            sparql.contains("GROUP BY ?source"),
+            "timestamp + projection must use GROUP BY: {sparql}"
+        );
+        assert!(
+            sparql.contains("(SAMPLE(?_first_ts) AS ?_first_ts)"),
+            "timestamp must be wrapped in SAMPLE under GROUP BY: {sparql}"
+        );
+    }
 }
