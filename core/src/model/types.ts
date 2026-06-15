@@ -25,8 +25,25 @@ export type WhereOps = {
   gte: number; // greater than or equal to
   contains: string | number; // substring/element check
 };
-export type WhereCondition = string | number | boolean | string[] | number[] | { [K in keyof WhereOps]?: WhereOps[K] };
-export type Where = { [propertyName: string]: WhereCondition };
+export type WhereCondition =
+  | string
+  | number
+  | boolean
+  | string[]
+  | number[]
+  | { [K in keyof WhereOps]?: WhereOps[K] }
+  | Where[]
+  | Where;
+
+export type Where = {
+  /** Logical OR: instance must satisfy at least one of the given sub-clauses. */
+  OR?: Where[];
+  /** Logical AND: instance must satisfy all of the given sub-clauses. */
+  AND?: Where[];
+  /** Logical NOT: instance must NOT satisfy the given sub-clause. */
+  NOT?: Where;
+  [propertyName: string]: WhereCondition | undefined;
+};
 export type Order = { [propertyName: string]: "ASC" | "DESC" };
 
 /**
@@ -282,7 +299,7 @@ export type TypedWhereCondition<V> =
   : WhereCondition;
 
 /** Strict Where: keys constrained to T's properties, plus the well-known
- *  link-metadata fields (`id`/`author`/`timestamp`). */
+ *  link-metadata fields (`id`/`author`/`timestamp`) and logical combinators. */
 type StrictTypedWhere<T extends Ad4mModel> =
   & { [K in PropertyKeysOf<T>]?: TypedWhereCondition<T[K]> }
   & {
@@ -290,6 +307,9 @@ type StrictTypedWhere<T extends Ad4mModel> =
       id?: string | string[];
       author?: WhereCondition;
       timestamp?: WhereCondition;
+      OR?: StrictTypedWhere<T>[];
+      AND?: StrictTypedWhere<T>[];
+      NOT?: StrictTypedWhere<T>;
     };
 
 /** Public typed `where` for a model class. Falls back to the loose `Where`
