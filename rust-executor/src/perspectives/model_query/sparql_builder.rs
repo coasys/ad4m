@@ -469,6 +469,9 @@ pub(super) fn where_clause_max_source_count(query: &ModelQueryInput) -> Option<u
             WhereCondition::NumberArray(arr) => Some(arr.len()),
             // `Ops` (gt/lt/between/contains/not) can match an unbounded set.
             WhereCondition::Ops(_) => None,
+            // SubClauses/SubClause are combinators handled Rust-side; they
+            // don't cap the id/base source count.
+            WhereCondition::SubClauses(_) | WhereCondition::SubClause(_) => None,
         };
         if let Some(cap) = cap {
             min = Some(min.map(|m| m.min(cap)).unwrap_or(cap));
@@ -489,6 +492,12 @@ pub(super) fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) ->
         return true;
     };
     for (prop_name, condition) in wc {
+        // OR/AND/NOT are always evaluated Rust-side; SPARQL-level pagination
+        // cannot be applied when they are present.
+        if prop_name == "OR" || prop_name == "AND" || prop_name == "NOT" {
+            return false;
+        }
+
         if prop_name == "base" || prop_name == "id" {
             match condition {
                 WhereCondition::String(_)
@@ -496,7 +505,9 @@ pub(super) fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) ->
                 | WhereCondition::Number(_)
                 | WhereCondition::Bool(_)
                 | WhereCondition::NumberArray(_)
-                | WhereCondition::Ops(_) => continue,
+                | WhereCondition::Ops(_)
+                | WhereCondition::SubClauses(_)
+                | WhereCondition::SubClause(_) => continue,
             }
         }
         if shape
@@ -677,6 +688,11 @@ pub(super) fn build_query_patterns(
     let mut where_patterns = Vec::new();
     if let Some(ref wc) = query.where_clause {
         for (prop_name, condition) in wc {
+            // OR/AND/NOT are evaluated Rust-side after hydration; skip SPARQL emission.
+            if prop_name == "OR" || prop_name == "AND" || prop_name == "NOT" {
+                continue;
+            }
+
             if prop_name == "base" || prop_name == "id" {
                 match condition {
                     WhereCondition::String(val) => {
@@ -741,6 +757,10 @@ pub(super) fn build_query_patterns(
                                 .push(format!("    FILTER(STR(?source) IN ({}))", ids.join(", ")));
                         }
                     }
+                    // SubClauses/SubClause are OR/AND/NOT combinators; they are
+                    // never stored under "id"/"base" keys and are handled
+                    // Rust-side, so nothing to emit here.
+                    WhereCondition::SubClauses(_) | WhereCondition::SubClause(_) => {}
                     WhereCondition::Ops(ops) => {
                         // Operate on the IRI's string form so range / contains
                         // comparisons work uniformly regardless of whether the
@@ -1165,6 +1185,9 @@ pub(super) fn build_query_patterns(
                             where_patterns.push(format!("    FILTER({})", filters.join(" && ")));
                         }
                     }
+                    // SubClauses/SubClause are OR/AND/NOT combinators evaluated
+                    // Rust-side; the outer loop skips them before reaching here.
+                    WhereCondition::SubClauses(_) | WhereCondition::SubClause(_) => {}
                 }
                 continue;
             }
