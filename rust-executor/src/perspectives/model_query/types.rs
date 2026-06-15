@@ -19,7 +19,12 @@ use std::collections::{BTreeMap, HashMap};
 /// Used inside [`WhereCondition::Ops`] to express range queries, negation,
 /// and substring matching.  Multiple fields can be combined (e.g. `gt` + `lt`
 /// for an open range).
+///
+/// `deny_unknown_fields` ensures that when `#[serde(untagged)]` tries this
+/// variant, objects that contain non-WhereOps keys (e.g. a nested where clause
+/// like `{"name": "Alice"}`) are rejected and fall through to `SubClause`.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WhereOps {
     #[serde(default)]
     pub not: Option<Value>,
@@ -61,15 +66,34 @@ impl Default for WhereOps {
 /// - `["a","b"]` → [`StringArray`](WhereCondition::StringArray) (IN operator)
 /// - `[1,2,3]` → [`NumberArray`](WhereCondition::NumberArray) (IN operator)
 /// - `{"gt": 5, "lt": 10}` → [`Ops`](WhereCondition::Ops)
+/// - `[{"name":"Alice"},{"name":"Bob"}]` → [`SubClauses`](WhereCondition::SubClauses) (OR / AND)
+/// - `{"name":"Alice","status":"active"}` → [`SubClause`](WhereCondition::SubClause) (NOT)
+///
+/// **Variant ordering** is significant for `#[serde(untagged)]`:
+/// - `Bool` before `Number` so JSON booleans don't coerce to `f64`.
+/// - `StringArray` / `NumberArray` before `SubClauses` so empty arrays `[]`
+///   become `StringArray([])` rather than `SubClauses([])`.
+/// - `Ops` (with `deny_unknown_fields`) before `SubClause` so operator objects
+///   like `{"gt": 5}` match `Ops` and where-clause objects like `{"name":"Alice"}`
+///   fall through to `SubClause`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum WhereCondition {
-    String(String),
-    Number(f64),
     Bool(bool),
+    Number(f64),
+    String(String),
     StringArray(Vec<String>),
     NumberArray(Vec<f64>),
+    /// Array of nested where clauses used for OR and AND combinators.
+    /// The key name in the parent `BTreeMap` determines the semantic:
+    /// `"OR"` → any branch must pass; `"AND"` → all branches must pass.
+    SubClauses(Vec<BTreeMap<String, WhereCondition>>),
+    /// Operator-based condition (`gt`, `lt`, `contains`, `not`, etc.).
+    /// `WhereOps` uses `deny_unknown_fields` so objects whose keys are not
+    /// WhereOps fields are rejected here and fall through to `SubClause`.
     Ops(WhereOps),
+    /// Single nested where clause used for the NOT combinator.
+    SubClause(BTreeMap<String, WhereCondition>),
 }
 
 /// Sort direction for ORDER BY clauses.
@@ -542,6 +566,125 @@ impl InstanceQueryPlan {
                 panic!("Expected Single query plan, got TwoPhase")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod where_condition_deser_tests {
+    use super::*;
+    use serde_json::from_value;
+
+    #[test]
+    fn deser_string() {
+        let v: WhereCondition = from_value(serde_json::json!("hello")).unwrap();
+        assert!(matches!(v, WhereCondition::String(s) if s == "hello"));
+    }
+
+    #[test]
+    fn deser_number() {
+        let v: WhereCondition = from_value(serde_json::json!(42.0)).unwrap();
+        assert!(matches!(v, WhereCondition::Number(n) if (n - 42.0).abs() < f64::EPSILON));
+    }
+
+    #[test]
+    fn deser_bool() {
+        let v: WhereCondition = from_value(serde_json::json!(true)).unwrap();
+        assert!(matches!(v, WhereCondition::Bool(true)));
+    }
+
+    #[test]
+    fn deser_string_array() {
+        let v: WhereCondition = from_value(serde_json::json!(["a", "b", "c"])).unwrap();
+        assert!(matches!(v, WhereCondition::StringArray(arr) if arr == vec!["a", "b", "c"]));
+    }
+
+    #[test]
+    fn deser_number_array() {
+        let v: WhereCondition = from_value(serde_json::json!([1.0, 2.0, 3.0])).unwrap();
+        assert!(matches!(v, WhereCondition::NumberArray(_)));
+    }
+
+    #[test]
+    fn deser_empty_array_is_string_array() {
+        // Empty arrays land on StringArray (first Vec variant), not SubClauses.
+        let v: WhereCondition = from_value(serde_json::json!([])).unwrap();
+        assert!(matches!(v, WhereCondition::StringArray(arr) if arr.is_empty()));
+    }
+
+    #[test]
+    fn deser_ops_with_known_fields() {
+        let v: WhereCondition = from_value(serde_json::json!({ "gt": 5, "lt": 10 })).unwrap();
+        assert!(
+            matches!(v, WhereCondition::Ops(ops) if ops.gt == Some(5.0) && ops.lt == Some(10.0))
+        );
+    }
+
+    #[test]
+    fn deser_sub_clauses_for_or_and() {
+        // Array of objects → SubClauses (used as OR/AND value)
+        let v: WhereCondition =
+            from_value(serde_json::json!([{"name": "Alice"}, {"name": "Bob"}])).unwrap();
+        match v {
+            WhereCondition::SubClauses(branches) => {
+                assert_eq!(branches.len(), 2);
+                assert!(branches[0].contains_key("name"));
+            }
+            other => panic!("expected SubClauses, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deser_sub_clause_for_not() {
+        // Object with non-WhereOps keys → SubClause (used as NOT value)
+        let v: WhereCondition =
+            from_value(serde_json::json!({"name": "Alice", "status": "active"})).unwrap();
+        match v {
+            WhereCondition::SubClause(map) => {
+                assert_eq!(map.len(), 2);
+                assert!(map.contains_key("name"));
+                assert!(map.contains_key("status"));
+            }
+            other => panic!("expected SubClause, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deser_where_clause_with_or() {
+        // Full where-clause map with OR key
+        let json = serde_json::json!({
+            "OR": [
+                { "name": { "contains": "foo" } },
+                { "description": { "contains": "foo" } }
+            ]
+        });
+        let wc: BTreeMap<String, WhereCondition> = serde_json::from_value(json).unwrap();
+        assert!(wc.contains_key("OR"));
+        let or_val = wc.get("OR").unwrap();
+        assert!(matches!(or_val, WhereCondition::SubClauses(b) if b.len() == 2));
+    }
+
+    #[test]
+    fn deser_where_clause_with_not() {
+        let json = serde_json::json!({ "NOT": { "status": "deleted" } });
+        let wc: BTreeMap<String, WhereCondition> = serde_json::from_value(json).unwrap();
+        assert!(wc.contains_key("NOT"));
+        let not_val = wc.get("NOT").unwrap();
+        assert!(matches!(not_val, WhereCondition::SubClause(_)));
+    }
+
+    #[test]
+    fn deser_model_query_with_or_where() {
+        let json = serde_json::json!({
+            "where": {
+                "OR": [
+                    { "name": "Alice" },
+                    { "name": "Bob" }
+                ]
+            }
+        });
+        let mq: ModelQueryInput = serde_json::from_value(json).unwrap();
+        let wc = mq.where_clause.unwrap();
+        assert!(matches!(wc.get("OR"), Some(WhereCondition::SubClauses(b)) if b.len() == 2));
     }
 }
 
