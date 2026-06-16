@@ -144,8 +144,8 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
 
         let path = first["path"].as_str().unwrap_or("").to_string();
         let datatype = first["datatype"].as_str().map(|s| s.to_string());
-        let resolve_literal = parse_bool_literal_target(first["resolveLiteral"].as_str())
-            .or_else(|| {
+        let resolve_literal =
+            parse_bool_literal_target(first["resolveLiteral"].as_str()).or_else(|| {
                 // Backward compat: old SHACL has ad4m://resolveLanguage → "literal"
                 first["resolveLanguage"]
                     .as_str()
@@ -520,12 +520,16 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
             let is_required = prop_meta["required"].as_bool().unwrap_or(false);
             let is_flag = prop_meta["flag"].as_bool().unwrap_or(false);
             let initial = prop_meta["initial"].as_str().map(|s| s.to_string());
-            let resolve_literal = prop_meta["resolveLiteral"].as_bool()
-                .or_else(|| {
-                    // Backward compat with test fixtures using "resolveLanguage": "literal"
-                    prop_meta["resolveLanguage"].as_str()
-                        .and_then(|s| if s == "literal" { Some(true) } else { None })
-                });
+            let resolve_literal = prop_meta["resolveLiteral"].as_bool().or_else(|| {
+                // Backward compat with test fixtures using "resolveLanguage": "literal"
+                prop_meta["resolveLanguage"].as_str().and_then(|s| {
+                    if s == "literal" {
+                        Some(true)
+                    } else {
+                        None
+                    }
+                })
+            });
             let datatype = prop_meta["datatype"].as_str().map(|s| s.to_string());
             let getter = prop_meta["getter"].as_str().map(|s| s.to_string());
 
