@@ -47,20 +47,20 @@ export function formatQueryValue(value: any): string {
  *
  * @param predicate  - The predicate URI for the property
  * @param condition  - The Where condition value
- * @param opts       - Optional settings (e.g. `resolveLanguage`)
+ * @param opts       - Optional settings (e.g. `resolveLiteral`)
  * @returns A single SPARQL condition string
  */
 export function buildWhereCondition(
     predicate: string,
     condition: WhereCondition,
-    opts?: { resolveLanguage?: string; varIndex?: number },
+    opts?: { resolveLiteral?: boolean; varIndex?: number },
 ): string {
     const escapedPredicate = escapeQueryString(predicate);
     // For literal-resolved properties, we match against the raw IRI (which is a literal: URI)
     // For language-resolved properties, we match against the plain URI
     // For literal-resolved properties, values are stored as IRIs like <literal:string:VALUE>
     // For language-resolved properties, values are plain URIs
-    const isLiteral = !opts?.resolveLanguage || opts.resolveLanguage === 'literal';
+    const isLiteral = opts?.resolveLiteral !== false;
 
     const varSuffix = opts?.varIndex ?? 0;
 
@@ -183,23 +183,21 @@ export function compileWhereClause(
         if (['id', 'author', 'timestamp'].includes(propertyName)) continue;
 
         let predicate: string;
-        let resolveLanguage: string | undefined;
+        let resolveLiteral: boolean | undefined;
 
         if (metadata) {
             const propMeta = metadata.properties[propertyName];
             if (propMeta) {
                 predicate = propMeta.predicate;
-                resolveLanguage = propMeta.resolveLanguage;
+                resolveLiteral = propMeta.resolveLiteral;
             } else {
-                // Property not found in metadata — treat name as raw predicate URI
                 predicate = propertyName;
             }
         } else {
-            // No metadata — treat name as raw predicate URI
             predicate = propertyName;
         }
 
-        const cond = buildWhereCondition(predicate, condition, { resolveLanguage, varIndex: conditions.length });
+        const cond = buildWhereCondition(predicate, condition, { resolveLiteral, varIndex: conditions.length });
         if (cond) {
             conditions.push(cond);
         }

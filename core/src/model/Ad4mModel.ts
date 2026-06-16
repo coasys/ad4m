@@ -141,7 +141,7 @@ function jsonToModelInstance<T extends Ad4mModel>(
  *   // Required property with literal value
  *   @Property({
  *     through: "recipe://name",
- *     resolveLanguage: "literal"
+ *     resolveLiteral: true
  *   })
  *   name: string = "";
  * 
@@ -300,7 +300,7 @@ export class Ad4mModel {
    * ```typescript
    * @Model({ name: "Recipe" })
    * class Recipe extends Ad4mModel {
-   *   @Property({ through: "recipe://name", resolveLanguage: "literal" })
+   *   @Property({ through: "recipe://name", resolveLiteral: true })
    *   name: string = "";
    *   
    *   @HasMany({ through: "recipe://ingredient" })
@@ -338,7 +338,7 @@ export class Ad4mModel {
         required: options.required || false,
         readOnly: !(options.writable ?? false),
         ...(options.initial !== undefined && { initial: options.initial }),
-        ...(options.resolveLanguage !== undefined && { resolveLanguage: options.resolveLanguage }),
+        ...(options.resolveLiteral !== undefined && { resolveLiteral: options.resolveLiteral }),
         ...(options.prologGetter !== undefined && { prologGetter: options.prologGetter }),
         ...(options.getter !== undefined && { getter: options.getter }),
         ...(options.prologSetter !== undefined && { prologSetter: options.prologSetter }),
@@ -404,7 +404,7 @@ export class Ad4mModel {
               predicate: predicate,
               required: isRequired,
               readOnly: propertySchema["x-ad4m"]?.writable === false,
-              ...(propertySchema["x-ad4m"]?.resolveLanguage && { resolveLanguage: propertySchema["x-ad4m"].resolveLanguage }),
+              ...(propertySchema["x-ad4m"]?.resolveLiteral !== undefined && { resolveLiteral: propertySchema["x-ad4m"].resolveLiteral }),
               ...(propertySchema["x-ad4m"]?.initial && { initial: propertySchema["x-ad4m"].initial }),
               ...(propertySchema["x-ad4m"]?.local !== undefined && { local: propertySchema["x-ad4m"].local })
             };
@@ -1091,32 +1091,15 @@ export class Ad4mModel {
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generatePropertySetterAction(key, metadata);
 
-    // Get resolve language from metadata (replaces Prolog query)
-    let resolveLanguage = metadata.resolveLanguage;
-
     // Skip storing empty/null/undefined values to avoid invalid empty literals (e.g. literal:string:)
     if (value === undefined || value === null || value === "") {
       return;
     }
 
-    if (resolveLanguage) {
-      // For the built-in "literal" resolver we produce the deterministic
-      // `literal:string:` / `:number:` / `:boolean:` / `:json:` URL directly
-      // instead of round-tripping through `createExpression`. The Rust
-      // mirror of this bypass lives in `resolve_property_value` — without
-      // both sides, the same value would land as `literal:json:<signed
-      // envelope>` on writes through this path, defeating the indexed
-      // equality lookups the WHERE builders now use.
-      //
-      // Route through `valueToLiteralIri` (also used by `queryToSPARQL`)
-      // so URI-shaped strings stay raw on both write AND read: writing
-      // `"https://example.com"` keeps it as `<https://example.com>`,
-      // matching what WHERE filters generate for the same value.
-      if (resolveLanguage === "literal") {
-        value = valueToLiteralIri(value);
-      } else {
-        value = await this._perspective.createExpression(value, resolveLanguage);
-      }
+    if (metadata.resolveLiteral !== false) {
+      value = valueToLiteralIri(value);
+    } else {
+      value = await this._perspective.createExpression(value, "literal");
     }
 
     await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value }], batchId);
@@ -1260,34 +1243,26 @@ export class Ad4mModel {
       (p) => p.required || p.flag || p.initial !== undefined
     );
 
-    // Track properties that have resolveLanguage (non-literal) so they can be
-    // set via setProperty after createSubject (which doesn't resolve languages).
-    const deferredResolveLanguageProps: string[] = [];
+    // Track properties with resolveLiteral: false — they need createExpression
+    // which may fail inside a batch context. Defer them to setProperty after
+    // createSubject.
+    const deferredExpressionProps: string[] = [];
 
     if (hasConstructor) {
-      // First filter out the properties that are not relations (arrays)
       const initialValues = {};
       for (const [key, value] of Object.entries(this)) {
         if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
-          // Check if this property requires language resolution (e.g. file storage).
-          // If so, resolve the expression *before* passing to createSubject so
-          // the constructor receives a valid URI instead of raw data.
           const propMeta = metadata.properties[key];
-          if (propMeta?.resolveLanguage && propMeta.resolveLanguage !== 'literal' && typeof value === 'object') {
-            // Defer these properties — they need createExpression which may
-            // fail inside a batch context on some languages.  We'll set them
-            // via setProperty after createSubject.
-            deferredResolveLanguageProps.push(key);
+          if (propMeta?.resolveLiteral === false && typeof value === 'object') {
+            deferredExpressionProps.push(key);
             continue;
           }
           initialValues[key] = value;
         }
       }
 
-      // Get the class name instead of passing the instance to avoid Prolog query generation
       const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
 
-      // Create the subject with the initial values
       await this.perspective.createSubject(
         className,
         this._baseExpression,
@@ -1301,10 +1276,7 @@ export class Ad4mModel {
     // property writing so that scalar values are persisted as links.
     await this.innerUpdate(!hasConstructor, batchId)
 
-    // Now handle any deferred resolveLanguage properties that were excluded
-    // from initialValues.  setProperty will call createExpression to upload
-    // the data to the appropriate language and store the resulting URI.
-    for (const key of deferredResolveLanguageProps) {
+    for (const key of deferredExpressionProps) {
       const value = (this as any)[key];
       if (value !== undefined && value !== null) {
         await this.setProperty(key, value, batchId);
@@ -1900,7 +1872,7 @@ export class Ad4mModel {
    * const PersonClass = Ad4mModel.fromJSONSchema(schema, {
    *   name: "Person",
    *   namespace: "person://",
-   *   resolveLanguage: "literal"
+   *   resolveLiteral: true
    * });
    * 
    * // With property mapping
@@ -1945,7 +1917,7 @@ export class Ad4mModel {
    * Unlike `fromJSONSchema()`, no predicate inference is required —
    * `SHACLShape` already contains the exact predicate URI in `path` for
    * every property. The method reads each property's `path`, `maxCount`,
-   * `writable`, and `resolveLanguage` directly and writes them to the
+   * `writable`, and `resolveLiteral` directly and writes them to the
    * WeakMap metadata registries.
    *
    * Properties with `hasValue` (flag / type-discrimination markers) are
@@ -2046,7 +2018,7 @@ export class Ad4mModel {
         setPropertyRegistryEntry(DynamicModelClass, prop.name, {
           through: prop.path,
           writable: prop.writable ?? true,
-          ...(prop.resolveLanguage !== undefined && { resolveLanguage: prop.resolveLanguage }),
+          ...(prop.resolveLiteral !== undefined && { resolveLiteral: prop.resolveLiteral }),
           ...(prop.local !== undefined && { local: prop.local }),
         });
       }

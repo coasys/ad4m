@@ -89,11 +89,11 @@ function looksLikeUri(value: string): boolean {
 
 /**
  * Convert a JS value to its literal: IRI form, matching how the Rust executor
- * stores property values that don't have a resolveLanguage set.
+ * stores property values with resolveLiteral: true (the default).
  * Strings that already look like URIs are returned as-is.
  *
  * Exported so write-side helpers (e.g. `Ad4mModel.setProperty`'s literal
- * resolveLanguage bypass) can keep their on-disk form aligned with what
+ * resolve path) can keep their on-disk form aligned with what
  * `queryToSPARQL()` filters against — otherwise the same value can be
  * stored as `<literal:string:https%3A...>` from one path while WHERE
  * builders probe `<https://example.com>` from the other.
@@ -114,16 +114,12 @@ export function valueToLiteralIri(value: any): string {
 
 /**
  * Determine if a property stores values as literal: IRIs (needs parse_literal for comparisons).
- * Properties with resolveLanguage === "literal" AND properties without resolveLanguage
- * both store values as literal: URIs. Only properties with a non-literal resolveLanguage
- * (e.g. file storage) or flag properties store raw URIs.
+ * Properties with resolveLiteral !== false store deterministic literal: URIs.
+ * Flag properties store raw URIs.
  */
 function isLiteralStoredProperty(propMeta: PropertyMetadata): boolean {
   if (propMeta.flag) return false;
-  // If resolveLanguage is set to something other than "literal", it's a language expression URI
-  if (propMeta.resolveLanguage && propMeta.resolveLanguage !== "literal") return false;
-  // Everything else (resolveLanguage === "literal" or undefined) stores as literal: URIs
-  return true;
+  return propMeta.resolveLiteral !== false;
 }
 
 /**

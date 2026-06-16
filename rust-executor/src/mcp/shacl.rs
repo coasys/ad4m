@@ -52,10 +52,9 @@ pub struct ShaclProperty {
     /// Target SHACL node shape URI (sh:class). When present, linked nodes
     /// must conform to this shape, enabling typed construction.
     pub class: Option<String>,
-    /// Language address for resolving property values (ad4m://resolveLanguage).
-    /// When set, values should be passed through `expression_create` on this language
-    /// instead of being encoded as raw `literal://string:` URIs.
-    pub resolve_language: Option<String>,
+    /// When true (default), store as deterministic literal: IRIs.
+    /// When false, values go through expression_create on the literal language.
+    pub resolve_literal: Option<bool>,
 }
 
 impl ShaclClass {
@@ -196,7 +195,7 @@ fn shape_to_shacl_class(class_name: &str, shape: &ModelShape) -> ShaclClass {
                 node_kind,
                 getter: p.getter.clone(),
                 class: class_uri,
-                resolve_language: p.resolve_language.clone(),
+                resolve_literal: p.resolve_literal,
             }
         })
         .collect();
@@ -396,34 +395,47 @@ pub async fn load_class_properties_with_uri(
             _ => None,
         };
 
-        // Get resolve language (ad4m://resolveLanguage)
-        let resolve_language = match perspective
+        // Get resolveLiteral (ad4m://resolveLiteral), with backward compat for ad4m://resolveLanguage
+        let resolve_literal = match perspective
             .get_links(&LinkQuery {
                 source: Some(prop_uri.clone()),
-                predicate: Some("ad4m://resolveLanguage".to_string()),
+                predicate: Some("ad4m://resolveLiteral".to_string()),
                 ..Default::default()
             })
             .await
         {
             Ok(links) if !links.is_empty() => {
                 let target = &links[0].data.target;
-                let prefix_legacy = "literal://string:";
-                let prefix = "literal:string:";
-                if target.starts_with(prefix_legacy) {
-                    let encoded_value = &target[prefix_legacy.len()..];
-                    urlencoding::decode(encoded_value)
-                        .ok()
-                        .map(|v| v.to_string())
-                } else if target.starts_with(prefix) {
-                    let encoded_value = &target[prefix.len()..];
-                    urlencoding::decode(encoded_value)
-                        .ok()
-                        .map(|v| v.to_string())
-                } else {
-                    Some(target.clone())
+                let val = target
+                    .strip_prefix("literal://boolean:")
+                    .or_else(|| target.strip_prefix("literal:boolean:"))
+                    .or_else(|| target.strip_prefix("literal://"))
+                    .or_else(|| target.strip_prefix("literal:"))
+                    .unwrap_or(target);
+                Some(val == "true")
+            }
+            _ => {
+                // Backward compat: ad4m://resolveLanguage → "literal" means resolveLiteral: true
+                match perspective
+                    .get_links(&LinkQuery {
+                        source: Some(prop_uri.clone()),
+                        predicate: Some("ad4m://resolveLanguage".to_string()),
+                        ..Default::default()
+                    })
+                    .await
+                {
+                    Ok(links) if !links.is_empty() => {
+                        let target = &links[0].data.target;
+                        let val = target
+                            .strip_prefix("literal://string:")
+                            .or_else(|| target.strip_prefix("literal:string:"))
+                            .unwrap_or(target);
+                        let decoded = urlencoding::decode(val).unwrap_or_default();
+                        Some(decoded.as_ref() == "literal")
+                    }
+                    _ => None,
                 }
             }
-            _ => None,
         };
 
         properties.push(ShaclProperty {
@@ -436,7 +448,7 @@ pub async fn load_class_properties_with_uri(
             node_kind,
             getter,
             class: class_uri,
-            resolve_language,
+            resolve_literal,
         });
     }
 
@@ -519,15 +531,15 @@ pub async fn resolve_property_predicate(
     ))
 }
 
-/// Resolve a property's resolve_language for a given class.
-/// Returns `Ok(Some(language))` if the property has a resolve language,
+/// Resolve whether a property uses literal storage for a given class.
+/// Returns `Ok(Some(true/false))` if the property has resolve_literal set,
 /// or `Err` if the class/property is not found.
 /// Matching is case-insensitive because dynamic tool names are lowercased.
-pub async fn resolve_property_resolve_language(
+pub async fn resolve_property_resolve_literal(
     perspective: &PerspectiveInstance,
     class_name: &str,
     property_name: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<bool>, String> {
     let properties = load_class_properties(perspective, class_name).await;
     if properties.is_empty() {
         return Err(format!("No SHACL shape found for class '{}'", class_name));
@@ -535,7 +547,7 @@ pub async fn resolve_property_resolve_language(
     let prop_lower = property_name.to_lowercase();
     for prop in &properties {
         if prop.name == property_name || prop.name.to_lowercase() == prop_lower {
-            return Ok(prop.resolve_language.clone());
+            return Ok(prop.resolve_literal);
         }
     }
     Err(format!(

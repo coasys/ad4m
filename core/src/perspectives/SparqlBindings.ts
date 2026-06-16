@@ -48,7 +48,7 @@ export function parseSparqlCount(result: CountBinding[] | undefined | null): num
  * Decode a `Literal`-encoded SPARQL binding back to a plain string.
  *
  * Returns `''` for `undefined`/empty input. Falls through to the raw value
- * if decoding fails — bindings against properties without `resolveLanguage`
+ * if decoding fails — bindings against properties without `resolveLiteral`
  * are already raw URIs and should pass through unchanged. `literal:json:`
  * objects are JSON-stringified for display.
  */

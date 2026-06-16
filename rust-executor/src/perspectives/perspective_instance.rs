@@ -4020,32 +4020,50 @@ impl PerspectiveInstance {
         Ok(None)
     }
 
-    /// Get resolve language from SHACL links
-    pub async fn get_resolve_language_from_shacl(
+    /// Check whether a property uses deterministic literal storage (resolveLiteral).
+    /// Falls back to checking the legacy ad4m://resolveLanguage → "literal" for
+    /// backward compat with old SHACL data.
+    pub async fn get_resolve_literal_from_shacl(
         &self,
         class_name: &str,
         property: &str,
-    ) -> Result<Option<String>, AnyError> {
+    ) -> Result<Option<bool>, AnyError> {
         let prop_suffix = format!("{}.{}", class_name, property);
-        let _uuid = self.uuid.clone();
 
+        // New path: ad4m://resolveLiteral
         let links = self
+            .sparql_store
+            .get_links_by_predicate_and_source_suffix("ad4m://resolveLiteral", &prop_suffix)?;
+
+        if let Some(link) = links.first() {
+            let val = link
+                .data
+                .target
+                .strip_prefix("literal://boolean:")
+                .or_else(|| link.data.target.strip_prefix("literal:boolean:"))
+                .or_else(|| link.data.target.strip_prefix("literal://"))
+                .or_else(|| link.data.target.strip_prefix("literal:"))
+                .unwrap_or(&link.data.target);
+            return Ok(Some(val == "true"));
+        }
+
+        // Backward compat: ad4m://resolveLanguage → "literal" means resolveLiteral: true
+        let lang_links = self
             .sparql_store
             .get_links_by_predicate_and_source_suffix("ad4m://resolveLanguage", &prop_suffix)?;
 
-        if let Some(link) = links.first() {
-            // Extract value from literal:string:{value} or legacy literal://string:{value}
+        if let Some(link) = lang_links.first() {
             let encoded_value =
                 if let Some(rest) = link.data.target.strip_prefix("literal://string:") {
                     rest
                 } else if let Some(rest) = link.data.target.strip_prefix("literal:string:") {
                     rest
                 } else {
-                    return Ok(Some(link.data.target.clone()));
+                    return Ok(Some(link.data.target == "literal"));
                 };
             let decoded = urlencoding::decode(encoded_value)
                 .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
-            return Ok(Some(decoded.to_string()));
+            return Ok(Some(decoded.as_ref() == "literal"));
         }
 
         Ok(None)
@@ -4076,48 +4094,22 @@ impl PerspectiveInstance {
         value: &serde_json::Value,
         context: &AgentContext,
     ) -> Result<String, AnyError> {
-        // Get resolve language from SHACL links
-        let resolve_language = self
-            .get_resolve_language_from_shacl(class_name, property)
+        let resolve_literal = self
+            .get_resolve_literal_from_shacl(class_name, property)
             .await?;
 
-        if let Some(resolve_language) = resolve_language {
-            // The built-in "literal" language produces a deterministic plain URI
-            // (`literal:string:X` / `:number:` / `:boolean:` / `:json:`) directly
-            // from the value. Routing through `expression_create` would wrap the
-            // value in a signed envelope whose IRI depends on author+timestamp,
-            // making property values non-deterministic and breaking exact-match
-            // SPARQL WHERE filters. Provenance for the link as a whole already
-            // lives on the reifier; the literal payload doesn't need its own.
-            if resolve_language == "literal" {
-                // Mirror the no-resolveLanguage branch below + the TS-side
-                // `valueToLiteralIri`: strings that already carry a URI
-                // scheme are stored as-is so they round-trip through the
-                // WHERE builders' `<…>` IRI probes without wrapping. Other
-                // values flow through the canonical `literal_encode` so
-                // migrated rows and fresh writes share one IRI shape.
-                if let serde_json::Value::String(s) = value {
-                    static URI_SCHEME_RE: std::sync::OnceLock<regex::Regex> =
-                        std::sync::OnceLock::new();
-                    let re = URI_SCHEME_RE
-                        .get_or_init(|| regex::Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-._]*:").unwrap());
-                    if re.is_match(s) {
-                        return Ok(s.clone());
-                    }
-                }
-                let encoded = crate::languages::literal_encode(value);
-                return Ok(format!("literal:{}", encoded));
-            }
-
+        if resolve_literal == Some(false) {
+            // resolveLiteral: false — go through expression_create on the literal
+            // language, producing a signed-envelope URI.
             let controller = crate::languages::LanguageController::global_instance();
             let agent_context = context.clone();
             match controller
-                .expression_create(&resolve_language, value.clone(), &agent_context)
+                .expression_create("literal", value.clone(), &agent_context)
                 .await
             {
                 Ok(url) => Ok(url),
                 Err(e) => {
-                    log::warn!("Failed to create expression on {}: {}", resolve_language, e);
+                    log::warn!("Failed to create expression on literal: {}", e);
                     Ok(value.to_string())
                 }
             }

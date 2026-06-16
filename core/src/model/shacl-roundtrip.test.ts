@@ -180,7 +180,7 @@ describe("Decorators → SHACL writer round-trip", () => {
   it("emits scalar property predicates", () => {
     @Model({ name: "Profile" })
     class Profile extends Ad4mModel {
-      @Property({ through: "ns://name", resolveLanguage: "literal" })
+      @Property({ through: "ns://name" })
       name: string = "";
     }
 
@@ -191,7 +191,7 @@ describe("Decorators → SHACL writer round-trip", () => {
       "ns://name",
     );
     expect(
-      findLinkTarget(links, "ns://Profile.name", "ad4m://resolveLanguage"),
-    ).toBe("literal:string:literal");
+      findLinkTarget(links, "ns://Profile.name", "ad4m://resolveLiteral"),
+    ).toBe("literal:true");
   });
 });

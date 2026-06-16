@@ -280,9 +280,14 @@ export interface PropertyOptions {
     readOnly?: boolean;
 
     /**
-     * The language used to store the property. Can be the default `Literal` Language or a custom language address.
+     * When true (default), property values are stored as deterministic
+     * `literal:string:X` / `:number:` / `:boolean:` / `:json:` IRIs directly.
+     * This enables efficient Oxigraph POS-index lookups.
+     *
+     * When false, values go through `expression_create` on the literal
+     * language, producing a signed-envelope URI with author/timestamp/proof.
      */
-    resolveLanguage?: string;
+    resolveLiteral?: boolean;
 
     /**
      * Custom Prolog getter to get the value of the property. If not provided, the default getter will be used.
@@ -378,7 +383,7 @@ function applyPropertyMetadata(opts: PropertyOptions) {
  *
  * @description
  * Equivalent to `@Property` but defaults `required` to `false` and does not
- * apply `resolveLanguage` or `initial` defaults.  Use this when a property
+ * apply `resolveLiteral` or `initial` defaults.  Use this when a property
  * may or may not have a value, and you want full control over its configuration.
  *
  * @example
@@ -530,7 +535,7 @@ export interface ModelConfig {
  * class Recipe extends Ad4mModel {
  *   @Property({
  *     through: "recipe://name",
- *     resolveLanguage: "literal"
+ *     resolveLiteral: true
  *   })
  *   name: string = "";
  * 
@@ -603,7 +608,7 @@ export function Model(opts: ModelConfig) {
  * Smart defaults (all overridable):
  * - `required` → `false`
  * - `readOnly` → `false`
- * - `resolveLanguage` → `"literal"`
+ * - `resolveLiteral` → `true`
  * - `initial` → `undefined` (no link created until a value is explicitly set)
  * 
  * Properties are optional by default. When a model instance is created without
@@ -639,7 +644,7 @@ export function Model(opts: ModelConfig) {
  *   // Optional property with literal resolution
  *   @Property({
  *     through: "user://bio",
- *     resolveLanguage: "literal"
+ *     resolveLiteral: true
  *   })
  *   bio: string = "";
  * }
@@ -649,7 +654,7 @@ export function Model(opts: ModelConfig) {
  * @param {string} opts.through - The predicate URI for the property
  * @param {boolean} [opts.required=false] - Whether the property is required (adds query filters and sentinel initial value)
  * @param {string} [opts.initial] - Initial value (defaults to "literal:string:uninitialized" when required)
- * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
+ * @param {boolean} [opts.resolveLiteral=true] - When true, store as deterministic literal: IRIs
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
@@ -660,7 +665,7 @@ export function Property(opts: PropertyOptions) {
         ...opts,
         required,
         readOnly: opts.readOnly ?? false,
-        resolveLanguage: opts.resolveLanguage ?? "literal",
+        resolveLiteral: opts.resolveLiteral ?? true,
         initial: opts.initial ?? (required ? "literal:string:uninitialized" : undefined),
     });
 }
@@ -700,7 +705,7 @@ export function Property(opts: PropertyOptions) {
  *   // Read-only property that resolves to a Literal
  *   @ReadOnly({
  *     through: "post://author",
- *     resolveLanguage: "literal"
+ *     resolveLiteral: true
  *   })
  *   author: string = "";
  * 
@@ -716,7 +721,7 @@ export function Property(opts: PropertyOptions) {
  * @param {PropertyOptions} opts - Property configuration
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (if property should have one)
- * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
+ * @param {boolean} [opts.resolveLiteral=true] - When true, store as deterministic literal: IRIs
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
