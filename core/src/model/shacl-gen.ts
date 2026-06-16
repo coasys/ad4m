@@ -34,6 +34,17 @@ export function buildSHACL(
     properties: Record<string, PropertyMetadataEntry>,
     allRelationsMeta: Record<string, RelationMetadataEntry>,
     conformanceFilterFn: ConformanceFilterFn,
+    /**
+     * Optional early-cache seeding callback. When invoked with a
+     * partial `{ shape, name }`, any re-entrant `generateSHACL()`
+     * call on the same target — which happens when a relation's
+     * `target: () => SameClass` points at us, directly or
+     * transitively — observes the in-progress shape rather than
+     * re-entering this function infinitely. Provided by `@Model` via
+     * `getMemoizedSHACL`; safe to omit when calling `buildSHACL`
+     * directly (e.g. from a one-off SDNA build tool).
+     */
+    seedCache?: (partial: { shape: SHACLShape; name: string }) => void,
 ): { shape: SHACLShape; name: string } {
     const obj = target.prototype;
 
@@ -65,6 +76,18 @@ export function buildSHACL(
     const shapeUri = `${namespace}${subjectName}Shape`;
     const targetClass = `${namespace}${subjectName}`;
     const shape = new SHACLShape(shapeUri, targetClass);
+
+    // ── Seed the memoisation cache while we keep building ──────────────
+    // Any subsequent `target.generateSHACL()` call from inside this
+    // function (typically when walking a self-referential or
+    // mutually-recursive relation target) will now observe the
+    // already-allocated `shape` rather than re-entering `buildSHACL`
+    // and overflowing the stack. The shape is mutated in place as we
+    // populate it below, so the eventual cached value and the value
+    // recursive callers see are the same object.
+    if (seedCache) {
+        seedCache({ shape, name: subjectName });
+    }
 
     // Detect @Model inheritance — if the parent class also has
     // generateSHACL it is itself a @Model and we reference its shape

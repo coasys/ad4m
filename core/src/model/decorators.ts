@@ -115,11 +115,44 @@ export function getRelationsMetadata(ctor: Function): Record<string, RelationMet
 
 /**
  * Get or compute memoised SHACL for a class. Used by @Model decorator.
+ *
+ * The `compute` callback receives a `seed(partial)` function: calling
+ * it stores `partial` in the cache *before* `compute` returns, so any
+ * re-entrant `getMemoizedSHACL(target, …)` call from inside `compute`
+ * observes the in-progress shape instead of re-entering `compute`
+ * infinitely.
+ *
+ * This matters for self-referential models — e.g.
+ *
+ *     @Model({ name: "Channel" })
+ *     class Channel extends Ad4mModel {
+ *         @HasMany({ predicate: "…/child", target: () => Channel })
+ *         childChannels!: Channel[];
+ *     }
+ *
+ * Without the seed, building the SHACL shape for `Channel` invokes
+ * `Channel.generateSHACL()` while walking the `childChannels`
+ * relation's target (shacl-gen.ts ~line 327), which re-enters this
+ * function with an empty cache, blowing the stack.
  */
-export function getMemoizedSHACL(target: Function, compute: () => any): any {
+export function getMemoizedSHACL(
+    target: Function,
+    compute: (seed: (partial: any) => void) => any,
+): any {
     const cached = shaclCache.get(target);
     if (cached) return cached;
-    const result = compute();
+    const seed = (partial: any) => {
+        shaclCache.set(target, partial);
+    };
+    let result: any;
+    try {
+        result = compute(seed);
+    } catch (e) {
+        // If compute throws after seeding, evict the half-built entry
+        // so a later retry can rebuild from scratch.
+        shaclCache.delete(target);
+        throw e;
+    }
     shaclCache.set(target, result);
     return result;
 }
@@ -544,12 +577,13 @@ export function Model(opts: ModelConfig) {
         }
 
         target.generateSHACL = function() {
-            return getMemoizedSHACL(target, () => buildSHACL(
+            return getMemoizedSHACL(target, (seed) => buildSHACL(
                 opts.name,
                 target,
                 getPropertiesMetadata(target),
                 getRelationsMetadata(target),
                 buildConformanceFilter,
+                seed,
             ));
         }
 
