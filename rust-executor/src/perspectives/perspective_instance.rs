@@ -4740,7 +4740,19 @@ impl PerspectiveInstance {
 
         let mut log_counter = 0;
         const LOG_INTERVAL: u32 = 300; // Log every ~60 seconds (300 * 200ms)
-        const BATCH_WINDOW_MS: u64 = 50; // Debounce window for batching rapid link changes
+
+        // Debounce window for batching rapid link changes into a single
+        // subscription dispatch. A single Ad4mModel.save() can produce
+        // multiple link inserts (one per property/flag); without a wide
+        // enough window the dispatch can fire on a partial-state read
+        // — e.g. seeing the `name` link but not yet the `status` link a
+        // status="active" filter relies on — and the subsequent re-fetch
+        // reflects only part of the just-saved model. Back-to-back saves
+        // amplify this into a missed-update race that surfaces as a stuck
+        // `lastCall.args[0].results.length` in paginate-subscribe tests.
+        // 250ms is still imperceptible to UI consumers and absorbs both
+        // the multi-link-per-save and the rapid-saves-in-a-row cases.
+        const BATCH_WINDOW_MS: u64 = 250;
 
         while !self.is_teardown.load(Ordering::Acquire) {
             // Check trigger without holding lock during the operation
