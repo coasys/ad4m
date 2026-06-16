@@ -119,8 +119,8 @@ export function buildSHACL(
             path: propMeta.through,
         };
 
-        // Determine datatype from initial value or resolveLanguage
-        if (propMeta.resolveLanguage === "literal") {
+        // Determine datatype from initial value or resolveLiteral
+        if (propMeta.resolveLiteral) {
             propShape.datatype = "xsd://string";
         } else if (propMeta.initial) {
             const initialType = typeof obj[propName];
@@ -160,8 +160,8 @@ export function buildSHACL(
             propShape.writable = propMeta.writable;
         }
 
-        if (propMeta.resolveLanguage != null) {
-            propShape.resolveLanguage = propMeta.resolveLanguage;
+        if (propMeta.resolveLiteral != null) {
+            propShape.resolveLiteral = propMeta.resolveLiteral;
         }
 
         // Explicit getter SPARQL — the executor evaluates this when

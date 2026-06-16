@@ -1654,7 +1654,7 @@ export class PerspectiveProxy {
     async getSubjectClassMetadata(className: string): Promise<{
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
-        properties: Map<string, { predicate: string, resolveLanguage?: string }>,
+        properties: Map<string, { predicate: string, resolveLiteral?: boolean }>,
         relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
     } | null> {
         try {
@@ -1667,7 +1667,7 @@ export class PerspectiveProxy {
 
             const requiredPredicates: string[] = [];
             const requiredTriples: Array<{predicate: string, target?: string}> = [];
-            const properties = new Map<string, { predicate: string, resolveLanguage?: string }>();
+            const properties = new Map<string, { predicate: string, resolveLiteral?: boolean }>();
             const relations = new Map<string, { predicate: string, instanceFilter?: string }>();
 
             // Build property/relation maps and track writable predicates from shape properties
@@ -1685,7 +1685,7 @@ export class PerspectiveProxy {
                 } else {
                     properties.set(prop.name, {
                         predicate: prop.path,
-                        resolveLanguage: prop.resolveLanguage
+                        resolveLiteral: prop.resolveLiteral
                     });
                 }
             }
@@ -1722,7 +1722,7 @@ export class PerspectiveProxy {
     private async findInstancesByMetadata(metadata: {
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
-        properties: Map<string, { predicate: string, resolveLanguage?: string }>,
+        properties: Map<string, { predicate: string, resolveLiteral?: boolean }>,
         relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
     }): Promise<Array<{base: string}>> {
         if (metadata.requiredTriples.length === 0) {

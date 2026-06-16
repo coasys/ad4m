@@ -45,11 +45,11 @@ export function buildSDNA(
     for (let property in properties) {
         let propertyCode = `property(${uuid}, "${property}").\n`;
 
-        let { through, initial, required, resolveLanguage, writable, flag, prologGetter, prologSetter, local } = properties[property];
+        let { through, initial, required, resolveLiteral, writable, flag, prologGetter, prologSetter, local } = properties[property];
 
-        if (resolveLanguage) {
+        if (resolveLiteral !== false) {
             propertyCode += `property_resolve(${uuid}, "${property}").\n`;
-            propertyCode += `property_resolve_language(${uuid}, "${property}", "${resolveLanguage}").\n`;
+            propertyCode += `property_resolve_language(${uuid}, "${property}", "literal").\n`;
         }
 
         if (prologGetter) {

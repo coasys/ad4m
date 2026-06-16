@@ -18,7 +18,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
   it("should extract property metadata with all fields", () => {
     @Model({ name: "PropertyModel" })
     class PropertyModel extends Ad4mModel {
-      @Property({ through: "test://name", resolveLanguage: "literal" })
+      @Property({ through: "test://name", resolveLiteral: true })
       name: string = "";
       
       @Optional({ through: "test://optional" })
@@ -40,7 +40,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.name.predicate).toBe("test://name");
     expect(metadata.properties.name.required).toBe(false);
     expect(metadata.properties.name.readOnly).toBe(false);
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    expect(metadata.properties.name.resolveLiteral).toBe(true);
     
     // Verify "optional" property
     expect(metadata.properties.optional.predicate).toBe("test://optional");
@@ -148,7 +148,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
   it("should handle complex model with mixed property and relation types", () => {
     @Model({ name: "Recipe" })
     class Recipe extends Ad4mModel {
-      @Property({ through: "recipe://name", resolveLanguage: "literal" })
+      @Property({ through: "recipe://name", resolveLiteral: true })
       name: string = "";
       
       @Optional({ through: "recipe://description" })
@@ -182,7 +182,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
     
     // Verify all metadata fields are correctly extracted
     expect(metadata.properties.name.predicate).toBe("recipe://name");
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    expect(metadata.properties.name.resolveLiteral).toBe(true);
     expect(metadata.properties.description.predicate).toBe("recipe://description");
     expect(metadata.properties.rating.predicate).toBe("recipe://rating");
     expect(metadata.properties.rating.prologGetter).toBe("avg_rating(Base, Value)");
@@ -208,7 +208,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     const ProductClass = Ad4mModel.fromJSONSchema(schema, {
       name: "Product",
       namespace: "product://",
-      resolveLanguage: "literal"
+      resolveLiteral: true
     });
 
     const metadata = ProductClass.getModelMetadata();
@@ -222,12 +222,12 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.name.predicate).toBe("product://name");
     expect(metadata.properties.name.required).toBe(true);
     expect(metadata.properties.name.readOnly).toBe(false);
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    expect(metadata.properties.name.resolveLiteral).toBe(true);
 
     expect(metadata.properties.price).toBeDefined();
     expect(metadata.properties.price.predicate).toBe("product://price");
     expect(metadata.properties.price.required).toBe(true);
-    expect(metadata.properties.price.resolveLanguage).toBe("literal");
+    expect(metadata.properties.price.resolveLiteral).toBe(true);
 
     expect(metadata.properties.description).toBeDefined();
     expect(metadata.properties.description.predicate).toBe("product://description");
@@ -288,7 +288,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
           type: "string",
           "x-ad4m": {
             through: "foaf://name",
-            resolveLanguage: "literal",
+            resolveLiteral: true,
             writable: true
           }
         },
@@ -311,7 +311,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
 
     // Verify x-ad4m metadata is respected
     expect(metadata.properties.name.predicate).toBe("foaf://name");
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    expect(metadata.properties.name.resolveLiteral).toBe(true);
     expect(metadata.properties.name.readOnly).toBe(false);
     expect(metadata.properties.name.required).toBe(true);
 
@@ -372,7 +372,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     const ArticleClass = Ad4mModel.fromJSONSchema(schema, {
       name: "Article",
       namespace: "article://",
-      resolveLanguage: "literal"
+      resolveLiteral: true
     });
 
     const metadata = ArticleClass.getModelMetadata();
@@ -384,11 +384,11 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.title).toBeDefined();
     expect(metadata.properties.title.predicate).toBe("article://title");
     expect(metadata.properties.title.required).toBe(true);
-    expect(metadata.properties.title.resolveLanguage).toBe("literal");
+    expect(metadata.properties.title.resolveLiteral).toBe(true);
 
     expect(metadata.properties.views).toBeDefined();
     expect(metadata.properties.views.predicate).toBe("article://views");
-    expect(metadata.properties.views.resolveLanguage).toBe("literal");
+    expect(metadata.properties.views.resolveLiteral).toBe(true);
 
     expect(metadata.properties.published).toBeDefined();
     expect(metadata.properties.published.predicate).toBe("article://published");
@@ -522,13 +522,13 @@ describe("Ad4mModel.queryToSPARQL()", () => {
 
   @Model({ name: "Task" })
   class Task extends Ad4mModel {
-    @Property({ through: "task://title", resolveLanguage: "literal", required: true })
+    @Property({ through: "task://title", resolveLiteral: true, required: true })
     title: string = "";
 
-    @Property({ through: "task://priority", resolveLanguage: "literal" })
+    @Property({ through: "task://priority", resolveLiteral: true })
     priority: number = 0;
 
-    @Property({ through: "task://done", resolveLanguage: "literal" })
+    @Property({ through: "task://done", resolveLiteral: true })
     done: boolean = false;
 
     @Optional({ through: "task://description" })
@@ -951,7 +951,7 @@ describe("SPARQL direct triple pattern generation", () => {
     @Flag({ through: "flux://entry_type", value: "flux://channel" })
     type: string = "";
 
-    @Property({ through: "flux://name", resolveLanguage: "literal", required: true })
+    @Property({ through: "flux://name", resolveLiteral: true, required: true })
     name: string = "";
 
     @Optional({ through: "flux://description" })
@@ -1034,13 +1034,13 @@ describe("buildSPARQLQuery edge cases", () => {
     @Flag({ through: "flag://type", value: "flag://FlagModel" })
     type: string = "";
 
-    @Property({ through: "flag://name", resolveLanguage: "literal", required: true })
+    @Property({ through: "flag://name", resolveLiteral: true, required: true })
     name: string = "";
   }
 
   @Model({ name: "NoFlagModel" })
   class NoFlagModel extends Ad4mModel {
-    @Property({ through: "noflag://title", resolveLanguage: "literal" })
+    @Property({ through: "noflag://title", resolveLiteral: true })
     title: string = "";
   }
 
@@ -1735,7 +1735,7 @@ describe("SHACL recursion — self-referential relations", () => {
   it("should generate SHACL for a directly self-referential model without overflowing the stack", () => {
     @Model({ name: "RecursiveChannel" })
     class RecursiveChannel extends Ad4mModel {
-      @Property({ through: "channel://name", resolveLanguage: "literal" })
+      @Property({ through: "channel://name", resolveLiteral: true })
       name: string = "";
 
       @HasMany(() => RecursiveChannel, { through: "channel://child" })
@@ -1862,7 +1862,7 @@ describe("deepQuery — getter evaluation", () => {
     @Flag({ through: "flux://entry_type", value: "flux://message" })
     type: string = "";
 
-    @Property({ through: "flux://body", resolveLanguage: "literal" })
+    @Property({ through: "flux://body", resolveLiteral: true })
     body: string = "";
 
     @Property({
@@ -2070,13 +2070,13 @@ describe("Ad4mModel.fromSHACL()", () => {
     expect(meta.relations["participants"].direction).toBe("forward");
   });
 
-  it("propagates resolveLanguage onto scalar properties", () => {
+  it("propagates resolveLiteral onto scalar properties", () => {
     const shape = makeShape("flux://Post", [
-      { name: "body", path: "flux://body", maxCount: 1, resolveLanguage: "literal" },
+      { name: "body", path: "flux://body", maxCount: 1, resolveLiteral: true },
     ]);
     const Cls = Ad4mModel.fromSHACL(shape, "Post");
     const meta = Cls.getModelMetadata();
-    expect(meta.properties["body"].resolveLanguage).toBe("literal");
+    expect(meta.properties["body"].resolveLiteral).toBe(true);
   });
 
   it("defaults writable to true when not specified", () => {

@@ -320,7 +320,7 @@ pub(super) fn build_projection_where_patterns(
                             p.name.clone(),
                             (
                                 p.predicate.clone(),
-                                p.resolve_language.as_deref() == Some("literal"),
+                                p.resolve_literal != Some(false),
                             ),
                         );
                     }

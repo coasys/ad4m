@@ -577,14 +577,13 @@ impl Ad4mMcpHandler {
         super::shacl::resolve_property_predicate(perspective, class_name, property_name).await
     }
 
-    /// Resolve a property value through the appropriate language, respecting
-    /// the SHACL `resolve_language` setting for the property.
+    /// Resolve a property value through the appropriate storage path, respecting
+    /// the SHACL `resolveLiteral` setting for the property.
     ///
     /// If the value already has a URI scheme (e.g. `literal://...`, `did:...`),
     /// it is returned as-is. Otherwise, the value is parsed as JSON to recover
     /// its native type (boolean, number, etc.) and resolved through the
-    /// perspective's `resolve_property_value` method, which uses the language
-    /// controller when a `resolve_language` is set on the property.
+    /// perspective's `resolve_property_value` method.
     ///
     /// Handles case-insensitive property name matching: dynamic tool names are
     /// lowercased but SHACL stores original case. We resolve to the original

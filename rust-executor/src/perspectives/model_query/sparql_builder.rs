@@ -529,11 +529,7 @@ pub(super) fn build_query_patterns(
                     continue;
                 }
                 let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
-                // Only `resolveLanguage: "literal"` stores deterministic
-                // `literal:*` targets we can probe directly. Other resolvers
-                // wrap values in author-signed expression IRIs, so they fall
-                // through to the FILTER-on-decoded path below.
-                let is_literal_prop = prop.resolve_language.as_deref() == Some("literal");
+                let is_literal_prop = prop.resolve_literal != Some(false);
                 match condition {
                     WhereCondition::String(val) => {
                         if is_literal_prop {
