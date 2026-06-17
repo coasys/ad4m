@@ -2,9 +2,9 @@ services:
   ad4m:
     build: .
     ports:
-      - "12000:12000"   # GraphQL/WS API
-      - "3001:3001"     # MCP server
-      - "8080:8080"     # Dapp server
+      - "13000:12000"   # GraphQL/WS API (default 12000 reserved for local dev)
+      - "3101:3001"     # MCP server (default 3001 reserved for local dev)
+      - "8180:8080"     # Dapp server (default 8080 reserved for local dev)
     volumes:
       - ad4m-data:/data
     environment:
@@ -13,6 +13,12 @@ services:
       - ENABLE_MCP=${ENABLE_MCP:-true}
       - MCP_PORT=3001
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:12000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 volumes:
   ad4m-data:

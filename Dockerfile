@@ -187,6 +187,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    curl \
     libssl3 \
     libgtk-3-0 \
     libwebkit2gtk-4.1-0 \
@@ -211,5 +212,8 @@ EXPOSE 12000
 EXPOSE 3001
 # Dapp server
 EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -sf http://localhost:12000/ || exit 1
 
 ENTRYPOINT ["docker-entrypoint.sh"]
