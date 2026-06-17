@@ -13,23 +13,23 @@ if [ ! -f /data/mainnet_seed.seed ]; then
     ad4m-executor init --data-path /data
 fi
 
-EXTRA_ARGS=""
+EXTRA_ARGS=()
 
-if [ -n "$ADMIN_CREDENTIAL" ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --admin-credential $ADMIN_CREDENTIAL"
+if [ -n "${ADMIN_CREDENTIAL:-}" ]; then
+    EXTRA_ARGS+=(--admin-credential "$ADMIN_CREDENTIAL")
 fi
 
-if [ "${ENABLE_MULTI_USER}" = "true" ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --enable-multi-user true"
+if [ "${ENABLE_MULTI_USER:-}" = "true" ]; then
+    EXTRA_ARGS+=(--enable-multi-user true)
 fi
 
-if [ "${ENABLE_MCP}" = "true" ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --enable-mcp true --mcp-port ${MCP_PORT:-3001}"
+if [ "${ENABLE_MCP:-}" = "true" ]; then
+    EXTRA_ARGS+=(--enable-mcp true --mcp-port "${MCP_PORT:-3001}")
 fi
 
 exec ad4m-executor run \
     --app-data-path /data \
     --localhost false \
     --run-dapp-server true \
-    $EXTRA_ARGS \
+    "${EXTRA_ARGS[@]}" \
     "$@"

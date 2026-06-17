@@ -47,7 +47,7 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 
 # Node
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
-    && apt-get install -y nodejs \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # pnpm (match version pinned in package.json)

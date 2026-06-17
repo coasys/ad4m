@@ -11,7 +11,7 @@ services:
       - ADMIN_CREDENTIAL=${ADMIN_CREDENTIAL:-}
       - ENABLE_MULTI_USER=${ENABLE_MULTI_USER:-true}
       - ENABLE_MCP=${ENABLE_MCP:-true}
-      - MCP_PORT=3001
+      - MCP_PORT=${MCP_PORT:-3001}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:12000/"]
