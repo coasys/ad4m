@@ -1,0 +1,18 @@
+services:
+  ad4m:
+    build: .
+    ports:
+      - "12000:12000"   # GraphQL/WS API
+      - "3001:3001"     # MCP server
+      - "8080:8080"     # Dapp server
+    volumes:
+      - ad4m-data:/data
+    environment:
+      - ADMIN_CREDENTIAL=${ADMIN_CREDENTIAL:-}
+      - ENABLE_MULTI_USER=${ENABLE_MULTI_USER:-true}
+      - ENABLE_MCP=${ENABLE_MCP:-true}
+      - MCP_PORT=3001
+    restart: unless-stopped
+
+volumes:
+  ad4m-data:

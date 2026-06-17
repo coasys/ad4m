@@ -451,13 +451,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     info!("Starting dapp server...");
 
     if let Some(true) = config.run_dapp_server {
-        std::thread::spawn(|| {
+        let dapp_localhost = config.localhost.unwrap_or(true);
+        std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .thread_name(String::from("dapp_server"))
                 .enable_all()
                 .build()
                 .unwrap();
-            if let Err(e) = runtime.block_on(serve_dapp(8080, app_dir)) {
+            if let Err(e) = runtime.block_on(serve_dapp(8080, app_dir, dapp_localhost)) {
                 error!("Failed to start dapp server: {:?}", e);
             }
         });
@@ -618,7 +619,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                 .unwrap();
             let mcp_config = mcp::server::McpServerConfig {
                 port: config.mcp_port.unwrap_or(3001),
-                ..Default::default()
+                host: if config.localhost.unwrap_or(true) {
+                    "127.0.0.1".to_string()
+                } else {
+                    "0.0.0.0".to_string()
+                },
             };
             if let Err(e) = runtime.block_on(mcp::start_mcp_server(
                 admin_credential,
