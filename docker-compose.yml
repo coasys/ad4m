@@ -3,7 +3,7 @@ services:
     build: .
     ports:
       - "13000:12000"   # GraphQL/WS API (default 12000 reserved for local dev)
-      - "3101:3001"     # MCP server (default 3001 reserved for local dev)
+      - "3101:${MCP_PORT:-3001}"     # MCP server
       - "8180:8080"     # Dapp server (default 8080 reserved for local dev)
     volumes:
       - ad4m-data:/data

@@ -151,13 +151,13 @@ RUN if ! grep -q '\[patch."https://github.com/coasys/deno_core.git"\]' Cargo.tom
 # Pre-cache floneum in cargo git DB (GitHub rejects fetch-by-SHA on forks)
 RUN mkdir -p /home/builder/.cargo/git/db && \
     for i in 1 2 3; do \
-      git clone --bare --single-branch --branch coasys-2-without-pdf --depth 50 \
+      git clone --bare --single-branch --branch coasys-2-without-pdf --depth 20 \
         https://github.com/coasys/floneum.git \
         /home/builder/.cargo/git/db/floneum-bfbb720c433546c9 && break; \
       rm -rf /home/builder/.cargo/git/db/floneum-bfbb720c433546c9; sleep 10; \
     done && \
     cd /home/builder/.cargo/git/db/floneum-bfbb720c433546c9 && \
-    git fetch --depth 50 origin 427cfdf3c07f5502ea085f281f6a362adb046312 || true && \
+    git fetch --depth 1 origin 427cfdf3c07f5502ea085f281f6a362adb046312 || true && \
     mkdir -p /home/builder/.cargo/git/checkouts/floneum-bfbb720c433546c9 && \
     git clone --shared /home/builder/.cargo/git/db/floneum-bfbb720c433546c9 \
       /home/builder/.cargo/git/checkouts/floneum-bfbb720c433546c9/427cfdf && \
@@ -206,8 +206,7 @@ COPY --from=builder /home/builder/ad4m-executor-bin /usr/local/bin/ad4m-executor
 
 RUN useradd -m -s /bin/bash ad4m && mkdir -p /data && chown ad4m:ad4m /data
 
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 WORKDIR /data
 
