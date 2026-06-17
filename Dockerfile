@@ -210,7 +210,7 @@ COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 WORKDIR /data
 
-# GraphQL/WS API
+# WS-RPC API
 EXPOSE 12000
 # MCP server
 EXPOSE 3001
