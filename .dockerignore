@@ -10,3 +10,6 @@ LICENSE
 .env.*
 dist/
 out/
+Dockerfile
+docker-compose.yml
+docker-entrypoint.sh

@@ -169,9 +169,14 @@ RUN mkdir -p /home/builder/.cargo/git/db && \
 # fails on submodule resolution for chromium buildtools).
 RUN sed -i '/^source = "git+https:\/\/github\.com\/coasys\/rusty_v8/d' Cargo.lock
 
-# ── Build ───────────────────────────────────────────────────────────────
-RUN pnpm run build-deno-snapshot
-RUN pnpm run build-libs
+# ── Build (cargo target cached across rebuilds) ───────────────────────
+RUN --mount=type=cache,target=/home/builder/ad4m/target,uid=1001,gid=1001 \
+    pnpm run build-deno-snapshot
+
+RUN --mount=type=cache,target=/home/builder/ad4m/target,uid=1001,gid=1001 \
+    pnpm run build-libs \
+    && cp target/release/ad4m /home/builder/ad4m-bin \
+    && cp target/release/ad4m-executor /home/builder/ad4m-executor-bin
 
 # Free disk space
 RUN rm -rf /home/builder/deno-local /home/builder/deno_core-local /home/builder/rusty_v8-local \
@@ -196,8 +201,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gosu \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /home/builder/ad4m/target/release/ad4m /usr/local/bin/ad4m
-COPY --from=builder /home/builder/ad4m/target/release/ad4m-executor /usr/local/bin/ad4m-executor
+COPY --from=builder /home/builder/ad4m-bin /usr/local/bin/ad4m
+COPY --from=builder /home/builder/ad4m-executor-bin /usr/local/bin/ad4m-executor
 
 RUN useradd -m -s /bin/bash ad4m && mkdir -p /data && chown ad4m:ad4m /data
 
