@@ -126,7 +126,7 @@ impl ServerHandler for Ad4mMcpHandler {
         if !AUTH_TOOLS.contains(&tool_name.as_str()) {
             if !self.check_auth(&tool_name, &context).await {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    json!({"error": "Authentication required. Use request_capability + generate_jwt, login_email, or signup to authenticate."}).to_string()
+                    json!({"error": "Authentication required. Use login_email (multi-user) or request_capability + generate_jwt (single-user). To create a new account: signup then login_email."}).to_string()
                 )]));
             }
         }

@@ -19,7 +19,7 @@ use serde_json::json;
 /// Parameters for email/password login (multi-user mode)
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct LoginEmailParams {
-    /// User email address
+    /// Account identifier (email address or username)
     pub email: String,
     /// User password
     pub password: String,
@@ -52,7 +52,7 @@ pub struct GenerateJwtParams {
 /// Parameters for user signup (multi-user mode)
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SignupParams {
-    /// User email address
+    /// Account identifier (email address or username — no format validation)
     pub email: String,
     /// User password
     pub password: String,
@@ -85,9 +85,9 @@ pub struct AuthStatusParams {}
 // ============================================================================
 
 impl Ad4mMcpHandler {
-    /// Login with email and password (multi-user mode)
+    /// Login with email/username and password (multi-user mode)
     #[tool(
-        description = "Login to a multi-user AD4M executor using email and password. Returns a JWT token on success that will be used for subsequent operations."
+        description = "Login to a multi-user AD4M executor. The 'email' field is the account identifier used during signup (can be an email address or any username). Returns a JWT token on success that is stored in the session and used for all subsequent operations. To create a new account, call signup first, then login_email — no email verification step is required."
     )]
     pub async fn login_email(&self, params: Parameters<LoginEmailParams>) -> String {
         use crate::user_management as um;
@@ -168,7 +168,7 @@ impl Ad4mMcpHandler {
 
     /// Sign up a new user (multi-user mode)
     #[tool(
-        description = "Create a new user account (multi-user mode). Sends a verification email with a code. Use verify_email_code to complete signup."
+        description = "Create a new user account on a multi-user AD4M executor. The 'email' field is an account identifier — it can be any string (email address or username), no format validation is applied. After signup, call login_email with the same credentials to get a JWT — no email verification step is required. If SMTP is configured, a verification email is sent, but completing verification is optional."
     )]
     pub async fn signup(&self, params: Parameters<SignupParams>) -> String {
         use crate::user_management as um;
@@ -178,8 +178,9 @@ impl Ad4mMcpHandler {
             Ok(did) => json!({
                 "success": true,
                 "did": did,
-                "message": "User created. Check your email for a verification code and call verify_email_code."
-            }).to_string(),
+                "message": "User created. Call login_email with the same credentials to get a JWT."
+            })
+            .to_string(),
             Err(e) => json!({"success": false, "error": e}).to_string(),
         }
     }
@@ -230,10 +231,21 @@ impl Ad4mMcpHandler {
     /// Check current authentication status
     #[tool(description = "Check the current authentication status of the MCP session.")]
     pub async fn auth_status(&self, _params: Parameters<AuthStatusParams>) -> String {
+        use crate::agent::capabilities::is_admin_credential_token;
+
         let token = self.context.auth_token.read().await;
 
         match &*token {
             Some(t) if !t.is_empty() => {
+                if is_admin_credential_token(t, &self.context.admin_credential) {
+                    return json!({
+                        "authenticated": true,
+                        "token_type": "admin_credential",
+                        "has_capabilities": true,
+                    })
+                    .to_string();
+                }
+
                 match decode_jwt(t.clone()) {
                     Ok(claims) => json!({
                         "authenticated": true,
@@ -242,19 +254,17 @@ impl Ad4mMcpHandler {
                         "has_capabilities": claims.capabilities.capabilities.is_some(),
                     })
                     .to_string(),
-                    Err(_) => {
-                        json!({
-                            "authenticated": false,
-                            "token_type": "unknown",
-                            "message": "Token set but invalid - could not decode"
-                        })
-                        .to_string()
-                    }
+                    Err(_) => json!({
+                        "authenticated": false,
+                        "token_type": "unknown",
+                        "message": "Token set but could not be validated"
+                    })
+                    .to_string(),
                 }
             }
             _ => json!({
                 "authenticated": false,
-                "message": "Not authenticated. Use request_capability + generate_jwt, login_email, or signup + verify_email_code to authenticate."
+                "message": "Not authenticated. Use login_email (multi-user), or request_capability + generate_jwt (single-user). To create a new account: signup then login_email."
             })
             .to_string(),
         }
