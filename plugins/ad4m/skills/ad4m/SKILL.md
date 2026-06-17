@@ -74,7 +74,7 @@ This eliminates the need for a separate `add_child` call. The parent parameter i
 When creating a message, pass the `parent` parameter to add it as a child of a channel:
 
 ```
-message_create(perspective_id="...", body="Hello!", parent="literal://string:<channel-id>")
+message_create(perspective_id="...", body="Hello!", parent="literal:string:<channel-id>")
 ```
 
 This is equivalent to calling `message_create` + `add_child` in one step.
@@ -147,7 +147,7 @@ Use `list_waker_subscriptions()` to see active subscriptions, and `unsubscribe_f
 
 ## Model base expressions / IDs
 
-Model instances are constructed around a base node (called base expression, also ID). Usually those are random literal strings (`literal://string:xyz`). Their properties hang off of that base node with predicates as defined by the class.
+Model instances are constructed around a base node (called base expression, also ID). Usually those are random literal strings (`literal:string:xyz`). Their properties hang off of that base node with predicates as defined by the class.
 
 ## Tree structure
 
@@ -252,10 +252,10 @@ Subscription: mention-abc
 Event type: mention
 
 Mentioned messages (2):
-  Message: literal://string:msg-123
-  Parents: literal://string:channel-1, literal://string:conv-thread-5
-  Message: literal://string:msg-456
-  Parents: literal://string:channel-1
+  Message: literal:string:msg-123
+  Parents: literal:string:channel-1, literal:string:conv-thread-5
+  Message: literal:string:msg-456
+  Parents: literal:string:channel-1
 ```
 
 **Channel-messages events** have the simpler format:
@@ -369,7 +369,7 @@ AD4M's MCP server introspects SHACL subject class definitions and auto-generates
 
 Class and property names are **lowercased** in tool names. Example: `Channel` with `name` and `messages` → `channel_create`, `channel_set_name`, `channel_add_messages`, etc.
 
-**Use `parent` parameter to create + add to channel in one step:** `message_create(..., parent="literal://string:<channel-id>")`
+**Use `parent` parameter to create + add to channel in one step:** `message_create(..., parent="literal:string:<channel-id>")`
 
 **Use `{class}_list` for quick channel message listing:** `message_list(perspective_id, parent="<channel-id>")`
 

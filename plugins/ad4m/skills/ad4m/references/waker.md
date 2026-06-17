@@ -1,12 +1,12 @@
 # AD4M Waker (Embedded)
 
-The AD4M waker watches perspectives for data changes via WebSocket subscriptions and wakes your OpenClaw agent when relevant events occur. It runs as a background service inside the AD4M plugin — no separate process needed.
+The AD4M waker watches perspectives for data changes via WebSocket subscriptions and wakes your agent when relevant events occur. It runs as a background service — no separate process needed.
 
 ## How It Works
 
-1. The plugin's `ad4m-waker` service connects to the AD4M executor's WebSocket event endpoint
-2. When you call `subscribe_to_mentions` or `subscribe_to_children`, the plugin creates a `QuerySubscriptionProxy` with a SPARQL live query
-3. When query results change, the plugin debounces and POSTs to OpenClaw's `/hooks/wake` endpoint
+1. The waker service connects to the AD4M executor's WebSocket event endpoint
+2. When you call `subscribe_to_mentions` or `subscribe_to_children`, it creates a `QuerySubscriptionProxy` with a SPARQL live query
+3. When query results change, the waker debounces and delivers the event to your agent session
 4. Your agent wakes up with context about what changed and processes the new data via MCP tools
 
 ## Plugin Config Fields
@@ -15,8 +15,8 @@ The AD4M waker watches perspectives for data changes via WebSocket subscriptions
 | --------------- | ----------------------------------- | ------------------------------------------------------------------------------- |
 | `wakerEnabled`  | `true`                              | Enable/disable the waker service                                                |
 | `executorUrl`   | `http://localhost:12000`             | AD4M executor REST URL                                                          |
-| `wakeUrl`       | `http://localhost:18789/hooks/wake` | OpenClaw wake endpoint URL                                                      |
-| `wakeToken`     | auto from `hooks.token`             | Override for the hooks token. Auto-read from OpenClaw global config if omitted. |
+| `wakeUrl`       | (platform-specific)                 | Agent wake endpoint URL                                                         |
+| `wakeToken`     | (platform-specific)                 | Auth token for the wake endpoint                                                |
 | `debounceMs`    | `2000`                              | Debounce interval to prevent rapid-fire wakes (ms)                              |
 
 ## Subscription Tools
@@ -33,7 +33,7 @@ The subscribe tools call the MCP tools `ad4m_get_mention_waker_config` / `ad4m_g
 
 ## Wake Message Format
 
-**Use `/hooks/wake` (recommended).** It enqueues the event into the main agent session which has your skills loaded. Do NOT use `/hooks/agent` — that spawns an isolated sub-agent without your skills.
+Wake events are delivered directly to your agent session with full skill context.
 
 ### Mention events
 
@@ -41,7 +41,7 @@ For mention subscriptions, the wake message includes per-message details with re
 
 ```json
 {
-  "text": "You were @mentioned in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: mention-abc\nEvent type: mention\n\nMentioned messages (1):\n  Message: literal://string:msg-123\n  Parents: literal://string:channel-1, literal://string:conv-thread-5",
+  "text": "You were @mentioned in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: mention-abc\nEvent type: mention\n\nMentioned messages (1):\n  Message: literal:string:msg-123\n  Parents: literal:string:channel-1, literal:string:conv-thread-5",
   "mode": "now"
 }
 ```
@@ -50,7 +50,7 @@ The `Mentioned messages` section lists each message that triggered the wake:
 - **Message** — the base expression address of the message containing the mention
 - **Parents** — all parent containers this message belongs to (channels, conversation threads, etc.)
 
-A message can have multiple parents because Flux auto-generates conversation threads. Use `ad4m_channel_list` to identify which parent is the actual channel, and respond there.
+A message can have multiple parents because Flux auto-generates conversation threads. Use `channel_list` to identify which parent is the actual channel, and respond there.
 
 ### Channel-messages events
 
@@ -68,24 +68,12 @@ A message can have multiple parents because Flux auto-generates conversation thr
 - **Subscription** — subscription ID
 - **Event type** — `"mention"` or `"channel-messages"`
 
-The plugin manages the MCP connection — just call AD4M tools directly after waking.
+The waker manages the MCP connection — just call AD4M tools directly after waking.
 
 ### Deduplication
 
 The waker tracks seen message addresses per subscription and only wakes for **new** messages. After restart, previously seen messages are restored from persisted state — no duplicate wakes.
 
-## OpenClaw Hooks Config
+## Wake Delivery
 
-The plugin reads the hooks token from OpenClaw's global config (`hooks.token`). The `openclaw ad4m-setup` command includes `wakeToken` in the generated config snippet if hooks are enabled.
-
-If you want to set one manually:
-
-```json
-{
-  "hooks": {
-    "enabled": true,
-    "path": "/hooks",
-    "token": "your-hooks-token"
-  }
-}
-```
+How wake events reach your agent session depends on the platform (Sovereign, OpenClaw, etc.). The waker emits bus events; the platform's routing layer delivers them to the active session. No manual webhook configuration is needed.

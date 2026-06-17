@@ -237,7 +237,7 @@ After init + generate, `--app-data-path` contains:
 The plugin manages MCP authentication internally — credentials are not sent in wake messages. Wake messages only contain event metadata (perspective UUID, parent, event type, agent DID).
 
 - The plugin's background service maintains an authenticated MCP session
-- Wake messages are sent over HTTP to your local OpenClaw hooks endpoint (`localhost` by default)
+- Wake events are delivered locally to your agent session
 - If running the waker on a remote machine, ensure the wake endpoint uses HTTPS
 
 ### Executor Security
@@ -255,7 +255,7 @@ Connect to `ws://localhost:12000/api/v1/ws` and send JSON-RPC messages:
 ```json
 {"method": "agent.status", "params": {}, "id": "1"}
 
-{"method": "perspectives.add_link", "params": {"uuid": "<perspective-uuid>", "link": {"source": "ad4m://self", "predicate": "has_name", "target": "literal://string:Data"}}, "id": "2"}
+{"method": "perspectives.add_link", "params": {"uuid": "<perspective-uuid>", "link": {"source": "ad4m://self", "predicate": "has_name", "target": "literal:string:Data"}}, "id": "2"}
 ```
 
 **Auth:** Send `{"method": "auth", "params": {"credential": "<admin-credential>"}}` (single-user) or `{"method": "auth", "params": {"jwt": "<token>"}}` (multi-user) as the first message.
