@@ -4048,7 +4048,7 @@ impl PerspectiveInstance {
                 Ok(url) => Ok(url),
                 Err(e) => {
                     log::warn!("Failed to create expression on literal: {}", e);
-                    Ok(value.to_string())
+                    Err(anyhow!("Failed to create literal expression: {}", e))
                 }
             }
         } else {

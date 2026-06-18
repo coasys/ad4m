@@ -1253,7 +1253,7 @@ export class Ad4mModel {
       for (const [key, value] of Object.entries(this)) {
         if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
           const propMeta = metadata.properties[key];
-          if (propMeta?.resolveLiteral === false && typeof value === 'object') {
+          if (propMeta?.resolveLiteral === false) {
             deferredExpressionProps.push(key);
             continue;
           }
