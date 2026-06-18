@@ -388,6 +388,19 @@ pub struct ShapeProperty {
     pub(super) transform: Option<TransformExpression>,
 }
 
+impl ShapeProperty {
+    /// True when the property's values are stored as deterministic typed
+    /// `literal:` IRIs (POS-index friendly) rather than signed expression
+    /// envelopes. This holds for the literal language (explicit `"literal"`
+    /// or the unset default) with the optimization left enabled
+    /// (`resolve_literal != Some(false)`). A custom resolve language always
+    /// produces signed-envelope URIs, so it is never a deterministic literal.
+    pub(crate) fn is_deterministic_literal(&self) -> bool {
+        self.resolve_literal != Some(false)
+            && !matches!(self.resolve_language.as_deref(), Some(lang) if lang != "literal")
+    }
+}
+
 /// Enriched relation metadata for include (eager-loading) resolution.
 /// Target shapes are resolved at recursion time through a [`ShapeResolver`]
 /// against the perspective's in-memory shape cache.

@@ -319,9 +319,14 @@ pub(super) async fn execute_model_query_inner(
 
 /// Apply transform expressions to expression-resolved properties.
 ///
-/// For properties with `resolve_literal: false`, values are stored as signed
-/// expression URIs. This function fetches the expression data from the
-/// language controller and applies the property's transform expression.
+/// Properties whose values are stored as signed expression URIs (rather than
+/// deterministic `literal:` IRIs) need their expression data fetched from the
+/// language controller and the property's transform expression applied. That
+/// covers two cases:
+///   - `resolve_language` set to a custom (non-"literal") language address, and
+///   - the literal language with `resolve_literal: false` (envelope opt-in).
+/// Values already stored as deterministic `literal:` IRIs are left untouched
+/// by the per-value check below.
 async fn resolve_language_transforms(
     shape: &ModelShape,
     instances: &mut [Value],
@@ -329,7 +334,7 @@ async fn resolve_language_transforms(
     let resolve_props: Vec<&super::types::ShapeProperty> = shape
         .properties
         .iter()
-        .filter(|p| p.resolve_literal == Some(false))
+        .filter(|p| !p.is_deterministic_literal())
         .collect();
 
     if resolve_props.is_empty() {

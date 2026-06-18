@@ -318,7 +318,7 @@ pub(super) fn build_projection_where_patterns(
                     if !p.predicate.is_empty() {
                         map.insert(
                             p.name.clone(),
-                            (p.predicate.clone(), p.resolve_literal != Some(false)),
+                            (p.predicate.clone(), p.is_deterministic_literal()),
                         );
                     }
                 }
