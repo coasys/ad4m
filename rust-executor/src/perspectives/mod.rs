@@ -157,7 +157,17 @@ pub fn initialize_from_db() {
                     );
                 }
                 Ok(_) => {} // Already migrated or nothing to migrate
-                Err(e) => log::warn!("Typed-literal migration for {}: {}", handle_clone.uuid, e),
+                Err(e) => {
+                    log::error!(
+                        "Typed-literal migration failed for {}: {} — \
+                         skipping perspective init to avoid mixing IRI-shaped and \
+                         typed-literal targets under the new indexed WHERE path. \
+                         Will retry on next executor restart.",
+                        handle_clone.uuid,
+                        e
+                    );
+                    return;
+                }
             }
 
             // Rebuild SPARQL index from existing links

@@ -119,16 +119,15 @@ export function buildSHACL(
             path: propMeta.through,
         };
 
-        // Determine datatype from initial value or resolveLiteral
-        if (propMeta.resolveLiteral) {
-            propShape.datatype = "xsd://string";
-        } else if (propMeta.initial) {
+        // Determine datatype from JS field value type; resolveLiteral controls
+        // storage mode, not scalar type.
+        if (propMeta.initial !== undefined || propMeta.resolveLiteral) {
             const initialType = typeof obj[propName];
             if (initialType === "number") {
                 propShape.datatype = "xsd://integer";
             } else if (initialType === "boolean") {
                 propShape.datatype = "xsd://boolean";
-            } else if (initialType === "string") {
+            } else if (initialType === "string" || propMeta.resolveLiteral) {
                 propShape.datatype = "xsd://string";
             }
         }

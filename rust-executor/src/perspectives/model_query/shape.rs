@@ -150,7 +150,15 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 first["resolveLanguage"]
                     .as_str()
                     .map(decode_literal_string_target)
-                    .and_then(|lang| if lang == "literal" { Some(true) } else { None })
+                    .and_then(|lang| {
+                        if lang == "literal" {
+                            Some(true)
+                        } else if !lang.is_empty() {
+                            Some(false)
+                        } else {
+                            None
+                        }
+                    })
             });
         let writable = parse_bool_literal_target(first["writable"].as_str());
         let local = parse_bool_literal_target(first["local"].as_str());
@@ -521,10 +529,12 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
             let is_flag = prop_meta["flag"].as_bool().unwrap_or(false);
             let initial = prop_meta["initial"].as_str().map(|s| s.to_string());
             let resolve_literal = prop_meta["resolveLiteral"].as_bool().or_else(|| {
-                // Backward compat with test fixtures using "resolveLanguage": "literal"
+                // Backward compat with legacy fixtures using `resolveLanguage`
                 prop_meta["resolveLanguage"].as_str().and_then(|s| {
                     if s == "literal" {
                         Some(true)
+                    } else if !s.is_empty() {
+                        Some(false)
                     } else {
                         None
                     }
