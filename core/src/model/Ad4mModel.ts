@@ -338,6 +338,7 @@ export class Ad4mModel {
         required: options.required || false,
         readOnly: !(options.writable ?? false),
         ...(options.initial !== undefined && { initial: options.initial }),
+        ...(options.resolveLanguage !== undefined && { resolveLanguage: options.resolveLanguage }),
         ...(options.resolveLiteral !== undefined && { resolveLiteral: options.resolveLiteral }),
         ...(options.prologGetter !== undefined && { prologGetter: options.prologGetter }),
         ...(options.getter !== undefined && { getter: options.getter }),
@@ -404,6 +405,7 @@ export class Ad4mModel {
               predicate: predicate,
               required: isRequired,
               readOnly: propertySchema["x-ad4m"]?.writable === false,
+              ...(propertySchema["x-ad4m"]?.resolveLanguage !== undefined && { resolveLanguage: propertySchema["x-ad4m"].resolveLanguage }),
               ...(propertySchema["x-ad4m"]?.resolveLiteral !== undefined && { resolveLiteral: propertySchema["x-ad4m"].resolveLiteral }),
               ...(propertySchema["x-ad4m"]?.initial && { initial: propertySchema["x-ad4m"].initial }),
               ...(propertySchema["x-ad4m"]?.local !== undefined && { local: propertySchema["x-ad4m"].local })
@@ -1096,10 +1098,16 @@ export class Ad4mModel {
       return;
     }
 
-    if (metadata.resolveLiteral !== false) {
-      value = valueToLiteralIri(value);
-    } else {
+    const resolveLanguage = metadata.resolveLanguage;
+    if (resolveLanguage !== undefined && resolveLanguage !== "literal") {
+      // Custom language: route through expression_create on that language.
+      value = await this._perspective.createExpression(value, resolveLanguage);
+    } else if (metadata.resolveLiteral === false) {
+      // Literal language, optimization opted out: signed-envelope expression.
       value = await this._perspective.createExpression(value, "literal");
+    } else {
+      // Default: deterministic literal: IRI.
+      value = valueToLiteralIri(value);
     }
 
     await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value }], batchId);
@@ -1243,9 +1251,9 @@ export class Ad4mModel {
       (p) => p.required || p.flag || p.initial !== undefined
     );
 
-    // Track properties with resolveLiteral: false — they need createExpression
-    // which may fail inside a batch context. Defer them to setProperty after
-    // createSubject.
+    // Track properties resolved through expression_create — resolveLiteral:
+    // false, or a custom (non-"literal") resolveLanguage. These may fail inside
+    // a batch context, so defer them to setProperty after createSubject.
     const deferredExpressionProps: string[] = [];
 
     if (hasConstructor) {
@@ -1253,7 +1261,9 @@ export class Ad4mModel {
       for (const [key, value] of Object.entries(this)) {
         if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
           const propMeta = metadata.properties[key];
-          if (propMeta?.resolveLiteral === false) {
+          const customLanguage =
+            propMeta?.resolveLanguage !== undefined && propMeta.resolveLanguage !== "literal";
+          if (propMeta?.resolveLiteral === false || customLanguage) {
             deferredExpressionProps.push(key);
             continue;
           }
@@ -2018,6 +2028,7 @@ export class Ad4mModel {
         setPropertyRegistryEntry(DynamicModelClass, prop.name, {
           through: prop.path,
           writable: prop.writable ?? true,
+          ...(prop.resolveLanguage !== undefined && { resolveLanguage: prop.resolveLanguage }),
           ...(prop.resolveLiteral !== undefined && { resolveLiteral: prop.resolveLiteral }),
           ...(prop.local !== undefined && { local: prop.local }),
         });

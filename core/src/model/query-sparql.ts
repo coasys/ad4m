@@ -104,11 +104,14 @@ export function valueToLiteralIri(value: any): string {
 
 /**
  * Determine if a property stores values as literal: IRIs (needs parse_literal for comparisons).
- * Properties with resolveLiteral !== false store deterministic literal: URIs.
- * Flag properties store raw URIs.
+ * Properties on the literal language (explicit "literal" or the unset default)
+ * with resolveLiteral !== false store deterministic literal: URIs. A custom
+ * resolveLanguage produces signed-envelope URIs, and flag properties store raw
+ * URIs — neither is a deterministic literal.
  */
 function isLiteralStoredProperty(propMeta: PropertyMetadata): boolean {
   if (propMeta.flag) return false;
+  if (propMeta.resolveLanguage !== undefined && propMeta.resolveLanguage !== "literal") return false;
   return propMeta.resolveLiteral !== false;
 }
 

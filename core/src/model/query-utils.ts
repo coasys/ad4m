@@ -190,6 +190,11 @@ export function compileWhereClause(
             if (propMeta) {
                 predicate = propMeta.predicate;
                 resolveLiteral = propMeta.resolveLiteral;
+                // A custom resolve language stores signed-envelope URIs, not
+                // deterministic literals — force the non-literal WHERE path.
+                if (propMeta.resolveLanguage !== undefined && propMeta.resolveLanguage !== "literal") {
+                    resolveLiteral = false;
+                }
             } else {
                 predicate = propertyName;
             }

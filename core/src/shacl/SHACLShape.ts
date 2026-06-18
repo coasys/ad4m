@@ -151,8 +151,13 @@ export interface SHACLPropertyShape {
   /** AD4M-specific: Writable property */
   writable?: boolean;
 
-  /** AD4M-specific: When true (default), deterministic literal: IRIs.
-   *  When false, values go through expression_create on the literal language. */
+  /** AD4M-specific: Language used to resolve the value ("literal" or a custom
+   *  language address). Custom languages route through expression_create. */
+  resolveLanguage?: string;
+
+  /** AD4M-specific: When true (default) and resolveLanguage is "literal",
+   *  deterministic literal: IRIs. When false, the literal value goes through
+   *  expression_create on the literal language. */
   resolveLiteral?: boolean;
 
   /** AD4M-specific: Setter action for this property */
@@ -525,6 +530,14 @@ export class SHACLShape {
         });
       }
 
+      if (prop.resolveLanguage != null) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://resolveLanguage",
+          target: `literal:string:${prop.resolveLanguage}`
+        });
+      }
+
       if (prop.resolveLiteral != null) {
         links.push({
           source: propShapeId,
@@ -797,6 +810,14 @@ export class SHACLShape {
         prop.writable = val === 'true';
       }
 
+      // The general language selector (e.g. "literal" or a custom address).
+      const resolveLangLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://resolveLanguage"
+      );
+      if (resolveLangLink) {
+        prop.resolveLanguage = resolveLangLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
+      }
+
       const resolveLiteralLink = links.find(l =>
         l.source === propShapeId && l.predicate === "ad4m://resolveLiteral"
       );
@@ -804,16 +825,11 @@ export class SHACLShape {
         let val = resolveLiteralLink.target.replace(/^literal:\/\/|^literal:/, '');
         if (val.startsWith('boolean:')) val = val.substring(8);
         prop.resolveLiteral = val === 'true';
-      } else {
-        // Backward compat: old SHACL has ad4m://resolveLanguage → "literal"
-        // which is equivalent to resolveLiteral: true
-        const resolveLangLink = links.find(l =>
-          l.source === propShapeId && l.predicate === "ad4m://resolveLanguage"
-        );
-        if (resolveLangLink) {
-          const lang = resolveLangLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-          prop.resolveLiteral = lang === 'literal';
-        }
+      } else if (prop.resolveLanguage !== undefined) {
+        // Backward compat: when only ad4m://resolveLanguage is present (old
+        // SHACL), derive the literal-optimization flag — "literal" implies the
+        // deterministic literal path.
+        prop.resolveLiteral = prop.resolveLanguage === 'literal';
       }
 
       // Parse action arrays
@@ -995,6 +1011,7 @@ export class SHACLShape {
         has_value: p.hasValue,
         local: p.local,
         writable: p.writable,
+        resolve_language: p.resolveLanguage,
         resolve_literal: p.resolveLiteral,
         setter: p.setter,
         adder: p.adder,
@@ -1045,6 +1062,7 @@ export class SHACLShape {
         hasValue: p.has_value,
         local: p.local,
         writable: p.writable,
+        resolveLanguage: p.resolve_language ?? (p as any).resolveLanguage,
         resolveLiteral: p.resolve_literal ?? (
           (p.resolve_language ?? (p as any).resolveLanguage) !== undefined
             ? (p.resolve_language ?? (p as any).resolveLanguage) === 'literal'
