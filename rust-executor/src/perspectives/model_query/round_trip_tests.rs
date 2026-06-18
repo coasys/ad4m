@@ -426,3 +426,96 @@ fn round_trip_preserves_empty_resolve_language() {
         "empty-string resolveLanguage must survive SHACL round-trip (not be coerced to None)",
     );
 }
+
+/// The resolveLiteral optimization flag round-trips independently of
+/// resolveLanguage. `false` opts a literal property out of deterministic
+/// storage (routing it through expression_create), so it must survive the
+/// SHACL writer → store → loader pipeline intact.
+#[test]
+fn round_trip_preserves_resolve_literal_false() {
+    let shacl_json = r#"{
+        "target_class": "ns://ImagePost",
+        "properties": [
+            {
+                "path": "image://data",
+                "name": "image",
+                "datatype": "xsd://string",
+                "resolve_language": "literal",
+                "resolve_literal": false
+            }
+        ]
+    }"#;
+    let shape = round_trip("ImagePost", shacl_json);
+    let prop = shape
+        .properties
+        .iter()
+        .find(|p| p.name == "image")
+        .expect("image property");
+    assert_eq!(prop.resolve_language.as_deref(), Some("literal"));
+    assert_eq!(
+        prop.resolve_literal,
+        Some(false),
+        "resolve_literal: false must survive SHACL round-trip alongside resolve_language",
+    );
+    assert!(
+        !prop.is_deterministic_literal(),
+        "resolve_literal: false means the property is not deterministic-literal stored",
+    );
+}
+
+/// The common case: literal language with the optimization enabled round-trips
+/// to a deterministic-literal property.
+#[test]
+fn round_trip_preserves_resolve_literal_true() {
+    let shacl_json = r#"{
+        "target_class": "ns://Recipe",
+        "properties": [
+            {
+                "path": "ns://name",
+                "name": "name",
+                "datatype": "xsd://string",
+                "resolve_language": "literal",
+                "resolve_literal": true
+            }
+        ]
+    }"#;
+    let shape = round_trip("Recipe", shacl_json);
+    let prop = shape
+        .properties
+        .iter()
+        .find(|p| p.name == "name")
+        .expect("name property");
+    assert_eq!(prop.resolve_language.as_deref(), Some("literal"));
+    assert_eq!(prop.resolve_literal, Some(true));
+    assert!(
+        prop.is_deterministic_literal(),
+        "literal language + resolve_literal: true is deterministic-literal stored",
+    );
+}
+
+/// A custom (non-"literal") resolveLanguage round-trips and is never treated
+/// as deterministic-literal storage.
+#[test]
+fn round_trip_preserves_custom_resolve_language() {
+    let shacl_json = r#"{
+        "target_class": "ns://ImagePost",
+        "properties": [
+            {
+                "path": "image://data",
+                "name": "image",
+                "resolve_language": "lang://custom"
+            }
+        ]
+    }"#;
+    let shape = round_trip("ImagePost", shacl_json);
+    let prop = shape
+        .properties
+        .iter()
+        .find(|p| p.name == "image")
+        .expect("image property");
+    assert_eq!(prop.resolve_language.as_deref(), Some("lang://custom"));
+    assert!(
+        !prop.is_deterministic_literal(),
+        "custom resolveLanguage produces signed envelopes, never deterministic literals",
+    );
+}

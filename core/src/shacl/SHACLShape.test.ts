@@ -339,6 +339,48 @@ describe('SHACLShape', () => {
       expect(reconstructed.properties[0].resolveLiteral).toBe(true);
     });
 
+    it('preserves resolveLanguage', () => {
+      const original = new SHACLShape('test://Model');
+      original.addProperty({
+        name: 'content',
+        path: 'test://content',
+        resolveLanguage: 'lang://custom',
+      });
+
+      const json = original.toJSON();
+      const reconstructed = SHACLShape.fromJSON(json);
+
+      expect(reconstructed.properties[0].resolveLanguage).toBe('lang://custom');
+    });
+
+    it('preserves resolveLanguage and resolveLiteral together', () => {
+      const original = new SHACLShape('test://Model');
+      original.addProperty({
+        name: 'content',
+        path: 'test://content',
+        resolveLanguage: 'literal',
+        resolveLiteral: false,
+      });
+
+      const reconstructed = SHACLShape.fromJSON(original.toJSON());
+      expect(reconstructed.properties[0].resolveLanguage).toBe('literal');
+      expect(reconstructed.properties[0].resolveLiteral).toBe(false);
+    });
+
+    it('round-trips resolveLanguage through toLinks/fromLinks', () => {
+      const original = new SHACLShape('test://Model');
+      original.addProperty({
+        name: 'content',
+        path: 'test://content',
+        resolveLanguage: 'lang://custom',
+      });
+
+      const links = original.toLinks();
+      const reconstructed = SHACLShape.fromLinks(links, 'test://ModelShape');
+      const prop = reconstructed.properties.find(p => p.name === 'content');
+      expect(prop?.resolveLanguage).toBe('lang://custom');
+    });
+
     it('preserves constructor and destructor actions', () => {
       const original = new SHACLShape('test://Model');
       original.constructor_actions = [

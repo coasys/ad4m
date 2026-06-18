@@ -144,11 +144,11 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
 
         let path = first["path"].as_str().unwrap_or("").to_string();
         let datatype = first["datatype"].as_str().map(|s| s.to_string());
-        // General language selector (e.g. "literal" or a custom language address).
+        // General language selector (e.g. "literal" or a custom language
+        // address). Preserved verbatim, including an explicit empty string.
         let resolve_language = first["resolveLanguage"]
             .as_str()
-            .map(decode_literal_string_target)
-            .filter(|s| !s.is_empty());
+            .map(decode_literal_string_target);
         let resolve_literal = parse_bool_literal_target(first["resolveLiteral"].as_str())
             .or_else(|| {
                 // Backward compat: when only ad4m://resolveLanguage is present
@@ -531,7 +531,6 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
             let initial = prop_meta["initial"].as_str().map(|s| s.to_string());
             let resolve_language = prop_meta["resolveLanguage"]
                 .as_str()
-                .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
             let resolve_literal = prop_meta["resolveLiteral"].as_bool().or_else(|| {
                 // Backward compat with legacy fixtures using `resolveLanguage`:
