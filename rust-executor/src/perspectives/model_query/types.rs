@@ -359,6 +359,16 @@ pub struct ShapeProperty {
     pub(crate) is_flag: bool,
     pub(crate) is_required: bool,
     pub(crate) initial_value: Option<String>,
+    /// Language address used to resolve property values (the general
+    /// mechanism). `Some("literal")` is the built-in literal language;
+    /// any other address routes values through `expression_create` on that
+    /// language. `None` means values are stored raw.
+    pub(crate) resolve_language: Option<String>,
+    /// Optimization flag for the literal language: `Some(true)` (the default)
+    /// stores values as deterministic `literal:*` IRIs for POS-index lookups;
+    /// `Some(false)` routes the literal value through `expression_create`,
+    /// producing a signed-envelope URI. Only meaningful when
+    /// `resolve_language` is `"literal"` / unset.
     pub(crate) resolve_literal: Option<bool>,
     pub(crate) datatype: Option<String>,
     pub(crate) direction: Option<String>, // "forward" or "reverse" for relation properties
