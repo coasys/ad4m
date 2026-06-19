@@ -138,13 +138,27 @@ function jsonToModelInstance<T extends Ad4mModel>(
  * // Define a recipe model
  * @Model({ name: "Recipe" })
  * class Recipe extends Ad4mModel {
- *   // Required property with literal value
+ *   // Property resolved through the built-in literal language (the default).
+ *   // `resolveLanguage` selects HOW a value is resolved ("literal" or a custom
+ *   // language address); `resolveLiteral` is an optimization that applies only
+ *   // when resolveLanguage is "literal" — true (default) stores a deterministic
+ *   // literal: IRI, false routes through expression_create for a signed envelope.
  *   @Property({
  *     through: "recipe://name",
- *     resolveLiteral: true
+ *     resolveLanguage: "literal", // default
+ *     resolveLiteral: true        // default
  *   })
  *   name: string = "";
- * 
+ *
+ *   // Property resolved through a custom language: values are routed through
+ *   // expression_create on that language (signed-envelope URIs). resolveLiteral
+ *   // is ignored for a custom resolveLanguage.
+ *   @Optional({
+ *     through: "recipe://photo",
+ *     resolveLanguage: "QmFileStorageLanguageAddress..."
+ *   })
+ *   photo: string = "";
+ *
  *   // Optional property with custom initial value
  *   @Optional({
  *     through: "recipe://status",
@@ -300,9 +314,9 @@ export class Ad4mModel {
    * ```typescript
    * @Model({ name: "Recipe" })
    * class Recipe extends Ad4mModel {
-   *   @Property({ through: "recipe://name", resolveLiteral: true })
+   *   @Property({ through: "recipe://name", resolveLanguage: "literal", resolveLiteral: true })
    *   name: string = "";
-   *   
+   *
    *   @HasMany({ through: "recipe://ingredient" })
    *   ingredients: string[] = [];
    * }
