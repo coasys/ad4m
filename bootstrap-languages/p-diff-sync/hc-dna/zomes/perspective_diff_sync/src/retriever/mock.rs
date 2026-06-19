@@ -12,10 +12,6 @@ use std::sync::Mutex;
 
 use super::PerspectiveDiffRetreiver;
 use crate::errors::{SocialContextError, SocialContextResult};
-use crate::link_adapter::conversions::{
-    entry_ref_from_algo, entry_ref_to_algo, hash_from_algo, hash_ref_to_algo, hash_to_algo,
-    local_hash_ref_to_algo,
-};
 use crate::link_adapter::workspace::NULL_NODE;
 use crate::utils::create_link_expression;
 use crate::Hash;
@@ -112,21 +108,14 @@ impl PerspectiveDiffRetreiver for MockPerspectiveGraph {
     }
 }
 
-// Step 13b-C phase 2: bridge to the algorithm-crate's `WorkspaceRetriever`
-// trait. Conversions take the algo `Hash` → HoloHash via the existing
-// integrity-zome retrieval, then return the algo mirror entry-ref.
-//
-// The mock graph never carries Snapshot links — the workspace tests
-// that need snapshots are the holochain-side `snapshots::tests`, not
-// the algorithm-crate's BFS tests. Return `Ok(None)` for snapshots.
+// Bridge to the algorithm-crate's retriever traits. With shared types
+// from `perspective-diff-types`, no field-by-field conversion is needed.
 impl algo::WorkspaceRetriever for MockPerspectiveGraph {
     fn get_p_diff_reference(
         hash: &algo::Hash,
     ) -> algo::AlgoResult<algo::PerspectiveDiffEntryReference> {
-        let h = hash_from_algo(hash);
-        let entry = <Self as PerspectiveDiffRetreiver>::get(h)
-            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
-        Ok(entry_ref_to_algo(entry))
+        <Self as PerspectiveDiffRetreiver>::get(hash.clone())
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
     }
 
     fn get_snapshot_by_target(
@@ -136,48 +125,34 @@ impl algo::WorkspaceRetriever for MockPerspectiveGraph {
     }
 }
 
-// Step 13b-D — round-trips through the existing
-// `PerspectiveDiffRetreiver::create_entry` (which hashes the
-// SerializedBytes payload, matching MockPerspectiveGraph's hashing
-// convention).
 impl algo::SnapshotRetriever for MockPerspectiveGraph {
     fn create_diff_entry(
         entry: algo::PerspectiveDiffEntryReference,
     ) -> algo::AlgoResult<algo::Hash> {
-        let integrity = entry_ref_from_algo(entry);
-        let hash = <Self as PerspectiveDiffRetreiver>::create_entry(
-            perspective_diff_sync_integrity::EntryTypes::PerspectiveDiffEntryReference(integrity),
+        <Self as PerspectiveDiffRetreiver>::create_entry(
+            perspective_diff_sync_integrity::EntryTypes::PerspectiveDiffEntryReference(entry),
         )
-        .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
-        Ok(hash_to_algo(&hash))
+        .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
     }
 }
 
-// Step 13b-E — forwards to the existing HDK-trait methods, which back
-// onto the in-process `CURRENT_REVISION` / `LATEST_REVISION` Mutex
-// statics declared further down this file.
 impl algo::RevisionsRetriever for MockPerspectiveGraph {
     fn current_revision() -> algo::AlgoResult<Option<algo::LocalHashReference>> {
-        let rev = <Self as PerspectiveDiffRetreiver>::current_revision()
-            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
-        Ok(rev.map(local_hash_ref_to_algo))
+        <Self as PerspectiveDiffRetreiver>::current_revision()
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
     }
 
     fn latest_revision() -> algo::AlgoResult<Option<algo::HashReference>> {
-        let rev = <Self as PerspectiveDiffRetreiver>::latest_revision()
-            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
-        Ok(rev.map(hash_ref_to_algo))
+        <Self as PerspectiveDiffRetreiver>::latest_revision()
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
     }
 
     fn update_current_revision(
         hash: algo::Hash,
         timestamp: chrono::DateTime<chrono::Utc>,
     ) -> algo::AlgoResult<()> {
-        <Self as PerspectiveDiffRetreiver>::update_current_revision(
-            hash_from_algo(&hash),
-            timestamp,
-        )
-        .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
+        <Self as PerspectiveDiffRetreiver>::update_current_revision(hash, timestamp)
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
     }
 }
 
@@ -499,7 +474,6 @@ fn can_create_graph_from_dot() {
 
 #[test]
 fn example_test() {
-    use crate::link_adapter::conversions::hash_to_algo;
     use crate::link_adapter::workspace::Workspace;
 
     fn update() {
@@ -534,8 +508,8 @@ fn example_test() {
 
     let mut workspace = Workspace::new();
     let res = workspace.collect_until_common_ancestor::<MockPerspectiveGraph>(
-        hash_to_algo(&ActionHash::from_raw_36(vec![5; 36])),
-        hash_to_algo(&ActionHash::from_raw_36(vec![4; 36])),
+        ActionHash::from_raw_36(vec![5; 36]),
+        ActionHash::from_raw_36(vec![4; 36]),
     );
     println!("Got result: {:#?}", res);
 }

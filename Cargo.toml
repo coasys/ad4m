@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "cli",
     "crates/perspective-diff-algorithm",
+    "crates/perspective-diff-types",
     "rust-client",
     "rust-executor",
     "ui/src-tauri"

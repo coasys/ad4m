@@ -1,6 +1,5 @@
 pub(crate) mod chunked_diffs;
 pub(crate) mod commit;
-pub mod conversions;
 pub(crate) mod pull;
 pub(crate) mod render;
 pub(crate) mod revisions;

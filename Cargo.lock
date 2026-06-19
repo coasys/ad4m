@@ -14372,9 +14372,21 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "once_cell",
+ "perspective-diff-types",
  "petgraph 0.6.5",
  "serde",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "perspective-diff-types"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hdi",
+ "holo_hash",
+ "holochain_serialized_bytes",
+ "serde",
 ]
 
 [[package]]

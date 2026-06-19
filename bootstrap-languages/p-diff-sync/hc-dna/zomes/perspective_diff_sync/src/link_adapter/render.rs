@@ -3,7 +3,6 @@ use perspective_diff_algorithm as algo;
 use std::collections::HashSet;
 
 use crate::errors::{SocialContextError, SocialContextResult};
-use crate::link_adapter::conversions::{hash_to_algo, link_from_algo};
 use crate::link_adapter::revisions::current_revision;
 use crate::link_adapter::workspace::Workspace;
 use crate::retriever::PerspectiveDiffRetreiver;
@@ -23,7 +22,7 @@ pub fn render<
     debug!("===PerspectiveDiffSync.render(): current: {:?}", current);
 
     let mut workspace = Workspace::new();
-    workspace.collect_only_from_latest::<Retriever>(hash_to_algo(&current.hash))?;
+    workspace.collect_only_from_latest::<Retriever>(current.hash)?;
 
     let mut perspective = Perspective { links: vec![] };
 
@@ -31,18 +30,14 @@ pub fn render<
     let mut removals_set = HashSet::new();
 
     for diff_node in workspace.entry_map {
-        // workspace.entry_map carries algorithm-crate mirror
-        // `LinkExpression`s; convert each link back to the integrity-zome
-        // shape exposed by `Perspective`.
         for addition in diff_node.1.diff.additions {
-            perspective.links.push(link_from_algo(addition));
+            perspective.links.push(addition);
         }
         for removal in diff_node.1.diff.removals {
-            removals_set.insert(link_from_algo(removal));
+            removals_set.insert(removal);
         }
     }
 
-    // Remove all links that are in the removals set with a single retain call - O(N)
     perspective
         .links
         .retain(|link| !removals_set.contains(link));

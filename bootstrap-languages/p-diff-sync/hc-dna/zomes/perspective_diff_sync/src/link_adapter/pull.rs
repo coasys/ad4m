@@ -6,7 +6,6 @@ use perspective_diff_sync_integrity::{
 
 use crate::errors::SocialContextResult;
 use crate::link_adapter::chunked_diffs::load_diff_from_entry;
-use crate::link_adapter::conversions::{entry_ref_from_algo, hash_to_algo};
 use crate::link_adapter::revisions::{current_revision, update_current_revision};
 use crate::link_adapter::workspace::Workspace;
 use crate::retriever::PerspectiveDiffRetreiver;
@@ -84,25 +83,9 @@ pub fn pull<
 
     let mut workspace = Workspace::new();
 
-    let theirs_algo = hash_to_algo(&theirs);
-
     if current.is_none() {
-        workspace.collect_only_from_latest::<Retriever>(theirs_algo.clone())?;
-        let squashed = workspace.squashed_diff();
-        // Convert algo `PerspectiveDiff` back to the integrity-zome shape
-        // expected by `emit_signal`.
-        let diff = PerspectiveDiff {
-            additions: squashed
-                .additions
-                .into_iter()
-                .map(crate::link_adapter::conversions::link_from_algo)
-                .collect(),
-            removals: squashed
-                .removals
-                .into_iter()
-                .map(crate::link_adapter::conversions::link_from_algo)
-                .collect(),
-        };
+        workspace.collect_only_from_latest::<Retriever>(theirs.clone())?;
+        let diff = workspace.squashed_diff();
         update_current_revision::<Retriever>(theirs, get_now()?)?;
         emit_signal(diff.clone())?;
         return Ok(PullResult {
@@ -112,15 +95,15 @@ pub fn pull<
     }
 
     let current = current.expect("current missing handled above");
-    let current_hash_algo = hash_to_algo(&current.hash);
+    let current_hash = current.hash.clone();
 
-    workspace.build_diffs::<Retriever>(theirs_algo.clone(), current_hash_algo.clone())?;
+    workspace.build_diffs::<Retriever>(theirs.clone(), current_hash.clone())?;
 
     // First check if we are actually ahead of them -> we don't have to do anything
     // they will have to merge with / or fast-forward to our current
     if workspace
-        .all_ancestors(&current_hash_algo)?
-        .contains(&theirs_algo)
+        .all_ancestors(&current_hash)?
+        .contains(&theirs)
     {
         debug!("===PerspectiveDiffSync.pull(): We are ahead of them. They will have to pull/fast-forward. Exiting without change...");
         return Ok(PullResult {
@@ -130,8 +113,8 @@ pub fn pull<
     }
 
     let fast_forward_possible = workspace
-        .all_ancestors(&theirs_algo)?
-        .contains(&current_hash_algo);
+        .all_ancestors(&theirs)?
+        .contains(&current_hash);
 
     // If we can't fast forward, we have to merge
     // but if we are not a scribe, we can't merge
@@ -145,14 +128,10 @@ pub fn pull<
     }
 
     //Get all the diffs which exist between current and the last ancestor that we got
-    let seen_diffs = workspace.all_ancestors(&current_hash_algo)?;
-    // println!("SEEN DIFFS: {:#?}", seen_diffs);
+    let seen_diffs = workspace.all_ancestors(&current_hash)?;
 
-    //Get all the diffs in the graph which we havent seen. Filter is on the
-    // algorithm-crate mirror types; we convert each kept entry back to the
-    // integrity-zome `PerspectiveDiffEntryReference` so `load_diff_from_entry`
-    // can consume it.
-    let algo_null = algo::null_node();
+    //Get all the diffs in the graph which we havent seen.
+    let null = algo::null_node();
     let unseen_diffs: Vec<(Hash, PerspectiveDiffEntryReference)> = if seen_diffs.len() > 0 {
         workspace
             .sorted_diffs
@@ -160,10 +139,10 @@ pub fn pull<
             .expect("should be unseen diffs after build_diffs() call")
             .into_iter()
             .filter(|val| {
-                if val.0 == algo_null {
+                if val.0 == null {
                     return false;
                 };
-                if val.0 == current_hash_algo {
+                if val.0 == current_hash {
                     return false;
                 };
                 if seen_diffs.contains(&val.0) {
@@ -171,25 +150,13 @@ pub fn pull<
                 };
                 true
             })
-            .map(|(h, entry)| {
-                (
-                    crate::link_adapter::conversions::hash_from_algo(&h),
-                    entry_ref_from_algo(entry),
-                )
-            })
             .collect()
     } else {
         workspace
             .sorted_diffs
             .expect("should be unseen diffs after build_diffs() call")
             .into_iter()
-            .filter(|val| val.0 != algo_null && val.0 != current_hash_algo)
-            .map(|(h, entry)| {
-                (
-                    crate::link_adapter::conversions::hash_from_algo(&h),
-                    entry_ref_from_algo(entry),
-                )
-            })
+            .filter(|val| val.0 != null && val.0 != current_hash)
             .collect()
     };
 

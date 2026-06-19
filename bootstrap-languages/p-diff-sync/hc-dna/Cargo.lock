@@ -5426,9 +5426,21 @@ name = "perspective-diff-algorithm"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "perspective-diff-types",
  "petgraph",
  "serde",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "perspective-diff-types"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hdi",
+ "holo_hash",
+ "holochain_serialized_bytes",
+ "serde",
 ]
 
 [[package]]
@@ -5465,7 +5477,7 @@ dependencies = [
  "hdk",
  "holo_hash",
  "holochain_serialized_bytes",
- "perspective-diff-algorithm",
+ "perspective-diff-types",
  "serde",
 ]
 
