@@ -149,15 +149,13 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         let resolve_language = first["resolveLanguage"]
             .as_str()
             .map(decode_literal_string_target);
-        let resolve_literal = parse_bool_literal_target(first["resolveLiteral"].as_str())
-            .or_else(|| {
+        let resolve_literal =
+            parse_bool_literal_target(first["resolveLiteral"].as_str()).or_else(|| {
                 // Backward compat: when only ad4m://resolveLanguage is present
                 // (old SHACL), derive the literal-optimization flag from it —
                 // "literal" implies the deterministic literal path (true),
                 // any other language implies expression resolution (false).
-                resolve_language
-                    .as_deref()
-                    .map(|lang| lang == "literal")
+                resolve_language.as_deref().map(|lang| lang == "literal")
             });
         let writable = parse_bool_literal_target(first["writable"].as_str());
         let local = parse_bool_literal_target(first["local"].as_str());
@@ -529,9 +527,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
             let is_required = prop_meta["required"].as_bool().unwrap_or(false);
             let is_flag = prop_meta["flag"].as_bool().unwrap_or(false);
             let initial = prop_meta["initial"].as_str().map(|s| s.to_string());
-            let resolve_language = prop_meta["resolveLanguage"]
-                .as_str()
-                .map(|s| s.to_string());
+            let resolve_language = prop_meta["resolveLanguage"].as_str().map(|s| s.to_string());
             let resolve_literal = prop_meta["resolveLiteral"].as_bool().or_else(|| {
                 // Backward compat with legacy fixtures using `resolveLanguage`:
                 // derive the literal-optimization flag from the language.
