@@ -672,8 +672,9 @@ pub(super) fn build_query_patterns(
                                 match not_val {
                                     Value::String(s) => {
                                         let escaped = escape_sparql_string(s);
-                                        filters
-                                            .push(format!("{var} != \"{escaped}\"^^<{XSD_STRING}>"));
+                                        filters.push(format!(
+                                            "{var} != \"{escaped}\"^^<{XSD_STRING}>"
+                                        ));
                                     }
                                     Value::Number(n) => {
                                         let n_f64 = n.as_f64().unwrap_or(0.0);
@@ -738,8 +739,9 @@ pub(super) fn build_query_patterns(
                             }
                             if let Some((lo, hi)) = ops.between {
                                 match (typed_number_literal(lo), typed_number_literal(hi)) {
-                                    (Some(lo_t), Some(hi_t)) => filters
-                                        .push(format!("{var} >= {lo_t} && {var} <= {hi_t}")),
+                                    (Some(lo_t), Some(hi_t)) => {
+                                        filters.push(format!("{var} >= {lo_t} && {var} <= {hi_t}"))
+                                    }
                                     _ => filters.push("false".to_string()),
                                 }
                             }
@@ -770,7 +772,10 @@ pub(super) fn build_query_patterns(
                                         ));
                                     }
                                     Value::Number(n) => {
-                                        filters.push(format!("{num} != {}", n.as_f64().unwrap_or(0.0)));
+                                        filters.push(format!(
+                                            "{num} != {}",
+                                            n.as_f64().unwrap_or(0.0)
+                                        ));
                                     }
                                     Value::Bool(b) => {
                                         filters.push(format!("{pv} != \"{b}\""));
@@ -782,9 +787,10 @@ pub(super) fn build_query_patterns(
                                                 Value::String(s) => {
                                                     Some(format!("\"{}\"", escape_sparql_string(s)))
                                                 }
-                                                Value::Number(n) => {
-                                                    Some(format!("\"{}\"", n.as_f64().unwrap_or(0.0)))
-                                                }
+                                                Value::Number(n) => Some(format!(
+                                                    "\"{}\"",
+                                                    n.as_f64().unwrap_or(0.0)
+                                                )),
                                                 Value::Bool(b) => Some(format!("\"{b}\"")),
                                                 _ => None,
                                             })

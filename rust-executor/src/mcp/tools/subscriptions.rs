@@ -220,7 +220,12 @@ impl Ad4mMcpHandler {
         // would otherwise produce false-positive mentions.
         let mention_conditions: Vec<String> = all_terms
             .iter()
-            .map(|t| format!("CONTAINS(LCASE(STR(<ad4m://fn/parse_literal>(?target))), \"{}\")", t))
+            .map(|t| {
+                format!(
+                    "CONTAINS(LCASE(STR(<ad4m://fn/parse_literal>(?target))), \"{}\")",
+                    t
+                )
+            })
             .collect();
 
         let mention_predicate = format!("({})", mention_conditions.join(" || "));

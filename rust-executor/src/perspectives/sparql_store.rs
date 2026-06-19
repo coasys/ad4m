@@ -3363,8 +3363,12 @@ mod tests {
         let svc = new_service();
 
         // SHACL property shape declaring `ns://status` as resolveLiteral:false.
-        svc.add_link(&make_link("shacl://Item.status", "sh://path", "ns://status"))
-            .unwrap();
+        svc.add_link(&make_link(
+            "shacl://Item.status",
+            "sh://path",
+            "ns://status",
+        ))
+        .unwrap();
         svc.add_link(&make_link(
             "shacl://Item.status",
             "ad4m://resolveLiteral",
