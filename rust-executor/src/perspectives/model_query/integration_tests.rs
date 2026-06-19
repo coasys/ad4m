@@ -571,10 +571,13 @@ async fn test_build_projection_where_patterns_id_filter() {
 
 #[tokio::test]
 async fn test_build_projection_where_patterns_with_target_shape() {
+    // A custom resolveLanguage stores signed-envelope URIs, not deterministic
+    // literals, so the WHERE builder must probe via FILTER(STR(?var)=...) rather
+    // than a typed-literal VALUES clause.
     let target_shape_json = r#"{
         "className": "Signal",
         "properties": {
-            "signalTypeId": { "predicate": "signal://type" }
+            "signalTypeId": { "predicate": "signal://type", "resolveLanguage": "test://custom-lang" }
         },
         "relations": {}
     }"#;
@@ -655,6 +658,7 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
             is_required: false,
             initial_value: None,
             resolve_language: None,
+            resolve_literal: None,
             datatype: None,
             direction: Some("forward".to_string()),
             is_scalar_relation: false,
@@ -1230,6 +1234,7 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
+            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -1794,6 +1799,7 @@ async fn test_where_filter_signed_expression_string() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
+            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -1868,6 +1874,7 @@ async fn test_where_filter_signed_expression_no_matches() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
+            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -1990,6 +1997,7 @@ async fn test_where_filter_multiple_conditions() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
+            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -2057,6 +2065,7 @@ async fn test_where_filter_missing_property_on_target() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
+            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -2122,6 +2131,7 @@ async fn test_where_filter_plain_literal_string() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
+            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -2210,6 +2220,7 @@ async fn test_where_filter_on_multiple_instances() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
+            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -2599,6 +2610,7 @@ fn scalar_prop(name: &str, predicate: &str, required: bool, flag: bool) -> Shape
             None
         },
         resolve_language: None,
+        resolve_literal: None,
         datatype: None,
         direction: None,
         is_scalar_relation: false,
@@ -2619,6 +2631,7 @@ fn collection_prop(name: &str, predicate: &str, getter: Option<&str>) -> ShapePr
         is_required: false,
         initial_value: None,
         resolve_language: None,
+        resolve_literal: None,
         datatype: None,
         direction: None,
         is_scalar_relation: false,
@@ -4326,6 +4339,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
+            resolve_literal: None,
             datatype: None,
             direction: Some("forward".to_string()),
             is_scalar_relation: false,

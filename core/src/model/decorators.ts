@@ -280,12 +280,22 @@ export interface PropertyOptions {
     readOnly?: boolean;
 
     /**
-     * When true (default), property values are stored as deterministic
-     * `literal:string:X` / `:number:` / `:boolean:` / `:json:` IRIs directly.
-     * This enables efficient Oxigraph POS-index lookups.
+     * The language used to resolve/store the property value. Can be the
+     * built-in `"literal"` language (the default) or a custom language
+     * address. A custom language routes values through `expression_create`
+     * on that language, producing signed-envelope URIs.
+     */
+    resolveLanguage?: string;
+
+    /**
+     * Literal-language optimization flag. When true (the default) and
+     * `resolveLanguage` is `"literal"`, property values are stored as
+     * deterministic `literal:string:X` / `:number:` / `:boolean:` / `:json:`
+     * IRIs directly, enabling efficient Oxigraph POS-index lookups.
      *
-     * When false, values go through `expression_create` on the literal
-     * language, producing a signed-envelope URI with author/timestamp/proof.
+     * When false, the literal value goes through `expression_create` on the
+     * literal language, producing a signed-envelope URI with
+     * author/timestamp/proof. Ignored for custom `resolveLanguage` values.
      */
     resolveLiteral?: boolean;
 
@@ -608,6 +618,7 @@ export function Model(opts: ModelConfig) {
  * Smart defaults (all overridable):
  * - `required` → `false`
  * - `readOnly` → `false`
+ * - `resolveLanguage` → `"literal"`
  * - `resolveLiteral` → `true`
  * - `initial` → `undefined` (no link created until a value is explicitly set)
  * 
@@ -654,7 +665,8 @@ export function Model(opts: ModelConfig) {
  * @param {string} opts.through - The predicate URI for the property
  * @param {boolean} [opts.required=false] - Whether the property is required (adds query filters and sentinel initial value)
  * @param {string} [opts.initial] - Initial value (defaults to "literal:string:uninitialized" when required)
- * @param {boolean} [opts.resolveLiteral=true] - When true, store as deterministic literal: IRIs
+ * @param {string} [opts.resolveLanguage="literal"] - Language used to resolve the value ("literal" or a custom language address)
+ * @param {boolean} [opts.resolveLiteral=true] - When true (and resolveLanguage is "literal"), store as deterministic literal: IRIs
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
@@ -665,6 +677,7 @@ export function Property(opts: PropertyOptions) {
         ...opts,
         required,
         readOnly: opts.readOnly ?? false,
+        resolveLanguage: opts.resolveLanguage ?? "literal",
         resolveLiteral: opts.resolveLiteral ?? true,
         initial: opts.initial ?? (required ? "literal:string:uninitialized" : undefined),
     });
@@ -721,7 +734,8 @@ export function Property(opts: PropertyOptions) {
  * @param {PropertyOptions} opts - Property configuration
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (if property should have one)
- * @param {boolean} [opts.resolveLiteral=true] - When true, store as deterministic literal: IRIs
+ * @param {string} [opts.resolveLanguage="literal"] - Language used to resolve the value ("literal" or a custom language address)
+ * @param {boolean} [opts.resolveLiteral=true] - When true (and resolveLanguage is "literal"), store as deterministic literal: IRIs
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */

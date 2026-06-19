@@ -120,14 +120,16 @@ export function buildSHACL(
         };
 
         // Determine datatype from JS field value type; resolveLiteral controls
-        // storage mode, not scalar type.
-        if (propMeta.initial !== undefined || propMeta.resolveLiteral) {
+        // storage mode, not scalar type. The literal language implies a string
+        // datatype when no initial value pins a more specific type.
+        const isLiteral = propMeta.resolveLiteral || propMeta.resolveLanguage === "literal";
+        if (propMeta.initial !== undefined || isLiteral) {
             const initialType = typeof obj[propName];
             if (initialType === "number") {
                 propShape.datatype = "xsd://integer";
             } else if (initialType === "boolean") {
                 propShape.datatype = "xsd://boolean";
-            } else if (initialType === "string" || propMeta.resolveLiteral) {
+            } else if (initialType === "string" || isLiteral) {
                 propShape.datatype = "xsd://string";
             }
         }
@@ -157,6 +159,10 @@ export function buildSHACL(
 
         if (propMeta.writable !== undefined) {
             propShape.writable = propMeta.writable;
+        }
+
+        if (propMeta.resolveLanguage != null) {
+            propShape.resolveLanguage = propMeta.resolveLanguage;
         }
 
         if (propMeta.resolveLiteral != null) {

@@ -4007,6 +4007,39 @@ impl PerspectiveInstance {
         Ok(None)
     }
 
+    /// Get the resolve language address (ad4m://resolveLanguage) for a property.
+    /// This is the general expression-language selector: `"literal"` selects the
+    /// built-in literal language; any other address routes values through
+    /// `expression_create` on that language.
+    pub async fn get_resolve_language_from_shacl(
+        &self,
+        class_name: &str,
+        property: &str,
+    ) -> Result<Option<String>, AnyError> {
+        let prop_suffix = format!("{}.{}", class_name, property);
+
+        let links = self
+            .sparql_store
+            .get_links_by_predicate_and_source_suffix("ad4m://resolveLanguage", &prop_suffix)?;
+
+        if let Some(link) = links.first() {
+            // Extract value from literal:string:{value} or legacy literal://string:{value}
+            let encoded_value =
+                if let Some(rest) = link.data.target.strip_prefix("literal://string:") {
+                    rest
+                } else if let Some(rest) = link.data.target.strip_prefix("literal:string:") {
+                    rest
+                } else {
+                    return Ok(Some(link.data.target.clone()));
+                };
+            let decoded = urlencoding::decode(encoded_value)
+                .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
+            return Ok(Some(decoded.to_string()));
+        }
+
+        Ok(None)
+    }
+
     async fn get_constructor_actions(&self, class_name: &str) -> Result<Vec<Command>, AnyError> {
         self.get_shape_actions_from_shacl(class_name, "ad4m://constructor")
             .await?
@@ -4032,13 +4065,37 @@ impl PerspectiveInstance {
         value: &serde_json::Value,
         context: &AgentContext,
     ) -> Result<String, AnyError> {
+        let resolve_language = self
+            .get_resolve_language_from_shacl(class_name, property)
+            .await?;
         let resolve_literal = self
             .get_resolve_literal_from_shacl(class_name, property)
             .await?;
 
+        // A custom (non-"literal") resolve language routes the value through
+        // `expression_create` on that language, producing a signed-envelope URI
+        // with author/timestamp/proof. This is the general dev behavior.
+        if let Some(lang) = resolve_language.as_deref() {
+            if lang != "literal" {
+                let controller = crate::languages::LanguageController::global_instance();
+                let agent_context = context.clone();
+                return match controller
+                    .expression_create(lang, value.clone(), &agent_context)
+                    .await
+                {
+                    Ok(url) => Ok(url),
+                    Err(e) => {
+                        log::warn!("Failed to create expression on {}: {}", lang, e);
+                        Ok(value.to_string())
+                    }
+                };
+            }
+        }
+
         if resolve_literal == Some(false) {
-            // resolveLiteral: false — go through expression_create on the literal
-            // language, producing a signed-envelope URI.
+            // Literal language with the optimization opted out (resolveLiteral:
+            // false) — go through expression_create on the literal language,
+            // producing a signed-envelope URI instead of a deterministic IRI.
             let controller = crate::languages::LanguageController::global_instance();
             let agent_context = context.clone();
             match controller
@@ -4079,7 +4136,23 @@ impl PerspectiveInstance {
                             .map_err(|e| anyhow!("Failed to encode number as literal URI: {}", e))?
                     }
                 }
-                _ => value.to_string(),
+                // Booleans become deterministic `literal:boolean:` IRIs, matching
+                // the TS `valueToLiteralIri` / `Literal` encoding. The storage
+                // layer turns these into typed `xsd:boolean` terms for indexed
+                // WHERE matching, and the read path decodes them back to a JSON
+                // bool. The Rust `Literal` helper has no boolean variant, so we
+                // format the wire form directly.
+                serde_json::Value::Bool(b) => format!("literal:boolean:{b}"),
+                // Objects / arrays become deterministic `literal:json:` IRIs so
+                // they round-trip back to JSON values rather than being stored
+                // as raw `value.to_string()` targets (which the storage layer
+                // would keep as opaque NamedNode IRIs and read back as strings).
+                serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                    Literal::from_json(value.clone())
+                        .to_url()
+                        .map_err(|e| anyhow!("Failed to encode JSON as literal URI: {}", e))?
+                }
+                serde_json::Value::Null => value.to_string(),
             };
             Ok(uri)
         }

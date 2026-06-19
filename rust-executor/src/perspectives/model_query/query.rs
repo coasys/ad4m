@@ -319,17 +319,28 @@ pub(super) async fn execute_model_query_inner(
 
 /// Apply transform expressions to expression-resolved properties.
 ///
-/// For properties with `resolve_literal: false`, values are stored as signed
-/// expression URIs. This function fetches the expression data from the
-/// language controller and applies the property's transform expression.
+/// Properties whose values are stored as signed expression URIs (rather than
+/// deterministic `literal:` IRIs) need their expression data fetched from the
+/// language controller and the property's transform expression applied. That
+/// covers two cases:
+///   - `resolve_language` set to a custom (non-"literal") language address, and
+///   - the literal language with `resolve_literal: false` (envelope opt-in).
+/// Values already stored as deterministic `literal:` IRIs are left untouched
+/// by the per-value check below.
 async fn resolve_language_transforms(
     shape: &ModelShape,
     instances: &mut [Value],
 ) -> Result<(), Error> {
+    // Two kinds of properties need post-hydration work here:
+    //   - expression-resolved properties (custom resolve_language or
+    //     resolve_literal: false): fetch the expression data, then transform.
+    //   - deterministic-literal properties that carry a transform: their value
+    //     is already decoded by hydration, but the transform still has to be
+    //     applied to it (e.g. concat a prefix onto the stored literal).
     let resolve_props: Vec<&super::types::ShapeProperty> = shape
         .properties
         .iter()
-        .filter(|p| p.resolve_literal == Some(false))
+        .filter(|p| !p.is_deterministic_literal() || p.transform.is_some())
         .collect();
 
     if resolve_props.is_empty() {
@@ -344,8 +355,13 @@ async fn resolve_language_transforms(
             //   - String that parses as a language expression URL → fetch via controller
             //   - Anything else (already-decoded literal string, object, etc.) → use as-is
             let current = instance[&prop.name].clone();
+            // Only expression-resolved properties fetch their data from the
+            // language controller. Deterministic-literal properties (with a
+            // transform) use their already-decoded value as the transform focus
+            // directly — never re-interpreted as an expression URL.
+            let is_expr = !prop.is_deterministic_literal();
             let resolved: Option<Value> = match &current {
-                Value::String(uri) if !uri.starts_with("literal:") => {
+                Value::String(uri) if is_expr && !uri.starts_with("literal:") => {
                     match crate::languages::LanguageController::parse_expr_url(uri) {
                         Ok((lang, expr_addr)) => {
                             // Ensure the language is loaded before attempting to fetch the

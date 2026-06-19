@@ -359,6 +359,16 @@ pub struct ShapeProperty {
     pub(crate) is_flag: bool,
     pub(crate) is_required: bool,
     pub(crate) initial_value: Option<String>,
+    /// Language address used to resolve property values (the general
+    /// mechanism). `Some("literal")` is the built-in literal language;
+    /// any other address routes values through `expression_create` on that
+    /// language. `None` means values are stored raw.
+    pub(crate) resolve_language: Option<String>,
+    /// Optimization flag for the literal language: `Some(true)` (the default)
+    /// stores values as deterministic `literal:*` IRIs for POS-index lookups;
+    /// `Some(false)` routes the literal value through `expression_create`,
+    /// producing a signed-envelope URI. Only meaningful when
+    /// `resolve_language` is `"literal"` / unset.
     pub(crate) resolve_literal: Option<bool>,
     pub(crate) datatype: Option<String>,
     pub(crate) direction: Option<String>, // "forward" or "reverse" for relation properties
@@ -376,6 +386,19 @@ pub struct ShapeProperty {
     /// Transform expression (SHACL-AF Node Expression).
     /// Applied in hydration for resolveLanguage properties.
     pub(super) transform: Option<TransformExpression>,
+}
+
+impl ShapeProperty {
+    /// True when the property's values are stored as deterministic typed
+    /// `literal:` IRIs (POS-index friendly) rather than signed expression
+    /// envelopes. This holds for the literal language (explicit `"literal"`
+    /// or the unset default) with the optimization left enabled
+    /// (`resolve_literal != Some(false)`). A custom resolve language always
+    /// produces signed-envelope URIs, so it is never a deterministic literal.
+    pub(crate) fn is_deterministic_literal(&self) -> bool {
+        self.resolve_literal != Some(false)
+            && !matches!(self.resolve_language.as_deref(), Some(lang) if lang != "literal")
+    }
 }
 
 /// Enriched relation metadata for include (eager-loading) resolution.

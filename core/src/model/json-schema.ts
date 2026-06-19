@@ -24,6 +24,7 @@ export interface JSONSchemaProperty {
   required?: string[];
   "x-ad4m"?: {
     through?: string;
+    resolveLanguage?: string;
     resolveLiteral?: boolean;
     local?: boolean;
     writable?: boolean;
@@ -50,6 +51,7 @@ export interface JSONSchemaToModelOptions {
   predicateTemplate?: string;
   predicateGenerator?: (title: string, property: string) => string;
   propertyMapping?: Record<string, string>;
+  resolveLanguage?: string;
   resolveLiteral?: boolean;
   local?: boolean;
   propertyOptions?: Record<string, Partial<PropertyOptions>>;
@@ -334,6 +336,7 @@ export function buildModelFromJSONSchema(
         const writable = !readOnly;
         let initial = getPropertyOption(propertyName, propertySchema, options, 'initial');
 
+        const resolveLanguage = getPropertyOption(propertyName, propertySchema, options, 'resolveLanguage') ?? "literal";
         const resolveLiteral = getPropertyOption(propertyName, propertySchema, options, 'resolveLiteral') ?? true;
 
         if (isObjectType(propertySchema)) {
@@ -352,6 +355,7 @@ export function buildModelFromJSONSchema(
           through: predicate,
           required: isRequired,
           writable: writable,
+          resolveLanguage,
           resolveLiteral,
           ...(local !== undefined && { local }),
           ...(initial && { initial })
