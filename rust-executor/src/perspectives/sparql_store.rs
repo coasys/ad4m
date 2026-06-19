@@ -1397,6 +1397,69 @@ impl SparqlStore {
 
         use percent_encoding::percent_decode_str;
 
+        // Build the set of predicates whose property explicitly opts into
+        // expression resolution — `resolveLiteral: false` (signed-envelope
+        // literals) or a custom `resolveLanguage`. Flattening their envelopes
+        // would discard the expression-level signature, which is distinct from
+        // and not recoverable from the link-level signature on the reifier. We
+        // skip those predicates so only deterministic-literal (`resolveLiteral`
+        // default/true) properties get normalized to typed literals.
+        //
+        // If the SHACL lookup yields nothing (no shapes, or query error), the
+        // set is empty and every envelope is flattened — the prior behavior.
+        let keep_envelope_predicates: std::collections::HashSet<String> = {
+            let mut set = std::collections::HashSet::new();
+            let query = r#"
+                SELECT ?path ?resolveLiteral ?resolveLanguage WHERE {
+                    ?propUri <sh://path> ?path .
+                    OPTIONAL { ?propUri <ad4m://resolveLiteral> ?resolveLiteral . }
+                    OPTIONAL { ?propUri <ad4m://resolveLanguage> ?resolveLanguage . }
+                }
+            "#;
+            if let Ok(json) = self.query(query) {
+                if let Ok(rows) = serde_json::from_str::<Vec<Value>>(&json) {
+                    for row in &rows {
+                        let path = match row["path"].as_str() {
+                            Some(p) => p.to_string(),
+                            None => continue,
+                        };
+                        // resolveLiteral is stored as `literal:false` / `literal:true`.
+                        let resolve_literal_false = row["resolveLiteral"]
+                            .as_str()
+                            .map(|v| {
+                                let t = v
+                                    .strip_prefix("literal://")
+                                    .or_else(|| v.strip_prefix("literal:"))
+                                    .unwrap_or(v);
+                                t.strip_prefix("boolean:").unwrap_or(t) == "false"
+                            })
+                            .unwrap_or(false);
+                        // resolveLanguage comes back as its decoded lexical value
+                        // (e.g. "literal" or a custom address); the literal:string:
+                        // forms are also tolerated for older data.
+                        let custom_language = row["resolveLanguage"]
+                            .as_str()
+                            .map(|v| {
+                                let t = v
+                                    .strip_prefix("literal://string:")
+                                    .or_else(|| v.strip_prefix("literal:string:"))
+                                    .unwrap_or(v);
+                                let decoded = percent_decode_str(t)
+                                    .decode_utf8()
+                                    .map(|c| c.into_owned())
+                                    .unwrap_or_else(|_| t.to_string());
+                                !decoded.is_empty() && decoded != "literal"
+                            })
+                            .unwrap_or(false);
+                        if resolve_literal_false || custom_language {
+                            set.insert(path);
+                        }
+                    }
+                }
+            }
+            set
+        };
+
         let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
         let ont_author = NamedNodeRef::new_unchecked(ONT_AUTHOR);
         let ont_timestamp = NamedNodeRef::new_unchecked(ONT_TIMESTAMP);
@@ -1450,6 +1513,13 @@ impl SparqlStore {
                 }
                 _ => continue,
             };
+
+            // Skip predicates whose property explicitly keeps signed-expression
+            // literals (resolveLiteral: false or a custom resolveLanguage) —
+            // flattening would destroy the expression-level signature.
+            if keep_envelope_predicates.contains(&predicate) {
+                continue;
+            }
 
             // Check if the target is a signed envelope literal:json:
             if !old_target.starts_with("literal:json:") {
@@ -3275,6 +3345,88 @@ mod tests {
                 );
             }
             other => panic!("expected typed literal, got {other:?}"),
+        }
+    }
+
+    /// v3 must NOT flatten signed-expression envelopes for properties that opt
+    /// into them (`resolveLiteral: false`) — that would destroy the
+    /// expression-level signature (distinct from the link-level reifier proof).
+    /// A default property's envelope on a sibling predicate is still flattened,
+    /// proving the skip is predicate-scoped, not blanket.
+    #[test]
+    fn test_migration_v3_preserves_envelopes_for_resolve_literal_false() {
+        use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+
+        let svc = new_service();
+
+        // SHACL property shape declaring `ns://status` as resolveLiteral:false.
+        svc.add_link(&make_link("shacl://Item.status", "sh://path", "ns://status"))
+            .unwrap();
+        svc.add_link(&make_link(
+            "shacl://Item.status",
+            "ad4m://resolveLiteral",
+            "literal:false",
+        ))
+        .unwrap();
+        // `ns://name` has no shape → behaves as a default (flatten) property.
+
+        let envelope = |data: &str| {
+            let json = serde_json::json!({
+                "author": "did:key:zTest",
+                "timestamp": "2024-01-01T00:00:00.000Z",
+                "data": data,
+                "proof": {"key":"#zTest","signature":"sig","valid":true}
+            });
+            let encoded =
+                utf8_percent_encode(&serde_json::to_string(&json).unwrap(), NON_ALPHANUMERIC)
+                    .to_string();
+            format!("literal:json:{encoded}")
+        };
+
+        let status_target = envelope("active");
+        svc.add_link_with_raw_iri_target(&make_link(
+            "ad4m://item-1",
+            "ns://status",
+            &status_target,
+        ))
+        .unwrap();
+        svc.add_link_with_raw_iri_target(&make_link(
+            "ad4m://item-1",
+            "ns://name",
+            &envelope("Widget"),
+        ))
+        .unwrap();
+
+        svc.migrate_signed_envelopes_to_plain_literals().unwrap();
+
+        let object_for = |pred: &str| -> Term {
+            svc.store
+                .quads_for_pattern(
+                    Some(NamedNodeRef::new_unchecked("ad4m://item-1").into()),
+                    Some(NamedNodeRef::new_unchecked(pred)),
+                    None,
+                    Some(GraphNameRef::DefaultGraph),
+                )
+                .next()
+                .unwrap()
+                .unwrap()
+                .object
+        };
+
+        // resolveLiteral:false predicate: envelope preserved unchanged.
+        match object_for("ns://status") {
+            Term::NamedNode(n) => assert_eq!(
+                n.as_str(),
+                status_target,
+                "resolveLiteral:false envelope must be left intact"
+            ),
+            other => panic!("expected the envelope NamedNode intact, got {other:?}"),
+        }
+
+        // default predicate: envelope flattened to a typed literal.
+        match object_for("ns://name") {
+            Term::Literal(l) => assert_eq!(l.value(), "Widget", "default envelope flattened"),
+            other => panic!("expected flattened typed literal, got {other:?}"),
         }
     }
 
