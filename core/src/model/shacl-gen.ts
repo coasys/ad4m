@@ -119,10 +119,14 @@ export function buildSHACL(
             path: propMeta.through,
         };
 
-        // Determine datatype from JS field value type; resolveLiteral controls
-        // storage mode, not scalar type. The literal language implies a string
-        // datatype when no initial value pins a more specific type.
-        const isLiteral = propMeta.resolveLiteral || propMeta.resolveLanguage === "literal";
+        // Determine datatype from JS field value type; the resolve* options
+        // control storage mode (deterministic vs envelope), not scalar type.
+        // A value stored on the literal language (deterministic or envelope,
+        // i.e. resolveLanguage unset or "literal") gets a string datatype when
+        // no initial value pins a more specific type. A custom resolveLanguage
+        // yields an expression URI, not a literal.
+        const isLiteral =
+            propMeta.resolveLanguage === undefined || propMeta.resolveLanguage === "literal";
         if (propMeta.initial !== undefined || isLiteral) {
             const initialType = typeof obj[propName];
             if (initialType === "number") {

@@ -422,7 +422,9 @@ pub async fn load_class_properties_with_uri(
             _ => None,
         };
 
-        // Get resolveLiteral (ad4m://resolveLiteral), with backward compat for ad4m://resolveLanguage
+        // Get resolveLiteral (ad4m://resolveLiteral) — explicit flag only. The
+        // storage mode (incl. explicit resolveLanguage:"literal" → envelope) is
+        // decided downstream from both this flag and resolve_language.
         let resolve_literal = match perspective
             .get_links(&LinkQuery {
                 source: Some(prop_uri.clone()),
@@ -441,28 +443,7 @@ pub async fn load_class_properties_with_uri(
                     .unwrap_or(target);
                 Some(val == "true")
             }
-            _ => {
-                // Backward compat: ad4m://resolveLanguage → "literal" means resolveLiteral: true
-                match perspective
-                    .get_links(&LinkQuery {
-                        source: Some(prop_uri.clone()),
-                        predicate: Some("ad4m://resolveLanguage".to_string()),
-                        ..Default::default()
-                    })
-                    .await
-                {
-                    Ok(links) if !links.is_empty() => {
-                        let target = &links[0].data.target;
-                        let val = target
-                            .strip_prefix("literal://string:")
-                            .or_else(|| target.strip_prefix("literal:string:"))
-                            .unwrap_or(target);
-                        let decoded = urlencoding::decode(val).unwrap_or_default();
-                        Some(decoded.as_ref() == "literal")
-                    }
-                    _ => None,
-                }
-            }
+            _ => None,
         };
 
         properties.push(ShaclProperty {

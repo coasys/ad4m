@@ -11,7 +11,7 @@ import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSON
 import type { SHACLShape } from "../shacl/SHACLShape";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
-import { buildSPARQLQuery, valueToLiteralIri } from "./query-sparql";
+import { buildSPARQLQuery, valueToLiteralIri, effectiveLiteralStorage } from "./query-sparql";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import {
   normalizeValue,
@@ -1112,15 +1112,15 @@ export class Ad4mModel {
       return;
     }
 
-    const resolveLanguage = metadata.resolveLanguage;
-    if (resolveLanguage !== undefined && resolveLanguage !== "literal") {
+    const mode = effectiveLiteralStorage(metadata);
+    if (mode.kind === "custom") {
       // Custom language: route through expression_create on that language.
-      value = await this._perspective.createExpression(value, resolveLanguage);
-    } else if (metadata.resolveLiteral === false) {
-      // Literal language, optimization opted out: signed-envelope expression.
+      value = await this._perspective.createExpression(value, mode.language);
+    } else if (mode.kind === "envelope") {
+      // Built-in literal language: signed-envelope expression (provenance).
       value = await this._perspective.createExpression(value, "literal");
     } else {
-      // Default: deterministic literal: IRI.
+      // Deterministic literal: IRI (POS-index friendly).
       value = valueToLiteralIri(value);
     }
 
@@ -1265,9 +1265,9 @@ export class Ad4mModel {
       (p) => p.required || p.flag || p.initial !== undefined
     );
 
-    // Track properties resolved through expression_create — resolveLiteral:
-    // false, or a custom (non-"literal") resolveLanguage. These may fail inside
-    // a batch context, so defer them to setProperty after createSubject.
+    // Track properties resolved through expression_create — a signed literal
+    // envelope or a custom (non-"literal") resolveLanguage. These may fail
+    // inside a batch context, so defer them to setProperty after createSubject.
     const deferredExpressionProps: string[] = [];
 
     if (hasConstructor) {
@@ -1275,9 +1275,7 @@ export class Ad4mModel {
       for (const [key, value] of Object.entries(this)) {
         if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
           const propMeta = metadata.properties[key];
-          const customLanguage =
-            propMeta?.resolveLanguage !== undefined && propMeta.resolveLanguage !== "literal";
-          if (propMeta?.resolveLiteral === false || customLanguage) {
+          if (propMeta && effectiveLiteralStorage(propMeta).kind !== "deterministic") {
             deferredExpressionProps.push(key);
             continue;
           }

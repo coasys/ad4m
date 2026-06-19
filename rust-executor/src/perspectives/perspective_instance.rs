@@ -3958,9 +3958,14 @@ impl PerspectiveInstance {
         Ok(None)
     }
 
-    /// Check whether a property uses deterministic literal storage (resolveLiteral).
-    /// Falls back to checking the legacy ad4m://resolveLanguage → "literal" for
-    /// backward compat with old SHACL data.
+    /// Read the explicit `ad4m://resolveLiteral` flag for a property, if present.
+    ///
+    /// Returns `None` when the flag is absent — it is NOT derived from
+    /// `resolveLanguage`. The effective storage mode (see `resolve_property_value`
+    /// / `ShapeProperty::is_deterministic_literal`) combines this flag with
+    /// `resolveLanguage`: an explicit `resolveLanguage:"literal"` selects the
+    /// signed-envelope path, while an unspecified property defaults to a
+    /// deterministic literal.
     pub async fn get_resolve_literal_from_shacl(
         &self,
         class_name: &str,
@@ -3968,7 +3973,6 @@ impl PerspectiveInstance {
     ) -> Result<Option<bool>, AnyError> {
         let prop_suffix = format!("{}.{}", class_name, property);
 
-        // New path: ad4m://resolveLiteral
         let links = self
             .sparql_store
             .get_links_by_predicate_and_source_suffix("ad4m://resolveLiteral", &prop_suffix)?;
@@ -3983,25 +3987,6 @@ impl PerspectiveInstance {
                 .or_else(|| link.data.target.strip_prefix("literal:"))
                 .unwrap_or(&link.data.target);
             return Ok(Some(val == "true"));
-        }
-
-        // Backward compat: ad4m://resolveLanguage → "literal" means resolveLiteral: true
-        let lang_links = self
-            .sparql_store
-            .get_links_by_predicate_and_source_suffix("ad4m://resolveLanguage", &prop_suffix)?;
-
-        if let Some(link) = lang_links.first() {
-            let encoded_value =
-                if let Some(rest) = link.data.target.strip_prefix("literal://string:") {
-                    rest
-                } else if let Some(rest) = link.data.target.strip_prefix("literal:string:") {
-                    rest
-                } else {
-                    return Ok(Some(link.data.target == "literal"));
-                };
-            let decoded = urlencoding::decode(encoded_value)
-                .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
-            return Ok(Some(decoded.as_ref() == "literal"));
         }
 
         Ok(None)
@@ -4092,10 +4077,15 @@ impl PerspectiveInstance {
             }
         }
 
-        if resolve_literal == Some(false) {
-            // Literal language with the optimization opted out (resolveLiteral:
-            // false) — go through expression_create on the literal language,
-            // producing a signed-envelope URI instead of a deterministic IRI.
+        // Literal-language storage. The value goes through a signed-envelope
+        // expression when the property explicitly opts in — `resolveLiteral:
+        // false`, or an explicit `resolveLanguage:"literal"` with no
+        // resolveLiteral flag (the dev/Flux behavior). Otherwise (resolveLiteral
+        // true, or neither set) it is stored as a deterministic literal: IRI.
+        let envelope = resolve_literal == Some(false)
+            || (resolve_literal.is_none() && resolve_language.as_deref() == Some("literal"));
+
+        if envelope {
             let controller = crate::languages::LanguageController::global_instance();
             let agent_context = context.clone();
             match controller

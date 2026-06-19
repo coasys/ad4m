@@ -405,7 +405,7 @@ pub(super) fn build_projection_where_patterns(
                 } else {
                     let escaped = escape_sparql_string(val);
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
-                    patterns.push(format!("    FILTER(STR(?{var}) = \"{escaped}\")\n",));
+                    patterns.push(format!("    FILTER(<ad4m://fn/parse_literal>(?{var}) = \"{escaped}\")\n",));
                 }
             }
             WhereCondition::Bool(b) => {
@@ -414,7 +414,7 @@ pub(super) fn build_projection_where_patterns(
                 } else {
                     let bval = if *b { "true" } else { "false" };
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
-                    patterns.push(format!("    FILTER(STR(?{var}) = \"{bval}\")\n",));
+                    patterns.push(format!("    FILTER(<ad4m://fn/parse_literal>(?{var}) = \"{bval}\")\n",));
                 }
             }
             WhereCondition::Number(n) => {
@@ -426,7 +426,7 @@ pub(super) fn build_projection_where_patterns(
                     }
                 } else {
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
-                    patterns.push(format!("    FILTER(STR(?{var}) = \"{n}\")\n",));
+                    patterns.push(format!("    FILTER(<ad4m://fn/parse_literal>(?{var}) = \"{n}\")\n",));
                 }
             }
             WhereCondition::StringArray(vals) => {
@@ -448,7 +448,7 @@ pub(super) fn build_projection_where_patterns(
                         .collect::<Vec<_>>()
                         .join(", ");
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
-                    patterns.push(format!("    FILTER(STR(?{var}) IN ({list}))\n",));
+                    patterns.push(format!("    FILTER(<ad4m://fn/parse_literal>(?{var}) IN ({list}))\n",));
                 }
             }
             WhereCondition::NumberArray(vals) => {
@@ -470,7 +470,7 @@ pub(super) fn build_projection_where_patterns(
                         .collect::<Vec<_>>()
                         .join(", ");
                     patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
-                    patterns.push(format!("    FILTER(STR(?{var}) IN ({list}))\n",));
+                    patterns.push(format!("    FILTER(<ad4m://fn/parse_literal>(?{var}) IN ({list}))\n",));
                 }
             }
             _ => {}

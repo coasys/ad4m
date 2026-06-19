@@ -280,22 +280,25 @@ export interface PropertyOptions {
     readOnly?: boolean;
 
     /**
-     * The language used to resolve/store the property value. Can be the
-     * built-in `"literal"` language (the default) or a custom language
-     * address. A custom language routes values through `expression_create`
-     * on that language, producing signed-envelope URIs.
+     * The language used to resolve/store the property value. Not defaulted —
+     * its presence selects the storage mode (see `resolveLiteral`):
+     *   - unset → deterministic literal storage (the perf default)
+     *   - `"literal"` → the built-in literal language: values go through
+     *     `expression_create`, producing a signed-envelope URI with
+     *     author/timestamp/proof (provenance carried in the value)
+     *   - a custom language address → `expression_create` on that language
      */
     resolveLanguage?: string;
 
     /**
-     * Literal-language optimization flag. When true (the default) and
-     * `resolveLanguage` is `"literal"`, property values are stored as
-     * deterministic `literal:string:X` / `:number:` / `:boolean:` / `:json:`
-     * IRIs directly, enabling efficient Oxigraph POS-index lookups.
-     *
-     * When false, the literal value goes through `expression_create` on the
-     * literal language, producing a signed-envelope URI with
-     * author/timestamp/proof. Ignored for custom `resolveLanguage` values.
+     * Literal-language storage selector. Not defaulted; combined with
+     * `resolveLanguage` to pick the storage mode:
+     *   - `true` → deterministic `literal:string:X` / `:number:` / `:boolean:` /
+     *     `:json:` IRIs (POS-index friendly). Explicit opt-in to the fast path.
+     *   - `false` → signed-envelope expression on the literal language.
+     *   - unset → deterministic UNLESS `resolveLanguage` is explicitly
+     *     `"literal"` (which selects the signed envelope).
+     * Ignored for a custom `resolveLanguage`. See `effectiveLiteralStorage`.
      */
     resolveLiteral?: boolean;
 
@@ -618,8 +621,9 @@ export function Model(opts: ModelConfig) {
  * Smart defaults (all overridable):
  * - `required` → `false`
  * - `readOnly` → `false`
- * - `resolveLanguage` → `"literal"`
- * - `resolveLiteral` → `true`
+ * - `resolveLanguage` / `resolveLiteral` → unset → deterministic literal storage
+ *   (the perf default). Set `resolveLanguage: "literal"` for a signed-envelope
+ *   value, or a custom language address to resolve through that language.
  * - `initial` → `undefined` (no link created until a value is explicitly set)
  * 
  * Properties are optional by default. When a model instance is created without
@@ -665,20 +669,27 @@ export function Model(opts: ModelConfig) {
  * @param {string} opts.through - The predicate URI for the property
  * @param {boolean} [opts.required=false] - Whether the property is required (adds query filters and sentinel initial value)
  * @param {string} [opts.initial] - Initial value (defaults to "literal:string:uninitialized" when required)
- * @param {string} [opts.resolveLanguage="literal"] - Language used to resolve the value ("literal" or a custom language address)
- * @param {boolean} [opts.resolveLiteral=true] - When true (and resolveLanguage is "literal"), store as deterministic literal: IRIs
+ * @param {string} [opts.resolveLanguage] - Value-resolution language: unset (deterministic literal, default), "literal" (signed envelope), or a custom language address
+ * @param {boolean} [opts.resolveLiteral] - true → deterministic literal: IRIs; false → signed envelope on the literal language; unset → deterministic unless resolveLanguage is "literal"
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function Property(opts: PropertyOptions) {
     const required = opts.required ?? false;
+    // resolveLanguage / resolveLiteral are intentionally NOT defaulted here.
+    // The effective storage mode is derived from what the user explicitly set:
+    //   - neither set            → deterministic literal (the perf default)
+    //   - resolveLanguage:"literal" (explicit) → signed literal envelope
+    //   - resolveLiteral:true     → deterministic literal (explicit opt-in)
+    //   - resolveLiteral:false    → signed literal envelope
+    //   - resolveLanguage:<custom>→ expression on that language
+    // Leaving them unset lets us tell "explicitly literal" (envelope) apart from
+    // "unspecified" (deterministic). See effectiveLiteralStorage().
     return applyPropertyMetadata({
         ...opts,
         required,
         readOnly: opts.readOnly ?? false,
-        resolveLanguage: opts.resolveLanguage ?? "literal",
-        resolveLiteral: opts.resolveLiteral ?? true,
         initial: opts.initial ?? (required ? "literal:string:uninitialized" : undefined),
     });
 }
@@ -734,8 +745,8 @@ export function Property(opts: PropertyOptions) {
  * @param {PropertyOptions} opts - Property configuration
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (if property should have one)
- * @param {string} [opts.resolveLanguage="literal"] - Language used to resolve the value ("literal" or a custom language address)
- * @param {boolean} [opts.resolveLiteral=true] - When true (and resolveLanguage is "literal"), store as deterministic literal: IRIs
+ * @param {string} [opts.resolveLanguage] - Value-resolution language: unset (deterministic literal, default), "literal" (signed envelope), or a custom language address
+ * @param {boolean} [opts.resolveLiteral] - true → deterministic literal: IRIs; false → signed envelope on the literal language; unset → deterministic unless resolveLanguage is "literal"
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */

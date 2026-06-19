@@ -827,12 +827,11 @@ export class SHACLShape {
         let val = resolveLiteralLink.target.replace(/^literal:\/\/|^literal:/, '');
         if (val.startsWith('boolean:')) val = val.substring(8);
         prop.resolveLiteral = val === 'true';
-      } else if (prop.resolveLanguage !== undefined) {
-        // Backward compat: when only ad4m://resolveLanguage is present (old
-        // SHACL), derive the literal-optimization flag — "literal" implies the
-        // deterministic literal path.
-        prop.resolveLiteral = prop.resolveLanguage === 'literal';
       }
+      // resolveLiteral is left unset when no ad4m://resolveLiteral link exists;
+      // the storage mode is then derived from resolveLanguage (unset/"literal")
+      // by effectiveLiteralStorage — an explicit resolveLanguage:"literal"
+      // means the signed-envelope path, not deterministic.
 
       // Parse action arrays
       const setterLink = links.find(l =>
@@ -1065,11 +1064,9 @@ export class SHACLShape {
         local: p.local,
         writable: p.writable,
         resolveLanguage: p.resolve_language ?? (p as any).resolveLanguage,
-        resolveLiteral: p.resolve_literal ?? (
-          (p.resolve_language ?? (p as any).resolveLanguage) !== undefined
-            ? (p.resolve_language ?? (p as any).resolveLanguage) === 'literal'
-            : undefined
-        ),
+        // Left as-is (no derivation from resolveLanguage); the storage mode is
+        // computed from both fields by effectiveLiteralStorage.
+        resolveLiteral: p.resolve_literal ?? (p as any).resolveLiteral,
         setter: p.setter,
         adder: p.adder,
         remover: p.remover,

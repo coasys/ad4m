@@ -63,7 +63,9 @@ const CHANNEL_SHACL = JSON.stringify({
             min_count: 1,
             max_count: 1,
             writable: true,
-            resolve_language: "literal",
+            // No resolve_language → deterministic literal storage (perf, indexed
+            // WHERE; provenance carried by the reifier). Flux opts channels into
+            // the fast path by omitting resolveLanguage.
             setter: [
                 { action: "setSingleTarget", source: "this", predicate: "flux://channel_name", target: "value", local: false }
             ]
@@ -75,7 +77,7 @@ const CHANNEL_SHACL = JSON.stringify({
             min_count: 0,
             max_count: 1,
             writable: true,
-            resolve_language: "literal",
+            // deterministic (no resolve_language)
             setter: [
                 { action: "setSingleTarget", source: "this", predicate: "flux://channel_description", target: "value", local: false }
             ]
@@ -87,7 +89,7 @@ const CHANNEL_SHACL = JSON.stringify({
             min_count: 0,
             max_count: 1,
             writable: true,
-            resolve_language: "literal",
+            // deterministic (no resolve_language)
             setter: [
                 { action: "setSingleTarget", source: "this", predicate: "flux://channel_is_conversation", target: "value", local: false }
             ]
@@ -99,7 +101,7 @@ const CHANNEL_SHACL = JSON.stringify({
             min_count: 0,
             max_count: 1,
             writable: true,
-            resolve_language: "literal",
+            // deterministic (no resolve_language)
             setter: [
                 { action: "setSingleTarget", source: "this", predicate: "flux://channel_is_pinned", target: "value", local: false }
             ]
@@ -673,6 +675,35 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(children.count).to.be.greaterThan(0);
             var childAddrs = children.children.map((c: any) => c.address);
             expect(childAddrs).to.include(createdMsgAddr);
+        });
+
+        it("stores message body as a signed expression envelope (resolveLanguage:'literal' keeps provenance in the value)", async function() {
+            // Flux messages opt INTO the envelope: the Message SHACL keeps
+            // resolve_language:"literal" on body, so the stored value is a signed
+            // expression (literal:json:<{author,timestamp,data,proof}>) carrying
+            // per-value provenance — distinct from the link-level reifier proof.
+            // Channels, by contrast, omit resolve_language → deterministic literals.
+            var body = "Provenance matters " + Date.now();
+            var msgResult = await callMcpTool(MCP_BASE_URL, 'message_create', {
+                perspective_id: perspectiveUuid,
+                body,
+            }, mcpSessionId);
+            expect(msgResult.created).to.be.true;
+            var msgAddr = msgResult.expression_address;
+
+            var links = await callMcpTool(MCP_BASE_URL, 'query_links', {
+                perspective_id: perspectiveUuid,
+                source: msgAddr,
+                predicate: "flux://body",
+            }, mcpSessionId);
+            var linksArr = Array.isArray(links) ? links : (links.links || []);
+            expect(linksArr.length).to.be.greaterThan(0);
+            var target = linksArr[0].data?.target || linksArr[0].target || '';
+            expect(target).to.match(/^literal:json:/);
+            var envelope = JSON.parse(decodeURIComponent(target.replace(/^literal:json:/, "")));
+            expect(envelope).to.have.property("author");
+            expect(envelope).to.have.property("proof");
+            expect(envelope.data).to.equal(body);
         });
 
         it("should create with parent when parent is a plain string (not URI)", async function() {

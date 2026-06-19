@@ -336,8 +336,11 @@ export function buildModelFromJSONSchema(
         const writable = !readOnly;
         let initial = getPropertyOption(propertyName, propertySchema, options, 'initial');
 
-        const resolveLanguage = getPropertyOption(propertyName, propertySchema, options, 'resolveLanguage') ?? "literal";
-        const resolveLiteral = getPropertyOption(propertyName, propertySchema, options, 'resolveLiteral') ?? true;
+        // Not defaulted — absence means "deterministic literal" (the perf
+        // default); an explicit resolveLanguage:"literal" or resolveLiteral
+        // selects the storage mode. See effectiveLiteralStorage().
+        const resolveLanguage = getPropertyOption(propertyName, propertySchema, options, 'resolveLanguage');
+        const resolveLiteral = getPropertyOption(propertyName, propertySchema, options, 'resolveLiteral');
 
         if (isObjectType(propertySchema)) {
           console.warn(`Property "${propertyName}" is an object type. It will be stored as JSON. Consider flattening complex objects for better semantic querying.`);
@@ -355,8 +358,8 @@ export function buildModelFromJSONSchema(
           through: predicate,
           required: isRequired,
           writable: writable,
-          resolveLanguage,
-          resolveLiteral,
+          ...(resolveLanguage !== undefined && { resolveLanguage }),
+          ...(resolveLiteral !== undefined && { resolveLiteral }),
           ...(local !== undefined && { local }),
           ...(initial && { initial })
         };

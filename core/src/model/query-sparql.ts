@@ -102,17 +102,43 @@ export function valueToLiteralIri(value: any): string {
   return Literal.from(String(value)).toUrl();
 }
 
+/** How a property's value is stored / resolved. */
+export type LiteralStorageMode =
+  | { kind: "deterministic" }            // deterministic literal: IRI (POS-index friendly, no signature)
+  | { kind: "envelope" }                 // signed expression on the built-in literal language
+  | { kind: "custom"; language: string }; // signed expression on a custom language
+
 /**
- * Determine if a property stores values as literal: IRIs (needs parse_literal for comparisons).
- * Properties on the literal language (explicit "literal" or the unset default)
- * with resolveLiteral !== false store deterministic literal: URIs. A custom
- * resolveLanguage produces signed-envelope URIs, and flag properties store raw
- * URIs — neither is a deterministic literal.
+ * Derive the effective storage mode from a property's explicit options.
+ * `resolveLanguage` and `resolveLiteral` are NOT defaulted at the decorator
+ * level, so absence is meaningful:
+ *   - neither set                       → deterministic (the perf default)
+ *   - resolveLanguage:"literal" (explicit) → envelope (signed literal expression)
+ *   - resolveLiteral:true               → deterministic (explicit opt-in)
+ *   - resolveLiteral:false              → envelope
+ *   - resolveLanguage:<custom>          → that language's expression
+ * resolveLiteral, when set, wins over the language-implied default.
+ */
+export function effectiveLiteralStorage(meta: {
+  resolveLanguage?: string;
+  resolveLiteral?: boolean;
+}): LiteralStorageMode {
+  const lang = meta.resolveLanguage;
+  if (lang !== undefined && lang !== "literal") return { kind: "custom", language: lang };
+  if (meta.resolveLiteral === true) return { kind: "deterministic" };
+  if (meta.resolveLiteral === false) return { kind: "envelope" };
+  return lang === "literal" ? { kind: "envelope" } : { kind: "deterministic" };
+}
+
+/**
+ * Determine if a property stores values as deterministic literal: IRIs (so WHERE
+ * filters can match typed literals directly). Envelope / custom-language
+ * properties resolve through expressions, and flag properties store raw URIs —
+ * none is a deterministic literal.
  */
 function isLiteralStoredProperty(propMeta: PropertyMetadata): boolean {
   if (propMeta.flag) return false;
-  if (propMeta.resolveLanguage !== undefined && propMeta.resolveLanguage !== "literal") return false;
-  return propMeta.resolveLiteral !== false;
+  return effectiveLiteralStorage(propMeta).kind === "deterministic";
 }
 
 /**

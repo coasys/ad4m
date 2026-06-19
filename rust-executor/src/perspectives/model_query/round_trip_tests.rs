@@ -519,3 +519,51 @@ fn round_trip_preserves_custom_resolve_language() {
         "custom resolveLanguage produces signed envelopes, never deterministic literals",
     );
 }
+
+/// An explicit `resolveLanguage: "literal"` with no `resolveLiteral` flag selects
+/// the signed-envelope path (NOT deterministic) — the Flux message case.
+#[test]
+fn round_trip_explicit_literal_without_flag_is_envelope() {
+    let shacl_json = r#"{
+        "target_class": "ns://Message",
+        "properties": [
+            { "path": "flux://body", "name": "body", "resolve_language": "literal" }
+        ]
+    }"#;
+    let shape = round_trip("Message", shacl_json);
+    let prop = shape
+        .properties
+        .iter()
+        .find(|p| p.name == "body")
+        .expect("body property");
+    assert_eq!(prop.resolve_language.as_deref(), Some("literal"));
+    assert_eq!(prop.resolve_literal, None);
+    assert!(
+        !prop.is_deterministic_literal(),
+        "explicit resolveLanguage:\"literal\" without a flag means the signed-envelope path",
+    );
+}
+
+/// A property with neither resolveLanguage nor resolveLiteral defaults to
+/// deterministic literal storage (the performance default).
+#[test]
+fn round_trip_no_resolve_options_is_deterministic() {
+    let shacl_json = r#"{
+        "target_class": "ns://Channel",
+        "properties": [
+            { "path": "flux://channel_name", "name": "name", "datatype": "xsd://string" }
+        ]
+    }"#;
+    let shape = round_trip("Channel", shacl_json);
+    let prop = shape
+        .properties
+        .iter()
+        .find(|p| p.name == "name")
+        .expect("name property");
+    assert_eq!(prop.resolve_language, None);
+    assert_eq!(prop.resolve_literal, None);
+    assert!(
+        prop.is_deterministic_literal(),
+        "no resolve options → deterministic literal storage (perf default)",
+    );
+}

@@ -1424,34 +1424,37 @@ impl SparqlStore {
                             None => continue,
                         };
                         // resolveLiteral is stored as `literal:false` / `literal:true`.
-                        let resolve_literal_false = row["resolveLiteral"]
-                            .as_str()
-                            .map(|v| {
-                                let t = v
-                                    .strip_prefix("literal://")
-                                    .or_else(|| v.strip_prefix("literal:"))
-                                    .unwrap_or(v);
-                                t.strip_prefix("boolean:").unwrap_or(t) == "false"
-                            })
-                            .unwrap_or(false);
+                        let resolve_literal = row["resolveLiteral"].as_str().map(|v| {
+                            let t = v
+                                .strip_prefix("literal://")
+                                .or_else(|| v.strip_prefix("literal:"))
+                                .unwrap_or(v);
+                            t.strip_prefix("boolean:").unwrap_or(t) == "true"
+                        });
                         // resolveLanguage comes back as its decoded lexical value
                         // (e.g. "literal" or a custom address); the literal:string:
                         // forms are also tolerated for older data.
-                        let custom_language = row["resolveLanguage"]
-                            .as_str()
-                            .map(|v| {
-                                let t = v
-                                    .strip_prefix("literal://string:")
-                                    .or_else(|| v.strip_prefix("literal:string:"))
-                                    .unwrap_or(v);
-                                let decoded = percent_decode_str(t)
-                                    .decode_utf8()
-                                    .map(|c| c.into_owned())
-                                    .unwrap_or_else(|_| t.to_string());
-                                !decoded.is_empty() && decoded != "literal"
-                            })
-                            .unwrap_or(false);
-                        if resolve_literal_false || custom_language {
+                        let resolve_language = row["resolveLanguage"].as_str().map(|v| {
+                            let t = v
+                                .strip_prefix("literal://string:")
+                                .or_else(|| v.strip_prefix("literal:string:"))
+                                .unwrap_or(v);
+                            percent_decode_str(t)
+                                .decode_utf8()
+                                .map(|c| c.into_owned())
+                                .unwrap_or_else(|_| t.to_string())
+                        });
+                        let custom_language = matches!(resolve_language.as_deref(), Some(l) if !l.is_empty() && l != "literal");
+                        // Keep the envelope (skip flattening) whenever the property
+                        // is NOT a deterministic literal — mirrors
+                        // ShapeProperty::is_deterministic_literal:
+                        //   custom language, OR resolveLiteral:false, OR an
+                        //   explicit resolveLanguage:"literal" with no resolveLiteral:true.
+                        let keep_envelope = custom_language
+                            || resolve_literal == Some(false)
+                            || (resolve_literal.is_none()
+                                && resolve_language.as_deref() == Some("literal"));
+                        if keep_envelope {
                             set.insert(path);
                         }
                     }

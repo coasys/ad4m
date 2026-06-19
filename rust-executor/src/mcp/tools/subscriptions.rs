@@ -213,11 +213,14 @@ impl Ad4mMcpHandler {
             .collect();
 
         // Build CONTAINS conditions for mention matching.
-        // Typed-literal targets carry their value directly in the lexical
-        // form, so `STR(?target)` yields the text we want to substring-match.
+        // The message body may be stored either as a deterministic literal or as
+        // a signed expression envelope (resolveLanguage:"literal"). Match on the
+        // decoded value via `fn/parse_literal` so substring matching sees the
+        // message text only — NOT the author/proof DIDs inside an envelope, which
+        // would otherwise produce false-positive mentions.
         let mention_conditions: Vec<String> = all_terms
             .iter()
-            .map(|t| format!("CONTAINS(LCASE(STR(?target)), \"{}\")", t))
+            .map(|t| format!("CONTAINS(LCASE(STR(<ad4m://fn/parse_literal>(?target))), \"{}\")", t))
             .collect();
 
         let mention_predicate = format!("({})", mention_conditions.join(" || "));

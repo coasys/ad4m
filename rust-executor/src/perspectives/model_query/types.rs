@@ -391,13 +391,21 @@ pub struct ShapeProperty {
 impl ShapeProperty {
     /// True when the property's values are stored as deterministic typed
     /// `literal:` IRIs (POS-index friendly) rather than signed expression
-    /// envelopes. This holds for the literal language (explicit `"literal"`
-    /// or the unset default) with the optimization left enabled
-    /// (`resolve_literal != Some(false)`). A custom resolve language always
-    /// produces signed-envelope URIs, so it is never a deterministic literal.
+    /// envelopes. Mirrors the TS `effectiveLiteralStorage`:
+    ///   - custom resolve language            → never deterministic (envelope)
+    ///   - `resolve_literal == Some(true)`     → deterministic
+    ///   - `resolve_literal == Some(false)`    → envelope
+    ///   - unset: deterministic UNLESS `resolve_language` is explicitly
+    ///     `"literal"` (which selects the signed-envelope path)
     pub(crate) fn is_deterministic_literal(&self) -> bool {
-        self.resolve_literal != Some(false)
-            && !matches!(self.resolve_language.as_deref(), Some(lang) if lang != "literal")
+        if matches!(self.resolve_language.as_deref(), Some(lang) if lang != "literal") {
+            return false;
+        }
+        match self.resolve_literal {
+            Some(true) => true,
+            Some(false) => false,
+            None => self.resolve_language.as_deref() != Some("literal"),
+        }
     }
 }
 

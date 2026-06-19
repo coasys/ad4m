@@ -298,8 +298,10 @@ describe("Prolog + Literals", () => {
                 //@ts-ignore
                 let links = await perspective!.get(new LinkQuery({source: todo.id, predicate: "todo://has_title"}))
                 expect(links.length).to.equal(1)
-                let literal = Literal.fromUrl(links[0].data.target).get()
-                expect(literal).to.equal("new title")
+                // resolveLanguage:"literal" → signed expression envelope; the raw
+                // target's inner .data is the value (the model read above unwraps it).
+                let envelope: any = Literal.fromUrl(links[0].data.target).get()
+                expect(envelope.data).to.equal("new title")
             })
 
             it("can easily be initialized with PerspectiveProxy.ensureSDNASubjectClass()", async () => {
@@ -654,8 +656,11 @@ describe("Prolog + Literals", () => {
                     //@ts-ignore
                     let links = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://resolve"}))
                     expect(links.length).to.equal(1)
-                    let literal = Literal.fromUrl(links[0].data.target).get()
-                    expect(literal).to.equal(recipe.resolve)
+                    // resolveLanguage:"literal" stores a signed expression envelope;
+                    // the raw target decodes to {author,timestamp,data,proof} whose
+                    // .data is the value. The model read (recipe3) unwraps it.
+                    let envelope: any = Literal.fromUrl(links[0].data.target).get()
+                    expect(envelope.data).to.equal(recipe.resolve)
 
                     const recipe3 = new Recipe(perspective!, root);
                     await recipe3.get();
@@ -703,6 +708,58 @@ describe("Prolog + Literals", () => {
                     expect(recipe2.image).to.equal(`data:image/png;base64,${testImageData.data_base64}`);
                 })
 
+                it("resolveLanguage:'literal' stores signed-expression envelopes and reads back the JSON object (Flux message case)", async () => {
+                    // Mirrors what Flux does for message atoms: a property declared
+                    // with `resolveLanguage: "literal"` and nothing else. The value
+                    // must be stored as a *signed expression* on the literal language
+                    // (envelope with author/timestamp/proof) — provenance Flux relies
+                    // on — and read back as the original JSON object.
+                    @Model({ name: "FluxMessageAtom" })
+                    class FluxMessageAtom extends Ad4mModel {
+                        @Property({ through: "flux://content", resolveLanguage: "literal" })
+                        content: any = null;
+                    }
+                    await perspective!.ensureSDNASubjectClass(FluxMessageAtom);
+
+                    const payload = { body: "hello flux", mentions: ["did:key:zABC"] };
+
+                    const root1 = Literal.from("flux atom 1").toUrl();
+                    const m1 = new FluxMessageAtom(perspective!, root1);
+                    m1.content = payload;
+                    await m1.save();
+
+                    // Raw stored target must be a SIGNED envelope, not a plain
+                    // deterministic literal:json: of the value.
+                    const links1 = await perspective!.get(new LinkQuery({ source: root1, predicate: "flux://content" }));
+                    expect(links1.length).to.equal(1);
+                    const target1 = links1[0].data.target;
+                    expect(target1).to.match(/^literal:json:/);
+                    const envelope1 = JSON.parse(decodeURIComponent(target1.replace(/^literal:json:/, "")));
+                    expect(envelope1).to.have.property("author");
+                    expect(envelope1).to.have.property("timestamp");
+                    expect(envelope1).to.have.property("proof");
+                    expect(envelope1.data).to.deep.equal(payload);
+
+                    // Read back through the model → the JSON object (envelope unwrapped).
+                    const all = await FluxMessageAtom.findAll(perspective!);
+                    const got: any = all.find((m: any) => m.id === root1);
+                    expect(got).to.not.be.undefined;
+                    expect(got.content).to.be.an("object");
+                    expect(got.content).to.deep.equal(payload);
+
+                    // Each message is a distinct signed expression: identical content
+                    // yields a DIFFERENT envelope (per-expression provenance), not a
+                    // deduped deterministic literal.
+                    const root2 = Literal.from("flux atom 2").toUrl();
+                    const m2 = new FluxMessageAtom(perspective!, root2);
+                    m2.content = payload;
+                    await m2.save();
+                    const links2 = await perspective!.get(new LinkQuery({ source: root2, predicate: "flux://content" }));
+                    const target2 = links2[0].data.target;
+                    expect(target2).to.match(/^literal:json:/);
+                    expect(target2).to.not.equal(target1);
+                })
+
                 it("works with very long property values", async() => {
                     let root = Literal.from("Active record implementation test long value").toUrl()
                     const recipe = new Recipe(perspective!, root)
@@ -716,8 +773,9 @@ describe("Prolog + Literals", () => {
 
                     let linksResolve = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://resolve"}))
                     expect(linksResolve.length).to.equal(1)
-                    let literal = Literal.fromUrl(linksResolve[0].data.target).get()
-                    expect(literal).to.equal(longName)
+                    // resolveLanguage:"literal" → signed envelope; check the inner .data.
+                    let envelope: any = Literal.fromUrl(linksResolve[0].data.target).get()
+                    expect(envelope.data).to.equal(longName)
 
                     const recipe2 = new Recipe(perspective!, root)
                     await recipe2.get()

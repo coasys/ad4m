@@ -149,14 +149,10 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         let resolve_language = first["resolveLanguage"]
             .as_str()
             .map(decode_literal_string_target);
-        let resolve_literal =
-            parse_bool_literal_target(first["resolveLiteral"].as_str()).or_else(|| {
-                // Backward compat: when only ad4m://resolveLanguage is present
-                // (old SHACL), derive the literal-optimization flag from it —
-                // "literal" implies the deterministic literal path (true),
-                // any other language implies expression resolution (false).
-                resolve_language.as_deref().map(|lang| lang == "literal")
-            });
+        // Explicit flag only — NOT derived from resolveLanguage. The storage
+        // mode is computed by `is_deterministic_literal`, where an explicit
+        // resolveLanguage:"literal" with no flag means the envelope path.
+        let resolve_literal = parse_bool_literal_target(first["resolveLiteral"].as_str());
         let writable = parse_bool_literal_target(first["writable"].as_str());
         let local = parse_bool_literal_target(first["local"].as_str());
         let getter = first["getter"].as_str().map(decode_literal_string_target);
@@ -528,11 +524,10 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
             let is_flag = prop_meta["flag"].as_bool().unwrap_or(false);
             let initial = prop_meta["initial"].as_str().map(|s| s.to_string());
             let resolve_language = prop_meta["resolveLanguage"].as_str().map(|s| s.to_string());
-            let resolve_literal = prop_meta["resolveLiteral"].as_bool().or_else(|| {
-                // Backward compat with legacy fixtures using `resolveLanguage`:
-                // derive the literal-optimization flag from the language.
-                resolve_language.as_deref().map(|s| s == "literal")
-            });
+            // Explicit flag only — the storage mode (incl. explicit
+            // resolveLanguage:"literal" → envelope) is decided by
+            // is_deterministic_literal, not derived here.
+            let resolve_literal = prop_meta["resolveLiteral"].as_bool();
             let datatype = prop_meta["datatype"].as_str().map(|s| s.to_string());
             let getter = prop_meta["getter"].as_str().map(|s| s.to_string());
 

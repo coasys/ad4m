@@ -204,7 +204,9 @@ async fn test_where_clause_literal_prop_with_raw_uri_value() {
         ))
         .unwrap();
 
-    // Shape has resolveLanguage: "literal" (the @Property default)
+    // Shape omits resolveLanguage → deterministic literal storage (the default).
+    // A deterministic property whose value happens to be a raw URI is matched via
+    // the WHERE builder's typed-literal-VALUES + `<uri>` UNION fallback.
     let shape_json = r#"{
         "className": "Todo",
         "properties": {
@@ -216,8 +218,7 @@ async fn test_where_clause_literal_prop_with_raw_uri_value() {
             },
             "state": {
                 "predicate": "todo://state",
-                "required": true,
-                "resolveLanguage": "literal"
+                "required": true
             }
         },
         "relations": {}
@@ -239,7 +240,7 @@ async fn test_where_clause_literal_prop_with_raw_uri_value() {
     assert_eq!(
         result.instances.len(),
         1,
-        "WHERE state='todo://ready' should match raw URI even with resolveLanguage: literal"
+        "WHERE state='todo://ready' should match a raw URI value on a deterministic-literal property"
     );
 }
 
