@@ -13,7 +13,7 @@ pub fn prop(name: &str, predicate: &str) -> ShapeProperty {
         is_flag: false,
         is_required: false,
         initial_value: None,
-
+        resolve_language: None,
         datatype: None,
         direction: None,
         is_scalar_relation: false,
@@ -33,7 +33,7 @@ pub fn relation(name: &str, predicate: &str) -> ShapeProperty {
         is_flag: false,
         is_required: false,
         initial_value: None,
-
+        resolve_language: None,
         datatype: None,
         direction: Some("forward".to_string()),
         is_scalar_relation: false,
@@ -53,7 +53,7 @@ pub fn flag(name: &str, predicate: &str, initial: &str) -> ShapeProperty {
         is_flag: true,
         is_required: true,
         initial_value: Some(initial.to_string()),
-
+        resolve_language: None,
         datatype: None,
         direction: None,
         is_scalar_relation: false,
