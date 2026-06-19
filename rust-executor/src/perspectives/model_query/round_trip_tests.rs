@@ -75,7 +75,7 @@ fn round_trip_preserves_basic_property() {
     assert!(name.is_required, "name should be required");
     assert!(!name.is_collection, "name should be scalar");
     assert_eq!(name.datatype.as_deref(), Some("xsd://string"));
-    assert_eq!(name.resolve_language.as_deref(), Some("literal"));
+    assert_eq!(name.resolve_literal, Some(true));
 }
 
 #[test]
@@ -395,14 +395,11 @@ fn round_trip_preserves_transform_expression() {
     );
 }
 
-/// Regression guard for the empty-string preservation half of the
-/// transform-round-trip fix.  Before that fix, `resolveLanguage: ""` was
-/// dropped on the floor by JS truthiness in both `buildSHACL` and
-/// `SHACLShape.toLinks()`.  The Rust pipeline must also preserve it
-/// end-to-end so language-expression resolution can be opted into without
-/// hard-coding a language address.
+/// Regression guard: a legacy "resolve_language": "literal" fixture
+/// correctly maps to resolve_literal: Some(true) through the backward-compat
+/// path in parse_shape_from_json.
 #[test]
-fn round_trip_preserves_empty_resolve_language() {
+fn round_trip_legacy_resolve_language_literal_maps_to_resolve_literal_true() {
     let shacl_json = r#"{
         "target_class": "ns://ImagePost",
         "properties": [
@@ -410,7 +407,7 @@ fn round_trip_preserves_empty_resolve_language() {
                 "path": "image://data",
                 "name": "image",
                 "datatype": "xsd://string",
-                "resolve_language": ""
+                "resolve_language": "literal"
             }
         ]
     }"#;
@@ -421,8 +418,8 @@ fn round_trip_preserves_empty_resolve_language() {
         .find(|p| p.name == "image")
         .expect("image property");
     assert_eq!(
-        prop.resolve_language.as_deref(),
-        Some(""),
-        "empty-string resolveLanguage must survive SHACL round-trip (not be coerced to None)",
+        prop.resolve_literal,
+        Some(true),
+        "legacy resolveLanguage: 'literal' should map to resolve_literal: true",
     );
 }
