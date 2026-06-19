@@ -1,256 +1,41 @@
-use hdk::prelude::*;
+//! HDK-side shim onto the algorithm-crate `pull` and `handle_broadcast`.
+//!
+//! The implementations live in `perspective_diff_algorithm::pull`. This
+//! module keeps the legacy import path
+//! (`crate::link_adapter::pull::pull`) and the SocialContextResult
+//! error mapping so existing zome callers don't have to change.
+
 use perspective_diff_algorithm as algo;
-use perspective_diff_sync_integrity::{
-    EntryTypes, HashBroadcast, PerspectiveDiff, PerspectiveDiffEntryReference, PullResult,
-};
+use perspective_diff_sync_integrity::{HashBroadcast, PullResult};
 
 use crate::errors::SocialContextResult;
-use crate::link_adapter::chunked_diffs::load_diff_from_entry;
-use crate::link_adapter::revisions::{current_revision, update_current_revision};
-use crate::link_adapter::workspace::Workspace;
 use crate::retriever::PerspectiveDiffRetreiver;
-use crate::utils::get_now;
 use crate::Hash;
 
-fn merge<Retriever: PerspectiveDiffRetreiver + algo::RevisionsRetriever>(
-    latest: Hash,
-    current: Hash,
-) -> SocialContextResult<Hash> {
-    debug!("===PerspectiveDiffSync.merge(): Function start");
-    let fn_start = get_now()?.time();
-
-    let latest_diff = Retriever::get(latest.clone())?;
-    let current_diff = Retriever::get(current.clone())?;
-    //Create the merge diff
-    let merge_diff = PerspectiveDiff {
-        additions: vec![],
-        removals: vec![],
-    };
-
-    //Create the merge entry reference
-    let merge_entry_reference = PerspectiveDiffEntryReference {
-        parents: Some(vec![latest, current]),
-        diff: merge_diff.clone(),
-        diffs_since_snapshot: latest_diff.diffs_since_snapshot
-            + current_diff.diffs_since_snapshot
-            + 1,
-        diff_chunks: None, // Merge entries always have empty inline diff
-    };
-    let merge_entry_reference_hash = Retriever::create_entry(
-        EntryTypes::PerspectiveDiffEntryReference(merge_entry_reference.clone()),
-    )?;
-    debug!(
-        "===PerspectiveDiffSync.merge(): Commited merge entry: {:#?}",
-        merge_entry_reference_hash
-    );
-
-    let now = get_now()?;
-    update_current_revision::<Retriever>(merge_entry_reference_hash.clone(), now)?;
-
-    let fn_end = get_now()?.time();
-    debug!(
-        "===PerspectiveDiffSync.merge() - Profiling: Took: {} to complete merge() function",
-        (fn_end - fn_start).num_milliseconds()
-    );
-    Ok(merge_entry_reference_hash)
-}
-
 pub fn pull<
-    Retriever: PerspectiveDiffRetreiver + algo::WorkspaceRetriever + algo::RevisionsRetriever,
+    Retriever: PerspectiveDiffRetreiver
+        + algo::WorkspaceRetriever
+        + algo::RevisionsRetriever
+        + algo::SnapshotRetriever
+        + algo::PullCommitEnv,
 >(
     emit: bool,
     theirs: Hash,
     is_scribe: bool,
 ) -> SocialContextResult<PullResult> {
-    debug!("===PerspectiveDiffSync.pull(): Function start");
-    let fn_start = get_now()?.time();
-
-    let current = current_revision::<Retriever>()?;
-    let current_hash = current.clone().map(|val| val.hash);
-    debug!(
-        "===PerspectiveDiffSync.pull(): Pull made with theirs: {:#?} and current: {:#?}",
-        theirs, current
-    );
-
-    let theirs_hash = theirs.clone();
-
-    if Some(theirs_hash) == current_hash {
-        return Ok(PullResult {
-            diff: PerspectiveDiff::default(),
-            current_revision: current_hash,
-        });
-    }
-
-    let mut workspace = Workspace::new();
-
-    if current.is_none() {
-        workspace.collect_only_from_latest::<Retriever>(theirs.clone())?;
-        let diff = workspace.squashed_diff();
-        update_current_revision::<Retriever>(theirs, get_now()?)?;
-        emit_signal(diff.clone())?;
-        return Ok(PullResult {
-            diff: PerspectiveDiff::default(),
-            current_revision: None,
-        });
-    }
-
-    let current = current.expect("current missing handled above");
-    let current_hash = current.hash.clone();
-
-    workspace.build_diffs::<Retriever>(theirs.clone(), current_hash.clone())?;
-
-    // First check if we are actually ahead of them -> we don't have to do anything
-    // they will have to merge with / or fast-forward to our current
-    if workspace
-        .all_ancestors(&current_hash)?
-        .contains(&theirs)
-    {
-        debug!("===PerspectiveDiffSync.pull(): We are ahead of them. They will have to pull/fast-forward. Exiting without change...");
-        return Ok(PullResult {
-            diff: PerspectiveDiff::default(),
-            current_revision: Some(current.hash),
-        });
-    }
-
-    let fast_forward_possible = workspace
-        .all_ancestors(&theirs)?
-        .contains(&current_hash);
-
-    // If we can't fast forward, we have to merge
-    // but if we are not a scribe, we can't merge
-    // so in that case, we can't do anything
-    if !fast_forward_possible && !is_scribe {
-        debug!("===PerspectiveDiffSync.pull(): Have to merge but I'm not a scribe. Exiting without change...");
-        return Ok(PullResult {
-            diff: PerspectiveDiff::default(),
-            current_revision: Some(current.hash),
-        });
-    }
-
-    //Get all the diffs which exist between current and the last ancestor that we got
-    let seen_diffs = workspace.all_ancestors(&current_hash)?;
-
-    //Get all the diffs in the graph which we havent seen.
-    let null = algo::null_node();
-    let unseen_diffs: Vec<(Hash, PerspectiveDiffEntryReference)> = if seen_diffs.len() > 0 {
-        workspace
-            .sorted_diffs
-            .clone()
-            .expect("should be unseen diffs after build_diffs() call")
-            .into_iter()
-            .filter(|val| {
-                if val.0 == null {
-                    return false;
-                };
-                if val.0 == current_hash {
-                    return false;
-                };
-                if seen_diffs.contains(&val.0) {
-                    return false;
-                };
-                true
-            })
-            .collect()
-    } else {
-        workspace
-            .sorted_diffs
-            .expect("should be unseen diffs after build_diffs() call")
-            .into_iter()
-            .filter(|val| val.0 != null && val.0 != current_hash)
-            .collect()
-    };
-
-    let (diffs, current_revision) = if fast_forward_possible {
-        debug!("===PerspectiveDiffSync.pull(): There are paths between current and latest, lets fast forward the changes we have missed!");
-        let mut out = PerspectiveDiff {
-            additions: vec![],
-            removals: vec![],
-        };
-        for diff_entry in unseen_diffs {
-            // Load diff handling both inline and chunked storage
-            let mut loaded_diff = load_diff_from_entry::<Retriever>(&diff_entry.1)?;
-            out.additions.append(&mut loaded_diff.additions);
-            out.removals.append(&mut loaded_diff.removals);
-        }
-        update_current_revision::<Retriever>(theirs.clone(), get_now()?)?;
-        let fn_end = get_now()?.time();
-        debug!(
-            "===PerspectiveDiffSync.pull() - Profiling: Took: {} to complete pull() function",
-            (fn_end - fn_start).num_milliseconds()
-        );
-        (out, theirs)
-    } else if is_scribe {
-        debug!("===PerspectiveDiffSync.pull():There are no paths between current and latest, we must merge current and latest");
-        //Get the entries we missed from unseen diff
-        let mut out = PerspectiveDiff {
-            additions: vec![],
-            removals: vec![],
-        };
-        for diff_entry in unseen_diffs {
-            // Load diff handling both inline and chunked storage
-            let mut loaded_diff = load_diff_from_entry::<Retriever>(&diff_entry.1)?;
-            out.additions.append(&mut loaded_diff.additions);
-            out.removals.append(&mut loaded_diff.removals);
-        }
-
-        let merge_hash = merge::<Retriever>(theirs, current.hash)?;
-        let fn_end = get_now()?.time();
-        debug!(
-            "===PerspectiveDiffSync.pull() - Profiling: Took: {} to complete pull() function",
-            (fn_end - fn_start).num_milliseconds()
-        );
-        (out, merge_hash)
-    } else {
-        (
-            PerspectiveDiff {
-                additions: vec![],
-                removals: vec![],
-            },
-            current.hash,
-        )
-    };
-
-    //Emit the signal in case the client connection has a timeout during the zome call
-    if emit {
-        if diffs.additions.len() > 0 || diffs.removals.len() > 0 {
-            emit_signal(diffs.clone())?;
-        }
-    }
-    Ok(PullResult {
-        diff: diffs,
-        current_revision: Some(current_revision),
-    })
+    Ok(algo::pull::<Retriever>(emit, theirs, is_scribe)?)
 }
 
-pub fn handle_broadcast<Retriever: PerspectiveDiffRetreiver + algo::RevisionsRetriever>(
+pub fn handle_broadcast<
+    Retriever: PerspectiveDiffRetreiver
+        + algo::WorkspaceRetriever
+        + algo::RevisionsRetriever
+        + algo::SnapshotRetriever
+        + algo::PullCommitEnv,
+>(
     broadcast: HashBroadcast,
 ) -> SocialContextResult<()> {
-    // debug!("===PerspectiveDiffSync.fast_forward_signal(): Function start");
-    // let fn_start = get_now()?.time();
-    let diff_reference = broadcast.reference.clone();
-    let revision = broadcast.reference_hash.clone();
-
-    let current_revision = current_revision::<Retriever>()?;
-
-    if current_revision.is_some() {
-        let current_revision = current_revision.unwrap();
-        if revision == current_revision.hash {
-            // debug!("===PerspectiveDiffSync.fast_forward_signal(): Revision is the same as current");
-        };
-        if diff_reference.parents == Some(vec![current_revision.hash]) {
-            // debug!("===PerspectiveDiffSync.fast_forward_signal(): Revisions parent is the same as current, we can fast forward our current");
-            // CRITICAL: Load diff BEFORE updating current_revision
-            // If loading fails (e.g., chunks not available), we should NOT update current_revision
-            let loaded_diff = load_diff_from_entry::<Retriever>(&broadcast.reference)?;
-            // Only update current_revision if we successfully loaded the diff
-            update_current_revision::<Retriever>(revision, get_now()?)?;
-            emit_signal(loaded_diff)?;
-        };
-    };
-    emit_signal(broadcast)?;
-    // let fn_end = get_now()?.time();
-    // debug!("===PerspectiveDiffSync.fast_forward_signal() - Profiling: Took: {} to complete fast_forward_signal() function", (fn_end - fn_start).num_milliseconds());
-    Ok(())
+    Ok(algo::handle_broadcast::<Retriever>(broadcast)?)
 }
 
 #[cfg(test)]
@@ -274,11 +59,11 @@ mod tests {
                 2 [ label = "2" ]
                 3 [ label = "3" ]
 
-                1 -> 0 
-                2 -> 0 
-                3 -> 1 
+                1 -> 0
+                2 -> 0
+                3 -> 1
                 3 -> 2
-                
+
             }"#,
             )
             .unwrap();
@@ -322,7 +107,7 @@ mod tests {
                 4 [ label = "4" ]
                 5 [ label = "5" ]
                 6 [ label = "6" ]
-            
+
                 3 -> 2
                 4 -> 2
                 5 -> 3
@@ -364,11 +149,9 @@ mod tests {
             .iter()
             .all(|item| expected_additions.contains(item)));
 
-        //Test that a merge actually happened and current was updated
         let new_current = MockPerspectiveGraph::current_revision();
         assert!(new_current.is_ok());
         let new_current = new_current.unwrap();
-
         assert!(new_current.unwrap().hash != latest_node_hash);
     }
 
@@ -384,7 +167,7 @@ mod tests {
                 4 [ label = "4" ]
                 5 [ label = "5" ]
                 6 [ label = "6" ]
-            
+
                 3 -> 2
                 4 -> 2
                 5 -> 3
@@ -436,7 +219,7 @@ mod tests {
                 5 [ label = "5" ]
                 6 [ label = "6" ]
                 7 [ label = "7" ]
-            
+
                 3 -> 2
                 4 -> 2
                 5 -> 3
@@ -521,7 +304,6 @@ mod tests {
             .iter()
             .all(|item| expected_additions.contains(item)));
 
-        //ensure that merge was created and thus current revision got updated
         let current = MockPerspectiveGraph::current_revision();
         assert!(current.unwrap().unwrap().hash != current_node_hash);
     }
@@ -582,7 +364,6 @@ mod tests {
             .iter()
             .all(|item| expected_additions.contains(item)));
 
-        //ensure that merge was created and thus current revision got updated
         let current = MockPerspectiveGraph::current_revision();
         assert!(current.unwrap().unwrap().hash != current_node_hash);
     }
@@ -620,7 +401,6 @@ mod tests {
 
         let pull_res = pull::<MockPerspectiveGraph>(false, latest_node_hash.clone(), true);
         assert!(pull_res.is_ok());
-        println!("{:#?}", pull_res);
         let pull_res = pull_res.unwrap();
 
         let node_5 = &node_id_hash(&dot_structures::Id::Plain(String::from("5"))).to_string();
@@ -639,10 +419,6 @@ mod tests {
             .additions
             .iter()
             .all(|item| expected_additions.contains(item)));
-
-        //ensure that no merge was created
-        //let latest = MockPerspectiveGraph::latest_revision();
-        //assert!(latest.unwrap().unwrap().hash == latest_node_hash);
     }
 
     #[test]
@@ -679,7 +455,6 @@ mod tests {
 
         let pull_res = pull::<MockPerspectiveGraph>(false, latest_node_hash.clone(), true);
         assert!(pull_res.is_ok());
-        println!("{:#?}", pull_res);
         let pull_res = pull_res.unwrap();
 
         let node_5 = &node_id_hash(&dot_structures::Id::Plain(String::from("5"))).to_string();
@@ -701,7 +476,6 @@ mod tests {
             .iter()
             .all(|item| expected_additions.contains(item)));
 
-        //ensure that merge was created and thus current revision got updated
         let current = MockPerspectiveGraph::current_revision();
         assert!(current.unwrap().unwrap().hash != current_node_hash);
     }
@@ -728,7 +502,6 @@ mod tests {
 
         let pull_res = pull::<MockPerspectiveGraph>(false, latest_node_hash.clone(), true);
         assert!(pull_res.is_ok());
-        //println!("{:#?}", pull_res);
         let pull_res = pull_res.unwrap();
 
         let mut expected_additions = create_node_id_vec(23, 52);
@@ -744,7 +517,6 @@ mod tests {
             .iter()
             .all(|item| expected_additions.contains(item)));
 
-        //ensure that merge was created and thus current revision got updated
         let current = MockPerspectiveGraph::current_revision();
         assert!(current.unwrap().unwrap().hash != current_node_hash);
     }
@@ -769,7 +541,6 @@ mod tests {
 
         let pull_res = pull::<MockPerspectiveGraph>(false, latest_node_hash.clone(), true);
         assert!(pull_res.is_ok());
-        //println!("{:#?}", pull_res);
         let pull_res = pull_res.unwrap();
 
         let expected_additions = vec![create_node_id_link_expression(314)];
@@ -780,7 +551,6 @@ mod tests {
             .iter()
             .all(|item| expected_additions.contains(item)));
 
-        //ensure that merge was created and thus current revision got updated
         let current = MockPerspectiveGraph::current_revision();
         assert!(current.unwrap().unwrap().hash != current_node_hash);
     }
@@ -819,7 +589,6 @@ mod tests {
             .iter()
             .all(|item| expected_additions.contains(item)));
 
-        //ensure that merge was created and thus current revision got updated
         let current = MockPerspectiveGraph::current_revision();
         assert!(current.unwrap().unwrap().hash != current_node_hash);
     }
@@ -854,7 +623,6 @@ mod tests {
             .iter()
             .all(|item| expected_additions.contains(item)));
 
-        //ensure that merge was created and thus current revision got updated
         let current = MockPerspectiveGraph::current_revision();
         assert!(current.unwrap().unwrap().hash != current_node_hash);
     }

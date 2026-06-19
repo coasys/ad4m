@@ -12,7 +12,11 @@
 //! Pull/commit/render move here in wake-23 Step 2.
 
 pub mod chunked_diffs;
+pub mod commit;
+pub mod env;
 pub mod errors;
+pub mod pull;
+pub mod render;
 pub mod retriever;
 pub mod revisions;
 pub mod snapshots;
@@ -20,11 +24,16 @@ pub mod topo_sort;
 pub mod workspace;
 
 pub use chunked_diffs::{load_diff_aggregated, ChunkedDiffs};
+pub use commit::{commit, CommitConfig};
+pub use env::PullCommitEnv;
 pub use errors::{AlgoError, AlgoResult};
 pub use perspective_diff_types::{
-    null_node, ExpressionProof, HasDiffParents, Hash, HashReference, LinkExpression,
-    LocalHashReference, OpId, PerspectiveDiff, PerspectiveDiffEntryReference, Snapshot, Triple,
+    null_node, CommitInput, ExpressionProof, HasDiffParents, Hash, HashBroadcast, HashReference,
+    LinkExpression, LocalHashReference, OpId, PerspectiveDiff, PerspectiveDiffEntryReference,
+    PullResult, Snapshot, Triple,
 };
+pub use pull::{handle_broadcast, pull};
+pub use render::render_perspective_links;
 pub use retriever::{RevisionsRetriever, SnapshotRetriever, WorkspaceRetriever};
 pub use snapshots::generate_snapshot;
 pub use topo_sort::{topo_sort_diff_references, TopoSortError};

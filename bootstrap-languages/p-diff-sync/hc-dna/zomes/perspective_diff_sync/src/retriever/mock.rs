@@ -136,6 +136,39 @@ impl algo::SnapshotRetriever for MockPerspectiveGraph {
     }
 }
 
+impl algo::PullCommitEnv for MockPerspectiveGraph {
+    fn now() -> algo::AlgoResult<chrono::DateTime<chrono::Utc>> {
+        Ok(Utc::now())
+    }
+
+    fn sys_time_ms() -> algo::AlgoResult<i64> {
+        Ok(Utc::now().timestamp_millis())
+    }
+
+    fn emit_diff_signal(_diff: algo::PerspectiveDiff) -> algo::AlgoResult<()> {
+        Ok(())
+    }
+
+    fn emit_broadcast_signal(_broadcast: algo::HashBroadcast) -> algo::AlgoResult<()> {
+        Ok(())
+    }
+
+    fn send_hash_broadcast_to_active_agents(
+        _broadcast: algo::HashBroadcast,
+    ) -> algo::AlgoResult<()> {
+        Ok(())
+    }
+
+    fn create_snapshot_and_link(
+        _diff_action_hash: algo::Hash,
+        _snapshot: algo::Snapshot,
+    ) -> algo::AlgoResult<()> {
+        // The mock graph has no link store / snapshot-attached
+        // semantics — the pull/render tests don't exercise this path.
+        Ok(())
+    }
+}
+
 impl algo::RevisionsRetriever for MockPerspectiveGraph {
     fn current_revision() -> algo::AlgoResult<Option<algo::LocalHashReference>> {
         <Self as PerspectiveDiffRetreiver>::current_revision()
