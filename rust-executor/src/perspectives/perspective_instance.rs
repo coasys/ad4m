@@ -4136,7 +4136,23 @@ impl PerspectiveInstance {
                             .map_err(|e| anyhow!("Failed to encode number as literal URI: {}", e))?
                     }
                 }
-                _ => value.to_string(),
+                // Booleans become deterministic `literal:boolean:` IRIs, matching
+                // the TS `valueToLiteralIri` / `Literal` encoding. The storage
+                // layer turns these into typed `xsd:boolean` terms for indexed
+                // WHERE matching, and the read path decodes them back to a JSON
+                // bool. The Rust `Literal` helper has no boolean variant, so we
+                // format the wire form directly.
+                serde_json::Value::Bool(b) => format!("literal:boolean:{b}"),
+                // Objects / arrays become deterministic `literal:json:` IRIs so
+                // they round-trip back to JSON values rather than being stored
+                // as raw `value.to_string()` targets (which the storage layer
+                // would keep as opaque NamedNode IRIs and read back as strings).
+                serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                    Literal::from_json(value.clone())
+                        .to_url()
+                        .map_err(|e| anyhow!("Failed to encode JSON as literal URI: {}", e))?
+                }
+                serde_json::Value::Null => value.to_string(),
             };
             Ok(uri)
         }
