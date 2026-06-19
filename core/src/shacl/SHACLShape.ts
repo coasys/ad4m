@@ -212,8 +212,10 @@ export interface SHACLPropertyShape {
   filter?: boolean;
 
   /** AD4M-specific: Transform expression (SHACL-AF Node Expression).
-   *  Applied to resolved property values in the Rust model query engine.
-   *  Only used for properties with resolveLiteral set. */
+   *  Applied to a property's resolved value in the Rust model query engine —
+   *  for values resolved through a `resolveLanguage` (a custom language, or the
+   *  literal language with `resolveLiteral: false`) and for any property that
+   *  declares a transform. */
   transform?: NodeExpression;
 }
 
