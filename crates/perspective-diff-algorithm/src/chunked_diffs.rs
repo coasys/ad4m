@@ -13,9 +13,9 @@
 //! `integrity::PerspectiveDiff` and `algorithm::PerspectiveDiff` at the
 //! boundary.
 
-use crate::diff_types::{LinkExpression, PerspectiveDiff, PerspectiveDiffEntryReference};
 use crate::errors::AlgoResult;
 use crate::retriever::WorkspaceRetriever;
+use perspective_diff_types::{LinkExpression, PerspectiveDiff, PerspectiveDiffEntryReference};
 
 /// Aggregate the diff carried (inline or as chunk hashes) by a
 /// `PerspectiveDiffEntryReference`. Resolves at most one level of
@@ -146,7 +146,7 @@ mod tests {
     use super::*;
 
     fn link(source: &str, target: &str) -> LinkExpression {
-        use crate::diff_types::{ExpressionProof, Triple};
+        use perspective_diff_types::{ExpressionProof, Triple};
         LinkExpression {
             author: "test".into(),
             data: Triple {
