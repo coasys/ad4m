@@ -39,9 +39,11 @@ async fn publish_neighbourhood(
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let link_language = neighbourhoods::resolve_link_language(body.link_language)
+        .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
     let url = neighbourhoods::neighbourhood_publish_from_perspective_with_context(
         &body.perspective_uuid,
-        body.link_language,
+        link_language,
         body.meta,
         &agent_context,
     )

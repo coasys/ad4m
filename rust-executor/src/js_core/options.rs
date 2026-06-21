@@ -3,6 +3,7 @@ use std::rc::Rc;
 use url::Url;
 
 use super::agent_extension::agent_service;
+use super::holograph_service_extension::holograph_service;
 use super::languages_extension::language_service;
 use super::pubsub_extension::pubsub_service;
 use super::signature_extension::signature_service;
@@ -58,6 +59,7 @@ pub fn language_worker_options() -> WorkerOptions {
             utils_service::init(),
             pubsub_service::init(),
             holochain_service::init(),
+            holograph_service::init(),
             signature_service::init(),
             agent_service::init(),
             entanglement_service::init(),
