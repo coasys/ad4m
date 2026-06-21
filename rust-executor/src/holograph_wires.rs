@@ -50,7 +50,7 @@ use dashmap::DashMap;
 use holograph::{
     holograph_envelope_decoder, ArcPolicy, ChannelNotifier, EmittedOp, HolographSpace,
     HolographSpaceConfig, K2DynSpaceTarget, K2FetcherAdapter, K2OpStoreShim, K2PeerPickerAdapter,
-    KvOpStore, NotifyUp, OpEnvelope, SpaceConfig,
+    KvOpStore, NotifyUp, OpClass, OpEnvelope, SpaceConfig,
 };
 use kitsune2_api::{
     Builder, Config, DynLocalAgent, DynOpStore, DynSpaceHandler, K2Result, OpStoreFactory, SpaceId,
@@ -392,25 +392,38 @@ impl HolographRuntime {
         Ok(serde_json::json!({ "links": [] }))
     }
 
-    /// Pop the next-available `EmittedOp` for this neighborhood,
-    /// awaiting it inside Rust so the JS side never spins. Returns
-    /// `None` only on receiver close (i.e., neighborhood closed).
+    /// Pop the next-available diff-carrying `EmittedOp` for this
+    /// neighborhood, awaiting it inside Rust so the JS side never spins.
+    /// Returns `None` only on receiver close (i.e., neighborhood closed).
+    ///
+    /// Wake-19 E4 introduced auto-published `Head` ops alongside each
+    /// `Ancestry` op. Heads are substrate-internal pointers with an
+    /// empty payload — they don't carry a diff JS could render — so this
+    /// loop drops them on the floor and waits for the next emit.
     pub async fn next_emitted(
         &self,
         handle: HolographHandle,
     ) -> HolographWireResult<Option<EmittedOpWire>> {
         let state = self.state(handle)?;
         let mut rx = state.receiver.lock().await;
-        match rx.recv().await {
-            Some(emit) => {
-                let diff = decode_envelope(emit.envelope_bytes.as_ref())?;
-                Ok(Some(EmittedOpWire {
-                    op_id_b64: url_safe_b64_no_pad(Bytes::from(emit.op_id).as_ref()),
-                    created_at_ms: emit.created_at.as_micros() / 1000,
-                    diff,
-                }))
+        loop {
+            match rx.recv().await {
+                Some(emit) => {
+                    let env = OpEnvelope::decode(emit.envelope_bytes.as_ref())
+                        .map_err(|e| invalid_envelope(format!("decode envelope: {e}")))?;
+                    if env.op_class == OpClass::Head {
+                        continue;
+                    }
+                    let diff: WireDiff = serde_json::from_slice(env.payload.as_ref())
+                        .map_err(|e| invalid_envelope(format!("decode payload JSON: {e}")))?;
+                    return Ok(Some(EmittedOpWire {
+                        op_id_b64: url_safe_b64_no_pad(Bytes::from(emit.op_id).as_ref()),
+                        created_at_ms: emit.created_at.as_micros() / 1000,
+                        diff,
+                    }));
+                }
+                None => return Ok(None),
             }
-            None => Ok(None),
         }
     }
 
