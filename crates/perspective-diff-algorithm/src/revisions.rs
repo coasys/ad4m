@@ -15,9 +15,9 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::diff_types::{Hash, HashReference, LocalHashReference};
 use crate::errors::AlgoResult;
 use crate::retriever::RevisionsRetriever;
+use perspective_diff_types::{Hash, HashReference, LocalHashReference};
 
 /// The agent's local view of where they are in the DAG.
 pub fn current_revision<R: RevisionsRetriever>() -> AlgoResult<Option<LocalHashReference>> {

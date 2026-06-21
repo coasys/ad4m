@@ -27,9 +27,9 @@
 use std::collections::{BTreeSet, HashSet};
 
 use crate::chunked_diffs::{load_diff_aggregated, ChunkedDiffs};
-use crate::diff_types::{Hash, LinkExpression, PerspectiveDiffEntryReference, Snapshot};
 use crate::errors::AlgoResult;
 use crate::retriever::SnapshotRetriever;
+use perspective_diff_types::{Hash, LinkExpression, PerspectiveDiffEntryReference, Snapshot};
 
 struct SearchPosition {
     hash: Hash,
@@ -67,7 +67,7 @@ pub fn generate_snapshot<R: SnapshotRetriever>(
                 // synthesising a placeholder entry-ref that points at
                 // the chunks.
                 let placeholder = PerspectiveDiffEntryReference {
-                    diff: crate::diff_types::PerspectiveDiff::new(),
+                    diff: perspective_diff_types::PerspectiveDiff::new(),
                     parents: None,
                     diffs_since_snapshot: 0,
                     diff_chunks: Some(snapshot.diff_chunks.clone()),
@@ -228,9 +228,9 @@ fn handle_parents<R: SnapshotRetriever>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff_types::{ExpressionProof, PerspectiveDiff, Triple};
     use crate::retriever::WorkspaceRetriever;
     use once_cell::sync::Lazy;
+    use perspective_diff_types::{ExpressionProof, PerspectiveDiff, Triple};
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
@@ -257,7 +257,7 @@ mod tests {
         g.next_id += 1;
         let mut buf = [0u8; 36];
         buf[..4].copy_from_slice(&g.next_id.to_be_bytes());
-        Hash::from_raw_36(&buf)
+        Hash::from_raw_36(buf.to_vec())
     }
 
     fn put_entry(diff: PerspectiveDiff, parents: Option<Vec<Hash>>) -> Hash {
