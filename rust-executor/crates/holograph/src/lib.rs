@@ -16,7 +16,9 @@ pub mod op_store;
 pub mod retriever_kitsune;
 pub mod space;
 
-pub use config::{ArcPolicy, LocFnPolicy, SpaceConfig, ValidationRegime};
+pub use config::{
+    resolve_iroh_relay, ArcPolicy, FetchFallbackPolicy, LocFnPolicy, SpaceConfig, ValidationRegime,
+};
 pub use envelope::{EnvelopeError, OpEnvelope};
 pub use integration_queue::{
     AlwaysValid, HolographIntegrationQueue, IntegrationQueueConfig, NotifyUp, OpFetcher,

@@ -29,6 +29,33 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ArcPolicy;
 
+/// Classify a `sled::Error` as "lock held by another process" so
+/// `KvOpStore::open` can retry. sled wraps the underlying
+/// `fs2::FileExt::try_lock_exclusive` failure in an
+/// `io::Error::new(io::ErrorKind::Other, "could not acquire lock ...")`
+/// (the inner `Os { code: EWOULDBLOCK }` is stringified into the message
+/// rather than preserved as the outer kind). We match on the message
+/// prefix sled emits — both `WouldBlock` (Linux/macOS) and
+/// `AlreadyExists` (Windows) are caught via the same `kind: Other`
+/// wrapping, so the message text is the reliable signal.
+fn is_lock_contention(e: &sled::Error) -> bool {
+    match e {
+        sled::Error::Io(io_err) => {
+            if matches!(
+                io_err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::AlreadyExists
+            ) {
+                return true;
+            }
+            // Fallback: sled wraps the OS-level lock failure into
+            // `kind: Other` with a "could not acquire lock" message.
+            let s = io_err.to_string();
+            s.contains("could not acquire lock") || s.contains("WouldBlock")
+        }
+        _ => false,
+    }
+}
+
 /// On-disk shape of a stored op.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpRecord {
@@ -79,33 +106,92 @@ impl KvOpStore {
     /// substrate layer owns the envelope format — see
     /// `crate::envelope::OpEnvelope` for v1's shape, and `HolographSpace`
     /// for the wiring.
+    ///
+    /// Lock-contention recovery: sled holds an exclusive advisory
+    /// file lock on `db/.lock`. A concurrent `sled::open` against the
+    /// same path returns `Error::Io` (kind WouldBlock / AlreadyExists
+    /// depending on platform). This open retries with exponential
+    /// backoff (50/100/200/400/800ms — total ~1.55s) so two
+    /// `HolographSpace::new` racing on the same data directory
+    /// don't both fail.
     pub fn open(
         path: impl AsRef<std::path::Path>,
         space_id: SpaceId,
         arc_policy: ArcPolicy,
         decode_envelope: EnvelopeDecoder,
     ) -> Result<Arc<Self>, K2Error> {
-        let db = sled::open(path).map_err(|e| K2Error::other_src("sled::open", e))?;
-        let ops = db
-            .open_tree(b"ops")
-            .map_err(|e| K2Error::other_src("open ops tree", e))?;
-        let slice_hashes = db
-            .open_tree(b"slice_hashes")
-            .map_err(|e| K2Error::other_src("open slice_hashes tree", e))?;
-        Ok(Arc::new(Self {
-            space_id,
-            arc_policy,
-            db,
-            ops,
-            slice_hashes,
-            decode_envelope,
-        }))
+        const BACKOFF_MS: &[u64] = &[50, 100, 200, 400, 800];
+
+        let path = path.as_ref();
+        let mut last_err: Option<sled::Error> = None;
+        for (attempt, &delay_ms) in BACKOFF_MS.iter().enumerate() {
+            // Stale-lock cleanup: POSIX advisory locks die with the
+            // owning process so sled's `.lock` file alone isn't a
+            // reliable "lock held" signal. After the first failed
+            // attempt, try to remove the lock file once — if the
+            // owning process is gone the next open will re-create it
+            // cleanly; if it's alive, the OS-level advisory lock
+            // still blocks us and we fall back to the backoff loop.
+            if attempt == 1 {
+                let lock_path = path.join(".lock");
+                let _ = std::fs::remove_file(&lock_path);
+            }
+            match sled::open(path) {
+                Ok(db) => {
+                    let ops = db
+                        .open_tree(b"ops")
+                        .map_err(|e| K2Error::other_src("open ops tree", e))?;
+                    let slice_hashes = db
+                        .open_tree(b"slice_hashes")
+                        .map_err(|e| K2Error::other_src("open slice_hashes tree", e))?;
+                    return Ok(Arc::new(Self {
+                        space_id,
+                        arc_policy,
+                        db,
+                        ops,
+                        slice_hashes,
+                        decode_envelope,
+                    }));
+                }
+                Err(e) => {
+                    if !is_lock_contention(&e) {
+                        return Err(K2Error::other_src("sled::open", e));
+                    }
+                    last_err = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                }
+            }
+        }
+        Err(K2Error::other_src(
+            "sled::open (lock-contention after 5 retries)",
+            last_err.expect("backoff loop ran at least once"),
+        ))
     }
 
     /// Synchronous helper for tests + the smoketest. Counts ops without
     /// going through the async trait.
     pub fn op_count_blocking(&self) -> u64 {
         self.ops.len() as u64
+    }
+
+    /// Async flush — pushes every dirty page to disk and fsyncs. Called
+    /// from `HolographSpace::shutdown` to make sure the snapshot is
+    /// durable before the process exits.
+    pub async fn flush_async(&self) -> K2Result<()> {
+        self.db
+            .flush_async()
+            .await
+            .map(|_| ())
+            .map_err(|e| K2Error::other_src("KvOpStore::flush_async", e))
+    }
+
+    /// Best-effort synchronous flush. The `Drop` impl on `HolographSpace`
+    /// uses this from contexts that can't await.
+    pub fn flush_blocking(&self) -> K2Result<()> {
+        self.db
+            .flush()
+            .map(|_| ())
+            .map_err(|e| K2Error::other_src("KvOpStore::flush", e))
     }
 
     fn target_arc(&self) -> DhtArc {
@@ -689,5 +775,56 @@ mod tests {
         // Bob can now serve the op to anyone who asks.
         let bob_serves = bob.retrieve_ops(bob_ids).await.unwrap();
         assert_eq!(bob_serves[0].op_data, payload);
+    }
+
+    /// D1 — concurrent `KvOpStore::open` against the same path.
+    /// First holder drops after ~200ms; second open must succeed within
+    /// the 5-step backoff window (~1.55s budget).
+    #[tokio::test]
+    async fn second_open_retries_until_first_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db");
+
+        let first = open_store_at(&db_path);
+        let path_for_drop = db_path.clone();
+        let dropper = tokio::task::spawn_blocking(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(first);
+            // path used only to keep ownership semantics clear
+            let _ = path_for_drop;
+        });
+
+        // Second open from a different blocking thread — sled locks
+        // the directory advisory-style, so this must wait for `first`
+        // to drop. The backoff loop should retry until success.
+        let path_for_second = db_path.clone();
+        let started = std::time::Instant::now();
+        let second = tokio::task::spawn_blocking(move || open_store_at(&path_for_second))
+            .await
+            .expect("second-open task");
+        let elapsed = started.elapsed();
+
+        dropper.await.unwrap();
+
+        // Sanity: the second open did wait (i.e., it didn't bypass the
+        // first holder via some other mechanism) and completed within
+        // the 1.55s backoff budget.
+        assert!(
+            elapsed >= std::time::Duration::from_millis(50),
+            "second open returned suspiciously fast ({:?}), suggests no contention",
+            elapsed
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(1_700),
+            "second open exceeded backoff budget ({:?})",
+            elapsed
+        );
+        // Smoke: the second handle is usable.
+        assert_eq!(second.query_total_op_count().await.unwrap(), 0);
+    }
+
+    fn open_store_at(path: &std::path::Path) -> Arc<KvOpStore> {
+        KvOpStore::open(path, space_id(), ArcPolicy::Full, envelope_decoder())
+            .expect("open store at path")
     }
 }

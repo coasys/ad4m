@@ -168,6 +168,14 @@ pub trait LocalCommitTarget: Send + Sync + std::fmt::Debug + 'static {
     /// Eagerly hint to known peers that we have the listed op-ids
     /// available. Implementations fan out via `Publish::publish_ops`.
     fn publish_ops_to_peers(&self, op_ids: Vec<OpId>) -> BoxFuture<'_, K2Result<()>>;
+    /// Wake-18 D3: best-effort transport teardown.
+    /// `HolographSpace::shutdown` calls this so the K2 stack can drop
+    /// transport handles, close iroh endpoints, etc. The default no-op
+    /// covers test mocks and the in-process `K2DynSpaceTarget` for
+    /// which the DynSpace's own Drop suffices.
+    fn close<'a>(&'a self) -> BoxFuture<'a, K2Result<()>> {
+        Box::pin(async move { Ok(()) })
+    }
 }
 
 /// Production `LocalCommitTarget` backed by a K2 `DynSpace`. Publishes
@@ -277,15 +285,15 @@ pub struct HolographSpaceConfig {
     pub commit_target: Arc<dyn LocalCommitTarget>,
     pub sig_verifier: Arc<dyn SigVerifier>,
     pub runtime: tokio::runtime::Handle,
-    pub fallback_timeout: std::time::Duration,
     pub watcher_tick: std::time::Duration,
-    pub max_retry_peers: usize,
 }
 
 impl HolographSpaceConfig {
-    /// Sensible-default builder opts: `AlwaysValid` sig verifier, 15s
-    /// fallback timeout, 1s watcher tick, 3 retry peers. Tests and
-    /// production usually start from this.
+    /// Sensible-default builder opts: `AlwaysValid` sig verifier, 1s
+    /// watcher tick. Fetch-fallback timings come from
+    /// `SpaceConfig::fetch_fallback_policy` (defaults: 5s/3-peers/30s,
+    /// see `FetchFallbackPolicy::default`). Tests and production
+    /// usually start from this.
     #[allow(clippy::too_many_arguments)]
     pub fn defaults(
         config: SpaceConfig,
@@ -309,9 +317,7 @@ impl HolographSpaceConfig {
             commit_target,
             sig_verifier: Arc::new(AlwaysValid),
             runtime,
-            fallback_timeout: std::time::Duration::from_secs(15),
             watcher_tick: std::time::Duration::from_secs(1),
-            max_retry_peers: 3,
         }
     }
 }
@@ -324,6 +330,10 @@ pub struct HolographSpace {
     op_store: Arc<KvOpStore>,
     decode_envelope: EnvelopeDecoder,
     commit_target: Arc<dyn LocalCommitTarget>,
+    /// Wake-18 D3 shutdown flag. `on_local_commit` consults this and
+    /// rejects new commits once flipped — drains-in-flight finish but
+    /// no new work piles up.
+    shutdown_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for HolographSpace {
@@ -353,18 +363,27 @@ impl HolographSpace {
             fetcher: cfg.fetcher,
             peer_picker: cfg.peer_picker,
             sig_verifier: cfg.sig_verifier,
-            fallback_timeout: cfg.fallback_timeout,
-            max_retry_peers: cfg.max_retry_peers,
+            fallback_policy: cfg.config.fetch_fallback_policy,
             watcher_tick: cfg.watcher_tick,
             runtime: cfg.runtime,
         });
         queue.start_watcher();
+        // Wake-18 D6: if SpaceConfig didn't carry an explicit relay
+        // URL, resolve from env. The resolved value is folded back
+        // into the stored config so downstream consumers
+        // (`HolographSpace::config()`) see one canonical surface and
+        // never have to reach for `std::env::var` themselves.
+        let mut config = cfg.config;
+        if config.iroh_relay_url.is_none() {
+            config.iroh_relay_url = crate::config::resolve_iroh_relay();
+        }
         Arc::new(Self {
-            config: cfg.config,
+            config,
             queue,
             op_store: cfg.op_store,
             decode_envelope: cfg.decode_envelope,
             commit_target: cfg.commit_target,
+            shutdown_requested: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -383,6 +402,15 @@ impl HolographSpace {
     /// all-parents-present branch and stores + notifies), then notify
     /// K2 of the new persisted op + publish to peers.
     pub async fn on_local_commit(&self, envelope_bytes: Bytes) -> K2Result<OpId> {
+        if self
+            .shutdown_requested
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(K2Error::other(
+                "HolographSpace::on_local_commit: shutdown in progress",
+            ));
+        }
+
         let (op_id, created_at) = (self.decode_envelope)(envelope_bytes.as_ref())?;
 
         let accepted = self
@@ -426,6 +454,66 @@ impl HolographSpace {
     /// observability.
     pub fn op_count(&self) -> u64 {
         self.op_store.op_count_blocking()
+    }
+
+    /// Wake-18 D3 — graceful shutdown.
+    ///
+    /// 1. Stop accepting new commits (sets the shutdown flag observed by
+    ///    `on_local_commit`).
+    /// 2. Stop the queue's fallback watcher so no new fetches are issued.
+    /// 3. Drain the integration queue: poll `pending_len() == 0` or 10s
+    ///    timeout, whichever comes first.
+    /// 4. `flush_async` the sled DB so the on-disk state is durable.
+    /// 5. `commit_target.close()` so the K2 transport (iroh) tears down.
+    ///
+    /// Returns the unflushed pending count if step 3 timed out so the
+    /// caller can surface a "drain didn't complete in time" signal.
+    /// Step 4 / 5 always run regardless.
+    pub async fn shutdown(&self) -> K2Result<usize> {
+        self.shutdown_requested
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.queue.stop_watcher();
+
+        let drain_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut remaining = self.queue.pending_len();
+        while remaining > 0 && std::time::Instant::now() < drain_deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            remaining = self.queue.pending_len();
+        }
+        if remaining > 0 {
+            tracing::warn!(
+                "HolographSpace::shutdown: drain timed out with {} pending",
+                remaining
+            );
+        }
+
+        if let Err(e) = self.op_store.flush_async().await {
+            tracing::warn!("HolographSpace::shutdown: flush_async failed: {e}");
+        }
+
+        if let Err(e) = self.commit_target.close().await {
+            tracing::warn!("HolographSpace::shutdown: commit_target.close failed: {e}");
+        }
+
+        Ok(remaining)
+    }
+}
+
+impl Drop for HolographSpace {
+    /// Wake-18 D3 — best-effort sync flush on drop.
+    ///
+    /// The async `shutdown()` is the preferred path; `Drop` is the
+    /// safety net for "process exit before shutdown was called." We
+    /// can only do a sync flush here (no async runtime guaranteed),
+    /// and we log + swallow errors instead of panicking — a `Drop`
+    /// that panics during unwinding aborts the process.
+    fn drop(&mut self) {
+        self.shutdown_requested
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.queue.stop_watcher();
+        if let Err(e) = self.op_store.flush_blocking() {
+            tracing::warn!("HolographSpace::drop: flush_blocking failed: {e}");
+        }
     }
 }
 

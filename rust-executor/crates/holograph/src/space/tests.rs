@@ -182,9 +182,7 @@ fn build_space() -> Harness {
         commit_target: Arc::clone(&commit_target) as Arc<dyn LocalCommitTarget>,
         sig_verifier: Arc::new(AlwaysValid),
         runtime: handle,
-        fallback_timeout: Duration::from_secs(15),
         watcher_tick: Duration::from_millis(100),
-        max_retry_peers: 3,
     };
     let space = HolographSpace::new(opts);
 
@@ -423,6 +421,34 @@ async fn holograph_op_store_full_passthrough_surface() {
 
     let total = wrapper.query_total_op_count().await.unwrap();
     assert_eq!(total, 0);
+}
+
+/// Wake-18 D3 — `shutdown()` rejects new commits, drains the queue,
+/// and flushes sled so a reopen sees the committed ops.
+#[tokio::test]
+async fn shutdown_flushes_and_rejects_new_commits() {
+    let h = build_space();
+
+    // Commit one op so the store + DB has something to flush.
+    let (envelope_bytes, _op_id) = make_envelope(b"shutdown-test", vec![]);
+    h.space
+        .on_local_commit(envelope_bytes)
+        .await
+        .expect("commit");
+    assert_eq!(h.op_store.op_count_blocking(), 1);
+
+    // Shutdown — no pending ops, so the drain completes immediately.
+    let remaining = h.space.shutdown().await.expect("shutdown");
+    assert_eq!(remaining, 0);
+
+    // Post-shutdown commit attempt is rejected.
+    let (envelope_bytes2, _) = make_envelope(b"after-shutdown", vec![]);
+    let post = h.space.on_local_commit(envelope_bytes2).await;
+    assert!(post.is_err(), "commit after shutdown should fail");
+    assert!(
+        format!("{:?}", post.err().unwrap()).contains("shutdown in progress"),
+        "rejection should mention shutdown"
+    );
 }
 
 // Touch the imports used only by tests to keep clippy quiet about
