@@ -21,10 +21,10 @@ use petgraph::{
 };
 
 use crate::chunked_diffs::load_diff_aggregated;
-use crate::diff_types::{null_node, Hash, PerspectiveDiff, PerspectiveDiffEntryReference};
 use crate::errors::{AlgoError, AlgoResult};
 use crate::retriever::WorkspaceRetriever;
 use crate::topo_sort::topo_sort_diff_references;
+use perspective_diff_types::{null_node, Hash, PerspectiveDiff, PerspectiveDiffEntryReference};
 
 #[derive(Debug)]
 pub struct Workspace {
@@ -695,7 +695,7 @@ mod tests {
         }
         // Last 4 bytes: a marker so a label "1" and "11" don't alias.
         buf[32] = bytes.len() as u8;
-        Hash::from_raw_36(&buf)
+        Hash::from_raw_36(buf.to_vec())
     }
 
     struct MockRetriever;
