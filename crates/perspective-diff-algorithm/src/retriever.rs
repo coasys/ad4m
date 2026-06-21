@@ -8,10 +8,10 @@
 //! `PerspectiveDiffEntryReference`, `Snapshot`) — the HDK-side adapter
 //! converts the integrity-zome types to these on the way through.
 
-use crate::diff_types::{
+use crate::errors::AlgoResult;
+use perspective_diff_types::{
     Hash, HashReference, LocalHashReference, PerspectiveDiffEntryReference, Snapshot,
 };
-use crate::errors::AlgoResult;
 
 /// The minimum read-side surface the in-crate `Workspace` builder needs
 /// from any substrate.
