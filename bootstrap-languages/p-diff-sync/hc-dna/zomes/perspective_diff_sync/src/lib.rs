@@ -11,10 +11,10 @@ use perspective_diff_sync_integrity::{
     RoutedSignalPayload,
 };
 
-mod errors;
+pub mod errors;
 mod inputs;
-mod link_adapter;
-mod retriever;
+pub mod link_adapter;
+pub mod retriever;
 mod telepresence;
 mod utils;
 

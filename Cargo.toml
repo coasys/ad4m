@@ -6,6 +6,7 @@ members = [
     "crates/perspective-diff-types",
     "rust-client",
     "rust-executor",
+    "rust-executor/crates/holograph",
     "ui/src-tauri"
 ]
 
