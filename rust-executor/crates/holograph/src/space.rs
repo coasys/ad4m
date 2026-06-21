@@ -401,6 +401,12 @@ impl HolographSpace {
     /// already present locally, so the queue takes the
     /// all-parents-present branch and stores + notifies), then notify
     /// K2 of the new persisted op + publish to peers.
+    ///
+    /// Wake-19 E4 — when the committed envelope is an `Ancestry` op,
+    /// this method also auto-publishes a matching `Head` envelope so
+    /// the new ancestry op-id is announced as a current leaf. Both
+    /// ops land in our local op-store and are published to peers in
+    /// a single `publish_ops_to_peers` call.
     pub async fn on_local_commit(&self, envelope_bytes: Bytes) -> K2Result<OpId> {
         if self
             .shutdown_requested
@@ -413,6 +419,13 @@ impl HolographSpace {
 
         let (op_id, created_at) = (self.decode_envelope)(envelope_bytes.as_ref())?;
 
+        // Decode again to inspect op_class. This is one extra CBOR
+        // pass per local commit (paid in the local-commit hot path,
+        // not the gossip-incoming path) — cheap relative to the sled
+        // write + K2 publish that follow.
+        let env = crate::envelope::OpEnvelope::decode(envelope_bytes.as_ref())
+            .map_err(|e| K2Error::other_src("HolographSpace::on_local_commit: decode", e))?;
+
         let accepted = self
             .queue
             .process_incoming_ops(vec![envelope_bytes], None)
@@ -423,18 +436,99 @@ impl HolographSpace {
             ));
         }
 
-        self.commit_target
-            .inform_ops_stored(vec![StoredOp {
-                op_id: op_id.clone(),
-                created_at,
-            }])
-            .await?;
+        // Wake-19 E4 — Ancestry commit auto-publishes a matching Head.
+        let extra_published = if matches!(env.op_class, crate::envelope::OpClass::Ancestry) {
+            self.publish_head_for(&op_id, &env, created_at).await?
+        } else {
+            // E4 — Head commit registers itself in the heads index;
+            // no follow-up envelope to publish.
+            if let Some(target) = env.head_pointer_op_id() {
+                self.register_head_in_store(&op_id, &target)?;
+            }
+            None
+        };
 
-        self.commit_target
-            .publish_ops_to_peers(vec![op_id.clone()])
-            .await?;
+        let mut stored = vec![StoredOp {
+            op_id: op_id.clone(),
+            created_at,
+        }];
+        let mut to_publish = vec![op_id.clone()];
+        if let Some((head_op_id, head_ts)) = &extra_published {
+            stored.push(StoredOp {
+                op_id: head_op_id.clone(),
+                created_at: *head_ts,
+            });
+            to_publish.push(head_op_id.clone());
+        }
+
+        self.commit_target.inform_ops_stored(stored).await?;
+        self.commit_target.publish_ops_to_peers(to_publish).await?;
 
         Ok(op_id)
+    }
+
+    /// Wake-19 E4 — build and locally process a Head envelope pointing
+    /// at the just-stored Ancestry op. Returns `Some((head_op_id, ts))`
+    /// when a Head was actually published, `None` if the substrate is
+    /// running in "no auto-head" mode (currently unused — kept as a
+    /// future opt-out flag).
+    async fn publish_head_for(
+        &self,
+        ancestry_op_id: &OpId,
+        ancestry_env: &crate::envelope::OpEnvelope,
+        ancestry_created_at: Timestamp,
+    ) -> K2Result<Option<(OpId, Timestamp)>> {
+        // Build the Head envelope. v1 spike uses a placeholder
+        // signature; production v1.5 will sign with the agent's
+        // Ed25519 key. The Head reuses the Ancestry author so a peer
+        // can verify they came from the same identity.
+        let head_env = crate::envelope::OpEnvelope::new_head(
+            ancestry_op_id.clone(),
+            ancestry_env.author_pubkey.clone(),
+            Bytes::from_static(b"holograph-v1-head-sig"),
+            ancestry_created_at.as_micros(),
+        );
+        let head_bytes = head_env
+            .encode()
+            .map_err(|e| K2Error::other_src("publish_head_for: encode", e))?;
+        let head_bytes = Bytes::from(head_bytes);
+
+        // Decode op-id from the encoded bytes — same path the queue
+        // would take so the op-id matches what peers will see.
+        let (head_op_id, head_ts) = (self.decode_envelope)(head_bytes.as_ref())?;
+
+        let accepted = self
+            .queue
+            .process_incoming_ops(vec![head_bytes], None)
+            .await?;
+        if accepted.is_empty() {
+            // Out of arc — unlikely for Head ops (loc=0) on FULL arc
+            // peers, but signal it explicitly.
+            return Ok(None);
+        }
+
+        // Update the heads index now that the Head op is persisted.
+        self.register_head_in_store(&head_op_id, ancestry_op_id)?;
+
+        Ok(Some((head_op_id, head_ts)))
+    }
+
+    /// Run `KvOpStore::register_head` with the dominance-walk closure
+    /// bound to this space's `op_store`.
+    fn register_head_in_store(&self, head_op: &OpId, ancestry_op: &OpId) -> K2Result<()> {
+        let op_store = Arc::clone(&self.op_store);
+        let lookup = move |id: &OpId| -> Option<Vec<OpId>> {
+            let bytes = op_store.get_op_bytes_blocking(id)?;
+            let env = crate::envelope::OpEnvelope::decode(&bytes).ok()?;
+            Some(env.parent_op_ids())
+        };
+        // Dominance walks up to 100 hops by default — enough for
+        // human-timescale event streams, capped to avoid pathological
+        // walks if a Head targets the tail of a very long chain.
+        // v1.5 may surface this as a SpaceConfig knob.
+        self.op_store
+            .register_head(head_op, ancestry_op, 100, lookup)
+            .map(|_| ())
     }
 
     pub fn config(&self) -> &SpaceConfig {

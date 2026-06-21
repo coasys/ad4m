@@ -56,6 +56,24 @@ fn is_lock_contention(e: &sled::Error) -> bool {
     }
 }
 
+// ---- Wake-19 E3 — op-id <-> bytes helpers (also used by integration_queue) -
+
+fn opid_bytes(op_id: &OpId) -> Vec<u8> {
+    Bytes::from(op_id.clone()).to_vec()
+}
+
+fn bytes_to_opid(b: &[u8]) -> OpId {
+    OpId::from(Bytes::copy_from_slice(b))
+}
+
+/// Outcome of `KvOpStore::register_head`.
+#[derive(Debug, Clone, Copy)]
+pub struct HeadRegistration {
+    /// Number of pre-existing `current_heads` that the new Head
+    /// dominated (and that were removed from `current_heads`).
+    pub dominated_count: usize,
+}
+
 /// On-disk shape of a stored op.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpRecord {
@@ -85,6 +103,14 @@ pub struct KvOpStore {
     db: sled::Db,
     ops: sled::Tree,
     slice_hashes: sled::Tree,
+    /// Wake-19 E3 — heads tracking. `heads_by_ancestry` maps an
+    /// Ancestry op-id → the Head op-id that announced it as a leaf;
+    /// `current_heads` is the set of Head op-ids that haven't yet
+    /// been dominated by a newer Head pointing at one of their
+    /// descendants. Both are sled::Tree so they persist across
+    /// restarts (formal "restart survives state" #6, Wake-18 D4).
+    heads_by_ancestry: sled::Tree,
+    current_heads: sled::Tree,
     decode_envelope: EnvelopeDecoder,
 }
 
@@ -144,12 +170,20 @@ impl KvOpStore {
                     let slice_hashes = db
                         .open_tree(b"slice_hashes")
                         .map_err(|e| K2Error::other_src("open slice_hashes tree", e))?;
+                    let heads_by_ancestry = db
+                        .open_tree(b"heads_by_ancestry")
+                        .map_err(|e| K2Error::other_src("open heads_by_ancestry tree", e))?;
+                    let current_heads = db
+                        .open_tree(b"current_heads")
+                        .map_err(|e| K2Error::other_src("open current_heads tree", e))?;
                     return Ok(Arc::new(Self {
                         space_id,
                         arc_policy,
                         db,
                         ops,
                         slice_hashes,
+                        heads_by_ancestry,
+                        current_heads,
                         decode_envelope,
                     }));
                 }
@@ -192,6 +226,121 @@ impl KvOpStore {
             .flush()
             .map(|_| ())
             .map_err(|e| K2Error::other_src("KvOpStore::flush", e))
+    }
+
+    // ---- Wake-19 E3 — head-tracking ------------------------------------
+
+    /// Record a Head op announcing `ancestry_op` as a current leaf.
+    /// Also runs the dominance walk: any current Head whose ancestry
+    /// target is on the parent-chain of `ancestry_op` is dominated
+    /// and gets removed from `current_heads`.
+    ///
+    /// `ancestry_parents_lookup` is called to walk the parent chain
+    /// of the new Head's target. The caller (the integration queue,
+    /// today) provides a closure that decodes a stored Ancestry op's
+    /// envelope to extract its parents.
+    pub fn register_head<F>(
+        &self,
+        head_op: &OpId,
+        ancestry_op: &OpId,
+        max_walk_hops: usize,
+        ancestry_parents_lookup: F,
+    ) -> K2Result<HeadRegistration>
+    where
+        F: Fn(&OpId) -> Option<Vec<OpId>>,
+    {
+        let head_key = opid_bytes(head_op);
+        let ancestry_key = opid_bytes(ancestry_op);
+
+        // Walk back from `ancestry_op` to collect every Ancestry op on
+        // its parent-chain (up to `max_walk_hops`). Any current Head
+        // whose target is in this set is dominated by the new Head.
+        let mut visited: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<OpId> = std::collections::VecDeque::new();
+        queue.push_back(ancestry_op.clone());
+        let mut hops = 0usize;
+        while let Some(node) = queue.pop_front() {
+            if hops >= max_walk_hops {
+                break;
+            }
+            hops += 1;
+            let node_bytes = opid_bytes(&node);
+            if !visited.insert(node_bytes.clone()) {
+                continue;
+            }
+            if let Some(parents) = ancestry_parents_lookup(&node) {
+                for p in parents {
+                    queue.push_back(p);
+                }
+            }
+        }
+
+        // Find dominated current Heads: those whose `heads_by_ancestry`
+        // entry maps to a Head that points at a target in `visited`.
+        // `heads_by_ancestry` key = ancestry op-id; value = Head op-id.
+        let mut dominated: Vec<Vec<u8>> = Vec::new();
+        for kv in self.heads_by_ancestry.iter() {
+            let (k, v) = kv.map_err(|e| K2Error::other_src("heads_by_ancestry iter", e))?;
+            if visited.contains(k.as_ref()) {
+                dominated.push(v.as_ref().to_vec());
+            }
+        }
+        // Remove dominated heads from `current_heads`.
+        for h in &dominated {
+            self.current_heads
+                .remove(h)
+                .map_err(|e| K2Error::other_src("current_heads remove", e))?;
+        }
+
+        // Register the new head.
+        self.heads_by_ancestry
+            .insert(&ancestry_key, head_key.clone())
+            .map_err(|e| K2Error::other_src("heads_by_ancestry insert", e))?;
+        self.current_heads
+            .insert(&head_key, b"")
+            .map_err(|e| K2Error::other_src("current_heads insert", e))?;
+
+        Ok(HeadRegistration {
+            dominated_count: dominated.len(),
+        })
+    }
+
+    /// The current head op-ids — the leaves of the dominance order.
+    /// O(N_heads) iteration, no full op scan.
+    pub fn current_head_op_ids(&self) -> K2Result<Vec<OpId>> {
+        let mut out = Vec::new();
+        for kv in self.current_heads.iter() {
+            let (k, _) = kv.map_err(|e| K2Error::other_src("current_heads iter", e))?;
+            out.push(bytes_to_opid(k.as_ref()));
+        }
+        Ok(out)
+    }
+
+    /// Test/observability hook: head op-id for a given ancestry op-id,
+    /// if one exists.
+    pub fn head_for_ancestry(&self, ancestry_op: &OpId) -> K2Result<Option<OpId>> {
+        let key = opid_bytes(ancestry_op);
+        let v = self
+            .heads_by_ancestry
+            .get(&key)
+            .map_err(|e| K2Error::other_src("heads_by_ancestry get", e))?;
+        Ok(v.map(|ivec| bytes_to_opid(ivec.as_ref())))
+    }
+
+    /// Test/observability hook: count of `current_heads`.
+    pub fn current_heads_count(&self) -> u64 {
+        self.current_heads.len() as u64
+    }
+
+    /// Synchronously read the raw envelope bytes for `op_id` from the
+    /// sled `ops` tree, or `None` if not present. Used by the head
+    /// dominance walk to find an Ancestry op's parents without going
+    /// through the async OpStore trait.
+    pub fn get_op_bytes_blocking(&self, op_id: &OpId) -> Option<Bytes> {
+        let key = opid_bytes(op_id);
+        let v = self.ops.get(&key).ok().flatten()?;
+        let rec: OpRecord = ciborium::from_reader(v.as_ref()).ok()?;
+        Some(Bytes::from(rec.op_data))
     }
 
     fn target_arc(&self) -> DhtArc {
@@ -826,5 +975,118 @@ mod tests {
     fn open_store_at(path: &std::path::Path) -> Arc<KvOpStore> {
         KvOpStore::open(path, space_id(), ArcPolicy::Full, envelope_decoder())
             .expect("open store at path")
+    }
+
+    /// Wake-19 E3 — register Head, dominance walk drops the older Head
+    /// whose target is on the parent chain of the new Head's target.
+    #[tokio::test]
+    async fn register_head_dominates_older_head_via_parent_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(&dir);
+
+        // Build a fake parent chain: root <- a <- b.
+        // Op-ids constructed directly here — we don't need to round-trip
+        // through envelope encoding for the dominance walk; the walk
+        // closure is what supplies parents.
+        let root = OpId::from(Bytes::from_static(b"ancestry-root......................"));
+        let a = OpId::from(Bytes::from_static(b"ancestry-a........................."));
+        let b = OpId::from(Bytes::from_static(b"ancestry-b........................."));
+        let h_root = OpId::from(Bytes::from_static(b"head-for-root......................"));
+        let h_b = OpId::from(Bytes::from_static(b"head-for-b........................."));
+
+        let parents_for = |id: &OpId| -> Option<Vec<OpId>> {
+            if id == &b {
+                Some(vec![a.clone()])
+            } else if id == &a {
+                Some(vec![root.clone()])
+            } else {
+                None
+            }
+        };
+
+        // Register the older Head pointing at `root` first.
+        let reg1 = store
+            .register_head(&h_root, &root, 100, parents_for)
+            .unwrap();
+        assert_eq!(reg1.dominated_count, 0, "first Head dominates nothing");
+        assert_eq!(store.current_heads_count(), 1);
+
+        // Register the new Head pointing at `b` — walk b → a → root,
+        // discover that h_root's target is in the parent chain, drop it.
+        let reg2 = store.register_head(&h_b, &b, 100, parents_for).unwrap();
+        assert_eq!(reg2.dominated_count, 1, "h_root dominated by h_b");
+        assert_eq!(store.current_heads_count(), 1, "only h_b remains");
+
+        let heads = store.current_head_op_ids().unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0], h_b);
+    }
+
+    /// Wake-19 E3 — sibling Heads (concurrent leaves) both stay in
+    /// `current_heads`. Dominance only fires when one target is on
+    /// the other's parent walk.
+    #[tokio::test]
+    async fn register_head_siblings_both_survive() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(&dir);
+
+        let root = OpId::from(Bytes::from_static(b"ancestry-root......................"));
+        let left = OpId::from(Bytes::from_static(b"ancestry-left......................"));
+        let right = OpId::from(Bytes::from_static(b"ancestry-right....................."));
+        let h_left = OpId::from(Bytes::from_static(b"head-for-left......................"));
+        let h_right = OpId::from(Bytes::from_static(b"head-for-right....................."));
+
+        let parents_for = |id: &OpId| -> Option<Vec<OpId>> {
+            if id == &left || id == &right {
+                Some(vec![root.clone()])
+            } else {
+                None
+            }
+        };
+
+        let r1 = store
+            .register_head(&h_left, &left, 100, parents_for)
+            .unwrap();
+        assert_eq!(r1.dominated_count, 0);
+        // h_right walks right → root; root != left, so h_left is NOT
+        // dominated. (left is not on right's parent walk and vice versa.)
+        let r2 = store
+            .register_head(&h_right, &right, 100, parents_for)
+            .unwrap();
+        assert_eq!(r2.dominated_count, 0, "siblings don't dominate each other");
+        assert_eq!(store.current_heads_count(), 2);
+
+        let mut heads = store.current_head_op_ids().unwrap();
+        heads.sort_by_key(|h| Bytes::from(h.clone()).to_vec());
+        let mut want = vec![h_left, h_right];
+        want.sort_by_key(|h| Bytes::from(h.clone()).to_vec());
+        assert_eq!(heads, want);
+    }
+
+    /// Wake-19 E3 — head-tracking tables survive a store restart
+    /// (sled persistence). Continuation of D4's restart-survives-state
+    /// guarantee.
+    #[tokio::test]
+    async fn heads_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = OpId::from(Bytes::from_static(b"ancestry-root......................"));
+        let head = OpId::from(Bytes::from_static(b"head-id............................"));
+        {
+            let store = open_store(&dir);
+            store
+                .register_head(&head, &root, 10, |_| None)
+                .expect("register head");
+            assert_eq!(store.current_heads_count(), 1);
+            drop(store);
+        }
+        // Reopen and verify both indexes survived.
+        let store = open_store(&dir);
+        assert_eq!(store.current_heads_count(), 1);
+        assert_eq!(
+            store.head_for_ancestry(&root).unwrap(),
+            Some(head.clone()),
+            "heads_by_ancestry round-trips across restart"
+        );
+        assert_eq!(store.current_head_op_ids().unwrap(), vec![head]);
     }
 }

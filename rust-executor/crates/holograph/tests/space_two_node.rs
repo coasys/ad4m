@@ -37,24 +37,12 @@ use holograph::{
 
 // -------- Test shared infra --------
 
-/// SHA-256 over payload, tag with 0xdb*4, matches the production
-/// decoder in `retriever_kitsune`.
+/// Use the production envelope decoder so the test's op-id derivation
+/// matches what the executor uses — load-bearing for Wake-19 E2 where
+/// Head envelopes need a different op-id derivation (hash the whole
+/// envelope + HEAD_OP_TAG trailer) than Ancestry envelopes.
 fn envelope_decoder() -> EnvelopeDecoder {
-    use sha2::{Digest, Sha256};
-    Arc::new(
-        |bytes: &[u8]| -> Result<(kitsune2_api::OpId, Timestamp), K2Error> {
-            let env = OpEnvelope::decode(bytes).map_err(|e| K2Error::other_src("decode", e))?;
-            let mut hasher = Sha256::new();
-            hasher.update(env.payload.as_ref());
-            let digest = hasher.finalize();
-            let mut id_bytes = [0u8; 36];
-            id_bytes[..32].copy_from_slice(&digest);
-            id_bytes[32..].copy_from_slice(&[0xdb, 0xdb, 0xdb, 0xdb]);
-            let op_id = kitsune2_api::OpId::from(Bytes::copy_from_slice(&id_bytes));
-            let ts = Timestamp::from_micros(env.created_at_micros);
-            Ok((op_id, ts))
-        },
-    )
+    holograph::holograph_envelope_decoder()
 }
 
 fn make_envelope(payload: &[u8], parents: Vec<kitsune2_api::OpId>) -> (Bytes, kitsune2_api::OpId) {
@@ -357,6 +345,30 @@ async fn two_node_commit_propagates_via_real_k2() {
         .expect("bob should receive alice's child envelope within 30s");
     assert_eq!(bob_child_emit.envelope_bytes, child_bytes);
 
-    assert_eq!(bob.space.op_count(), 2);
-    assert_eq!(alice.space.op_count(), 2);
+    // Wake-19 E4: each Ancestry commit auto-publishes a matching Head,
+    // so the per-peer op count goes to 4 locally (2 Ancestry + 2 Head)
+    // on the committer. On the receiver, K2's publish_ops batches the
+    // Ancestry + Head op-ids together; the Head trails the Ancestry
+    // through K2's fetch pipeline, so allow time for it to settle.
+    //
+    // Alice owns both commits locally, so she ought to reach 4 quickly.
+    // Bob picks them up via publish_ops + K2 fetch — give it 30s
+    // (matching the per-op wait_for_emit budget above).
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if alice.space.op_count() >= 4 && bob.space.op_count() >= 4 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let alice_n = alice.space.op_count();
+    let bob_n = bob.space.op_count();
+    assert!(
+        alice_n >= 4,
+        "alice expected >= 4 ops (2 Ancestry + 2 Head), got {alice_n}"
+    );
+    assert!(
+        bob_n >= 4,
+        "bob expected >= 4 ops (2 Ancestry + 2 Head) after gossip, got {bob_n}"
+    );
 }

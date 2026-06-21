@@ -197,9 +197,13 @@ fn build_space() -> Harness {
 
 // ---------------- Tests ----------------
 
-/// `on_local_commit` stores the op via the queue, notifies K2 via
-/// `inform_ops_stored`, and publishes via `publish_ops_to_peers`. Each
-/// call exactly once for a single committed op.
+/// `on_local_commit` stores the Ancestry op via the queue, notifies K2
+/// via `inform_ops_stored`, and publishes via `publish_ops_to_peers`.
+///
+/// Wake-19 E4: each Ancestry commit also publishes a matching Head op.
+/// So the op-store sees 2 ops, both go through one inform call (single
+/// batch) and one publish call (single batch). `current_heads` shows
+/// the new Head as the sole current head.
 #[tokio::test]
 async fn on_local_commit_stores_informs_publishes() {
     let h = build_space();
@@ -212,17 +216,33 @@ async fn on_local_commit_stores_informs_publishes() {
         .expect("commit");
     assert_eq!(returned, op_id);
 
-    assert_eq!(h.op_store.op_count_blocking(), 1);
-    assert_eq!(h.notify.count(), 1);
-    assert_eq!(h.notify.last_id().unwrap(), op_id);
+    // Wake-19 E4: Ancestry + auto-published Head are both stored.
+    assert_eq!(h.op_store.op_count_blocking(), 2);
+    // Notifier sees both ops as integration-ready.
+    assert_eq!(h.notify.count(), 2);
 
+    // Single inform_ops_stored call carrying both op-ids.
     assert_eq!(h.commit_target.inform_count(), 1);
-    assert_eq!(
-        h.commit_target.last_informed().unwrap(),
-        vec![op_id.clone()]
-    );
+    let informed = h.commit_target.last_informed().unwrap();
+    assert_eq!(informed.len(), 2, "inform_ops_stored carries both");
+    assert_eq!(informed[0], op_id, "ancestry first, head second");
+    // Single publish_ops_to_peers call carrying both op-ids.
     assert_eq!(h.commit_target.publish_count(), 1);
-    assert_eq!(h.commit_target.last_published().unwrap(), vec![op_id]);
+    let published = h.commit_target.last_published().unwrap();
+    assert_eq!(published.len(), 2);
+    assert_eq!(published[0], op_id);
+
+    // The Head registered in the head-tracking index.
+    assert_eq!(h.op_store.current_heads_count(), 1);
+    let head_for_ancestry = h
+        .op_store
+        .head_for_ancestry(&op_id)
+        .expect("head_for_ancestry");
+    assert_eq!(
+        head_for_ancestry,
+        Some(informed[1].clone()),
+        "the head registered for our ancestry op matches the auto-published Head"
+    );
 }
 
 /// `process_incoming_ops` (from K2) routes through the queue and ends
@@ -429,13 +449,14 @@ async fn holograph_op_store_full_passthrough_surface() {
 async fn shutdown_flushes_and_rejects_new_commits() {
     let h = build_space();
 
-    // Commit one op so the store + DB has something to flush.
+    // Commit one Ancestry op so the store + DB has something to flush.
+    // Wake-19 E4 auto-publishes a matching Head → op_count == 2.
     let (envelope_bytes, _op_id) = make_envelope(b"shutdown-test", vec![]);
     h.space
         .on_local_commit(envelope_bytes)
         .await
         .expect("commit");
-    assert_eq!(h.op_store.op_count_blocking(), 1);
+    assert_eq!(h.op_store.op_count_blocking(), 2);
 
     // Shutdown — no pending ops, so the drain completes immediately.
     let remaining = h.space.shutdown().await.expect("shutdown");
