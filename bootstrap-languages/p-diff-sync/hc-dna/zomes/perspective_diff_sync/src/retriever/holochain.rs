@@ -8,10 +8,6 @@ use perspective_diff_sync_integrity::{
 
 use super::PerspectiveDiffRetreiver;
 use crate::errors::{SocialContextError, SocialContextResult};
-use crate::link_adapter::conversions::{
-    entry_ref_from_algo, entry_ref_to_algo, hash_from_algo, hash_ref_to_algo, hash_to_algo,
-    local_hash_ref_to_algo, snapshot_to_algo,
-};
 use crate::utils::dedup;
 use crate::Hash;
 use perspective_diff_algorithm as algo;
@@ -150,32 +146,22 @@ impl PerspectiveDiffRetreiver for HolochainRetreiver {
     }
 }
 
-// Step 13b-C phase 2: bridge `HolochainRetreiver` over to the
-// algorithm-crate's `WorkspaceRetriever` trait so
-// `perspective_diff_algorithm::Workspace` can drive its BFS through HDK.
-//
-// The methods re-shape calls + types: `algo::Hash` ↔ `HoloHash<Action>`,
-// `algo::PerspectiveDiffEntryReference` ← integrity, etc. Conversion
-// helpers live in `crate::link_adapter::conversions`.
+// Bridges `HolochainRetreiver` over to the algorithm-crate retriever
+// traits so `perspective_diff_algorithm::Workspace` can drive its BFS
+// through HDK. With the shared `perspective-diff-types`, both crates
+// see the same struct shapes, so the bridge is just a function call.
 impl algo::WorkspaceRetriever for HolochainRetreiver {
     fn get_p_diff_reference(
         hash: &algo::Hash,
     ) -> algo::AlgoResult<algo::PerspectiveDiffEntryReference> {
-        let h = hash_from_algo(hash);
-        let entry = <Self as PerspectiveDiffRetreiver>::get(h)
-            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
-        Ok(entry_ref_to_algo(entry))
+        <Self as PerspectiveDiffRetreiver>::get(hash.clone())
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
     }
 
     fn get_snapshot_by_target(
         target_hash: &algo::Hash,
     ) -> algo::AlgoResult<Option<algo::Snapshot>> {
-        // Replicates `Workspace::get_snapshot` from the pre-13b-C HDK
-        // body: fetch the entry-ref at `target_hash`, compute its
-        // content hash, query for `Snapshot` links with the
-        // "snapshot" tag prefix, then deref the first link's target.
-        let action_hash = hash_from_algo(target_hash);
-        let entry_ref = <Self as PerspectiveDiffRetreiver>::get(action_hash)
+        let entry_ref = <Self as PerspectiveDiffRetreiver>::get(target_hash.clone())
             .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
         let entry_hash = hash_entry(entry_ref)
             .map_err(|e| algo::AlgoError::Retriever(format!("hash_entry: {}", e)))?;
@@ -207,52 +193,98 @@ impl algo::WorkspaceRetriever for HolochainRetreiver {
             .map_err(|e| algo::AlgoError::Retriever(format!("snapshot decode: {}", e)))?
             .ok_or(algo::AlgoError::Retriever("snapshot entry empty".into()))?;
 
-        Ok(Some(snapshot_to_algo(snapshot)))
+        Ok(Some(snapshot))
     }
 }
 
-// Step 13b-D: write-side surface for `snapshots::generate_snapshot`.
-// Persists a chunk-diff entry and returns its action-hash for the
-// algo crate to reference from the new `Snapshot`.
 impl algo::SnapshotRetriever for HolochainRetreiver {
     fn create_diff_entry(
         entry: algo::PerspectiveDiffEntryReference,
     ) -> algo::AlgoResult<algo::Hash> {
-        let integrity = entry_ref_from_algo(entry);
-        let hash = <Self as PerspectiveDiffRetreiver>::create_entry(
-            EntryTypes::PerspectiveDiffEntryReference(integrity),
-        )
-        .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
-        Ok(hash_to_algo(&hash))
+        <Self as PerspectiveDiffRetreiver>::create_entry(EntryTypes::PerspectiveDiffEntryReference(
+            entry,
+        ))
+        .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
     }
 }
 
-// Step 13b-E: revision-pointer surface for the `revisions` module.
-// Forwards to the existing HDK-side `PerspectiveDiffRetreiver` methods
-// and bridges the integrity-zome `LocalHashReference` / `HashReference`
-// to their algo mirrors.
+impl algo::PullCommitEnv for HolochainRetreiver {
+    fn now() -> algo::AlgoResult<chrono::DateTime<chrono::Utc>> {
+        crate::utils::get_now().map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
+    }
+
+    fn sys_time_ms() -> algo::AlgoResult<i64> {
+        Ok(sys_time()
+            .map_err(|e| algo::AlgoError::Retriever(format!("sys_time: {}", e)))?
+            .as_millis())
+    }
+
+    fn emit_diff_signal(diff: algo::PerspectiveDiff) -> algo::AlgoResult<()> {
+        emit_signal(diff).map_err(|e| algo::AlgoError::Retriever(format!("emit_signal: {}", e)))
+    }
+
+    fn emit_broadcast_signal(broadcast: algo::HashBroadcast) -> algo::AlgoResult<()> {
+        emit_signal(broadcast)
+            .map_err(|e| algo::AlgoError::Retriever(format!("emit_signal: {}", e)))
+    }
+
+    fn send_hash_broadcast_to_active_agents(
+        broadcast: algo::HashBroadcast,
+    ) -> algo::AlgoResult<()> {
+        let recent_agents =
+            get_active_agents().map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        let payload = broadcast
+            .get_sb()
+            .map_err(|e| algo::AlgoError::Retriever(format!("get_sb: {}", e)))?;
+        send_remote_signal(payload, recent_agents)
+            .map_err(|e| algo::AlgoError::Retriever(format!("send_remote_signal: {}", e)))
+    }
+
+    fn create_snapshot_and_link(
+        diff_action_hash: algo::Hash,
+        snapshot: algo::Snapshot,
+    ) -> algo::AlgoResult<()> {
+        // Look up the source entry-ref so we can compute its EntryHash
+        // for the snapshot link's source.
+        let diff_entry_ref = <Self as PerspectiveDiffRetreiver>::get(diff_action_hash)
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        let diff_entry_hash = hash_entry(diff_entry_ref)
+            .map_err(|e| algo::AlgoError::Retriever(format!("hash_entry: {}", e)))?;
+
+        let snapshot_clone = snapshot.clone();
+        <Self as PerspectiveDiffRetreiver>::create_entry(EntryTypes::Snapshot(snapshot))
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        let snapshot_entry_hash = hash_entry(snapshot_clone)
+            .map_err(|e| algo::AlgoError::Retriever(format!("hash_entry snapshot: {}", e)))?;
+
+        create_link(
+            diff_entry_hash,
+            snapshot_entry_hash,
+            IntegrityLinkTypes::Snapshot,
+            LinkTag::new("snapshot"),
+        )
+        .map_err(|e| algo::AlgoError::Retriever(format!("create_link: {}", e)))?;
+        Ok(())
+    }
+}
+
 impl algo::RevisionsRetriever for HolochainRetreiver {
     fn current_revision() -> algo::AlgoResult<Option<algo::LocalHashReference>> {
-        let rev = <Self as PerspectiveDiffRetreiver>::current_revision()
-            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
-        Ok(rev.map(local_hash_ref_to_algo))
+        <Self as PerspectiveDiffRetreiver>::current_revision()
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
     }
 
     fn latest_revision() -> algo::AlgoResult<Option<algo::HashReference>> {
-        let rev = <Self as PerspectiveDiffRetreiver>::latest_revision()
-            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
-        Ok(rev.map(hash_ref_to_algo))
+        <Self as PerspectiveDiffRetreiver>::latest_revision()
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
     }
 
     fn update_current_revision(
         hash: algo::Hash,
         timestamp: chrono::DateTime<chrono::Utc>,
     ) -> algo::AlgoResult<()> {
-        <Self as PerspectiveDiffRetreiver>::update_current_revision(
-            hash_from_algo(&hash),
-            timestamp,
-        )
-        .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
+        <Self as PerspectiveDiffRetreiver>::update_current_revision(hash, timestamp)
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
     }
 }
 
