@@ -643,9 +643,12 @@ export default class Ad4mConnect extends EventTarget {
     this.url = hostUrl;
     setLocal("ad4m-url", hostUrl);
 
-    // Reuse stored guest credentials so the identity survives page reloads
-    const GUEST_EMAIL_KEY = "ad4m-guest-email";
-    const GUEST_PASS_KEY  = "ad4m-guest-pass";
+    // Reuse stored guest credentials so the identity survives page reloads.
+    // Keys are scoped to the normalised host so credentials from one host
+    // are never tried against a different host.
+    const normalizedHost  = hostUrl.replace(/\/+$/, '').toLowerCase();
+    const GUEST_EMAIL_KEY = `ad4m-guest-email-${normalizedHost}`;
+    const GUEST_PASS_KEY  = `ad4m-guest-pass-${normalizedHost}`;
     const storedEmail    = getLocal(GUEST_EMAIL_KEY);
     const storedPassword = getLocal(GUEST_PASS_KEY);
     let email: string;
@@ -657,8 +660,9 @@ export default class Ad4mConnect extends EventTarget {
     } else {
       email    = `guest-${crypto.randomUUID()}@flux.demo`;
       password = crypto.randomUUID();
-      setLocal(GUEST_EMAIL_KEY, email);
-      setLocal(GUEST_PASS_KEY, password);
+      // Credentials are written to localStorage only after successful
+      // account creation below — not here — so a failed createUser call
+      // leaves localStorage clean and the next attempt gets fresh credentials.
     }
 
     const isReturningGuest = !!(storedEmail && storedPassword);
@@ -668,10 +672,15 @@ export default class Ad4mConnect extends EventTarget {
         // Returning guest: credentials already exist on the server, just log in
         return await client.agent.loginUser(email, password);
       } else {
-        // First visit: credentials are freshly generated UUIDs — create the account directly
+        // First visit: create the account then log in
         const result = await client.agent.createUser(email, password);
         if (!result.success) throw new Error(result.error || "Failed to create guest account");
-        return await client.agent.loginUser(email, password);
+        const newToken = await client.agent.loginUser(email, password);
+        // Persist only after both steps succeed so a partial failure leaves
+        // localStorage clean for the next attempt
+        setLocal(GUEST_EMAIL_KEY, email);
+        setLocal(GUEST_PASS_KEY, password);
+        return newToken;
       }
     });
 
@@ -680,6 +689,9 @@ export default class Ad4mConnect extends EventTarget {
 
     this.ad4mClient = this.buildClient();
     await this.checkAuth();
+    if (this.authState !== "authenticated") {
+      throw new Error(`Guest authentication failed: auth state is "${this.authState}"`);
+    }
     return this.ad4mClient;
   }
 
