@@ -630,6 +630,59 @@ export default class Ad4mConnect extends EventTarget {
     }
   }
 
+  /**
+   * Connect to a remote hosted node as a guest without any UI interaction.
+   * Generates a persistent random identity stored in localStorage so that
+   * refreshing the page reuses the same guest account.
+   *
+   * Tries loginUser first (returning visitor); falls back to createUser +
+   * loginUser (first visit). No email verification required — password-based
+   * accounts on multi-user executors skip the email code step entirely.
+   */
+  async connectAsGuest(hostUrl: string): Promise<Ad4mClient> {
+    this.url = hostUrl;
+    setLocal("ad4m-url", hostUrl);
+
+    // Reuse stored guest credentials so the identity survives page reloads
+    const GUEST_EMAIL_KEY = "ad4m-guest-email";
+    const GUEST_PASS_KEY  = "ad4m-guest-pass";
+    const storedEmail    = getLocal(GUEST_EMAIL_KEY);
+    const storedPassword = getLocal(GUEST_PASS_KEY);
+    let email: string;
+    let password: string;
+
+    if (storedEmail && storedPassword) {
+      email    = storedEmail;
+      password = storedPassword;
+    } else {
+      email    = `guest-${crypto.randomUUID()}@flux.demo`;
+      password = crypto.randomUUID();
+      setLocal(GUEST_EMAIL_KEY, email);
+      setLocal(GUEST_PASS_KEY, password);
+    }
+
+    const isReturningGuest = !!(storedEmail && storedPassword);
+
+    const token = await this.withTempClient(hostUrl, async (client) => {
+      if (isReturningGuest) {
+        // Returning guest: credentials already exist on the server, just log in
+        return await client.agent.loginUser(email, password);
+      } else {
+        // First visit: credentials are freshly generated UUIDs — create the account directly
+        const result = await client.agent.createUser(email, password);
+        if (!result.success) throw new Error(result.error || "Failed to create guest account");
+        return await client.agent.loginUser(email, password);
+      }
+    });
+
+    this.token = token;
+    setLocal("ad4m-token", token);
+
+    this.ad4mClient = this.buildClient();
+    await this.checkAuth();
+    return this.ad4mClient;
+  }
+
   // Private helpers
   private resolveEmbedded(client: Ad4mClient): void {
     if (this.embeddedResolve) {
