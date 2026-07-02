@@ -25,6 +25,47 @@ pub(super) fn matches_where(
     shape: &ModelShape,
 ) -> bool {
     for (prop_name, condition) in where_clause {
+        // --- Logical combinators ---
+
+        // OR: instance must match at least one branch.
+        if prop_name == "OR" {
+            if let WhereCondition::SubClauses(branches) = condition {
+                if branches.is_empty() {
+                    return false;
+                }
+                if !branches
+                    .iter()
+                    .any(|branch| matches_where(instance, branch, shape))
+                {
+                    return false;
+                }
+            }
+            continue;
+        }
+
+        // AND: instance must match every branch.
+        if prop_name == "AND" {
+            if let WhereCondition::SubClauses(branches) = condition {
+                if !branches
+                    .iter()
+                    .all(|branch| matches_where(instance, branch, shape))
+                {
+                    return false;
+                }
+            }
+            continue;
+        }
+
+        // NOT: instance must NOT match the branch.
+        if prop_name == "NOT" {
+            if let WhereCondition::SubClause(branch) = condition {
+                if matches_where(instance, branch, shape) {
+                    return false;
+                }
+            }
+            continue;
+        }
+
         if prop_name == "base" || prop_name == "id" {
             // String and StringArray id conditions are pushed to SPARQL.
             // Complex ops (Ops, NumberArray, etc.) still need post-hydration.
@@ -103,6 +144,9 @@ pub(super) fn matches_condition(val: &Value, condition: &WhereCondition) -> bool
             }
         }
         WhereCondition::Ops(ops) => matches_ops(val, ops),
+        // SubClauses/SubClause are handled at the where-clause level (matches_where),
+        // not per-value — reaching here means an unexpected field structure.
+        WhereCondition::SubClauses(_) | WhereCondition::SubClause(_) => false,
     }
 }
 
@@ -990,5 +1034,205 @@ mod tests {
             .map(|i| i["score"].as_i64().unwrap())
             .collect();
         assert_eq!(scores, vec![1, 5, 10]);
+    }
+
+    // ---- OR / AND / NOT combinator tests ------------------------------------
+
+    fn empty_shape() -> ModelShape {
+        ModelShape {
+            target_class: "Test".to_string(),
+            shape_uri: "".to_string(),
+            properties: vec![],
+            include_relations: vec![],
+        }
+    }
+
+    fn make_where(entries: Vec<(&str, WhereCondition)>) -> BTreeMap<String, WhereCondition> {
+        entries
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect()
+    }
+
+    #[test]
+    fn test_or_matches_when_any_branch_passes() {
+        let shape = empty_shape();
+        let instance = json!({ "status": "active", "name": "Alice" });
+
+        // OR: status == "active" OR name == "Bob"
+        // "active" matches first branch → passes
+        let wc = make_where(vec![(
+            "OR",
+            WhereCondition::SubClauses(vec![
+                make_where(vec![(
+                    "status",
+                    WhereCondition::String("active".to_string()),
+                )]),
+                make_where(vec![("name", WhereCondition::String("Bob".to_string()))]),
+            ]),
+        )]);
+        assert!(matches_where(&instance, &wc, &shape));
+    }
+
+    #[test]
+    fn test_or_fails_when_no_branch_passes() {
+        let shape = empty_shape();
+        let instance = json!({ "status": "inactive", "name": "Alice" });
+
+        // OR: status == "active" OR name == "Bob"
+        // neither matches → fails
+        let wc = make_where(vec![(
+            "OR",
+            WhereCondition::SubClauses(vec![
+                make_where(vec![(
+                    "status",
+                    WhereCondition::String("active".to_string()),
+                )]),
+                make_where(vec![("name", WhereCondition::String("Bob".to_string()))]),
+            ]),
+        )]);
+        assert!(!matches_where(&instance, &wc, &shape));
+    }
+
+    #[test]
+    fn test_or_empty_branches_fails() {
+        let shape = empty_shape();
+        let instance = json!({ "status": "active" });
+        let wc = make_where(vec![("OR", WhereCondition::SubClauses(vec![]))]);
+        assert!(!matches_where(&instance, &wc, &shape));
+    }
+
+    #[test]
+    fn test_and_passes_when_all_branches_pass() {
+        let shape = empty_shape();
+        let instance = json!({ "status": "active", "role": "admin" });
+
+        let wc = make_where(vec![(
+            "AND",
+            WhereCondition::SubClauses(vec![
+                make_where(vec![(
+                    "status",
+                    WhereCondition::String("active".to_string()),
+                )]),
+                make_where(vec![("role", WhereCondition::String("admin".to_string()))]),
+            ]),
+        )]);
+        assert!(matches_where(&instance, &wc, &shape));
+    }
+
+    #[test]
+    fn test_and_fails_when_any_branch_fails() {
+        let shape = empty_shape();
+        let instance = json!({ "status": "active", "role": "viewer" });
+
+        let wc = make_where(vec![(
+            "AND",
+            WhereCondition::SubClauses(vec![
+                make_where(vec![(
+                    "status",
+                    WhereCondition::String("active".to_string()),
+                )]),
+                make_where(vec![("role", WhereCondition::String("admin".to_string()))]),
+            ]),
+        )]);
+        assert!(!matches_where(&instance, &wc, &shape));
+    }
+
+    #[test]
+    fn test_and_empty_branches_passes() {
+        let shape = empty_shape();
+        let instance = json!({ "status": "active" });
+        let wc = make_where(vec![("AND", WhereCondition::SubClauses(vec![]))]);
+        // all() on empty iterator is true
+        assert!(matches_where(&instance, &wc, &shape));
+    }
+
+    #[test]
+    fn test_not_passes_when_branch_does_not_match() {
+        let shape = empty_shape();
+        let instance = json!({ "status": "active" });
+
+        // NOT { status: "deleted" } — instance has "active", so NOT matches
+        let wc = make_where(vec![(
+            "NOT",
+            WhereCondition::SubClause(make_where(vec![(
+                "status",
+                WhereCondition::String("deleted".to_string()),
+            )])),
+        )]);
+        assert!(matches_where(&instance, &wc, &shape));
+    }
+
+    #[test]
+    fn test_not_fails_when_branch_matches() {
+        let shape = empty_shape();
+        let instance = json!({ "status": "deleted" });
+
+        let wc = make_where(vec![(
+            "NOT",
+            WhereCondition::SubClause(make_where(vec![(
+                "status",
+                WhereCondition::String("deleted".to_string()),
+            )])),
+        )]);
+        assert!(!matches_where(&instance, &wc, &shape));
+    }
+
+    #[test]
+    fn test_or_combined_with_top_level_condition() {
+        let shape = empty_shape();
+
+        // { role: "admin", OR: [{ name: "Alice" }, { name: "Bob" }] }
+        // role must be "admin" AND (name is Alice or Bob)
+        let instance_pass = json!({ "role": "admin", "name": "Alice" });
+        let instance_fail_role = json!({ "role": "viewer", "name": "Alice" });
+        let instance_fail_name = json!({ "role": "admin", "name": "Charlie" });
+
+        let wc = {
+            let mut m = BTreeMap::new();
+            m.insert(
+                "role".to_string(),
+                WhereCondition::String("admin".to_string()),
+            );
+            m.insert(
+                "OR".to_string(),
+                WhereCondition::SubClauses(vec![
+                    make_where(vec![("name", WhereCondition::String("Alice".to_string()))]),
+                    make_where(vec![("name", WhereCondition::String("Bob".to_string()))]),
+                ]),
+            );
+            m
+        };
+
+        assert!(matches_where(&instance_pass, &wc, &shape));
+        assert!(!matches_where(&instance_fail_role, &wc, &shape));
+        assert!(!matches_where(&instance_fail_name, &wc, &shape));
+    }
+
+    #[test]
+    fn test_nested_or_inside_or() {
+        let shape = empty_shape();
+        // OR: [{ OR: [{ a: "1" }, { a: "2" }] }, { b: "x" }]
+        // matches when a is "1" or "2", OR b is "x"
+        let inner_or = WhereCondition::SubClauses(vec![
+            make_where(vec![("a", WhereCondition::String("1".to_string()))]),
+            make_where(vec![("a", WhereCondition::String("2".to_string()))]),
+        ]);
+        let wc = make_where(vec![(
+            "OR",
+            WhereCondition::SubClauses(vec![
+                {
+                    let mut m = BTreeMap::new();
+                    m.insert("OR".to_string(), inner_or);
+                    m
+                },
+                make_where(vec![("b", WhereCondition::String("x".to_string()))]),
+            ]),
+        )]);
+
+        assert!(matches_where(&json!({ "a": "1" }), &wc, &shape));
+        assert!(matches_where(&json!({ "a": "2" }), &wc, &shape));
+        assert!(matches_where(&json!({ "b": "x" }), &wc, &shape));
+        assert!(!matches_where(&json!({ "a": "3", "b": "y" }), &wc, &shape));
     }
 }

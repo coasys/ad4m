@@ -236,6 +236,12 @@ pub(super) fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) ->
         return true;
     };
     for (prop_name, condition) in wc {
+        // OR/AND/NOT are always evaluated Rust-side; SPARQL-level pagination
+        // cannot be applied when they are present.
+        if prop_name == "OR" || prop_name == "AND" || prop_name == "NOT" {
+            return false;
+        }
+
         if prop_name == "base" || prop_name == "id" {
             match condition {
                 WhereCondition::String(_) | WhereCondition::StringArray(_) => continue,
@@ -420,6 +426,11 @@ pub(super) fn build_query_patterns(
     let mut where_patterns = Vec::new();
     if let Some(ref wc) = query.where_clause {
         for (prop_name, condition) in wc {
+            // OR/AND/NOT are evaluated Rust-side after hydration; skip SPARQL emission.
+            if prop_name == "OR" || prop_name == "AND" || prop_name == "NOT" {
+                continue;
+            }
+
             if prop_name == "base" || prop_name == "id" {
                 match condition {
                     WhereCondition::String(val) => {
@@ -711,6 +722,9 @@ pub(super) fn build_query_patterns(
                             where_patterns.push(format!("    FILTER({})", filters.join(" && ")));
                         }
                     }
+                    // SubClauses/SubClause are OR/AND/NOT combinators evaluated
+                    // Rust-side; the outer loop skips them before reaching here.
+                    WhereCondition::SubClauses(_) | WhereCondition::SubClause(_) => {}
                 }
                 continue;
             }
