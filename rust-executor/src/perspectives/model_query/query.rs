@@ -90,64 +90,18 @@ pub(super) async fn execute_model_query_inner(
         }
     }
 
-    // Full pipeline.
-    //
-    // A single order key is pushable to SPARQL when it is:
-    //   - a reifier-timestamp synonym (`timestamp`/`createdAt`/`updatedAt`),
-    //   - a scalar property on the entry shape,
-    //   - a `$`-prefixed projection count key whose `from` relation exists, or
-    //   - a dotted relation-property path (`relName.propName`) where the
-    //     relation exists in the shape's include_relations and the named
-    //     property exists as a scalar on the target shape.
-    // Anything else (or more than one key) falls back to the post-hydration
-    // Rust sort.
+    // Full pipeline
     let can_push_pagination = all_where_pushable(query_input, shape) && {
         match &query_input.order {
             None => true,
             Some(order) => {
-                order.len() == 1 && {
-                    let name = &order[0].0;
-                    if name == "timestamp" || name == "createdAt" || name == "updatedAt" {
-                        true
-                    } else if shape
-                        .properties
-                        .iter()
-                        .any(|p| p.name == *name && !p.is_collection && !p.predicate.is_empty())
-                    {
-                        true
-                    } else if name.starts_with('$') {
-                        query_input
-                            .projections
-                            .as_ref()
-                            .and_then(|projs| projs.get(name.as_str()))
-                            .map(|proj| {
-                                proj.count
-                                    && shape
-                                        .properties
-                                        .iter()
-                                        .any(|p| p.name == proj.from && !p.predicate.is_empty())
-                            })
-                            .unwrap_or(false)
-                    } else if let Some(dot_pos) = name.find('.') {
-                        let rel_name = &name[..dot_pos];
-                        let prop_name = &name[dot_pos + 1..];
-                        shape
-                            .include_relations
-                            .iter()
-                            .find(|r| r.name == rel_name && !r.predicate.is_empty())
-                            .and_then(|rel| resolver.get_shape(&rel.target_class_name).ok())
-                            .map(|target_shape| {
-                                target_shape.properties.iter().any(|p| {
-                                    p.name == prop_name
-                                        && !p.is_collection
-                                        && !p.predicate.is_empty()
-                                })
-                            })
-                            .unwrap_or(false)
-                    } else {
-                        false
-                    }
-                }
+                order.len() == 1
+                    && (order[0].0 == "timestamp"
+                        || order[0].0 == "createdAt"
+                        || order[0].0 == "updatedAt"
+                        || shape.properties.iter().any(|p| {
+                            p.name == order[0].0 && !p.is_collection && !p.predicate.is_empty()
+                        }))
             }
         }
     };
@@ -172,48 +126,6 @@ pub(super) async fn execute_model_query_inner(
                         .find(|p| p.name == *key && !p.is_collection && !p.predicate.is_empty())
                     {
                         SortKey::Property(prop.predicate.clone())
-                    } else if key.starts_with('$') {
-                        // Projection count sort — find the from-relation's predicate.
-                        query_input
-                            .projections
-                            .as_ref()
-                            .and_then(|projs| projs.get(key.as_str()))
-                            .and_then(|proj| {
-                                shape
-                                    .properties
-                                    .iter()
-                                    .find(|p| p.name == proj.from && !p.predicate.is_empty())
-                                    .map(|p| p.predicate.clone())
-                            })
-                            .map(SortKey::Projection)
-                            .unwrap_or(SortKey::Timestamp)
-                    } else if let Some(dot_pos) = key.find('.') {
-                        // Dotted relation-property path: "relName.propName"
-                        let rel_name = &key[..dot_pos];
-                        let prop_name = &key[dot_pos + 1..];
-                        shape
-                            .include_relations
-                            .iter()
-                            .find(|r| r.name == rel_name && !r.predicate.is_empty())
-                            .and_then(|rel| {
-                                resolver
-                                    .get_shape(&rel.target_class_name)
-                                    .ok()
-                                    .and_then(|ts| {
-                                        ts.properties
-                                            .iter()
-                                            .find(|p| {
-                                                p.name == prop_name
-                                                    && !p.is_collection
-                                                    && !p.predicate.is_empty()
-                                            })
-                                            .map(|p| SortKey::RelationProperty {
-                                                rel_pred: rel.predicate.clone(),
-                                                prop_pred: p.predicate.clone(),
-                                            })
-                                    })
-                            })
-                            .unwrap_or(SortKey::Timestamp)
                     } else {
                         SortKey::Timestamp
                     }
@@ -231,10 +143,6 @@ pub(super) async fn execute_model_query_inner(
 
     let query_plan = build_instance_sparql(shape, query_input, sparql_pagination.as_ref());
 
-    // Captures the source IRI order returned by the phase-1 pagination subquery
-    // so we can restore it after hydration (which uses BTreeMap, alphabetical order).
-    let mut pagination_source_order: Option<Vec<String>> = None;
-
     let raw_results: Vec<Value> = match query_plan {
         InstanceQueryPlan::Single(sparql) => {
             let result_json = store.query_async(&sparql).await?;
@@ -246,13 +154,6 @@ pub(super) async fn execute_model_query_inner(
         } => {
             let page_json = store.query_async(&pagination_subquery).await?;
             let page_results: Vec<Value> = serde_json::from_str(&page_json)?;
-
-            pagination_source_order = Some(
-                page_results
-                    .iter()
-                    .filter_map(|r| r["source"].as_str().map(|s| s.to_string()))
-                    .collect(),
-            );
 
             if page_results.is_empty() {
                 vec![]
@@ -287,26 +188,6 @@ pub(super) async fn execute_model_query_inner(
 
     let grouped = group_results_by_source(&raw_results, shape);
     let mut instances = hydrate_instances(shape, &grouped);
-
-    // group_results_by_source uses BTreeMap (alphabetical by source IRI), so
-    // after hydration the instances are in lexicographic IRI order, not the
-    // sort order produced by the phase-1 pagination subquery.  Restore the
-    // SPARQL-established order here so that subsequent steps (includes,
-    // projections) see instances in the correct sequence.
-    if let Some(ref source_order) = pagination_source_order {
-        let pos: std::collections::HashMap<&str, usize> = source_order
-            .iter()
-            .enumerate()
-            .map(|(i, id)| (id.as_str(), i))
-            .collect();
-        instances.sort_by_key(|inst| {
-            inst["id"]
-                .as_str()
-                .and_then(|id| pos.get(id))
-                .copied()
-                .unwrap_or(usize::MAX)
-        });
-    }
 
     // Apply transform expressions for resolveLanguage properties
     resolve_language_transforms(&shape, &mut instances).await?;
@@ -352,12 +233,14 @@ pub(super) async fn execute_model_query_inner(
 
     // Apply ordering and pagination
     let mut paginated: Vec<Value> = if sparql_pagination.is_some() {
-        // Ordering was pushed into the SPARQL pagination subquery and the
-        // correct sequence has already been restored above — do not re-sort.
-        // (Re-sorting here would also be a no-op-or-worse for Projection /
-        // RelationProperty keys, since their source values — projection
-        // counts, hydrated relations — aren't resolved yet at this point in
-        // the pipeline.)
+        if let Some(ref order) = query_input.order {
+            sort_instances(&mut instances, order);
+        } else {
+            sort_instances(
+                &mut instances,
+                &[("timestamp".to_string(), OrderDirection::ASC)],
+            );
+        }
         instances
     } else {
         if let Some(ref order) = query_input.order {
