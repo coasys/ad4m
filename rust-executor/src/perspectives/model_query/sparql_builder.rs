@@ -164,7 +164,7 @@ pub(super) fn build_instance_sparql(
                     r#"SELECT DISTINCT ?source (SAMPLE(?_nv) AS ?_sort_num) (SAMPLE(?_sv) AS ?_sort_str) WHERE {{
 {conformance}
 {where_extra}
-            OPTIONAL {{ ?source <{predicate}> ?_sort_raw . BIND(SUBSTR(STR(?_sort_raw), 16) AS ?_sv) BIND(<http://www.w3.org/2001/XMLSchema#double>(SUBSTR(STR(?_sort_raw), 16)) AS ?_nv) }}
+            OPTIONAL {{ ?source <{predicate}> ?_sort_raw . BIND(STR(<ad4m://fn/parse_literal>(?_sort_raw)) AS ?_sv) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_sort_raw))) AS ?_nv) }}
         }} GROUP BY ?source{pagination_suffix}"#
                 )
             }
@@ -185,7 +185,7 @@ pub(super) fn build_instance_sparql(
                     r#"SELECT DISTINCT ?source (SAMPLE(?_rp_num_v) AS ?_rp_num) (SAMPLE(?_rp_str_v) AS ?_rp_str) WHERE {{
 {conformance}
 {where_extra}
-            OPTIONAL {{ ?source <{rel_pred}> ?_rp_rel . OPTIONAL {{ ?_rp_rel <{prop_pred}> ?_rp_raw . BIND(SUBSTR(STR(?_rp_raw), 16) AS ?_rp_str_v) BIND(<http://www.w3.org/2001/XMLSchema#double>(SUBSTR(STR(?_rp_raw), 16)) AS ?_rp_num_v) }} }}
+            OPTIONAL {{ ?source <{rel_pred}> ?_rp_rel . OPTIONAL {{ ?_rp_rel <{prop_pred}> ?_rp_raw . BIND(STR(<ad4m://fn/parse_literal>(?_rp_raw)) AS ?_rp_str_v) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_rp_raw))) AS ?_rp_num_v) }} }}
         }} GROUP BY ?source{pagination_suffix}"#
                 )
             }

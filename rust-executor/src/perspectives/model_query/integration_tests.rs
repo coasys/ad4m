@@ -3357,9 +3357,20 @@ async fn test_full_model_query_ops_contains_with_pagination() {
 /// Helper: create a signed-envelope literal IRI (mimics what expression.create("literal", value)
 /// produces in production). The signed envelope is JSON with {author, timestamp, data, proof}.
 fn signed_envelope_literal(value: &str) -> String {
+    signed_envelope_literal_with_ts(value, "2024-01-01T00:00:00.000Z")
+}
+
+/// Same as [`signed_envelope_literal`] but with a caller-supplied embedded
+/// envelope timestamp. Needed for sort regression tests: `signed_envelope_literal`
+/// hardcodes the same timestamp for every call, so fixtures built from it never
+/// actually diverge on that field — which would mask a bug where sort extraction
+/// accidentally reads the envelope's `timestamp` instead of its `data` value
+/// (since a *shared* timestamp prefix contributes nothing to string comparison,
+/// real-world envelopes have distinct per-write timestamps).
+fn signed_envelope_literal_with_ts(value: &str, timestamp: &str) -> String {
     let envelope = serde_json::json!({
         "author": "did:key:zQ3shTestAgent",
-        "timestamp": "2024-01-01T00:00:00.000Z",
+        "timestamp": timestamp,
         "data": value,
         "proof": {
             "key": "#zQ3shTestAgent",
@@ -3982,6 +3993,64 @@ async fn test_full_model_query_order_by_property_string() {
     assert_eq!(result.instances.len(), 2);
     // First 2 reverse alphabetically: Charlie, Bob
     assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Charlie");
+    assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
+}
+
+/// Regression test: same as `test_full_model_query_order_by_property_string`
+/// but with values stored as signed expression envelopes (the real-world
+/// storage format), not bare `literal:string:<value>`. See
+/// `test_sort_by_relation_property_with_signed_envelope_literal` for the
+/// analogous RelationProperty-sort regression and full explanation.
+#[tokio::test]
+async fn test_full_model_query_order_by_property_string_signed_envelope() {
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    // Insertion order (and embedded envelope timestamp order) is Charlie, Alice,
+    // Bob — deliberately NOT alphabetical, so a bug that sorts by the envelope's
+    // embedded timestamp instead of `data` produces a different (wrong) result
+    // than the expected alphabetical order.
+    let names = ["Charlie", "Alice", "Bob"];
+    for (i, name) in names.iter().enumerate() {
+        let item = format!("test://envitem-{i}");
+        let envelope_ts = format!("2024-01-0{}T00:00:00.000Z", i + 1);
+        store
+            .add_link(&make_link(&item, "ns://type", "ns://person2", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                &item,
+                "ns://name2",
+                &signed_envelope_literal_with_ts(name, &envelope_ts),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Person2",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://person2" },
+            "name": { "predicate": "ns://name2", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let result = execute_model_query_from_json(
+        &store,
+        "Person2",
+        &ModelQueryInput {
+            limit: Some(2),
+            order: Some(vec![("name".to_string(), OrderDirection::ASC)]),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 2);
+    assert_eq!(result.total_count, 3);
+    assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Alice");
     assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
 }
 
@@ -4618,6 +4687,100 @@ async fn test_sort_by_relation_property_desc() {
         ids,
         vec!["test://post/z", "test://post/x", "test://post/y"],
         "posts should be ordered by location name DESC: got {ids:?}"
+    );
+}
+
+/// Regression test: real-world literal storage wraps values in a signed
+/// expression envelope (`literal:json:{"author":...,"data":<value>,"proof":...}`),
+/// not a bare `literal:string:<value>`. The pagination subquery's sort-value
+/// extraction must unwrap that envelope via `fn/parse_literal` — a naive
+/// fixed-offset SUBSTR over the raw IRI string previously extracted the whole
+/// envelope blob instead, which happens to sort by the embedded `timestamp`
+/// field (since it precedes `data` in the JSON) rather than the actual value.
+#[tokio::test]
+async fn test_sort_by_relation_property_with_signed_envelope_literal() {
+    let store = SparqlStore::new(None).unwrap();
+    let ts_base = 1700000000000i64;
+
+    // Insertion order deliberately does NOT match either alphabetical or
+    // timestamp order, so a fallback-to-timestamp bug would produce a
+    // different (wrong) result than a fallback-to-insertion-order bug —
+    // either kind of regression is caught.
+    let fixtures = [
+        ("test://post/e1", "test://loc/e1", "Portugal"),
+        ("test://post/e2", "test://loc/e2", "Germany"),
+        ("test://post/e3", "test://loc/e3", "France"),
+    ];
+    for (i, (post_id, loc_id, country)) in fixtures.iter().enumerate() {
+        let ts = format!("{}", ts_base + i as i64);
+        store
+            .add_link(&make_link(post_id, "ns://type", "ns://post3", &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(post_id, "ns://has-location", loc_id, &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(loc_id, "ns://type", "ns://location3", &ts))
+            .unwrap();
+        let envelope_ts = format!("2024-01-0{}T00:00:00.000Z", i + 1);
+        store
+            .add_link(&make_link(
+                loc_id,
+                "ns://loc-country",
+                &signed_envelope_literal_with_ts(country, &envelope_ts),
+                &ts,
+            ))
+            .unwrap();
+    }
+
+    let resolver = StaticShapeResolver::new();
+    let post_shape_json = r#"{
+        "className": "Post3",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://post3" }
+        },
+        "relations": {
+            "location": { "predicate": "ns://has-location", "targetClassName": "Location3", "kind": "hasOne" }
+        }
+    }"#;
+    let loc_shape_json = r#"{
+        "className": "Location3",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://location3" },
+            "country": { "predicate": "ns://loc-country", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+    let post_shape = parse_shape_from_json(post_shape_json, "Post3").unwrap();
+    let loc_shape = parse_shape_from_json(loc_shape_json, "Location3").unwrap();
+    resolver.register("Post3", post_shape.clone());
+    resolver.register("Location3", loc_shape);
+
+    let result = super::query::execute_model_query(
+        &store,
+        &post_shape,
+        &ModelQueryInput {
+            order: Some(vec![("location.country".to_string(), OrderDirection::ASC)]),
+            limit: Some(10),
+            ..Default::default()
+        },
+        &resolver,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 3);
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    // Alphabetical by country ASC: France, Germany, Portugal
+    assert_eq!(
+        ids,
+        vec!["test://post/e3", "test://post/e2", "test://post/e1"],
+        "posts should be ordered by location.country ASC despite signed-envelope \
+         literal storage: got {ids:?}"
     );
 }
 
