@@ -27,41 +27,46 @@ pub(super) fn matches_where(
     for (prop_name, condition) in where_clause {
         // --- Logical combinators ---
 
-        // OR: instance must match at least one branch.
+        // OR: instance must match at least one branch. Fails closed (rejects
+        // the instance) if `condition` isn't the expected SubClauses shape,
+        // rather than silently skipping the filter on malformed input.
         if prop_name == "OR" {
-            if let WhereCondition::SubClauses(branches) = condition {
-                if branches.is_empty() {
-                    return false;
-                }
-                if !branches
-                    .iter()
-                    .any(|branch| matches_where(instance, branch, shape))
-                {
-                    return false;
-                }
+            let WhereCondition::SubClauses(branches) = condition else {
+                return false;
+            };
+            if branches.is_empty() {
+                return false;
+            }
+            if !branches
+                .iter()
+                .any(|branch| matches_where(instance, branch, shape))
+            {
+                return false;
             }
             continue;
         }
 
-        // AND: instance must match every branch.
+        // AND: instance must match every branch. Fails closed on malformed input.
         if prop_name == "AND" {
-            if let WhereCondition::SubClauses(branches) = condition {
-                if !branches
-                    .iter()
-                    .all(|branch| matches_where(instance, branch, shape))
-                {
-                    return false;
-                }
+            let WhereCondition::SubClauses(branches) = condition else {
+                return false;
+            };
+            if !branches
+                .iter()
+                .all(|branch| matches_where(instance, branch, shape))
+            {
+                return false;
             }
             continue;
         }
 
-        // NOT: instance must NOT match the branch.
+        // NOT: instance must NOT match the branch. Fails closed on malformed input.
         if prop_name == "NOT" {
-            if let WhereCondition::SubClause(branch) = condition {
-                if matches_where(instance, branch, shape) {
-                    return false;
-                }
+            let WhereCondition::SubClause(branch) = condition else {
+                return false;
+            };
+            if matches_where(instance, branch, shape) {
+                return false;
             }
             continue;
         }
@@ -1103,6 +1108,16 @@ mod tests {
     }
 
     #[test]
+    fn test_or_malformed_condition_fails_closed() {
+        // "OR" present but its value isn't SubClauses (e.g. a raw string) —
+        // must reject the instance rather than silently skip the filter.
+        let shape = empty_shape();
+        let instance = json!({ "status": "active" });
+        let wc = make_where(vec![("OR", WhereCondition::String("bogus".to_string()))]);
+        assert!(!matches_where(&instance, &wc, &shape));
+    }
+
+    #[test]
     fn test_and_passes_when_all_branches_pass() {
         let shape = empty_shape();
         let instance = json!({ "status": "active", "role": "admin" });
@@ -1148,6 +1163,14 @@ mod tests {
     }
 
     #[test]
+    fn test_and_malformed_condition_fails_closed() {
+        let shape = empty_shape();
+        let instance = json!({ "status": "active" });
+        let wc = make_where(vec![("AND", WhereCondition::Number(1.0))]);
+        assert!(!matches_where(&instance, &wc, &shape));
+    }
+
+    #[test]
     fn test_not_passes_when_branch_does_not_match() {
         let shape = empty_shape();
         let instance = json!({ "status": "active" });
@@ -1175,6 +1198,14 @@ mod tests {
                 WhereCondition::String("deleted".to_string()),
             )])),
         )]);
+        assert!(!matches_where(&instance, &wc, &shape));
+    }
+
+    #[test]
+    fn test_not_malformed_condition_fails_closed() {
+        let shape = empty_shape();
+        let instance = json!({ "status": "active" });
+        let wc = make_where(vec![("NOT", WhereCondition::Bool(true))]);
         assert!(!matches_where(&instance, &wc, &shape));
     }
 

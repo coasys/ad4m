@@ -24,6 +24,7 @@ import type { Where, Query, ModelMetadata, PropertyMetadata } from "./types";
  * - Literal-stored properties (equality, comparison, contains, etc.)
  * - Reverse relations (belongsToOne / belongsToMany)
  * - author / timestamp filters (skipped by buildSPARQLWhereFilters)
+ * - OR / AND / NOT combinators (skipped by buildSPARQLWhereFilters — see below)
  *
  * When JS-only filters exist, SPARQL-level LIMIT/OFFSET must NOT be applied
  * because the database would cap the candidate set before JS filters run,
@@ -39,22 +40,13 @@ export function hasJsOnlyWhereFilters(
   for (const [propertyName, condition] of Object.entries(where)) {
     if (propertyName === "base" || propertyName === "id") continue;
 
-    // OR/AND: recurse into each branch; if any branch has JS-only filters,
-    // the whole combinator cannot be pushed to SPARQL.
-    if (propertyName === "OR" || propertyName === "AND") {
-      const branches = condition as Where[];
-      if (Array.isArray(branches)) {
-        for (const branch of branches) {
-          if (hasJsOnlyWhereFilters(metadata, allRelationsMetadata, branch)) return true;
-        }
-      }
-      continue;
-    }
-
-    // NOT: recurse into the single negated clause.
-    if (propertyName === "NOT") {
-      if (hasJsOnlyWhereFilters(metadata, allRelationsMetadata, condition as Where)) return true;
-      continue;
+    // OR/AND/NOT: buildSPARQLWhereFilters never emits a SPARQL translation
+    // for these regardless of what their branches contain, so their mere
+    // presence — not just JS-only conditions within a branch — must block
+    // SPARQL-level pagination. Otherwise LIMIT/OFFSET would be applied
+    // before the (Rust-side, post-hydration) combinator filter ever runs.
+    if (propertyName === "OR" || propertyName === "AND" || propertyName === "NOT") {
+      return true;
     }
 
     // author/timestamp filters are handled in JS
