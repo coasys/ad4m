@@ -256,9 +256,11 @@ export type TypedWhere<T extends Ad4mModel> =
 
 // ---- Typed order -------------------------------------------------------------
 
-type StrictTypedOrder<T extends Ad4mModel> = {
-  [K in PropertyKeysOf<T> | 'timestamp' | 'author' | 'createdAt' | 'updatedAt']?: 'ASC' | 'DESC';
-};
+type StrictTypedOrder<T extends Ad4mModel> =
+  & { [K in PropertyKeysOf<T> | 'timestamp' | 'author' | 'createdAt' | 'updatedAt']?: 'ASC' | 'DESC' }
+  // $-prefixed projection count keys (e.g. "$likeCount") — typed at the
+  // include map level but accepted here so callers can sort by them.
+  & { [K in `$${string}`]?: 'ASC' | 'DESC' };
 
 export type TypedOrder<T extends Ad4mModel> =
   HasNoTypedFields<T> extends true ? Order : StrictTypedOrder<T>;
