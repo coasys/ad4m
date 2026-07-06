@@ -851,23 +851,52 @@ impl PerspectiveInstance {
 
             local_links.retain(|(_, status)| status == &LinkStatus::Shared);
 
-            // Only a genuine `Ok(None)` from `current_revision()` means "nothing has been
-            // committed to this neighbourhood yet" — safe to treat as an empty remote set.
-            // Any other non-success outcome (a transport/timeout error from either call, or
-            // an unexpected `Ok(None)` from `render()` despite a revision existing) means we
-            // don't actually know the remote state. Treating that the same as "remote is
-            // empty" — which the previous `.unwrap_or(None).unwrap_or_default()` did — makes
-            // every local shared link look "missing" below, so a single transient timeout
-            // resubmits the perspective's *entire* shared link set (SDNA included) as a fresh
-            // batch of creates. Bail out and let the caller's backoff loop retry once the
-            // link language is actually reachable again.
-            let remote_links = match link_language.current_revision().await {
-                Ok(None) => vec![],
-                Ok(Some(_)) => match link_language.render().await {
+            // `current_revision()` returns `Ok(None)` both when the link language
+            // genuinely has no committed revision yet AND when it lacks the
+            // `PerspectiveCurrentRevision` capability at all (see
+            // `Language::current_revision`) — the two cases are indistinguishable from
+            // the return value alone. Only trust `Ok(None)` as "nothing committed yet"
+            // when the capability is actually present; otherwise go straight to
+            // `render()`, which has its own capability check and safely reports
+            // "unavailable" as `Ok(None)` too.
+            //
+            // Any other non-success outcome (a transport/timeout error from either call,
+            // or an unexpected `Ok(None)` from `render()` despite a revision existing)
+            // means we don't actually know the remote state. Treating that the same as
+            // "remote is empty" — which the previous `.unwrap_or(None).unwrap_or_default()`
+            // did — makes every local shared link look "missing" below, so a single
+            // transient timeout resubmits the perspective's *entire* shared link set
+            // (SDNA included) as a fresh batch of creates. Bail out and let the caller's
+            // backoff loop retry once the link language is actually reachable again.
+            let has_revision_capability = link_language
+                .has(crate::languages::capability::Capability::PerspectiveCurrentRevision);
+
+            // `Ok(Some(_))` here just means "we're clear to call render()" — it's reached
+            // both when a revision genuinely exists and when we skip the check entirely
+            // because the capability isn't supported.
+            let known_revision = if has_revision_capability {
+                match link_language.current_revision().await {
+                    Ok(None) => None,
+                    Ok(Some(_)) => Some(()),
+                    Err(e) => {
+                        log::warn!(
+                            "ensure_public_links_are_shared: current_revision() failed for perspective {}: {:?} — skipping this sync attempt",
+                            uuid, e
+                        );
+                        return false;
+                    }
+                }
+            } else {
+                Some(())
+            };
+
+            let remote_links = match known_revision {
+                None => vec![],
+                Some(()) => match link_language.render().await {
                     Ok(Some(rendered)) => rendered.links,
                     Ok(None) => {
                         log::warn!(
-                            "ensure_public_links_are_shared: render() returned no perspective for {} despite an existing revision — skipping this sync attempt rather than risk resubmitting the whole shared link set",
+                            "ensure_public_links_are_shared: render() returned no perspective for {} — skipping this sync attempt rather than risk resubmitting the whole shared link set",
                             uuid
                         );
                         return false;
@@ -880,13 +909,6 @@ impl PerspectiveInstance {
                         return false;
                     }
                 },
-                Err(e) => {
-                    log::warn!(
-                        "ensure_public_links_are_shared: current_revision() failed for perspective {}: {:?} — skipping this sync attempt",
-                        uuid, e
-                    );
-                    return false;
-                }
             };
 
             let mut links_to_commit = Vec::new();
