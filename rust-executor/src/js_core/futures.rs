@@ -84,13 +84,18 @@ where
             };
         }
 
-        if let Poll::Ready(event_loop_result) = &mut worker
+        let event_loop_poll = worker
             .js_runtime
-            .poll_event_loop(cx, deno_core::PollEventLoopOptions::default())
-        {
+            .poll_event_loop(cx, deno_core::PollEventLoopOptions::default());
+        if let Poll::Ready(event_loop_result) = event_loop_poll {
             if let Err(err) = event_loop_result {
+                // Propagate the actual event-loop error. This previously returned a
+                // hardcoded CoreError::TLA, which relabelled EVERY event-loop failure
+                // (permission denials, uncaught rejections, module-eval errors) as
+                // "Top-level await is not allowed in synchronous evaluation" — a red
+                // herring that hid the real cause of language-bundle load failures.
                 log::error!("Error in event loop: {:?}", err);
-                return Poll::Ready(Err(CoreError::TLA));
+                return Poll::Ready(Err(err));
             }
 
             if let Poll::Ready(result) = value_pin.poll(cx) {
