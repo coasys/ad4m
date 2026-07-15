@@ -179,6 +179,7 @@ describe('PerspectiveClient RPC operations', () => {
             link: { source: 'a', target: 'b', predicate: 'c' },
             status: 'shared',
             batchId: undefined,
+            graph: null,
         })
     })
 

@@ -524,6 +524,11 @@ export interface ModelConfig {
      * The name of the entity.
      */
     name: string;
+    /**
+     * When true, instances are stored in a named graph keyed by their base expression.
+     * This enables efficient bulk deletion (drop entire graph) and scoped queries.
+     */
+    graph?: boolean;
 }
 
 /**
@@ -584,6 +589,9 @@ export function Model(opts: ModelConfig) {
     return function (target: any) {
         target.prototype.className = opts.name;
         target.className = opts.name;
+        if (opts.graph) {
+            target._graphRooted = true;
+        }
 
         target.generateSDNA = function() {
             return buildSDNA(

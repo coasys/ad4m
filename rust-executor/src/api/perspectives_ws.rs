@@ -299,7 +299,13 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
     let status = parse_link_status(body.status.as_deref());
 
     let result = perspective
-        .add_link(Link::from(body.link), status, body.batch_id, &agent_context)
+        .add_link(
+            Link::from(body.link),
+            status,
+            body.batch_id,
+            &agent_context,
+            body.graph,
+        )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -328,18 +334,14 @@ async fn add_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let status = parse_link_status(body.status.as_deref());
+    let links: Vec<Link> = body.links.into_iter().map(Link::from).collect();
 
-    let mutations = LinkMutations {
-        additions: body.links,
-        removals: vec![],
-    };
-
-    let diff = perspective
-        .link_mutations(mutations, status, &agent_context)
+    let results = perspective
+        .add_links(links, status, body.batch_id, &agent_context, body.graph)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let count = diff.additions.len();
+    let count = results.len();
     if count > 0 {
         if let Err(e) = reserve_credits(&ctx.user_email, count as f64 * DEFAULT_LINK_WRITE) {
             log::warn!(
@@ -349,7 +351,7 @@ async fn add_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         }
     }
 
-    Ok(serde_json::to_value(diff.additions)?)
+    Ok(serde_json::to_value(results)?)
 }
 
 async fn remove_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -546,6 +548,10 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let engine = params
         .opt_str("engine")
         .unwrap_or_else(|| "sparql".to_string());
+    let graphs: Option<Vec<String>> = params
+        .as_object()
+        .and_then(|o| o.get("graphs"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     match engine.as_str() {
@@ -554,7 +560,7 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
             // so it doesn't block the async runtime or hang indefinitely.
             let result = tokio::time::timeout(
                 Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-                tokio::task::spawn_blocking(move || perspective.sparql_query(query)),
+                tokio::task::spawn_blocking(move || perspective.sparql_query_with_graphs(query, graphs.as_deref())),
             )
             .await;
 
@@ -582,6 +588,39 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
             other
         ))),
     }
+}
+
+async fn named_graphs(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let graphs = perspective
+        .named_graphs()
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(serde_json::to_value(graphs)?)
+}
+
+async fn remove_named_graph(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let graph_iri = params.require_str("graphIri")?;
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    perspective
+        .remove_graph(&graph_iri)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(true))
 }
 
 async fn add_sdna(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -677,6 +716,7 @@ async fn execute_commands(params: Value, ctx: Arc<RequestContext>) -> Result<Val
             parameters,
             body.batch_id.clone(),
             &agent_context,
+            body.graph,
         )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -848,6 +888,7 @@ async fn create_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value
             initial_values,
             body.batch_id.clone(),
             &agent_context,
+            body.graph,
         )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -895,13 +936,17 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
 
     let class_name = params.require_str("class_name")?;
     let query_json = params.require_str("query_json")?;
+    let graph_iris: Option<Vec<String>> = params
+        .as_object()
+        .and_then(|o| o.get("graph_iris"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     // Run async model query with timeout
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        perspective.model_query(&class_name, &query_json),
+        perspective.model_query(&class_name, &query_json, graph_iris.as_deref()),
     )
     .await;
 
@@ -997,12 +1042,16 @@ async fn model_subscribe_handler(
 
     let class_name = params.require_str("class_name")?;
     let query_json = params.require_str("query_json")?;
+    let graph_iris: Option<Vec<String>> = params
+        .as_object()
+        .and_then(|o| o.get("graph_iris"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let user_email = ctx.user_email.clone();
     let (subscription_id, result_string) = perspective
-        .model_subscribe_and_query(class_name, query_json, user_email)
+        .model_subscribe_and_query(class_name, query_json, user_email, graph_iris)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -1047,4 +1096,6 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.modelQuery", model_query_handler);
     map.register("perspective.modelSubscribe", model_subscribe_handler);
     map.register("perspective.evaluateGetters", evaluate_getters_handler);
+    map.register("perspective.namedGraphs", named_graphs);
+    map.register("perspective.removeNamedGraph", remove_named_graph);
 }

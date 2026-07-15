@@ -35,6 +35,7 @@ pub fn resolve_reverse_relations(
     store: &SparqlStore,
     instances: &mut [Value],
     relations: &[(String, String, bool)], // (name, predicate, is_single)
+    _graph_iris: Option<&[String]>,
 ) -> Result<(), Error> {
     if relations.is_empty() || instances.is_empty() {
         return Ok(());
@@ -119,6 +120,7 @@ pub(super) async fn resolve_includes_recursive(
     shape: &ModelShape,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    graph_iris: Option<&[String]>,
 ) -> Result<(), Error> {
     for (rel_name, include_val) in include {
         match include_val {
@@ -138,9 +140,11 @@ pub(super) async fn resolve_includes_recursive(
         };
 
         if rel.direction == "reverse" {
-            resolve_reverse_include(store, instances, rel, &sub_query, resolver, depth).await?;
+            resolve_reverse_include(store, instances, rel, &sub_query, resolver, depth, graph_iris)
+                .await?;
         } else {
-            resolve_forward_include(store, instances, rel, &sub_query, resolver, depth).await?;
+            resolve_forward_include(store, instances, rel, &sub_query, resolver, depth, graph_iris)
+                .await?;
         }
     }
     Ok(())
@@ -158,6 +162,7 @@ async fn resolve_forward_include(
     sub_query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    graph_iris: Option<&[String]>,
 ) -> Result<(), Error> {
     let mut seen = std::collections::HashSet::new();
     let mut all_ids: Vec<String> = Vec::new();
@@ -203,6 +208,7 @@ async fn resolve_forward_include(
         &query,
         resolver,
         depth + 1,
+        graph_iris,
     ))
     .await?;
 
@@ -269,6 +275,7 @@ async fn resolve_reverse_include(
     sub_query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    graph_iris: Option<&[String]>,
 ) -> Result<(), Error> {
     let all_ids: Vec<String> = instances
         .iter()
@@ -294,7 +301,7 @@ async fn resolve_reverse_include(
     let sparql = format!(
         "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . FILTER(?target IN ({id_list})) }}"
     );
-    let result_json = store.query(&sparql)?;
+    let result_json = store.query_with_graphs(&sparql, graph_iris)?;
     let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
     let mut sources_by_target: HashMap<String, Vec<String>> = HashMap::new();
@@ -354,6 +361,7 @@ async fn resolve_reverse_include(
             &query,
             resolver,
             depth + 1,
+            graph_iris,
         ))
         .await?;
 

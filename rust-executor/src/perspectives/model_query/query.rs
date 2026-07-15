@@ -40,8 +40,9 @@ pub async fn execute_model_query(
     shape: &ModelShape,
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
+    graph_iris: Option<&[String]>,
 ) -> Result<ModelQueryResult, Error> {
-    execute_model_query_inner(store, shape, query_input, resolver, 0).await
+    execute_model_query_inner(store, shape, query_input, resolver, 0, graph_iris).await
 }
 
 /// Inner implementation with recursion depth tracking.
@@ -55,6 +56,7 @@ pub(super) async fn execute_model_query_inner(
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    graph_iris: Option<&[String]>,
 ) -> Result<ModelQueryResult, Error> {
     if depth > MAX_INCLUDE_DEPTH {
         log::warn!(
@@ -72,7 +74,7 @@ pub(super) async fn execute_model_query_inner(
     let is_count_only = query_input.limit == Some(0);
     if is_count_only && all_where_pushable(query_input, shape) {
         if let Some(sparql) = build_count_sparql(shape, query_input) {
-            let result_json = store.query(&sparql)?;
+            let result_json = store.query_with_graphs(&sparql, graph_iris)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             let count = results
                 .first()
@@ -237,14 +239,16 @@ pub(super) async fn execute_model_query_inner(
 
     let raw_results: Vec<Value> = match query_plan {
         InstanceQueryPlan::Single(sparql) => {
-            let result_json = store.query_async(&sparql).await?;
+            let result_json = store.query_with_graphs_async(&sparql, graph_iris).await?;
             serde_json::from_str(&result_json)?
         }
         InstanceQueryPlan::TwoPhase {
             pagination_subquery,
             predicate_filter,
         } => {
-            let page_json = store.query_async(&pagination_subquery).await?;
+            let page_json = store
+                .query_with_graphs_async(&pagination_subquery, graph_iris)
+                .await?;
             let page_results: Vec<Value> = serde_json::from_str(&page_json)?;
 
             pagination_source_order = Some(
@@ -278,7 +282,9 @@ pub(super) async fn execute_model_query_inner(
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
 }}"#
                     );
-                    let result_json = store.query_async(&property_sparql).await?;
+                    let result_json = store
+                        .query_with_graphs_async(&property_sparql, graph_iris)
+                        .await?;
                     serde_json::from_str(&result_json)?
                 }
             }
@@ -319,7 +325,7 @@ pub(super) async fn execute_model_query_inner(
         .map(|p| (p.name.clone(), p.predicate.clone(), p.is_scalar_relation))
         .collect();
     if !reverse_rels.is_empty() && !instances.is_empty() {
-        resolve_reverse_relations(store, &mut instances, &reverse_rels)?;
+        resolve_reverse_relations(store, &mut instances, &reverse_rels, graph_iris)?;
     }
 
     // Apply post-hydration where-clause filters
@@ -332,7 +338,7 @@ pub(super) async fn execute_model_query_inner(
     // Calculate total count
     let total_count = if sparql_pagination.is_some() {
         if let Some(count_sparql) = build_count_sparql(shape, query_input) {
-            let result_json = store.query(&count_sparql)?;
+            let result_json = store.query_with_graphs(&count_sparql, graph_iris)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             results
                 .first()
@@ -386,14 +392,23 @@ pub(super) async fn execute_model_query_inner(
             shape,
             query_input.include.as_ref(),
             deep_query,
+            graph_iris,
         )?;
     }
 
     // Eager-load included relations
     if let Some(ref include) = query_input.include {
         if !paginated.is_empty() && !shape.include_relations.is_empty() {
-            resolve_includes_recursive(store, &mut paginated, include, shape, resolver, depth)
-                .await?;
+            resolve_includes_recursive(
+                store,
+                &mut paginated,
+                include,
+                shape,
+                resolver,
+                depth,
+                graph_iris,
+            )
+            .await?;
         }
     }
 
@@ -424,6 +439,7 @@ pub(super) async fn execute_model_query_inner(
             shape,
             resolver,
             depth,
+            graph_iris,
         )
         .await?;
     }

@@ -179,7 +179,7 @@ impl Ad4mMcpHandler {
                 };
 
                 match perspective
-                    .add_link(link, LinkStatus::Shared, None, &agent_context)
+                    .add_link(link, LinkStatus::Shared, None, &agent_context, None)
                     .await
                 {
                     Ok(decorated) => {

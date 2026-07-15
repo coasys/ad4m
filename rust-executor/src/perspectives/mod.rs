@@ -852,6 +852,7 @@ mod tests {
                 signature: "test-signature".to_string(),
             },
             status: Some(LinkStatus::Local),
+            graph: None,
         };
         println!("test_link: {:?}", test_link);
 

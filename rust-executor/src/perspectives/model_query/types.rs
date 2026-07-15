@@ -475,6 +475,9 @@ pub struct ModelShape {
     /// Enriched relation metadata for include resolution, populated
     /// directly from the perspective's SHACL triples.
     pub(crate) include_relations: Vec<ShapeRelation>,
+    /// Whether instances of this model are stored in named graphs
+    #[allow(dead_code)]
+    pub(crate) has_graph: bool,
 }
 
 impl ModelShape {

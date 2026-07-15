@@ -770,7 +770,7 @@ describe("compileWhereClause()", () => {
   it("should compile simple equality to SPARQL condition", () => {
     const conditions = compileWhereClause(
       { status: "active" },
-      { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test" }
+      { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test", graph: false }
     );
     expect(conditions).toHaveLength(1);
     expect(conditions[0]).toContain("test://status");
@@ -780,7 +780,7 @@ describe("compileWhereClause()", () => {
   it("should compile not operator", () => {
     const conditions = compileWhereClause(
       { status: { not: "archived" } },
-      { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test" }
+      { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test", graph: false }
     );
     expect(conditions).toHaveLength(1);
     expect(conditions[0]).toContain("NOT EXISTS");  // negation
@@ -790,7 +790,7 @@ describe("compileWhereClause()", () => {
   it("should compile array values to IN clause", () => {
     const conditions = compileWhereClause(
       { category: ["food", "drink"] },
-      { properties: { category: { name: "category", predicate: "test://category", required: false, readOnly: false } }, relations: {}, className: "Test" }
+      { properties: { category: { name: "category", predicate: "test://category", required: false, readOnly: false } }, relations: {}, className: "Test", graph: false }
     );
     expect(conditions).toHaveLength(1);
     expect(conditions[0]).toContain("food");

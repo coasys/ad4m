@@ -71,6 +71,7 @@ pub fn evaluate_getters_batch(
         shape_uri: shape.shape_uri.clone(),
         properties: filtered_props,
         include_relations: shape.include_relations.clone(),
+        has_graph: shape.has_graph,
     };
 
     let mut instances: Vec<Value> = instance_ids
@@ -82,7 +83,7 @@ pub fn evaluate_getters_batch(
         })
         .collect();
 
-    evaluate_getters(store, &mut instances, &filtered_shape, None, true)?;
+    evaluate_getters(store, &mut instances, &filtered_shape, None, true, None)?;
 
     let mut result = Map::new();
     for inst in &instances {
@@ -184,6 +185,7 @@ pub(super) fn evaluate_getters(
     shape: &ModelShape,
     _include: Option<&HashMap<String, IncludeValue>>,
     deep_query: bool,
+    graph_iris: Option<&[String]>,
 ) -> Result<(), Error> {
     let getter_props: Vec<&ShapeProperty> = shape
         .properties
@@ -223,7 +225,7 @@ pub(super) fn evaluate_getters(
 
         if upper.starts_with("ASK") {
             let batched = convert_ask_to_batched_select(getter, &values_clause);
-            match store.query(&batched) {
+            match store.query_with_graphs(&batched, graph_iris) {
                 Ok(result_json) => {
                     let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
                     let matched: std::collections::HashSet<&str> = rows
@@ -252,7 +254,7 @@ pub(super) fn evaluate_getters(
         } else if upper.starts_with("SELECT") {
             let batched = inject_values_into_select(getter, &values_clause);
 
-            match store.query(&batched) {
+            match store.query_with_graphs(&batched, graph_iris) {
                 Ok(result_json) => {
                     let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
 

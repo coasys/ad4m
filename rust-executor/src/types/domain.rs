@@ -296,6 +296,7 @@ pub struct LinkExpressionInput {
     pub proof: ExpressionProofInput,
     pub timestamp: String,
     pub status: Option<LinkStatus>,
+    pub graph: Option<String>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]
@@ -434,6 +435,7 @@ impl TryFrom<LinkExpressionInput> for DecoratedLinkExpression {
                 invalid: input.proof.invalid,
             },
             status: input.status,
+            graph: input.graph,
         })
     }
 }

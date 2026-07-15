@@ -242,6 +242,9 @@ export class SHACLShape {
   /** Parent shape URIs for model inheritance (sh:node references) */
   parentShapes: string[];
 
+  /** Whether instances are stored in named graphs */
+  hasGraph: boolean;
+
   /**
    * Create a new SHACL Shape
    * @param targetClassOrShapeUri - If one argument: the target class (shape URI auto-derived as {class}Shape)
@@ -263,6 +266,7 @@ export class SHACLShape {
     }
     this.properties = [];
     this.parentShapes = [];
+    this.hasGraph = false;
   }
 
   /**
@@ -317,6 +321,11 @@ export class SHACLShape {
     // Emit sh:node references for parent shapes (model inheritance)
     for (const parentUri of this.parentShapes) {
       turtle += `  sh:node <${parentUri}> ;\n`;
+    }
+
+    // Emit AD4M graph-rooting flag
+    if (this.hasGraph) {
+      turtle += `  ad4m:hasGraph true ;\n`;
     }
     
     // Add property shapes

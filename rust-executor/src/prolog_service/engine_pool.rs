@@ -1047,6 +1047,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             });
         }
 
@@ -1146,6 +1147,7 @@ mod tests {
                 invalid: Some(false),
             },
             status: None,
+            graph: None,
         }];
         let result = pool
             .update_all_engines_with_links("test".to_string(), test_links, None, None)
@@ -1181,6 +1183,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             DecoratedLinkExpression {
                 author: "user2".to_string(),
@@ -1197,6 +1200,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
         ];
 
@@ -1269,6 +1273,7 @@ mod tests {
                 invalid: Some(false),
             },
             status: None,
+            graph: None,
         }];
         pool.update_all_engines_with_links("test".to_string(), test_links, None, None)
             .await
@@ -1335,6 +1340,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             DecoratedLinkExpression {
                 author: "user2".to_string(),
@@ -1351,6 +1357,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
         ];
 
@@ -1517,6 +1524,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             DecoratedLinkExpression {
                 author: "user2".to_string(),
@@ -1533,6 +1541,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             DecoratedLinkExpression {
                 author: "user3".to_string(),
@@ -1549,6 +1558,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
         ];
 
@@ -1722,6 +1732,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             DecoratedLinkExpression {
                 author: "item1".to_string(),
@@ -1738,6 +1749,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             DecoratedLinkExpression {
                 author: "other_user".to_string(),
@@ -1754,6 +1766,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
         ];
 
@@ -1873,6 +1886,7 @@ mod tests {
                 invalid: Some(false),
             },
             status: None,
+            graph: None,
         });
 
         // Use the PRODUCTION method that properly sets up the pool state
@@ -1998,6 +2012,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             DecoratedLinkExpression {
                 author: "user2".to_string(),
@@ -2014,6 +2029,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
         ]);
 
@@ -2238,6 +2254,7 @@ mod tests {
                 invalid: Some(false),
             },
             status: None,
+            graph: None,
         }];
 
         // Use the PRODUCTION method that properly sets up the pool state
@@ -2377,6 +2394,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             DecoratedLinkExpression {
                 author: "user1".to_string(),
@@ -2393,6 +2411,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
         ];
 
@@ -2450,6 +2469,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             DecoratedLinkExpression {
                 author: "user1".to_string(),
@@ -2466,6 +2486,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
         ]);
 
@@ -2487,6 +2508,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             // SDNA Prolog code: subject class name -> ad4m://sdna -> literal with actual subject_class rule
             DecoratedLinkExpression {
@@ -2504,6 +2526,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
         ]);
 
@@ -2651,6 +2674,7 @@ mod tests {
                 invalid: Some(false),
             },
             status: None,
+            graph: None,
         }];
 
         pool.update_all_engines_with_links("facts".to_string(), test_links, None, None)
@@ -2806,6 +2830,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             DecoratedLinkExpression {
                 author: "user1".to_string(),
@@ -2822,6 +2847,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             DecoratedLinkExpression {
                 author: "user1".to_string(),
@@ -2838,6 +2864,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             // User1 profile
             DecoratedLinkExpression {
@@ -2855,6 +2882,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
         ];
 
@@ -3137,6 +3165,7 @@ mod tests {
                 invalid: Some(false),
             },
             status: None,
+            graph: None,
         }];
 
         pool.update_all_engines_with_links("test_facts".to_string(), test_links, None, None)
@@ -3308,6 +3337,7 @@ mod tests {
                 invalid: Some(false),
             },
             status: None,
+            graph: None,
         }];
 
         pool.update_all_engines_with_links("facts".to_string(), test_links, None, None)
@@ -3642,6 +3672,7 @@ mod tests {
                 invalid: Some(false),
             },
             status: None,
+            graph: None,
         }];
 
         pool.update_all_engines_with_links("facts".to_string(), test_links, None, None)
@@ -3698,6 +3729,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             DecoratedLinkExpression {
                 author: "user2".to_string(),
@@ -3714,6 +3746,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
         ];
 

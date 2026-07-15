@@ -100,6 +100,11 @@ export function buildSHACL(
         }
     }
 
+    // Set graph-rooting flag from @Model({ graph: true })
+    if (target._graphRooted) {
+        shape.hasGraph = true;
+    }
+
     // ── Constructor / Destructor actions ────────────────────────────────
     let constructorActions: any[] = [];
     if (obj.subjectConstructor && obj.subjectConstructor.length) {

@@ -74,6 +74,7 @@ pub fn shape(class: &str, properties: Vec<ShapeProperty>) -> ModelShape {
         shape_uri: format!("{class}Shape"),
         properties,
         include_relations: Vec::new(),
+        has_graph: false,
     }
 }
 
@@ -141,7 +142,7 @@ pub async fn execute_model_query_from_json(
     shape_json: &str,
 ) -> Result<super::types::ModelQueryResult, Error> {
     let (resolver, shape) = StaticShapeResolver::from_json(class_name, shape_json)?;
-    super::query::execute_model_query(store, shape.as_ref(), query_input, &resolver).await
+    super::query::execute_model_query(store, shape.as_ref(), query_input, &resolver, None).await
 }
 
 /// Test wrapper for `evaluate_getters_batch` that takes shape JSON.
