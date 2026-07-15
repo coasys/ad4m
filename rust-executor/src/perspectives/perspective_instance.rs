@@ -5116,7 +5116,8 @@ impl PerspectiveInstance {
                     self.uuid,
                     changed_preds
                 );
-                self.check_subscribed_queries(changed_preds, changed_graphs).await;
+                self.check_subscribed_queries(changed_preds, changed_graphs)
+                    .await;
             }
 
             // Periodic subscription logging and proactive timeout cleanup
@@ -6436,6 +6437,7 @@ mod tests {
         for (i, (s, p, t)) in triples.iter().enumerate() {
             let link = DecoratedLinkExpression {
                 author: "did:key:test".into(),
+                graph: None,
                 timestamp: format!("17000000000{:02}", i),
                 data: Link {
                     source: s.to_string(),
@@ -6458,7 +6460,7 @@ mod tests {
             board
         );
         let result_json = perspective
-            .model_query("TaskBoard", &query_json)
+            .model_query("TaskBoard", &query_json, None)
             .await
             .expect("model_query");
         let result: serde_json::Value = serde_json::from_str(&result_json).expect("parse result");
@@ -6535,6 +6537,7 @@ mod tests {
         ] {
             let link = DecoratedLinkExpression {
                 author: "did:key:test".into(),
+                graph: None,
                 timestamp: "1700000000000".into(),
                 data: Link {
                     source: src.to_string(),
@@ -6557,7 +6560,7 @@ mod tests {
             post_root
         );
         let result_json = perspective
-            .model_query("BlogPost", &query_json)
+            .model_query("BlogPost", &query_json, None)
             .await
             .expect("model_query");
         let result: serde_json::Value = serde_json::from_str(&result_json).expect("parse result");
@@ -6633,7 +6636,7 @@ mod tests {
 
         // First query warms the cache (load_shape fires once).
         let result_json = perspective
-            .model_query("Recipe", "{}")
+            .model_query("Recipe", "{}", None)
             .await
             .expect("first query");
         assert!(result_json.contains("\"instances\""));
@@ -6669,6 +6672,7 @@ mod tests {
                 LinkStatus::Shared,
                 Some(batch_id.clone()),
                 &AgentContext::main_agent(),
+                None,
             )
             .await
             .unwrap();
@@ -6737,7 +6741,13 @@ mod tests {
         for _ in 0..50 {
             let link = create_link();
             perspective
-                .add_link(link, LinkStatus::Local, None, &AgentContext::main_agent())
+                .add_link(
+                    link,
+                    LinkStatus::Local,
+                    None,
+                    &AgentContext::main_agent(),
+                    None,
+                )
                 .await
                 .unwrap();
         }

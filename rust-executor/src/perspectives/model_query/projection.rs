@@ -229,6 +229,7 @@ pub(super) async fn resolve_projections(
                                 &sub_query,
                                 resolver,
                                 depth + 1,
+                                graph_iris,
                             ))
                             .await
                             {
