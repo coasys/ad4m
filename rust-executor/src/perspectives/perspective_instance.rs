@@ -3053,6 +3053,52 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// Execute a SPARQL query with optional graph scoping
+    pub fn sparql_query_with_graphs(
+        &self,
+        query: String,
+        graphs: Option<&[String]>,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.sparql_store
+            .query_with_graphs(&query, graphs)
+            .map_err(|e| e.into())
+    }
+
+    /// List all named graph IRIs in this perspective
+    pub fn named_graphs(&self) -> Result<Vec<String>, deno_core::anyhow::Error> {
+        self.sparql_store.named_graphs().map_err(|e| e.into())
+    }
+
+    /// Remove a named graph and all its quads
+    pub fn remove_graph(&self, graph_iri: &str) -> Result<(), deno_core::anyhow::Error> {
+        // 1. Find all subject IRIs within this graph (batch — single query)
+        let subjects_in_graph = self
+            .sparql_store
+            .query_with_graphs(
+                "SELECT DISTINCT ?s WHERE { ?s ?p ?o . FILTER(isIRI(?s)) }",
+                Some(&[graph_iri.to_string()]),
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+
+        // Collect subject IRIs
+        let subject_iris: Vec<String> =
+            serde_json::from_str::<Vec<serde_json::Value>>(&subjects_in_graph)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|v| v["s"].as_str().map(|s| s.to_string()))
+                .collect();
+
+        // 2. Remove the named graph and all its quads (fast — single oxigraph op)
+        self.sparql_store.remove_named_graph_and_quads(graph_iri)?;
+
+        // 3. Batch-remove incoming links from other graphs targeting deleted subjects
+        //    (single SPARQL query with VALUES clause, not N individual queries)
+        self.sparql_store
+            .remove_links_targeting_subjects(&subject_iris)?;
+
+        Ok(())
+    }
+
     /// Execute a model query — the executor-side replacement for
     /// SPARQL-build → hydrate → JS-filter → JS-sort → JS-paginate.
     pub async fn model_query(
