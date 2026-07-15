@@ -93,8 +93,8 @@ What each step does:
 
 - **Create / update** writes the channel's links into `ad4m://graph/<channel.id>`.
 - **Child instances** added with a `parent` land in the *parent's* graph — messages live alongside their channel.
-- **Parent-scoped queries** on a graph-rooted parent are automatically restricted to that parent's graph, so the scan stays proportional to the channel, not the Perspective.
-- **Delete** takes an O(1) fast path: the whole graph is dropped in one operation.
+- **Parent-scoped queries** on a graph-rooted parent are automatically restricted to that parent's graph.
+- **Delete** drops the whole graph in one operation.
 
 <Callout type="info" emoji="ℹ️">
   Only `@Model` takes the `graph` option — not `@Property` or the relation decorators (`@HasMany`, `@HasOne`, …). A model roots **one** graph, and all of its properties and child relations live inside it. This keeps the mental model simple: one instance, one graph.
@@ -172,7 +172,7 @@ const messages = await perspective.querySparql(`
 ]);
 ```
 
-The same query *without* the second argument scans the whole Perspective. Scoping keeps the cost proportional to the size of the named graphs rather than the whole store — the more channels a Perspective holds, the larger that difference gets.
+The same query *without* the second argument scans the whole Perspective.
 
 ### Dataset resolution priority
 
@@ -206,7 +206,7 @@ With model classes you rarely call these directly — a parent-scoped query on a
 await Message.query(perspective).parent(channel).get();
 ```
 
-Subscriptions scoped to a graph only re-evaluate when that graph changes, so watching one channel doesn't wake up on writes to unrelated channels — the subscription cost tracks the collection, not the Perspective.
+Subscriptions scoped to a graph only re-evaluate when that graph changes.
 
 ## Under the Hood
 
@@ -217,18 +217,9 @@ Subscriptions scoped to a graph only re-evaluate when that graph changes, so wat
 
 ## When to Use Named Graphs
 
-**Reach for named graphs when:**
+Use named graphs when a Perspective holds many independent collections with their own lifecycle — channels, documents, boards — that you delete, query, or subscribe to one at a time. Skip them when the Perspective is small or flat, or the data has no natural partition.
 
-- A Perspective holds many independent collections with their own lifecycle — channels, documents, boards, threads.
-- You bulk-delete whole collections and want that to stay cheap as data grows.
-- You frequently query or subscribe to one collection at a time and want it to scale with the collection, not the Perspective.
-
-**Don't bother when:**
-
-- The Perspective is small or flat — the default graph is simpler and just as fast.
-- Your data has no natural partition — forcing one adds ceremony without benefit.
-
-Because named graphs are opt-in per model class (and per link), you can introduce them exactly where they pay off and leave the rest of your schema unchanged.
+They're opt-in per model class and per link, so you can introduce them exactly where they pay off and leave the rest of your schema unchanged.
 
 ## API Reference
 
