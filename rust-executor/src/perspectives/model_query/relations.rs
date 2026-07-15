@@ -140,15 +140,11 @@ pub(super) async fn resolve_includes_recursive(
         };
 
         if rel.direction == "reverse" {
-            resolve_reverse_include(
-                store, instances, rel, &sub_query, resolver, depth, graph_iris,
-            )
-            .await?;
+            resolve_reverse_include(store, instances, rel, &sub_query, resolver, depth, graph_iris)
+                .await?;
         } else {
-            resolve_forward_include(
-                store, instances, rel, &sub_query, resolver, depth, graph_iris,
-            )
-            .await?;
+            resolve_forward_include(store, instances, rel, &sub_query, resolver, depth, graph_iris)
+                .await?;
         }
     }
     Ok(())

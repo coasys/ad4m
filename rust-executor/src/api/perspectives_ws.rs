@@ -560,9 +560,7 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
             // so it doesn't block the async runtime or hang indefinitely.
             let result = tokio::time::timeout(
                 Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-                tokio::task::spawn_blocking(move || {
-                    perspective.sparql_query_with_graphs(query, graphs.as_deref())
-                }),
+                tokio::task::spawn_blocking(move || perspective.sparql_query_with_graphs(query, graphs.as_deref())),
             )
             .await;
 
