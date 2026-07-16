@@ -1,10 +1,12 @@
 pub mod memory_diagnostics;
 pub mod migration;
 pub mod model_query;
+pub mod mount_table;
 pub mod perspective_instance;
 pub mod sdna;
 pub mod shacl_parser;
 pub mod shacl_to_prolog;
+pub mod snapshot_proof;
 pub mod sparql_store;
 pub mod utils;
 use crate::types::{

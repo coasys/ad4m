@@ -38,6 +38,11 @@ export * from './shacl/NodeExpression'
 export * from './shacl/builders'
 export { fileToDataUri } from './shacl/index'
 export * from "./generated/api";
+// Graph-expression-duality snapshot types (excluded from the generated/api barrel,
+// which only re-exports *Request types to avoid clashing with hand-written domain classes).
+export type { SnapshotProof } from "./generated/api/SnapshotProof";
+export type { MountedGraphEntry } from "./generated/api/MountedGraphEntry";
+export type { TrustLevel } from "./generated/api/TrustLevel";
 export { RpcError } from "./apiClient";
 /** @deprecated Use `RpcError` instead. */
 export { RpcError as RestError } from "./apiClient";

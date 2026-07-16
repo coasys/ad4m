@@ -109,5 +109,9 @@ pub fn build_expression_rendered(
             name: String::new(),
         },
         icon: Icon { code: None },
+        // Legacy (non-graph) expressions carry no content-hash address and no
+        // snapshot proof bundle; the single `proof` above is authoritative.
+        address: String::new(),
+        snapshot_proofs: Vec::new(),
     }
 }

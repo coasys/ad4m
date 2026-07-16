@@ -10,6 +10,7 @@ import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
+import { MountedGraphEntry } from "../generated/api/MountedGraphEntry";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -123,6 +124,30 @@ export class PerspectiveClient {
 
     async namedGraphs(uuid: string): Promise<string[]> {
         return this.#apiClient.call<string[]>('perspective.namedGraphs', { uuid })
+    }
+
+    async getGraphAsExpression(uuid: string, subject: string, format?: string): Promise<ExpressionRendered> {
+        return this.#apiClient.call<ExpressionRendered>('perspective.getGraphAsExpression', { uuid, subject, format: format ?? null })
+    }
+
+    async graphContentHash(uuid: string, subject: string): Promise<string> {
+        return this.#apiClient.call<string>('perspective.graphContentHash', { uuid, subject })
+    }
+
+    async getGraphExpression(uuid: string, address: string): Promise<ExpressionRendered> {
+        return this.#apiClient.call<ExpressionRendered>('perspective.getGraphExpression', { uuid, address })
+    }
+
+    async mountExpression(uuid: string, uri: string): Promise<string> {
+        return this.#apiClient.call<string>('perspective.mountExpression', { uuid, uri })
+    }
+
+    async unmountGraph(uuid: string, graphIri: string): Promise<void> {
+        await this.#apiClient.call<boolean>('perspective.unmountGraph', { uuid, graphIri })
+    }
+
+    async mountedGraphs(uuid: string): Promise<MountedGraphEntry[]> {
+        return this.#apiClient.call<MountedGraphEntry[]>('perspective.mountedGraphs', { uuid })
     }
 
     async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult }> {

@@ -286,6 +286,19 @@ impl AgentService {
     pub fn init_global_test_instance() {
         let mut agent_instance = AGENT_SERVICE.lock().unwrap();
 
+        // Init-once: every test shares a single stable global agent. Re-generating
+        // the keypair on each call raced parallel tests that resolve
+        // `main_agent()` across a sign/verify boundary — one test's setup could
+        // swap the global key mid-run, so a proof signed under key A recorded
+        // signer B and failed verification. A stable agent removes the race.
+        if agent_instance
+            .as_ref()
+            .map(|a| a.agent.is_some())
+            .unwrap_or(false)
+        {
+            return;
+        }
+
         *agent_instance = Some(AgentService {
             did: None,
             did_document: None,

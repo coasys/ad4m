@@ -1069,6 +1069,136 @@ async fn model_subscribe_handler(
     }))?)
 }
 
+// ── Graph ↔ Expression duality ──
+
+/// Export a graph-backed subject as a content-hash-addressed `ExpressionRendered`.
+/// `format` defaults to `nquads-canonical`. The snapshot is signed by the calling
+/// agent's DID.
+async fn get_graph_as_expression(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let subject = params.require_str("subject")?;
+    let format = crate::perspectives::sparql_store::GraphDumpFormat::parse(
+        &params
+            .opt_str("format")
+            .unwrap_or_else(|| "nquads-canonical".to_string()),
+    )
+    .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let rendered = perspective
+        .get_graph_as_expression(&subject, format, &agent_context)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(serde_json::to_value(rendered)?)
+}
+
+/// Bare content hash of a graph-backed subject's current triples. The
+/// content-hash IRI is `"graph://" + hash`.
+async fn graph_content_hash(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let subject = params.require_str("subject")?;
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let hash = perspective
+        .graph_content_hash(&subject)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::String(hash))
+}
+
+/// Serve a locally-held graph snapshot by its content-hash IRI. A
+/// `graph://<hash>` the node does not hold is a not-found error.
+async fn get_graph_expression(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let address = params.require_str("address")?;
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let rendered = perspective
+        .get_graph_expression(&address)
+        .map_err(|e| WsRpcError::not_found(e.to_string()))?;
+
+    Ok(serde_json::to_value(rendered)?)
+}
+
+/// Materialise a locally-held snapshot (resolved via `getGraphExpression`) into a
+/// named graph keyed by its content-hash IRI. Returns the mounted
+/// `graph://<hash>` IRI.
+async fn mount_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let uri = params.require_str("uri")?;
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let expr = perspective
+        .get_graph_expression(&uri)
+        .map_err(|e| WsRpcError::not_found(e.to_string()))?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let iri = perspective
+        .mount_expression(&uri, &expr, None, &agent_context)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::String(iri))
+}
+
+/// Remove a mounted graph's triples and deregister it locally. Idempotent.
+async fn unmount_graph(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let graph_iri = params.require_str("graphIri")?;
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    perspective
+        .unmount_graph(&graph_iri)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(true))
+}
+
+/// List the content-hash-addressed graphs this perspective holds, with
+/// provenance, trust level, and proof bundle.
+async fn mounted_graphs(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    Ok(serde_json::to_value(perspective.mounted_graphs())?)
+}
+
 // ── Registration ──
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -1106,4 +1236,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.evaluateGetters", evaluate_getters_handler);
     map.register("perspective.namedGraphs", named_graphs);
     map.register("perspective.removeNamedGraph", remove_named_graph);
+    map.register("perspective.getGraphAsExpression", get_graph_as_expression);
+    map.register("perspective.graphContentHash", graph_content_hash);
+    map.register("perspective.getGraphExpression", get_graph_expression);
+    map.register("perspective.mountExpression", mount_expression);
+    map.register("perspective.unmountGraph", unmount_graph);
+    map.register("perspective.mountedGraphs", mounted_graphs);
 }

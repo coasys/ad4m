@@ -175,6 +175,63 @@ pub struct ExpressionRendered {
     pub language: LanguageRef,
     pub proof: DecoratedExpressionProof,
     pub timestamp: String,
+    /// Content-hash IRI (`graph://<hash>`) of a graph snapshot. Empty for
+    /// non-graph expressions. Additive + backward-readable: legacy payloads
+    /// without this field deserialize to the empty string.
+    #[serde(default)]
+    pub address: String,
+    /// Snapshot proof bundle. Present on graph snapshots; the legacy single
+    /// `proof` above remains the fallback for non-graph expressions and legacy
+    /// senders.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snapshot_proofs: Vec<SnapshotProof>,
+}
+
+/// A single signature over a graph snapshot's content-hash IRI + timestamp. The
+/// payload signed is `"{graphContentHashIri}\n{timestamp}"`. The signer is
+/// identified by `signer_did` alone: AD4M treats individual agents and groups
+/// (graphs that carry their own DID) identically, so a proof is verified against
+/// its DID's document regardless of what kind of identity that DID denotes.
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SnapshotProof {
+    pub signer_did: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key_id: Option<String>,
+    pub signature: String,
+    pub timestamp: String,
+}
+
+/// Trust classification for a graph the local node holds or has mounted.
+/// `local` = produced here; `external` = mounted from a remote source with a
+/// verified proof bundle.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export)]
+pub enum TrustLevel {
+    #[default]
+    Local,
+    MountedRead,
+    External,
+    Cached,
+}
+
+/// An entry in the in-memory mount table: a content-hash-addressed graph the
+/// node holds, its provenance, and the proof bundle that justified its trust
+/// level.
+#[derive(Default, Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct MountedGraphEntry {
+    pub graph_iri: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_did: Option<String>,
+    pub source: String,
+    pub trust_level: TrustLevel,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snapshot_proofs: Vec<SnapshotProof>,
+    pub mounted_at: String,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]

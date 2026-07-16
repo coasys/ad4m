@@ -1,5 +1,6 @@
 import { Icon } from "../language/Icon";
 import { LanguageRef } from "../language/LanguageRef";
+import { SnapshotProof } from "../generated/api/SnapshotProof";
 
 type ClassType<T = any> = new (...args: any[]) => T;
 
@@ -52,6 +53,8 @@ export class Expression extends ExpressionGeneric(Object) {};
 export class ExpressionRendered extends ExpressionGeneric(String) {
     language: LanguageRef
     icon: Icon
+    address?: string
+    snapshotProofs?: SnapshotProof[]
 };
 
 export function isExpression(e: any): boolean {
