@@ -17,6 +17,3 @@ packages:
   - '!**/test/**'
 hoist: false
 public-hoist-pattern: '!core'
-overrides:
-  core:
-    hoist: false
