@@ -452,13 +452,17 @@ export async function graphSetHead(
 }
 
 export async function graphCurrentRevision(graphId: string): Promise<string | null> {
-    const result = await holochainCall(dnaRole, zomeName, "get_graph_head", graphId);
-    return (result as string) || null;
+    const result: any = await holochainCall(dnaRole, zomeName, "get_graph_head", graphId);
+    return result?.commit_iri || null;
 }
 
-export async function graphHeads(): Promise<[string, string][]> {
-    const result = await holochainCall(dnaRole, zomeName, "get_all_graph_heads", null);
-    return (result as [string, string][]) || [];
+export async function graphHeads(): Promise<{ graphId: string; commitIri: string; parentIris: string[] }[]> {
+    const result: any[] = (await holochainCall(dnaRole, zomeName, "get_all_graph_heads", null)) as any[] || [];
+    return result.map((entry: any) => ({
+        graphId: entry.graph_id,
+        commitIri: entry.commit_iri,
+        parentIris: entry.parent_iris || [],
+    }));
 }
 
 // =============================================================================

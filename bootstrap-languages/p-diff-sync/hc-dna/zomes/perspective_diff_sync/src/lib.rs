@@ -6,8 +6,8 @@ use inputs::PullArguments;
 use lazy_static::lazy_static;
 
 use perspective_diff_sync_integrity::{
-    CommitInput, HashBroadcast, HashReference, OnlineAgent, OnlineAgentAndAction, Perspective,
-    PerspectiveDiff, PerspectiveDiffEntryReference, PerspectiveExpression, PullResult,
+    CommitInput, GraphHeadEntry, HashBroadcast, HashReference, OnlineAgent, OnlineAgentAndAction,
+    Perspective, PerspectiveDiff, PerspectiveDiffEntryReference, PerspectiveExpression, PullResult,
     RoutedSignalPayload, SetGraphHeadInput,
 };
 
@@ -105,13 +105,13 @@ pub fn set_graph_head(input: SetGraphHeadInput) -> ExternResult<()> {
 }
 
 #[hdk_extern]
-pub fn get_graph_head(graph_id: String) -> ExternResult<Option<String>> {
+pub fn get_graph_head(graph_id: String) -> ExternResult<Option<GraphHeadEntry>> {
     graph_heads::get_graph_head(graph_id)
         .map_err(|error| utils::err(&format!("{}", error)))
 }
 
 #[hdk_extern]
-pub fn get_all_graph_heads(_: ()) -> ExternResult<Vec<(String, String)>> {
+pub fn get_all_graph_heads(_: ()) -> ExternResult<Vec<GraphHeadEntry>> {
     graph_heads::get_all_graph_heads()
         .map_err(|error| utils::err(&format!("{}", error)))
 }

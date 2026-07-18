@@ -34,12 +34,12 @@ pub fn set_graph_head(input: SetGraphHeadInput) -> SocialContextResult<()> {
     Ok(())
 }
 
-pub fn get_graph_head(graph_id: String) -> SocialContextResult<Option<String>> {
+pub fn get_graph_head(graph_id: String) -> SocialContextResult<Option<GraphHeadEntry>> {
     let anchor_hash = hash_entry(&graph_heads_anchor())?;
     let query = LinkQuery::try_new(anchor_hash, LinkTypes::GraphHead)?
         .tag_prefix(LinkTag::new(graph_id.as_bytes()));
 
-    let mut links = get_links(query, GetStrategy::Local)?;
+    let mut links = get_links(query, GetStrategy::Network)?;
     links.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     if let Some(link) = links.first() {
@@ -54,7 +54,7 @@ pub fn get_graph_head(graph_id: String) -> SocialContextResult<Option<String>> {
                             "GraphHeadEntry not found".to_string()
                         ))
                     })?;
-                return Ok(Some(entry.commit_iri));
+                return Ok(Some(entry));
             }
         }
     }
@@ -62,14 +62,14 @@ pub fn get_graph_head(graph_id: String) -> SocialContextResult<Option<String>> {
     Ok(None)
 }
 
-pub fn get_all_graph_heads() -> SocialContextResult<Vec<(String, String)>> {
+pub fn get_all_graph_heads() -> SocialContextResult<Vec<GraphHeadEntry>> {
     let anchor_hash = hash_entry(&graph_heads_anchor())?;
     let query = LinkQuery::try_new(anchor_hash, LinkTypes::GraphHead)?;
 
-    let mut links = get_links(query, GetStrategy::Local)?;
+    let mut links = get_links(query, GetStrategy::Network)?;
     links.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
-    let mut heads: Vec<(String, String)> = Vec::new();
+    let mut heads: Vec<GraphHeadEntry> = Vec::new();
     let mut seen_graphs: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for link in links {
@@ -77,7 +77,7 @@ pub fn get_all_graph_heads() -> SocialContextResult<Vec<(String, String)>> {
             if let Some(record) = get(target, GetOptions::default())? {
                 if let Ok(Some(entry)) = record.entry().to_app_option::<GraphHeadEntry>() {
                     if seen_graphs.insert(entry.graph_id.clone()) {
-                        heads.push((entry.graph_id, entry.commit_iri));
+                        heads.push(entry);
                     }
                 }
             }
