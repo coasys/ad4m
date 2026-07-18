@@ -32,6 +32,9 @@ pub enum Capability {
     TelepresenceSendBroadcast,
     LanguageGetSource,
     HolochainSignal,
+    GraphSetHead,
+    GraphCurrentRevision,
+    GraphHeads,
 }
 
 impl Capability {
@@ -53,6 +56,9 @@ impl Capability {
             "telepresence-send-broadcast" => Some(Capability::TelepresenceSendBroadcast),
             "language-get-source" => Some(Capability::LanguageGetSource),
             "holochain-signal" => Some(Capability::HolochainSignal),
+            "graph-set-head" => Some(Capability::GraphSetHead),
+            "graph-current-revision" => Some(Capability::GraphCurrentRevision),
+            "graph-heads" => Some(Capability::GraphHeads),
             _ => None,
         }
     }

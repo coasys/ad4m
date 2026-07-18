@@ -426,6 +426,9 @@ impl LanguageRuntime {
                                                 Capability::TelepresenceSendBroadcast => "telepresence-send-broadcast",
                                                 Capability::LanguageGetSource => "language-get-source",
                                                 Capability::HolochainSignal => "holochain-signal",
+                                                Capability::GraphSetHead => "graph-set-head",
+                                                Capability::GraphCurrentRevision => "graph-current-revision",
+                                                Capability::GraphHeads => "graph-heads",
                                             }).collect();
                                             serde_json::to_string(&names).map_err(|e| e.to_string())
                                         })

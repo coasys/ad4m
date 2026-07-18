@@ -125,6 +125,27 @@ pub trait LanguageSourceCapability: Language {
     ) -> impl std::future::Future<Output = LanguageResult<String>>;
 }
 
+/// Per-graph commit capability — storing graph DAG heads. SPEC_8 §5.
+///
+/// The link language tracks per-graph head pointers for replication.
+/// The executor computes diffs and commit hashes (it has the SPARQL store),
+/// then delegates head storage to the link language so heads replicate
+/// to peers via the normal sync protocol.
+pub trait GraphCommitCapability: Language {
+    fn graph_set_head(
+        &mut self,
+        graph_id: &str,
+        commit_iri: &str,
+        parent_iris: &[String],
+    ) -> LanguageResult<()>;
+}
+
+/// Per-graph sync capability — head queries. SPEC_8 §5.
+pub trait GraphSyncCapability: Language {
+    fn graph_current_revision(&mut self, graph_id: &str) -> LanguageResult<Option<String>>;
+    fn graph_heads(&mut self) -> LanguageResult<Vec<(String, String)>>;
+}
+
 /// Optional Holochain signal handler. Auto-wired when the language
 /// declares `holochain_signal` in the `ad4m_language!` macro.
 pub trait HolochainSignalHandler: Language {

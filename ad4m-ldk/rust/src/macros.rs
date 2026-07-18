@@ -254,6 +254,40 @@ macro_rules! __ad4m_cap {
         }
     };
 
+    (graph_commit, $lang:ty) => {
+        #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "graphSetHead")]
+        pub fn __ad4m_graph_set_head(
+            graph_id: String,
+            commit_iri: String,
+            parent_iris: ::wasm_bindgen::JsValue,
+        ) -> ::std::result::Result<(), ::wasm_bindgen::JsValue> {
+            let parents: Vec<String> = ::serde_wasm_bindgen::from_value(parent_iris)
+                .map_err($crate::errors::LanguageError::from)?;
+            __ad4m_with(|l| <$lang as $crate::traits::GraphCommitCapability>::graph_set_head(l, &graph_id, &commit_iri, &parents))?;
+            Ok(())
+        }
+    };
+
+    (graph_sync, $lang:ty) => {
+        #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "graphCurrentRevision")]
+        pub fn __ad4m_graph_current_revision(
+            graph_id: String,
+        ) -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
+            let r = __ad4m_with(|l| <$lang as $crate::traits::GraphSyncCapability>::graph_current_revision(l, &graph_id))?;
+            Ok(match r {
+                Some(s) => ::wasm_bindgen::JsValue::from_str(&s),
+                None => ::wasm_bindgen::JsValue::NULL,
+            })
+        }
+        #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "graphHeads")]
+        pub fn __ad4m_graph_heads()
+            -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue>
+        {
+            let v = __ad4m_with(|l| <$lang as $crate::traits::GraphSyncCapability>::graph_heads(l))?;
+            Ok($crate::__serde::to_js(&v).map_err($crate::errors::LanguageError::from)?)
+        }
+    };
+
     (telepresence, $lang:ty) => {
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "telepresenceSetOnlineStatus")]
         pub fn __ad4m_telepresence_set_online_status(
