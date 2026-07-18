@@ -3152,7 +3152,6 @@ impl PerspectiveInstance {
         context: &AgentContext,
     ) -> Result<ExpressionRendered, AnyError> {
         use crate::perspectives::commit::{commit_iri, compute_diff};
-        use crate::perspectives::sparql_store::GraphDumpFormat;
         use crate::types::GraphDiff;
 
         let partition_iri = crate::perspectives::sparql_store::make_graph_iri(subject_base);
@@ -3199,7 +3198,6 @@ impl PerspectiveInstance {
         let snapshot_proofs =
             crate::perspectives::snapshot_proof::build_proof_bundle(&address, &timestamp, context)?;
 
-        let parents_for_lang = parent_iris.clone();
         let parents = if parent_iris.is_empty() {
             None
         } else {
@@ -3230,25 +3228,6 @@ impl PerspectiveInstance {
             .write()
             .unwrap()
             .insert(address.clone(), rendered.clone());
-
-        {
-            let link_lang = self.link_language.clone();
-            let graph_id = subject_base.to_string();
-            let commit_iri = address.clone();
-            let parents_for_lang = parents_for_lang;
-            tokio::spawn(async move {
-                let guard = link_lang.read().await;
-                if let Some(mut lang) = guard.clone() {
-                    drop(guard);
-                    if let Err(e) = lang
-                        .graph_set_head(&graph_id, &commit_iri, &parents_for_lang)
-                        .await
-                    {
-                        log::warn!("graph_set_head delegation failed: {e}");
-                    }
-                }
-            });
-        }
 
         Ok(rendered)
     }

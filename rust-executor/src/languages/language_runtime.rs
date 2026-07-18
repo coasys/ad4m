@@ -314,9 +314,6 @@ impl LanguageRuntime {
                 if (typeof language.telepresenceSendBroadcast === "function") caps.push("telepresence-send-broadcast");
                 if (typeof language.languageGetSource === "function") caps.push("language-get-source");
                 if (typeof language.handleHolochainSignal === "function") caps.push("holochain-signal");
-                if (typeof language.graphSetHead === "function") caps.push("graph-set-head");
-                if (typeof language.graphCurrentRevision === "function") caps.push("graph-current-revision");
-                if (typeof language.graphHeads === "function") caps.push("graph-heads");
                 return JSON.stringify(caps);
             })()
         "#;
@@ -429,9 +426,6 @@ impl LanguageRuntime {
                                                 Capability::TelepresenceSendBroadcast => "telepresence-send-broadcast",
                                                 Capability::LanguageGetSource => "language-get-source",
                                                 Capability::HolochainSignal => "holochain-signal",
-                                                Capability::GraphSetHead => "graph-set-head",
-                                                Capability::GraphCurrentRevision => "graph-current-revision",
-                                                Capability::GraphHeads => "graph-heads",
                                             }).collect();
                                             serde_json::to_string(&names).map_err(|e| e.to_string())
                                         })
