@@ -161,24 +161,6 @@ pub struct PullResult {
     pub current_revision: Option<HoloHash<holo_hash::hash_type::Action>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes)]
-pub struct GraphHeadEntry {
-    pub graph_id: String,
-    pub commit_iri: String,
-    #[serde(default)]
-    pub parent_iris: Vec<String>,
-}
-
-app_entry!(GraphHeadEntry);
-
-#[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes)]
-pub struct SetGraphHeadInput {
-    pub graph_id: String,
-    pub commit_iri: String,
-    #[serde(default)]
-    pub parent_iris: Vec<String>,
-}
-
 #[hdk_entry_types]
 #[unit_enum(UnitEntryTypes)]
 pub enum EntryTypes {
@@ -196,8 +178,6 @@ pub enum EntryTypes {
     Anchor(Anchor),
     #[entry_type(visibility = "private")]
     PrivateOnlineStatus(PerspectiveExpression),
-    #[entry_type(visibility = "public")]
-    GraphHeadEntry(GraphHeadEntry),
 }
 
 #[hdk_link_types]
@@ -208,7 +188,6 @@ pub enum LinkTypes {
     TimePath,
     Index,
     DidLink,
-    GraphHead,
 }
 
 impl Anchor {
