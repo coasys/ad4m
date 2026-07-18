@@ -8,10 +8,11 @@ use lazy_static::lazy_static;
 use perspective_diff_sync_integrity::{
     CommitInput, HashBroadcast, HashReference, OnlineAgent, OnlineAgentAndAction, Perspective,
     PerspectiveDiff, PerspectiveDiffEntryReference, PerspectiveExpression, PullResult,
-    RoutedSignalPayload,
+    RoutedSignalPayload, SetGraphHeadInput,
 };
 
 mod errors;
+mod graph_heads;
 mod inputs;
 mod link_adapter;
 mod retriever;
@@ -92,6 +93,26 @@ pub fn pull(args: PullArguments) -> ExternResult<PullResult> {
 #[hdk_extern]
 pub fn render(_: ()) -> ExternResult<Perspective> {
     link_adapter::render::render::<retriever::HolochainRetreiver>()
+        .map_err(|error| utils::err(&format!("{}", error)))
+}
+
+/// Per-graph head tracking — SPEC_8 §5
+
+#[hdk_extern]
+pub fn set_graph_head(input: SetGraphHeadInput) -> ExternResult<()> {
+    graph_heads::set_graph_head(input)
+        .map_err(|error| utils::err(&format!("{}", error)))
+}
+
+#[hdk_extern]
+pub fn get_graph_head(graph_id: String) -> ExternResult<Option<String>> {
+    graph_heads::get_graph_head(graph_id)
+        .map_err(|error| utils::err(&format!("{}", error)))
+}
+
+#[hdk_extern]
+pub fn get_all_graph_heads(_: ()) -> ExternResult<Vec<(String, String)>> {
+    graph_heads::get_all_graph_heads()
         .map_err(|error| utils::err(&format!("{}", error)))
 }
 

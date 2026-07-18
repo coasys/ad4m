@@ -435,6 +435,33 @@ export function linkSyncAddSyncStateChangeCallback(callback: (state: string) => 
 }
 
 // =============================================================================
+// Graph head tracking — SPEC_8 §5
+// Executor computes diffs + hashes; link language stores + replicates heads.
+// =============================================================================
+
+export async function graphSetHead(
+    graphId: string,
+    commitIri: string,
+    parentIris: string[],
+): Promise<void> {
+    await holochainCall(dnaRole, zomeName, "set_graph_head", {
+        graph_id: graphId,
+        commit_iri: commitIri,
+        parent_iris: parentIris,
+    });
+}
+
+export async function graphCurrentRevision(graphId: string): Promise<string | null> {
+    const result = await holochainCall(dnaRole, zomeName, "get_graph_head", graphId);
+    return (result as string) || null;
+}
+
+export async function graphHeads(): Promise<[string, string][]> {
+    const result = await holochainCall(dnaRole, zomeName, "get_all_graph_heads", null);
+    return (result as [string, string][]) || [];
+}
+
+// =============================================================================
 // PerspectiveDiff — returned by perspectiveSync.sync()
 // =============================================================================
 
