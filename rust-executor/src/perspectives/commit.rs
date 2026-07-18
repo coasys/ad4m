@@ -53,34 +53,39 @@ pub fn compute_diff(old_triples: &[String], new_triples: &[String]) -> GraphDiff
     }
 }
 
-pub struct GraphHead {
-    pub commit_iri: String,
-    pub triples: Vec<String>,
+struct CachedGraphState {
+    commit_iri: String,
+    triples: Vec<String>,
 }
 
-pub struct HeadTable {
-    heads: RwLock<HashMap<String, GraphHead>>,
+/// In-memory cache mirroring the per-graph head state that the link language
+/// owns authoritatively (SPEC_8 §5).  `get_graph_as_expression` is sync but
+/// link-language calls are async, so this cache avoids a context switch on
+/// every diff computation.  It is populated after each commit and seeded from
+/// the link language on perspective init when an async context is available.
+pub struct GraphDiffCache {
+    state: RwLock<HashMap<String, CachedGraphState>>,
 }
 
-impl HeadTable {
+impl GraphDiffCache {
     pub fn new() -> Self {
         Self {
-            heads: RwLock::new(HashMap::new()),
+            state: RwLock::new(HashMap::new()),
         }
     }
 
     pub fn get(&self, subject_base: &str) -> Option<(String, Vec<String>)> {
-        self.heads
+        self.state
             .read()
             .unwrap()
             .get(subject_base)
-            .map(|h| (h.commit_iri.clone(), h.triples.clone()))
+            .map(|s| (s.commit_iri.clone(), s.triples.clone()))
     }
 
     pub fn set(&self, subject_base: &str, commit_iri: String, triples: Vec<String>) {
-        self.heads.write().unwrap().insert(
+        self.state.write().unwrap().insert(
             subject_base.to_string(),
-            GraphHead {
+            CachedGraphState {
                 commit_iri,
                 triples,
             },
@@ -168,15 +173,15 @@ mod tests {
     }
 
     #[test]
-    fn head_table_get_set() {
-        let table = HeadTable::new();
-        assert!(table.get("foo").is_none());
-        table.set(
+    fn graph_diff_cache_get_set() {
+        let cache = GraphDiffCache::new();
+        assert!(cache.get("foo").is_none());
+        cache.set(
             "foo",
             "graph://abc".to_string(),
             vec!["<a> <b> <c> .".to_string()],
         );
-        let (iri, triples) = table.get("foo").unwrap();
+        let (iri, triples) = cache.get("foo").unwrap();
         assert_eq!(iri, "graph://abc");
         assert_eq!(triples, vec!["<a> <b> <c> ."]);
     }

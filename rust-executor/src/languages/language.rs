@@ -345,7 +345,7 @@ impl Language {
         parse_revision(result)
     }
 
-    pub async fn graph_heads(&mut self) -> Result<Vec<(String, String)>, AnyError> {
+    pub async fn graph_heads(&mut self) -> Result<Vec<crate::types::GraphHeadInfo>, AnyError> {
         if !self.has(Capability::GraphHeads) {
             return Ok(Vec::new());
         }
@@ -356,7 +356,7 @@ impl Language {
             .execute_on_language(&self.address, script)
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        let heads: Vec<(String, String)> = serde_json::from_str(&result)?;
+        let heads: Vec<crate::types::GraphHeadInfo> = serde_json::from_str(&result)?;
         Ok(heads)
     }
 }

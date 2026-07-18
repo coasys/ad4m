@@ -352,8 +352,9 @@ pub struct PerspectiveInstance {
     /// Mount metadata for content-hash-addressed graph snapshots this
     /// perspective holds. Keyed by content-hash IRI.
     graph_mounts: Arc<crate::perspectives::mount_table::MountTable>,
-    /// Per-subject head tracking for diff-DAG commit addressing.
-    head_table: Arc<crate::perspectives::commit::HeadTable>,
+    /// Per-subject diff-computation cache (non-authoritative; link language
+    /// owns the canonical heads per SPEC_8 §5).
+    graph_diff_cache: Arc<crate::perspectives::commit::GraphDiffCache>,
     /// Snapshots this perspective can serve via `get_graph_expression`:
     /// populated on export and on mount, keyed by
     /// content-hash IRI. Session-scoped, non-persistent — matches the mount
@@ -422,7 +423,7 @@ impl PerspectiveInstance {
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            head_table: Arc::new(crate::perspectives::commit::HeadTable::new()),
+            graph_diff_cache: Arc::new(crate::perspectives::commit::GraphDiffCache::new()),
             graph_mounts: Arc::new(crate::perspectives::mount_table::MountTable::new()),
             graph_snapshots: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
@@ -3165,7 +3166,7 @@ impl PerspectiveInstance {
 
         let snapshot_hash = self.sparql_store.content_hash(&partition_iri)?;
 
-        let (diff, parent_iris) = match self.head_table.get(subject_base) {
+        let (diff, parent_iris) = match self.graph_diff_cache.get(subject_base) {
             Some((prev_iri, prev_triples)) => {
                 let d = compute_diff(&prev_triples, &current_triples);
                 (d, vec![prev_iri])
@@ -3222,7 +3223,7 @@ impl PerspectiveInstance {
             snapshot_hash: Some(snapshot_hash),
         };
 
-        self.head_table
+        self.graph_diff_cache
             .set(subject_base, address.clone(), current_triples);
 
         self.graph_snapshots

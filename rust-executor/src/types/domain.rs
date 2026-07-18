@@ -201,6 +201,17 @@ pub struct GraphDiff {
     pub removals: Vec<String>,
 }
 
+/// Per-graph head entry returned by `graphHeads()` from the link language.
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct GraphHeadInfo {
+    pub graph_id: String,
+    pub commit_iri: String,
+    #[serde(default)]
+    pub parent_iris: Vec<String>,
+}
+
 /// A single signature over a commit IRI + timestamp. The payload signed is
 /// `"{commitIri}\n{timestamp}"`. The signer is identified by `signer_did`
 /// alone: AD4M treats individual agents and groups (graphs that carry their
