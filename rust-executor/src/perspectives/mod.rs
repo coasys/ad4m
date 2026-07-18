@@ -1,3 +1,4 @@
+pub mod commit;
 pub mod memory_diagnostics;
 pub mod migration;
 pub mod model_query;

@@ -3,8 +3,7 @@ import type { SnapshotProof } from "./SnapshotProof";
 import type { TrustLevel } from "./TrustLevel";
 
 /**
- * An entry in the in-memory mount table: a content-hash-addressed
- * graph the node holds, its provenance, and the proof bundle that justified its
- * trust level.
+ * An entry in the in-memory mount table: a commit-addressed graph the node
+ * holds, its provenance, and the proof bundle that justified its trust level.
  */
-export type MountedGraphEntry = { graphIri: string, graphDid?: string | null, source: string, trustLevel: TrustLevel, snapshotProofs?: Array<SnapshotProof>, mountedAt: string, };
+export type MountedGraphEntry = { graphIri: string, graphDid?: string | null, source: string, trustLevel: TrustLevel, snapshotProofs?: Array<SnapshotProof>, mountedAt: string, parents?: Array<string> | null, snapshotHash?: string | null, };

@@ -352,6 +352,8 @@ pub struct PerspectiveInstance {
     /// Mount metadata for content-hash-addressed graph snapshots this
     /// perspective holds. Keyed by content-hash IRI.
     graph_mounts: Arc<crate::perspectives::mount_table::MountTable>,
+    /// Per-subject head tracking for diff-DAG commit addressing.
+    head_table: Arc<crate::perspectives::commit::HeadTable>,
     /// Snapshots this perspective can serve via `get_graph_expression`:
     /// populated on export and on mount, keyed by
     /// content-hash IRI. Session-scoped, non-persistent — matches the mount
@@ -420,6 +422,7 @@ impl PerspectiveInstance {
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            head_table: Arc::new(crate::perspectives::commit::HeadTable::new()),
             graph_mounts: Arc::new(crate::perspectives::mount_table::MountTable::new()),
             graph_snapshots: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
@@ -3135,46 +3138,71 @@ impl PerspectiveInstance {
             .map(|s| s.to_string())
     }
 
-    /// Export a graph-backed subject as a content-hash-addressed
-    /// `ExpressionRendered`. Resolves the subject's internal partition
-    /// (`make_graph_iri(base)` — never surfaced), projects and hashes its
-    /// label-excluded triples into the public `graph://<hash>` address,
-    /// serialises the bytes in `format`, derives author/timestamp from the
-    /// graph's self-describing triples (falling back to the snapshotting agent /
-    /// now), signs a proof bundle with the current DID, and caches the snapshot
-    /// so `get_graph_expression` can serve it.
+    /// Export a graph-backed subject as a diff-DAG commit addressed by
+    /// `graph://<hash(diff, parents)>`. Computes a `GraphDiff` against the
+    /// previous head (genesis if first export), derives the commit IRI,
+    /// advances the head pointer, and returns an `ExpressionRendered` carrying
+    /// the serialised bytes, the diff, parent references, and a snapshot hash
+    /// for integrity verification.
     pub fn get_graph_as_expression(
         &self,
         subject_base: &str,
         format: crate::perspectives::sparql_store::GraphDumpFormat,
         context: &AgentContext,
     ) -> Result<ExpressionRendered, AnyError> {
+        use crate::perspectives::commit::{commit_iri, compute_diff};
+        use crate::perspectives::sparql_store::GraphDumpFormat;
+        use crate::types::GraphDiff;
+
         let partition_iri = crate::perspectives::sparql_store::make_graph_iri(subject_base);
 
-        // Public content-hash address over the label-excluded canonical triple set.
-        let hash = self.sparql_store.content_hash(&partition_iri)?;
-        let address = format!("graph://{hash}");
+        let canonical = self.sparql_store.canonical_ntriples(&partition_iri)?;
+        let current_triples: Vec<String> = canonical
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect();
 
-        // Serialised bytes in the requested format (reifiers preserved).
+        let snapshot_hash = self.sparql_store.content_hash(&partition_iri)?;
+
+        let (diff, parent_iris) = match self.head_table.get(subject_base) {
+            Some((prev_iri, prev_triples)) => {
+                let d = compute_diff(&prev_triples, &current_triples);
+                (d, vec![prev_iri])
+            }
+            None => {
+                let d = GraphDiff {
+                    additions: current_triples.clone(),
+                    removals: vec![],
+                };
+                (d, vec![])
+            }
+        };
+
+        let address = commit_iri(&diff, &parent_iris);
+
         let data = self.sparql_store.dump_graph(&partition_iri, format)?;
 
-        // Author: self-describing creator triple, else the snapshotting agent.
         let author = match self.first_object_in_graph(&partition_iri, Self::GRAPH_CREATOR_PREDICATE)
         {
             Some(creator_did) => creator_did,
             None => did_for_context(context)?,
         };
 
-        // Timestamp: self-describing creation-timestamp triple, else now.
         let timestamp = self
             .first_object_in_graph(&partition_iri, Self::GRAPH_CREATED_AT_PREDICATE)
             .unwrap_or_else(|| {
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
             });
 
-        // Proof bundle binding the content-hash IRI to the snapshotter's DID.
         let snapshot_proofs =
             crate::perspectives::snapshot_proof::build_proof_bundle(&address, &timestamp, context)?;
+
+        let parents = if parent_iris.is_empty() {
+            None
+        } else {
+            Some(parent_iris)
+        };
 
         let rendered = ExpressionRendered {
             author,
@@ -3188,9 +3216,14 @@ impl PerspectiveInstance {
             timestamp,
             address: address.clone(),
             snapshot_proofs,
+            graph_diff: Some(diff),
+            parents,
+            snapshot_hash: Some(snapshot_hash),
         };
 
-        // Cache so `get_graph_expression` can serve this snapshot.
+        self.head_table
+            .set(subject_base, address.clone(), current_triples);
+
         self.graph_snapshots
             .write()
             .unwrap()
@@ -3199,17 +3232,16 @@ impl PerspectiveInstance {
         Ok(rendered)
     }
 
-    /// Bare content hash of a graph-backed subject's current triples. The
-    /// content-hash IRI is `"graph://" + hash`.
+    /// Bare content hash (snapshot hash) of a graph-backed subject's current
+    /// triples. The snapshot hash IRI is `"graph://" + hash`. This is the
+    /// integrity hash, not the commit address.
     pub fn graph_content_hash(&self, subject_base: &str) -> Result<String, AnyError> {
         let partition_iri = crate::perspectives::sparql_store::make_graph_iri(subject_base);
         self.sparql_store.content_hash(&partition_iri)
     }
 
-    /// Serve a locally-held graph snapshot by its content-hash IRI: one this
-    /// node produced this session or materialised as a mount. A `graph://<hash>`
-    /// the node does not hold is a not-found error — remote resolution requires
-    /// a transport/identity layer that is not part of this change.
+    /// Serve a locally-held graph commit by its commit IRI. A `graph://<hash>`
+    /// the node does not hold is a not-found error.
     pub fn get_graph_expression(&self, address: &str) -> Result<ExpressionRendered, AnyError> {
         self.graph_snapshots
             .read()
@@ -3219,14 +3251,12 @@ impl PerspectiveInstance {
             .ok_or_else(|| anyhow!("graph snapshot not held locally: {address}"))
     }
 
-    /// Materialise a verified graph snapshot into a local named graph keyed by
-    /// its content-hash IRI. The proof bundle is verified BEFORE any triples are
-    /// written (an empty bundle rejects as `"unsigned snapshot"`); the
-    /// materialised triples are re-hashed and the graph rolled back on mismatch,
-    /// so a tampered snapshot leaves no partial state. Trust resolves to `local`
-    /// when every proof is signed by `context`'s DID, else `external`. `source`
-    /// is the resolved URI recorded on the mount entry. Returns the mounted
-    /// `graph://<hash>` IRI.
+    /// Materialise a verified graph commit into a local named graph keyed by
+    /// its commit IRI (`graph://<hash(diff, parents)>`). The proof bundle is
+    /// verified BEFORE any triples are written. If a `snapshot_hash` is present,
+    /// the materialised triples are re-hashed and rolled back on mismatch.
+    /// Trust resolves to `local` when every proof is signed by `context`'s DID,
+    /// else `external`. Returns the mounted commit IRI.
     pub fn mount_expression(
         &self,
         source: &str,
@@ -3238,37 +3268,29 @@ impl PerspectiveInstance {
 
         let address = expr.address.trim().to_string();
         if address.is_empty() {
-            return Err(anyhow!("snapshot has no content-hash address"));
+            return Err(anyhow!("commit has no address"));
         }
 
-        // Format from an explicit hint, else the snapshot's language ref
-        // (`language.name` carries the export format).
         let format = match format_hint {
             Some(f) => f,
             None => GraphDumpFormat::parse(&expr.language.name)?,
         };
 
-        // Verify the proof bundle BEFORE touching the store. An empty/absent
-        // bundle or an invalid signature aborts with no state written.
         crate::perspectives::snapshot_proof::verify_proof_bundle(&address, &expr.snapshot_proofs)?;
 
-        // Materialise the triples into the content-hash partition.
         self.sparql_store
             .load_serialized_into_graph(&address, &expr.data, format)?;
 
-        // Re-hash the materialised triples; a mismatch means the bytes did not
-        // hash to the claimed address (tampered data) — roll the graph back so
-        // no partial state remains.
-        let recomputed = format!("graph://{}", self.sparql_store.content_hash(&address)?);
-        if recomputed != address {
-            let _ = self.sparql_store.remove_named_graph_and_quads(&address);
-            return Err(anyhow!(
-                "snapshot content-hash mismatch: claimed {address}, materialised {recomputed}"
-            ));
+        if let Some(expected_hash) = &expr.snapshot_hash {
+            let recomputed = self.sparql_store.content_hash(&address)?;
+            if &recomputed != expected_hash {
+                let _ = self.sparql_store.remove_named_graph_and_quads(&address);
+                return Err(anyhow!(
+                    "snapshot hash mismatch: claimed {expected_hash}, materialised {recomputed}"
+                ));
+            }
         }
 
-        // Trust resolution + mount metadata. Held at the perspective layer,
-        // never written as triples into the graph.
         let mounted_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let local_did = did_for_context(context).ok();
         let all_local = match &local_did {
@@ -3281,6 +3303,8 @@ impl PerspectiveInstance {
                 source.to_string(),
                 expr.snapshot_proofs.clone(),
                 mounted_at,
+                expr.parents.clone(),
+                expr.snapshot_hash.clone(),
             )
         } else {
             crate::perspectives::mount_table::external_entry(
@@ -3288,11 +3312,12 @@ impl PerspectiveInstance {
                 source.to_string(),
                 expr.snapshot_proofs.clone(),
                 mounted_at,
+                expr.parents.clone(),
+                expr.snapshot_hash.clone(),
             )
         };
         self.graph_mounts.insert(entry);
 
-        // Cache so `get_graph_expression` can serve this snapshot.
         self.graph_snapshots
             .write()
             .unwrap()
@@ -3302,18 +3327,15 @@ impl PerspectiveInstance {
     }
 
     /// Remove a mounted graph's triples and deregister it locally. Idempotent —
-    /// a second call is a no-op. Peers holding the same content-hash graph
-    /// through their own mounts are unaffected (removal is purely local). The
-    /// snapshot stays in the `get_graph_expression` cache: it was still held
-    /// this session, and the bytes are independent of whether the triples remain
-    /// materialised.
+    /// a second call is a no-op. The commit stays in the
+    /// `get_graph_expression` cache.
     pub fn unmount_graph(&self, graph_iri: &str) -> Result<(), AnyError> {
         self.sparql_store.remove_named_graph_and_quads(graph_iri)?;
         self.graph_mounts.remove(graph_iri);
         Ok(())
     }
 
-    /// List the content-hash-addressed graphs this perspective holds, with
+    /// List the commit-addressed graphs this perspective holds, with
     /// provenance, trust level, and proof bundle. Sorted by IRI.
     pub fn mounted_graphs(&self) -> Vec<MountedGraphEntry> {
         self.graph_mounts.list()
@@ -7120,12 +7142,11 @@ mod tests {
         json.contains(needle)
     }
 
-    /// Export projects a subject's partition into a public
-    /// `graph://<hash>` address. The internal `ad4m://graph/<base>` partition IRI
-    /// never surfaces — not in the address, not in the serialised bytes — and the
-    /// address equals `graph://` + the bare content hash.
+    /// Export projects a subject's partition into a commit-addressed
+    /// `graph://<hash(diff, parents)>`. The internal `ad4m://graph/<base>` never
+    /// surfaces. The commit IRI differs from the snapshot hash (content hash).
     #[tokio::test]
-    async fn export_is_content_addressed_and_never_surfaces_the_partition_iri() {
+    async fn export_is_commit_addressed_and_never_surfaces_the_partition_iri() {
         let p = setup().await;
         let ctx = AgentContext::main_agent();
         add_graph_link(&p, "doc1", "ad4m://alice", "foaf://knows", "ad4m://bob");
@@ -7136,7 +7157,7 @@ mod tests {
 
         assert!(
             expr.address.starts_with("graph://"),
-            "public address must be content-hash addressed, got {}",
+            "public address must be commit-addressed, got {}",
             expr.address
         );
         assert!(
@@ -7149,10 +7170,32 @@ mod tests {
             expr.data
         );
         let bare = p.graph_content_hash("doc1").expect("bare content hash");
+        let snapshot_hash = expr
+            .snapshot_hash
+            .as_ref()
+            .expect("snapshot_hash must be present");
         assert_eq!(
+            snapshot_hash, &bare,
+            "snapshot_hash carries the content hash"
+        );
+        assert_ne!(
             expr.address,
             format!("graph://{bare}"),
-            "address is graph:// + the bare content hash"
+            "commit IRI differs from content-hash IRI (hash includes diff + parents)"
+        );
+        assert!(
+            expr.graph_diff.is_some(),
+            "genesis export includes a GraphDiff"
+        );
+        let diff = expr.graph_diff.as_ref().unwrap();
+        assert!(
+            !diff.additions.is_empty(),
+            "genesis diff has all triples as additions"
+        );
+        assert!(diff.removals.is_empty(), "genesis diff has no removals");
+        assert!(
+            expr.parents.is_none(),
+            "genesis export has no parent commits"
         );
     }
 
@@ -7208,10 +7251,10 @@ mod tests {
             .expect("fallback timestamp is a valid RFC3339 instant");
     }
 
-    /// Mounting a verified snapshot materialises its triples
-    /// under the content-hash IRI, is queryable, resolves to `local` trust when
-    /// the local agent signed it, carries the proof bundle on the mount entry,
-    /// and never writes the proofs into the graph as triples.
+    /// Mounting a verified commit materialises its triples under the commit IRI,
+    /// is queryable, resolves to `local` trust when the local agent signed it,
+    /// carries the proof bundle + lineage on the mount entry, and never writes
+    /// the proofs into the graph as triples.
     #[tokio::test]
     async fn mount_round_trips_queryable_with_local_trust_and_proofs_off_graph() {
         let p = setup().await;
@@ -7227,11 +7270,11 @@ mod tests {
         let mounted = p
             .mount_expression("ad4m://test/source", &expr, None, &ctx)
             .expect("mount succeeds");
-        assert_eq!(mounted, address, "mount returns the content-hash IRI");
+        assert_eq!(mounted, address, "mount returns the commit IRI");
 
         assert!(
             partition_mentions(&p, &address, "ad4m://alice"),
-            "mounted triples are queryable under the content-hash IRI"
+            "mounted triples are queryable under the commit IRI"
         );
         assert!(
             !partition_mentions(&p, &address, &signature),
@@ -7244,17 +7287,21 @@ mod tests {
         assert_eq!(
             entries[0].trust_level,
             TrustLevel::Local,
-            "self-signed snapshot mounts at local trust"
+            "self-signed commit mounts at local trust"
         );
         assert!(
             !entries[0].snapshot_proofs.is_empty(),
-            "the proof bundle is carried on the mount entry, not the graph"
+            "the proof bundle is carried on the mount entry"
+        );
+        assert!(
+            entries[0].snapshot_hash.is_some(),
+            "snapshot_hash is carried on the mount entry"
         );
     }
 
-    /// An unsigned snapshot is rejected and writes no partial state.
+    /// An unsigned commit is rejected and writes no partial state.
     #[tokio::test]
-    async fn mount_rejects_unsigned_snapshot_with_no_partial_state() {
+    async fn mount_rejects_unsigned_commit_with_no_partial_state() {
         let p = setup().await;
         let ctx = AgentContext::main_agent();
         add_graph_link(&p, "doc1", "ad4m://alice", "foaf://knows", "ad4m://bob");
@@ -7267,9 +7314,9 @@ mod tests {
 
         let err = p
             .mount_expression("ad4m://test/source", &expr, None, &ctx)
-            .expect_err("unsigned snapshot must be rejected")
+            .expect_err("unsigned commit must be rejected")
             .to_string();
-        assert!(err.contains("unsigned snapshot"), "got: {err}");
+        assert!(err.contains("unsigned commit"), "got: {err}");
         assert!(
             !partition_mentions(&p, &address, "ad4m://alice"),
             "a rejected mount must write no partial state"
@@ -7299,11 +7346,11 @@ mod tests {
         );
     }
 
-    /// Bytes that do not hash to the claimed address are detected on
+    /// Bytes that do not match the declared snapshot hash are detected on
     /// re-hash and the graph is rolled back, leaving no partial state — even when
-    /// the proof bundle over the claimed address is itself valid.
+    /// the proof bundle over the commit IRI is itself valid.
     #[tokio::test]
-    async fn mount_rolls_back_on_content_hash_mismatch() {
+    async fn mount_rolls_back_on_snapshot_hash_mismatch() {
         let p = setup().await;
         let ctx = AgentContext::main_agent();
         add_graph_link(&p, "doc1", "ad4m://alice", "foaf://knows", "ad4m://bob");
@@ -7312,24 +7359,21 @@ mod tests {
             .get_graph_as_expression("doc1", GraphDumpFormat::NquadsCanonical, &ctx)
             .expect("export succeeds");
         let address = expr.address.clone();
-        // Keep the valid proof bundle over `address`, but swap the bytes for a
-        // different triple set that hashes to something else.
         expr.data = "<ad4m://mallory> <foaf://knows> <ad4m://eve> .\n".to_string();
 
         let err = p
             .mount_expression("ad4m://test/source", &expr, None, &ctx)
-            .expect_err("content-hash mismatch must be rejected")
+            .expect_err("snapshot hash mismatch must be rejected")
             .to_string();
-        assert!(err.contains("content-hash mismatch"), "got: {err}");
+        assert!(err.contains("snapshot hash mismatch"), "got: {err}");
         assert!(
             !partition_mentions(&p, &address, "ad4m://mallory"),
             "a hash mismatch must roll back — no partial state under the claimed IRI"
         );
     }
 
-    /// Unmount removes the materialised triples and the mount entry,
-    /// is idempotent, and leaves the session snapshot cache intact so the bytes
-    /// remain servable (removal is local to this node's triple store).
+    /// Unmount removes the materialised triples and the mount entry, is
+    /// idempotent, and leaves the session cache intact.
     #[tokio::test]
     async fn unmount_is_idempotent_and_local_and_preserves_the_cached_snapshot() {
         let p = setup().await;
@@ -7360,11 +7404,48 @@ mod tests {
             .expect("the cached snapshot survives unmount");
     }
 
-    /// `get_graph_expression` serves a snapshot the node produced this
-    /// session, and errors for a `graph://` address the node does not hold
-    /// (remote resolution is deferred to a later phase).
+    /// A second export of the same subject advances the head pointer and
+    /// produces a different commit IRI with the first commit as parent.
     #[tokio::test]
-    async fn get_graph_expression_serves_local_snapshot_and_errors_when_not_held() {
+    async fn second_export_advances_head_and_carries_parent() {
+        let p = setup().await;
+        let ctx = AgentContext::main_agent();
+        add_graph_link(&p, "doc1", "ad4m://alice", "foaf://knows", "ad4m://bob");
+
+        let first = p
+            .get_graph_as_expression("doc1", GraphDumpFormat::NquadsCanonical, &ctx)
+            .expect("first export succeeds");
+        let first_iri = first.address.clone();
+
+        add_graph_link(&p, "doc1", "ad4m://alice", "foaf://knows", "ad4m://charlie");
+
+        let second = p
+            .get_graph_as_expression("doc1", GraphDumpFormat::NquadsCanonical, &ctx)
+            .expect("second export succeeds");
+        assert_ne!(
+            second.address, first_iri,
+            "second commit has a different IRI"
+        );
+        let parents = second.parents.as_ref().expect("second commit has parents");
+        assert_eq!(parents, &[first_iri], "parent is the first commit IRI");
+        let diff = second
+            .graph_diff
+            .as_ref()
+            .expect("second commit has a diff");
+        assert!(
+            diff.additions.iter().any(|t| t.contains("ad4m://charlie")),
+            "diff additions include the new triple"
+        );
+        assert!(
+            diff.removals.is_empty(),
+            "no removals in an additive change"
+        );
+    }
+
+    /// `get_graph_expression` serves a commit the node produced this session,
+    /// and errors for a `graph://` address the node does not hold.
+    #[tokio::test]
+    async fn get_graph_expression_serves_local_commit_and_errors_when_not_held() {
         let p = setup().await;
         let ctx = AgentContext::main_agent();
         add_graph_link(&p, "doc1", "ad4m://alice", "foaf://knows", "ad4m://bob");

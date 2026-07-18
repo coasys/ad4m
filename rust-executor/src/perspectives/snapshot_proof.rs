@@ -14,26 +14,26 @@ use crate::agent::{did_for_context, sign_string_hex_for_context, signing_key_id_
 use crate::types::SnapshotProof;
 use deno_core::anyhow::{anyhow, Error};
 
-/// The exact byte string a proof signs: the content-hash IRI and the snapshot
+/// The exact byte string a proof signs: the commit IRI and the commit
 /// timestamp, joined by a single newline. The newline is a hard field separator
 /// so no `(iri, timestamp)` pair can collide with another by shifting the
 /// boundary. Both signing and verification route through this one function, so
 /// the separator choice only has to be internally consistent.
-pub fn signing_payload(graph_content_hash_iri: &str, timestamp: &str) -> String {
-    format!("{graph_content_hash_iri}\n{timestamp}")
+pub fn signing_payload(commit_iri: &str, timestamp: &str) -> String {
+    format!("{commit_iri}\n{timestamp}")
 }
 
-/// Produce the proof bundle for a snapshot being exported. Signs
+/// Produce the proof bundle for a commit being exported. Signs
 /// `signing_payload(iri, timestamp)` with the DID carried by `context` and
-/// returns a single proof. The bundle is a `Vec` because a snapshot may in
+/// returns a single proof. The bundle is a `Vec` because a commit may in
 /// principle carry several co-signatures; export attaches exactly one — the
-/// snapshotter's.
+/// committer's.
 pub fn build_proof_bundle(
-    graph_content_hash_iri: &str,
+    commit_iri: &str,
     timestamp: &str,
     context: &AgentContext,
 ) -> Result<Vec<SnapshotProof>, Error> {
-    let payload = signing_payload(graph_content_hash_iri, timestamp);
+    let payload = signing_payload(commit_iri, timestamp);
     let signature = sign_string_hex_for_context(payload, context)?;
     Ok(vec![SnapshotProof {
         signer_did: did_for_context(context)?,
@@ -43,21 +43,17 @@ pub fn build_proof_bundle(
     }])
 }
 
-/// Verify every proof in a bundle against the snapshot's content-hash IRI. An
-/// empty bundle is rejected — an unsigned blob is not a snapshot (error text
-/// `"unsigned snapshot"`). Each proof folds its own `timestamp` back into the
-/// payload it signed and is checked against its `signer_did`; a DID whose method
-/// cannot be resolved simply fails to verify, so unsupported identities are
-/// rejected without any special-casing.
-pub fn verify_proof_bundle(
-    graph_content_hash_iri: &str,
-    proofs: &[SnapshotProof],
-) -> Result<(), Error> {
+/// Verify every proof in a bundle against the commit IRI. An empty bundle
+/// is rejected (error text `"unsigned commit"`). Each proof folds its own
+/// `timestamp` back into the payload it signed and is checked against its
+/// `signer_did`; a DID whose method cannot be resolved simply fails to
+/// verify, so unsupported identities are rejected without any special-casing.
+pub fn verify_proof_bundle(commit_iri: &str, proofs: &[SnapshotProof]) -> Result<(), Error> {
     if proofs.is_empty() {
-        return Err(anyhow!("unsigned snapshot"));
+        return Err(anyhow!("unsigned commit"));
     }
     for proof in proofs {
-        let payload = signing_payload(graph_content_hash_iri, &proof.timestamp);
+        let payload = signing_payload(commit_iri, &proof.timestamp);
         let valid = verify_string_signed_by_did(&proof.signer_did, &payload, &proof.signature)?;
         if !valid {
             return Err(anyhow!(
@@ -102,28 +98,22 @@ mod tests {
 
     #[test]
     fn build_bundle_emits_a_single_verifiable_proof() {
-        // Export yields exactly one proof over `(iri || timestamp)`, signed by
-        // the DID carried by the local signing context.
+        // Export yields exactly one proof signed by the local DID.
         ensure_agent();
         let ctx = AgentContext::main_agent();
         let proofs = build_proof_bundle(IRI, TS, &ctx).expect("build proof");
         assert_eq!(proofs.len(), 1, "export yields exactly one proof");
         assert_eq!(proofs[0].timestamp, TS);
-        assert!(
-            proofs[0].signer_did.starts_with("did:"),
-            "the proof is signed by a DID, got {}",
-            proofs[0].signer_did
-        );
+        assert!(proofs[0].signer_did.starts_with("did:"));
         verify_proof_bundle(IRI, &proofs).expect("a freshly-built bundle must verify");
     }
 
     #[test]
-    fn empty_bundle_is_an_unsigned_snapshot() {
-        // An unsigned blob is not a snapshot.
+    fn empty_bundle_is_an_unsigned_commit() {
         let err = verify_proof_bundle(IRI, &[])
             .expect_err("empty bundle must be rejected")
             .to_string();
-        assert!(err.contains("unsigned snapshot"), "got: {err}");
+        assert!(err.contains("unsigned commit"), "got: {err}");
     }
 
     #[test]
@@ -140,14 +130,14 @@ mod tests {
 
     #[test]
     fn proof_bound_to_a_different_iri_fails_verification() {
-        // The proof is bound to the exact content-hash IRI it signed; verifying
-        // it against any other IRI (a tampered hash) must fail.
+        // The proof is bound to the exact commit IRI it signed; verifying it
+        // against any other IRI must fail.
         ensure_agent();
         let ctx = AgentContext::main_agent();
         let proofs = build_proof_bundle(IRI, TS, &ctx).unwrap();
         assert!(
             verify_proof_bundle("graph://tampered", &proofs).is_err(),
-            "verifying against a different content-hash IRI must fail"
+            "verifying against a different IRI must fail"
         );
     }
 

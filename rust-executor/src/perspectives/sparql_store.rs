@@ -1508,7 +1508,7 @@ impl SparqlStore {
     /// byte-identical to RDFC-1.0 canonical output; the blank-node guard keeps
     /// the invariant honest. The returned string is exactly the preimage of the
     /// content hash and of the `nquads-canonical` dump.
-    fn canonical_ntriples(&self, graph_iri: &str) -> Result<String, Error> {
+    pub(crate) fn canonical_ntriples(&self, graph_iri: &str) -> Result<String, Error> {
         let graph_node = NamedNode::new_unchecked(graph_iri);
         let graph_ref = GraphNameRef::NamedNode(graph_node.as_ref());
         let mut lines = Vec::new();
