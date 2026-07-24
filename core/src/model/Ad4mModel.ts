@@ -141,7 +141,7 @@ function jsonToModelInstance<T extends Ad4mModel>(
  *   // Required property with literal value
  *   @Property({
  *     through: "recipe://name",
- *     resolveLiteral: true
+ *     resolveLanguage: "literal"
  *   })
  *   name: string = "";
  * 
@@ -300,7 +300,7 @@ export class Ad4mModel {
    * ```typescript
    * @Model({ name: "Recipe" })
    * class Recipe extends Ad4mModel {
-   *   @Property({ through: "recipe://name", resolveLiteral: true })
+   *   @Property({ through: "recipe://name", resolveLanguage: "literal" })
    *   name: string = "";
    *   
    *   @HasMany({ through: "recipe://ingredient" })
@@ -338,7 +338,7 @@ export class Ad4mModel {
         required: options.required || false,
         readOnly: !(options.writable ?? false),
         ...(options.initial !== undefined && { initial: options.initial }),
-        ...(options.resolveLiteral !== undefined && { resolveLiteral: options.resolveLiteral }),
+        ...(options.resolveLanguage !== undefined && { resolveLanguage: options.resolveLanguage }),
         ...(options.prologGetter !== undefined && { prologGetter: options.prologGetter }),
         ...(options.getter !== undefined && { getter: options.getter }),
         ...(options.prologSetter !== undefined && { prologSetter: options.prologSetter }),
@@ -404,7 +404,7 @@ export class Ad4mModel {
               predicate: predicate,
               required: isRequired,
               readOnly: propertySchema["x-ad4m"]?.writable === false,
-              ...(propertySchema["x-ad4m"]?.resolveLiteral !== undefined && { resolveLiteral: propertySchema["x-ad4m"].resolveLiteral }),
+              ...(propertySchema["x-ad4m"]?.resolveLanguage !== undefined && { resolveLanguage: propertySchema["x-ad4m"].resolveLanguage }),
               ...(propertySchema["x-ad4m"]?.initial && { initial: propertySchema["x-ad4m"].initial }),
               ...(propertySchema["x-ad4m"]?.local !== undefined && { local: propertySchema["x-ad4m"].local })
             };
@@ -1096,10 +1096,10 @@ export class Ad4mModel {
       return;
     }
 
-    if (metadata.resolveLiteral !== false) {
+    if (!metadata.resolveLanguage || metadata.resolveLanguage === "literal") {
       value = valueToLiteralIri(value);
     } else {
-      value = await this._perspective.createExpression(value, "literal");
+      value = await this._perspective.createExpression(value, metadata.resolveLanguage);
     }
 
     await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value }], batchId);
@@ -1243,9 +1243,9 @@ export class Ad4mModel {
       (p) => p.required || p.flag || p.initial !== undefined
     );
 
-    // Track properties with resolveLiteral: false — they need createExpression
-    // which may fail inside a batch context. Defer them to setProperty after
-    // createSubject.
+    // Track properties with resolveLanguage set to a non-"literal" language —
+    // they need createExpression which may fail inside a batch context. Defer
+    // them to setProperty after createSubject.
     const deferredExpressionProps: string[] = [];
 
     if (hasConstructor) {
@@ -1253,7 +1253,7 @@ export class Ad4mModel {
       for (const [key, value] of Object.entries(this)) {
         if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
           const propMeta = metadata.properties[key];
-          if (propMeta?.resolveLiteral === false) {
+          if (propMeta?.resolveLanguage && propMeta.resolveLanguage !== "literal") {
             deferredExpressionProps.push(key);
             continue;
           }
@@ -1872,7 +1872,7 @@ export class Ad4mModel {
    * const PersonClass = Ad4mModel.fromJSONSchema(schema, {
    *   name: "Person",
    *   namespace: "person://",
-   *   resolveLiteral: true
+   *   resolveLanguage: "literal"
    * });
    * 
    * // With property mapping
@@ -1917,7 +1917,7 @@ export class Ad4mModel {
    * Unlike `fromJSONSchema()`, no predicate inference is required —
    * `SHACLShape` already contains the exact predicate URI in `path` for
    * every property. The method reads each property's `path`, `maxCount`,
-   * `writable`, and `resolveLiteral` directly and writes them to the
+   * `writable`, and `resolveLanguage` directly and writes them to the
    * WeakMap metadata registries.
    *
    * Properties with `hasValue` (flag / type-discrimination markers) are
@@ -2018,7 +2018,7 @@ export class Ad4mModel {
         setPropertyRegistryEntry(DynamicModelClass, prop.name, {
           through: prop.path,
           writable: prop.writable ?? true,
-          ...(prop.resolveLiteral !== undefined && { resolveLiteral: prop.resolveLiteral }),
+          ...(prop.resolveLanguage !== undefined && { resolveLanguage: prop.resolveLanguage }),
           ...(prop.local !== undefined && { local: prop.local }),
         });
       }

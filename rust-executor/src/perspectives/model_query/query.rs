@@ -434,11 +434,12 @@ pub(super) async fn execute_model_query_inner(
     })
 }
 
-/// Apply transform expressions to expression-resolved properties.
+/// Apply transform expressions to resolveLanguage properties.
 ///
-/// For properties with `resolve_literal: false`, values are stored as signed
-/// expression URIs. This function fetches the expression data from the
-/// language controller and applies the property's transform expression.
+/// For properties marked with `resolve_language`, if the value is a non-literal
+/// expression URL (not starting with "literal:"), this function fetches the
+/// expression data from the language controller and applies the property's
+/// transform expression (or the default file decode).
 async fn resolve_language_transforms(
     shape: &ModelShape,
     instances: &mut [Value],
@@ -446,7 +447,10 @@ async fn resolve_language_transforms(
     let resolve_props: Vec<&super::types::ShapeProperty> = shape
         .properties
         .iter()
-        .filter(|p| p.resolve_literal == Some(false))
+        .filter(|p| {
+            p.resolve_language.is_some()
+                && p.resolve_language.as_deref() != Some("literal")
+        })
         .collect();
 
     if resolve_props.is_empty() {

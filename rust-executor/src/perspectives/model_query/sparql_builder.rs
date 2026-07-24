@@ -580,7 +580,7 @@ pub(super) fn build_query_patterns(
                     continue;
                 }
                 let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
-                let is_literal_prop = prop.resolve_literal != Some(false);
+                let is_literal_prop = prop.resolve_language.is_some();
                 match condition {
                     WhereCondition::String(val) => {
                         if is_literal_prop {

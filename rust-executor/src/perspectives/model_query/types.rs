@@ -391,7 +391,7 @@ pub struct ShapeProperty {
     pub(crate) is_flag: bool,
     pub(crate) is_required: bool,
     pub(crate) initial_value: Option<String>,
-    pub(crate) resolve_literal: Option<bool>,
+    pub(crate) resolve_language: Option<String>,
     pub(crate) datatype: Option<String>,
     pub(crate) direction: Option<String>, // "forward" or "reverse" for relation properties
     pub(crate) is_scalar_relation: bool, // true for hasOne/belongsToOne (render as scalar, not array)

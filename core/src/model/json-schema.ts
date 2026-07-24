@@ -24,7 +24,7 @@ export interface JSONSchemaProperty {
   required?: string[];
   "x-ad4m"?: {
     through?: string;
-    resolveLiteral?: boolean;
+    resolveLanguage?: string;
     local?: boolean;
     writable?: boolean;
     initial?: string;
@@ -50,7 +50,7 @@ export interface JSONSchemaToModelOptions {
   predicateTemplate?: string;
   predicateGenerator?: (title: string, property: string) => string;
   propertyMapping?: Record<string, string>;
-  resolveLiteral?: boolean;
+  resolveLanguage?: string;
   local?: boolean;
   propertyOptions?: Record<string, Partial<PropertyOptions>>;
 }
@@ -334,7 +334,7 @@ export function buildModelFromJSONSchema(
         const writable = !readOnly;
         let initial = getPropertyOption(propertyName, propertySchema, options, 'initial');
 
-        const resolveLiteral = getPropertyOption(propertyName, propertySchema, options, 'resolveLiteral') ?? true;
+        const resolveLanguage = getPropertyOption(propertyName, propertySchema, options, 'resolveLanguage') ?? "literal";
 
         if (isObjectType(propertySchema)) {
           console.warn(`Property "${propertyName}" is an object type. It will be stored as JSON. Consider flattening complex objects for better semantic querying.`);
@@ -352,7 +352,7 @@ export function buildModelFromJSONSchema(
           through: predicate,
           required: isRequired,
           writable: writable,
-          resolveLiteral,
+          resolveLanguage,
           ...(local !== undefined && { local }),
           ...(initial && { initial })
         };

@@ -4020,50 +4020,31 @@ impl PerspectiveInstance {
         Ok(None)
     }
 
-    /// Check whether a property uses deterministic literal storage (resolveLiteral).
-    /// Falls back to checking the legacy ad4m://resolveLanguage → "literal" for
-    /// backward compat with old SHACL data.
-    pub async fn get_resolve_literal_from_shacl(
+    pub async fn get_resolve_language_from_shacl(
         &self,
         class_name: &str,
         property: &str,
-    ) -> Result<Option<bool>, AnyError> {
+    ) -> Result<Option<String>, AnyError> {
         let prop_suffix = format!("{}.{}", class_name, property);
+        let _uuid = self.uuid.clone();
 
-        // New path: ad4m://resolveLiteral
         let links = self
-            .sparql_store
-            .get_links_by_predicate_and_source_suffix("ad4m://resolveLiteral", &prop_suffix)?;
-
-        if let Some(link) = links.first() {
-            let val = link
-                .data
-                .target
-                .strip_prefix("literal://boolean:")
-                .or_else(|| link.data.target.strip_prefix("literal:boolean:"))
-                .or_else(|| link.data.target.strip_prefix("literal://"))
-                .or_else(|| link.data.target.strip_prefix("literal:"))
-                .unwrap_or(&link.data.target);
-            return Ok(Some(val == "true"));
-        }
-
-        // Backward compat: ad4m://resolveLanguage → "literal" means resolveLiteral: true
-        let lang_links = self
             .sparql_store
             .get_links_by_predicate_and_source_suffix("ad4m://resolveLanguage", &prop_suffix)?;
 
-        if let Some(link) = lang_links.first() {
+        if let Some(link) = links.first() {
+            // Extract value from literal:string:{value} or legacy literal://string:{value}
             let encoded_value =
                 if let Some(rest) = link.data.target.strip_prefix("literal://string:") {
                     rest
                 } else if let Some(rest) = link.data.target.strip_prefix("literal:string:") {
                     rest
                 } else {
-                    return Ok(Some(link.data.target == "literal"));
+                    return Ok(Some(link.data.target.clone()));
                 };
             let decoded = urlencoding::decode(encoded_value)
                 .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
-            return Ok(Some(decoded.as_ref() == "literal"));
+            return Ok(Some(decoded.to_string()));
         }
 
         Ok(None)
@@ -4094,23 +4075,23 @@ impl PerspectiveInstance {
         value: &serde_json::Value,
         context: &AgentContext,
     ) -> Result<String, AnyError> {
-        let resolve_literal = self
-            .get_resolve_literal_from_shacl(class_name, property)
+        // Get resolve language from SHACL links
+        let resolve_language = self
+            .get_resolve_language_from_shacl(class_name, property)
             .await?;
 
-        if resolve_literal == Some(false) {
-            // resolveLiteral: false — go through expression_create on the literal
-            // language, producing a signed-envelope URI.
+        if let Some(resolve_language) = resolve_language {
+            // Create an expression for the value
             let controller = crate::languages::LanguageController::global_instance();
             let agent_context = context.clone();
             match controller
-                .expression_create("literal", value.clone(), &agent_context)
+                .expression_create(&resolve_language, value.clone(), &agent_context)
                 .await
             {
                 Ok(url) => Ok(url),
                 Err(e) => {
-                    log::warn!("Failed to create expression on literal: {}", e);
-                    Err(anyhow!("Failed to create literal expression: {}", e))
+                    log::warn!("Failed to create expression on {}: {}", resolve_language, e);
+                    Ok(value.to_string())
                 }
             }
         } else {

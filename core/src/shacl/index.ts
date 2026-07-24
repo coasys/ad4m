@@ -43,7 +43,7 @@ export {
  * ```typescript
  * @Property({
  *   through: 'we://image',
- *   resolveLiteral: false,
+ *   resolveLanguage: 'file_storage',
  *   transform: fileToDataUri,
  * })
  * avatar?: string;

@@ -191,7 +191,7 @@ describe("Decorators → SHACL writer round-trip", () => {
       "ns://name",
     );
     expect(
-      findLinkTarget(links, "ns://Profile.name", "ad4m://resolveLiteral"),
-    ).toBe("literal:true");
+      findLinkTarget(links, "ns://Profile.name", "ad4m://resolveLanguage"),
+    ).toBe("literal:string:literal");
   });
 });

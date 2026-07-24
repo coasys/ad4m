@@ -656,6 +656,7 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
             is_flag: false,
             is_required: false,
             initial_value: None,
+            resolve_language: None,
 
             datatype: None,
             direction: Some("forward".to_string()),
@@ -1231,6 +1232,7 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
             is_flag: false,
             is_required: false,
             initial_value: None,
+            resolve_language: None,
 
             datatype: None,
             direction: None,
@@ -1795,6 +1797,7 @@ async fn test_where_filter_signed_expression_string() {
             is_flag: false,
             is_required: false,
             initial_value: None,
+            resolve_language: None,
 
             datatype: None,
             direction: None,
@@ -1869,6 +1872,7 @@ async fn test_where_filter_signed_expression_no_matches() {
             is_flag: false,
             is_required: false,
             initial_value: None,
+            resolve_language: None,
 
             datatype: None,
             direction: None,
@@ -1991,6 +1995,7 @@ async fn test_where_filter_multiple_conditions() {
             is_flag: false,
             is_required: false,
             initial_value: None,
+            resolve_language: None,
 
             datatype: None,
             direction: None,
@@ -2058,6 +2063,7 @@ async fn test_where_filter_missing_property_on_target() {
             is_flag: false,
             is_required: false,
             initial_value: None,
+            resolve_language: None,
 
             datatype: None,
             direction: None,
@@ -2123,6 +2129,7 @@ async fn test_where_filter_plain_literal_string() {
             is_flag: false,
             is_required: false,
             initial_value: None,
+            resolve_language: None,
 
             datatype: None,
             direction: None,
@@ -2211,6 +2218,7 @@ async fn test_where_filter_on_multiple_instances() {
             is_flag: false,
             is_required: false,
             initial_value: None,
+            resolve_language: None,
 
             datatype: None,
             direction: None,
@@ -2600,6 +2608,7 @@ fn scalar_prop(name: &str, predicate: &str, required: bool, flag: bool) -> Shape
         } else {
             None
         },
+        resolve_language: None,
         datatype: None,
         direction: None,
         is_scalar_relation: false,
@@ -2619,6 +2628,7 @@ fn collection_prop(name: &str, predicate: &str, getter: Option<&str>) -> ShapePr
         is_flag: false,
         is_required: false,
         initial_value: None,
+        resolve_language: None,
         datatype: None,
         direction: None,
         is_scalar_relation: false,
@@ -3368,8 +3378,8 @@ fn legacy_envelope_literal(value: &str) -> String {
 fn signed_envelope_literal_with_ts(value: &str, timestamp: &str) -> String {
     let envelope = serde_json::json!({
         "author": "did:key:zQ3shTestAgent",
-        "timestamp": timestamp,
         "data": value,
+        "timestamp": timestamp,
         "proof": {
             "key": "#zQ3shTestAgent",
             "signature": "fake-sig",
@@ -4387,6 +4397,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
             is_flag: false,
             is_required: false,
             initial_value: None,
+            resolve_language: None,
 
             datatype: None,
             direction: Some("forward".to_string()),

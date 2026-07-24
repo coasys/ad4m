@@ -280,14 +280,15 @@ export interface PropertyOptions {
     readOnly?: boolean;
 
     /**
-     * When true (default), property values are stored as deterministic
-     * `literal:string:X` / `:number:` / `:boolean:` / `:json:` IRIs directly.
-     * This enables efficient Oxigraph POS-index lookups.
+     * When set to "literal" (default) or left undefined, property values are
+     * stored as deterministic `literal:string:X` / `:number:` / `:boolean:` /
+     * `:json:` IRIs directly. This enables efficient Oxigraph POS-index lookups.
      *
-     * When false, values go through `expression_create` on the literal
-     * language, producing a signed-envelope URI with author/timestamp/proof.
+     * When set to a language address string (e.g. "literal"), values go through
+     * `expression_create` on that language, producing a signed-envelope URI
+     * with author/timestamp/proof.
      */
-    resolveLiteral?: boolean;
+    resolveLanguage?: string;
 
     /**
      * Custom Prolog getter to get the value of the property. If not provided, the default getter will be used.
@@ -383,7 +384,7 @@ function applyPropertyMetadata(opts: PropertyOptions) {
  *
  * @description
  * Equivalent to `@Property` but defaults `required` to `false` and does not
- * apply `resolveLiteral` or `initial` defaults.  Use this when a property
+ * apply `resolveLanguage` or `initial` defaults.  Use this when a property
  * may or may not have a value, and you want full control over its configuration.
  *
  * @example
@@ -535,13 +536,13 @@ export interface ModelConfig {
  * class Recipe extends Ad4mModel {
  *   @Property({
  *     through: "recipe://name",
- *     resolveLiteral: true
+ *     resolveLanguage: "literal"
  *   })
  *   name: string = "";
- * 
+ *
  *   @HasMany({ through: "recipe://ingredient" })
  *   ingredients: string[] = [];
- * 
+ *
  *   // Static query methods from Ad4mModel:
  *   static async findByName(perspective: PerspectiveProxy, name: string) {
  *     return Recipe.query(perspective)
@@ -549,21 +550,21 @@ export interface ModelConfig {
  *       .run();
  *   }
  * }
- * 
+ *
  * // Using the model:
  * const recipe = new Recipe(perspective);
  * recipe.name = "Chocolate Cake";
  * await recipe.save();
- * 
+ *
  * // Querying instances:
  * const recipes = await Recipe.query(perspective)
  *   .where({ name: "Chocolate Cake" })
  *   .run();
- * 
+ *
  * // Using with PerspectiveProxy:
  * await perspective.ensureSDNASubjectClass(Recipe);
  * ```
- * 
+ *
  * @param {ModelConfig} opts - Model configuration
  * @param {string} opts.name - Unique name for the model class in AD4M
  */
@@ -608,7 +609,7 @@ export function Model(opts: ModelConfig) {
  * Smart defaults (all overridable):
  * - `required` → `false`
  * - `readOnly` → `false`
- * - `resolveLiteral` → `true`
+ * - `resolveLanguage` → `"literal"`
  * - `initial` → `undefined` (no link created until a value is explicitly set)
  * 
  * Properties are optional by default. When a model instance is created without
@@ -644,17 +645,17 @@ export function Model(opts: ModelConfig) {
  *   // Optional property with literal resolution
  *   @Property({
  *     through: "user://bio",
- *     resolveLiteral: true
+ *     resolveLanguage: "literal"
  *   })
  *   bio: string = "";
  * }
  * ```
- * 
+ *
  * @param {PropertyOptions} opts - Property configuration
  * @param {string} opts.through - The predicate URI for the property
  * @param {boolean} [opts.required=false] - Whether the property is required (adds query filters and sentinel initial value)
  * @param {string} [opts.initial] - Initial value (defaults to "literal:string:uninitialized" when required)
- * @param {boolean} [opts.resolveLiteral=true] - When true, store as deterministic literal: IRIs
+ * @param {string} [opts.resolveLanguage="literal"] - When "literal" (default), store as deterministic literal: IRIs
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
@@ -665,7 +666,7 @@ export function Property(opts: PropertyOptions) {
         ...opts,
         required,
         readOnly: opts.readOnly ?? false,
-        resolveLiteral: opts.resolveLiteral ?? true,
+        resolveLanguage: opts.resolveLanguage ?? "literal",
         initial: opts.initial ?? (required ? "literal:string:uninitialized" : undefined),
     });
 }
@@ -705,7 +706,7 @@ export function Property(opts: PropertyOptions) {
  *   // Read-only property that resolves to a Literal
  *   @ReadOnly({
  *     through: "post://author",
- *     resolveLiteral: true
+ *     resolveLanguage: "literal"
  *   })
  *   author: string = "";
  * 
@@ -721,7 +722,7 @@ export function Property(opts: PropertyOptions) {
  * @param {PropertyOptions} opts - Property configuration
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (if property should have one)
- * @param {boolean} [opts.resolveLiteral=true] - When true, store as deterministic literal: IRIs
+ * @param {string} [opts.resolveLanguage="literal"] - When "literal" (default), store as deterministic literal: IRIs
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */

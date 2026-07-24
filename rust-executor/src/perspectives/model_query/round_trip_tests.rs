@@ -75,7 +75,7 @@ fn round_trip_preserves_basic_property() {
     assert!(name.is_required, "name should be required");
     assert!(!name.is_collection, "name should be scalar");
     assert_eq!(name.datatype.as_deref(), Some("xsd://string"));
-    assert_eq!(name.resolve_literal, Some(true));
+    assert_eq!(name.resolve_language.as_deref(), Some("literal"));
 }
 
 #[test]
@@ -395,11 +395,9 @@ fn round_trip_preserves_transform_expression() {
     );
 }
 
-/// Regression guard: a legacy "resolve_language": "literal" fixture
-/// correctly maps to resolve_literal: Some(true) through the backward-compat
-/// path in parse_shape_from_json.
+/// Verify resolve_language: "literal" round-trips through SHACL correctly.
 #[test]
-fn round_trip_legacy_resolve_language_literal_maps_to_resolve_literal_true() {
+fn round_trip_resolve_language_literal() {
     let shacl_json = r#"{
         "target_class": "ns://ImagePost",
         "properties": [
@@ -418,8 +416,8 @@ fn round_trip_legacy_resolve_language_literal_maps_to_resolve_literal_true() {
         .find(|p| p.name == "image")
         .expect("image property");
     assert_eq!(
-        prop.resolve_literal,
-        Some(true),
-        "legacy resolveLanguage: 'literal' should map to resolve_literal: true",
+        prop.resolve_language.as_deref(),
+        Some("literal"),
+        "resolve_language: 'literal' should round-trip through SHACL",
     );
 }

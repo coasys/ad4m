@@ -50,7 +50,7 @@ pub struct PropertyShape {
     pub max_count: Option<u32>,
     pub writable: Option<bool>,
     pub local: Option<bool>,
-    pub resolve_literal: Option<bool>,
+    pub resolve_language: Option<String>,
     pub node_kind: Option<String>,
     pub collection: Option<bool>,
     /// Setter action for single-valued properties
@@ -467,11 +467,11 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             });
         }
 
-        if let Some(resolve_literal) = &prop.resolve_literal {
+        if let Some(resolve_lang) = &prop.resolve_language {
             links.push(Link {
                 source: prop_shape_uri.clone(),
-                predicate: Some("ad4m://resolveLiteral".to_string()),
-                target: format!("literal:{}", resolve_literal),
+                predicate: Some("ad4m://resolveLanguage".to_string()),
+                target: format!("literal:string:{}", resolve_lang),
             });
         }
 

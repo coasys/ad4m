@@ -402,9 +402,10 @@ export interface PropertyMetadata {
   readOnly: boolean;
   /** Initial value if specified */
   initial?: string;
-  /** When true (default), deterministic literal: IRIs. When false,
-   *  values go through expression_create on the literal language. */
-  resolveLiteral?: boolean;
+  /** When set to "literal" (default) or left undefined, deterministic literal: IRIs.
+   *  When set to a language address string, values go through expression_create
+   *  on that language. */
+  resolveLanguage?: string;
   /** Custom Prolog getter code */
   prologGetter?: string;
   /** Custom Prolog setter code */

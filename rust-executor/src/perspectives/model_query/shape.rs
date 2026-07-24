@@ -85,7 +85,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         SELECT
             ?propUri ?path ?propType
             ?datatype ?minCount ?maxCount
-            ?resolveLiteral ?resolveLanguage ?writable ?local
+            ?resolveLanguage ?writable ?local
             ?getter ?hasValue ?className
             ?relationKind ?targetClassName
             ?whereFilter ?wherePredicates ?filterEnabled
@@ -97,7 +97,6 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             OPTIONAL {{ ?propUri <sh://datatype> ?datatype . }}
             OPTIONAL {{ ?propUri <sh://minCount> ?minCount . }}
             OPTIONAL {{ ?propUri <sh://maxCount> ?maxCount . }}
-            OPTIONAL {{ ?propUri <ad4m://resolveLiteral> ?resolveLiteral . }}
             OPTIONAL {{ ?propUri <ad4m://resolveLanguage> ?resolveLanguage . }}
             OPTIONAL {{ ?propUri <ad4m://writable> ?writable . }}
             OPTIONAL {{ ?propUri <ad4m://local> ?local . }}
@@ -144,22 +143,9 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
 
         let path = first["path"].as_str().unwrap_or("").to_string();
         let datatype = first["datatype"].as_str().map(|s| s.to_string());
-        let resolve_literal =
-            parse_bool_literal_target(first["resolveLiteral"].as_str()).or_else(|| {
-                // Backward compat: old SHACL has ad4m://resolveLanguage → "literal"
-                first["resolveLanguage"]
-                    .as_str()
-                    .map(decode_literal_string_target)
-                    .and_then(|lang| {
-                        if lang == "literal" {
-                            Some(true)
-                        } else if !lang.is_empty() {
-                            Some(false)
-                        } else {
-                            None
-                        }
-                    })
-            });
+        let resolve_language = first["resolveLanguage"]
+            .as_str()
+            .map(decode_literal_string_target);
         let writable = parse_bool_literal_target(first["writable"].as_str());
         let local = parse_bool_literal_target(first["local"].as_str());
         let getter = first["getter"].as_str().map(decode_literal_string_target);
@@ -258,7 +244,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 is_flag: false,
                 is_required: min_count.unwrap_or(0) >= 1,
                 initial_value: None,
-                resolve_literal,
+                resolve_language: resolve_language.clone(),
                 datatype: datatype.clone(),
                 direction: direction.clone(),
                 is_scalar_relation: scalar_kind,
@@ -297,7 +283,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 is_flag,
                 is_required: min_count.unwrap_or(0) >= 1,
                 initial_value,
-                resolve_literal,
+                resolve_language: resolve_language.clone(),
                 datatype,
                 direction: None,
                 is_scalar_relation: false,
@@ -528,18 +514,9 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
             let is_required = prop_meta["required"].as_bool().unwrap_or(false);
             let is_flag = prop_meta["flag"].as_bool().unwrap_or(false);
             let initial = prop_meta["initial"].as_str().map(|s| s.to_string());
-            let resolve_literal = prop_meta["resolveLiteral"].as_bool().or_else(|| {
-                // Backward compat with legacy fixtures using `resolveLanguage`
-                prop_meta["resolveLanguage"].as_str().and_then(|s| {
-                    if s == "literal" {
-                        Some(true)
-                    } else if !s.is_empty() {
-                        Some(false)
-                    } else {
-                        None
-                    }
-                })
-            });
+            let resolve_language = prop_meta["resolveLanguage"]
+                .as_str()
+                .map(|s| s.to_string());
             let datatype = prop_meta["datatype"].as_str().map(|s| s.to_string());
             let getter = prop_meta["getter"].as_str().map(|s| s.to_string());
 
@@ -563,7 +540,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 is_flag,
                 is_required,
                 initial_value: initial,
-                resolve_literal,
+                resolve_language: resolve_language.clone(),
                 datatype,
                 direction: None,
                 is_scalar_relation: false,
@@ -610,7 +587,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 is_flag: false,
                 is_required: false,
                 initial_value: None,
-                resolve_literal: None,
+                resolve_language: None,
                 datatype: None,
                 direction: direction.clone(),
                 is_scalar_relation,

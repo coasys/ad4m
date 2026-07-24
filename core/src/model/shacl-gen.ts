@@ -119,15 +119,15 @@ export function buildSHACL(
             path: propMeta.through,
         };
 
-        // Determine datatype from JS field value type; resolveLiteral controls
+        // Determine datatype from JS field value type; resolveLanguage controls
         // storage mode, not scalar type.
-        if (propMeta.initial !== undefined || propMeta.resolveLiteral) {
+        if (propMeta.initial !== undefined || propMeta.resolveLanguage) {
             const initialType = typeof obj[propName];
             if (initialType === "number") {
                 propShape.datatype = "xsd://integer";
             } else if (initialType === "boolean") {
                 propShape.datatype = "xsd://boolean";
-            } else if (initialType === "string" || propMeta.resolveLiteral) {
+            } else if (initialType === "string" || propMeta.resolveLanguage) {
                 propShape.datatype = "xsd://string";
             }
         }
@@ -159,8 +159,8 @@ export function buildSHACL(
             propShape.writable = propMeta.writable;
         }
 
-        if (propMeta.resolveLiteral != null) {
-            propShape.resolveLiteral = propMeta.resolveLiteral;
+        if (propMeta.resolveLanguage != null) {
+            propShape.resolveLanguage = propMeta.resolveLanguage;
         }
 
         // Explicit getter SPARQL — the executor evaluates this when

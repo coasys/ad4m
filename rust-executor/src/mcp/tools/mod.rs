@@ -578,7 +578,7 @@ impl Ad4mMcpHandler {
     }
 
     /// Resolve a property value through the appropriate storage path, respecting
-    /// the SHACL `resolveLiteral` setting for the property.
+    /// the SHACL `resolve_language` setting for the property.
     ///
     /// If the value already has a URI scheme (e.g. `literal://...`, `did:...`),
     /// it is returned as-is. Otherwise, the value is parsed as JSON to recover

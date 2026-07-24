@@ -89,7 +89,7 @@ function looksLikeUri(value: string): boolean {
 
 /**
  * Convert a JS value to its literal: IRI form, matching how the Rust executor
- * stores property values with resolveLiteral: true (the default).
+ * stores property values with resolveLanguage: "literal" (the default).
  * Strings that already look like URIs are returned as-is.
  *
  * Exported so write-side helpers (e.g. `Ad4mModel.setProperty`'s literal
@@ -114,12 +114,12 @@ export function valueToLiteralIri(value: any): string {
 
 /**
  * Determine if a property stores values as literal: IRIs (needs parse_literal for comparisons).
- * Properties with resolveLiteral !== false store deterministic literal: URIs.
+ * Properties with resolveLanguage undefined/null or "literal" store deterministic literal: URIs.
  * Flag properties store raw URIs.
  */
 function isLiteralStoredProperty(propMeta: PropertyMetadata): boolean {
   if (propMeta.flag) return false;
-  return propMeta.resolveLiteral !== false;
+  return !propMeta.resolveLanguage || propMeta.resolveLanguage === "literal";
 }
 
 /**
