@@ -5415,7 +5415,8 @@ impl PerspectiveInstance {
                     self.uuid,
                     changed_preds
                 );
-                self.check_subscribed_queries(changed_preds, changed_graphs).await;
+                self.check_subscribed_queries(changed_preds, changed_graphs)
+                    .await;
             }
 
             // Periodic subscription logging and proactive timeout cleanup
