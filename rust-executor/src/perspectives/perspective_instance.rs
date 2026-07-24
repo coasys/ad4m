@@ -4090,11 +4090,7 @@ impl PerspectiveInstance {
                 {
                     Ok(url) => Ok(url),
                     Err(e) => {
-                        log::warn!(
-                            "Failed to create expression on {}: {}",
-                            resolve_language,
-                            e
-                        );
+                        log::warn!("Failed to create expression on {}: {}", resolve_language, e);
                         Ok(value.to_string())
                     }
                 };
@@ -4111,20 +4107,14 @@ impl PerspectiveInstance {
                     if re.is_match(s) {
                         s.clone()
                     } else {
-                        format!(
-                            "literal:{}",
-                            crate::languages::literal_encode(value)
-                        )
+                        format!("literal:{}", crate::languages::literal_encode(value))
                     }
                 }
                 serde_json::Value::Number(_)
                 | serde_json::Value::Bool(_)
                 | serde_json::Value::Array(_)
                 | serde_json::Value::Object(_) => {
-                    format!(
-                        "literal:{}",
-                        crate::languages::literal_encode(value)
-                    )
+                    format!("literal:{}", crate::languages::literal_encode(value))
                 }
                 serde_json::Value::Null => "literal:json:null".to_string(),
             };
