@@ -1,7 +1,16 @@
-use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet};
 use serde_json::Value as JsonValue;
 
 use super::error::LanguageError;
+
+/// Percent-encoding set matching JS `encodeRFC3986URIComponent`.
+/// Leaves `A-Z a-z 0-9 - _ . ~` un-encoded — same characters the JS SDK
+/// preserves, so `literal:*:` URLs round-trip without encoding drift.
+const RFC3986_COMPONENT_ENCODE: AsciiSet = percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
 
 /// Encode a JSON value into a literal URL expression part.
 ///
@@ -11,7 +20,7 @@ use super::error::LanguageError;
 pub fn literal_encode(value: &JsonValue) -> String {
     match value {
         JsonValue::String(s) => {
-            let encoded = utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();
+            let encoded = utf8_percent_encode(s, &RFC3986_COMPONENT_ENCODE).to_string();
             format!("string:{}", encoded)
         }
         JsonValue::Number(n) => {
@@ -21,9 +30,8 @@ pub fn literal_encode(value: &JsonValue) -> String {
             format!("boolean:{}", b)
         }
         _ => {
-            // For objects, arrays, null — use json: prefix
             let json_str = serde_json::to_string(value).unwrap_or_default();
-            let encoded = utf8_percent_encode(&json_str, NON_ALPHANUMERIC).to_string();
+            let encoded = utf8_percent_encode(&json_str, &RFC3986_COMPONENT_ENCODE).to_string();
             format!("json:{}", encoded)
         }
     }

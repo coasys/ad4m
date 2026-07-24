@@ -4080,25 +4080,30 @@ impl PerspectiveInstance {
             .get_resolve_language_from_shacl(class_name, property)
             .await?;
 
-        if let Some(resolve_language) = resolve_language {
-            // Create an expression for the value
-            let controller = crate::languages::LanguageController::global_instance();
-            let agent_context = context.clone();
-            match controller
-                .expression_create(&resolve_language, value.clone(), &agent_context)
-                .await
-            {
-                Ok(url) => Ok(url),
-                Err(e) => {
-                    log::warn!("Failed to create expression on {}: {}", resolve_language, e);
-                    Ok(value.to_string())
-                }
+        if let Some(ref resolve_language) = resolve_language {
+            if resolve_language != "literal" {
+                let controller = crate::languages::LanguageController::global_instance();
+                let agent_context = context.clone();
+                return match controller
+                    .expression_create(resolve_language, value.clone(), &agent_context)
+                    .await
+                {
+                    Ok(url) => Ok(url),
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to create expression on {}: {}",
+                            resolve_language,
+                            e
+                        );
+                        Ok(value.to_string())
+                    }
+                };
             }
-        } else {
+        }
+
+        {
             let uri = match value {
                 serde_json::Value::String(s) => {
-                    // If the value is already a valid URI (has a scheme), use it directly.
-                    // Otherwise wrap it in a literal:// URI so link targets are always valid URIs.
                     static URI_SCHEME_RE: std::sync::OnceLock<regex::Regex> =
                         std::sync::OnceLock::new();
                     let re = URI_SCHEME_RE
@@ -4106,23 +4111,22 @@ impl PerspectiveInstance {
                     if re.is_match(s) {
                         s.clone()
                     } else {
-                        Literal::from_string(s.clone())
-                            .to_url()
-                            .map_err(|e| anyhow!("Failed to encode string as literal URI: {}", e))?
+                        format!(
+                            "literal:{}",
+                            crate::languages::literal_encode(value)
+                        )
                     }
                 }
-                serde_json::Value::Number(n) => {
-                    if let Some(f) = n.as_f64() {
-                        Literal::from_number(f)
-                            .to_url()
-                            .map_err(|e| anyhow!("Failed to encode number as literal URI: {}", e))?
-                    } else {
-                        Literal::from_string(value.to_string())
-                            .to_url()
-                            .map_err(|e| anyhow!("Failed to encode number as literal URI: {}", e))?
-                    }
+                serde_json::Value::Number(_)
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Array(_)
+                | serde_json::Value::Object(_) => {
+                    format!(
+                        "literal:{}",
+                        crate::languages::literal_encode(value)
+                    )
                 }
-                _ => value.to_string(),
+                serde_json::Value::Null => "literal:json:null".to_string(),
             };
             Ok(uri)
         }
