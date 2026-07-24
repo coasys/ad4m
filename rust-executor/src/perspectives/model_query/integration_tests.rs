@@ -5151,11 +5151,11 @@ fn bench_indexed_iri_vs_fn_parse_literal_filter() {
             .unwrap();
     }
 
-    let indexed = format!("SELECT ?source WHERE {{ ?source <{pred}> <{stored_target}> . }}");
+    let indexed = format!("SELECT ?source WHERE {{ ?source <{pred}> \"{target_value}\" . }}");
     let filtered = format!(
         "SELECT ?source WHERE {{ \
             ?source <{pred}> ?t . \
-            FILTER(STR(<ad4m://fn/parse_literal>(?t)) = \"{target_value}\") \
+            FILTER(STR(?t) = \"{target_value}\") \
         }}"
     );
 
