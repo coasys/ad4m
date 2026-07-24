@@ -514,9 +514,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
             let is_required = prop_meta["required"].as_bool().unwrap_or(false);
             let is_flag = prop_meta["flag"].as_bool().unwrap_or(false);
             let initial = prop_meta["initial"].as_str().map(|s| s.to_string());
-            let resolve_language = prop_meta["resolveLanguage"]
-                .as_str()
-                .map(|s| s.to_string());
+            let resolve_language = prop_meta["resolveLanguage"].as_str().map(|s| s.to_string());
             let datatype = prop_meta["datatype"].as_str().map(|s| s.to_string());
             let getter = prop_meta["getter"].as_str().map(|s| s.to_string());
 

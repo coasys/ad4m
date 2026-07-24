@@ -448,8 +448,7 @@ async fn resolve_language_transforms(
         .properties
         .iter()
         .filter(|p| {
-            p.resolve_language.is_some()
-                && p.resolve_language.as_deref() != Some("literal")
+            p.resolve_language.is_some() && p.resolve_language.as_deref() != Some("literal")
         })
         .collect();
 
