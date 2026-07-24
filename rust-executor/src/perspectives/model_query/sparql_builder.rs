@@ -702,90 +702,88 @@ pub(super) fn build_query_patterns(
                         }
                     }
                     WhereCondition::Ops(ops) => {
-                        // Bind the raw typed-literal target; comparisons run
-                        // directly against `?val` using SPARQL's native xsd
-                        // datatype semantics (no `fn/parse_literal` hop).
                         let var = format!("?_pw_{safe_name}");
+                        let val_var = format!("?_pw_{safe_name}_v");
                         where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
+                        where_patterns.push(format!("    BIND(STR({var}) AS {val_var})"));
 
                         let mut filters = Vec::new();
 
                         if let Some(ref not_val) = ops.not {
                             match not_val {
                                 Value::String(s) => {
-                                    let escaped = escape_sparql_string(s);
-                                    filters.push(format!("{var} != \"{escaped}\"^^<{XSD_STRING}>"));
+                                    filters.push(format!(
+                                        "{val_var} != \"{}\"",
+                                        escape_sparql_string(s)
+                                    ));
                                 }
                                 Value::Number(n) => {
                                     let n_f64 = n.as_f64().unwrap_or(0.0);
-                                    if let Some(typed) = typed_number_literal(n_f64) {
-                                        filters.push(format!("{var} != {typed}"));
-                                    }
+                                    let n_str = if n_f64.fract() == 0.0 {
+                                        format!("{}", n_f64 as i64)
+                                    } else {
+                                        format!("{n_f64}")
+                                    };
+                                    filters.push(format!("{val_var} != \"{n_str}\""));
                                 }
                                 Value::Bool(b) => {
-                                    filters.push(format!("{var} != \"{b}\"^^<{XSD_BOOLEAN}>"));
+                                    filters.push(format!("{val_var} != \"{b}\""));
                                 }
                                 Value::Array(arr) => {
                                     let items: Vec<String> = arr
                                         .iter()
                                         .filter_map(|item| match item {
-                                            Value::String(s) => Some(format!(
-                                                "\"{}\"^^<{XSD_STRING}>",
-                                                escape_sparql_string(s)
-                                            )),
+                                            Value::String(s) => {
+                                                Some(format!("\"{}\"", escape_sparql_string(s)))
+                                            }
                                             Value::Number(n) => {
                                                 let f = n.as_f64().unwrap_or(0.0);
-                                                typed_number_literal(f)
-                                            }
-                                            Value::Bool(b) => {
-                                                Some(format!("\"{b}\"^^<{XSD_BOOLEAN}>"))
+                                                let s = if f.fract() == 0.0 {
+                                                    format!("{}", f as i64)
+                                                } else {
+                                                    format!("{f}")
+                                                };
+                                                Some(format!("\"{s}\""))
                                             }
                                             _ => None,
                                         })
                                         .collect();
                                     if !items.is_empty() {
-                                        filters
-                                            .push(format!("{var} NOT IN ({})", items.join(", ")));
+                                        filters.push(format!(
+                                            "{val_var} NOT IN ({})",
+                                            items.join(", ")
+                                        ));
                                     }
                                 }
                                 _ => {}
                             }
                         }
 
-                        if let Some(gt) = ops.gt {
-                            if let Some(typed) = typed_number_literal(gt) {
-                                filters.push(format!("{var} > {typed}"));
-                            } else {
-                                filters.push("false".to_string());
+                        let has_numeric = ops.gt.is_some()
+                            || ops.gte.is_some()
+                            || ops.lt.is_some()
+                            || ops.lte.is_some()
+                            || ops.between.is_some();
+
+                        if has_numeric {
+                            let num_var = format!("?_pw_{safe_name}_num");
+                            where_patterns.push(format!(
+                                "    BIND(<http://www.w3.org/2001/XMLSchema#double>({val_var}) AS {num_var})"
+                            ));
+                            if let Some(gt) = ops.gt {
+                                filters.push(format!("{num_var} > {gt}"));
                             }
-                        }
-                        if let Some(gte) = ops.gte {
-                            if let Some(typed) = typed_number_literal(gte) {
-                                filters.push(format!("{var} >= {typed}"));
-                            } else {
-                                filters.push("false".to_string());
+                            if let Some(gte) = ops.gte {
+                                filters.push(format!("{num_var} >= {gte}"));
                             }
-                        }
-                        if let Some(lt) = ops.lt {
-                            if let Some(typed) = typed_number_literal(lt) {
-                                filters.push(format!("{var} < {typed}"));
-                            } else {
-                                filters.push("false".to_string());
+                            if let Some(lt) = ops.lt {
+                                filters.push(format!("{num_var} < {lt}"));
                             }
-                        }
-                        if let Some(lte) = ops.lte {
-                            if let Some(typed) = typed_number_literal(lte) {
-                                filters.push(format!("{var} <= {typed}"));
-                            } else {
-                                filters.push("false".to_string());
+                            if let Some(lte) = ops.lte {
+                                filters.push(format!("{num_var} <= {lte}"));
                             }
-                        }
-                        if let Some((lo, hi)) = ops.between {
-                            match (typed_number_literal(lo), typed_number_literal(hi)) {
-                                (Some(lo_t), Some(hi_t)) => {
-                                    filters.push(format!("{var} >= {lo_t} && {var} <= {hi_t}"));
-                                }
-                                _ => filters.push("false".to_string()),
+                            if let Some((lo, hi)) = ops.between {
+                                filters.push(format!("{num_var} >= {lo} && {num_var} <= {hi}"));
                             }
                         }
 
@@ -795,7 +793,7 @@ pub(super) fn build_query_patterns(
                                 other => other.to_string(),
                             };
                             filters.push(format!(
-                                "CONTAINS(LCASE(STR({var})), LCASE(\"{}\"))",
+                                "CONTAINS(LCASE({val_var}), LCASE(\"{}\"))",
                                 escape_sparql_string(&needle)
                             ));
                         }

@@ -6231,16 +6231,13 @@ mod tests {
             .await
             .expect("add_sdna");
 
-        // `literal:string:` URIs are wire-format encodings of typed string
-        // values; round-tripping them through typed-literal storage
-        // re-encodes `_` as `%5F` per `literal_encode`'s canonical output.
-        let post_root = "literal:string:test%5Fpost%5Froot";
-        let parent_root = "literal:string:test%5Fparent%5Froot";
+        let post_root = "literal:string:test_post_root";
+        let parent_root = "literal:string:test_parent_root";
 
         // Title link makes the post a BlogPost instance (structural conformance)
         for (src, pred, tgt) in &[
-            (post_root, "blog://title", "literal:string:my%5Fpost"),
-            (parent_root, "blog://title", "literal:string:my%5Fparent"),
+            (post_root, "blog://title", "literal:string:my_post"),
+            (parent_root, "blog://title", "literal:string:my_parent"),
             (post_root, "blog://reply_to", parent_root),
         ] {
             let link = DecoratedLinkExpression {

@@ -26,6 +26,15 @@ const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
 const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 
+/// Percent-encoding set matching JS `encodeRFC3986URIComponent`.
+/// Leaves `A-Z a-z 0-9 - _ . ~` un-encoded — same characters the SDK
+/// preserves, so `literal:*:` URLs round-trip without re-encoding drift.
+const RFC3986_COMPONENT_ENCODE: percent_encoding::AsciiSet = percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
 /// Convert a wire-format link target string to the oxigraph [`Term`] that
 /// represents it in storage.
 ///
@@ -95,7 +104,7 @@ fn target_to_storage_term(target: &str) -> Term {
 /// consumers (TypeScript SDK, `parse_literal_value`) see the same shape they
 /// did before the typed-literal migration.
 fn storage_term_to_target_string(term: &Term) -> String {
-    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    use percent_encoding::utf8_percent_encode;
 
     match term {
         Term::NamedNode(n) => n.as_str().to_string(),
@@ -106,13 +115,11 @@ fn storage_term_to_target_string(term: &Term) -> String {
                 XSD_INTEGER | XSD_DECIMAL => format!("literal:number:{val}"),
                 XSD_BOOLEAN => format!("literal:boolean:{val}"),
                 ONT_JSON => {
-                    let encoded = utf8_percent_encode(val, NON_ALPHANUMERIC).to_string();
+                    let encoded = utf8_percent_encode(val, &RFC3986_COMPONENT_ENCODE).to_string();
                     format!("literal:json:{encoded}")
                 }
-                // `xsd:string` (or the legacy simple literal, which oxigraph
-                // also reports as xsd:string) — encode as `literal:string:`.
                 _ => {
-                    let encoded = utf8_percent_encode(val, NON_ALPHANUMERIC).to_string();
+                    let encoded = utf8_percent_encode(val, &RFC3986_COMPONENT_ENCODE).to_string();
                     format!("literal:string:{encoded}")
                 }
             }
