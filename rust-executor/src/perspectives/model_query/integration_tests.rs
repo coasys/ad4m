@@ -4886,6 +4886,7 @@ async fn test_sort_by_relation_property_asc() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -4961,6 +4962,7 @@ async fn test_sort_by_relation_property_desc() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -5054,6 +5056,7 @@ async fn test_sort_by_relation_property_with_signed_envelope_literal() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -5159,6 +5162,7 @@ async fn test_sort_by_relation_property_with_missing_relation() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();
