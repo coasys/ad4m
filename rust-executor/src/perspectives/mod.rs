@@ -743,8 +743,9 @@ mod tests {
     use chrono::Utc;
 
     fn setup() {
-        //setup_wallet();
+        crate::test_utils::setup_wallet();
         Ad4mDb::init_global_instance(":memory:").unwrap();
+        crate::agent::AgentService::init_global_test_instance();
     }
 
     async fn find_perspective_by_uuid(

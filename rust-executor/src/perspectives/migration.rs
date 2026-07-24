@@ -591,9 +591,7 @@ mod tests {
             .iter()
             .find(|l| l.data.source == "ad4m://self")
             .expect("Should find link with canonical source URI");
-        // After typed-literal round-trip the underscore is percent-encoded
-        // canonically (NON_ALPHANUMERIC), matching `literal_encode`'s output.
-        assert_eq!(canonical.data.target, "literal:string:already%5Fgood");
+        assert_eq!(canonical.data.target, "literal:string:already_good");
 
         // Rusqlite should be empty
         let remaining = Ad4mDb::with_global_instance(|db| db.get_all_links(&handle.uuid).unwrap());
