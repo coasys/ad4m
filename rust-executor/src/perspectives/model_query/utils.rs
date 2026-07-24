@@ -7,22 +7,30 @@
 
 use deno_core::anyhow::{anyhow, Error};
 #[cfg(test)]
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::utf8_percent_encode;
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
 // SPARQL injection prevention helpers
 // ---------------------------------------------------------------------------
 
-/// Encode a string for use in a `literal:string:…` IRI, using
-/// `NON_ALPHANUMERIC` percent-encoding to match `literal_encode` in
-/// `languages/literal.rs`. (`urlencoding::encode` keeps RFC 3986's
-/// `.-_~`, which diverges from the storage encoding.) Test-only —
+/// Percent-encoding set matching JS `encodeRFC3986URIComponent`.
+/// Leaves `A-Z a-z 0-9 - _ . ~` un-encoded — same characters the SDK
+/// preserves, so `literal:*:` URLs round-trip without re-encoding drift.
+#[cfg(test)]
+const RFC3986_COMPONENT_ENCODE: percent_encoding::AsciiSet = percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+/// Encode a string for use in a `literal:string:…` IRI, matching
+/// the JS SDK's `encodeRFC3986URIComponent` encoding. Test-only —
 /// production paths construct typed RDF literals instead of synthesising
 /// the URI form by hand.
 #[cfg(test)]
 pub(super) fn literal_percent_encode(s: &str) -> String {
-    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+    utf8_percent_encode(s, &RFC3986_COMPONENT_ENCODE).to_string()
 }
 
 /// Format a finite f64 for the `literal:number:` IRI tail, mirroring

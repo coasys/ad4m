@@ -10,7 +10,7 @@ use super::sparql_builder::build_instance_sparql;
 use super::test_helpers::{
     evaluate_getters_batch_from_json, execute_model_query_from_json, StaticShapeResolver,
 };
-use super::types::{ModelShape, ShapeProperty};
+use super::types::{ModelQueryInput, ModelShape, ShapeProperty};
 use super::utils::literal_percent_encode;
 use super::*;
 use crate::perspectives::sparql_store::SparqlStore;
@@ -5099,5 +5099,366 @@ async fn test_sort_by_relation_property_with_missing_relation() {
         ids,
         vec!["test://post3/b", "test://post3/a", "test://post3/c"],
         "post without location should sort to end: got {ids:?}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Indexed-WHERE benchmark
+// -----------------------------------------------------------------------------
+//
+// `cargo test --release --lib perspectives::model_query::integration_tests::bench`
+//
+// Compares two equivalent SPARQL queries against the same `literal:string:`
+// data: an indexed direct-IRI probe vs. a `fn/parse_literal`-wrapped FILTER.
+// The former is what the WHERE builders now emit; the latter is the shape
+// they emitted before. Both queries find the same rows; the difference is
+// whether Oxigraph's planner can use the POS index.
+
+#[test]
+fn bench_indexed_iri_vs_fn_parse_literal_filter() {
+    use std::time::Instant;
+
+    // Skip in debug builds — comparing per-row function call to an index probe
+    // is meaningless without optimisations.
+    if cfg!(debug_assertions) {
+        eprintln!("(bench skipped — run with --release)");
+        return;
+    }
+
+    // Toggle scale with WT_BENCH_LINKS; 10k by default.
+    let n_links: usize = std::env::var("WT_BENCH_LINKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10_000);
+
+    let store = SparqlStore::new(None).unwrap();
+    let pred = "ns://body";
+    let target_value = "needle";
+    let stored_target = format!("literal:string:{}", literal_percent_encode(target_value));
+
+    // Seed N rows; only the last carries the matching target.
+    let needle_idx = n_links - 1;
+    for i in 0..n_links {
+        let source = format!("test://row/{i}");
+        store
+            .add_link(&make_link(
+                &source,
+                "ns://type",
+                "ns://row",
+                &format!("{}", 1_700_000_000_000_i64 + i as i64),
+            ))
+            .unwrap();
+        let target = if i == needle_idx {
+            stored_target.clone()
+        } else {
+            format!(
+                "literal:string:{}",
+                literal_percent_encode(&format!("row-{i}"))
+            )
+        };
+        store
+            .add_link(&make_link(
+                &source,
+                pred,
+                &target,
+                &format!("{}", 1_700_000_000_000_i64 + i as i64),
+            ))
+            .unwrap();
+    }
+
+    let indexed = format!("SELECT ?source WHERE {{ ?source <{pred}> \"{target_value}\" . }}");
+    let filtered = format!(
+        "SELECT ?source WHERE {{ \
+            ?source <{pred}> ?t . \
+            FILTER(STR(?t) = \"{target_value}\") \
+        }}"
+    );
+
+    // Warm-up — touch every triple under both query plans before timing.
+    let _ = store.query(&indexed).unwrap();
+    let _ = store.query(&filtered).unwrap();
+
+    let runs = 5;
+    let mut indexed_total = std::time::Duration::ZERO;
+    let mut filtered_total = std::time::Duration::ZERO;
+    let expected = format!("test://row/{needle_idx}");
+
+    for _ in 0..runs {
+        let start = Instant::now();
+        let r = store.query(&indexed).unwrap();
+        indexed_total += start.elapsed();
+        let rows: Vec<Value> = serde_json::from_str(&r).unwrap();
+        assert_eq!(rows.len(), 1, "indexed query must return exactly 1 row");
+        assert_eq!(
+            rows[0]["source"].as_str(),
+            Some(expected.as_str()),
+            "indexed query must return only the needle source",
+        );
+
+        let start = Instant::now();
+        let r = store.query(&filtered).unwrap();
+        filtered_total += start.elapsed();
+        let rows: Vec<Value> = serde_json::from_str(&r).unwrap();
+        assert_eq!(rows.len(), 1, "filtered query must return exactly 1 row");
+        assert_eq!(
+            rows[0]["source"].as_str(),
+            Some(expected.as_str()),
+            "filtered query must return only the needle source",
+        );
+    }
+
+    let indexed_us = (indexed_total.as_secs_f64() * 1_000_000.0) / runs as f64;
+    let filtered_us = (filtered_total.as_secs_f64() * 1_000_000.0) / runs as f64;
+    let speedup = filtered_us / indexed_us;
+    eprintln!(
+        "[bench] n={n_links}  indexed={indexed_us:.1}µs  fn_parse_literal_filter={filtered_us:.1}µs  speedup={speedup:.1}x"
+    );
+}
+
+#[tokio::test]
+async fn test_persistent_store_typed_literal_comparison() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SparqlStore::new(Some(dir.path().to_str().unwrap())).unwrap();
+    let ts = "1700000000000";
+
+    let items: Vec<String> = (0..5).map(|i| format!("test://item-{i}")).collect();
+    let scores = [10.0, 30.0, 50.0, 70.0, 90.0];
+    let names = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+
+    for (i, item) in items.iter().enumerate() {
+        store
+            .add_link(&make_link(item, "ns://type", "ns://scored", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item,
+                "ns://score",
+                &signed_literal_number(scores[i]),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(item, "ns://name", &signed_literal(names[i]), ts))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Scored",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+            "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" },
+            "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // Test 1: gt numeric
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "score".to_string(),
+        WhereCondition::Ops(WhereOps {
+            gt: Some(50.0),
+            ..Default::default()
+        }),
+    );
+    let result = execute_model_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "persistent: gt:50 should match 70 and 90, got {:?}",
+        result.instances
+    );
+
+    // Test 2: not string
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "name".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(Value::String("Alpha".to_string())),
+            ..Default::default()
+        }),
+    );
+    let result = execute_model_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        4,
+        "persistent: not:Alpha should match 4 items, got {:?}",
+        result.instances
+    );
+
+    // Test 3: not string array
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "name".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(Value::Array(vec![
+                Value::String("Alpha".to_string()),
+                Value::String("Beta".to_string()),
+            ])),
+            ..Default::default()
+        }),
+    );
+    let result = execute_model_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        3,
+        "persistent: not:[Alpha,Beta] should match 3 items, got {:?}",
+        result.instances
+    );
+
+    // Diagnostic: raw SPARQL to verify typed literal comparison
+    let raw_gt = store
+        .query(
+            r#"SELECT ?s WHERE {
+                ?s <ns://score> ?v .
+                FILTER(?v > "50"^^<http://www.w3.org/2001/XMLSchema#integer>)
+            }"#,
+        )
+        .unwrap();
+    let raw_gt_rows: Vec<Value> = serde_json::from_str(&raw_gt).unwrap();
+    eprintln!(
+        "[diag] raw gt:50 query returned {} rows: {:?}",
+        raw_gt_rows.len(),
+        raw_gt_rows
+    );
+    assert_eq!(raw_gt_rows.len(), 2, "raw SPARQL gt:50 must return 2 rows");
+
+    let raw_neq = store
+        .query(
+            r#"SELECT ?s WHERE {
+                ?s <ns://name> ?v .
+                FILTER(?v != "Alpha"^^<http://www.w3.org/2001/XMLSchema#string>)
+            }"#,
+        )
+        .unwrap();
+    let raw_neq_rows: Vec<Value> = serde_json::from_str(&raw_neq).unwrap();
+    eprintln!(
+        "[diag] raw neq:Alpha query returned {} rows: {:?}",
+        raw_neq_rows.len(),
+        raw_neq_rows
+    );
+    assert_eq!(
+        raw_neq_rows.len(),
+        4,
+        "raw SPARQL neq:Alpha must return 4 rows"
+    );
+}
+
+#[tokio::test]
+async fn test_model_query_from_js_wire_format() {
+    use super::query::execute_model_query;
+
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let items: Vec<String> = (0..5).map(|i| format!("test://item-{i}")).collect();
+    let titles = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+    let counts = [10i64, 20, 30, 40, 50];
+
+    for (i, item) in items.iter().enumerate() {
+        store
+            .add_link(&make_link(item, "test://post_type", "test://post", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item,
+                "test://title",
+                &signed_literal(titles[i]),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item,
+                "test://view_count",
+                &format!("literal:number:{}", counts[i]),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "TestPost",
+        "properties": {
+            "type": { "predicate": "test://post_type", "required": true, "flag": true, "initial": "test://post" },
+            "title": { "predicate": "test://title", "required": true, "resolveLanguage": "literal" },
+            "viewCount": { "predicate": "test://view_count", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // Simulate exact JSON wire format from JS client:
+    // { "where": { "viewCount": { "gt": 30 } }, "deepQuery": true }
+    let wire_json = r#"{"where": {"viewCount": {"gt": 30}}, "deepQuery": true}"#;
+    let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
+    eprintln!("[wire] parsed query: {:?}", query_input);
+
+    let (resolver, shape) = StaticShapeResolver::from_json("TestPost", shape_json).unwrap();
+    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "wire gt:30 should match 40 and 50, got {:?}",
+        result.instances
+    );
+
+    // not:Alpha from JS wire format
+    let wire_json = r#"{"where": {"title": {"not": "Alpha"}}, "deepQuery": true}"#;
+    let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
+    eprintln!("[wire] parsed not query: {:?}", query_input);
+
+    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        4,
+        "wire not:Alpha should match 4, got {:?}",
+        result.instances
+    );
+
+    // between from JS wire format
+    let wire_json = r#"{"where": {"viewCount": {"between": [20, 40]}}, "deepQuery": true}"#;
+    let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
+    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        3,
+        "wire between:[20,40] should match 3, got {:?}",
+        result.instances
     );
 }
