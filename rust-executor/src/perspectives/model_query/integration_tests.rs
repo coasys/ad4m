@@ -5503,7 +5503,7 @@ async fn test_model_query_from_js_wire_format() {
     eprintln!("[wire] parsed query: {:?}", query_input);
 
     let (resolver, shape) = StaticShapeResolver::from_json("TestPost", shape_json).unwrap();
-    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver, None)
         .await
         .unwrap();
     assert_eq!(
@@ -5518,7 +5518,7 @@ async fn test_model_query_from_js_wire_format() {
     let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
     eprintln!("[wire] parsed not query: {:?}", query_input);
 
-    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver, None)
         .await
         .unwrap();
     assert_eq!(
@@ -5531,7 +5531,7 @@ async fn test_model_query_from_js_wire_format() {
     // between from JS wire format
     let wire_json = r#"{"where": {"viewCount": {"between": [20, 40]}}, "deepQuery": true}"#;
     let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
-    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver, None)
         .await
         .unwrap();
     assert_eq!(
