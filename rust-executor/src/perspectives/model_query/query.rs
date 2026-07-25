@@ -448,7 +448,8 @@ async fn resolve_language_transforms(
         .properties
         .iter()
         .filter(|p| {
-            p.resolve_language.is_some() && p.resolve_language.as_deref() != Some("literal")
+            (p.resolve_language.is_some() && p.resolve_language.as_deref() != Some("literal"))
+                || p.transform.is_some()
         })
         .collect();
 
@@ -464,8 +465,10 @@ async fn resolve_language_transforms(
             //   - String that parses as a language expression URL → fetch via controller
             //   - Anything else (already-decoded literal string, object, etc.) → use as-is
             let current = instance[&prop.name].clone();
+            let is_expr = prop.resolve_language.is_some()
+                && prop.resolve_language.as_deref() != Some("literal");
             let resolved: Option<Value> = match &current {
-                Value::String(uri) if !uri.starts_with("literal:") => {
+                Value::String(uri) if is_expr && !uri.starts_with("literal:") => {
                     match crate::languages::LanguageController::parse_expr_url(uri) {
                         Ok((lang, expr_addr)) => {
                             // Ensure the language is loaded before attempting to fetch the
