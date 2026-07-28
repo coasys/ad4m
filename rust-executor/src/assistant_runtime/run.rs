@@ -183,13 +183,25 @@ async fn resolve_config(
         }
     }
 
-    let model_id = if !thread.model_id.is_empty() {
+    let requested_model = if !thread.model_id.is_empty() {
         thread.model_id.clone()
     } else if !assistant.model_id.is_empty() {
         assistant.model_id.clone()
     } else {
         "default".to_string()
     };
+    // Resolve the model reference (id | name | "default") to the registered
+    // model id that AIService keys its LLM channel by — the same resolution
+    // the /v1 endpoint performs. Without this a friendly name like "qwen2.5"
+    // never matches the channel (which is keyed by the model uuid).
+    let model_id = crate::api::openai_compat::model_selector::resolve_model(
+        &requested_model,
+        crate::types::ModelType::Llm,
+    )
+    .await
+    .map_err(|_| {
+        anyhow!("assistant model '{requested_model}' is not registered on this executor")
+    })?;
 
     Ok(RunConfig {
         assistant,
