@@ -59,6 +59,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     enable_multi_user: None,
                     enable_mcp: None,
                     mcp_port: None,
+                    enable_assistants: None,
                     smtp_config: None,
                     pid_file: None,
                 })
@@ -214,6 +215,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     enable_multi_user: None,
                     enable_mcp: None,
                     mcp_port: None,
+                    enable_assistants: None,
                     smtp_config: None,
                     pid_file: None,
                 })

@@ -169,6 +169,9 @@ enum Domain {
         enable_mcp: Option<bool>,
         #[arg(long, action)]
         mcp_port: Option<u16>,
+        /// Enable the server-side AI-assistant runtime (default: on).
+        #[arg(long, action)]
+        enable_assistants: Option<bool>,
         /// Write the executor PID to this file on startup (removed on clean shutdown).
         /// Useful for test harnesses that need targeted process cleanup.
         #[arg(long)]
@@ -226,6 +229,7 @@ async fn main() -> Result<()> {
         enable_multi_user,
         enable_mcp,
         mcp_port,
+        enable_assistants,
         pid_file,
     } = args.domain
     {
@@ -267,6 +271,7 @@ async fn main() -> Result<()> {
                 smtp_config: None,
                 enable_mcp,
                 mcp_port,
+                enable_assistants,
                 pid_file,
             })
             .await;

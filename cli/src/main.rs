@@ -269,6 +269,7 @@ async fn main() -> Result<()> {
                 enable_multi_user,
                 enable_mcp,
                 mcp_port,
+                enable_assistants: None,
                 pid_file,
                 localhost: None,
                 auto_permit_cap_requests: None,
