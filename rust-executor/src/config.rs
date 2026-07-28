@@ -91,6 +91,9 @@ pub struct Ad4mConfig {
     pub enable_mcp: Option<bool>,
     /// Port for MCP HTTP server (default: 3001)
     pub mcp_port: Option<u16>,
+    /// Enable the server-side AI-assistant run subsystem (default: enabled).
+    /// Only `Some(false)` disables it, mirroring how a missing flag defaults on.
+    pub enable_assistants: Option<bool>,
     /// Path to write PID file (for test harness cleanup)
     pub pid_file: Option<String>,
 }
@@ -182,6 +185,7 @@ impl Default for Ad4mConfig {
             smtp_config: None,
             enable_mcp: None,
             mcp_port: None,
+            enable_assistants: None,
             pid_file: None,
         };
         config.prepare();

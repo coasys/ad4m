@@ -2,6 +2,7 @@
 extern crate lazy_static;
 
 pub mod api;
+pub mod assistant_runtime;
 pub mod config;
 pub mod email_service;
 pub mod entanglement_service;
@@ -615,6 +616,23 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             )) {
                 error!("MCP server error: {:?}", e);
             }
+        });
+    }
+
+    // Check if the AI-assistant subsystem is enabled — run it alongside the
+    // MCP + REST servers. Enabled unless explicitly disabled, mirroring the
+    // default-on convention (a missing flag stays on). This closure captures
+    // nothing from `config`, so `config` is still moved into the REST server
+    // below.
+    if config.enable_assistants != Some(false) {
+        info!("Starting AI-assistant run subsystem...");
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .thread_name(String::from("assistant_runtime"))
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(assistant_runtime::start());
         });
     }
 
