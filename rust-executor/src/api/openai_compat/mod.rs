@@ -31,6 +31,7 @@ pub mod model_selector;
 pub mod models;
 pub mod realtime;
 pub mod router;
+pub mod tool_grammar;
 pub mod tts_passthrough;
 pub mod types;
 
