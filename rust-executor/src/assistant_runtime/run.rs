@@ -216,7 +216,7 @@ async fn drive_loop(
 
     let toolset = ToolSet::new(vec![
         ToolProvider::Builtin(BuiltinTools::new(conv.uuid.clone())),
-        ToolProvider::Mcp(McpToolProvider::new(config.mcp_servers.clone())),
+        ToolProvider::Mcp(McpToolProvider::connect(config.mcp_servers.clone()).await),
     ]);
     let tool_defs = toolset.tool_defs();
 

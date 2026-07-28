@@ -6,20 +6,27 @@
 //! * [`BuiltinTools`] — in-process perspective / neighbourhood graph
 //!   operations, fully implemented (zero HTTP; direct
 //!   `PerspectiveInstance`/`neighbourhoods` calls).
-//! * [`McpToolProvider`] — external MCP servers configured on an assistant.
-//!   The live MCP **client** transport is a documented follow-up: `rmcp` is
-//!   currently built with server features only, so wiring a client means
-//!   enabling `rmcp`'s `client` + `transport-*-client` features and connecting
-//!   each `McpServer`. Until then this provider exposes **no** tools and any
-//!   attempt to call one returns an explicit error (never a silent stub). The
-//!   provider boundary is the seam that follow-up work slots into without
-//!   touching the loop.
+//! * [`McpToolProvider`] — external MCP servers configured on an assistant,
+//!   connected via a live `rmcp` client. Each `McpServer` is connected on run
+//!   start (stdio → child process; http/streamable/sse → streamable-HTTP;
+//!   websocket unsupported by the pinned rmcp), its tools discovered via
+//!   `list_tools` and mapped to OpenAI `ToolDef`s, and calls dispatched via
+//!   `call_tool`. A server that fails to connect or enumerate is logged and
+//!   skipped, so the model is never offered an unfulfillable tool and one bad
+//!   server never fails the whole set.
 //!
 //! Dispatch is a plain enum (no `async-trait` dependency); [`ToolSet`]
 //! aggregates providers and routes a call to whichever owns the tool name.
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
+
+use rmcp::model::{CallToolRequestParams, Tool};
+use rmcp::service::RunningService;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
+use rmcp::{RoleClient, ServiceExt};
+use tokio::process::Command;
 
 use crate::agent::AgentContext;
 use crate::api::openai_compat::types::{FunctionDef, ToolDef};
@@ -257,47 +264,203 @@ impl BuiltinTools {
 }
 
 // ---------------------------------------------------------------------------
-// MCP tool provider (live client transport is a documented follow-up)
+// MCP tool provider — live rmcp client
 // ---------------------------------------------------------------------------
 
-/// Tools from an assistant's configured external MCP servers.
+/// One connected external MCP server: the live rmcp client session plus the
+/// tool definitions discovered from it.
+struct McpConnection {
+    server_name: String,
+    client: RunningService<RoleClient, ()>,
+    tools: Vec<ToolDef>,
+}
+
+/// Tools from an assistant's configured external MCP servers, connected via
+/// rmcp. Servers are connected once when the provider is built (and the
+/// sessions are cached for the provider's — i.e. the run's — lifetime). A
+/// server that fails to connect or enumerate tools is logged and skipped, so
+/// the model is never offered a tool the executor cannot fulfil, and one bad
+/// server never fails the whole tool set.
 ///
-/// FOLLOW-UP: connecting requires enabling `rmcp`'s client features
-/// (`client`, `transport-streamable-http-client`, `transport-sse-client`) in
-/// `rust-executor/Cargo.toml` and, per configured [`McpServer`], establishing a
-/// session, running `list_tools`, and forwarding `call_tool`. That work slots
-/// in behind this provider without touching the run loop or [`ToolSet`]. Until
-/// it lands this provider is inert: no tools are advertised and any call fails
-/// loudly.
+/// Transports (rmcp 0.15): `stdio` → [`TokioChildProcess`];
+/// `http`/`streamable` → [`StreamableHttpClientTransport`]; `sse` → the same
+/// streamable-HTTP client (0.15 folds SSE into `client-side-sse` — there is no
+/// standalone SSE client transport); `websocket` is unsupported (this rmcp has
+/// no ws client transport) and is skipped with a clear warning.
 pub struct McpToolProvider {
-    servers: Vec<McpServer>,
+    connections: Vec<McpConnection>,
 }
 
 impl McpToolProvider {
-    pub fn new(servers: Vec<McpServer>) -> Self {
-        if !servers.is_empty() {
-            log::warn!(
-                "assistant_runtime: {} MCP server(s) configured on this assistant but the MCP \
-                 client transport is not yet wired (follow-up: enable rmcp client features and \
-                 connect). Their tools are unavailable for this run.",
-                servers.len()
-            );
+    /// Connect to every configured server and discover its tools. Failures are
+    /// logged and skipped; never panics, never fails the whole set.
+    pub async fn connect(servers: Vec<McpServer>) -> Self {
+        let mut connections = Vec::new();
+        for server in servers {
+            match connect_server(&server).await {
+                Ok(conn) => {
+                    log::info!(
+                        "assistant_runtime: connected MCP server '{}' ({} tools)",
+                        conn.server_name,
+                        conn.tools.len()
+                    );
+                    connections.push(conn);
+                }
+                Err(e) => log::warn!(
+                    "assistant_runtime: MCP server '{}' (transport '{}') unavailable, skipping: {}",
+                    server.name,
+                    server.transport,
+                    e
+                ),
+            }
         }
-        Self { servers }
+        Self { connections }
+    }
+
+    /// A provider with no connections (fallback / tests).
+    pub fn empty() -> Self {
+        Self {
+            connections: Vec::new(),
+        }
     }
 
     fn tools(&self) -> Vec<ToolDef> {
-        // No tools until the client transport is wired — deliberately empty so
-        // the model is never offered a tool the executor cannot fulfil.
-        Vec::new()
+        self.connections
+            .iter()
+            .flat_map(|c| c.tools.clone())
+            .collect()
     }
 
-    async fn execute(&self, name: &str, _arguments: &str) -> Result<String> {
-        Err(anyhow!(
-            "MCP tool '{name}' is unavailable: the MCP client transport is not yet wired \
-             (follow-up behind McpToolProvider). {} server(s) configured.",
-            self.servers.len()
-        ))
+    async fn execute(&self, name: &str, arguments: &str) -> Result<String> {
+        for conn in &self.connections {
+            if conn.tools.iter().any(|t| t.function.name == name) {
+                return call_mcp_tool(&conn.client, name, arguments).await;
+            }
+        }
+        Err(anyhow!("MCP tool '{name}' not found on any connected server"))
+    }
+}
+
+/// Connect one server (dispatching on its transport) and enumerate its tools.
+async fn connect_server(server: &McpServer) -> Result<McpConnection> {
+    let client: RunningService<RoleClient, ()> = match server.transport.as_str() {
+        "stdio" => {
+            let mut parts = server.command.split_whitespace();
+            let program = parts
+                .next()
+                .ok_or_else(|| anyhow!("stdio server '{}' has an empty command", server.name))?
+                .to_string();
+            let args: Vec<String> = parts.map(str::to_string).collect();
+            let transport = TokioChildProcess::new(Command::new(&program).configure(|cmd| {
+                for arg in &args {
+                    cmd.arg(arg);
+                }
+            }))
+            .map_err(|e| anyhow!("failed to spawn '{program}': {e}"))?;
+            ()
+                .serve(transport)
+                .await
+                .map_err(|e| anyhow!("stdio MCP handshake failed: {e:?}"))?
+        }
+        "http" | "streamable" | "sse" => {
+            if server.url.is_empty() {
+                return Err(anyhow!(
+                    "'{}' server '{}' has no url",
+                    server.transport,
+                    server.name
+                ));
+            }
+            if server.transport == "sse" {
+                log::info!(
+                    "assistant_runtime: MCP server '{}' declares transport 'sse'; the pinned rmcp \
+                     folds SSE into the streamable-HTTP client (no standalone SSE transport), \
+                     connecting via streamable-HTTP.",
+                    server.name
+                );
+            }
+            // `from_config` builds the transport's own reqwest client
+            // internally, so the executor's reqwest version is never involved.
+            let mut config = StreamableHttpClientTransportConfig::with_uri(server.url.clone());
+            if !server.auth.is_empty() {
+                // Bearer token value (no `Bearer ` prefix), per the config API.
+                config.auth_header = Some(server.auth.clone());
+            }
+            let transport = StreamableHttpClientTransport::from_config(config);
+            ()
+                .serve(transport)
+                .await
+                .map_err(|e| anyhow!("streamable-HTTP MCP handshake failed: {e:?}"))?
+        }
+        "websocket" | "ws" => {
+            return Err(anyhow!(
+                "transport 'websocket' is unsupported by the pinned rmcp (no ws client transport)"
+            ));
+        }
+        other => return Err(anyhow!("unknown transport '{other}'")),
+    };
+
+    let raw_tools = client
+        .list_all_tools()
+        .await
+        .map_err(|e| anyhow!("list_tools failed: {e}"))?;
+    let tools = raw_tools.iter().map(tool_to_def).collect();
+
+    Ok(McpConnection {
+        server_name: server.name.clone(),
+        client,
+        tools,
+    })
+}
+
+/// Call one MCP tool and flatten its result content to a string.
+async fn call_mcp_tool(
+    client: &RunningService<RoleClient, ()>,
+    name: &str,
+    arguments: &str,
+) -> Result<String> {
+    // The OpenAI `function.arguments` is a JSON *string* of an object.
+    let parsed: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
+    let arguments = match parsed {
+        Value::Object(map) => Some(map),
+        _ => None,
+    };
+
+    let result = client
+        .call_tool(CallToolRequestParams {
+            meta: None,
+            name: name.to_string().into(),
+            arguments,
+            task: None,
+        })
+        .await
+        .map_err(|e| anyhow!("call_tool '{name}' failed: {e}"))?;
+
+    // Prefer concatenated text blocks; fall back to structured content / raw.
+    let text = result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !text.is_empty() {
+        Ok(text)
+    } else if let Some(structured) = result.structured_content {
+        Ok(structured.to_string())
+    } else {
+        Ok(serde_json::to_string(&result.content).unwrap_or_default())
+    }
+}
+
+/// Map an rmcp [`Tool`] to an OpenAI-shaped [`ToolDef`]: name, description, and
+/// `inputSchema` → `parameters`.
+fn tool_to_def(tool: &Tool) -> ToolDef {
+    ToolDef {
+        kind: "function".to_string(),
+        function: FunctionDef {
+            name: tool.name.to_string(),
+            description: tool.description.as_ref().map(|d| d.to_string()),
+            parameters: Some(Value::Object((*tool.input_schema).clone())),
+        },
     }
 }
 
@@ -337,22 +500,35 @@ mod tests {
     }
 
     #[test]
-    fn mcp_provider_is_inert_until_wired() {
-        let p = McpToolProvider::new(vec![McpServer {
-            id: "m".into(),
-            name: "srv".into(),
-            transport: "http".into(),
-            url: "http://x".into(),
-            ..Default::default()
-        }]);
-        assert!(p.tools().is_empty());
+    fn mcp_tool_maps_to_tooldef() {
+        use std::sync::Arc;
+        let mut schema = serde_json::Map::new();
+        schema.insert("type".to_string(), json!("object"));
+        schema.insert(
+            "properties".to_string(),
+            json!({ "q": { "type": "string" } }),
+        );
+        let tool = Tool::new("search", "Search the web", Arc::new(schema));
+
+        let def = tool_to_def(&tool);
+        assert_eq!(def.kind, "function");
+        assert_eq!(def.function.name, "search");
+        assert_eq!(def.function.description.as_deref(), Some("Search the web"));
+        let params = def.function.parameters.expect("parameters mapped");
+        assert_eq!(params["type"], json!("object"));
+        assert_eq!(params["properties"]["q"]["type"], json!("string"));
+    }
+
+    #[test]
+    fn empty_mcp_provider_advertises_no_tools() {
+        assert!(McpToolProvider::empty().tools().is_empty());
     }
 
     #[test]
     fn toolset_routes_by_ownership() {
         let set = ToolSet::new(vec![
             ToolProvider::Builtin(BuiltinTools::new("u".into())),
-            ToolProvider::Mcp(McpToolProvider::new(vec![])),
+            ToolProvider::Mcp(McpToolProvider::empty()),
         ]);
         assert!(!set.is_empty());
         assert!(set
