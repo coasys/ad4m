@@ -118,10 +118,13 @@ struct LLMTaskSpawnRequest {
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
 struct LLMTaskPromptRequest {
     pub task_id: String,
     pub prompt: String,
+    /// Optional decoding constraint (a tool-call grammar).  `None` ⇒ normal
+    /// unconstrained generation, byte-for-byte the pre-tools behaviour.
+    /// Ignored on the remote path (upstream tool forwarding is a follow-up).
+    pub constraint: Option<ArcParser<()>>,
     pub result_sender: oneshot::Sender<Result<String>>,
 }
 
@@ -152,12 +155,36 @@ struct LLMTaskShutdownRequest {
 /// `done_sender` fires once the model has emitted its final token (or
 /// errored) and carries `PromptResult` for the closing chunk's `usage`.
 #[allow(dead_code)]
-#[derive(Debug)]
 struct LLMTaskPromptStreamRequest {
     pub task_id: String,
     pub prompt: String,
+    /// See [`LLMTaskPromptRequest::constraint`].
+    pub constraint: Option<ArcParser<()>>,
     pub token_sender: mpsc::UnboundedSender<String>,
     pub done_sender: oneshot::Sender<Result<PromptResult>>,
+}
+
+// Manual `Debug` — these structs hold a non-`Debug` `ArcParser` constraint.
+// `LLMTaskRequest` must stay `Debug` so that `SendError<LLMTaskRequest>`
+// converts into `anyhow::Error` via `?` at the channel send sites.
+impl std::fmt::Debug for LLMTaskPromptRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LLMTaskPromptRequest")
+            .field("task_id", &self.task_id)
+            .field("prompt", &self.prompt)
+            .field("constrained", &self.constraint.is_some())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for LLMTaskPromptStreamRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LLMTaskPromptStreamRequest")
+            .field("task_id", &self.task_id)
+            .field("prompt", &self.prompt)
+            .field("constrained", &self.constraint.is_some())
+            .finish()
+    }
 }
 
 #[allow(dead_code)]
@@ -847,7 +874,28 @@ impl AIService {
                                         ));
 
                                         let result = rt.block_on(async {
-                                            task.run(prompt_request.prompt.clone()).all_text().await
+                                            match prompt_request.constraint.clone() {
+                                                // Tool-call grammar: constrain decoding and
+                                                // accumulate the (guaranteed on-grammar) text.
+                                                Some(parser) => {
+                                                    use futures::StreamExt;
+                                                    let mut stream = Box::pin(
+                                                        task.run(prompt_request.prompt.clone())
+                                                            .with_constraints(parser),
+                                                    );
+                                                    let mut acc = String::new();
+                                                    while let Some(token) = stream.next().await {
+                                                        acc.push_str(&token);
+                                                    }
+                                                    acc
+                                                }
+                                                // No tools: unchanged unconstrained path.
+                                                None => {
+                                                    task.run(prompt_request.prompt.clone())
+                                                        .all_text()
+                                                        .await
+                                                }
+                                            }
                                         });
 
                                         rt.block_on(publish_model_status(
@@ -969,14 +1017,33 @@ impl AIService {
                                             // implements `Stream<Item=String>`;
                                             // polling it yields one token
                                             // chunk at a time.
-                                            let mut stream =
-                                                Box::pin(task.run(prompt_clone.clone()));
                                             let mut accumulated = String::new();
-                                            while let Some(token) = stream.next().await {
-                                                accumulated.push_str(&token);
-                                                if token_sender.send(token).is_err() {
-                                                    // consumer dropped — stop generating
-                                                    break;
+                                            match stream_request.constraint.clone() {
+                                                // Tool-call grammar: constrained streaming.
+                                                Some(parser) => {
+                                                    let mut stream = Box::pin(
+                                                        task.run(prompt_clone.clone())
+                                                            .with_constraints(parser),
+                                                    );
+                                                    while let Some(token) = stream.next().await {
+                                                        accumulated.push_str(&token);
+                                                        if token_sender.send(token).is_err() {
+                                                            // consumer dropped — stop generating
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                // No tools: unchanged unconstrained streaming.
+                                                None => {
+                                                    let mut stream =
+                                                        Box::pin(task.run(prompt_clone.clone()));
+                                                    while let Some(token) = stream.next().await {
+                                                        accumulated.push_str(&token);
+                                                        if token_sender.send(token).is_err() {
+                                                            // consumer dropped — stop generating
+                                                            break;
+                                                        }
+                                                    }
                                                 }
                                             }
                                             accumulated
@@ -1205,6 +1272,7 @@ impl AIService {
         &self,
         model_id: String,
         messages: Vec<(String, String)>,
+        constraint: Option<ArcParser<()>>,
     ) -> Result<PromptResult> {
         let resolved = Self::replace_model_variables(&model_id)?;
         let (task, final_prompt) = Self::build_ephemeral_task(&resolved, messages);
@@ -1235,6 +1303,7 @@ impl AIService {
             sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
                 task_id: task_id.clone(),
                 prompt: final_prompt.clone(),
+                constraint,
                 result_sender: prompt_tx,
             }))?;
         }
@@ -1269,6 +1338,7 @@ impl AIService {
         &self,
         model_id: String,
         messages: Vec<(String, String)>,
+        constraint: Option<ArcParser<()>>,
     ) -> Result<(
         mpsc::UnboundedReceiver<String>,
         oneshot::Receiver<Result<PromptResult>>,
@@ -1300,6 +1370,7 @@ impl AIService {
             sender.send(LLMTaskRequest::PromptStream(LLMTaskPromptStreamRequest {
                 task_id: task_id.clone(),
                 prompt: final_prompt,
+                constraint,
                 token_sender: token_tx,
                 done_sender: done_tx,
             }))?;
@@ -1350,6 +1421,7 @@ impl AIService {
                 task_id,
                 prompt,
                 result_sender,
+                constraint: None,
             }))?;
         } else {
             return Err(anyhow::anyhow!(
