@@ -7,9 +7,11 @@
 //!   - `{"type":"transcription_session.update","session":{"model":"<id>"}}` —
 //!     opens a Whisper session.  Must arrive before any audio.
 //!   - `{"type":"input_audio_buffer.append","audio":"<base64 PCM>"}` —
-//!     16 kHz mono `f32` LE samples, base64-encoded.
-//!   - `{"type":"input_audio_buffer.commit"}` — flush any pending
-//!     segment.  Optional; idle timeout flushes too.
+//!     16 kHz mono PCM16 (signed i16 LE) samples, base64-encoded.
+//!     Matches the OpenAI Realtime default `input_audio_format: pcm16`.
+//!   - `{"type":"input_audio_buffer.commit"}` — acknowledge the commit.
+//!     The underlying whisper engine uses VAD-based segmentation, so
+//!     this is a client synchronisation point, not a forced flush.
 //!   - `{"type":"session.close"}` — close the session and the socket.
 //!
 //! * **Server → client**
@@ -52,6 +54,7 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
 
     let mut stream_id: Option<String> = None;
     let mut delta_rx: Option<broadcast::Receiver<String>> = None;
+    let mut audio_format = AudioFormat::Pcm16;
 
     loop {
         // Move the receiver out so select! doesn't conflict with
@@ -124,11 +127,31 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
 
         match event_type.as_str() {
             "transcription_session.update" => {
-                let model_str = parsed
-                    .get("session")
+                let session = parsed.get("session");
+                let model_str = session
                     .and_then(|s| s.get("model"))
                     .and_then(|m| m.as_str())
                     .unwrap_or("default");
+
+                audio_format = match session
+                    .and_then(|s| s.get("input_audio_format"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("pcm16")
+                {
+                    "pcm16" => AudioFormat::Pcm16,
+                    other => {
+                        let _ = send_error(
+                            &mut socket,
+                            "invalid_request",
+                            &format!(
+                                "Unsupported input_audio_format \"{other}\"; only \"pcm16\" is supported"
+                            ),
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+
                 let model_id = match resolve_model(model_str, ModelType::Transcription).await {
                     Ok(id) => id,
                     Err(e) => {
@@ -143,6 +166,15 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                         continue;
                     }
                 };
+
+                // Tear down any prior session before opening a new one.
+                if let Some(old_sid) = stream_id.take() {
+                    let _ = service
+                        .close_transcription_stream(&old_sid, &auth.auth_token)
+                        .await;
+                }
+                delta_rx = None;
+
                 let sid = match service
                     .open_transcription_stream(model_id.clone(), None, auth.auth_token.clone())
                     .await
@@ -191,39 +223,38 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                         continue;
                     }
                 };
-                let samples = bytes_to_f32_le(&bytes);
+                let samples = match audio_format {
+                    AudioFormat::Pcm16 => pcm16_to_f32(&bytes),
+                };
 
-                if let Ok(service) = AIService::global_instance().await {
-                    if delta_rx.is_none() {
-                        match service
-                            .feed_transcription_stream_with_broadcast(
-                                sid,
-                                samples,
-                                &auth.auth_token,
-                            )
-                            .await
-                        {
-                            Ok(rx) => delta_rx = Some(rx),
-                            Err(e) => {
-                                let _ =
-                                    send_error(&mut socket, "server_error", &e.to_string()).await;
-                            }
-                        }
-                    } else {
-                        let _ = service
-                            .feed_transcription_stream(sid, samples, &auth.auth_token)
-                            .await;
+                let service = match AIService::global_instance().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
+                        continue;
                     }
+                };
+                if delta_rx.is_none() {
+                    match service
+                        .feed_transcription_stream_with_broadcast(sid, samples, &auth.auth_token)
+                        .await
+                    {
+                        Ok(rx) => delta_rx = Some(rx),
+                        Err(e) => {
+                            let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
+                        }
+                    }
+                } else {
+                    let _ = service
+                        .feed_transcription_stream(sid, samples, &auth.auth_token)
+                        .await;
                 }
             }
             "input_audio_buffer.commit" => {
-                let completed = json!({
-                    "type": "conversation.item.input_audio_transcription.completed",
-                    "transcript": "",
-                });
-                let _ = socket
-                    .send(Message::Text(completed.to_string().into()))
-                    .await;
+                // The whisper backend uses VAD-based segmentation; there
+                // is no explicit flush API.  We acknowledge the commit so
+                // clients that wait for it can proceed — transcription
+                // results arrive asynchronously via delta events.
             }
             "session.close" => {
                 break;
@@ -263,11 +294,17 @@ async fn send_error(socket: &mut WebSocket, code: &str, message: &str) -> Result
         .map_err(|_| ())
 }
 
-/// Reinterpret a raw byte slice as little-endian `f32` samples.
-pub(super) fn bytes_to_f32_le(bytes: &[u8]) -> Vec<f32> {
-    let mut out = Vec::with_capacity(bytes.len() / 4);
-    for chunk in bytes.chunks_exact(4) {
-        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+enum AudioFormat {
+    Pcm16,
+}
+
+/// Convert PCM16 (signed i16 LE) bytes to normalised f32 samples.
+/// This is the default OpenAI Realtime `input_audio_format`.
+pub(super) fn pcm16_to_f32(bytes: &[u8]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for chunk in bytes.chunks_exact(2) {
+        let s = i16::from_le_bytes([chunk[0], chunk[1]]);
+        out.push((s as f32) / (i16::MAX as f32));
     }
     out
 }

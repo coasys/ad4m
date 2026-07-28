@@ -1,33 +1,7 @@
 use super::audio::{audio_decode, decode_pcm_wav};
 use super::errors::OpenAIError;
-use super::realtime::bytes_to_f32_le;
+use super::realtime::pcm16_to_f32;
 use super::types::*;
-
-// ---------------------------------------------------------------------------
-// bytes_to_f32_le
-// ---------------------------------------------------------------------------
-
-#[test]
-fn bytes_to_f32_le_roundtrip() {
-    let values: Vec<f32> = vec![0.0, 1.0, -1.0, 0.5, f32::MIN, f32::MAX];
-    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-    assert_eq!(bytes_to_f32_le(&bytes), values);
-}
-
-#[test]
-fn bytes_to_f32_le_empty() {
-    assert!(bytes_to_f32_le(&[]).is_empty());
-}
-
-#[test]
-fn bytes_to_f32_le_trailing_bytes_ignored() {
-    let one_float = 42.0_f32.to_le_bytes();
-    let mut bytes = one_float.to_vec();
-    bytes.extend_from_slice(&[0xFF, 0xFF]); // 2 extra bytes, not a full f32
-    let result = bytes_to_f32_le(&bytes);
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0], 42.0);
-}
 
 // ---------------------------------------------------------------------------
 // ChatMessageContent::flatten_to_text
@@ -159,7 +133,10 @@ fn chat_completion_request_with_parts() {
         }]
     });
     let req: ChatCompletionRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.messages[0].content.flatten_to_text(), "describe this");
+    assert_eq!(
+        req.messages[0].content.as_ref().unwrap().flatten_to_text(),
+        "describe this"
+    );
 }
 
 #[test]
@@ -319,4 +296,81 @@ fn reject_truncated_wav() {
         .as_str()
         .unwrap()
         .contains("Truncated"));
+}
+
+#[test]
+fn decode_wav_inflated_chunk_size() {
+    let mut wav = make_wav(16_000, 1, 16, &[100, -100]);
+    let data_size_pos = wav.windows(4).position(|w| w == b"data").unwrap() + 4;
+    wav[data_size_pos..data_size_pos + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+
+    let result = decode_pcm_wav(&wav).unwrap();
+    assert_eq!(result.len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// pcm16_to_f32
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pcm16_to_f32_roundtrip() {
+    let samples: Vec<i16> = vec![0, i16::MAX, i16::MIN, 1000, -1000];
+    let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let result = pcm16_to_f32(&bytes);
+    assert_eq!(result.len(), 5);
+    assert!((result[0] - 0.0).abs() < 1e-6);
+    assert!((result[1] - 1.0).abs() < 1e-5);
+    assert!(result[2] < -0.999);
+    assert!((result[3] - 1000.0 / i16::MAX as f32).abs() < 1e-5);
+}
+
+#[test]
+fn pcm16_to_f32_empty() {
+    assert!(pcm16_to_f32(&[]).is_empty());
+}
+
+#[test]
+fn pcm16_to_f32_odd_byte_dropped() {
+    let bytes = 500_i16.to_le_bytes().to_vec();
+    let mut with_trailing = bytes.clone();
+    with_trailing.push(0xFF);
+    assert_eq!(pcm16_to_f32(&with_trailing).len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Optional ChatMessage.content
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chat_message_null_content() {
+    let json = serde_json::json!({
+        "role": "assistant",
+        "content": null
+    });
+    let msg: ChatMessage = serde_json::from_value(json).unwrap();
+    assert!(msg.content.is_none());
+}
+
+#[test]
+fn chat_message_missing_content() {
+    let json = serde_json::json!({
+        "role": "assistant"
+    });
+    let msg: ChatMessage = serde_json::from_value(json).unwrap();
+    assert!(msg.content.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// PromptInput error messages
+// ---------------------------------------------------------------------------
+
+#[test]
+fn prompt_input_empty_vs_batch_distinct_errors() {
+    let empty_err = PromptInput::Many(vec![]).into_single().unwrap_err();
+    let batch_err = PromptInput::Many(vec!["a".into(), "b".into()])
+        .into_single()
+        .unwrap_err();
+    assert_ne!(empty_err, batch_err);
+    assert!(empty_err.contains("empty"));
+    assert!(batch_err.contains("Batch"));
 }

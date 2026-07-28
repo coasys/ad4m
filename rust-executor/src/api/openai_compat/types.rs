@@ -71,7 +71,8 @@ pub enum Role {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
-    pub content: ChatMessageContent,
+    #[serde(default)]
+    pub content: Option<ChatMessageContent>,
     #[serde(default)]
     pub name: Option<String>,
 }
@@ -221,6 +222,7 @@ impl PromptInput {
         match self {
             PromptInput::One(s) => Ok(s),
             PromptInput::Many(v) if v.len() == 1 => Ok(v.into_iter().next().unwrap()),
+            PromptInput::Many(v) if v.is_empty() => Err("`prompt` must not be an empty array"),
             PromptInput::Many(_) => Err(
                 "Batch prompts (array with >1 element) are not supported; send one prompt per request",
             ),

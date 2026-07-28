@@ -19,8 +19,8 @@ use super::errors::{OpenAIError, OpenAIResult};
 use super::model_selector::resolve_model;
 use super::types::{
     ChatChoice, ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest,
-    ChatCompletionResponse, ChatResponseMessage, CompletionChoice, CompletionRequest,
-    CompletionResponse, Role, Usage,
+    ChatCompletionResponse, ChatMessageContent, ChatResponseMessage, CompletionChoice,
+    CompletionRequest, CompletionResponse, Role, Usage,
 };
 use crate::agent::capabilities::{check_capability, AI_PROMPT_CAPABILITY};
 use crate::ai_service::AIService;
@@ -39,14 +39,16 @@ pub async fn chat_completions(
     // Resolve the OpenAI `model` string to an AD4M model_id.
     let model_id = resolve_model(&req.model, ModelType::Llm).await?;
 
-    // Flatten messages to (role, content) pairs.
     let messages: Vec<(String, String)> = req
         .messages
         .iter()
         .map(|m| {
             (
                 role_to_str(&m.role).to_string(),
-                m.content.flatten_to_text(),
+                m.content
+                    .as_ref()
+                    .map(ChatMessageContent::flatten_to_text)
+                    .unwrap_or_default(),
             )
         })
         .collect();

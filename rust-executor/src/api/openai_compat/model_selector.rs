@@ -21,20 +21,6 @@ pub async fn resolve_model(requested: &str, expected_type: ModelType) -> OpenAIR
         ));
     }
 
-    // Resolve `default` via the DB's per-type pointer.  This mirrors
-    // `AIService::replace_model_variables` so OpenAI callers can use the
-    // same shorthand as native AD4M ones.
-    if requested == "default" {
-        return Ad4mDb::with_global_instance(|db| db.get_default_model(expected_type.clone()))
-            .map_err(|e| OpenAIError::internal(format!("Database error: {e}")))?
-            .ok_or_else(|| {
-                OpenAIError::not_found(format!(
-                    "No default {} model configured on this executor",
-                    type_label(&expected_type)
-                ))
-            });
-    }
-
     let models = Ad4mDb::with_global_instance(|db| db.get_models())
         .map_err(|e| OpenAIError::internal(format!("Database error listing models: {e}")))?;
 
@@ -62,6 +48,19 @@ pub async fn resolve_model(requested: &str, expected_type: ModelType) -> OpenAIR
             )));
         }
         return Ok(m.id.clone());
+    }
+
+    // Pass 3: the `"default"` keyword resolves via the DB's per-type
+    // pointer, after id/name so a real model named "default" wins.
+    if requested == "default" {
+        return Ad4mDb::with_global_instance(|db| db.get_default_model(expected_type.clone()))
+            .map_err(|e| OpenAIError::internal(format!("Database error: {e}")))?
+            .ok_or_else(|| {
+                OpenAIError::not_found(format!(
+                    "No default {} model configured on this executor",
+                    type_label(&expected_type)
+                ))
+            });
     }
 
     Err(OpenAIError::not_found(format!(

@@ -225,6 +225,7 @@ pub(super) fn decode_pcm_wav(bytes: &[u8]) -> OpenAIResult<Vec<f32>> {
             bytes[pos + 7],
         ]) as usize;
         pos += 8;
+        let size = size.min(bytes.len().saturating_sub(pos));
         match id {
             b"fmt " => {
                 if pos + 16 > bytes.len() {

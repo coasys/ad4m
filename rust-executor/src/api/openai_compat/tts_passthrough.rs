@@ -98,7 +98,14 @@ fn find_tts_upstream(requested_model: &str) -> Result<TtsUpstream, TtsPassthroug
     // LLM if none matches.
     let candidate = models
         .iter()
-        .find(|m| m.model_type == ModelType::Llm && m.api.is_some() && m.name == requested_model)
+        .find(|m| {
+            m.model_type == ModelType::Llm
+                && m.api
+                    .as_ref()
+                    .map(|a| matches!(a.api_type, ModelApiType::OpenAi))
+                    .unwrap_or(false)
+                && m.name == requested_model
+        })
         .or_else(|| {
             models.iter().find(|m| {
                 m.model_type == ModelType::Llm

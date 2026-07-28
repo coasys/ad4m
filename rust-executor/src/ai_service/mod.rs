@@ -1163,12 +1163,10 @@ impl AIService {
                 }
                 "user" => {
                     if let Some(prev_user) = current_user.take() {
-                        // user→user with no assistant in between; treat
-                        // earlier user as a finalised final prompt slot
-                        // (will be overwritten if more turns follow).
-                        final_prompt = prev_user;
+                        current_user = Some(format!("{}\n{}", prev_user, content));
+                    } else {
+                        current_user = Some(content.clone());
                     }
-                    current_user = Some(content.clone());
                 }
                 "assistant" => {
                     if let Some(user_msg) = current_user.take() {
