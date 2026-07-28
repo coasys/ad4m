@@ -1,0 +1,1 @@
+{"id":"chatcmpl-f01933c5-d944-48b0-9755-1d5df5a36003","object":"chat.completion","created":1785239529,"model":"qwen2.5","choices":[{"index":0,"message":{"role":"assistant","content":"The current temperature in San Francisco is 14 degrees Celsius and the weather condition is foggy."},"finish_reason":"stop"}],"usage":{"prompt_tokens":21,"completion_tokens":25,"total_tokens":46}}

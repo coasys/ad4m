@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
+use super::model_backend::ModelBackend;
 use super::run::{self, RunInput};
 
 struct RunHandle {
@@ -18,15 +19,18 @@ struct RunHandle {
 }
 
 /// Cheaply-cloneable handle to the set of live runs, keyed by thread id.
+/// Holds the production [`ModelBackend`] handed to each spawned run.
 #[derive(Clone)]
 pub struct RunRegistry {
     inner: Arc<Mutex<HashMap<String, RunHandle>>>,
+    backend: Arc<dyn ModelBackend>,
 }
 
 impl RunRegistry {
-    pub fn new() -> Self {
+    pub fn new(backend: Arc<dyn ModelBackend>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
+            backend,
         }
     }
 
@@ -45,9 +49,10 @@ impl RunRegistry {
         }
 
         let registry = self.clone();
+        let backend = self.backend.clone();
         let tid = thread_id.clone();
         let handle = tokio::spawn(async move {
-            if let Err(e) = run::run_thread(input).await {
+            if let Err(e) = run::run_thread(input, backend).await {
                 log::error!("assistant_runtime: run_thread error for {tid}: {e}");
             }
             registry.remove(&tid).await;
@@ -64,11 +69,5 @@ impl RunRegistry {
     #[cfg(test)]
     pub async fn active_count(&self) -> usize {
         self.inner.lock().await.len()
-    }
-}
-
-impl Default for RunRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }

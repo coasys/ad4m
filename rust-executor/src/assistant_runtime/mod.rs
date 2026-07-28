@@ -22,14 +22,18 @@
 
 pub mod context;
 pub mod entities;
+pub mod model_backend;
 pub mod registry;
 pub mod run;
 pub mod sdna;
 pub mod store;
 pub mod tools;
 
+#[cfg(test)]
+mod e2e_tests;
+
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tokio::sync::broadcast::error::RecvError;
 
@@ -39,6 +43,7 @@ use crate::pubsub::{get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC};
 use crate::types::PerspectiveLinkWithOwner;
 
 use entities::{Message, CLASS_ASSISTANT, CLASS_MESSAGE, CLASS_THREAD};
+use model_backend::AiServiceBackend;
 use registry::RunRegistry;
 use run::RunInput;
 
@@ -53,7 +58,7 @@ fn ensured_set() -> &'static Mutex<HashSet<String>> {
 /// Entry point — never returns. Bootstraps, then watches for new turns.
 pub async fn start() {
     log::info!("assistant_runtime: starting");
-    let registry = RunRegistry::new();
+    let registry = RunRegistry::new(Arc::new(AiServiceBackend));
 
     // Give the executor a moment to finish loading perspectives before the
     // boot-time resume scan; the live watcher below catches everything after.

@@ -264,6 +264,19 @@ pub fn get_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         })
 }
 
+/// Register a pre-built [`PerspectiveInstance`] directly in the global registry
+/// so `get_perspective`/`all_perspectives` resolve it — without the DB write,
+/// background tasks, or pubsub of [`add_perspective`]. Test-only: used by the
+/// assistant-runtime end-to-end tests to drive the real subsystem against an
+/// in-memory perspective.
+#[cfg(test)]
+pub fn insert_perspective_for_test(instance: PerspectiveInstance) {
+    PERSPECTIVES
+        .write()
+        .expect("Couldn't get write lock on PERSPECTIVES")
+        .insert(instance.uuid.clone(), RwLock::new(instance));
+}
+
 pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String> {
     {
         if PERSPECTIVES.read().unwrap().get(&handle.uuid).is_none() {

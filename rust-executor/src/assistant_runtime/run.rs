@@ -17,12 +17,13 @@
 //! auto-publishes on `PERSPECTIVE_LINK_ADDED_TOPIC` so WE's live query
 //! re-renders — no separate token channel, matching WE.
 
+use std::sync::Arc;
+
 use anyhow::{anyhow, Result};
 
 use kalosm::language::ArcParser;
 
 use crate::agent::AgentContext;
-use crate::ai_service::AIService;
 use crate::api::openai_compat::tool_grammar::{build_tool_call_parser, extract_tool_calls, ToolChoice};
 
 use super::context::assemble_messages;
@@ -30,6 +31,7 @@ use super::entities::{
     Assistant, McpServer, Message, Personality, Skill, Thread, CLASS_ASSISTANT, CLASS_MCP_SERVER,
     CLASS_THREAD, P_CONTENT, P_STATUS, P_TOOL_CALLS,
 };
+use super::model_backend::ModelBackend;
 use super::store;
 use super::tools::{BuiltinTools, McpToolProvider, ToolProvider, ToolSet};
 
@@ -45,10 +47,12 @@ pub struct RunInput {
     pub thread_id: String,
 }
 
-/// Run one user turn for `input.thread_id`. Errors are handled internally
+/// Run one user turn for `input.thread_id`, streaming model output through
+/// `backend` (the real [`AiServiceBackend`](super::model_backend::AiServiceBackend)
+/// in production; a fixture backend in tests). Errors are handled internally
 /// (assistant message + RunState marked `error`); the returned `Result` is for
 /// the registry's logging only.
-pub async fn run_thread(input: RunInput) -> Result<()> {
+pub async fn run_thread(input: RunInput, backend: Arc<dyn ModelBackend>) -> Result<()> {
     let RunInput {
         perspective_uuid,
         thread_id,
@@ -97,7 +101,17 @@ pub async fn run_thread(input: RunInput) -> Result<()> {
 
     let _ = store::upsert_run_state(&mut conv, &thread_id, "running", "0", "").await;
 
-    match drive_loop(&mut conv, &reply_id, &thread_id, &config, &user_turn, &history).await {
+    match drive_loop(
+        &mut conv,
+        &reply_id,
+        &thread_id,
+        &config,
+        &user_turn,
+        &history,
+        backend.as_ref(),
+    )
+    .await
+    {
         Ok(()) => {
             let _ = store::upsert_run_state(&mut conv, &thread_id, "done", "final", "").await;
             Ok(())
@@ -213,6 +227,7 @@ async fn resolve_config(
 }
 
 /// The context → model → tools → repeat loop for one turn.
+#[allow(clippy::too_many_arguments)]
 async fn drive_loop(
     conv: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
     reply_id: &str,
@@ -220,11 +235,9 @@ async fn drive_loop(
     config: &RunConfig,
     user_turn: &str,
     history: &[Message],
+    backend: &dyn ModelBackend,
 ) -> Result<()> {
     let ctx = AgentContext::main_agent();
-    let ai = AIService::global_instance()
-        .await
-        .map_err(|e| anyhow!("AI service unavailable: {e}"))?;
 
     let toolset = ToolSet::new(vec![
         ToolProvider::Builtin(BuiltinTools::new(conv.uuid.clone())),
@@ -258,9 +271,16 @@ async fn drive_loop(
             build_tool_call_parser(&tool_defs, &ToolChoice::Auto, true);
 
         // Stream the model output, rewriting Message.content at a cadence.
-        let full =
-            stream_completion(conv, reply_id, &ctx, &ai, &config.model_id, messages, constraint)
-                .await?;
+        let full = stream_completion(
+            conv,
+            reply_id,
+            &ctx,
+            backend,
+            &config.model_id,
+            messages,
+            constraint,
+        )
+        .await?;
 
         let calls = extract_tool_calls(&full);
         if calls.is_empty() {
@@ -335,19 +355,19 @@ async fn drive_loop(
 
 /// Run one streaming completion, rewriting `Message.content` as tokens arrive,
 /// and return the full generated text.
+#[allow(clippy::too_many_arguments)]
 async fn stream_completion(
     conv: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
     reply_id: &str,
     ctx: &AgentContext,
-    ai: &AIService,
+    backend: &dyn ModelBackend,
     model_id: &str,
     messages: Vec<(String, String)>,
     constraint: Option<ArcParser<()>>,
 ) -> Result<String> {
-    let (mut token_rx, done_rx) = ai
-        .prompt_messages_stream(model_id.to_string(), messages, constraint)
-        .await
-        .map_err(|e| anyhow!("model stream failed: {e}"))?;
+    let mut token_rx = backend
+        .stream(model_id.to_string(), messages, constraint)
+        .await?;
 
     let mut buffer = String::new();
     let mut since_update = 0usize;
@@ -360,8 +380,6 @@ async fn stream_completion(
             let _ = store::set_single_target(conv, reply_id, P_CONTENT, &visible, ctx).await;
         }
     }
-    // Drain the completion signal (token counts unused here).
-    let _ = done_rx.await;
 
     Ok(buffer)
 }
