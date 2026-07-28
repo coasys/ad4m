@@ -25,7 +25,7 @@ use super::types::{
 use crate::agent::capabilities::{check_capability, AI_PROMPT_CAPABILITY};
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
-use crate::billing::{bill_compute, BillingError};
+use crate::billing::{bill_compute, check_compute_credits};
 use crate::types::ModelType;
 
 /// `POST /v1/chat/completions` — handles both streaming (`stream: true`)
@@ -67,7 +67,16 @@ pub async fn completions(
     check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
 
     let model_id = resolve_model(&req.model, ModelType::Llm).await?;
-    let messages = vec![("user".to_string(), req.prompt.first())];
+    let prompt = req
+        .prompt
+        .into_single()
+        .map_err(OpenAIError::invalid_request)?;
+    let messages = vec![("user".to_string(), prompt)];
+
+    if let Some(email) = user_email(&auth) {
+        check_compute_credits(&email)
+            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+    }
 
     let service = AIService::global_instance()
         .await
@@ -78,13 +87,7 @@ pub async fn completions(
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
     if let Some(email) = user_email(&auth) {
-        if let Err(BillingError::InsufficientCredits) =
-            bill_compute(&email, 1.0, "ai_prompt", Some("v1/completions"))
-        {
-            return Err(OpenAIError::insufficient_quota(
-                "Insufficient compute credits",
-            ));
-        }
+        let _ = bill_compute(&email, 1.0, "ai_prompt", Some("v1/completions"));
     }
 
     Ok(Json(CompletionResponse {
@@ -111,6 +114,11 @@ async fn chat_oneshot(
     model_id: String,
     messages: Vec<(String, String)>,
 ) -> Result<axum::response::Response, OpenAIError> {
+    if let Some(email) = user_email(&auth) {
+        check_compute_credits(&email)
+            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+    }
+
     let service = AIService::global_instance()
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
@@ -120,13 +128,7 @@ async fn chat_oneshot(
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
     if let Some(email) = user_email(&auth) {
-        if let Err(BillingError::InsufficientCredits) =
-            bill_compute(&email, 1.0, "ai_prompt", Some("v1/chat/completions"))
-        {
-            return Err(OpenAIError::insufficient_quota(
-                "Insufficient compute credits",
-            ));
-        }
+        let _ = bill_compute(&email, 1.0, "ai_prompt", Some("v1/chat/completions"));
     }
 
     let body = ChatCompletionResponse {
@@ -157,6 +159,11 @@ async fn chat_stream(
     model_id: String,
     messages: Vec<(String, String)>,
 ) -> Result<axum::response::Response, OpenAIError> {
+    if let Some(email) = user_email(&auth) {
+        check_compute_credits(&email)
+            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+    }
+
     let service = AIService::global_instance()
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;

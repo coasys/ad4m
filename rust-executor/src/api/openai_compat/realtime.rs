@@ -31,6 +31,7 @@ use axum::{
 use base64::Engine;
 use futures::SinkExt;
 use serde_json::{json, Value};
+use tokio::sync::broadcast;
 
 use super::model_selector::resolve_model;
 use crate::agent::capabilities::{check_capability, AI_TRANSCRIBE_CAPABILITY};
@@ -43,22 +44,56 @@ pub async fn realtime_ws(auth: AuthContext, ws: WebSocketUpgrade) -> Response {
 }
 
 async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
-    // Capability check happens after upgrade — there's no clean way to
-    // reject a 403 mid-handshake under axum's `on_upgrade`, so we emit
-    // an `error` envelope and close.
     if let Err(e) = check_capability(&auth.capabilities, &AI_TRANSCRIBE_CAPABILITY) {
         let _ = send_error(&mut socket, "forbidden", &e).await;
         let _ = socket.close().await;
         return;
     }
 
-    let mut session_state: Option<SessionState> = None;
+    let mut stream_id: Option<String> = None;
+    let mut delta_rx: Option<broadcast::Receiver<String>> = None;
 
-    while let Some(msg) = socket.recv().await {
-        let msg = match msg {
-            Ok(m) => m,
-            Err(_) => break,
+    loop {
+        // Move the receiver out so select! doesn't conflict with
+        // mutations inside the socket-message handler.
+        let mut rx_taken = delta_rx.take();
+
+        enum Ev {
+            Ws(Option<Result<Message, axum::Error>>),
+            Delta(Result<String, broadcast::error::RecvError>),
+        }
+
+        let ev = if let Some(ref mut rx) = rx_taken {
+            tokio::select! {
+                msg = socket.recv() => Ev::Ws(msg),
+                text = rx.recv() => Ev::Delta(text),
+            }
+        } else {
+            Ev::Ws(socket.recv().await)
         };
+
+        delta_rx = rx_taken;
+
+        let msg = match ev {
+            Ev::Delta(Ok(text)) => {
+                if !text.is_empty() {
+                    let delta = json!({
+                        "type": "conversation.item.input_audio_transcription.delta",
+                        "delta": text,
+                    });
+                    let _ = socket.send(Message::Text(delta.to_string().into())).await;
+                }
+                continue;
+            }
+            Ev::Delta(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            Ev::Delta(Err(broadcast::error::RecvError::Closed)) => {
+                delta_rx = None;
+                continue;
+            }
+            Ev::Ws(None) | Ev::Ws(Some(Err(_))) => break,
+            Ev::Ws(Some(Ok(m))) => m,
+        };
+
         let text = match msg {
             Message::Text(t) => t.to_string(),
             Message::Binary(_) => {
@@ -71,7 +106,6 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                 continue;
             }
             Message::Close(_) => break,
-            // Ping/pong handled by axum automatically.
             _ => continue,
         };
         let parsed: Value = match serde_json::from_str(&text) {
@@ -109,7 +143,7 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                         continue;
                     }
                 };
-                let stream_id = match service
+                let sid = match service
                     .open_transcription_stream(model_id.clone(), None, auth.auth_token.clone())
                     .await
                 {
@@ -121,14 +155,14 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                 };
                 let created = json!({
                     "type": "transcription_session.created",
-                    "session_id": stream_id,
+                    "session_id": sid,
                     "model": model_id,
                 });
                 let _ = socket.send(Message::Text(created.to_string().into())).await;
-                session_state = Some(SessionState { stream_id });
+                stream_id = Some(sid);
             }
             "input_audio_buffer.append" => {
-                let Some(ref state) = session_state else {
+                let Some(ref sid) = stream_id else {
                     let _ = send_error(
                         &mut socket,
                         "invalid_request",
@@ -159,38 +193,30 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                 };
                 let samples = bytes_to_f32_le(&bytes);
 
-                let service = AIService::global_instance().await.ok();
-                if let Some(service) = service {
-                    let rx = service
-                        .feed_transcription_stream_with_broadcast(
-                            &state.stream_id,
-                            samples,
-                            &auth.auth_token,
-                        )
-                        .await;
-                    if let Ok(mut rx) = rx {
-                        // Drain any whisper deltas that became
-                        // available since the last append.  We do this
-                        // synchronously on each append rather than
-                        // running a background forwarder — keeps the
-                        // socket lifetime obvious and avoids races at
-                        // close time.
-                        while let Ok(text) = rx.try_recv() {
-                            let delta = json!({
-                                "type": "conversation.item.input_audio_transcription.delta",
-                                "delta": text,
-                            });
-                            let _ = socket.send(Message::Text(delta.to_string().into())).await;
+                if let Ok(service) = AIService::global_instance().await {
+                    if delta_rx.is_none() {
+                        match service
+                            .feed_transcription_stream_with_broadcast(
+                                sid,
+                                samples,
+                                &auth.auth_token,
+                            )
+                            .await
+                        {
+                            Ok(rx) => delta_rx = Some(rx),
+                            Err(e) => {
+                                let _ =
+                                    send_error(&mut socket, "server_error", &e.to_string()).await;
+                            }
                         }
+                    } else {
+                        let _ = service
+                            .feed_transcription_stream(sid, samples, &auth.auth_token)
+                            .await;
                     }
                 }
             }
             "input_audio_buffer.commit" => {
-                // No-op for now — the whisper engine flushes on its own
-                // VAD detection.  Forward the no-op as `completed` so
-                // OpenAI clients that wait for it can proceed; if
-                // there's nothing to flush, the `completed` carries an
-                // empty transcript.
                 let completed = json!({
                     "type": "conversation.item.input_audio_transcription.completed",
                     "transcript": "",
@@ -213,18 +239,14 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
         }
     }
 
-    if let Some(state) = session_state {
+    if let Some(ref sid) = stream_id {
         if let Ok(service) = AIService::global_instance().await {
             let _ = service
-                .close_transcription_stream(&state.stream_id, &auth.auth_token)
+                .close_transcription_stream(sid, &auth.auth_token)
                 .await;
         }
     }
     let _ = socket.close().await;
-}
-
-struct SessionState {
-    stream_id: String,
 }
 
 async fn send_error(socket: &mut WebSocket, code: &str, message: &str) -> Result<(), ()> {
@@ -242,7 +264,7 @@ async fn send_error(socket: &mut WebSocket, code: &str, message: &str) -> Result
 }
 
 /// Reinterpret a raw byte slice as little-endian `f32` samples.
-fn bytes_to_f32_le(bytes: &[u8]) -> Vec<f32> {
+pub(super) fn bytes_to_f32_le(bytes: &[u8]) -> Vec<f32> {
     let mut out = Vec::with_capacity(bytes.len() / 4);
     for chunk in bytes.chunks_exact(4) {
         out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));

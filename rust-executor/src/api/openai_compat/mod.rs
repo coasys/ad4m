@@ -34,3 +34,6 @@ pub mod tts_passthrough;
 pub mod types;
 
 pub use router::router;
+
+#[cfg(test)]
+mod tests;

@@ -217,10 +217,13 @@ pub enum PromptInput {
 }
 
 impl PromptInput {
-    pub fn first(&self) -> String {
+    pub fn into_single(self) -> Result<String, &'static str> {
         match self {
-            PromptInput::One(s) => s.clone(),
-            PromptInput::Many(v) => v.first().cloned().unwrap_or_default(),
+            PromptInput::One(s) => Ok(s),
+            PromptInput::Many(v) if v.len() == 1 => Ok(v.into_iter().next().unwrap()),
+            PromptInput::Many(_) => Err(
+                "Batch prompts (array with >1 element) are not supported; send one prompt per request",
+            ),
         }
     }
 }
@@ -250,6 +253,8 @@ pub struct CompletionChoice {
 pub struct EmbeddingRequest {
     pub model: String,
     pub input: EmbeddingInput,
+    #[serde(default)]
+    pub encoding_format: Option<String>,
     #[serde(default)]
     pub user: Option<String>,
 }

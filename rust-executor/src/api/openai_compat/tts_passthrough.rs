@@ -45,17 +45,14 @@ pub async fn synthesize(
         "speed": req.speed.unwrap_or(1.0),
     });
 
-    let url = format!(
-        "{}/audio/speech",
-        upstream
-            .base_url
-            .trim_end_matches('/')
-            .trim_end_matches("/v1"),
-    );
+    let base = upstream
+        .base_url
+        .trim_end_matches('/')
+        .trim_end_matches("/v1");
 
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{url}/v1/audio/speech"))
+        .post(format!("{base}/v1/audio/speech"))
         .bearer_auth(&upstream.api_key)
         .json(&body)
         .send()

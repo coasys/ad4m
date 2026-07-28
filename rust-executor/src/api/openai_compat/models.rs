@@ -1,5 +1,7 @@
 //! `GET /v1/models` — list every model registered with the executor.
 
+use std::time::SystemTime;
+
 use axum::Json;
 
 use super::errors::{OpenAIError, OpenAIResult};
@@ -37,7 +39,10 @@ fn model_to_info(m: Model) -> ModelInfo {
     ModelInfo {
         id: m.id,
         object: "model",
-        created: 0,
+        created: SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
         owned_by: "ad4m",
         extensions: ModelExtensions {
             model_type,

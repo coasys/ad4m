@@ -22,7 +22,7 @@
 //! backend is in the design but not in this PR; the proposal allows
 //! passthrough as a valid Phase-4 deliverable.
 
-use axum::{extract::Multipart, http::header, response::Response, Json};
+use axum::{extract::Multipart, http::header, response::IntoResponse, response::Response, Json};
 
 use super::errors::{OpenAIError, OpenAIResult};
 use super::model_selector::resolve_model;
@@ -33,13 +33,13 @@ use crate::agent::capabilities::{
 };
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
-use crate::billing::{bill_compute, BillingError};
+use crate::billing::{bill_compute, check_compute_credits};
 use crate::types::ModelType;
 
 pub async fn transcriptions(
     auth: AuthContext,
     mut multipart: Multipart,
-) -> OpenAIResult<Json<TranscriptionResponse>> {
+) -> Result<Response, OpenAIError> {
     check_capability(&auth.capabilities, &AI_TRANSCRIBE_CAPABILITY)
         .map_err(OpenAIError::forbidden)?;
 
@@ -95,6 +95,12 @@ pub async fn transcriptions(
 
     let samples = audio_decode(&bytes, content_type.as_deref())?;
 
+    if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
+    {
+        check_compute_credits(&email)
+            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+    }
+
     let service = AIService::global_instance()
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
@@ -105,30 +111,18 @@ pub async fn transcriptions(
 
     if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
     {
-        // Mirror native transcription billing: 1 credit per request
-        // (the native path bills per-word but only after `delta` events
-        // — batch jobs round to a flat charge until per-word accounting
-        // is plumbed through).
-        if let Err(BillingError::InsufficientCredits) = bill_compute(
+        let _ = bill_compute(
             &email,
             1.0,
             "ai_transcription",
             Some("v1/audio/transcriptions"),
-        ) {
-            return Err(OpenAIError::insufficient_quota(
-                "Insufficient compute credits",
-            ));
-        }
+        );
     }
 
-    // `response_format` honoured: `json` (default) returns the envelope
-    // below.  `text` / `verbose_json` / `srt` / `vtt` are accepted for
-    // request-compatibility but currently always produce the `json`
-    // envelope; widening the return to a raw `Response` so we can emit
-    // text/srt/vtt directly is a follow-up that touches the router's
-    // type signature.
-    let _ = response_format;
-    Ok(Json(TranscriptionResponse { text }))
+    if response_format == "text" {
+        return Ok(([(header::CONTENT_TYPE, "text/plain")], text).into_response());
+    }
+    Ok(Json(TranscriptionResponse { text }).into_response())
 }
 
 pub async fn speech(
@@ -137,10 +131,12 @@ pub async fn speech(
 ) -> Result<Response, OpenAIError> {
     check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
 
-    // TTS isn't a registered ModelType yet (the proposal calls for a new
-    // `ModelType::TextToSpeech` in a follow-up); for now we accept the
-    // model name verbatim and forward to the configured passthrough
-    // upstream.  See `tts_passthrough` for the configuration shape.
+    if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
+    {
+        check_compute_credits(&email)
+            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+    }
+
     let response_format = req
         .response_format
         .clone()
@@ -159,13 +155,7 @@ pub async fn speech(
 
     if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
     {
-        if let Err(BillingError::InsufficientCredits) =
-            bill_compute(&email, 1.0, "ai_tts", Some("v1/audio/speech"))
-        {
-            return Err(OpenAIError::insufficient_quota(
-                "Insufficient compute credits",
-            ));
-        }
+        let _ = bill_compute(&email, 1.0, "ai_tts", Some("v1/audio/speech"));
     }
 
     let content_type = match response_format.as_str() {
@@ -195,7 +185,7 @@ pub async fn speech(
 /// home for that work, but adding two heavy crates in the same PR as
 /// the rest of the OpenAI surface would dominate the diff for a single
 /// endpoint.
-fn audio_decode(bytes: &[u8], content_type: Option<&str>) -> OpenAIResult<Vec<f32>> {
+pub(super) fn audio_decode(bytes: &[u8], content_type: Option<&str>) -> OpenAIResult<Vec<f32>> {
     // Quick WAV header sniff — RIFF....WAVEfmt
     if bytes.len() >= 44 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
         return decode_pcm_wav(bytes);
@@ -214,7 +204,7 @@ fn audio_decode(bytes: &[u8], content_type: Option<&str>) -> OpenAIResult<Vec<f3
 /// We don't attempt to handle every WAV variant — the goal is to clear
 /// the most common upload path (whisper's reference format) without
 /// pulling in `symphonia`.  Mismatched format → 400 with a clear hint.
-fn decode_pcm_wav(bytes: &[u8]) -> OpenAIResult<Vec<f32>> {
+pub(super) fn decode_pcm_wav(bytes: &[u8]) -> OpenAIResult<Vec<f32>> {
     // Find the fmt and data chunks.  WAV is a RIFF container: after
     // the 12-byte RIFF header, chunks alternate {id (4 bytes), size
     // (u32 LE), payload}.
