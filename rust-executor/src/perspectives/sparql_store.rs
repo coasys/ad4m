@@ -273,11 +273,27 @@ pub fn validate_readonly_query(query: &str) -> Result<(), Error> {
 
 /// Generate a deterministic reifier IRI from link data + timestamp.
 fn make_reifier_iri(link: &DecoratedLinkExpression) -> NamedNode {
+    // Hash the *normalized* storage-term form of the target, not the raw
+    // wire string. `literal:json:` targets are canonicalized before storage
+    // (see `target_to_storage_term`), so two callers describing the same
+    // JSON value with different key order/whitespace would otherwise hash
+    // to different reifier IRIs for what ends up being the identical stored
+    // triple. `remove_link` recomputes this same hash from whatever
+    // wire-format string the caller passes in (e.g. the hydrated form read
+    // back from a query), so a mismatch here orphans the reifier metadata
+    // and leaves the direct triple un-removable. Normalizing first makes
+    // the hash a pure function of the stored term, independent of how the
+    // caller happened to format an equivalent value. This is a no-op for
+    // every other target shape (NamedNode / number / boolean round-trip
+    // through `target_to_storage_term` unchanged).
+    let normalized_target =
+        storage_term_to_target_string(&target_to_storage_term(&link.data.target));
+
     let mut hasher = Sha256::new();
     hasher.update(link.author.as_bytes());
     hasher.update(link.data.source.as_bytes());
     hasher.update(link.data.predicate.as_deref().unwrap_or("").as_bytes());
-    hasher.update(link.data.target.as_bytes());
+    hasher.update(normalized_target.as_bytes());
     hasher.update(link.timestamp.as_bytes());
     let hash = hex::encode(hasher.finalize());
     NamedNode::new_unchecked(format!("link:{}", &hash[..32]))
@@ -968,9 +984,31 @@ impl SparqlStore {
         })
     }
 
-    /// Execute an arbitrary read-only SPARQL SELECT query, returning a JSON string.
+    /// Execute a read-only SPARQL SELECT query, returning a JSON string.
     /// All data lives in the default graph — no union graph needed.
+    ///
+    /// Applies wire-format hydration to `?target`/`?t` bindings — this is
+    /// the internal convention AD4M's own hydration/relation/projection
+    /// query builders rely on. For query text supplied by an external or
+    /// untrusted caller (who has no reason to expect — or want — a
+    /// same-named variable of their own silently reformatted), use
+    /// [`Self::query_arbitrary`] instead.
     pub fn query(&self, query_string: &str) -> Result<String, Error> {
+        self.query_internal(query_string, true)
+    }
+
+    /// Execute a caller-supplied read-only SPARQL SELECT query (e.g. the
+    /// `perspective.querySparql` RPC). Unlike [`Self::query`], this never
+    /// re-encodes `?target`/`?t` bindings as wire-format `literal:*:`
+    /// strings — those names are purely an internal convention, and an
+    /// external caller choosing the same name for something unrelated
+    /// (say, `SELECT ?target WHERE { ?r <ad4m://ontology/author> ?target }`)
+    /// should get its plain lexical value back, not a silently mangled one.
+    pub fn query_arbitrary(&self, query_string: &str) -> Result<String, Error> {
+        self.query_internal(query_string, false)
+    }
+
+    fn query_internal(&self, query_string: &str, hydrate_target_vars: bool) -> Result<String, Error> {
         validate_readonly_query(query_string)?;
 
         let results = self
@@ -1007,8 +1045,11 @@ impl SparqlStore {
                             // hydrates to a JSON `5`, not the string `"5"`).
                             // All other variables emit the lexical form so
                             // SPARQL `FILTER(STR(?x) = ...)` and `COUNT`
-                            // consumers continue to see the raw value.
-                            let is_target_var = var == "target" || var == "t";
+                            // consumers continue to see the raw value. Only
+                            // applied for internal callers — see
+                            // `query_arbitrary` for external/untrusted queries.
+                            let is_target_var =
+                                hydrate_target_vars && (var == "target" || var == "t");
                             let val = match term {
                                 Term::NamedNode(n) => Value::String(n.as_str().to_string()),
                                 Term::Literal(l) => {
@@ -4206,6 +4247,104 @@ mod tests {
             !last_ts.is_empty(),
             "MAX timestamp should be present. Raw: {}",
             result
+        );
+    }
+
+    // ── Reifier IRI stability for literal:json: targets ──
+
+    #[test]
+    fn test_remove_link_with_hydrated_json_target_round_trip() {
+        // The realistic failure mode: a caller inserts with a hand-written
+        // (whitespace-containing) JSON target, later reads it back via a
+        // query — receiving the re-serialized, whitespace-compacted wire
+        // string `storage_term_to_target_string` produces — and then
+        // removes the link using that hydrated string. Before normalizing
+        // the reifier-IRI hash input, insert and remove hashed two
+        // differently-formatted (but semantically identical) strings to
+        // two different reifier IRIs, so removal silently no-opped: the
+        // recomputed reifier IRI never matched the one stored at insert
+        // time. Note: canonicalization here normalizes whitespace, not
+        // object key order (this crate builds serde_json with the
+        // `preserve_order` feature via a transitive dependency).
+        let svc = new_service();
+        let insert_target = "literal:json:{\"a\": 1, \"b\": 2}".to_string();
+
+        let link = make_link("ad4m://json_source", "ad4m://json_pred", &insert_target);
+        svc.add_link(&link).unwrap();
+
+        let before = svc.get_all_links().unwrap();
+        assert_eq!(
+            before.iter().filter(|l| l.data.source == "ad4m://json_source").count(),
+            1,
+            "link should be present after insert"
+        );
+
+        // Simulate "query, then remove what you read back".
+        let hydrated_target =
+            storage_term_to_target_string(&target_to_storage_term(&insert_target));
+        assert_ne!(
+            hydrated_target, insert_target,
+            "test setup: hydration must actually reformat the target (whitespace-compacted), \
+             otherwise this test isn't exercising the mismatch at all"
+        );
+
+        let remove_link = make_link("ad4m://json_source", "ad4m://json_pred", &hydrated_target);
+        svc.remove_link(&remove_link).unwrap();
+
+        let after = svc.get_all_links().unwrap();
+        assert_eq!(
+            after.iter().filter(|l| l.data.source == "ad4m://json_source").count(),
+            0,
+            "link should be gone after removing with the hydrated (re-serialized) JSON target"
+        );
+    }
+
+    // ── query() vs query_arbitrary() target-hydration scoping ──
+
+    #[test]
+    fn test_query_arbitrary_does_not_hydrate_coincidentally_named_variables() {
+        // A caller-supplied query has no reason to expect a variable it
+        // happens to name `?target` or `?t` to be silently re-encoded into
+        // AD4M's internal literal:*: wire format.
+        let svc = new_service();
+        svc.add_link(&make_link(
+            "ad4m://msg1",
+            "ad4m://ontology/author",
+            "did:key:zAlice",
+        ))
+        .unwrap();
+        svc.add_link(&make_link(
+            "ad4m://msg1",
+            "flux://priority",
+            "literal:number:5",
+        ))
+        .unwrap();
+
+        // query_arbitrary(): ?t bound to a typed-integer literal must come
+        // back as its plain lexical value, not `literal:number:5`.
+        let arbitrary_result = svc
+            .query_arbitrary("SELECT ?t WHERE { <ad4m://msg1> <flux://priority> ?t . }")
+            .unwrap();
+        let arbitrary_rows: Vec<serde_json::Value> =
+            serde_json::from_str(&arbitrary_result).unwrap();
+        assert_eq!(
+            arbitrary_rows[0]["t"].as_str(),
+            Some("5"),
+            "query_arbitrary must not wire-encode a coincidentally-named ?t: {}",
+            arbitrary_result
+        );
+
+        // query(): same shape, but through the internal-hydration path —
+        // still wire-encodes ?t, unchanged from before this fix.
+        let internal_result = svc
+            .query("SELECT ?t WHERE { <ad4m://msg1> <flux://priority> ?t . }")
+            .unwrap();
+        let internal_rows: Vec<serde_json::Value> = serde_json::from_str(&internal_result).unwrap();
+        assert_eq!(
+            internal_rows[0]["t"].as_str(),
+            Some("literal:number:5"),
+            "query() must keep wire-encoding ?t for internal callers: {}",
+            internal_result
         );
     }
 }
