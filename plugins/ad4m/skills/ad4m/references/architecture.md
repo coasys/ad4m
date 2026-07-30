@@ -60,6 +60,14 @@ interface LinkExpression {
 - `did:key:z6Mk...` — agent identity
 - `Qm...` — content-addressed expression (language-specific)
 
+### Links Alone Don't Give You Uniqueness
+
+`addLink` is a raw graph-edge primitive — `ad4m_add_link(perspective_id, source, predicate, target)` writes exactly the triple you give it and has no opinion about whether `source` or `target` uniquely identifies anything in your domain. Link directly against content (e.g. using a message's text itself as the source or target of a link, instead of a dedicated instance IRI) and two logically distinct entities with identical content collapse onto the same graph node — there's nothing left to tell them apart.
+
+**Reifiers provide provenance, not identity.** Every link is stored with an RDF 1.2 reifier — `<link:HASH> rdf:reifies <<( source predicate target )>>` — carrying author, timestamp, and signature metadata for that specific triple-assertion (`rust-executor/src/perspectives/sparql_store.rs`). This answers "who claimed this link, when, and is it validly signed" for any individual write. It does **not** give the entity the triple describes a stable, addressable identity. Two different messages, each independently reified with their own author and timestamp, are still indistinguishable as entities if both use the same literal as their source/target — the reifier authenticates the assertion, not the thing being asserted about.
+
+**Subject classes are the canonical fix.** Instantiating a subject class always mints a fresh, random, content-independent base expression (`ad4m://obj/<24 random chars>` — see `core/src/model/Ad4mModel.ts`) *before* any property is written, and every property write for that instance uses this IRI as the link's `source` — never the property's own value. Two instances with byte-identical properties therefore stay distinct: identity lives in the instance's IRI, not in whatever its properties happen to hold. Work at the class/model level (`ad4m_add_model`, `{class}_create`, `@Property`) rather than writing raw links directly, unless you're deliberately reconstructing this uniqueness guarantee yourself.
+
 ## Languages
 
 Protocol abstractions that handle expression storage and retrieval. A language defines:
@@ -102,6 +110,8 @@ Subject classes impose structure on the link graph using SHACL (Shapes Constrain
 ### How It Works
 
 Classes are registered via the `ad4m_add_model` MCP tool (or `add_sdna()` in Rust) using a JSON representation of a SHACL shape. The JSON is parsed by `SHACLShape` / `PropertyShape` structs and converted to RDF links in the perspective.
+
+Each instance's identity is its base expression — a freshly generated, content-independent `ad4m://obj/<id>` IRI (see [Links Alone Don't Give You Uniqueness](#links-alone-dont-give-you-uniqueness) above). This is what makes subject classes the canonical way to model anything where two instances might end up with identical property values.
 
 ### SHACL JSON Format
 
