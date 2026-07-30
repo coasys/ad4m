@@ -5091,16 +5091,16 @@ async fn test_sort_by_relation_property_with_missing_relation() {
 // Indexed-WHERE benchmark
 // -----------------------------------------------------------------------------
 //
-// `cargo test --release --lib perspectives::model_query::integration_tests::bench`
+// `cargo test --release --lib perspectives::model_query::integration_tests::bench_indexed_literal_vs_str_filter`
 //
 // Compares two equivalent SPARQL queries against the same `literal:string:`
-// data: an indexed direct-IRI probe vs. a `fn/parse_literal`-wrapped FILTER.
-// The former is what the WHERE builders now emit; the latter is the shape
-// they emitted before. Both queries find the same rows; the difference is
-// whether Oxigraph's planner can use the POS index.
+// data: an indexed direct-typed-literal probe vs. a `FILTER(STR(?t) = ...)`
+// comparison. The former is what the WHERE builders now emit; the latter is
+// the shape they emitted before. Both queries find the same rows; the
+// difference is whether Oxigraph's planner can use the POS index.
 
 #[test]
-fn bench_indexed_iri_vs_fn_parse_literal_filter() {
+fn bench_indexed_literal_vs_str_filter() {
     use std::time::Instant;
 
     // Skip in debug builds — comparing per-row function call to an index probe
