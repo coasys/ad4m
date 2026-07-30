@@ -5447,3 +5447,148 @@ async fn test_model_query_from_js_wire_format() {
         result.instances
     );
 }
+
+#[tokio::test]
+async fn test_duplicate_literal_property_values_keep_instances_distinct() {
+    // Two Message-like instances with IDENTICAL body text must remain two
+    // distinct, independently addressable/queryable entities. Uniqueness
+    // comes from each instance's own subject-class base IRI (the source of
+    // the property triple), never from the shared literal object — see PR
+    // #842 discussion on why bare literals cannot provide entity identity.
+    let store = SparqlStore::new(None).unwrap();
+
+    let base1 = "ad4m://obj/aaaaaaaaaaaaaaaaaaaaaaaa";
+    let base2 = "ad4m://obj/bbbbbbbbbbbbbbbbbbbbbbbb";
+    let hello_target = format!("literal:string:{}", literal_percent_encode("hello"));
+
+    for base in [base1, base2] {
+        store
+            .add_link(&make_link(
+                base,
+                "ad4m://type",
+                "message://Message",
+                "1700000000000",
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "message://body",
+                &hello_target,
+                "1700000000001",
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Message",
+        "properties": {
+            "type": {
+                "predicate": "ad4m://type",
+                "required": true,
+                "flag": true,
+                "initial": "message://Message"
+            },
+            "body": {
+                "predicate": "message://body",
+                "required": false,
+                "resolveLanguage": "literal"
+            }
+        },
+        "relations": {}
+    }"#;
+
+    // Identical body text must NOT collapse the two instances into one.
+    let result =
+        execute_model_query_from_json(&store, "Message", &ModelQueryInput::default(), shape_json)
+            .await
+            .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "two instances with identical body text must both be returned, not deduplicated: {:?}",
+        result.instances
+    );
+
+    let mut ids: Vec<String> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    let mut expected_ids = vec![base1.to_string(), base2.to_string()];
+    expected_ids.sort();
+    assert_eq!(
+        ids, expected_ids,
+        "each instance must keep its own distinct base IRI"
+    );
+    for instance in &result.instances {
+        assert_eq!(instance["body"], json!("hello"));
+    }
+
+    // A WHERE clause on the shared value must match both — the store
+    // indexes triples by (subject, predicate, object), not by object value
+    // alone, so a shared literal never merges two subjects into one.
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "body".to_string(),
+        WhereCondition::String("hello".to_string()),
+    );
+    let query_where = ModelQueryInput {
+        where_clause: Some(where_clause),
+        ..Default::default()
+    };
+    let result2 = execute_model_query_from_json(&store, "Message", &query_where, shape_json)
+        .await
+        .unwrap();
+    assert_eq!(
+        result2.instances.len(),
+        2,
+        "WHERE body='hello' must match both instances sharing that literal value"
+    );
+
+    // Mutating one instance's property must never leak onto the other —
+    // this is what `setSingleTarget` relies on in production: remove+add
+    // scoped by (source, predicate), where `source` is the instance's own
+    // base IRI, not the literal value being replaced.
+    store
+        .remove_link(&make_link(
+            base1,
+            "message://body",
+            &hello_target,
+            "1700000000001",
+        ))
+        .unwrap();
+    let goodbye_target = format!("literal:string:{}", literal_percent_encode("goodbye"));
+    store
+        .add_link(&make_link(
+            base1,
+            "message://body",
+            &goodbye_target,
+            "1700000000002",
+        ))
+        .unwrap();
+
+    let result3 =
+        execute_model_query_from_json(&store, "Message", &ModelQueryInput::default(), shape_json)
+            .await
+            .unwrap();
+    let body_by_id: HashMap<String, String> = result3
+        .instances
+        .iter()
+        .map(|i| {
+            (
+                i["id"].as_str().unwrap().to_string(),
+                i["body"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        body_by_id[base1], "goodbye",
+        "base1's body should reflect its own update"
+    );
+    assert_eq!(
+        body_by_id[base2], "hello",
+        "base2's body must be unaffected by base1's independent update"
+    );
+}
