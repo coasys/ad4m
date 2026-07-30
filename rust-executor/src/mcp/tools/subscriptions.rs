@@ -46,6 +46,23 @@ pub struct MentionWakerConfigParams {
 }
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+/// Escape a string for safe interpolation inside a double-quoted SPARQL
+/// string literal. Mention terms come from profile names / `name_override`
+/// — untrusted input, potentially attacker-controlled in a shared
+/// neighbourhood — so without this, a `"` or `\` breaks out of the literal
+/// and can inject arbitrary SPARQL into the mention-matching FILTER.
+fn escape_sparql_literal(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+// ============================================================================
 // Tool Implementations
 // ============================================================================
 
@@ -217,7 +234,7 @@ impl Ad4mMcpHandler {
         // form, so `STR(?target)` yields the text we want to substring-match.
         let mention_conditions: Vec<String> = all_terms
             .iter()
-            .map(|t| format!("CONTAINS(LCASE(STR(?target)), \"{}\")", t))
+            .map(|t| format!("CONTAINS(LCASE(STR(?target)), \"{}\")", escape_sparql_literal(t)))
             .collect();
 
         let mention_predicate = format!("({})", mention_conditions.join(" || "));
@@ -278,5 +295,41 @@ impl Ad4mMcpHandler {
             ),
         })
         .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_escape_sparql_literal_neutralizes_quote_breakout() {
+        // A profile name / name_override containing a `"` must not be able
+        // to close the SPARQL string literal early and inject a second
+        // CONTAINS(...) clause (or worse) into the mention FILTER.
+        let malicious = r#"x") || CONTAINS(STR(?target), "leaked"#;
+        let escaped = escape_sparql_literal(malicious);
+
+        let condition = format!("CONTAINS(LCASE(STR(?target)), \"{}\")", escaped);
+
+        // The whole payload must resolve to a single string literal — i.e.
+        // exactly two unescaped double quotes (the ones we added), none
+        // contributed by the input.
+        let unescaped_quote_count = condition
+            .char_indices()
+            .filter(|&(i, c)| c == '"' && (i == 0 || condition.as_bytes()[i - 1] != b'\\'))
+            .count();
+        assert_eq!(
+            unescaped_quote_count, 2,
+            "escaped payload must not introduce unescaped quotes: {condition}"
+        );
+    }
+
+    #[test]
+    fn test_escape_sparql_literal_handles_backslash_and_control_chars() {
+        assert_eq!(escape_sparql_literal(r"a\b"), r"a\\b");
+        assert_eq!(escape_sparql_literal("a\"b"), "a\\\"b");
+        assert_eq!(escape_sparql_literal("a\nb"), "a\\nb");
+        assert_eq!(escape_sparql_literal("plain"), "plain");
     }
 }
