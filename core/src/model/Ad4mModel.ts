@@ -425,16 +425,18 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective where this model will be stored
    * @param baseExpression - Optional expression URI for this instance.
-   *             If omitted, a random Literal URL is generated.
+   *             If omitted, a random `ad4m://obj/<id>` IRI is generated,
+   *             independent of any property content — this is what keeps
+   *             two instances with identical property values distinct.
    * @param source - Optional source expression this instance is linked to
-   * 
+   *
    * @example
    * ```typescript
    * // Create a new recipe with auto-generated base expression
    * const recipe = new Recipe(perspective);
-   * 
+   *
    * // Create with specific base expression
-   * const recipe = new Recipe(perspective, "literal:...");
+   * const recipe = new Recipe(perspective, "ad4m://obj/existing-id");
    * ```
    */
   constructor(perspective: PerspectiveProxy, baseExpression?: string) {
