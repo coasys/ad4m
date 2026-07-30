@@ -2432,3 +2432,62 @@ describe("IncludeProjection type guard and key splitting", () => {
     expect((results[0] as any).$signalCount).toBe(5);
   });
 });
+
+describe("Ad4mModel instance identity (uniqueness without envelopes)", () => {
+  // Without a signed envelope, the only thing that keeps two instances from
+  // collapsing onto the same node is their auto-generated base expression.
+  // These tests pin that guarantee down: identity must come from the
+  // instance's own IRI, never from (possibly duplicate) property content.
+  const mockPerspective = {} as any;
+
+  it("auto-generates a distinct id for every instance, even with identical property values", () => {
+    @Model({ name: "IdentityTestMessage" })
+    class IdentityTestMessage extends Ad4mModel {
+      @Property({ through: "identity://body", resolveLanguage: "literal" })
+      body: string = "";
+    }
+
+    const message1 = new IdentityTestMessage(mockPerspective);
+    const message2 = new IdentityTestMessage(mockPerspective);
+
+    message1.body = "hello";
+    message2.body = "hello";
+
+    expect(message1.body).toBe(message2.body);
+    expect(message1.id).not.toBe(message2.id);
+  });
+
+  it("uses the ad4m://obj/<random> scheme, not content-derived addressing", () => {
+    @Model({ name: "IdentityTestSchemeCheck" })
+    class IdentityTestSchemeCheck extends Ad4mModel {}
+
+    const instance = new IdentityTestSchemeCheck(mockPerspective);
+
+    // 24 lowercase a-z chars after the prefix (see makeRandomId in ./util.ts).
+    // Locks in the scheme so a regression toward hashing property content
+    // for the base expression — which would reintroduce the exact collision
+    // this scheme exists to prevent — fails this test.
+    expect(instance.id).toMatch(/^ad4m:\/\/obj\/[a-z]{24}$/);
+  });
+
+  it("never reuses an id across many instances", () => {
+    @Model({ name: "IdentityTestManyInstances" })
+    class IdentityTestManyInstances extends Ad4mModel {}
+
+    const ids = Array.from(
+      { length: 200 },
+      () => new IdentityTestManyInstances(mockPerspective).id
+    );
+
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("respects an explicitly-provided base expression instead of generating one", () => {
+    @Model({ name: "IdentityTestExplicitId" })
+    class IdentityTestExplicitId extends Ad4mModel {}
+
+    const instance = new IdentityTestExplicitId(mockPerspective, "flux://existing-instance");
+
+    expect(instance.id).toBe("flux://existing-instance");
+  });
+});
