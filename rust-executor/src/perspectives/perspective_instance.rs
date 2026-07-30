@@ -2930,9 +2930,13 @@ impl PerspectiveInstance {
         .await
     }
 
-    /// Execute a SPARQL query against this perspective's Oxigraph store
+    /// Execute a SPARQL query against this perspective's Oxigraph store.
+    /// This is the generic `perspective.querySparql` entrypoint — the query
+    /// text is caller-supplied, so it uses `query_arbitrary` rather than
+    /// `query` (no wire-format re-encoding of coincidentally-named
+    /// `?target`/`?t` bindings; see `SparqlStore::query_arbitrary`).
     pub fn sparql_query(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_store.query(&query)
+        self.sparql_store.query_arbitrary(&query)
     }
 
     /// Execute a model query — the executor-side replacement for
