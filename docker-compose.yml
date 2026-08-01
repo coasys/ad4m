@@ -4,6 +4,7 @@ services:
       context: .
       args:
         INCLUDE_WE: "${INCLUDE_WE:-true}"
+        INCLUDE_MODELS: "${INCLUDE_MODELS:-false}"
     ports:
       - "13000:12000"   # WS-RPC API (default 12000 reserved for local dev)
       - "3101:${MCP_PORT:-3001}"     # MCP server

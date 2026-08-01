@@ -3,14 +3,16 @@
 # Multi-stage build: full toolchain → minimal runtime
 #
 # Build args:
-#   INCLUDE_WE=true     — bundle WE web frontend (served on port 8081)
-#   RUN_HOLOCHAIN=true  — include Holochain conductor (false = standalone mode)
+#   INCLUDE_WE=true       — bundle WE web frontend (served on port 8081)
+#   INCLUDE_MODELS=false  — pre-cache default Kalosm AI models (~1.8 GB)
+#   RUN_HOLOCHAIN=true    — include Holochain conductor (false = standalone mode)
 # =============================================================================
 
 ARG RUST_VERSION=1.92
 ARG NODE_MAJOR=24
 ARG GO_VERSION=1.24.6
 ARG INCLUDE_WE=true
+ARG INCLUDE_MODELS=false
 
 # =============================================================================
 # Stage 1: Builder
@@ -228,6 +230,28 @@ RUN mkdir -p /we-dist && \
     fi
 
 # =============================================================================
+# Stage 2b: Kalosm model pre-cache (conditional)
+# =============================================================================
+FROM ubuntu:24.04 AS model-fetcher
+
+ARG INCLUDE_MODELS
+
+RUN if [ "${INCLUDE_MODELS}" != "true" ]; then \
+      mkdir -p /models && exit 0; \
+    fi && \
+    apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY docker/download-models.sh /tmp/download-models.sh
+RUN chmod +x /tmp/download-models.sh && \
+    if [ "${INCLUDE_MODELS}" = "true" ]; then \
+      /tmp/download-models.sh /models; \
+    else \
+      mkdir -p /models; \
+    fi
+
+# =============================================================================
 # Stage 3: Runtime
 # =============================================================================
 FROM ubuntu:24.04 AS runtime
@@ -255,6 +279,9 @@ COPY --from=builder /home/builder/ad4m/docker/seed-output/languages/ /opt/ad4m/b
 
 # WE web frontend (empty dir if INCLUDE_WE=false)
 COPY --from=we-builder /we-dist/ /opt/ad4m/we-dist/
+
+# Pre-cached Kalosm models (empty dir if INCLUDE_MODELS=false)
+COPY --from=model-fetcher /models/ /opt/ad4m/models/
 
 RUN useradd -m -s /bin/bash ad4m && mkdir -p /data && chown ad4m:ad4m /data
 

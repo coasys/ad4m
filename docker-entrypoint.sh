@@ -24,6 +24,19 @@ if [ ! -f /data/mainnet_seed.seed ]; then
     fi
 fi
 
+# ── Pre-populate Kalosm model cache ────────────────────────────────────────
+# If the Docker image includes pre-cached models (INCLUDE_MODELS=true at
+# build time), copy them into the kalosm cache directory so the executor
+# finds them on disk and skips network downloads.
+KALOSM_CACHE="${HOME}/.local/share/kalosm/cache"
+if [ -d /opt/ad4m/models ] && [ "$(ls -A /opt/ad4m/models 2>/dev/null)" ]; then
+    if [ ! -d "${KALOSM_CACHE}" ]; then
+        echo "Pre-populating Kalosm model cache..."
+        mkdir -p "${KALOSM_CACHE}"
+        cp -r /opt/ad4m/models/* "${KALOSM_CACHE}/"
+    fi
+fi
+
 # ── Build executor args ─────────────────────────────────────────────────────
 EXTRA_ARGS=()
 

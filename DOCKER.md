@@ -24,6 +24,18 @@ docker compose build
 INCLUDE_WE=false docker compose build
 ```
 
+### With pre-cached AI models (~1.8 GB)
+
+```bash
+INCLUDE_MODELS=true docker compose build
+```
+
+Pre-downloads the default Kalosm models into the image so the executor can load them without network access at runtime:
+
+- **Embedding:** BAAI/bge-small-en-v1.5 (auto-loaded on startup)
+- **Transcription:** openai/whisper-small (default whisper model)
+- **LLM:** TinyLlama-1.1B-Chat Q4_K_M (smallest supported chat model)
+
 ### With Holochain enabled
 
 ```bash
@@ -35,6 +47,7 @@ RUN_HOLOCHAIN=true docker compose up -d
 ```bash
 docker build -t ad4m-executor .
 docker build -t ad4m-executor --build-arg INCLUDE_WE=false .
+docker build -t ad4m-executor --build-arg INCLUDE_MODELS=true .
 ```
 
 ## Port Map
@@ -47,6 +60,13 @@ docker build -t ad4m-executor --build-arg INCLUDE_WE=false .
 | WE frontend | 8081 | 8181 | WE collaborative web app |
 
 Host ports offset by +1000 to avoid collisions with a local dev executor.
+
+## Build Arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `INCLUDE_WE` | `true` | Bundle the WE web frontend |
+| `INCLUDE_MODELS` | `false` | Pre-cache default Kalosm AI models (~1.8 GB) |
 
 ## Environment Variables
 
