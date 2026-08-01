@@ -1,0 +1,118 @@
+#!/usr/bin/env node
+// generate-seed.mjs — Produces docker_seed.json and a pre-seed directory
+// structure matching the executor's language storage layout.
+//
+// Usage: node generate-seed.mjs <bootstrap-dir> <output-dir>
+//
+// The output directory receives:
+//   docker_seed.json          — seed file for the executor
+//   languages/<hash>/bundle.js — pre-populated language bundles
+//
+// The hash algorithm matches the executor's calculate_language_hash():
+//   SHA-256 → CIDv1 (raw codec 0x00) → multibase base58btc → "Qm" prefix
+
+import { createHash } from "node:crypto";
+import { readFileSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { join, resolve } from "node:path";
+
+// --- CID / multibase encoding (no npm deps) ---
+
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function base58Encode(bytes) {
+    const digits = [0];
+    for (let i = 0; i < bytes.length; i++) {
+        let carry = bytes[i];
+        for (let j = 0; j < digits.length; j++) {
+            carry += digits[j] << 8;
+            digits[j] = carry % 58;
+            carry = (carry / 58) | 0;
+        }
+        while (carry > 0) {
+            digits.push(carry % 58);
+            carry = (carry / 58) | 0;
+        }
+    }
+    let result = "";
+    // leading zeros
+    for (let i = 0; i < bytes.length && bytes[i] === 0; i++) {
+        result += BASE58_ALPHABET[0];
+    }
+    for (let i = digits.length - 1; i >= 0; i--) {
+        result += BASE58_ALPHABET[digits[i]];
+    }
+    return result;
+}
+
+function computeLanguageHash(bundleContent) {
+    // SHA-256 digest
+    const sha256 = createHash("sha256").update(bundleContent, "utf8").digest();
+
+    // Multihash: 0x12 = sha2-256, 0x20 = 32 bytes
+    const multihash = Buffer.concat([Buffer.from([0x12, 0x20]), sha256]);
+
+    // CIDv1: version=1, codec=0x00 (raw identity)
+    // Varint encoding: 1 → 0x01, 0 → 0x00
+    const cidBytes = Buffer.concat([Buffer.from([0x01, 0x00]), multihash]);
+
+    // Multibase base58btc: prefix 'z'
+    const encoded = "z" + base58Encode(cidBytes);
+
+    return "Qm" + encoded;
+}
+
+// --- Main ---
+
+const bootstrapDir = resolve(process.argv[2] || "bootstrap-languages/docker");
+const outputDir = resolve(process.argv[3] || "docker/seed-output");
+
+const LANGUAGES = [
+    { role: "languageLanguage", file: "language-language.js" },
+    { role: "agentLanguage",    file: "agent-language.js" },
+    { role: "neighbourhoodLanguage", file: "neighbourhood-language.js" },
+    { role: "perspectiveLanguage",   file: "perspective-language.js" },
+    { role: "linkLanguage",     file: "link-language.js" },
+];
+
+mkdirSync(join(outputDir, "languages"), { recursive: true });
+
+const addresses = {};
+const bundles = {};
+
+for (const lang of LANGUAGES) {
+    const filePath = join(bootstrapDir, lang.file);
+    if (!existsSync(filePath)) {
+        console.error("Missing: " + filePath);
+        process.exit(1);
+    }
+    const content = readFileSync(filePath, "utf8");
+    const hash = computeLanguageHash(content);
+    addresses[lang.role] = hash;
+    bundles[lang.role] = content;
+
+    // Write bundle to the pre-seed directory
+    const langDir = join(outputDir, "languages", hash);
+    mkdirSync(langDir, { recursive: true });
+    writeFileSync(join(langDir, "bundle.js"), content);
+
+    console.log(lang.role + ": " + hash);
+}
+
+// Build seed JSON
+const seed = {
+    trustedAgents: [],
+    knownLinkLanguages: [addresses.linkLanguage],
+    directMessageLanguage: "",
+    agentLanguage: addresses.agentLanguage,
+    perspectiveLanguage: addresses.perspectiveLanguage,
+    neighbourhoodLanguage: addresses.neighbourhoodLanguage,
+    languageLanguageBundle: bundles.languageLanguage,
+};
+
+writeFileSync(
+    join(outputDir, "docker_seed.json"),
+    JSON.stringify(seed, null, 2)
+);
+
+console.log("\nSeed written to: " + join(outputDir, "docker_seed.json"));
+console.log("Pre-seed languages in: " + join(outputDir, "languages"));

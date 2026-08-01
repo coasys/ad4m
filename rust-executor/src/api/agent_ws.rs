@@ -293,20 +293,22 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         agent_service.dump().clone()
     });
 
-    // Start Holochain conductor
     let config = crate::config::get_global_config();
-    let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
-        &config,
-        body.passphrase.clone(),
-    );
-
     let mut init_errors: Vec<String> = Vec::new();
 
-    if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
-        log::error!("Error initializing Holochain: {:?}", e);
-        init_errors.push(format!("Holochain init failed: {}", e));
+    if config.run_holochain.unwrap_or(true) {
+        let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
+            &config,
+            body.passphrase.clone(),
+        );
+        if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
+            log::error!("Error initializing Holochain: {:?}", e);
+            init_errors.push(format!("Holochain init failed: {}", e));
+        } else {
+            log::info!("Holochain init complete");
+        }
     } else {
-        log::info!("Holochain init complete");
+        log::info!("Holochain disabled (run_holochain=false), skipping conductor init");
     }
 
     let language_language_only = config.language_language_only.unwrap_or(false);
@@ -402,26 +404,30 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .is_unlocked();
 
     if is_unlocked {
-        if crate::holochain_service::maybe_get_holochain_service()
-            .await
-            .is_none()
-        {
-            log::info!("Holochain service not initialized. Initializing...");
-            let config = crate::config::get_global_config();
-            let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
-                &config,
-                body.passphrase.clone(),
-            );
+        let config = crate::config::get_global_config();
 
-            if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
-                log::error!("Error initializing Holochain: {:?}", e);
-                init_errors.push(format!("Holochain init failed: {}", e));
-            } else {
-                log::info!("Holochain init complete");
+        if config.run_holochain.unwrap_or(true) {
+            if crate::holochain_service::maybe_get_holochain_service()
+                .await
+                .is_none()
+            {
+                log::info!("Holochain service not initialized. Initializing...");
+                let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
+                    &config,
+                    body.passphrase.clone(),
+                );
+
+                if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
+                    log::error!("Error initializing Holochain: {:?}", e);
+                    init_errors.push(format!("Holochain init failed: {}", e));
+                } else {
+                    log::info!("Holochain init complete");
+                }
             }
+        } else {
+            log::info!("Holochain disabled (run_holochain=false), skipping conductor init");
         }
 
-        let config = crate::config::get_global_config();
         let language_language_only = config.language_language_only.unwrap_or(false);
         let controller = LanguageController::global_instance();
         if let Err(e) = controller

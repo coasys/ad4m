@@ -1,10 +1,14 @@
 services:
   ad4m:
-    build: .
+    build:
+      context: .
+      args:
+        INCLUDE_WE: "${INCLUDE_WE:-true}"
     ports:
       - "13000:12000"   # WS-RPC API (default 12000 reserved for local dev)
       - "3101:${MCP_PORT:-3001}"     # MCP server
       - "8180:8080"     # Dapp server (default 8080 reserved for local dev)
+      - "8181:${WE_PORT:-8081}"      # WE web frontend
     volumes:
       - ad4m-data:/data
     environment:
@@ -13,6 +17,8 @@ services:
       - ENABLE_MULTI_USER=${ENABLE_MULTI_USER:-true}
       - ENABLE_MCP=${ENABLE_MCP:-true}
       - MCP_PORT=${MCP_PORT:-3001}
+      - RUN_HOLOCHAIN=${RUN_HOLOCHAIN:-false}
+      - WE_PORT=${WE_PORT:-8081}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:12000/"]

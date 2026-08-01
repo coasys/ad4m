@@ -1,11 +1,16 @@
 # =============================================================================
 # AD4M Executor Docker Image
 # Multi-stage build: full toolchain → minimal runtime
+#
+# Build args:
+#   INCLUDE_WE=true     — bundle WE web frontend (served on port 8081)
+#   RUN_HOLOCHAIN=true  — include Holochain conductor (false = standalone mode)
 # =============================================================================
 
 ARG RUST_VERSION=1.92
 ARG NODE_MAJOR=24
 ARG GO_VERSION=1.24.6
+ARG INCLUDE_WE=true
 
 # =============================================================================
 # Stage 1: Builder
@@ -183,8 +188,47 @@ RUN rm -rf /home/builder/deno-local /home/builder/deno_core-local /home/builder/
     && rm -rf /tmp/rustc* \
     && rm -rf /home/builder/.cargo/registry/cache
 
+# ── Generate Docker bootstrap seed ────────────────────────────────────
+# Local bootstrap languages replace Holochain-backed ones for standalone mode.
+RUN node docker/generate-seed.mjs bootstrap-languages/docker docker/seed-output
+
 # =============================================================================
-# Stage 2: Runtime
+# Stage 2a: WE web frontend (conditional)
+# =============================================================================
+FROM ubuntu:24.04 AS we-builder
+
+ARG NODE_MAJOR
+ARG INCLUDE_WE
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN if [ "${INCLUDE_WE}" != "true" ]; then \
+      mkdir -p /we-dist && echo "WE build skipped" > /we-dist/SKIPPED && exit 0; \
+    fi && \
+    apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git nodejs && \
+    curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    npm install -g pnpm@9.15.0 && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN if [ "${INCLUDE_WE}" != "true" ]; then exit 0; fi && \
+    git clone --depth 1 --single-branch --branch dev \
+      https://github.com/coasys/we.git /we
+
+WORKDIR /we
+
+RUN if [ "${INCLUDE_WE}" != "true" ]; then exit 0; fi && \
+    pnpm install --no-frozen-lockfile && \
+    pnpm build:web
+
+RUN mkdir -p /we-dist && \
+    if [ "${INCLUDE_WE}" = "true" ] && [ -d /we/apps/we-web/dist ]; then \
+      cp -r /we/apps/we-web/dist/* /we-dist/; \
+    fi
+
+# =============================================================================
+# Stage 3: Runtime
 # =============================================================================
 FROM ubuntu:24.04 AS runtime
 
@@ -193,6 +237,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    python3-minimal \
     libssl3 \
     libgtk-3-0 \
     libwebkit2gtk-4.1-0 \
@@ -203,6 +248,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /home/builder/ad4m-bin /usr/local/bin/ad4m
 COPY --from=builder /home/builder/ad4m-executor-bin /usr/local/bin/ad4m-executor
+
+# Docker bootstrap seed and pre-populated language bundles
+COPY --from=builder /home/builder/ad4m/docker/seed-output/docker_seed.json /opt/ad4m/docker_seed.json
+COPY --from=builder /home/builder/ad4m/docker/seed-output/languages/ /opt/ad4m/bootstrap-languages/
+
+# WE web frontend (empty dir if INCLUDE_WE=false)
+COPY --from=we-builder /we-dist/ /opt/ad4m/we-dist/
 
 RUN useradd -m -s /bin/bash ad4m && mkdir -p /data && chown ad4m:ad4m /data
 
@@ -216,6 +268,8 @@ EXPOSE 12000
 EXPOSE 3001
 # Dapp server
 EXPOSE 8080
+# WE web frontend
+EXPOSE 8081
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -sf http://localhost:12000/ || exit 1

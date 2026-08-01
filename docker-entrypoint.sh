@@ -7,12 +7,24 @@ if [ "$(id -u)" = "0" ]; then
     exec gosu ad4m "$0" "$@"
 fi
 
-# First-run init
+# ── First-run init ──────────────────────────────────────────────────────────
+# Use the Docker seed (local bootstrap languages, no external dependencies)
+# unless the operator supplies a custom seed via NETWORK_BOOTSTRAP_SEED.
+SEED_FILE="${NETWORK_BOOTSTRAP_SEED:-/opt/ad4m/docker_seed.json}"
+
 if [ ! -f /data/mainnet_seed.seed ]; then
     echo "Initializing AD4M data directory..."
-    ad4m-executor init --data-path /data
+    ad4m-executor init --data-path /data --network-bootstrap-seed "${SEED_FILE}"
+
+    # Pre-populate language bundles on disk so the executor finds them
+    # without needing to fetch from any external language-language store.
+    if [ -d /opt/ad4m/bootstrap-languages ]; then
+        echo "Pre-seeding bootstrap language bundles..."
+        cp -r /opt/ad4m/bootstrap-languages/* /data/ad4m/languages/ 2>/dev/null || true
+    fi
 fi
 
+# ── Build executor args ─────────────────────────────────────────────────────
 EXTRA_ARGS=()
 
 if [ -n "${ADMIN_CREDENTIAL:-}" ]; then
@@ -25,6 +37,14 @@ fi
 
 if [ "${ENABLE_MCP:-}" = "true" ]; then
     EXTRA_ARGS+=(--enable-mcp true --mcp-port "${MCP_PORT:-3001}")
+fi
+
+# No-Holochain mode: skip conductor startup entirely.
+# Default to false (no holochain) for Docker standalone deployments.
+if [ "${RUN_HOLOCHAIN:-false}" = "true" ]; then
+    EXTRA_ARGS+=(--run-holochain true)
+else
+    EXTRA_ARGS+=(--run-holochain false)
 fi
 
 # ── Agent auto-generation + auto-unlock ─────────────────────────────────────
@@ -98,8 +118,6 @@ maybe_setup_agent() {
             exit 1
         fi
         echo "Generating AD4M agent..."
-        # `agent generate` also suffers from the CLI/schema drift, so ignore
-        # its exit code and re-check the status flag to confirm success.
         ${AD4M_CLI_BASE} agent generate --passphrase "${AGENT_PASSPHRASE}" 2>&1 || true
         local post_output post_initialized
         post_output=$(${AD4M_CLI_BASE} agent status 2>&1 || true)
@@ -115,10 +133,7 @@ maybe_setup_agent() {
     fi
 
     # Agent is initialised. Unlock the wallet if a passphrase was provided
-    # and it's not already unlocked. Without this, `wallet.get_secret_key("main")`
-    # returns None on every JWT-issuing code path, so multi-user user.create
-    # and user.login fail with "main key not found. call createMainKey() first"
-    # or "User key not found on executor" until someone manually unlocks.
+    # and it's not already unlocked.
     if [ "${is_unlocked}" = "true" ]; then
         echo "Agent already initialised and unlocked."
         return
@@ -127,7 +142,6 @@ maybe_setup_agent() {
     if [ -z "${AGENT_PASSPHRASE:-}" ]; then
         echo "WARNING: Agent is initialised but locked, and AGENT_PASSPHRASE is not set." >&2
         echo "         Set AGENT_PASSPHRASE to auto-unlock on boot, or run 'ad4m agent unlock' manually." >&2
-        echo "         Multi-user signup/login will fail with 'main key not found' until unlocked." >&2
         return
     fi
 
@@ -143,6 +157,24 @@ maybe_setup_agent() {
     fi
 }
 
+# ── WE web frontend (static file server) ───────────────────────────────────
+WE_PID=""
+start_we_server() {
+    local we_dist="/opt/ad4m/we-dist"
+    local we_port="${WE_PORT:-8081}"
+
+    if [ -f "${we_dist}/SKIPPED" ] || [ ! -f "${we_dist}/index.html" ]; then
+        echo "WE frontend not bundled — skipping static server."
+        return
+    fi
+
+    echo "Starting WE web frontend on port ${we_port}..."
+    # Use Python's built-in HTTP server (available on Ubuntu 24.04)
+    python3 -m http.server "${we_port}" --directory "${we_dist}" --bind 0.0.0.0 &
+    WE_PID=$!
+    echo "WE frontend serving at http://0.0.0.0:${we_port}/"
+}
+
 # ── Start executor in background, auto-generate agent, then wait ────────────
 ad4m-executor run \
     --app-data-path /data \
@@ -153,11 +185,16 @@ ad4m-executor run \
 
 EXECUTOR_PID=$!
 
+start_we_server
 wait_for_executor
 maybe_setup_agent
 
-# Forward SIGTERM/SIGINT to the executor process so Docker can stop it cleanly.
-trap 'kill -TERM "${EXECUTOR_PID}" 2>/dev/null' TERM INT
+# Forward SIGTERM/SIGINT to all child processes so Docker can stop cleanly.
+cleanup() {
+    kill -TERM "${EXECUTOR_PID}" 2>/dev/null
+    [ -n "${WE_PID}" ] && kill -TERM "${WE_PID}" 2>/dev/null
+}
+trap cleanup TERM INT
 
 # Wait for executor to exit; propagate its exit code.
 wait "${EXECUTOR_PID}"
