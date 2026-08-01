@@ -222,7 +222,7 @@ WORKDIR /we
 
 RUN if [ "${INCLUDE_WE}" != "true" ]; then exit 0; fi && \
     pnpm install --no-frozen-lockfile && \
-    pnpm build:web
+    pnpm -r --workspace-concurrency=1 --no-bail run build
 
 RUN mkdir -p /we-dist && \
     if [ "${INCLUDE_WE}" = "true" ] && [ -d /we/apps/we-web/dist ]; then \
