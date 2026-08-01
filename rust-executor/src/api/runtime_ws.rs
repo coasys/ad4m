@@ -197,7 +197,9 @@ async fn restart_holochain(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     }
     let config = crate::config::get_global_config();
     if !config.run_holochain.unwrap_or(true) {
-        return Err(WsRpcError::bad_request("Holochain disabled (run_holochain=false)"));
+        return Err(WsRpcError::bad_request(
+            "Holochain disabled (run_holochain=false)",
+        ));
     }
     let _ = get_holochain_service().await;
     Ok(Value::Bool(true))
