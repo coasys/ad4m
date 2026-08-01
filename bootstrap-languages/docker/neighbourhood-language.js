@@ -17,10 +17,9 @@ export function interactions() { return []; }
 export async function teardown() {}
 
 export async function expressionCreate(neighbourhood) {
+    const address = hash(JSON.stringify(neighbourhood));
     const expression = agentCreateSignedExpression(neighbourhood);
-    const content = JSON.stringify(expression);
-    const address = hash(content);
-    storagePut("neighbourhood-" + address, content);
+    storagePut("neighbourhood-" + address, JSON.stringify(expression));
     return address;
 }
 

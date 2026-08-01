@@ -18,10 +18,9 @@ export function interactions() { return []; }
 export async function teardown() {}
 
 export async function expressionCreate(perspective) {
+    const address = hash(JSON.stringify(perspective));
     const expression = agentCreateSignedExpression(perspective);
-    const content = JSON.stringify(expression);
-    const address = hash(content);
-    storagePut("perspective-" + address, content);
+    storagePut("perspective-" + address, JSON.stringify(expression));
     return address;
 }
 

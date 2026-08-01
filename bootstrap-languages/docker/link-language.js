@@ -48,7 +48,6 @@ export async function teardown() { saveState(); }
 export async function perspectiveSyncSync() {
     if (synced) return null;
     synced = true;
-    loadState();
     if (links.length > 0) {
         emitPerspectiveDiff({
             additions: links,
@@ -68,26 +67,32 @@ export async function perspectiveSyncCurrentRevision() {
 
 // -- commit capability --
 
+function linkKey(l) {
+    return JSON.stringify({
+        author: l.author || "",
+        timestamp: l.timestamp || "",
+        data: l.data || {},
+    });
+}
+
 export async function perspectiveCommit(diff) {
     const additions = diff.additions || [];
     const removals = diff.removals || [];
 
-    // Apply removals
     if (removals.length > 0) {
-        const removalKeys = new Set(
-            removals.map(function(l) {
-                return (l.data.source || "") + "|" + (l.data.predicate || "") + "|" + (l.data.target || "");
-            })
-        );
+        const removalKeys = new Set(removals.map(linkKey));
         links = links.filter(function(l) {
-            var key = (l.data.source || "") + "|" + (l.data.predicate || "") + "|" + (l.data.target || "");
-            return !removalKeys.has(key);
+            return !removalKeys.has(linkKey(l));
         });
     }
 
-    // Apply additions
+    const existing = new Set(links.map(linkKey));
     for (var i = 0; i < additions.length; i++) {
-        links.push(additions[i]);
+        var key = linkKey(additions[i]);
+        if (!existing.has(key)) {
+            existing.add(key);
+            links.push(additions[i]);
+        }
     }
 
     revision = revision + 1;

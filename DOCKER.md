@@ -83,7 +83,7 @@ RUN_HOLOCHAIN=true NETWORK_BOOTSTRAP_SEED=/path/to/mainnet_seed.json docker comp
 
 All state lives in the `/data` volume:
 
-```
+```text
 /data/
   mainnet_seed.seed    — bootstrap seed (written on first init)
   ad4m/
@@ -194,7 +194,7 @@ If missing, rebuild: `INCLUDE_WE=true docker compose build`
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────┐
 │ Docker Container                            │
 │                                             │

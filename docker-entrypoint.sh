@@ -57,13 +57,13 @@ fi
 
 AD4M_CLI_URL="http://localhost:12000"
 
-# Build the common CLI prefix (executor URL; no cap-token needed for
-# agent.status / agent.generate / agent.unlock).
-AD4M_CLI_BASE="ad4m --executor-url ${AD4M_CLI_URL} --no-capability"
-if [ -n "${ADMIN_CREDENTIAL:-}" ]; then
-    # Use the admin credential so the CLI can reach a secured executor.
-    AD4M_CLI_BASE="ad4m --executor-url ${AD4M_CLI_URL} --admin-credential ${ADMIN_CREDENTIAL}"
-fi
+run_ad4m_cli() {
+    if [ -n "${ADMIN_CREDENTIAL:-}" ]; then
+        ad4m --executor-url "${AD4M_CLI_URL}" --admin-credential "${ADMIN_CREDENTIAL}" "$@"
+    else
+        ad4m --executor-url "${AD4M_CLI_URL}" --no-capability "$@"
+    fi
+}
 
 wait_for_executor() {
     echo "Waiting for AD4M executor to be ready..."
@@ -99,7 +99,7 @@ extract_agent_flag() {
 
 maybe_setup_agent() {
     local status_output is_initialized is_unlocked
-    status_output=$(${AD4M_CLI_BASE} agent status 2>&1 || true)
+    status_output=$(run_ad4m_cli agent status 2>&1 || true)
     is_initialized=$(extract_agent_flag "${status_output}" isInitialized)
     is_unlocked=$(extract_agent_flag "${status_output}" isUnlocked)
 
@@ -118,9 +118,9 @@ maybe_setup_agent() {
             exit 1
         fi
         echo "Generating AD4M agent..."
-        ${AD4M_CLI_BASE} agent generate --passphrase "${AGENT_PASSPHRASE}" 2>&1 || true
+        run_ad4m_cli agent generate --passphrase "${AGENT_PASSPHRASE}" 2>&1 || true
         local post_output post_initialized
-        post_output=$(${AD4M_CLI_BASE} agent status 2>&1 || true)
+        post_output=$(run_ad4m_cli agent status 2>&1 || true)
         post_initialized=$(extract_agent_flag "${post_output}" isInitialized)
         if [ "${post_initialized}" != "true" ]; then
             echo "ERROR: agent generate did not initialise the agent. Raw status:" >&2
@@ -147,7 +147,7 @@ maybe_setup_agent() {
 
     echo "Unlocking AD4M agent..."
     local unlock_output unlock_status
-    unlock_output=$(${AD4M_CLI_BASE} agent unlock --passphrase "${AGENT_PASSPHRASE}" 2>&1 || true)
+    unlock_output=$(run_ad4m_cli agent unlock --passphrase "${AGENT_PASSPHRASE}" 2>&1 || true)
     unlock_status=$(extract_agent_flag "${unlock_output}" isUnlocked)
     if [ "${unlock_status}" = "true" ]; then
         echo "AD4M agent unlocked."
