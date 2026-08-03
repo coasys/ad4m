@@ -178,7 +178,12 @@ RUN if ! grep -q '\[patch."https://github.com/coasys/deno_core.git"\]' Cargo.tom
 RUN sed -i '/^source = "git+https:\/\/github\.com\/coasys\/rusty_v8/d' Cargo.lock
 
 # ── Build (cargo target cached across rebuilds) ───────────────────────
+# Purge v8 build-script cache: v8's build.rs generates binding files
+# outside the cargo target dir (in the rusty_v8 source tree). The cache
+# mount preserves stale fingerprints across layer changes, so cargo skips
+# build.rs re-execution while the generated files no longer exist.
 RUN --mount=type=cache,target=/home/builder/ad4m/target,uid=1001,gid=1001 \
+    rm -rf target/release/build/v8-* target/release/.fingerprint/v8-* 2>/dev/null || true && \
     pnpm run build-deno-snapshot
 
 RUN --mount=type=cache,target=/home/builder/ad4m/target,uid=1001,gid=1001 \
