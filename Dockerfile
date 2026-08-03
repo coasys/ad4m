@@ -299,7 +299,8 @@ COPY --from=model-fetcher /models/ /opt/ad4m/models/
 
 RUN useradd -m -s /bin/bash ad4m && mkdir -p /data && chown ad4m:ad4m /data
 
-COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+# docker-entrypoint.sh is volume-mounted by docker-compose.yml (not baked
+# into the image) so entrypoint changes only need a container restart.
 
 WORKDIR /data
 
