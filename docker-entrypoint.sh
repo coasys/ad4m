@@ -218,7 +218,7 @@ CADDYEOF
 ad4m-executor run \
     --app-data-path /data \
     --localhost false \
-    --run-dapp-server true \
+    --run-dapp-server false \
     "${EXTRA_ARGS[@]}" \
     "$@" &
 
