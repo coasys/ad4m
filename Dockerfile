@@ -225,7 +225,7 @@ RUN if [ "${INCLUDE_WE}" != "true" ]; then exit 0; fi && \
     sed -i 's/hosting: true,/hosting: true,\n      remoteUrl: window.location.origin,/' \
       apps/we-web/src/platform/webAdapter.ts && \
     pnpm install --no-frozen-lockfile && \
-    pnpm -r --workspace-concurrency=1 --no-bail run build
+    pnpm --filter "@we/app-web..." --workspace-concurrency=1 run build
 
 RUN mkdir -p /we-dist && \
     if [ "${INCLUDE_WE}" = "true" ] && [ -d /we/apps/we-web/dist ]; then \
