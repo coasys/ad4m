@@ -261,7 +261,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    python3-minimal \
+    python3 \
     libssl3 \
     libgtk-3-0 \
     libwebkit2gtk-4.1-0 \
