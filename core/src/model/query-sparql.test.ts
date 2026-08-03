@@ -374,3 +374,151 @@ describe('buildSPARQLQuery — RDF 1.2 reifier patterns', () => {
   });
 
 });
+
+// ──────────────────────────────────────────────────────────
+// OR / AND / NOT logical combinators
+// ──────────────────────────────────────────────────────────
+
+describe('hasJsOnlyWhereFilters — OR/AND/NOT combinators', () => {
+  // buildSPARQLWhereFilters never emits a SPARQL translation for OR/AND/NOT
+  // regardless of what their branches contain (see the comment there), so
+  // hasJsOnlyWhereFilters must treat their mere presence as JS-only —
+  // otherwise SPARQL-level LIMIT/OFFSET would run before the combinator
+  // filter itself is ever applied.
+
+  it('returns true for OR even when every branch is SPARQL-pushable', () => {
+    const where = {
+      OR: [
+        { category: 'some://uri' },
+        { category: 'other://uri' },
+      ],
+    };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+
+  it('returns true for OR when a branch contains a JS-only filter', () => {
+    const where = {
+      OR: [
+        { category: 'some://uri' },
+        { author: 'did:key:abc' },
+      ],
+    };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+
+  it('returns true for OR when a branch contains a contains operator', () => {
+    const where = {
+      OR: [
+        { name: { contains: 'foo' } },
+        { description: { contains: 'foo' } },
+      ],
+    };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+
+  it('returns true for AND even when every branch is SPARQL-pushable', () => {
+    const where = {
+      AND: [
+        { category: 'some://uri' },
+        { category: 'other://uri' },
+      ],
+    };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+
+  it('returns true for AND when a branch contains a JS-only filter', () => {
+    const where = {
+      AND: [
+        { category: 'some://uri' },
+        { name: { gt: 5 } },
+      ],
+    };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+
+  it('returns true for NOT even when the negated clause is SPARQL-pushable', () => {
+    const where = { NOT: { category: 'some://uri' } };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+
+  it('returns true for NOT when the negated clause contains a JS-only filter', () => {
+    const where = { NOT: { author: 'did:key:abc' } };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+
+  it('returns true for nested OR inside OR', () => {
+    const where = {
+      OR: [
+        { OR: [{ author: 'did:key:abc' }] },
+        { category: 'some://uri' },
+      ],
+    };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+});
+
+describe('buildSPARQLQuery — OR/AND/NOT not emitted as SPARQL (handled Rust-side)', () => {
+  const modelClass: any = {};
+
+  it('does not emit OR key as a SPARQL triple pattern', () => {
+    const query = {
+      where: {
+        OR: [
+          { name: 'Alice' },
+          { name: 'Bob' },
+        ],
+      },
+    };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    // OR should not appear as a predicate in the SPARQL
+    expect(sparql).not.toContain('"OR"');
+    expect(sparql).not.toContain('<OR>');
+    // Valid SPARQL structure still present
+    expect(sparql).toContain('SELECT ?source ?predicate ?target');
+  });
+
+  it('does not emit AND or NOT as SPARQL patterns', () => {
+    const query = {
+      where: {
+        AND: [{ category: 'some://uri' }],
+        NOT: { category: 'other://uri' },
+      },
+    };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('"AND"');
+    expect(sparql).not.toContain('"NOT"');
+  });
+
+  it('does NOT include LIMIT when OR contains JS-only filters', () => {
+    // OR with contains → hasJsOnlyWhereFilters true → no SPARQL pagination
+    const query = {
+      limit: 10,
+      where: {
+        OR: [
+          { name: { contains: 'foo' } },
+          { description: { contains: 'foo' } },
+        ],
+      },
+    };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('LIMIT');
+  });
+
+  it('does NOT include LIMIT when OR branches are all SPARQL-pushable', () => {
+    // Even though both OR branches are simple non-literal equality, the OR
+    // combinator itself is never translated into a SPARQL FILTER (see
+    // buildSPARQLWhereFilters), so pushing LIMIT down would cap the
+    // candidate set before the combinator is applied.
+    const query = {
+      limit: 5,
+      where: {
+        OR: [
+          { category: 'some://uri' },
+          { category: 'other://uri' },
+        ],
+      },
+    };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('LIMIT');
+  });
+});

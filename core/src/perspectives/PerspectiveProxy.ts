@@ -1293,12 +1293,25 @@ export class PerspectiveProxy {
             predicate: "sh://property"
         }));
         
-        // Fetch all links from the shape and its property shapes
+        // Fetch all links from the shape and its property shapes. These reads are
+        // independent of each other, so fire them concurrently rather than one RPC
+        // round trip at a time — over a remote (non-loopback) connection, a shape with
+        // a dozen properties otherwise pays a dozen sequential round trips just to load.
         const sourceUris = [shapeUri, ...propertyLinks.map(l => l.data.target)];
+        const linksByUri = await Promise.all(sourceUris.map(uri => this.get(new LinkQuery({ source: uri }))));
+        // Dedupe by (source, predicate, target): a perspective that's accumulated duplicate
+        // SDNA links (e.g. from repeated registration attempts, or executor-side sync bugs)
+        // would otherwise feed the same triple into SHACLShape.fromLinks more than once —
+        // harmless for scalar fields like targetClass (first match wins) but can surface as
+        // visibly duplicated properties for repeated sh://property links. Cheap: this is an
+        // in-memory pass over data already fetched, no extra round trips.
+        const seenLinks = new Set<string>();
         const allLinks: Array<{source: string, predicate: string, target: string}> = [];
-        for (const uri of sourceUris) {
-            const links = await this.get(new LinkQuery({ source: uri }));
+        for (const links of linksByUri) {
             for (const l of links) {
+                const key = `${l.data.source} ${l.data.predicate} ${l.data.target}`;
+                if (seenLinks.has(key)) continue;
+                seenLinks.add(key);
                 allLinks.push({
                     source: l.data.source,
                     predicate: l.data.predicate,
@@ -1306,34 +1319,74 @@ export class PerspectiveProxy {
                 });
             }
         }
-        
+
         const shapeLinks = allLinks;
-        
+
         return SHACLShape.fromLinks(shapeLinks, shapeUri);
     }
     
     /**
-     * Get all SHACL shapes stored in this Perspective
+     * List the names of every SHACL shape stored in this Perspective, without fetching
+     * each shape's full definition (properties, target class, etc.) — just the cheap
+     * `ad4m://has_shacl` enumeration, one round trip regardless of how many shapes exist.
+     * Use this to check which shapes are actually worth resolving via `getShacl()` before
+     * paying for each one's full (multi-round-trip) fetch.
      */
-    async getAllShacl(): Promise<Array<{name: string, shape: SHACLShape}>> {
+    async getShaclNames(): Promise<string[]> {
         const nameLinks = await this.get(new LinkQuery({
             source: "ad4m://self",
             predicate: "ad4m://has_shacl"
         }));
-        
-        const shapes = [];
-        for (const nameLink of nameLinks) {
-            const nameUrl = nameLink.data.target;
-            const name = Literal.fromUrl(nameUrl).get() as string;
-            const shapeName = name.replace('shacl://', '');
-            
-            const shape = await this.getShacl(shapeName);
-            if (shape) {
-                shapes.push({ name: shapeName, shape });
-            }
+        // Dedupe: a perspective with duplicate `has_shacl` links (see the dedup note in
+        // getShacl()) would otherwise report the same name more than once, causing callers
+        // to redundantly resolve (or redundantly disambiguate) it multiple times.
+        const names = nameLinks.map((nameLink) => {
+            const name = Literal.fromUrl(nameLink.data.target).get() as string;
+            return name.replace('shacl://', '');
+        });
+        return [...new Set(names)];
+    }
+
+    /**
+     * Resolve just a shape's `sh:targetClass` by name, without fetching its properties —
+     * two round trips (name → shapeUri, then shapeUri's own direct triples) instead of
+     * `getShacl()`'s full walk (which also fetches every property sub-shape). Use this to
+     * disambiguate a shape name that collides with another app's `@Model({ name })` string
+     * (the bare `shacl://{name}` mapping ad4m-core uses is namespace-blind — see
+     * `getShaclNames()` callers for why that matters) before paying for a full fetch.
+     */
+    async getShaclTargetClass(name: string): Promise<string | undefined> {
+        const nameMapping = Literal.fromUrl(`literal:string:shacl://${name}`);
+        const shapeUriLinks = await this.get(new LinkQuery({
+            source: nameMapping.toUrl(),
+            predicate: "ad4m://shacl_shape_uri"
+        }));
+        if (shapeUriLinks.length === 0) {
+            return undefined;
         }
-        
-        return shapes;
+        const shapeUri = shapeUriLinks[0].data.target;
+
+        const shapeOwnLinks = await this.get(new LinkQuery({ source: shapeUri }));
+        return shapeOwnLinks.find(l => l.data.predicate === "sh://targetClass")?.data.target;
+    }
+
+    /**
+     * Get all SHACL shapes stored in this Perspective
+     */
+    async getAllShacl(): Promise<Array<{name: string, shape: SHACLShape}>> {
+        const shapeNames = await this.getShaclNames();
+
+        // Each shape is fetched independently of the others — resolve them concurrently.
+        // Sequentially awaiting getShacl() per shape means a perspective with N SDNA
+        // models pays N times getShacl()'s own multi-round-trip cost one after another;
+        // over a remote connection with real per-call latency that compounds into the
+        // dominant cost of switching into a perspective at all.
+        const results = await Promise.all(shapeNames.map(async (shapeName) => {
+            const shape = await this.getShacl(shapeName);
+            return shape ? { name: shapeName, shape } : null;
+        }));
+
+        return results.filter((s): s is { name: string, shape: SHACLShape } => s !== null);
     }
 
     /**
