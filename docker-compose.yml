@@ -11,7 +11,6 @@ services:
       - "8180:${WE_PORT:-8080}"      # WE frontend + API reverse proxy (Caddy)
     volumes:
       - ad4m-data:/data
-      - ./docker-entrypoint.sh:/usr/local/bin/docker-entrypoint.sh:ro
     environment:
       - ADMIN_CREDENTIAL=${ADMIN_CREDENTIAL:-}
       - AGENT_PASSPHRASE=${AGENT_PASSPHRASE:-}
