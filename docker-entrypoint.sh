@@ -188,15 +188,11 @@ start_we_server() {
 }
 
 :${we_port} {
-    handle /ws {
-        reverse_proxy localhost:12000
-    }
-
     handle /health {
         reverse_proxy localhost:12000
     }
 
-    handle_path /api/v1/* {
+    handle /api/* {
         reverse_proxy localhost:12000
     }
 
