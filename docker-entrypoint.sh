@@ -196,7 +196,7 @@ start_we_server() {
         reverse_proxy localhost:12000
     }
 
-    handle_path /api/* {
+    handle_path /api/v1/* {
         reverse_proxy localhost:12000
     }
 
