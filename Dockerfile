@@ -139,9 +139,25 @@ RUN mkdir -p /home/builder/.cargo/git/db && \
     cd /home/builder/.cargo/git/checkouts/floneum-bfbb720c433546c9/427cfdf && \
     git checkout 427cfdf3c07f5502ea085f281f6a362adb046312
 
-# ── Copy source ─────────────────────────────────────────────────────────
-COPY --chown=builder:builder . /home/builder/ad4m
+# ── Copy source (selective — keeps docker-entrypoint.sh out of the
+#    builder so entrypoint-only edits don't bust the Rust cache) ─────────
 WORKDIR /home/builder/ad4m
+COPY --chown=builder:builder Cargo.toml Cargo.lock package.json pnpm-lock.yaml pnpm-workspace.yaml rust-toolchain.toml deno.lock ./
+COPY --chown=builder:builder rust-executor/ ./rust-executor/
+COPY --chown=builder:builder rust-client/ ./rust-client/
+COPY --chown=builder:builder cli/ ./cli/
+COPY --chown=builder:builder core/ ./core/
+COPY --chown=builder:builder connect/ ./connect/
+COPY --chown=builder:builder ui/ ./ui/
+COPY --chown=builder:builder dapp/ ./dapp/
+COPY --chown=builder:builder bootstrap-languages/ ./bootstrap-languages/
+COPY --chown=builder:builder ad4m-ldk/ ./ad4m-ldk/
+COPY --chown=builder:builder ad4m-hooks/ ./ad4m-hooks/
+COPY --chown=builder:builder tests/ ./tests/
+COPY --chown=builder:builder docker/ ./docker/
+COPY --chown=builder:builder patches/ ./patches/
+COPY --chown=builder:builder hooks/ ./hooks/
+COPY --chown=builder:builder docs-src/ ./docs-src/
 
 # Skip Electron/Playwright binary downloads (headless build)
 ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
@@ -178,7 +194,14 @@ RUN if ! grep -q '\[patch."https://github.com/coasys/deno_core.git"\]' Cargo.tom
 RUN sed -i '/^source = "git+https:\/\/github\.com\/coasys\/rusty_v8/d' Cargo.lock
 
 # ── Build (cargo target cached across rebuilds) ───────────────────────
+# If the v8 binding file is absent (fresh source tree after layer
+# invalidation), clear stale v8 fingerprints so build.rs re-runs and
+# regenerates it.  Only fires when the COPY layers actually changed.
 RUN --mount=type=cache,id=ad4m-cargo,target=/home/builder/ad4m/target,uid=1001,gid=1001 \
+    if [ ! -f /home/builder/rusty_v8-local/gen/src_binding_release_x86_64-unknown-linux-gnu.rs ]; then \
+      echo ">>> v8 binding missing — clearing stale build cache"; \
+      rm -rf target/release/build/v8-* target/release/.fingerprint/v8-* 2>/dev/null || true; \
+    fi && \
     pnpm run build-deno-snapshot
 
 RUN --mount=type=cache,id=ad4m-cargo,target=/home/builder/ad4m/target,uid=1001,gid=1001 \
