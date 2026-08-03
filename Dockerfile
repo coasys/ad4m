@@ -88,24 +88,8 @@ RUN curl -fsSL https://deno.land/install.sh | sh
 ENV DENO_INSTALL="/home/builder/.deno"
 ENV PATH="${DENO_INSTALL}/bin:${PATH}"
 
-# ── Copy source ─────────────────────────────────────────────────────────
-COPY --chown=builder:builder . /home/builder/ad4m
-WORKDIR /home/builder/ad4m
-
-# Skip Electron/Playwright binary downloads (headless build)
-ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-
-# ── JS deps + dapp assets ──────────────────────────────────────────────
-RUN pnpm install --no-frozen-lockfile
-RUN pnpm build-dapp
-
-WORKDIR /home/builder/ad4m/core
-RUN pnpm install --no-frozen-lockfile || \
-    (echo ">>> Retrying core pnpm install..." && sleep 5 && pnpm install --no-frozen-lockfile)
-WORKDIR /home/builder/ad4m
-
 # ── Prepare Deno/rusty_v8 local clones (bypass submodule hell) ─────────
+# Cloned BEFORE source copy so they cache independently of source changes.
 RUN for i in 1 2 3; do \
       git clone --depth 1 --single-branch --branch new-v8-dylib-hickory-update \
         --no-recurse-submodules \
@@ -139,22 +123,6 @@ RUN for i in 1 2 3; do \
     git add -A && \
     git -c user.email="build@docker" -c user.name="docker" commit --allow-empty -m "strip submodules"
 
-# Patch Cargo.toml to use local clones
-RUN sed -i 's|deno_runtime = {version = "0.212.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update"|deno_runtime = {version = "0.212.0", path = "/home/builder/deno-local/runtime"|' rust-executor/Cargo.toml && \
-    sed -i 's|deno_resolver = {version = "0.35.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update"|deno_resolver = {version = "0.35.0", path = "/home/builder/deno-local/resolvers/deno"|' rust-executor/Cargo.toml && \
-    sed -i 's|deno_fs = {version = "0.114.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update"|deno_fs = {version = "0.114.0", path = "/home/builder/deno-local/ext/fs"|' rust-executor/Cargo.toml && \
-    sed -i 's|deno_lib = {version = "0.20.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update"|deno_lib = {version = "0.20.0", path = "/home/builder/deno-local/cli/lib"|' rust-executor/Cargo.toml && \
-    sed -i 's|deno_snapshots = {version = "0.19.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update"|deno_snapshots = {version = "0.19.0", path = "/home/builder/deno-local/cli/snapshot"|' rust-executor/Cargo.toml && \
-    sed -i 's|deno_core = {version = "0.347.0", git = "https://github.com/coasys/deno_core.git", branch = "new-v8-dylib"|deno_core = {version = "0.347.0", path = "/home/builder/deno_core-local/core"|' rust-executor/Cargo.toml
-
-# Workspace-level [patch] to prevent duplicate crate versions
-RUN if ! grep -q '\[patch."https://github.com/coasys/deno_core.git"\]' Cargo.toml; then \
-      printf '\n[patch."https://github.com/coasys/deno_core.git"]\ndeno_core = { path = "/home/builder/deno_core-local/core" }\n' >> Cargo.toml; \
-    fi && \
-    if ! grep -q '\[patch."https://github.com/coasys/rusty_v8.git"\]' Cargo.toml; then \
-      printf '\n[patch."https://github.com/coasys/rusty_v8.git"]\nv8 = { path = "/home/builder/rusty_v8-local" }\n' >> Cargo.toml; \
-    fi
-
 # Pre-cache floneum in cargo git DB (GitHub rejects fetch-by-SHA on forks)
 RUN mkdir -p /home/builder/.cargo/git/db && \
     for i in 1 2 3; do \
@@ -170,6 +138,39 @@ RUN mkdir -p /home/builder/.cargo/git/db && \
       /home/builder/.cargo/git/checkouts/floneum-bfbb720c433546c9/427cfdf && \
     cd /home/builder/.cargo/git/checkouts/floneum-bfbb720c433546c9/427cfdf && \
     git checkout 427cfdf3c07f5502ea085f281f6a362adb046312
+
+# ── Copy source ─────────────────────────────────────────────────────────
+COPY --chown=builder:builder . /home/builder/ad4m
+WORKDIR /home/builder/ad4m
+
+# Skip Electron/Playwright binary downloads (headless build)
+ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
+# ── JS deps + dapp assets ──────────────────────────────────────────────
+RUN pnpm install --no-frozen-lockfile
+RUN pnpm build-dapp
+
+WORKDIR /home/builder/ad4m/core
+RUN pnpm install --no-frozen-lockfile || \
+    (echo ">>> Retrying core pnpm install..." && sleep 5 && pnpm install --no-frozen-lockfile)
+WORKDIR /home/builder/ad4m
+
+# Patch Cargo.toml to use local clones
+RUN sed -i 's|deno_runtime = {version = "0.212.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update"|deno_runtime = {version = "0.212.0", path = "/home/builder/deno-local/runtime"|' rust-executor/Cargo.toml && \
+    sed -i 's|deno_resolver = {version = "0.35.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update"|deno_resolver = {version = "0.35.0", path = "/home/builder/deno-local/resolvers/deno"|' rust-executor/Cargo.toml && \
+    sed -i 's|deno_fs = {version = "0.114.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update"|deno_fs = {version = "0.114.0", path = "/home/builder/deno-local/ext/fs"|' rust-executor/Cargo.toml && \
+    sed -i 's|deno_lib = {version = "0.20.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update"|deno_lib = {version = "0.20.0", path = "/home/builder/deno-local/cli/lib"|' rust-executor/Cargo.toml && \
+    sed -i 's|deno_snapshots = {version = "0.19.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update"|deno_snapshots = {version = "0.19.0", path = "/home/builder/deno-local/cli/snapshot"|' rust-executor/Cargo.toml && \
+    sed -i 's|deno_core = {version = "0.347.0", git = "https://github.com/coasys/deno_core.git", branch = "new-v8-dylib"|deno_core = {version = "0.347.0", path = "/home/builder/deno_core-local/core"|' rust-executor/Cargo.toml
+
+# Workspace-level [patch] to prevent duplicate crate versions
+RUN if ! grep -q '\[patch."https://github.com/coasys/deno_core.git"\]' Cargo.toml; then \
+      printf '\n[patch."https://github.com/coasys/deno_core.git"]\ndeno_core = { path = "/home/builder/deno_core-local/core" }\n' >> Cargo.toml; \
+    fi && \
+    if ! grep -q '\[patch."https://github.com/coasys/rusty_v8.git"\]' Cargo.toml; then \
+      printf '\n[patch."https://github.com/coasys/rusty_v8.git"]\nv8 = { path = "/home/builder/rusty_v8-local" }\n' >> Cargo.toml; \
+    fi
 
 # Strip the rusty_v8 git source from Cargo.lock so Cargo resolves v8
 # from the [patch] local path instead of fetching from GitHub (which
