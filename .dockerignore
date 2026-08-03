@@ -13,5 +13,4 @@ out/
 Dockerfile
 docker-compose.yml
 docker-compose.override.yml
-docker-entrypoint.sh
 DOCKER.md
