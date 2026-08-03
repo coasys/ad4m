@@ -142,7 +142,8 @@ RUN mkdir -p /home/builder/.cargo/git/db && \
 # ── Copy source (selective — keeps docker-entrypoint.sh out of the
 #    builder so entrypoint-only edits don't bust the Rust cache) ─────────
 WORKDIR /home/builder/ad4m
-COPY --chown=builder:builder Cargo.toml Cargo.lock package.json pnpm-lock.yaml pnpm-workspace.yaml rust-toolchain.toml deno.lock ./
+COPY --chown=builder:builder Cargo.toml Cargo.lock package.json pnpm-lock.yaml pnpm-workspace.yaml rust-toolchain.toml deno.lock turbo.json ./
+COPY --chown=builder:builder .cargo/ ./.cargo/
 COPY --chown=builder:builder rust-executor/ ./rust-executor/
 COPY --chown=builder:builder rust-client/ ./rust-client/
 COPY --chown=builder:builder cli/ ./cli/
