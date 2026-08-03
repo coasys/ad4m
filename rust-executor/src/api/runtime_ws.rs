@@ -21,17 +21,12 @@ use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
 async fn get_runtime_info(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let info = AgentService::with_global_instance(|agent_service| {
-        agent_service
-            .agent
-            .clone()
-            .ok_or(WsRpcError::not_found("Agent not found"))?;
-
-        Ok::<RuntimeInfo, WsRpcError>(RuntimeInfo {
+        RuntimeInfo {
             is_initialized: agent_service.is_initialized(),
             is_unlocked: agent_service.is_unlocked(),
             ad4m_executor_version: AD4M_VERSION.clone(),
-        })
-    })?;
+        }
+    });
     Ok(serde_json::to_value(info)?)
 }
 
