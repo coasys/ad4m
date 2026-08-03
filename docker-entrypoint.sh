@@ -93,21 +93,25 @@ wait_for_executor() {
     echo "AD4M executor is ready."
 }
 
-# Extract the raw JSON blob the CLI prints on deserialization failure.
-# The current CLI's response schema is out of sync with the executor's
-# `agent.status` and `agent.unlock` responses, but the raw payload is
-# emitted at the tail of the error message as `raw: {...}`. Parsing it
-# directly is more robust than depending on the CLI's parsed output.
+# Extract a boolean flag from the CLI's agent status output.
+# Handles three output formats the CLI produces:
+#   1. JSON blob:   raw: {"isInitialized":true, ...}
+#   2. JSON inline: "isInitialized":true
+#   3. CLI table:   is_initiliazed: false  (with ANSI colours)
+# Also handles the known CLI typo "initiliazed".
 extract_agent_flag() {
     # $1 = raw output, $2 = flag name (e.g. isInitialized, isUnlocked)
-    local raw json
-    raw=$(printf '%s' "$1" | grep -oE 'raw: \{.*\}' | head -1 | sed 's/^raw: //')
-    if [ -z "${raw}" ]; then
-        # No `raw:` prefix — the CLI parsed the response cleanly.
-        # Fall back to searching the whole output.
-        raw="$1"
-    fi
-    printf '%s' "${raw}" | grep -oE "\"$2\":(true|false)" | head -1 | sed "s/\"$2\"://"
+    local cleaned flag_name="$2"
+    # Strip ANSI escape codes
+    cleaned=$(printf '%s' "$1" | sed $'s/\x1b\\[[0-9;]*m//g')
+
+    # Build grep pattern: camelCase + snake_case + known typos
+    local snake pattern
+    snake=$(printf '%s' "${flag_name}" | sed 's/\([A-Z]\)/_\L\1/g')
+    pattern="${flag_name}|${snake}"
+    [ "${flag_name}" = "isInitialized" ] && pattern="${pattern}|is_initiliazed|initiliazed"
+
+    printf '%s' "${cleaned}" | grep -iE "${pattern}" | grep -oE '\b(true|false)\b' | head -1
 }
 
 maybe_setup_agent() {
