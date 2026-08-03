@@ -220,9 +220,9 @@ ad4m-executor run \
 
 EXECUTOR_PID=$!
 
-start_we_server
 wait_for_executor
 maybe_setup_agent
+start_we_server
 
 # Forward SIGTERM/SIGINT to all child processes so Docker can stop cleanly.
 cleanup() {
