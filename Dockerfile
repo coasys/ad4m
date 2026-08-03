@@ -258,10 +258,11 @@ FROM ubuntu:24.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+ARG CADDY_VERSION=2.9.1
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    python3 \
     libssl3 \
     libgtk-3-0 \
     libwebkit2gtk-4.1-0 \
@@ -269,6 +270,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libasound2t64 \
     gosu \
     && rm -rf /var/lib/apt/lists/*
+
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_${ARCH}.tar.gz" \
+    | tar -xz -C /usr/local/bin caddy && \
+    chmod +x /usr/local/bin/caddy
 
 COPY --from=builder /home/builder/ad4m-bin /usr/local/bin/ad4m
 COPY --from=builder /home/builder/ad4m-executor-bin /usr/local/bin/ad4m-executor
@@ -289,14 +295,12 @@ COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 WORKDIR /data
 
-# WS-RPC API
+# Caddy reverse proxy (WE frontend + executor API)
+EXPOSE 8080
+# WS-RPC API (direct, for non-browser clients)
 EXPOSE 12000
 # MCP server
 EXPOSE 3001
-# Dapp server
-EXPOSE 8080
-# WE web frontend
-EXPOSE 8081
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -sf http://localhost:12000/ || exit 1

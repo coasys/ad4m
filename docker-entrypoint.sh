@@ -170,22 +170,48 @@ maybe_setup_agent() {
     fi
 }
 
-# ── WE web frontend (static file server) ───────────────────────────────────
+# ── WE reverse proxy (Caddy: static files + executor API on one origin) ───
 WE_PID=""
 start_we_server() {
     local we_dist="/opt/ad4m/we-dist"
-    local we_port="${WE_PORT:-8081}"
+    local we_port="${WE_PORT:-8080}"
 
     if [ -f "${we_dist}/SKIPPED" ] || [ ! -f "${we_dist}/index.html" ]; then
-        echo "WE frontend not bundled — skipping static server."
+        echo "WE frontend not bundled — skipping reverse proxy."
         return
     fi
 
-    echo "Starting WE web frontend on port ${we_port}..."
-    # Use Python's built-in HTTP server (available on Ubuntu 24.04)
-    python3 -m http.server "${we_port}" --directory "${we_dist}" --bind 0.0.0.0 &
+    local caddyfile="/tmp/Caddyfile"
+    cat > "${caddyfile}" <<CADDYEOF
+{
+    admin off
+}
+
+:${we_port} {
+    handle /ws {
+        reverse_proxy localhost:12000
+    }
+
+    handle /health {
+        reverse_proxy localhost:12000
+    }
+
+    handle_path /api/* {
+        reverse_proxy localhost:12000
+    }
+
+    handle {
+        root * ${we_dist}
+        try_files {path} /index.html
+        file_server
+    }
+}
+CADDYEOF
+
+    echo "Starting Caddy reverse proxy on port ${we_port}..."
+    caddy run --config "${caddyfile}" --adapter caddyfile &
     WE_PID=$!
-    echo "WE frontend serving at http://0.0.0.0:${we_port}/"
+    echo "WE frontend + API proxy serving at http://0.0.0.0:${we_port}/"
 }
 
 # ── Start executor in background, auto-generate agent, then wait ────────────

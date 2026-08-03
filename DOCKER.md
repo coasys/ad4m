@@ -54,10 +54,9 @@ docker build -t ad4m-executor --build-arg INCLUDE_MODELS=true .
 
 | Service | Container | Host (compose) | Description |
 |---|---|---|---|
-| WS-RPC API | 12000 | 13000 | AD4M's primary API (WebSocket + HTTP) |
+| WE + API proxy | 8080 | 8180 | Caddy reverse proxy: WE frontend, executor API, and WebSocket on one origin |
+| WS-RPC API | 12000 | 13000 | Direct executor access for non-browser clients (CLI, scripts) |
 | MCP server | 3001 | 3101 | Model Context Protocol for AI agents |
-| Dapp server | 8080 | 8180 | Entanglement proof mini-app |
-| WE frontend | 8081 | 8181 | WE collaborative web app |
 
 Host ports offset by +1000 to avoid collisions with a local dev executor.
 
@@ -78,7 +77,7 @@ Host ports offset by +1000 to avoid collisions with a local dev executor.
 | `ENABLE_MCP` | `true` | Start the MCP server |
 | `MCP_PORT` | `3001` | MCP server port inside the container |
 | `RUN_HOLOCHAIN` | `false` | Start the Holochain conductor (`true` for P2P mode) |
-| `WE_PORT` | `8081` | WE frontend server port inside the container |
+| `WE_PORT` | `8080` | Caddy reverse proxy port inside the container |
 | `NETWORK_BOOTSTRAP_SEED` | _(docker seed)_ | Path to a custom bootstrap seed JSON file |
 
 ## Modes of Operation
@@ -121,7 +120,18 @@ docker run --rm -v ad4m-data:/data -v $(pwd):/backup busybox tar czf /backup/ad4
 
 ## WE Frontend
 
-When built with `INCLUDE_WE=true` (the default), the WE web application serves on port 8081 (host 8181). WE connects to the AD4M executor via WebSocket. Point the connection at the executor's WS-RPC port (container-internal: `ws://localhost:12000`, or from the host: `ws://localhost:13000`).
+When built with `INCLUDE_WE=true` (the default), a Caddy reverse proxy serves the WE web application and proxies API requests to the executor — all on a single port (8080, host 8180). This single-origin design avoids CORS issues when WE runs behind an authentication proxy (e.g. Cloudflare Access).
+
+Caddy routes:
+
+| Path | Target | Description |
+|---|---|---|
+| `/ws` | `localhost:12000` | WebSocket connection to the executor |
+| `/health` | `localhost:12000` | Executor health check |
+| `/api/*` | `localhost:12000` | HTTP API passthrough |
+| `/*` | WE static files | SPA with fallback to `index.html` |
+
+In ad4m-connect, set the executor URL to the same origin as the WE page (e.g. `https://we.example.com`). No separate API subdomain required.
 
 WE provides a collaborative interface for working with AD4M perspectives, neighbourhoods, and social DNA.
 
@@ -215,23 +225,22 @@ If missing, rebuild: `INCLUDE_WE=true docker compose build`
 ## Architecture
 
 ```text
-┌─────────────────────────────────────────────┐
-│ Docker Container                            │
-│                                             │
-│  ┌─────────────────┐  ┌──────────────────┐  │
-│  │  AD4M Executor   │  │  WE Frontend     │  │
-│  │  (Rust binary)   │  │  (Python httpd)  │  │
-│  │                  │  │                  │  │
-│  │  :12000 WS-RPC   │  │  :8081 HTTP      │  │
-│  │  :8080  Dapp     │  │                  │  │
-│  │  :3001  MCP      │  └──────────────────┘  │
-│  │                  │                        │
-│  │  ┌────────────┐  │                        │
-│  │  │ Holochain  │  │  (only if              │
-│  │  │ Conductor  │  │   RUN_HOLOCHAIN=true)  │
-│  │  └────────────┘  │                        │
-│  └─────────────────┘                        │
-│                                             │
-│  /data (persistent volume)                  │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│ Docker Container                                 │
+│                                                  │
+│  ┌──────────────────┐    ┌─────────────────────┐ │
+│  │  Caddy Proxy      │    │  AD4M Executor      │ │
+│  │                    │    │  (Rust binary)      │ │
+│  │  :8080 ─┬─ /*     │    │                     │ │
+│  │         │  static  │    │  :12000 WS-RPC      │ │
+│  │         ├─ /ws ────┼───>│  :3001  MCP         │ │
+│  │         ├─ /health─┼───>│                     │ │
+│  │         └─ /api/* ─┼───>│  ┌───────────────┐  │ │
+│  │                    │    │  │ Holochain     │  │ │
+│  └──────────────────┘    │  │ (optional)    │  │ │
+│                           │  └───────────────┘  │ │
+│                           └─────────────────────┘ │
+│                                                  │
+│  /data (persistent volume)                       │
+└──────────────────────────────────────────────────┘
 ```
