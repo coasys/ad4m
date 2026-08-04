@@ -109,16 +109,6 @@ pub async fn transcriptions(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
-    if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
-    {
-        let _ = bill_compute(
-            &email,
-            1.0,
-            "ai_transcription",
-            Some("v1/audio/transcriptions"),
-        );
-    }
-
     if response_format == "text" {
         return Ok(([(header::CONTENT_TYPE, "text/plain")], text).into_response());
     }
@@ -155,7 +145,8 @@ pub async fn speech(
 
     if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
     {
-        let _ = bill_compute(&email, 1.0, "ai_tts", Some("v1/audio/speech"));
+        let amount = (req.input.len() as f64 / 1000.0).max(1.0);
+        bill_compute(&email, amount, "ai_tts", Some("v1/audio/speech"))?;
     }
 
     let content_type = match response_format.as_str() {

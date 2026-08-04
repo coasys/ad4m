@@ -89,7 +89,8 @@ pub async fn completions(
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
     if let Some(email) = user_email(&auth) {
-        let _ = bill_compute(&email, 1.0, "ai_prompt", Some("v1/completions"));
+        let amount = ((result.prompt_tokens + result.completion_tokens) as f64 / 1000.0).max(0.001);
+        bill_compute(&email, amount, "ai_prompt", Some("v1/completions"))?;
     }
 
     Ok(Json(CompletionResponse {
@@ -116,6 +117,9 @@ async fn chat_oneshot(
     model_id: String,
     messages: Vec<(String, String)>,
 ) -> Result<axum::response::Response, OpenAIError> {
+    // NOTE: WS-RPC `ai.prompt` on dev does not bill today (only pre-checks).
+    // /v1 billing is correct for the public API surface; the WS-RPC gap
+    // should be aligned in a separate PR against dev.
     if let Some(email) = user_email(&auth) {
         check_compute_credits(&email)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
@@ -130,7 +134,8 @@ async fn chat_oneshot(
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
     if let Some(email) = user_email(&auth) {
-        let _ = bill_compute(&email, 1.0, "ai_prompt", Some("v1/chat/completions"));
+        let amount = ((result.prompt_tokens + result.completion_tokens) as f64 / 1000.0).max(0.001);
+        bill_compute(&email, amount, "ai_prompt", Some("v1/chat/completions"))?;
     }
 
     let body = ChatCompletionResponse {
@@ -253,17 +258,13 @@ async fn chat_stream(
                 Event::default().data(serde_json::to_string(&final_chunk).unwrap())
             ));
 
-            // Billing — best-effort, charged once per completed stream.
-            // Per-token billing requires tokenizer-exact counts which the
-            // Kalosm backend doesn't expose today; a flat charge matches
-            // the non-stream `chat.completions` policy.
+            // Billing — flat charge per stream. Per-token billing requires
+            // tokenizer counts that the Kalosm backend doesn't expose yet.
+            // TODO: plumb token counts from Kalosm for proportional billing.
             if let Some(email) = user_email(&auth_clone) {
-                let _ = bill_compute(
-                    &email,
-                    1.0,
-                    "ai_prompt",
-                    Some("v1/chat/completions[stream]"),
-                );
+                if let Err(e) = bill_compute(&email, 1.0, "ai_prompt", Some("v1/chat/completions[stream]")) {
+                    log::warn!("Streaming billing failed: {e}");
+                }
             }
             let _ = done_rx.await;
 

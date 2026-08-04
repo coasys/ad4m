@@ -124,5 +124,16 @@ impl IntoResponse for OpenAIError {
     }
 }
 
+impl From<crate::billing::BillingError> for OpenAIError {
+    fn from(e: crate::billing::BillingError) -> Self {
+        match e {
+            crate::billing::BillingError::InsufficientCredits => {
+                OpenAIError::insufficient_quota("Insufficient compute credits")
+            }
+            other => OpenAIError::internal(format!("Billing error: {other}")),
+        }
+    }
+}
+
 /// Result alias used by all handler functions in this module.
 pub type OpenAIResult<T> = Result<T, OpenAIError>;

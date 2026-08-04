@@ -63,7 +63,8 @@ pub async fn embeddings(
 
     if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
     {
-        let _ = bill_compute(&email, 1.0, "ai_embedding", Some("v1/embeddings"));
+        let amount = data.len().max(1) as f64;
+        bill_compute(&email, amount, "ai_embedding", Some("v1/embeddings"))?;
     }
 
     Ok(Json(EmbeddingResponse {
