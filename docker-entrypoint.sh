@@ -15,14 +15,25 @@ SEED_FILE="${NETWORK_BOOTSTRAP_SEED:-/opt/ad4m/docker_seed.json}"
 if [ ! -f /data/mainnet_seed.seed ]; then
     echo "Initializing AD4M data directory..."
     ad4m-executor init --data-path /data --network-bootstrap-seed "${SEED_FILE}"
+fi
 
-    # Pre-populate language bundles on disk so the executor finds them
-    # without needing to fetch from any external language-language store.
-    if [ -d /opt/ad4m/bootstrap-languages ]; then
-        echo "Pre-seeding bootstrap language bundles..."
-        cp -r /opt/ad4m/bootstrap-languages/* /data/ad4m/languages/ 2>/dev/null || true
-    fi
-
+# Pre-populate language bundles on disk so the executor finds them
+# without needing to fetch from any external language-language store.
+# Runs on every boot but only copies bundles that don't already exist,
+# so language upgrades in a new image get picked up while runtime state
+# in existing language directories stays untouched.
+if [ -d /opt/ad4m/bootstrap-languages ]; then
+    seeded=0
+    for lang_dir in /opt/ad4m/bootstrap-languages/*/; do
+        lang_hash=$(basename "${lang_dir}")
+        target="/data/ad4m/languages/${lang_hash}"
+        if [ ! -f "${target}/bundle.js" ]; then
+            mkdir -p "${target}"
+            cp "${lang_dir}bundle.js" "${target}/bundle.js"
+            seeded=$((seeded + 1))
+        fi
+    done
+    [ "${seeded}" -gt 0 ] && echo "Pre-seeded ${seeded} bootstrap language bundle(s)."
 fi
 
 # Pre-populate the language-language's KV store so it can serve
