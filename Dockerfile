@@ -294,7 +294,7 @@ RUN if [ "${INCLUDE_WE}" != "true" ]; then \
 RUN if [ "${INCLUDE_WE}" != "true" ]; then exit 0; fi && \
     cd /flux && \
     pnpm install --no-frozen-lockfile && \
-    VITE_BASE=/apps/flux/ NODE_OPTIONS='--max-old-space-size=4096' pnpm run build
+    VITE_ALLOWED_ORIGINS="" VITE_BASE=/apps/flux/ NODE_OPTIONS='--max-old-space-size=4096' pnpm run build
 
 RUN mkdir -p /flux-dist && \
     if [ "${INCLUDE_WE}" = "true" ] && [ -d /flux/app/dist ]; then \
