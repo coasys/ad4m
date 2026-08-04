@@ -53,11 +53,15 @@ export class AgentClient {
   // L1: in-memory promise cache with timestamps for TTL
   #memCache = new Map<string, { promise: Promise<Agent>; ts: number }>();
   // L2: persistent cache (IndexedDB in browser, NullCache in Node)
-  #persistent: PersistentCache<Agent>;
+  // Entries are wrapped with a timestamp so the TTL can be enforced across restarts.
+  #persistent: PersistentCache<{ agent: Agent; ts: number }>;
   // Self-DID for event-driven invalidation (no TTL for own profile)
   #selfDid: string | null = null;
   /** TTL for remote (non-self) agent profiles in L1 cache (ms). */
   static REMOTE_AGENT_TTL_MS = 5 * 60_000; // 5 minutes
+  /** TTL for remote agent profiles in the L2 (IndexedDB) cache (ms).
+   *  After this window any restart triggers a fresh network fetch. */
+  static REMOTE_AGENT_TTL_L2_MS = 5 * 60_000; // 5 minutes
 
   constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedApiClient?: ApiClient) {
     this.#baseUrl = baseUrl;
@@ -69,7 +73,7 @@ export class AgentClient {
     this.#hostingUserInfoChangedCallbacks = [];
     this.#computeLogUpdatedCallbacks = [];
     this.#unsubscribers = [];
-    this.#persistent = createPersistentCache<Agent>('ad4m-agent-cache', 'agents');
+    this.#persistent = createPersistentCache<{ agent: Agent; ts: number }>('ad4m-agent-cache', 'agents');
 
     if (subscribe) {
       this.subscribeAgentUpdated();
@@ -133,14 +137,15 @@ export class AgentClient {
     // Deduplicate: store the promise immediately so concurrent calls share one RPC
     const promise = (async () => {
       // L2: check persistent cache before network
-      const persisted = await this.#persistent.get(did);
-      if (persisted) {
-        return persisted;
+      const entry = await this.#persistent.get(did);
+      // entry.agent may be undefined for pre-TTL cache entries (migration) — treat as expired
+      if (entry?.agent && (now - (entry.ts ?? 0)) < AgentClient.REMOTE_AGENT_TTL_L2_MS) {
+        return entry.agent;
       }
 
       // L3: network fetch
       const result = await this.#apiClient.call<Agent>('agent.byDid', { did });
-      this.#persistent.put(did, result); // fire-and-forget write to L2
+      this.#persistent.put(did, { agent: result, ts: Date.now() }); // fire-and-forget write to L2
       return result;
     })();
 
@@ -198,7 +203,7 @@ export class AgentClient {
     // return fresh data without waiting for the subscription event
     if (agent.did) {
       this.#memCache.set(agent.did, { promise: Promise.resolve(agent), ts: Date.now() });
-      this.#persistent.put(agent.did, agent); // fire-and-forget
+      this.#persistent.put(agent.did, { agent, ts: Date.now() }); // fire-and-forget
     }
 
     return agent;
@@ -236,7 +241,7 @@ export class AgentClient {
     // return fresh data without waiting for the subscription event
     if (agent.did) {
       this.#memCache.set(agent.did, { promise: Promise.resolve(agent), ts: Date.now() });
-      this.#persistent.put(agent.did, agent); // fire-and-forget
+      this.#persistent.put(agent.did, { agent, ts: Date.now() }); // fire-and-forget
     }
 
     return agent;
@@ -277,7 +282,7 @@ export class AgentClient {
             promise: Promise.resolve(agent),
             ts: Date.now(),
           });
-          this.#persistent.put(agent.did, agent); // fire-and-forget
+          this.#persistent.put(agent.did, { agent, ts: Date.now() }); // fire-and-forget
         }
 
         this.#updatedCallbacks.forEach((cb) => cb(agent));

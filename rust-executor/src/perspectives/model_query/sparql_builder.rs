@@ -114,6 +114,25 @@ pub(super) fn build_instance_sparql(
                     "\n    ORDER BY ASC(IF(BOUND(?_sort_str), 0, 1)) {dir}(?_sort_num) {dir}(?_sort_str)"
                 ));
             }
+            SortKey::Projection(_) => {
+                let dir = match pg.direction {
+                    OrderDirection::DESC => "DESC",
+                    OrderDirection::ASC => "ASC",
+                };
+                // COUNT returns 0 for sources with no matches (not unbound),
+                // so no null-guard is needed here.
+                suffix.push_str(&format!("\n    ORDER BY {dir}(?_proj_sort)"));
+            }
+            SortKey::RelationProperty { .. } => {
+                let dir = match pg.direction {
+                    OrderDirection::DESC => "DESC",
+                    OrderDirection::ASC => "ASC",
+                };
+                // Same nulls-to-end + numeric-first logic as Property.
+                suffix.push_str(&format!(
+                    "\n    ORDER BY ASC(IF(BOUND(?_rp_str), 0, 1)) {dir}(?_rp_num) {dir}(?_rp_str)"
+                ));
+            }
         }
         if let Some(offset) = pg.offset {
             if offset > 0 {
@@ -145,7 +164,28 @@ pub(super) fn build_instance_sparql(
                     r#"SELECT DISTINCT ?source (SAMPLE(?_nv) AS ?_sort_num) (SAMPLE(?_sv) AS ?_sort_str) WHERE {{
 {conformance}
 {where_extra}
-            OPTIONAL {{ ?source <{predicate}> ?_sort_raw . BIND(SUBSTR(STR(?_sort_raw), 16) AS ?_sv) BIND(<http://www.w3.org/2001/XMLSchema#double>(SUBSTR(STR(?_sort_raw), 16)) AS ?_nv) }}
+            OPTIONAL {{ ?source <{predicate}> ?_sort_raw . BIND(STR(<ad4m://fn/parse_literal>(?_sort_raw)) AS ?_sv) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_sort_raw))) AS ?_nv) }}
+        }} GROUP BY ?source{pagination_suffix}"#
+                )
+            }
+            SortKey::Projection(predicate) => {
+                format!(
+                    r#"SELECT DISTINCT ?source (COUNT(DISTINCT ?_proj_t) AS ?_proj_sort) WHERE {{
+{conformance}
+{where_extra}
+            OPTIONAL {{ ?source <{predicate}> ?_proj_t . }}
+        }} GROUP BY ?source{pagination_suffix}"#
+                )
+            }
+            SortKey::RelationProperty {
+                rel_pred,
+                prop_pred,
+            } => {
+                format!(
+                    r#"SELECT DISTINCT ?source (SAMPLE(?_rp_num_v) AS ?_rp_num) (SAMPLE(?_rp_str_v) AS ?_rp_str) WHERE {{
+{conformance}
+{where_extra}
+            OPTIONAL {{ ?source <{rel_pred}> ?_rp_rel . OPTIONAL {{ ?_rp_rel <{prop_pred}> ?_rp_raw . BIND(STR(<ad4m://fn/parse_literal>(?_rp_raw)) AS ?_rp_str_v) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_rp_raw))) AS ?_rp_num_v) }} }}
         }} GROUP BY ?source{pagination_suffix}"#
                 )
             }
@@ -196,6 +236,12 @@ pub(super) fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) ->
         return true;
     };
     for (prop_name, condition) in wc {
+        // OR/AND/NOT are always evaluated Rust-side; SPARQL-level pagination
+        // cannot be applied when they are present.
+        if prop_name == "OR" || prop_name == "AND" || prop_name == "NOT" {
+            return false;
+        }
+
         if prop_name == "base" || prop_name == "id" {
             match condition {
                 WhereCondition::String(_) | WhereCondition::StringArray(_) => continue,
@@ -380,6 +426,11 @@ pub(super) fn build_query_patterns(
     let mut where_patterns = Vec::new();
     if let Some(ref wc) = query.where_clause {
         for (prop_name, condition) in wc {
+            // OR/AND/NOT are evaluated Rust-side after hydration; skip SPARQL emission.
+            if prop_name == "OR" || prop_name == "AND" || prop_name == "NOT" {
+                continue;
+            }
+
             if prop_name == "base" || prop_name == "id" {
                 match condition {
                     WhereCondition::String(val) => {
@@ -671,6 +722,9 @@ pub(super) fn build_query_patterns(
                             where_patterns.push(format!("    FILTER({})", filters.join(" && ")));
                         }
                     }
+                    // SubClauses/SubClause are OR/AND/NOT combinators evaluated
+                    // Rust-side; the outer loop skips them before reaching here.
+                    WhereCondition::SubClauses(_) | WhereCondition::SubClause(_) => {}
                 }
                 continue;
             }
@@ -681,4 +735,137 @@ pub(super) fn build_query_patterns(
     let where_extra = where_patterns.join("\n");
 
     (conformance, where_extra)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perspectives::model_query::test_helpers::{flag, prop, shape};
+
+    fn make_pg(sort_key: SortKey, direction: OrderDirection) -> SparqlPagination {
+        SparqlPagination {
+            sort_key,
+            direction,
+            offset: None,
+            limit: Some(10),
+        }
+    }
+
+    fn pagination_subquery(shape: &ModelShape, pg: &SparqlPagination) -> String {
+        match build_instance_sparql(shape, &ModelQueryInput::default(), Some(pg)) {
+            InstanceQueryPlan::TwoPhase {
+                pagination_subquery,
+                ..
+            } => pagination_subquery,
+            InstanceQueryPlan::Single(_) => panic!("Expected TwoPhase query plan, got Single"),
+        }
+    }
+
+    #[test]
+    fn test_pagination_subquery_projection_sort_contains_count_distinct() {
+        let s = shape(
+            "Post",
+            vec![
+                flag("type", "test://type", "test://post"),
+                prop("title", "test://title"),
+            ],
+        );
+        let pg = make_pg(
+            SortKey::Projection("test://has-like".to_string()),
+            OrderDirection::DESC,
+        );
+        let sparql = pagination_subquery(&s, &pg);
+
+        assert!(
+            sparql.contains("COUNT(DISTINCT ?_proj_t)"),
+            "should emit COUNT(DISTINCT) for projection sort: {sparql}"
+        );
+        assert!(
+            sparql.contains("?_proj_sort"),
+            "should project ?_proj_sort: {sparql}"
+        );
+        assert!(
+            sparql.contains("OPTIONAL { ?source <test://has-like> ?_proj_t"),
+            "should join via predicate OPTIONAL: {sparql}"
+        );
+        assert!(
+            sparql.contains("GROUP BY ?source"),
+            "should use GROUP BY for count aggregate: {sparql}"
+        );
+        assert!(
+            sparql.contains("DESC(?_proj_sort)"),
+            "ORDER BY should use DESC: {sparql}"
+        );
+    }
+
+    #[test]
+    fn test_pagination_subquery_projection_sort_asc() {
+        let s = shape("Post", vec![flag("type", "test://type", "test://post")]);
+        let pg = make_pg(
+            SortKey::Projection("test://has-comment".to_string()),
+            OrderDirection::ASC,
+        );
+        let sparql = pagination_subquery(&s, &pg);
+        assert!(
+            sparql.contains("ASC(?_proj_sort)"),
+            "ORDER BY should use ASC: {sparql}"
+        );
+    }
+
+    #[test]
+    fn test_pagination_subquery_relation_property_sort_contains_double_optional() {
+        let s = shape(
+            "Post",
+            vec![
+                flag("type", "test://type", "test://post"),
+                prop("title", "test://title"),
+            ],
+        );
+        let pg = make_pg(
+            SortKey::RelationProperty {
+                rel_pred: "test://has-location".to_string(),
+                prop_pred: "test://location-name".to_string(),
+            },
+            OrderDirection::ASC,
+        );
+        let sparql = pagination_subquery(&s, &pg);
+
+        assert!(
+            sparql.contains("?source <test://has-location> ?_rp_rel"),
+            "outer OPTIONAL should join via relation predicate: {sparql}"
+        );
+        assert!(
+            sparql.contains("?_rp_rel <test://location-name> ?_rp_raw"),
+            "inner OPTIONAL should join via property predicate: {sparql}"
+        );
+        assert!(
+            sparql.contains("SAMPLE(?_rp_num_v)") && sparql.contains("SAMPLE(?_rp_str_v)"),
+            "should project SAMPLE of numeric and string sort columns: {sparql}"
+        );
+        assert!(
+            sparql.contains("ASC(IF(BOUND(?_rp_str), 0, 1))"),
+            "ORDER BY should push nulls to end: {sparql}"
+        );
+        assert!(
+            sparql.contains("GROUP BY ?source"),
+            "should use GROUP BY: {sparql}"
+        );
+    }
+
+    #[test]
+    fn test_pagination_subquery_relation_property_sort_desc() {
+        let s = shape("Post", vec![flag("type", "test://type", "test://post")]);
+        let pg = make_pg(
+            SortKey::RelationProperty {
+                rel_pred: "test://has-location".to_string(),
+                prop_pred: "test://location-name".to_string(),
+            },
+            OrderDirection::DESC,
+        );
+        let sparql = pagination_subquery(&s, &pg);
+        assert!(
+            sparql.contains("DESC(?_rp_num)") && sparql.contains("DESC(?_rp_str)"),
+            "ORDER BY should use DESC: {sparql}"
+        );
+    }
 }

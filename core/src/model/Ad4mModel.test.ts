@@ -1725,6 +1725,109 @@ describe("SHACL Memoisation", () => {
   });
 });
 
+describe("SHACL recursion — self-referential relations", () => {
+  // Reported as a Maximum-call-stack-size-exceeded overflow when Flux's
+  // Channel model has `@HasMany(() => Channel) childChannels`. The
+  // memoised SHACL builder used to recurse forever because the cache
+  // entry wasn't populated until buildSHACL returned. The fix seeds
+  // the cache with the in-progress shape; these tests pin the contract.
+
+  it("should generate SHACL for a directly self-referential model without overflowing the stack", () => {
+    @Model({ name: "RecursiveChannel" })
+    class RecursiveChannel extends Ad4mModel {
+      @Property({ through: "channel://name", resolveLanguage: "literal" })
+      name: string = "";
+
+      @HasMany(() => RecursiveChannel, { through: "channel://child" })
+      childChannels: string[] = [];
+    }
+
+    let shacl: any;
+    expect(() => {
+      shacl = (RecursiveChannel as any).generateSHACL();
+    }).not.toThrow();
+
+    expect(shacl).toBeDefined();
+    expect(shacl.name).toBe("RecursiveChannel");
+    expect(shacl.shape).toBeDefined();
+    expect(shacl.shape.nodeShapeUri).toBe("channel://RecursiveChannelShape");
+
+    // The child relation must reference the same class's shape.
+    const childRel = (shacl.shape.properties as any[]).find((p) => p.name === "childChannels");
+    expect(childRel).toBeDefined();
+    expect(childRel.class).toBe("channel://RecursiveChannelShape");
+  });
+
+  it("should memoise the self-referential shape (single shared instance)", () => {
+    @Model({ name: "MemoSelfRef" })
+    class MemoSelfRef extends Ad4mModel {
+      @Property({ through: "memo://name" })
+      name: string = "";
+
+      @HasMany(() => MemoSelfRef, { through: "memo://child" })
+      children: string[] = [];
+    }
+
+    const a = (MemoSelfRef as any).generateSHACL();
+    const b = (MemoSelfRef as any).generateSHACL();
+    expect(a).toBe(b);
+  });
+
+  it("should handle mutually-recursive relations between two classes (A → B → A)", () => {
+    @Model({ name: "MutualA" })
+    class MutualA extends Ad4mModel {
+      @Property({ through: "mut://aName" })
+      aName: string = "";
+
+      @HasMany(() => MutualB, { through: "mut://aToB" })
+      bs: string[] = [];
+    }
+
+    @Model({ name: "MutualB" })
+    class MutualB extends Ad4mModel {
+      @Property({ through: "mut://bName" })
+      bName: string = "";
+
+      @HasMany(() => MutualA, { through: "mut://bToA" })
+      as: string[] = [];
+    }
+
+    let shaclA: any;
+    let shaclB: any;
+    expect(() => {
+      shaclA = (MutualA as any).generateSHACL();
+      shaclB = (MutualB as any).generateSHACL();
+    }).not.toThrow();
+
+    expect(shaclA.name).toBe("MutualA");
+    expect(shaclB.name).toBe("MutualB");
+  });
+
+  it("should handle a three-cycle (A → B → C → A)", () => {
+    @Model({ name: "CycleA" })
+    class CycleA extends Ad4mModel {
+      @HasMany(() => CycleB, { through: "cyc://aToB" })
+      bs: string[] = [];
+    }
+
+    @Model({ name: "CycleB" })
+    class CycleB extends Ad4mModel {
+      @HasMany(() => CycleC, { through: "cyc://bToC" })
+      cs: string[] = [];
+    }
+
+    @Model({ name: "CycleC" })
+    class CycleC extends Ad4mModel {
+      @HasMany(() => CycleA, { through: "cyc://cToA" })
+      as: string[] = [];
+    }
+
+    expect(() => (CycleA as any).generateSHACL()).not.toThrow();
+    expect(() => (CycleB as any).generateSHACL()).not.toThrow();
+    expect(() => (CycleC as any).generateSHACL()).not.toThrow();
+  });
+});
+
 describe("Lazy Conformance Filters", () => {
   it("should defer conformance filter resolution until property access", () => {
     @Model({ name: "LazyTarget2" })

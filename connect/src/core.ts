@@ -12,6 +12,27 @@ const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev";
 const CREDIT_POLL_INTERVAL_MS = 60000;
 const DEFAULT_LOW_CREDIT_THRESHOLD = 10;
 
+/**
+ * Check whether `origin` is permitted by an entry in `allowedOrigins`.
+ * Supports the wildcard pattern `http://localhost:*` / `https://localhost:*`
+ * to allow any localhost port (useful in development environments where tools
+ * run on arbitrary ports). All other patterns require an exact match.
+ */
+function originAllowed(allowedOrigins: string[], origin: string): boolean {
+  return allowedOrigins.some((pattern) => {
+    if (pattern === 'http://localhost:*' || pattern === 'https://localhost:*') {
+      try {
+        const u = new URL(origin);
+        const scheme = pattern.startsWith('https') ? 'https:' : 'http:';
+        return u.hostname === 'localhost' && u.protocol === scheme;
+      } catch {
+        return false;
+      }
+    }
+    return pattern === origin;
+  });
+}
+
 export default class Ad4mConnect extends EventTarget {
   options: Ad4mConnectOptions;
   embedded: boolean;
@@ -357,13 +378,13 @@ export default class Ad4mConnect extends EventTarget {
             this.rejectEmbedded(new Error('proxy mode requires allowedOrigins'));
             return;
           }
-          if (!event.origin || !this.options.allowedOrigins.includes(event.origin)) {
+          if (!event.origin || !originAllowed(this.options.allowedOrigins, event.origin)) {
             console.warn('[Ad4m Connect] Rejected AD4M_CONFIG from unauthorized origin:', event.origin);
             this.rejectEmbedded(new Error(`Unauthorized origin: ${event.origin}`));
             return;
           }
         } else if (this.options.allowedOrigins && this.options.allowedOrigins.length > 0) {
-          if (!event.origin || !this.options.allowedOrigins.includes(event.origin)) {
+          if (!event.origin || !originAllowed(this.options.allowedOrigins, event.origin)) {
             console.warn('[Ad4m Connect] Rejected AD4M_CONFIG from unauthorized origin:', event.origin);
             this.rejectEmbedded(new Error(`Unauthorized origin: ${event.origin}`));
             return;
@@ -607,6 +628,71 @@ export default class Ad4mConnect extends EventTarget {
       console.error("[Ad4m Connect] Account creation error:", e);
       return false;
     }
+  }
+
+  /**
+   * Connect to a remote hosted node as a guest without any UI interaction.
+   * Generates a persistent random identity stored in localStorage so that
+   * refreshing the page reuses the same guest account.
+   *
+   * Tries loginUser first (returning visitor); falls back to createUser +
+   * loginUser (first visit). No email verification required — password-based
+   * accounts on multi-user executors skip the email code step entirely.
+   */
+  async connectAsGuest(hostUrl: string): Promise<Ad4mClient> {
+    this.url = hostUrl;
+    setLocal("ad4m-url", hostUrl);
+
+    // Reuse stored guest credentials so the identity survives page reloads.
+    // Keys are scoped to the normalised host so credentials from one host
+    // are never tried against a different host.
+    const normalizedHost  = hostUrl.replace(/\/+$/, '').toLowerCase();
+    const GUEST_EMAIL_KEY = `ad4m-guest-email-${normalizedHost}`;
+    const GUEST_PASS_KEY  = `ad4m-guest-pass-${normalizedHost}`;
+    const storedEmail    = getLocal(GUEST_EMAIL_KEY);
+    const storedPassword = getLocal(GUEST_PASS_KEY);
+    let email: string;
+    let password: string;
+
+    if (storedEmail && storedPassword) {
+      email    = storedEmail;
+      password = storedPassword;
+    } else {
+      email    = `guest-${crypto.randomUUID()}@flux.demo`;
+      password = crypto.randomUUID();
+      // Credentials are written to localStorage only after successful
+      // account creation below — not here — so a failed createUser call
+      // leaves localStorage clean and the next attempt gets fresh credentials.
+    }
+
+    const isReturningGuest = !!(storedEmail && storedPassword);
+
+    const token = await this.withTempClient(hostUrl, async (client) => {
+      if (isReturningGuest) {
+        // Returning guest: credentials already exist on the server, just log in
+        return await client.agent.loginUser(email, password);
+      } else {
+        // First visit: create the account then log in
+        const result = await client.agent.createUser(email, password);
+        if (!result.success) throw new Error(result.error || "Failed to create guest account");
+        const newToken = await client.agent.loginUser(email, password);
+        // Persist only after both steps succeed so a partial failure leaves
+        // localStorage clean for the next attempt
+        setLocal(GUEST_EMAIL_KEY, email);
+        setLocal(GUEST_PASS_KEY, password);
+        return newToken;
+      }
+    });
+
+    this.token = token;
+    setLocal("ad4m-token", token);
+
+    this.ad4mClient = this.buildClient();
+    await this.checkAuth();
+    if (this.authState !== "authenticated") {
+      throw new Error(`Guest authentication failed: auth state is "${this.authState}"`);
+    }
+    return this.ad4mClient;
   }
 
   // Private helpers

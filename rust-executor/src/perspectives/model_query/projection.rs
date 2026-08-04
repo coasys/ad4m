@@ -319,9 +319,15 @@ pub(super) fn build_projection_where_patterns(
     // pred_lookup would drop those filters and unexpectedly broaden the
     // projection results.
     if resolution_failed {
-        let has_property_filters = wc
-            .keys()
-            .any(|k| k != "id" && k != "base" && k != "author" && k != "timestamp");
+        let has_property_filters = wc.keys().any(|k| {
+            k != "id"
+                && k != "base"
+                && k != "author"
+                && k != "timestamp"
+                && k != "OR"
+                && k != "AND"
+                && k != "NOT"
+        });
         if has_property_filters {
             return "    FILTER(false)\n".to_string();
         }
@@ -331,6 +337,12 @@ pub(super) fn build_projection_where_patterns(
     let mut filter_idx = 0usize;
 
     for (prop_name, condition) in wc {
+        // OR/AND/NOT combinators are not supported in projection where clauses
+        // (projections use SPARQL, not the Rust post-filter path); skip silently.
+        if prop_name == "OR" || prop_name == "AND" || prop_name == "NOT" {
+            continue;
+        }
+
         if prop_name == "id" || prop_name == "base" {
             match condition {
                 WhereCondition::String(val) => {
