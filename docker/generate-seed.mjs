@@ -72,6 +72,7 @@ const LANGUAGES = [
     { role: "neighbourhoodLanguage", file: "neighbourhood-language.js" },
     { role: "perspectiveLanguage",   file: "perspective-language.js" },
     { role: "linkLanguage",     file: "link-language.js" },
+    { role: "fileStorageLanguage",   file: "file-storage-language.js" },
 ];
 
 mkdirSync(join(outputDir, "languages"), { recursive: true });
@@ -130,6 +131,13 @@ const kvDir = join(outputDir, "language-language-kv");
 mkdirSync(kvDir, { recursive: true });
 writeFileSync(join(kvDir, "ad4m-language-kv.json"), JSON.stringify(sortedKv));
 writeFileSync(join(kvDir, "address.txt"), langLangAddr);
+
+// Write file-storage language hash so the Dockerfile can patch WE's
+// hardcoded FILE_STORAGE_LANGUAGE constant to use the Docker-local version.
+if (addresses.fileStorageLanguage) {
+    writeFileSync(join(outputDir, "file-storage-hash.txt"), addresses.fileStorageLanguage);
+    console.log("\nFile-storage hash: " + addresses.fileStorageLanguage);
+}
 
 console.log("\nSeed written to: " + join(outputDir, "docker_seed.json"));
 console.log("Pre-seed languages in: " + join(outputDir, "languages"));

@@ -257,6 +257,16 @@ RUN if [ "${INCLUDE_WE}" != "true" ]; then exit 0; fi && \
     pnpm install --no-frozen-lockfile && \
     pnpm --filter "@we/app-web..." --workspace-concurrency=1 run build
 
+# Patch the built WE bundle: replace the hardcoded centralized
+# file-storage language hash with the Docker-local version.
+COPY --from=builder /home/builder/ad4m/docker/seed-output/file-storage-hash.txt /tmp/file-storage-hash.txt
+RUN if [ "${INCLUDE_WE}" = "true" ] && [ -d /we/apps/we-web/dist ]; then \
+      LOCAL_FS_HASH=$(cat /tmp/file-storage-hash.txt) && \
+      find /we/apps/we-web/dist -name '*.js' -exec \
+        sed -i "s/QmzSYwddqhm49PrRMzSrJf3AvmmreXMKtr1u56nbTjBFVmCzS8N/${LOCAL_FS_HASH}/g" {} + && \
+      echo "Patched FILE_STORAGE_LANGUAGE → ${LOCAL_FS_HASH}"; \
+    fi
+
 RUN mkdir -p /we-dist && \
     if [ "${INCLUDE_WE}" = "true" ] && [ -d /we/apps/we-web/dist ]; then \
       cp -r /we/apps/we-web/dist/* /we-dist/; \
