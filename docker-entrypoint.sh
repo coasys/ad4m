@@ -282,6 +282,32 @@ setup_global_space() {
     fi
 }
 
+# ── Auto-auth: inject ad4m-connect credentials into WE so it skips interactive login ──
+inject_we_auth() {
+    local we_dist="/opt/ad4m/we-dist"
+
+    if [ -f "${we_dist}/SKIPPED" ] || [ ! -f "${we_dist}/index.html" ]; then
+        return
+    fi
+
+    if [ -z "${ADMIN_CREDENTIAL:-}" ]; then
+        return
+    fi
+
+    # Remove previous injection (idempotent on restart — strip the tag, keep the rest of the line)
+    sed -i 's|<script id="__AD4M_AUTO_AUTH">[^<]*</script>||g' "${we_dist}/index.html"
+
+    # Two-stage escaping:
+    #   1. JavaScript string literal: \ → \\  and  ' → \'
+    #   2. sed replacement string:    \ → \\  and  & → \&  and  | → \|
+    local safe_cred
+    safe_cred=$(printf '%s' "${ADMIN_CREDENTIAL}" | sed "s/\\\\/\\\\\\\\/g; s/'/\\\\'/g" | sed 's/[\\&|]/\\&/g')
+
+    sed -i "s|</head>|<script id=\"__AD4M_AUTO_AUTH\">localStorage.setItem('ad4m-token','${safe_cred}');localStorage.setItem('ad4m-url',window.location.origin);</script></head>|" \
+      "${we_dist}/index.html"
+    echo "Injected auto-auth credentials into WE frontend."
+}
+
 # ── WE reverse proxy (Caddy: static files + executor API on one origin) ───
 WE_PID=""
 start_we_server() {
@@ -342,6 +368,7 @@ EXECUTOR_PID=$!
 wait_for_executor
 maybe_setup_agent
 setup_global_space
+inject_we_auth
 start_we_server
 
 # Forward SIGTERM/SIGINT to all child processes so Docker can stop cleanly.

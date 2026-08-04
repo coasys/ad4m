@@ -251,6 +251,8 @@ RUN if [ "${INCLUDE_WE}" != "true" ]; then exit 0; fi && \
     HOSTING_FILE=$(find apps/we-web/src/platform -name 'ad4mConnector.ts' -o -name 'webAdapter.ts' 2>/dev/null | head -1) && \
     if [ -n "${HOSTING_FILE}" ]; then \
       sed -i 's/hosting: true,/hosting: true,\n      remoteUrl: window.location.origin,/' "${HOSTING_FILE}"; \
+      sed -i 's/const { core, client }/const { core, client: clientP }/' "${HOSTING_FILE}"; \
+      sed -i '/return {/i\    const client = await clientP;' "${HOSTING_FILE}"; \
     fi && \
     sed -i 's|"globalSpaceUrl": "neighbourhood://[^"]*"|"globalSpaceUrl": ""|' we-seed.json && \
     sed -i 's|"marketplaceUrl": "neighbourhood://[^"]*"|"marketplaceUrl": ""|' we-seed.json && \
