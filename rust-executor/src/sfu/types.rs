@@ -96,6 +96,18 @@ pub struct SfuParticipantInfo {
     pub is_active_speaker: bool,
 }
 
+/// Maps one outbound SDP m-line to the originating participant's DID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackMapEntry {
+    /// The SDP mid (media-line identifier) in the offer.
+    pub mid: String,
+    /// DID of the participant whose media this m-line carries.
+    pub agent_did: String,
+    /// `"audio"` or `"video"`.
+    pub media_kind: String,
+}
+
 /// Server-pushed SDP offer delivered to one specific participant when
 /// the SFU needs them to renegotiate — typically because a new peer
 /// joined the same room and the relay now has additional outbound
@@ -112,6 +124,13 @@ pub struct SfuCallRenegotiationOffer {
     pub room_name: String,
     /// JSON-encoded `RTCSessionDescriptionInit` for the new offer.
     pub sdp_offer: String,
+    /// Mid-to-DID attribution for newly added outbound m-lines in this
+    /// offer.  The client uses these to correlate incoming tracks to
+    /// participant DIDs (arrival order alone cannot guarantee this —
+    /// HashMap iteration order on the server makes both stream_mapping
+    /// and m-line ordering non-deterministic).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub track_mapping: Vec<TrackMapEntry>,
 }
 
 /// Internal payload: the SFU event loop emits a fresh SDP offer for a
@@ -158,6 +177,9 @@ pub struct CallSessionInfo {
     /// node (cascaded mode load redirect).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redirect_to: Option<String>,
-    /// Stream-to-participant DID mapping, format: `"participantId:did"`.
+    /// Roster of existing participants at join time, format:
+    /// `"participantId:did"` (local) or `"remote-did:did"` (cascade).
+    /// For track-to-DID attribution, use the `track_mapping` field on
+    /// each renegotiation offer — the SDP mids are assigned there.
     pub stream_mapping: Vec<String>,
 }

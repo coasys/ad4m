@@ -370,13 +370,6 @@ impl CascadeManager {
             .unwrap_or_default()
     }
 
-    /// Mutable access to the known-nodes map.  Used by SfuService's
-    /// admin-only `enable_cascade` to seed a static peer set without
-    /// going through the announce/gossip path.
-    pub fn known_nodes_mut(&mut self) -> &mut HashMap<String, HashMap<String, SfuNodeInfo>> {
-        &mut self.known_nodes
-    }
-
     /// Read the configured capacity per node — used as the
     /// `capacity_hint` on announce-driven node info updates.
     pub fn max_participants_per_node(&self) -> u32 {
@@ -387,17 +380,18 @@ impl CascadeManager {
     /// Returns None if this local node should accept the participant.
     ///
     /// Looks up nodes under the specific `room_id` first, falls back to
-    /// the catch-all empty-string entry (populated by
-    /// `SfuService::enable_cascade` for statically-configured clusters
-    /// that haven't gone through the gossip announce path yet).
+    /// the catch-all empty-string entry (populated by statically-configured
+    /// clusters that haven't gone through the gossip announce path yet).
+    ///
+    /// `local_count` tracks only direct WebRTC peer connections on this
+    /// node — remote (cascade-piped) participants connect to their own
+    /// SFU node and do not consume local capacity.
     ///
     /// Rule: when the local node has capacity, accept.  When at
     /// capacity, redirect to the least-loaded peer that still has
-    /// headroom.  No proactive rebalancing — that requires fresher
-    /// cross-node count visibility than the static `enable_cascade`
-    /// path provides, and the wind tunnel cycle tests caught a
-    /// pingpong between under-loaded peers when the threshold was
-    /// active.
+    /// headroom.  No proactive rebalancing — the wind tunnel cycle
+    /// tests caught a pingpong between under-loaded peers when a
+    /// threshold-based rebalancing heuristic was active.
     pub fn pick_redirect_node(&self, room_id: &str, local_count: u32) -> Option<&SfuNodeInfo> {
         if local_count < self.max_participants_per_node {
             return None;

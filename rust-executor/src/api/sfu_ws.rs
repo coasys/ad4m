@@ -20,6 +20,7 @@ use std::sync::Arc;
 use crate::agent::capabilities::{
     check_capability, NEIGHBOURHOOD_READ_CAPABILITY, NEIGHBOURHOOD_UPDATE_CAPABILITY,
 };
+use crate::db::Ad4mDb;
 use crate::sfu::{get_sfu_service, SfuConfig};
 use crate::types::RequestContext;
 
@@ -103,12 +104,21 @@ async fn call_join(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     let room_name = params.require_str("roomName")?;
     let sdp_offer = params.require_str("sdpOffer")?;
     let agent_did = caller_did(&ctx)?;
-    // Membership is enforced server-side by the SFU; the
-    // is_neighbourhood_member flag here is the caller's claim that the
-    // executor has already joined the neighbourhood (true when the
-    // request came over an authenticated agent connection).
+    let is_member = if ctx.is_admin_credential {
+        true
+    } else {
+        Ad4mDb::with_global_instance(|db| db.get_neighbourhood_owners(&neighbourhood_url))
+            .unwrap_or_default()
+            .contains(&agent_did)
+    };
     let session = service()?
-        .call_join(&neighbourhood_url, &room_name, &agent_did, &sdp_offer, true)
+        .call_join(
+            &neighbourhood_url,
+            &room_name,
+            &agent_did,
+            &sdp_offer,
+            is_member,
+        )
         .await
         .map_err(map_room_err)?;
     Ok(serde_json::to_value(session)?)

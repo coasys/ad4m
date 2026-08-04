@@ -28,6 +28,16 @@ export interface IceServer {
  * generate an answer, and post the answer through
  * `sfu.callAnswerServerOffer`.
  */
+/** Maps one outbound SDP m-line to the originating participant's DID. */
+export interface TrackMapEntry {
+    /** SDP mid (media-line identifier) in the offer. */
+    mid: string
+    /** DID of the participant whose media this m-line carries. */
+    agentDid: string
+    /** `"audio"` or `"video"`. */
+    mediaKind: string
+}
+
 export interface SfuCallRenegotiationOffer {
     /** DID of the participant this offer is addressed to. */
     targetDid: string
@@ -35,6 +45,12 @@ export interface SfuCallRenegotiationOffer {
     roomName: string
     /** JSON-encoded `RTCSessionDescriptionInit`. */
     sdpOffer: string
+    /**
+     * Mid-to-DID attribution for newly added outbound m-lines.
+     * Use to correlate incoming tracks to participant DIDs
+     * (arrival order alone cannot guarantee correct attribution).
+     */
+    trackMapping?: TrackMapEntry[]
 }
 
 export interface SfuConfig {
@@ -89,7 +105,12 @@ export interface CallSessionInfo {
      * node (cascaded mode load redirect).
      */
     redirectTo?: string
-    /** Stream-to-participant DID mapping, format: `"participantId:did"`. */
+    /**
+     * Roster of existing participants at join time, format:
+     * `"participantId:did"` (local) or `"remote-did:did"` (cascade).
+     * For track-to-DID attribution, use `trackMapping` on each
+     * renegotiation offer — the SDP mids get assigned there.
+     */
     streamMapping: string[]
 }
 

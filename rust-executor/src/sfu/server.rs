@@ -565,6 +565,13 @@ impl SfuServer {
                 }
             }
 
+            // Snapshot pid → agent_did so the renegotiation loop can
+            // build track attribution without re-borrowing peers.
+            let pid_to_did: HashMap<ParticipantId, String> = peers
+                .iter()
+                .map(|(pid, peer)| (pid.clone(), peer.agent_did.clone()))
+                .collect();
+
             // Materialise per-target.  One sdp_api batch per target
             // peer so a single offer carries every new outbound m-line
             // (str0m permits exactly one in-flight change at a time).
@@ -577,16 +584,34 @@ impl SfuServer {
                 }
                 let room_id = target_peer.room_id.clone();
                 let mut api = target_peer.rtc.sdp_api();
-                let mut new_outbound: Vec<(Mid, ParticipantId, Mid)> = Vec::new();
+                let mut new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind)> = Vec::new();
                 for (kind, origin_pid, origin_mid) in &additions {
                     let new_mid =
                         api.add_media(*kind, str0m::media::Direction::SendOnly, None, None, None);
-                    new_outbound.push((new_mid, origin_pid.clone(), *origin_mid));
+                    new_outbound.push((new_mid, origin_pid.clone(), *origin_mid, *kind));
                 }
                 let Some((offer, pending)) = api.apply() else {
                     continue;
                 };
-                for (new_mid, origin_pid, origin_mid) in new_outbound {
+
+                // Build track attribution from the newly assigned mids.
+                let track_mapping: Vec<crate::sfu::TrackMapEntry> = new_outbound
+                    .iter()
+                    .filter_map(|(new_mid, origin_pid, _, kind)| {
+                        let did = pid_to_did.get(origin_pid)?;
+                        Some(crate::sfu::TrackMapEntry {
+                            mid: new_mid.to_string(),
+                            agent_did: did.clone(),
+                            media_kind: if kind.is_audio() {
+                                "audio".to_string()
+                            } else {
+                                "video".to_string()
+                            },
+                        })
+                    })
+                    .collect();
+
+                for (new_mid, origin_pid, origin_mid, _kind) in new_outbound {
                     target_peer
                         .tracks_out
                         .insert(new_mid, (origin_pid, origin_mid));
@@ -609,12 +634,6 @@ impl SfuServer {
                     }
                 };
                 if target_peer.is_pipe {
-                    // Pipe-bound renegotiation — route through the
-                    // cascade gossip layer to the remote SFU instead
-                    // of the events_ws fanout (no client lives on the
-                    // far end).  The SfuService subscribes to this
-                    // topic and ships the offer as
-                    // CascadeSignal::PipeOffer.
                     let payload = crate::sfu::SfuPipeRenegotiationOffer {
                         remote_did: target_peer.agent_did.clone(),
                         room_id: room_id.to_string(),
@@ -632,6 +651,7 @@ impl SfuServer {
                         neighbourhood_url: room_id.neighbourhood_url.clone(),
                         room_name: room_id.room_name.clone(),
                         sdp_offer: sdp_offer_json,
+                        track_mapping,
                     };
                     if let Ok(payload_json) = serde_json::to_string(&payload) {
                         crate::pubsub::get_global_pubsub_sync().publish_sync(
