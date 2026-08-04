@@ -248,6 +248,10 @@ WORKDIR /we
 RUN if [ "${INCLUDE_WE}" != "true" ]; then exit 0; fi && \
     sed -i 's/hosting: true,/hosting: true,\n      remoteUrl: window.location.origin,/' \
       apps/we-web/src/platform/webAdapter.ts && \
+    sed -i 's|"globalSpaceUrl": "neighbourhood://[^"]*"|"globalSpaceUrl": ""|' we-seed.json && \
+    sed -i 's|"marketplaceUrl": "neighbourhood://[^"]*"|"marketplaceUrl": ""|' we-seed.json && \
+    sed -i '/import weSeedFile from/a\if (typeof window !== "undefined" && (window as any).__WE_HOSTING_CONFIG?.globalSpaceUrl) { (weSeedFile as any).globalSpaceUrl = (window as any).__WE_HOSTING_CONFIG.globalSpaceUrl; }' \
+      packages/app-framework/src/frameworks/solid/stores/AdamStore.tsx && \
     pnpm install --no-frozen-lockfile && \
     pnpm --filter "@we/app-web..." --workspace-concurrency=1 run build
 
@@ -306,9 +310,10 @@ RUN ARCH=$(dpkg --print-architecture) && \
 COPY --from=builder /home/builder/ad4m-bin /usr/local/bin/ad4m
 COPY --from=builder /home/builder/ad4m-executor-bin /usr/local/bin/ad4m-executor
 
-# Docker bootstrap seed and pre-populated language bundles
+# Docker bootstrap seed, language bundles, and language-language KV store
 COPY --from=builder /home/builder/ad4m/docker/seed-output/docker_seed.json /opt/ad4m/docker_seed.json
 COPY --from=builder /home/builder/ad4m/docker/seed-output/languages/ /opt/ad4m/bootstrap-languages/
+COPY --from=builder /home/builder/ad4m/docker/seed-output/language-language-kv/ /opt/ad4m/language-language-kv/
 
 # WE web frontend (empty dir if INCLUDE_WE=false)
 COPY --from=we-builder /we-dist/ /opt/ad4m/we-dist/
@@ -316,7 +321,8 @@ COPY --from=we-builder /we-dist/ /opt/ad4m/we-dist/
 # Pre-cached Kalosm models (empty dir if INCLUDE_MODELS=false)
 COPY --from=model-fetcher /models/ /opt/ad4m/models/
 
-RUN useradd -m -s /bin/bash ad4m && mkdir -p /data && chown ad4m:ad4m /data
+RUN useradd -m -s /bin/bash ad4m && mkdir -p /data && chown ad4m:ad4m /data \
+    && chown -R ad4m:ad4m /opt/ad4m/we-dist/
 
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 

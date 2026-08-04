@@ -22,6 +22,16 @@ if [ ! -f /data/mainnet_seed.seed ]; then
         echo "Pre-seeding bootstrap language bundles..."
         cp -r /opt/ad4m/bootstrap-languages/* /data/ad4m/languages/ 2>/dev/null || true
     fi
+
+    # Pre-populate the language-language's KV store so it can serve
+    # bootstrap language bundles via storageGet("bundle-<hash>").
+    if [ -f /opt/ad4m/language-language-kv/address.txt ]; then
+        LL_ADDR=$(cat /opt/ad4m/language-language-kv/address.txt)
+        LL_DIR="/data/ad4m/languages/${LL_ADDR}"
+        mkdir -p "${LL_DIR}"
+        cp /opt/ad4m/language-language-kv/ad4m-language-kv.json "${LL_DIR}/ad4m-language-kv.json"
+        echo "Pre-seeded language-language KV store for ${LL_ADDR}"
+    fi
 fi
 
 # ── Pre-populate Kalosm model cache ────────────────────────────────────────
@@ -174,6 +184,68 @@ maybe_setup_agent() {
     fi
 }
 
+# ── Global discovery space (create on first boot, inject URL into WE) ───
+setup_global_space() {
+    local we_dist="/opt/ad4m/we-dist"
+
+    # Skip if WE not bundled
+    if [ -f "${we_dist}/SKIPPED" ] || [ ! -f "${we_dist}/index.html" ]; then
+        return
+    fi
+
+    local url_file="/data/global_space_url"
+    local neighbourhood_url
+
+    if [ -f "${url_file}" ]; then
+        neighbourhood_url=$(cat "${url_file}")
+        echo "Using existing global space: ${neighbourhood_url}"
+    else
+        echo "Creating global discovery space..."
+
+        # Extract link language hash from the Docker seed
+        local link_lang
+        link_lang=$(grep -A1 'knownLinkLanguages' /opt/ad4m/docker_seed.json | grep -oE 'Qm[A-Za-z0-9]+' | head -1 || true)
+
+        if [ -z "${link_lang}" ]; then
+            echo "WARNING: could not extract link language from docker_seed.json" >&2
+            return
+        fi
+
+        # Create a perspective
+        local perspective_output perspective_uuid
+        perspective_output=$(run_ad4m_cli perspectives add "Global Space" 2>&1 || true)
+        perspective_uuid=$(printf '%s' "${perspective_output}" | sed $'s/\x1b\\[[0-9;]*m//g' | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
+
+        if [ -z "${perspective_uuid}" ]; then
+            echo "WARNING: could not create perspective for global space. Raw output:" >&2
+            echo "${perspective_output}" >&2
+            return
+        fi
+
+        # Publish as neighbourhood using the Docker bootstrap link language
+        local neighbourhood_output
+        neighbourhood_output=$(run_ad4m_cli neighbourhoods create "${perspective_uuid}" "${link_lang}" 2>&1 || true)
+        neighbourhood_url=$(printf '%s' "${neighbourhood_output}" | sed $'s/\x1b\\[[0-9;]*m//g' | grep -oE 'neighbourhood://[A-Za-z0-9]+' | head -1)
+
+        if [ -z "${neighbourhood_url}" ]; then
+            echo "WARNING: could not publish global space. Raw output:" >&2
+            echo "${neighbourhood_output}" >&2
+            return
+        fi
+
+        # Persist for subsequent boots
+        echo "${neighbourhood_url}" > "${url_file}"
+        echo "Global space created: ${neighbourhood_url}"
+    fi
+
+    # Inject hosting config into WE index.html (idempotent)
+    if [ -n "${neighbourhood_url}" ]; then
+        sed -i '/__WE_HOSTING_CONFIG/d' "${we_dist}/index.html"
+        sed -i "s|</head>|<script>window.__WE_HOSTING_CONFIG={globalSpaceUrl:\"${neighbourhood_url}\"};</script></head>|" \
+          "${we_dist}/index.html"
+    fi
+}
+
 # ── WE reverse proxy (Caddy: static files + executor API on one origin) ───
 WE_PID=""
 start_we_server() {
@@ -226,6 +298,7 @@ EXECUTOR_PID=$!
 
 wait_for_executor
 maybe_setup_agent
+setup_global_space
 start_we_server
 
 # Forward SIGTERM/SIGINT to all child processes so Docker can stop cleanly.

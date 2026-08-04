@@ -114,5 +114,24 @@ writeFileSync(
     JSON.stringify(seed, null, 2)
 );
 
+// Build language-language KV file so storageGet("bundle-<hash>") works
+// at executor startup. Without this, the language-language can't serve
+// bootstrap language bundles to the executor's language installer.
+const langLangAddr = addresses.languageLanguage;
+const kv = {};
+for (const lang of LANGUAGES) {
+    if (lang.role === "languageLanguage") continue;
+    kv[langLangAddr + "::bundle-" + addresses[lang.role]] = bundles[lang.role];
+}
+const sortedKv = {};
+Object.keys(kv).sort().forEach(k => { sortedKv[k] = kv[k]; });
+
+const kvDir = join(outputDir, "language-language-kv");
+mkdirSync(kvDir, { recursive: true });
+writeFileSync(join(kvDir, "ad4m-language-kv.json"), JSON.stringify(sortedKv));
+writeFileSync(join(kvDir, "address.txt"), langLangAddr);
+
 console.log("\nSeed written to: " + join(outputDir, "docker_seed.json"));
 console.log("Pre-seed languages in: " + join(outputDir, "languages"));
+console.log("Language-language KV: " + join(kvDir, "ad4m-language-kv.json"));
+console.log("Language-language address: " + langLangAddr);
