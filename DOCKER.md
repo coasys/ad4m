@@ -126,14 +126,14 @@ Caddy routes:
 
 | Path | Target | Description |
 |---|---|---|
-| `/ws` | `localhost:12000` | WebSocket connection to the executor |
 | `/health` | `localhost:12000` | Executor health check |
-| `/api/*` | `localhost:12000` | HTTP API passthrough |
+| `/api/*` | `localhost:12000` | HTTP API passthrough (incl. WebSocket) |
+| `/apps/flux/*` | Flux static files | Flux SPA (iframe-embeddable, no X-Frame-Options) |
 | `/*` | WE static files | SPA with fallback to `index.html` |
 
-In ad4m-connect, set the executor URL to the same origin as the WE page (e.g. `https://we.example.com`). No separate API subdomain required.
+Flux (the social toolkit) builds alongside WE and loads inside WE as an iframe at `/apps/flux/`. Embedded apps connect to the executor directly through the same-origin reverse proxy — no postMessage proxy mode required.
 
-WE provides a collaborative interface for working with AD4M perspectives, neighbourhoods, and social DNA.
+In ad4m-connect, set the executor URL to the same origin as the WE page (e.g. `https://we.example.com`). No separate API subdomain required.
 
 ## API Access
 

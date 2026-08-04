@@ -254,6 +254,7 @@ RUN if [ "${INCLUDE_WE}" != "true" ]; then exit 0; fi && \
     fi && \
     sed -i 's|"globalSpaceUrl": "neighbourhood://[^"]*"|"globalSpaceUrl": ""|' we-seed.json && \
     sed -i 's|"marketplaceUrl": "neighbourhood://[^"]*"|"marketplaceUrl": ""|' we-seed.json && \
+    sed -i 's|"webUrl": "https://fluxsocial-dev.netlify.app"|"webUrl": "/apps/flux/"|' we-seed.json && \
     BRIDGE_FILE=$(find packages/app-shell/src -name 'appBridge.ts' 2>/dev/null | head -1) && \
     if [ -n "${BRIDGE_FILE}" ]; then \
       sed -i 's/= deps\.isDesktop$/= deps.isDesktop || url/' "${BRIDGE_FILE}"; \
@@ -279,6 +280,23 @@ RUN if [ "${INCLUDE_WE}" = "true" ] && [ -d /we/apps/we-web/dist ]; then \
 RUN mkdir -p /we-dist && \
     if [ "${INCLUDE_WE}" = "true" ] && [ -d /we/apps/we-web/dist ]; then \
       cp -r /we/apps/we-web/dist/* /we-dist/; \
+    fi
+
+# ── Flux app build (served alongside WE at /apps/flux/) ──────────────────────
+RUN if [ "${INCLUDE_WE}" != "true" ]; then \
+      mkdir -p /flux-dist && exit 0; \
+    fi && \
+    git clone --depth 1 --single-branch --branch dev \
+      https://github.com/coasys/flux.git /flux
+
+RUN if [ "${INCLUDE_WE}" != "true" ]; then exit 0; fi && \
+    cd /flux && \
+    pnpm install --no-frozen-lockfile && \
+    VITE_BASE=/apps/flux/ NODE_OPTIONS='--max-old-space-size=4096' pnpm run build
+
+RUN mkdir -p /flux-dist && \
+    if [ "${INCLUDE_WE}" = "true" ] && [ -d /flux/app/dist ]; then \
+      cp -r /flux/app/dist/* /flux-dist/; \
     fi
 
 # =============================================================================
@@ -339,11 +357,15 @@ COPY --from=builder /home/builder/ad4m/docker/seed-output/language-language-kv/ 
 # WE web frontend (empty dir if INCLUDE_WE=false)
 COPY --from=we-builder /we-dist/ /opt/ad4m/we-dist/
 
+# Flux app (served at /apps/flux/ alongside WE; empty dir if INCLUDE_WE=false)
+COPY --from=we-builder /flux-dist/ /opt/ad4m/flux-dist/
+
 # Pre-cached Kalosm models (empty dir if INCLUDE_MODELS=false)
 COPY --from=model-fetcher /models/ /opt/ad4m/models/
 
 RUN useradd -m -s /bin/bash ad4m && mkdir -p /data && chown ad4m:ad4m /data \
-    && chown -R ad4m:ad4m /opt/ad4m/we-dist/
+    && chown -R ad4m:ad4m /opt/ad4m/we-dist/ \
+    && chown -R ad4m:ad4m /opt/ad4m/flux-dist/
 
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 

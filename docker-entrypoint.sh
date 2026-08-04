@@ -308,6 +308,13 @@ start_we_server() {
         reverse_proxy localhost:12000
     }
 
+    handle_path /apps/flux/* {
+        root * /opt/ad4m/flux-dist
+        try_files {path} /index.html
+        file_server
+        header -X-Frame-Options
+    }
+
     handle {
         root * ${we_dist}
         try_files {path} /index.html
