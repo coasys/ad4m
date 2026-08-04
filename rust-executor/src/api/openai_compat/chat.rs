@@ -262,7 +262,12 @@ async fn chat_stream(
             // tokenizer counts that the Kalosm backend doesn't expose yet.
             // TODO: plumb token counts from Kalosm for proportional billing.
             if let Some(email) = user_email(&auth_clone) {
-                if let Err(e) = bill_compute(&email, 1.0, "ai_prompt", Some("v1/chat/completions[stream]")) {
+                if let Err(e) = bill_compute(
+                    &email,
+                    1.0,
+                    "ai_prompt",
+                    Some("v1/chat/completions[stream]"),
+                ) {
                     log::warn!("Streaming billing failed: {e}");
                 }
             }
