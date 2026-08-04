@@ -130,7 +130,10 @@ impl From<crate::billing::BillingError> for OpenAIError {
             crate::billing::BillingError::InsufficientCredits => {
                 OpenAIError::insufficient_quota("Insufficient compute credits")
             }
-            other => OpenAIError::internal(format!("Billing error: {other}")),
+            other => {
+                log::error!("Billing operation failed: {other}");
+                OpenAIError::internal("Billing operation failed")
+            }
         }
     }
 }

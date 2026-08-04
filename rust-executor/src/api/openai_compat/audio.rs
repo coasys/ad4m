@@ -125,6 +125,8 @@ pub async fn speech(
     {
         check_compute_credits(&email)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+        let amount = (req.input.chars().count() as f64 / 1000.0).max(1.0);
+        bill_compute(&email, amount, "ai_tts", Some("v1/audio/speech"))?;
     }
 
     let response_format = req
@@ -142,12 +144,6 @@ pub async fn speech(
                 OpenAIError::internal(format!("Upstream TTS error: {msg}"))
             }
         })?;
-
-    if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
-    {
-        let amount = (req.input.len() as f64 / 1000.0).max(1.0);
-        bill_compute(&email, amount, "ai_tts", Some("v1/audio/speech"))?;
-    }
 
     let content_type = match response_format.as_str() {
         "mp3" => "audio/mpeg",
