@@ -94,6 +94,7 @@ export class ApiClient {
     private _wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
     private _wsClosed = false
     private _wsPingTimer: ReturnType<typeof setInterval> | null = null
+    private _ignoredResponseIds = new Set<string>()
 
     private _getWsUrl(): string {
         const wsBase = this.baseUrl
@@ -154,6 +155,14 @@ export class ApiClient {
                 } else {
                     pending.resolve(parsed.result)
                 }
+                return
+            }
+
+            // Discard ack responses to cancel requests we sent — they have
+            // an id that was never in _pendingCalls, so without this guard
+            // they'd leak into subscriber callbacks as spurious events.
+            if (id && this._ignoredResponseIds.has(id)) {
+                this._ignoredResponseIds.delete(id)
                 return
             }
 
@@ -219,6 +228,42 @@ export class ApiClient {
         if (this._wsReady) await this._wsReady
     }
 
+    /**
+     * Like `_ready()`, but races the connection against an AbortSignal so
+     * that callers don't hang if the signal fires while connecting.
+     */
+    private async _readyOrAbort(signal?: AbortSignal): Promise<void> {
+        if (signal?.aborted) {
+            throw new DOMException('Aborted', 'AbortError')
+        }
+
+        await new Promise<void>((resolve, reject) => {
+            let settled = false
+
+            const finish = (fn: () => void) => {
+                if (settled) return
+                settled = true
+                if (signal && onAbort) {
+                    signal.removeEventListener('abort', onAbort)
+                }
+                fn()
+            }
+
+            const onAbort = signal
+                ? () => finish(() => reject(new DOMException('Aborted', 'AbortError')))
+                : null
+
+            if (onAbort) {
+                signal!.addEventListener('abort', onAbort, { once: true })
+            }
+
+            this._ready().then(
+                () => finish(resolve),
+                (error) => finish(() => reject(error)),
+            )
+        })
+    }
+
     // ── RPC call method ─────────────────────────────────────────────────────
 
     /**
@@ -236,7 +281,7 @@ export class ApiClient {
             throw new DOMException('Aborted', 'AbortError')
         }
 
-        await this._ready()
+        await this._readyOrAbort(signal)
 
         const id = nextId()
         // Put params under a "params" key to avoid collision with
@@ -283,8 +328,10 @@ export class ApiClient {
                     // still aborted either way.
                     if (this._ws && this._ws.readyState === 1 /* OPEN */) {
                         try {
+                            const cancelId = nextId()
+                            this._ignoredResponseIds.add(cancelId)
                             this._ws.send(JSON.stringify({
-                                id: nextId(),
+                                id: cancelId,
                                 type: 'request.cancel',
                                 params: { targetId: id },
                             }))

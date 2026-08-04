@@ -260,12 +260,14 @@ async fn handle_ws(
                     }
                 }
             };
-            let _ = tx_clone.send(response.to_string());
-
-            // Always clean up the registry entry — the request is done
-            // whether it completed normally, errored, or was cancelled.
+            // Clean up the registry entry BEFORE sending the response —
+            // otherwise a late `request.cancel` arriving between the send
+            // and the remove would find the token, cancel it, and report
+            // success even though the response already left.
             let mut guard = inflight_clone.lock().await;
             guard.remove(&id);
+            drop(guard);
+            let _ = tx_clone.send(response.to_string());
         });
     }
 

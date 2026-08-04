@@ -893,6 +893,9 @@ impl SparqlStore {
         query_string: &str,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String, Error> {
+        if cancel.is_cancelled() {
+            return Err(anyhow!("query cancelled"));
+        }
         let store = self.clone();
         let query = query_string.to_string();
         let handle = tokio::task::spawn_blocking(move || store.query(&query));
