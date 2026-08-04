@@ -108,24 +108,35 @@ wait_for_executor() {
 }
 
 # Extract a boolean flag from the CLI's agent status output.
-# Handles three output formats the CLI produces:
-#   1. JSON blob:   raw: {"isInitialized":true, ...}
-#   2. JSON inline: "isInitialized":true
-#   3. CLI table:   is_initiliazed: false  (with ANSI colours)
-# Also handles the known CLI typo "initiliazed".
+# The CLI has a deserialization bug that wraps the raw JSON in an error
+# message, so all fields land on ONE line. We must extract the boolean
+# value anchored to the specific flag name, not just any true/false.
 extract_agent_flag() {
     # $1 = raw output, $2 = flag name (e.g. isInitialized, isUnlocked)
     local cleaned flag_name="$2"
     # Strip ANSI escape codes
     cleaned=$(printf '%s' "$1" | sed $'s/\x1b\\[[0-9;]*m//g')
 
-    # Build grep pattern: camelCase + snake_case + known typos
-    local snake pattern
+    # 1) JSON format: "flagName":true  or  "flagName": false
+    local val
+    val=$(printf '%s' "${cleaned}" \
+        | grep -oE "\"${flag_name}\"[[:space:]]*:[[:space:]]*(true|false)" \
+        | grep -oE '(true|false)' | head -1)
+    if [ -n "${val}" ]; then
+        echo "${val}"
+        return
+    fi
+
+    # 2) snake_case CLI table:  is_unlocked: true  (+ known typo)
+    local snake
     snake=$(printf '%s' "${flag_name}" | sed 's/\([A-Z]\)/_\L\1/g')
-    pattern="${flag_name}|${snake}"
+    local pattern="${snake}"
     [ "${flag_name}" = "isInitialized" ] && pattern="${pattern}|is_initiliazed|initiliazed"
 
-    printf '%s' "${cleaned}" | grep -iE "${pattern}" | grep -oE '\b(true|false)\b' | head -1
+    val=$(printf '%s' "${cleaned}" \
+        | grep -oE "(${pattern})[[:space:]]*:[[:space:]]*(true|false)" \
+        | grep -oE '(true|false)' | head -1)
+    echo "${val}"
 }
 
 maybe_setup_agent() {
@@ -183,10 +194,17 @@ maybe_setup_agent() {
     fi
     local unlock_output
     unlock_output=$(run_ad4m_cli "${unlock_args[@]}" 2>&1 || true)
-    if printf '%s' "${unlock_output}" | grep -qi "Agent unlocked"; then
+
+    # The CLI has a deserialization bug that wraps the JSON response in
+    # an error message. Check the actual isUnlocked field rather than
+    # looking for "Agent unlocked" text output.
+    local post_unlock post_unlocked
+    post_unlock=$(run_ad4m_cli agent status 2>&1 || true)
+    post_unlocked=$(extract_agent_flag "${post_unlock}" isUnlocked)
+    if [ "${post_unlocked}" = "true" ]; then
         echo "AD4M agent unlocked."
     else
-        echo "WARNING: agent unlock may have failed. Raw output:" >&2
+        echo "WARNING: agent unlock may have failed (isUnlocked=${post_unlocked:-<empty>}). Raw output:" >&2
         echo "${unlock_output}" >&2
     fi
 }
