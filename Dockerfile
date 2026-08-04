@@ -254,6 +254,10 @@ RUN if [ "${INCLUDE_WE}" != "true" ]; then exit 0; fi && \
     fi && \
     sed -i 's|"globalSpaceUrl": "neighbourhood://[^"]*"|"globalSpaceUrl": ""|' we-seed.json && \
     sed -i 's|"marketplaceUrl": "neighbourhood://[^"]*"|"marketplaceUrl": ""|' we-seed.json && \
+    BRIDGE_FILE=$(find packages/app-shell/src -name 'appBridge.ts' 2>/dev/null | head -1) && \
+    if [ -n "${BRIDGE_FILE}" ]; then \
+      sed -i 's/= deps\.isDesktop$/= deps.isDesktop || url/' "${BRIDGE_FILE}"; \
+    fi && \
     if [ -f apps/we-web/src/index.tsx ]; then \
       sed -i '/import weSeed from/a\if (typeof window !== "undefined" && (window as any).__WE_HOSTING_CONFIG?.globalSpaceUrl) { (weSeed as any).globalSpaceUrl = (window as any).__WE_HOSTING_CONFIG.globalSpaceUrl; }' apps/we-web/src/index.tsx; \
     elif [ -f packages/app-framework/src/frameworks/solid/stores/AdamStore.tsx ]; then \
