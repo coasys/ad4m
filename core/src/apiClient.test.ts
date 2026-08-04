@@ -193,8 +193,11 @@ describe('ApiClient AbortSignal support', () => {
         // Give microtasks a chance.
         await flushMicrotasks()
         expect(ws.sent.length).toBe(sendCountBefore)
-        // And we did register the listener exactly once.
-        expect(listenerCount).toBe(1)
+        // Two listeners were registered in total: one in _readyOrAbort
+        // (connection phase) and one in call() (in-flight phase). Both
+        // were removed via cleanup — the "no extra send" check above
+        // confirms no stale handler remains.
+        expect(listenerCount).toBe(2)
 
         client.closeAll()
     })
