@@ -335,6 +335,7 @@ ARG CADDY_VERSION=2.9.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    jq \
     libssl3 \
     libgtk-3-0 \
     libwebkit2gtk-4.1-0 \

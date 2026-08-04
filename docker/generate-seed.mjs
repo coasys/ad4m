@@ -115,14 +115,33 @@ writeFileSync(
     JSON.stringify(seed, null, 2)
 );
 
-// Build language-language KV file so storageGet("bundle-<hash>") works
-// at executor startup. Without this, the language-language can't serve
-// bootstrap language bundles to the executor's language installer.
+// Build language-language KV file so storageGet("bundle-<hash>") and
+// storageGet("meta-<hash>") both work at executor startup. Without these,
+// applyTemplateAndPublish (used by Flux createCommunity) fails with
+// "Language not found" because expressionGet returns null.
 const langLangAddr = addresses.languageLanguage;
 const kv = {};
 for (const lang of LANGUAGES) {
     if (lang.role === "languageLanguage") continue;
-    kv[langLangAddr + "::bundle-" + addresses[lang.role]] = bundles[lang.role];
+    const addr = addresses[lang.role];
+    kv[langLangAddr + "::bundle-" + addr] = bundles[lang.role];
+
+    const expression = {
+        author: "",
+        timestamp: "1970-01-01T00:00:00.000Z",
+        data: {
+            address: addr,
+            author: "",
+            name: lang.role,
+            description: "Bootstrap " + lang.role,
+            possibleTemplateParams: ["uid", "name"],
+            templateAppliedParams: null,
+            templateSourceLanguageAddress: null,
+            templated: false,
+        },
+        proof: { key: "", signature: "" },
+    };
+    kv[langLangAddr + "::meta-" + addr] = JSON.stringify(expression);
 }
 const sortedKv = {};
 Object.keys(kv).sort().forEach(k => { sortedKv[k] = kv[k]; });

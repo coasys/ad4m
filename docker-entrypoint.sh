@@ -37,15 +37,22 @@ if [ -d /opt/ad4m/bootstrap-languages ]; then
 fi
 
 # Pre-populate the language-language's KV store so it can serve
-# bootstrap language bundles via storageGet("bundle-<hash>").
-# Runs on every boot but only copies when the file doesn't already exist.
+# bootstrap language bundles and metadata via storageGet().
+# Merges bootstrap entries into any existing KV file (preserving
+# runtime-published languages while ensuring bootstrap meta/bundle
+# entries exist for applyTemplateAndPublish).
 if [ -f /opt/ad4m/language-language-kv/address.txt ]; then
     LL_ADDR=$(cat /opt/ad4m/language-language-kv/address.txt)
     LL_DIR="/data/ad4m/languages/${LL_ADDR}"
+    mkdir -p "${LL_DIR}"
     if [ ! -f "${LL_DIR}/ad4m-language-kv.json" ]; then
-        mkdir -p "${LL_DIR}"
         cp /opt/ad4m/language-language-kv/ad4m-language-kv.json "${LL_DIR}/ad4m-language-kv.json"
         echo "Pre-seeded language-language KV store for ${LL_ADDR}"
+    else
+        jq -s '.[0] * .[1]' "${LL_DIR}/ad4m-language-kv.json" /opt/ad4m/language-language-kv/ad4m-language-kv.json \
+            > "${LL_DIR}/ad4m-language-kv.json.tmp" \
+            && mv "${LL_DIR}/ad4m-language-kv.json.tmp" "${LL_DIR}/ad4m-language-kv.json"
+        echo "Merged bootstrap entries into language-language KV store."
     fi
 fi
 
