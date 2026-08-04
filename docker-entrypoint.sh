@@ -23,11 +23,15 @@ if [ ! -f /data/mainnet_seed.seed ]; then
         cp -r /opt/ad4m/bootstrap-languages/* /data/ad4m/languages/ 2>/dev/null || true
     fi
 
-    # Pre-populate the language-language's KV store so it can serve
-    # bootstrap language bundles via storageGet("bundle-<hash>").
-    if [ -f /opt/ad4m/language-language-kv/address.txt ]; then
-        LL_ADDR=$(cat /opt/ad4m/language-language-kv/address.txt)
-        LL_DIR="/data/ad4m/languages/${LL_ADDR}"
+fi
+
+# Pre-populate the language-language's KV store so it can serve
+# bootstrap language bundles via storageGet("bundle-<hash>").
+# Runs on every boot but only copies when the file doesn't already exist.
+if [ -f /opt/ad4m/language-language-kv/address.txt ]; then
+    LL_ADDR=$(cat /opt/ad4m/language-language-kv/address.txt)
+    LL_DIR="/data/ad4m/languages/${LL_ADDR}"
+    if [ ! -f "${LL_DIR}/ad4m-language-kv.json" ]; then
         mkdir -p "${LL_DIR}"
         cp /opt/ad4m/language-language-kv/ad4m-language-kv.json "${LL_DIR}/ad4m-language-kv.json"
         echo "Pre-seeded language-language KV store for ${LL_ADDR}"
@@ -173,13 +177,16 @@ maybe_setup_agent() {
     fi
 
     echo "Unlocking AD4M agent..."
-    local unlock_output unlock_status
-    unlock_output=$(run_ad4m_cli agent unlock --passphrase "${AGENT_PASSPHRASE}" 2>&1 || true)
-    unlock_status=$(extract_agent_flag "${unlock_output}" isUnlocked)
-    if [ "${unlock_status}" = "true" ]; then
+    local unlock_args=(agent unlock --passphrase "${AGENT_PASSPHRASE}")
+    if [ "${RUN_HOLOCHAIN:-false}" != "true" ]; then
+        unlock_args+=(--holochain false)
+    fi
+    local unlock_output
+    unlock_output=$(run_ad4m_cli "${unlock_args[@]}" 2>&1 || true)
+    if printf '%s' "${unlock_output}" | grep -qi "Agent unlocked"; then
         echo "AD4M agent unlocked."
     else
-        echo "WARNING: agent unlock did not report isUnlocked:true. Raw output:" >&2
+        echo "WARNING: agent unlock may have failed. Raw output:" >&2
         echo "${unlock_output}" >&2
     fi
 }
