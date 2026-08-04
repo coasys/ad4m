@@ -63,7 +63,7 @@ function computeLanguageHash(bundleContent) {
 
 // --- Main ---
 
-const bootstrapDir = resolve(process.argv[2] || "bootstrap-languages/docker");
+const bootstrapDir = resolve(process.argv[2] || "docker/bootstrap-languages");
 const outputDir = resolve(process.argv[3] || "docker/seed-output");
 
 const LANGUAGES = [

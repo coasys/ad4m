@@ -219,7 +219,7 @@ RUN rm -rf /home/builder/deno-local /home/builder/deno_core-local /home/builder/
 # docker/ is copied here (not with the source tree above) so that changes
 # to generate-seed.mjs or download-models.sh don't bust the Rust cache.
 COPY --chown=builder:builder docker/ ./docker/
-RUN node docker/generate-seed.mjs bootstrap-languages/docker docker/seed-output
+RUN node docker/generate-seed.mjs docker/bootstrap-languages docker/seed-output
 
 # =============================================================================
 # Stage 2a: WE web frontend (conditional)
