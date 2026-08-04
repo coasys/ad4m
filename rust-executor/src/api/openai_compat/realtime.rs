@@ -245,9 +245,12 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                         }
                     }
                 } else {
-                    let _ = service
+                    if let Err(e) = service
                         .feed_transcription_stream(sid, samples, &auth.auth_token)
-                        .await;
+                        .await
+                    {
+                        let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
+                    }
                 }
             }
             "input_audio_buffer.commit" => {
