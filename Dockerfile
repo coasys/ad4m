@@ -248,12 +248,17 @@ RUN if [ "${INCLUDE_WE}" != "true" ]; then exit 0; fi && \
 WORKDIR /we
 
 RUN if [ "${INCLUDE_WE}" != "true" ]; then exit 0; fi && \
-    sed -i 's/hosting: true,/hosting: true,\n      remoteUrl: window.location.origin,/' \
-      apps/we-web/src/platform/webAdapter.ts && \
+    HOSTING_FILE=$(find apps/we-web/src/platform -name 'ad4mConnector.ts' -o -name 'webAdapter.ts' 2>/dev/null | head -1) && \
+    if [ -n "${HOSTING_FILE}" ]; then \
+      sed -i 's/hosting: true,/hosting: true,\n      remoteUrl: window.location.origin,/' "${HOSTING_FILE}"; \
+    fi && \
     sed -i 's|"globalSpaceUrl": "neighbourhood://[^"]*"|"globalSpaceUrl": ""|' we-seed.json && \
     sed -i 's|"marketplaceUrl": "neighbourhood://[^"]*"|"marketplaceUrl": ""|' we-seed.json && \
-    sed -i '/import weSeedFile from/a\if (typeof window !== "undefined" && (window as any).__WE_HOSTING_CONFIG?.globalSpaceUrl) { (weSeedFile as any).globalSpaceUrl = (window as any).__WE_HOSTING_CONFIG.globalSpaceUrl; }' \
-      packages/app-framework/src/frameworks/solid/stores/AdamStore.tsx && \
+    if [ -f apps/we-web/src/index.tsx ]; then \
+      sed -i '/import weSeed from/a\if (typeof window !== "undefined" && (window as any).__WE_HOSTING_CONFIG?.globalSpaceUrl) { (weSeed as any).globalSpaceUrl = (window as any).__WE_HOSTING_CONFIG.globalSpaceUrl; }' apps/we-web/src/index.tsx; \
+    elif [ -f packages/app-framework/src/frameworks/solid/stores/AdamStore.tsx ]; then \
+      sed -i '/import weSeedFile from/a\if (typeof window !== "undefined" && (window as any).__WE_HOSTING_CONFIG?.globalSpaceUrl) { (weSeedFile as any).globalSpaceUrl = (window as any).__WE_HOSTING_CONFIG.globalSpaceUrl; }' packages/app-framework/src/frameworks/solid/stores/AdamStore.tsx; \
+    fi && \
     pnpm install --no-frozen-lockfile && \
     pnpm --filter "@we/app-web..." --workspace-concurrency=1 run build
 
