@@ -299,6 +299,10 @@ RUN if [ "${INCLUDE_WE}" != "true" ]; then exit 0; fi && \
 RUN mkdir -p /flux-dist && \
     if [ "${INCLUDE_WE}" = "true" ] && [ -d /flux/app/dist ]; then \
       cp -r /flux/app/dist/* /flux-dist/; \
+      LOCAL_FS_HASH=$(cat /tmp/file-storage-hash.txt) && \
+      find /flux-dist -name '*.js' -exec \
+        sed -i "s/QmzSYwddqhm49PrRMzSrJf3AvmmreXMKtr1u56nbTjBFVmCzS8N/${LOCAL_FS_HASH}/g" {} + && \
+      echo "Patched Flux FILE_STORAGE_LANGUAGE → ${LOCAL_FS_HASH}"; \
     fi
 
 # =============================================================================
