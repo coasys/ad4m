@@ -73,29 +73,37 @@ Host ports offset by +1000 to avoid collisions with a local dev executor.
 |---|---|---|
 | `ADMIN_CREDENTIAL` | _(none)_ | Shared secret for admin-level API access |
 | `AGENT_PASSPHRASE` | _(none)_ | Passphrase for agent key generation and auto-unlock |
-| `ENABLE_MULTI_USER` | `true` | Allow multiple users via signup/login flow |
-| `ENABLE_MCP` | `true` | Start the MCP server |
+| `ENABLE_MULTI_USER` | `false` | Allow multiple users via signup/login flow |
+| `ENABLE_MCP` | `false` | Start the MCP server |
 | `MCP_PORT` | `3001` | MCP server port inside the container |
-| `RUN_HOLOCHAIN` | `false` | Start the Holochain conductor (`true` for P2P mode) |
+| `RUN_HOLOCHAIN` | `true` | Start the Holochain conductor |
 | `WE_PORT` | `8080` | Caddy reverse proxy port inside the container |
 | `NETWORK_BOOTSTRAP_SEED` | _(docker seed)_ | Path to a custom bootstrap seed JSON file |
 
 ## Modes of Operation
 
-### Standalone (default)
+### Default (Docker seed, Holochain on)
 
-Holochain disabled. All bootstrap languages use local storage. The executor functions as a self-contained server: perspectives, agents, languages, and neighbourhoods all persist locally. No external network calls.
+The Holochain conductor starts (matching the standard AD4M executor). The Docker bootstrap seed uses local-storage languages, so the node operates self-contained without needing the AD4M network. Holochain runs but stays idle until you supply a mainnet seed.
+
+```bash
+docker compose up -d
+```
+
+### Standalone (Holochain off)
+
+Holochain conductor disabled entirely. Saves resources when P2P networking will never apply.
 
 ```bash
 RUN_HOLOCHAIN=false docker compose up -d
 ```
 
-### P2P (Holochain enabled)
+### P2P (mainnet seed)
 
-The Holochain conductor starts alongside the executor. Bootstrap languages connect to the AD4M network for peer discovery, link sync, and language distribution. Requires network access to `bootstrap.ad4m.dev`.
+Full AD4M network participation. Supply a mainnet seed so bootstrap languages connect to Holochain for peer discovery, link sync, and language distribution.
 
 ```bash
-RUN_HOLOCHAIN=true NETWORK_BOOTSTRAP_SEED=/path/to/mainnet_seed.json docker compose up -d
+NETWORK_BOOTSTRAP_SEED=/path/to/mainnet_seed.json docker compose up -d
 ```
 
 ## Data Persistence

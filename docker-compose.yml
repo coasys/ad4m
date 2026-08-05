@@ -14,10 +14,10 @@ services:
     environment:
       - ADMIN_CREDENTIAL=${ADMIN_CREDENTIAL:-}
       - AGENT_PASSPHRASE=${AGENT_PASSPHRASE:-}
-      - ENABLE_MULTI_USER=${ENABLE_MULTI_USER:-true}
-      - ENABLE_MCP=${ENABLE_MCP:-true}
+      - ENABLE_MULTI_USER=${ENABLE_MULTI_USER:-}
+      - ENABLE_MCP=${ENABLE_MCP:-}
       - MCP_PORT=${MCP_PORT:-3001}
-      - RUN_HOLOCHAIN=${RUN_HOLOCHAIN:-false}
+      - RUN_HOLOCHAIN=${RUN_HOLOCHAIN:-}
       - WE_PORT=${WE_PORT:-8080}
     restart: unless-stopped
     healthcheck:

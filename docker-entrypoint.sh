@@ -84,11 +84,11 @@ if [ "${ENABLE_MCP:-}" = "true" ]; then
     EXTRA_ARGS+=(--enable-mcp true --mcp-port "${MCP_PORT:-3001}")
 fi
 
-# No-Holochain mode: skip conductor startup entirely.
-# Default to false (no holochain) for Docker standalone deployments.
-if [ "${RUN_HOLOCHAIN:-false}" = "true" ]; then
+# Only override run_holochain when explicitly set.
+# Executor default: true (Holochain conductor starts).
+if [ "${RUN_HOLOCHAIN:-}" = "true" ]; then
     EXTRA_ARGS+=(--run-holochain true)
-else
+elif [ "${RUN_HOLOCHAIN:-}" = "false" ]; then
     EXTRA_ARGS+=(--run-holochain false)
 fi
 
@@ -207,7 +207,7 @@ maybe_setup_agent() {
 
     echo "Unlocking AD4M agent..."
     local unlock_args=(agent unlock --passphrase "${AGENT_PASSPHRASE}")
-    if [ "${RUN_HOLOCHAIN:-false}" != "true" ]; then
+    if [ "${RUN_HOLOCHAIN:-}" = "false" ]; then
         unlock_args+=(--holochain false)
     fi
     local unlock_output
