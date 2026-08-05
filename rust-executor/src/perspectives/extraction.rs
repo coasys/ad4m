@@ -6,16 +6,21 @@
 //!   S2 — `parse_extraction_response`: LLM JSON -> `ProposedInstance`s
 //!   S3 — `build_extraction_input`   : shapes' hints + transcript -> prompt
 //!   S4 — `instance_links`           : `ProposedInstance` -> perspective links
-//!   S5 — `EXTRACTION_SYSTEM_PROMPT` + `ensure_extraction_task` (this commit)
-//!   S6 — `run_extraction`           : async shell wiring S1-S5 + AIService
+//!   S5 — `EXTRACTION_SYSTEM_PROMPT` + `ensure_extraction_task`
+//!   S6 — `apply_extraction_raw` + `retry_extraction_parse` + `run_extraction`
+//!          (this commit): async shell + retry harness, wiring S1-S5 through
+//!          `AIService::prompt` and `PerspectiveInstance::add_link`.
 //!
-//! S2–S5 are pure/DB-only (no LLM) and CI-tested.
+//! S2–S6 are pure/DB-only (no LLM) and CI-tested; the real-LLM e2e is S7.
 
+use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
 use crate::perspectives::model_query::types::ModelShape;
-use crate::types::{AITask, Link};
+use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::types::{AITask, Link, LinkStatus};
 use serde::Deserialize;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// One instance the LLM proposes creating: the target class name plus a flat
 /// map of field-name -> value. Extra/unknown fields are tolerated (kept in
@@ -218,6 +223,201 @@ pub fn ensure_extraction_task() -> anyhow::Result<AITask> {
     let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
         .ok_or_else(|| anyhow::anyhow!("extraction task vanished immediately after insert"))?;
     Ok(task)
+}
+
+// -----------------------------------------------------------------------------
+// S6: async shell + retry harness
+// -----------------------------------------------------------------------------
+
+/// Max attempts for [`retry_extraction_parse`]. Mirrors Flux's `LLMutils`
+/// retry-×5 loop: local models occasionally emit half-valid JSON, so we ask
+/// again a few times before giving up on the whole call.
+pub const EXTRACTION_MAX_ATTEMPTS: u8 = 5;
+
+/// S6 (pure): parse a raw LLM response and turn it into the set of links that
+/// would be written into the perspective. Callers minted a fresh instance base
+/// URI per proposed instance under `base_prefix` and delegate to
+/// [`instance_links`] (S4) for the actual shape-driven link construction.
+///
+/// The lookup from `inst.class` to a `ModelShape` is by local class name
+/// (final segment of `target_class`). Proposed instances whose class doesn't
+/// match any provided shape are silently dropped — the LLM cannot inject
+/// links outside the caller's declared shape set.
+///
+/// Returned tuples pair each fresh base URI with the links anchored on it, so
+/// the caller ([`run_extraction`] or a test) can decide how to persist them.
+pub fn apply_extraction_raw(
+    shapes: &[ModelShape],
+    raw: &str,
+    base_prefix: &str,
+) -> anyhow::Result<Vec<(String, Vec<Link>)>> {
+    let proposed = parse_extraction_response(raw)?;
+    Ok(place_instances(shapes, &proposed, base_prefix))
+}
+
+/// Core of [`apply_extraction_raw`], factored out so [`run_extraction`] can
+/// reuse it without a redundant JSON round-trip. Same semantics: unknown-class
+/// instances are dropped; every kept instance gets a fresh UUID-tagged base.
+pub fn place_instances(
+    shapes: &[ModelShape],
+    proposed: &[ProposedInstance],
+    base_prefix: &str,
+) -> Vec<(String, Vec<Link>)> {
+    let mut out = Vec::with_capacity(proposed.len());
+    for inst in proposed {
+        let Some(shape) = shapes
+            .iter()
+            .find(|s| class_local_name(&s.target_class) == inst.class)
+        else {
+            log::debug!(
+                "extraction: dropping proposed instance for unknown class '{}'",
+                inst.class
+            );
+            continue;
+        };
+        let base = format!(
+            "{base_prefix}{}/{}",
+            inst.class.to_lowercase(),
+            Uuid::new_v4()
+        );
+        let links = instance_links(shape, inst, &base);
+        out.push((base, links));
+    }
+    out
+}
+
+/// S6: run `prompt_fn` up to [`EXTRACTION_MAX_ATTEMPTS`] times, parsing each
+/// response as an extraction JSON payload. Returns the first successful parse;
+/// the last parse error propagates if every attempt fails. `prompt_fn` is an
+/// async closure so callers can inject anything (real `AIService`, a canned
+/// script, a mock) without a live LLM.
+///
+/// This is deliberately a thin generic wrapper: it never mutates state, and it
+/// is the only place we tolerate LLM flake. Any bug in prompt assembly should
+/// fail deterministically in [`build_extraction_input`], not here.
+pub async fn retry_extraction_parse<F, Fut>(
+    mut prompt_fn: F,
+) -> anyhow::Result<Vec<ProposedInstance>>
+where
+    F: FnMut(u8) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<String>>,
+{
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 1..=EXTRACTION_MAX_ATTEMPTS {
+        let raw = match prompt_fn(attempt).await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("extraction: prompt attempt {attempt} failed: {e:#}");
+                last_err = Some(e);
+                continue;
+            }
+        };
+        match parse_extraction_response(&raw) {
+            Ok(instances) => return Ok(instances),
+            Err(e) => {
+                log::warn!(
+                    "extraction: parse attempt {attempt} failed: {e:#}; will retry (max {EXTRACTION_MAX_ATTEMPTS})"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        anyhow::anyhow!(
+            "extraction: failed after {EXTRACTION_MAX_ATTEMPTS} attempts with no captured error"
+        )
+    }))
+}
+
+/// S6: minimal transcript gatherer. Reads links `source ⇒ predicate ⇒ literal`
+/// from a perspective where `predicate` matches `message_predicate` and the
+/// target is a `literal:string:` URI (i.e., a message body). Returns turns in
+/// the order the store returned them. Speaker is the link author.
+///
+/// Kept intentionally small — flows/channel-aware traversal is deferred to a
+/// later PR. Callers that already have a curated `Vec<(speaker, text)>` should
+/// pass it straight to [`run_extraction`] and skip this helper.
+pub async fn gather_transcript(
+    perspective: &PerspectiveInstance,
+    source: &str,
+    message_predicate: &str,
+) -> anyhow::Result<Vec<(String, String)>> {
+    use crate::types::LinkQuery;
+    let query = LinkQuery {
+        source: Some(source.to_string()),
+        predicate: Some(message_predicate.to_string()),
+        ..Default::default()
+    };
+    let links = perspective
+        .get_links(&query)
+        .await
+        .map_err(|e| anyhow::anyhow!("gather_transcript: get_links failed: {e:#}"))?;
+    let mut out = Vec::with_capacity(links.len());
+    for l in links {
+        if let Some(body) = decode_literal_string(&l.data.target) {
+            out.push((l.author, body));
+        }
+    }
+    Ok(out)
+}
+
+fn decode_literal_string(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("literal:string:")?;
+    percent_encoding::percent_decode_str(rest)
+        .decode_utf8()
+        .ok()
+        .map(|c| c.into_owned())
+}
+
+/// S6: end-to-end extraction driver. Wires everything: build the input from
+/// shapes' hints + transcript (S3), call `AIService::prompt` on the registered
+/// extraction task (S5), retry parsing up to 5× (S6), then for every proposed
+/// instance write its shape-driven links (S4) into the perspective via
+/// `add_link`. Returns the fresh base URI + links written per instance.
+///
+/// The `shapes` argument is exactly the classes to consider — callers pick
+/// which subject classes to extract into (usually all classes carrying an
+/// `extraction_hint`). `base_prefix` is the URI namespace under which new
+/// instance identities are minted, e.g. `"soa://ext/"`.
+pub async fn run_extraction(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[(String, String)],
+    base_prefix: &str,
+    context: &AgentContext,
+) -> anyhow::Result<Vec<(String, Vec<Link>)>> {
+    let task = ensure_extraction_task()?;
+    let prompt = build_extraction_input(shapes, transcript);
+
+    let service = crate::ai_service::AIService::global_instance()
+        .await
+        .map_err(|e| anyhow::anyhow!("run_extraction: AIService not ready: {e:#}"))?;
+
+    let instances = retry_extraction_parse(|_attempt| {
+        let service = service.clone();
+        let task_id = task.task_id.clone();
+        let prompt = prompt.clone();
+        async move {
+            let result = service
+                .prompt(task_id, prompt)
+                .await
+                .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
+            Ok(result.text)
+        }
+    })
+    .await?;
+
+    let placements = place_instances(shapes, &instances, base_prefix);
+
+    for (_base, links) in &placements {
+        for link in links {
+            perspective
+                .add_link(link.clone(), LinkStatus::Shared, None, context)
+                .await
+                .map_err(|e| anyhow::anyhow!("run_extraction: add_link failed: {e:#}"))?;
+        }
+    }
+    Ok(placements)
 }
 
 #[cfg(test)]
@@ -528,5 +728,140 @@ mod tests {
             .filter(|t| t.name == EXTRACTION_TASK_NAME)
             .collect();
         assert_eq!(rows.len(), 1, "expected exactly one extraction task row");
+    }
+
+    // ---- S6: apply_extraction_raw + retry_extraction_parse ---------------
+
+    #[test]
+    fn apply_extraction_raw_wires_parse_and_links() {
+        // Hand-fed raw = what the LLM would return; no live model in the loop.
+        // We verify the whole S3→S4 wiring: each proposed instance gets a fresh
+        // base under our prefix, its links are shape-driven (type flag + fields
+        // only), and multi-class output is split correctly.
+        let shapes = vec![
+            shape_from_sdna("Belief", BELIEF_SDNA),
+            shape_from_sdna("Intention", INTENTION_SDNA),
+        ];
+        let raw = r#"[
+          {"class":"Intention","title":"Extract LLM processing","owner":"Nico"},
+          {"class":"Belief","title":"This will work"}
+        ]"#;
+
+        let placements = apply_extraction_raw(&shapes, raw, "soa://ext/").unwrap();
+        assert_eq!(placements.len(), 2, "expected two placements");
+
+        // Bases are unique, prefixed, and class-tagged (lowercased).
+        let (b0, links0) = &placements[0];
+        let (b1, links1) = &placements[1];
+        assert_ne!(b0, b1, "each instance must get its own base URI");
+        assert!(b0.starts_with("soa://ext/intention/"));
+        assert!(b1.starts_with("soa://ext/belief/"));
+        assert!(links0.iter().all(|l| &l.source == b0));
+        assert!(links1.iter().all(|l| &l.source == b1));
+
+        // Intention: type flag + title + owner reached the link set.
+        assert!(links0
+            .iter()
+            .any(|l| l.predicate.as_deref() == Some("ns://type") && l.target == "ns://intention"));
+        assert!(links0
+            .iter()
+            .any(|l| l.predicate.as_deref() == Some("ns://title")
+                && l.target == "literal:string:Extract%20LLM%20processing"));
+        assert!(links0
+            .iter()
+            .any(|l| l.predicate.as_deref() == Some("ns://owner")
+                && l.target == "literal:string:Nico"));
+
+        // Belief: type flag with its own constant, no owner predicate.
+        assert!(links1
+            .iter()
+            .any(|l| l.predicate.as_deref() == Some("ns://type") && l.target == "ns://belief"));
+        assert!(!links1
+            .iter()
+            .any(|l| l.predicate.as_deref() == Some("ns://owner")));
+    }
+
+    #[test]
+    fn apply_extraction_raw_drops_unknown_class() {
+        // Only Belief is registered; the LLM hallucinates a Frob. It must be
+        // silently dropped (defensive: shapes are the source of truth for which
+        // classes can be instantiated).
+        let shapes = vec![shape_from_sdna("Belief", BELIEF_SDNA)];
+        let raw = r#"[
+          {"class":"Belief","title":"A"},
+          {"class":"Frob","title":"B"}
+        ]"#;
+        let placements = apply_extraction_raw(&shapes, raw, "soa://ext/").unwrap();
+        assert_eq!(placements.len(), 1);
+        assert!(placements[0].0.starts_with("soa://ext/belief/"));
+    }
+
+    #[test]
+    fn apply_extraction_raw_empty_array_yields_no_placements() {
+        let shapes = vec![shape_from_sdna("Belief", BELIEF_SDNA)];
+        assert!(apply_extraction_raw(&shapes, "[]", "soa://ext/")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn retry_extraction_parse_succeeds_on_first_attempt() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let attempts_clone = attempts.clone();
+        let out = retry_extraction_parse(move |_| {
+            let a = attempts_clone.clone();
+            async move {
+                a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(r#"[{"class":"Belief","title":"X"}]"#.to_string())
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_extraction_parse_recovers_after_bad_parse() {
+        // First attempt returns unparseable garbage; second returns valid JSON.
+        // retry_extraction_parse must call again and succeed within budget.
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let attempts_clone = attempts.clone();
+        let out = retry_extraction_parse(move |_| {
+            let a = attempts_clone.clone();
+            async move {
+                let n = a.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if n == 1 {
+                    Ok("total garbage, not json".to_string())
+                } else {
+                    Ok(r#"[{"class":"Intention","title":"Y"}]"#.to_string())
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_extraction_parse_fails_after_max_attempts() {
+        // Every attempt returns garbage → we exhaust EXTRACTION_MAX_ATTEMPTS
+        // and propagate the last parse error rather than looping forever.
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let attempts_clone = attempts.clone();
+        let result: anyhow::Result<Vec<ProposedInstance>> = retry_extraction_parse(move |_| {
+            let a = attempts_clone.clone();
+            async move {
+                a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok("never parseable".to_string())
+            }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            EXTRACTION_MAX_ATTEMPTS
+        );
     }
 }
