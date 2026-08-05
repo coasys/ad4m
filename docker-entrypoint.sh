@@ -227,6 +227,82 @@ maybe_setup_agent() {
     fi
 }
 
+# ── AI model auto-registration ─────────────────────────────────────────────
+# When pre-cached models exist (INCLUDE_MODELS=true at build time), register
+# them with the executor via WebSocket RPC so Flux transcription and
+# summarisation work out of the box.
+ws_rpc() {
+    local msg_type="$1" params="$2" msg_id="${3:-1}"
+    printf '{"id":"%s","type":"%s","params":%s}\n' "${msg_id}" "${msg_type}" "${params}" \
+        | websocat -n1 "ws://localhost:12000/api/v1/ws?token=${ADMIN_CREDENTIAL}" 2>/dev/null
+}
+
+setup_ai_models() {
+    if [ -z "$(ls -A "${KALOSM_CACHE}" 2>/dev/null)" ]; then
+        return
+    fi
+    if [ -z "${ADMIN_CREDENTIAL:-}" ]; then
+        return
+    fi
+    if ! command -v websocat >/dev/null 2>&1; then
+        echo "WARNING: websocat not found, skipping AI model registration." >&2
+        return
+    fi
+
+    echo "Registering AI models..."
+
+    local models_response
+    models_response=$(ws_rpc "ai.models" "{}" "list-models")
+    if [ -z "${models_response}" ]; then
+        echo "WARNING: could not query AI models." >&2
+        return
+    fi
+
+    # Register Whisper (transcription) if not already present
+    if ! echo "${models_response}" | jq -e '.result[] | select(.name == "Whisper")' >/dev/null 2>&1; then
+        local whisper_result whisper_id
+        whisper_result=$(ws_rpc "ai.addModel" \
+            '{"model":{"name":"Whisper","type":"TRANSCRIPTION","local":{"fileName":"whisper_small"}}}' \
+            "add-whisper")
+        whisper_id=$(echo "${whisper_result}" | jq -r '.result // empty')
+        if [ -n "${whisper_id}" ]; then
+            echo "  Registered transcription model: Whisper (${whisper_id})"
+        else
+            echo "  WARNING: failed to register Whisper model." >&2
+        fi
+    else
+        echo "  Whisper model already registered."
+    fi
+
+    # Register TinyLlama (LLM) if no LLM model exists
+    local llm_id=""
+    if echo "${models_response}" | jq -e '.result[] | select(.modelType == "LLM")' >/dev/null 2>&1; then
+        llm_id=$(echo "${models_response}" | jq -r '[.result[] | select(.modelType == "LLM")][0].id')
+        echo "  LLM model already registered (${llm_id})."
+    else
+        local llm_result
+        llm_result=$(ws_rpc "ai.addModel" \
+            '{"model":{"name":"TinyLlama","type":"LLM","local":{"fileName":"tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf","huggingfaceRepo":"TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF","tokenizerSource":{"repo":"hf-internal-testing/llama-tokenizer","revision":"main","fileName":"tokenizer.json"}}}}' \
+            "add-llm")
+        llm_id=$(echo "${llm_result}" | jq -r '.result // empty')
+        if [ -n "${llm_id}" ]; then
+            echo "  Registered LLM model: TinyLlama (${llm_id})"
+        else
+            echo "  WARNING: failed to register TinyLlama model." >&2
+        fi
+    fi
+
+    # Set default LLM if none configured
+    if [ -n "${llm_id}" ]; then
+        local default_response
+        default_response=$(ws_rpc "ai.getDefaultModel" '{"modelType":"LLM"}' "get-default")
+        if echo "${default_response}" | jq -e '.result == null' >/dev/null 2>&1; then
+            ws_rpc "ai.setDefaultModel" "{\"id\":\"${llm_id}\",\"modelType\":\"LLM\"}" "set-default" >/dev/null
+            echo "  Set TinyLlama as default LLM."
+        fi
+    fi
+}
+
 # ── Global discovery space (create on first boot, inject URL into WE) ───
 setup_global_space() {
     local we_dist="/opt/ad4m/we-dist"
@@ -374,6 +450,7 @@ EXECUTOR_PID=$!
 
 wait_for_executor
 maybe_setup_agent
+setup_ai_models || true
 setup_global_space
 inject_we_auth
 start_we_server

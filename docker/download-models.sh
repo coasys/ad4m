@@ -42,6 +42,7 @@ fetch "openai/whisper-small" "main" "config.json"
 
 echo "=== LLM: TinyLlama-1.1B-Chat Q4_K_M ==="
 fetch "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF" "main" "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+fetch "hf-internal-testing/llama-tokenizer" "main" "tokenizer.json"
 
 echo "=== Done ==="
 du -sh "${CACHE_ROOT}" 2>/dev/null || true

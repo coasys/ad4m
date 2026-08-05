@@ -30,11 +30,11 @@ INCLUDE_WE=false docker compose build
 INCLUDE_MODELS=true docker compose build
 ```
 
-Pre-downloads the default Kalosm models into the image so the executor can load them without network access at runtime:
+Pre-downloads the default Kalosm models into the image so the executor can load them without network access at runtime. On first boot, the entrypoint auto-registers the transcription and LLM models with the executor and sets the LLM as default — Flux transcription and summarisation work out of the box.
 
 - **Embedding:** BAAI/bge-small-en-v1.5 (auto-loaded on startup)
-- **Transcription:** openai/whisper-small (default whisper model)
-- **LLM:** TinyLlama-1.1B-Chat Q4_K_M (smallest supported chat model)
+- **Transcription:** openai/whisper-small (registered as "Whisper")
+- **LLM:** TinyLlama-1.1B-Chat Q4_K_M (registered as "TinyLlama", set as default)
 
 ### With Holochain enabled
 

@@ -353,6 +353,16 @@ RUN ARCH=$(dpkg --print-architecture) && \
     | tar -xz -C /usr/local/bin caddy && \
     chmod +x /usr/local/bin/caddy
 
+# websocat: minimal WebSocket CLI for AI model registration via WS-RPC
+ARG WEBSOCAT_VERSION=1.14.1
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "${ARCH}" = "amd64" ]; then WS_BIN="websocat.x86_64-unknown-linux-musl"; \
+    elif [ "${ARCH}" = "arm64" ]; then WS_BIN="websocat.aarch64-unknown-linux-musl"; \
+    else echo "Unsupported arch for websocat: ${ARCH}" >&2; exit 0; fi && \
+    curl -fsSL "https://github.com/vi/websocat/releases/download/v${WEBSOCAT_VERSION}/${WS_BIN}" \
+        -o /usr/local/bin/websocat && \
+    chmod +x /usr/local/bin/websocat
+
 COPY --from=builder /home/builder/ad4m-bin /usr/local/bin/ad4m
 COPY --from=builder /home/builder/ad4m-executor-bin /usr/local/bin/ad4m-executor
 
