@@ -90,6 +90,18 @@ pub enum CascadeSignal {
     Leave { did: String, room_id: String },
 }
 
+impl CascadeSignal {
+    /// Human-readable variant name for debug/trace logging.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            CascadeSignal::Announce { .. } => "Announce",
+            CascadeSignal::Leave { .. } => "Leave",
+            CascadeSignal::PipeOffer { .. } => "PipeOffer",
+            CascadeSignal::PipeAnswer { .. } => "PipeAnswer",
+        }
+    }
+}
+
 /// Manages the cascade cluster for a single SFU node.
 ///
 /// Tracks known peer SFU nodes, the bookkeeping side of pipe transports
@@ -109,6 +121,9 @@ pub struct CascadeManager {
     pipes: HashMap<(String, String), PipeMeta>,
     /// Max participants this node will accept per room
     max_participants_per_node: u32,
+    /// Per-room cooldown: last time a rebalance migration was issued.
+    /// Prevents rapid-fire migrations (anti-pingpong).
+    rebalance_cooldowns: HashMap<String, Instant>,
 }
 
 impl CascadeManager {
@@ -119,16 +134,7 @@ impl CascadeManager {
             known_nodes: HashMap::new(),
             pipes: HashMap::new(),
             max_participants_per_node,
-        }
-    }
-
-    /// Generate an announce signal for broadcasting.
-    pub fn announce_sfu_node(&self, room_id: &RoomId, participant_count: u32) -> CascadeSignal {
-        CascadeSignal::Announce {
-            did: self.local_did.clone(),
-            room_id: room_id.to_string(),
-            participant_count,
-            capacity_hint: self.max_participants_per_node,
+            rebalance_cooldowns: HashMap::new(),
         }
     }
 
@@ -221,18 +227,14 @@ impl CascadeManager {
             .map_err(|e| format!("Failed to serialize offer: {}", e))?;
 
         let participant_id = ParticipantId::next();
-        let peer = SfuPeer {
-            id: participant_id.clone(),
-            room_id: room_id.clone(),
-            agent_did: remote_did.to_string(),
+        let mut peer = SfuPeer::new(
+            participant_id.clone(),
+            room_id.clone(),
+            remote_did.to_string(),
             rtc,
-            tracks_in: HashMap::new(),
-            tracks_out: HashMap::new(),
-            tracks_out_rev: HashMap::new(),
-            pending_offer: Some(pending),
-            pending_offer_sent: None,
-            is_pipe: true,
-        };
+            true,
+        );
+        peer.pending_offer = Some(pending);
 
         self.pipes.insert(
             pipe_key,
@@ -281,25 +283,16 @@ impl CascadeManager {
         let sdp_answer = serde_json::to_string(&answer)
             .map_err(|e| format!("Failed to serialize pipe answer: {}", e))?;
 
-        // Parse room_id from the string format
-        // `{neighbourhood_url}:{room_name}`.  Neighbourhood URLs
-        // contain their own `://`, so split on the LAST `:`.
-        let (nh_url, room_name) = room_id.rsplit_once(':').unwrap_or((room_id, "default"));
-        let parsed_room = RoomId::new(nh_url, room_name);
+        let parsed_room = RoomId::parse(room_id);
 
         let participant_id = ParticipantId::next();
-        let peer = SfuPeer {
-            id: participant_id.clone(),
-            room_id: parsed_room.clone(),
-            agent_did: from_did.to_string(),
+        let peer = SfuPeer::new(
+            participant_id.clone(),
+            parsed_room.clone(),
+            from_did.to_string(),
             rtc,
-            tracks_in: HashMap::new(),
-            tracks_out: HashMap::new(),
-            tracks_out_rev: HashMap::new(),
-            pending_offer: None,
-            pending_offer_sent: None,
-            is_pipe: true,
-        };
+            true,
+        );
 
         let pipe_key = (room_id.to_string(), from_did.to_string());
         self.pipes.insert(
@@ -347,33 +340,6 @@ impl CascadeManager {
         Ok((meta.participant_id.clone(), sdp_answer_json.to_string()))
     }
 
-    /// Remove an SFU node from the cluster (handles sfu-leave).
-    /// Returns the list of `ParticipantId`s of pipes that were removed
-    /// so the caller can dispatch `SfuCommand::RemovePeer` for each.
-    pub fn remove_node(&mut self, did: &str) -> Vec<ParticipantId> {
-        // Remove from known nodes
-        for nodes in self.known_nodes.values_mut() {
-            nodes.remove(did);
-        }
-
-        // Remove pipe metadata for this DID across all rooms.
-        let keys_to_remove: Vec<_> = self
-            .pipes
-            .keys()
-            .filter(|(_, d)| d == did)
-            .cloned()
-            .collect();
-
-        let mut removed_pids = Vec::new();
-        for key in keys_to_remove {
-            if let Some(meta) = self.pipes.remove(&key) {
-                info!("Removed pipe transport to SFU node {}", did);
-                removed_pids.push(meta.participant_id);
-            }
-        }
-        removed_pids
-    }
-
     /// Targeted leave: drop just the `(room, did)` entry instead of
     /// purging the node from every room.  Returns the removed pipe's
     /// `ParticipantId` if there was one.
@@ -394,20 +360,6 @@ impl CascadeManager {
         } else {
             None
         }
-    }
-
-    /// Get known SFU nodes for a room (for the sfuNodesForRoom query).
-    pub fn nodes_for_room(&self, room_id: &str) -> Vec<SfuNodeInfo> {
-        self.known_nodes
-            .get(room_id)
-            .map(|nodes| nodes.values().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    /// Read the configured capacity per node — used as the
-    /// `capacity_hint` on announce-driven node info updates.
-    pub fn max_participants_per_node(&self) -> u32 {
-        self.max_participants_per_node
     }
 
     /// Pick the least-loaded SFU node for a new participant.
@@ -483,24 +435,6 @@ impl CascadeManager {
             .get(&(room_id.to_string(), remote_did.to_string()))
     }
 
-    /// All pipes for a given `room_id` — caller iterates the
-    /// `ParticipantId`s to find the corresponding `SfuPeer`s in the
-    /// server peers map.
-    pub fn pipes_for_room(&self, room_id: &str) -> Vec<&PipeMeta> {
-        self.pipes
-            .values()
-            .filter(|m| m.room_id.to_string() == room_id)
-            .collect()
-    }
-
-    /// Check if we're in cascaded mode for a room (have known peer nodes).
-    pub fn is_cascaded(&self, room_id: &str) -> bool {
-        self.known_nodes
-            .get(room_id)
-            .map(|n| !n.is_empty())
-            .unwrap_or(false)
-    }
-
     /// Our local DID (used by gossip dispatch to filter self-targeted signals).
     pub fn local_did(&self) -> &str {
         &self.local_did
@@ -519,23 +453,32 @@ impl CascadeManager {
         self.pipes.values().filter(|p| p.established).count()
     }
 
-    /// Evaluate whether the local node should shed participants to
-    /// a less-loaded peer.  Returns `Some((target_did, count))` if
-    /// rebalancing makes sense — the caller should initiate migration
-    /// of `count` participants to the target node.
+    /// Evaluate whether the local node should migrate one participant
+    /// to a less-loaded peer.  Returns `Some(target_did)` when a
+    /// migration makes sense.  The caller picks the participant and
+    /// publishes an `SfuMigrateEvent`.
     ///
-    /// Conservatively triggers only when:
-    /// 1. Local load exceeds 90% of capacity.
-    /// 2. A peer node has at least 30% free capacity.
-    /// 3. The load difference justifies moving participants (at least
-    ///    2 more than half the gap, to avoid ping-pong).
+    /// Anti-pingpong measures:
+    /// 1. Per-room 30-second cooldown between migrations.
+    /// 2. Local load must exceed 90% of capacity.
+    /// 3. A peer must have at least 30% free capacity.
+    /// 4. The gap between local and target must exceed 3 participants.
+    ///    (Moving one closes the gap by 2: local -1, target +1.
+    ///    A gap of 3 means the post-move gap drops to 1 — stable.)
     ///
-    /// Returns `None` when no rebalancing action makes sense.
+    /// Returns `None` when no migration action makes sense.
     pub fn suggest_rebalance(
-        &self,
+        &mut self,
         room_id: &str,
         local_count: u32,
-    ) -> Option<(String, u32)> {
+    ) -> Option<String> {
+        // Cooldown check: skip if we migrated from this room recently
+        if let Some(last) = self.rebalance_cooldowns.get(room_id) {
+            if last.elapsed() < Duration::from_secs(30) {
+                return None;
+            }
+        }
+
         // Only consider rebalancing when above 90% capacity
         let threshold = (self.max_participants_per_node as f64 * 0.9).ceil() as u32;
         if local_count < threshold {
@@ -562,17 +505,24 @@ impl CascadeManager {
             })
             .max_by_key(|n| n.capacity_hint.saturating_sub(n.participant_count))?;
 
-        let target_free = best.capacity_hint.saturating_sub(best.participant_count);
+        // Minimum gap of 4 participants to justify migration.
+        // Moving one participant closes the gap by 2 (local -1,
+        // target +1).  With gap >= 4, post-move gap = gap - 2 >= 2,
+        // which keeps the next tick below the threshold.
         let gap = local_count.saturating_sub(best.participant_count);
-
-        // Move half the gap, capped by target's free capacity, minimum 1
-        let to_move = (gap / 2).max(1).min(target_free);
-
-        if to_move == 0 {
+        if gap < 4 {
             return None;
         }
 
-        Some((best.did.clone(), to_move))
+        Some(best.did.clone())
+    }
+
+    /// Record that a migration was issued for `room_id`.  Starts the
+    /// cooldown timer so `suggest_rebalance` suppresses further
+    /// migrations for 30 seconds.
+    pub fn record_rebalance(&mut self, room_id: &str) {
+        self.rebalance_cooldowns
+            .insert(room_id.to_string(), Instant::now());
     }
 
     /// All `(room_id, remote_did)` keys for established pipes — for
@@ -594,44 +544,6 @@ mod tests {
 
     fn test_addr(port: u16) -> SocketAddr {
         format!("127.0.0.1:{}", port).parse().unwrap()
-    }
-
-    #[test]
-    fn test_cascade_announce_and_discovery() {
-        let mut node_a = CascadeManager::new("did:key:nodeA".into(), test_addr(10001), 8);
-        let mut node_b = CascadeManager::new("did:key:nodeB".into(), test_addr(10002), 8);
-        let room_id = RoomId::new("test-nh", "room1");
-
-        // node_a announces
-        let signal = node_a.announce_sfu_node(&room_id, 3);
-        match &signal {
-            CascadeSignal::Announce {
-                did,
-                room_id: _rid,
-                participant_count,
-                capacity_hint: _,
-            } => {
-                assert_eq!(did, "did:key:nodeA");
-                assert_eq!(*participant_count, 3);
-            }
-            _ => panic!("Expected Announce signal"),
-        }
-
-        // node_b handles announce
-        node_b.handle_sfu_announce("did:key:nodeA".into(), room_id.to_string(), 3, 8);
-        let nodes = node_b.nodes_for_room(&room_id.to_string());
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].did, "did:key:nodeA");
-        assert_eq!(nodes[0].participant_count, 3);
-
-        // node_a ignores its own announce
-        node_a.handle_sfu_announce("did:key:nodeA".into(), room_id.to_string(), 3, 8);
-        let nodes = node_a.nodes_for_room(&room_id.to_string());
-        assert_eq!(nodes.len(), 0);
-
-        // Verify cascaded detection
-        assert!(node_b.is_cascaded(&room_id.to_string()));
-        assert!(!node_a.is_cascaded(&room_id.to_string()));
     }
 
     #[test]
@@ -690,22 +602,6 @@ mod tests {
 
         // Duplicate pipe should error
         assert!(node_a.establish_pipe("did:key:nodeB", &room_id).is_err());
-    }
-
-    #[test]
-    fn test_cascade_remove_node() {
-        let mut node_a = CascadeManager::new("did:key:nodeA".into(), test_addr(10005), 8);
-        let room_id = RoomId::new("test-nh", "room1");
-
-        // Add node_b as known
-        node_a.handle_sfu_announce("did:key:nodeB".into(), room_id.to_string(), 2, 8);
-        assert_eq!(node_a.nodes_for_room(&room_id.to_string()).len(), 1);
-
-        // Remove node_b — no pipes registered so the returned Vec is empty.
-        let removed = node_a.remove_node("did:key:nodeB");
-        assert!(removed.is_empty());
-        assert_eq!(node_a.nodes_for_room(&room_id.to_string()).len(), 0);
-        assert!(!node_a.is_cascaded(&room_id.to_string()));
     }
 
     #[test]
@@ -770,42 +666,10 @@ mod tests {
         let mgr = CascadeManager::new("did:key:local".into(), test_addr(10009), 8);
         let room_id = RoomId::new("test-nh", "room1");
 
-        // No pipes registered → lookup returns None and pipes_for_room is empty.
+        // No pipes registered → lookup returns None.
         assert!(mgr
             .pipe_meta(&room_id.to_string(), "did:key:remote")
             .is_none());
-        assert!(mgr.pipes_for_room(&room_id.to_string()).is_empty());
     }
 
-    #[test]
-    fn test_room_remote_participants() {
-        use super::super::room::{ParticipantId, RoomId, SfuRoom};
-
-        let room_id = RoomId::new("test-nh", "room1");
-        let mut room = SfuRoom::new(room_id, None);
-
-        // Add local participant
-        let p1 = ParticipantId::next();
-        room.add_participant(p1.clone(), "did:key:local1".to_string())
-            .unwrap();
-        assert_eq!(room.participant_count(), 1);
-        assert_eq!(room.total_participant_count(), 1);
-
-        // Add remote participants
-        room.add_remote_participant("did:key:remote1".to_string(), "did:key:sfuB".to_string());
-        room.add_remote_participant("did:key:remote2".to_string(), "did:key:sfuB".to_string());
-        assert_eq!(room.participant_count(), 1); // local only
-        assert_eq!(room.total_participant_count(), 3); // local + remote
-
-        // Active speaker on local participant
-        room.set_active_speaker(&p1, true);
-
-        // Remove remote participant
-        assert!(room.remove_remote_participant("did:key:remote1"));
-        assert_eq!(room.total_participant_count(), 2);
-
-        // Remove all from SFU node
-        room.remove_remote_participants_from_node("did:key:sfuB");
-        assert_eq!(room.total_participant_count(), 1);
-    }
 }

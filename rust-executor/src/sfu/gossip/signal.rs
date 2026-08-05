@@ -93,13 +93,7 @@ impl SignalGossip {
         let signal: CascadeSignal = serde_json::from_str(json_payload)
             .map_err(|e| format!("SignalGossip: invalid JSON: {}", e))?;
 
-        let variant = match &signal {
-            CascadeSignal::Announce { .. } => "Announce",
-            CascadeSignal::Leave { .. } => "Leave",
-            CascadeSignal::PipeOffer { .. } => "PipeOffer",
-            CascadeSignal::PipeAnswer { .. } => "PipeAnswer",
-        };
-        debug!("SignalGossip[{}] injected inbound {}", self.local_did, variant);
+        debug!("SignalGossip[{}] injected inbound {}", self.local_did, signal.variant_name());
 
         self.inbound_tx
             .try_send(signal)
@@ -113,12 +107,7 @@ impl CascadeGossip for SignalGossip {
         let json = serde_json::to_string(&signal)
             .map_err(|e| format!("SignalGossip: serialise: {}", e))?;
 
-        let variant = match &signal {
-            CascadeSignal::Announce { .. } => "Announce",
-            CascadeSignal::Leave { .. } => "Leave",
-            CascadeSignal::PipeOffer { .. } => "PipeOffer",
-            CascadeSignal::PipeAnswer { .. } => "PipeAnswer",
-        };
+        let variant = signal.variant_name();
 
         match target {
             GossipTarget::Broadcast => {

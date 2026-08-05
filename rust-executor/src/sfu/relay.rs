@@ -115,23 +115,6 @@ impl MediaRelay {
         self.active_speaker = best.map(|(pid, _)| pid);
     }
 
-    /// Get the current active speaker, if any.
-    pub fn active_speaker(&self) -> Option<&ParticipantId> {
-        self.active_speaker.as_ref()
-    }
-
-    /// Check if a specific participant is currently speaking.
-    pub fn is_speaking(&self, pid: &ParticipantId) -> bool {
-        self.voice_activity
-            .get(pid)
-            .map(|s| {
-                s.is_speaking
-                    && Instant::now().duration_since(s.last_audio).as_millis()
-                        <= SPEAKING_TIMEOUT_MS
-            })
-            .unwrap_or(false)
-    }
-
     /// Remove a participant from voice activity tracking.
     pub fn remove_participant(&mut self, pid: &ParticipantId) {
         self.voice_activity.remove(pid);
@@ -145,12 +128,6 @@ impl MediaRelay {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_active_speaker_detection() {
-        let relay = MediaRelay::new();
-        assert!(relay.active_speaker().is_none());
-    }
 
     #[test]
     fn test_remove_participant() {
@@ -169,7 +146,7 @@ mod tests {
         relay.active_speaker = Some(p1.clone());
 
         relay.remove_participant(&p1);
-        assert!(relay.active_speaker().is_none());
-        assert!(!relay.is_speaking(&p1));
+        assert!(relay.active_speaker.is_none());
+        assert!(!relay.voice_activity.contains_key(&p1));
     }
 }

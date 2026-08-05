@@ -134,12 +134,7 @@ impl TcpGossip {
 impl CascadeGossip for TcpGossip {
     async fn send(&self, target: GossipTarget, signal: CascadeSignal) -> Result<(), String> {
         let outbound = self.outbound.lock().await;
-        let variant = match &signal {
-            CascadeSignal::Announce { .. } => "Announce",
-            CascadeSignal::Leave { .. } => "Leave",
-            CascadeSignal::PipeOffer { .. } => "PipeOffer",
-            CascadeSignal::PipeAnswer { .. } => "PipeAnswer",
-        };
+        let variant = signal.variant_name();
         match target {
             GossipTarget::Broadcast => {
                 let recipients: Vec<&String> = outbound.keys().collect();
@@ -217,13 +212,7 @@ async fn reader_loop(socket: TcpStream, inbound_tx: mpsc::Sender<CascadeSignal>)
                 }
                 match serde_json::from_str::<CascadeSignal>(line.trim()) {
                     Ok(signal) => {
-                        let variant = match &signal {
-                            CascadeSignal::Announce { .. } => "Announce",
-                            CascadeSignal::Leave { .. } => "Leave",
-                            CascadeSignal::PipeOffer { .. } => "PipeOffer",
-                            CascadeSignal::PipeAnswer { .. } => "PipeAnswer",
-                        };
-                        debug!("TcpGossip reader: inbound {} signal", variant);
+                        debug!("TcpGossip reader: inbound {} signal", signal.variant_name());
                         if inbound_tx.send(signal).await.is_err() {
                             return; // SfuService dropped the receiver
                         }

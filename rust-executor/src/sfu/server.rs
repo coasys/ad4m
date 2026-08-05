@@ -55,6 +55,29 @@ pub struct SfuPeer {
     pub is_pipe: bool,
 }
 
+impl SfuPeer {
+    pub fn new(
+        id: ParticipantId,
+        room_id: RoomId,
+        agent_did: String,
+        rtc: Rtc,
+        is_pipe: bool,
+    ) -> Self {
+        Self {
+            id,
+            room_id,
+            agent_did,
+            rtc,
+            tracks_in: HashMap::new(),
+            tracks_out: HashMap::new(),
+            tracks_out_rev: HashMap::new(),
+            pending_offer: None,
+            pending_offer_sent: None,
+            is_pipe,
+        }
+    }
+}
+
 impl std::fmt::Debug for SfuPeer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SfuPeer")
@@ -433,7 +456,6 @@ impl SfuServer {
                         Ok(Output::Transmit(transmit)) => {
                             if let Err(e) = socket
                                 .try_send_to(&transmit.contents, transmit.destination)
-                                .map_err(|e| e)
                             {
                                 debug!(
                                     "SFU: failed to send UDP to {}: {}",
@@ -493,25 +515,6 @@ impl SfuServer {
                     }
                     if target_peer.room_id != origin_room {
                         continue;
-                    }
-
-                    // Apply quality preference filtering for video
-                    if data.params.spec().codec.is_video() {
-                        if let Some(rid) = &data.rid {
-                            let pref = quality_preferences
-                                .get(target_pid)
-                                .map(|s| s.as_str())
-                                .unwrap_or("high");
-                            let rid_str = rid.to_string();
-                            let skip = match pref {
-                                "low" => rid_str != "low" && rid_str != "q",
-                                "medium" => rid_str == "high" || rid_str == "f",
-                                _ => false, // "high" and "auto" forward all
-                            };
-                            if skip {
-                                continue;
-                            }
-                        }
                     }
 
                     // Find the outgoing Mid on the target peer that maps to this origin track
@@ -772,11 +775,7 @@ impl SfuServer {
                             }
                         }
                         Err(e) => {
-                            if e.kind() == std::io::ErrorKind::WouldBlock {
-                                // Non-blocking mode, expected
-                            } else {
-                                error!("SFU: UDP recv error: {:?}", e);
-                            }
+                            error!("SFU: UDP recv error: {:?}", e);
                         }
                     }
                 }

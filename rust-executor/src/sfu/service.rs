@@ -37,7 +37,7 @@ pub struct SfuService {
     /// Maps neighbourhood URLs to their SFU configuration (from Social DNA).
     configs: Arc<RwLock<HashMap<String, SfuConfig>>>,
     /// Cascade manager for multi-node SFU deployments.
-    cascade_manager: Arc<RwLock<Option<CascadeManager>>>,
+    cascade_manager: Arc<RwLock<CascadeManager>>,
     /// Pluggable cluster-gossip transport.  Always present — single-node
     /// deployments pass a `NoopGossip` so the cascade plumbing stays
     /// uniform and the redirect logic falls through to "no peers".
@@ -78,7 +78,7 @@ impl SfuService {
             server,
             rooms: Arc::new(RwLock::new(RoomManager::new())),
             configs: Arc::new(RwLock::new(HashMap::new())),
-            cascade_manager: Arc::new(RwLock::new(Some(cascade_manager))),
+            cascade_manager: Arc::new(RwLock::new(cascade_manager)),
             gossip: Arc::clone(&gossip),
         });
 
@@ -250,11 +250,7 @@ impl SfuService {
             };
 
             {
-                let mut cascade_lock = self.cascade_manager.write().await;
-                let Some(mgr) = cascade_lock.as_mut() else {
-                    debug!("SFU gossip inbound: no CascadeManager, dropping signal");
-                    continue;
-                };
+                let mut mgr = self.cascade_manager.write().await;
                 match signal {
                     CascadeSignal::Announce {
                         did,
@@ -288,14 +284,7 @@ impl SfuService {
                             && mgr.local_did() > remote_did.as_str()
                             && !mgr.has_pipe(&room_id, &remote_did)
                         {
-                            // RoomId::Display formats as
-                            // `{neighbourhood_url}:{room_name}`; the
-                            // neighbourhood URL itself contains `:` (e.g.
-                            // `windtunnel://t6`), so split on the LAST
-                            // colon to recover the boundary.
-                            let (nh_url, room_name) =
-                                room_id.rsplit_once(':').unwrap_or((&room_id, "default"));
-                            let room = RoomId::new(nh_url, room_name);
+                            let room = RoomId::parse(&room_id);
                             match mgr.establish_pipe(&remote_did, &room) {
                                 Ok((pipe_peer, offer_signal)) => {
                                     info!(
@@ -486,25 +475,21 @@ impl SfuService {
                         "SFU cascade cleanup: pipe peer {} (room {} ↔ {}) died, removing",
                         dp.participant_id, dp.room_id, dp.remote_did
                     );
-                    let mut cascade_lock = self.cascade_manager.write().await;
-                    if let Some(mgr) = cascade_lock.as_mut() {
-                        mgr.remove_node_from_room(&dp.room_id, &dp.remote_did);
-                    }
+                    let mut mgr = self.cascade_manager.write().await;
+                    mgr.remove_node_from_room(&dp.room_id, &dp.remote_did);
                 }
                 _ = sweep_interval.tick() => {
                     let mut pipes_to_drop: Vec<ParticipantId> = Vec::new();
                     {
-                        let mut cascade_lock = self.cascade_manager.write().await;
-                        if let Some(mgr) = cascade_lock.as_mut() {
-                            let evicted = mgr.evict_stale_nodes(Duration::from_secs(30));
-                            for (room_id, did) in evicted {
-                                info!(
-                                    "SFU cascade sweep: evicting stale node {} from room {}",
-                                    did, room_id
-                                );
-                                if let Some(pid) = mgr.remove_node_from_room(&room_id, &did) {
-                                    pipes_to_drop.push(pid);
-                                }
+                        let mut mgr = self.cascade_manager.write().await;
+                        let evicted = mgr.evict_stale_nodes(Duration::from_secs(30));
+                        for (room_id, did) in evicted {
+                            info!(
+                                "SFU cascade sweep: evicting stale node {} from room {}",
+                                did, room_id
+                            );
+                            if let Some(pid) = mgr.remove_node_from_room(&room_id, &did) {
+                                pipes_to_drop.push(pid);
                             }
                         }
                     }
@@ -524,13 +509,7 @@ impl SfuService {
     /// Used by the cascade auto-establish logic so we only build pipes for
     /// rooms we're actively serving.
     async fn local_has_room(&self, room_id_str: &str) -> bool {
-        // RoomId::Display = `{neighbourhood_url}:{room_name}`, and
-        // the neighbourhood URL has its own scheme separator (`://`),
-        // so split on the LAST colon.
-        let (nh_url, room_name) = room_id_str
-            .rsplit_once(':')
-            .unwrap_or((room_id_str, "default"));
-        let room_id = RoomId::new(nh_url, room_name);
+        let room_id = RoomId::parse(room_id_str);
         let rooms = self.rooms.read().await;
         rooms.get_room(&room_id).is_some()
     }
@@ -549,10 +528,6 @@ impl SfuService {
         if let Err(e) = self.gossip.send(GossipTarget::Broadcast, signal).await {
             warn!("SFU announce_room failed: {}", e);
         }
-    }
-
-    pub fn is_available() -> bool {
-        true
     }
 
     /// Get the local address of the SFU server.
@@ -635,31 +610,29 @@ impl SfuService {
 
         // Check cascade redirect before accepting the participant
         {
-            let cascade = self.cascade_manager.read().await;
-            if let Some(ref mgr) = *cascade {
-                let rooms = self.rooms.read().await;
-                let local_count = rooms
-                    .get_room(&room_id)
-                    .map(|r| r.participant_count() as u32)
-                    .unwrap_or(0);
-                let configs = self.configs.read().await;
-                let preferred = configs
-                    .get(neighbourhood_url)
-                    .and_then(|c| c.preferred_sfu_did.as_deref());
-                if let Some(node) = mgr.pick_redirect_node(
-                    &room_id.to_string(),
-                    local_count,
-                    preferred,
-                ) {
-                    return Ok(CallSessionInfo {
-                        room_name: room_name.to_string(),
-                        neighbourhood_url: neighbourhood_url.to_string(),
-                        participant_id: String::new(),
-                        sdp_answer: String::new(),
-                        redirect_to: Some(node.did.clone()),
-                        stream_mapping: Vec::new(),
-                    });
-                }
+            let mgr = self.cascade_manager.read().await;
+            let rooms = self.rooms.read().await;
+            let local_count = rooms
+                .get_room(&room_id)
+                .map(|r| r.participant_count() as u32)
+                .unwrap_or(0);
+            let configs = self.configs.read().await;
+            let preferred = configs
+                .get(neighbourhood_url)
+                .and_then(|c| c.preferred_sfu_did.as_deref());
+            if let Some(node) = mgr.pick_redirect_node(
+                &room_id.to_string(),
+                local_count,
+                preferred,
+            ) {
+                return Ok(CallSessionInfo {
+                    room_name: room_name.to_string(),
+                    neighbourhood_url: neighbourhood_url.to_string(),
+                    participant_id: String::new(),
+                    sdp_answer: String::new(),
+                    redirect_to: Some(node.did.clone()),
+                    stream_mapping: Vec::new(),
+                });
             }
         }
 
@@ -688,18 +661,7 @@ impl SfuService {
         let (rtc, sdp_answer) = SfuServer::create_rtc_for_offer(offer, self.server.local_addr)?;
 
         // Create the SFU peer and send it to the event loop
-        let peer = SfuPeer {
-            id: pid.clone(),
-            room_id: room_id.clone(),
-            agent_did: agent_did.to_string(),
-            rtc,
-            tracks_in: HashMap::new(),
-            tracks_out: HashMap::new(),
-            tracks_out_rev: HashMap::new(),
-            pending_offer: None,
-            pending_offer_sent: None,
-            is_pipe: false,
-        };
+        let peer = SfuPeer::new(pid.clone(), room_id.clone(), agent_did.to_string(), rtc, false);
 
         self.server
             .command_tx
@@ -714,15 +676,12 @@ impl SfuService {
         let (stream_mapping, local_count) = {
             let rooms = self.rooms.read().await;
             if let Some(room) = rooms.get_room(&room_id) {
-                let mut mapping: Vec<String> = room
+                let mapping: Vec<String> = room
                     .participants
                     .values()
                     .filter(|p| p.id != pid)
                     .map(|p| format!("{}:{}", p.id.0, p.agent_did))
                     .collect();
-                for (did, _remote) in &room.remote_participants {
-                    mapping.push(format!("remote-{}:{}", did, did));
-                }
                 (mapping, room.participant_count() as u32)
             } else {
                 (Vec::new(), 0)
@@ -755,12 +714,8 @@ impl SfuService {
             .get_room_mut(&room_id)
             .ok_or_else(|| RoomError::NotFound.to_string())?;
 
-        // Find participant by DID
         let pid = room
-            .participants
-            .iter()
-            .find(|(_, p)| p.agent_did == agent_did)
-            .map(|(pid, _)| pid.clone())
+            .participant_id_for_did(agent_did)
             .ok_or_else(|| "Agent not in room".to_string())?;
 
         let is_empty = room.remove_participant(&pid);
@@ -821,10 +776,7 @@ impl SfuService {
             .get_room(&room_id)
             .ok_or_else(|| RoomError::NotFound.to_string())?;
         let pid = room
-            .participants
-            .iter()
-            .find(|(_, p)| p.agent_did == agent_did)
-            .map(|(pid, _)| pid.clone())
+            .participant_id_for_did(agent_did)
             .ok_or_else(|| "Agent not in room".to_string())?;
         let _ = self
             .server
@@ -842,22 +794,16 @@ impl SfuService {
     /// assert that auto-establish + the gossip-driven offer/answer
     /// round-trip lights up node-to-node pipes.
     pub async fn cascade_established_pipe_count(&self) -> usize {
-        let cascade = self.cascade_manager.read().await;
-        cascade
-            .as_ref()
-            .map(|mgr| mgr.established_pipe_count())
-            .unwrap_or(0)
+        let mgr = self.cascade_manager.read().await;
+        mgr.established_pipe_count()
     }
 
     /// Detailed list of established pipes as `(room_id, remote_did)`
     /// tuples.  Lets scenarios verify which specific node-pairs are
     /// connected.
     pub async fn cascade_established_pipes(&self) -> Vec<(String, String)> {
-        let cascade = self.cascade_manager.read().await;
-        cascade
-            .as_ref()
-            .map(|mgr| mgr.established_pipes())
-            .unwrap_or_default()
+        let mgr = self.cascade_manager.read().await;
+        mgr.established_pipes()
     }
 
     /// Set the quality preference for a participant's received video streams.
@@ -886,12 +832,8 @@ impl SfuService {
             .get_room(&room_id)
             .ok_or_else(|| RoomError::NotFound.to_string())?;
 
-        // Find participant by DID
         let pid = room
-            .participants
-            .iter()
-            .find(|(_, p)| p.agent_did == agent_did)
-            .map(|(pid, _)| pid.clone())
+            .participant_id_for_did(agent_did)
             .ok_or_else(|| "Agent not in room".to_string())?;
 
         self.server

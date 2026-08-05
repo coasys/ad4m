@@ -152,6 +152,11 @@ lazy_static::lazy_static! {
     /// it back over gossip.  Payload is a JSON
     /// [`crate::sfu::types::SfuPipeRenegotiationAnswer`].
     pub static ref SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC: String = "sfu-pipe-renegotiation-answer-topic".to_owned();
+    /// Cascade rebalancer tells a specific participant to leave this
+    /// node and rejoin on a less-loaded peer.  Payload is a JSON
+    /// [`crate::sfu::types::SfuMigrateEvent`].  Filtered by `targetDid`
+    /// in the events_ws fanout — only the named participant receives it.
+    pub static ref SFU_MIGRATE_TOPIC: String = "sfu-migrate-topic".to_owned();
 }
 
 /// Per-user dirty set for batched credit change notifications.

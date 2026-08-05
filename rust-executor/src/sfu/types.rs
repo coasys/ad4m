@@ -172,6 +172,24 @@ pub struct SfuPipeRenegotiationAnswer {
     pub sdp_answer: String,
 }
 
+/// Server-pushed event telling a participant to leave their current
+/// SFU node and rejoin on `target_did`.  The cascade rebalancer
+/// publishes this when it detects a significant load imbalance across
+/// the cluster.  The client should call `leave()`, set the connected
+/// node DID to `target_did`, then call `join()` — the same flow as
+/// cascade failover.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SfuMigrateEvent {
+    /// DID of the participant being migrated.  Used by the events_ws
+    /// fanout to filter per-user.
+    pub target_did: String,
+    pub neighbourhood_url: String,
+    pub room_name: String,
+    /// DID of the SFU node the participant should reconnect to.
+    pub migrate_to_did: String,
+}
+
 /// Result of a `call_join` — SDP answer + optional cascade redirect +
 /// stream mapping for the joining peer.
 #[derive(Debug, Clone, Serialize, Deserialize)]

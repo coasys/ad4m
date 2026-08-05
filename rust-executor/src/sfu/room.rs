@@ -40,6 +40,18 @@ impl RoomId {
             room_name: room_name.into(),
         }
     }
+
+    /// Parse a `RoomId` from its `Display` format
+    /// (`{neighbourhood_url}:{room_name}`).
+    ///
+    /// Neighbourhood URLs contain their own `://`, so the split uses
+    /// the LAST colon.  When no colon appears, the entire string
+    /// becomes the neighbourhood URL and the room name defaults to
+    /// `"default"`.
+    pub fn parse(s: &str) -> Self {
+        let (nh_url, room_name) = s.rsplit_once(':').unwrap_or((s, "default"));
+        Self::new(nh_url, room_name)
+    }
 }
 
 impl fmt::Display for RoomId {
@@ -59,22 +71,11 @@ pub struct ParticipantInfo {
     pub is_active_speaker: bool,
 }
 
-/// A remote participant connected via a pipe transport from a peer SFU node.
-#[derive(Debug, Clone)]
-pub struct RemoteParticipantInfo {
-    pub agent_did: String,
-    pub origin_sfu_did: String,
-    pub has_audio: bool,
-    pub has_video: bool,
-}
-
 /// A call room managed by the SFU.
 #[derive(Debug)]
 pub struct SfuRoom {
     pub id: RoomId,
     pub participants: HashMap<ParticipantId, ParticipantInfo>,
-    /// Remote participants connected through pipe transports from peer SFU nodes.
-    pub remote_participants: HashMap<String, RemoteParticipantInfo>,
     /// Epoch millis when the room was created.
     pub created_at: u64,
     pub max_participants: Option<usize>,
@@ -85,7 +86,6 @@ impl SfuRoom {
         Self {
             id,
             participants: HashMap::new(),
-            remote_participants: HashMap::new(),
             created_at: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -141,54 +141,12 @@ impl SfuRoom {
         self.participants.is_empty()
     }
 
-    pub fn participant_dids(&self) -> Vec<String> {
+    /// Find a participant's ID by their agent DID.
+    pub fn participant_id_for_did(&self, did: &str) -> Option<ParticipantId> {
         self.participants
-            .values()
-            .map(|p| p.agent_did.clone())
-            .collect()
-    }
-
-    /// Update active speaker status based on voice activity.
-    pub fn set_active_speaker(&mut self, pid: &ParticipantId, active: bool) {
-        if let Some(p) = self.participants.get_mut(pid) {
-            p.is_active_speaker = active;
-        }
-    }
-
-    pub fn set_media_state(&mut self, pid: &ParticipantId, has_audio: bool, has_video: bool) {
-        if let Some(p) = self.participants.get_mut(pid) {
-            p.has_audio = has_audio;
-            p.has_video = has_video;
-        }
-    }
-
-    /// Add a remote participant (from a peer SFU node).
-    pub fn add_remote_participant(&mut self, agent_did: String, origin_sfu_did: String) {
-        self.remote_participants.insert(
-            agent_did.clone(),
-            RemoteParticipantInfo {
-                agent_did,
-                origin_sfu_did,
-                has_audio: false,
-                has_video: false,
-            },
-        );
-    }
-
-    /// Remove a remote participant.
-    pub fn remove_remote_participant(&mut self, agent_did: &str) -> bool {
-        self.remote_participants.remove(agent_did).is_some()
-    }
-
-    /// Remove all remote participants from a specific SFU node.
-    pub fn remove_remote_participants_from_node(&mut self, sfu_did: &str) {
-        self.remote_participants
-            .retain(|_, p| p.origin_sfu_did != sfu_did);
-    }
-
-    /// Total participant count (local + remote).
-    pub fn total_participant_count(&self) -> usize {
-        self.participants.len() + self.remote_participants.len()
+            .iter()
+            .find(|(_, p)| p.agent_did == did)
+            .map(|(pid, _)| pid.clone())
     }
 }
 
@@ -198,7 +156,6 @@ pub enum RoomError {
     RoomFull,
     AlreadyJoined,
     NotFound,
-    NotMember,
 }
 
 impl fmt::Display for RoomError {
@@ -207,7 +164,6 @@ impl fmt::Display for RoomError {
             RoomError::RoomFull => write!(f, "Room is full"),
             RoomError::AlreadyJoined => write!(f, "Agent already joined this room"),
             RoomError::NotFound => write!(f, "Room not found"),
-            RoomError::NotMember => write!(f, "Not a member of this neighbourhood"),
         }
     }
 }
@@ -265,25 +221,6 @@ impl RoomManager {
         self.rooms.values().collect()
     }
 
-    /// Remove a participant from their room. Cleans up empty rooms.
-    /// Returns the room ID if the room was cleaned up.
-    pub fn remove_participant_from_all(&mut self, pid: &ParticipantId) -> Vec<RoomId> {
-        let mut cleaned_up = Vec::new();
-        let mut empty_rooms = Vec::new();
-
-        for (room_id, room) in self.rooms.iter_mut() {
-            if room.remove_participant(pid) {
-                empty_rooms.push(room_id.clone());
-            }
-        }
-
-        for room_id in empty_rooms {
-            self.rooms.remove(&room_id);
-            cleaned_up.push(room_id);
-        }
-
-        cleaned_up
-    }
 }
 
 #[cfg(test)]
@@ -325,10 +262,6 @@ mod tests {
         let room = mgr.get_room_mut(&room_id).unwrap();
         room.remove_participant(&p2);
         assert!(room.is_empty());
-
-        // Cleanup via manager
-        let cleaned = mgr.remove_participant_from_all(&ParticipantId::next());
-        // Room was already empty, cleanup happens on remove_participant_from_all
     }
 
     #[test]
