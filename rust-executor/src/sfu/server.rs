@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
 use str0m::change::SdpOffer;
-use str0m::media::{KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid};
+use str0m::media::{KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid, Rid};
 use str0m::net::Protocol;
 use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tokio::net::UdpSocket;
@@ -92,6 +92,30 @@ impl std::fmt::Debug for SfuPeer {
             .field("is_pipe", &self.is_pipe)
             .finish()
     }
+}
+
+/// Determine whether a media packet should pass the simulcast filter.
+///
+/// When the sender uses simulcast, each `MediaData` event carries a
+/// `rid` that identifies the layer ("high", "medium", "low").  The
+/// subscriber's quality preference (defaulting to "high") selects
+/// which layer to forward.  Non-simulcast sources (`rid = None`)
+/// always pass — there's only one layer to forward.
+///
+/// "auto" maps to "high" in this implementation.  True adaptive
+/// quality selection requires TWCC/REMB bandwidth estimation, which
+/// is a separate feature.
+pub(crate) fn should_forward_rid(rid: Option<&Rid>, preference: Option<&str>) -> bool {
+    let Some(rid) = rid else {
+        return true; // non-simulcast source — always forward
+    };
+    let desired: Rid = match preference.unwrap_or("high") {
+        "low" => Rid::from("low"),
+        "medium" => Rid::from("medium"),
+        // "high", "auto", and any unexpected value default to high
+        _ => Rid::from("high"),
+    };
+    *rid == desired
 }
 
 /// Commands sent to the SFU event loop from the GraphQL API / signalling layer.
@@ -276,7 +300,48 @@ impl SfuServer {
                             "SFU: peer {} quality preference set to '{}'",
                             participant_id, preference
                         );
-                        quality_preferences.insert(participant_id, preference);
+                        quality_preferences.insert(participant_id.clone(), preference);
+
+                        // Request a keyframe from every video origin
+                        // that feeds this subscriber.  The new layer's
+                        // decoder needs a keyframe to start rendering
+                        // after a layer switch.
+                        if let Some(sub_peer) = peers.get(&participant_id) {
+                            let room_id = sub_peer.room_id.clone();
+                            let video_origins: Vec<(ParticipantId, Mid)> = sub_peer
+                                .tracks_out
+                                .values()
+                                .filter_map(|(origin_pid, origin_mid)| {
+                                    peers.get(origin_pid).and_then(|op| {
+                                        op.tracks_in.get(origin_mid).and_then(|kind| {
+                                            if kind.is_video() {
+                                                Some((origin_pid.clone(), *origin_mid))
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                    })
+                                })
+                                .collect();
+                            for (origin_pid, origin_mid) in video_origins {
+                                if let Some(origin_peer) = peers.get_mut(&origin_pid) {
+                                    if origin_peer.room_id == room_id {
+                                        if let Some(mut writer) =
+                                            origin_peer.rtc.writer(origin_mid)
+                                        {
+                                            let _ = writer.request_keyframe(
+                                                None,
+                                                KeyframeRequestKind::Pli,
+                                            );
+                                            debug!(
+                                                "SFU: requested keyframe from {} mid {} for layer switch on {}",
+                                                origin_pid, origin_mid, participant_id
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     Ok(SfuCommand::ApplyServerAnswer {
                         participant_id,
@@ -514,6 +579,18 @@ impl SfuServer {
                         continue;
                     }
                     if target_peer.room_id != origin_room {
+                        continue;
+                    }
+
+                    // Simulcast filter: when the source sends multiple
+                    // layers (data.rid = Some("high"|"medium"|"low")),
+                    // only forward the layer matching the subscriber's
+                    // quality preference.  Non-simulcast packets
+                    // (rid = None) always pass through.
+                    if !should_forward_rid(
+                        data.rid.as_ref(),
+                        quality_preferences.get(target_pid).map(|s| s.as_str()),
+                    ) {
                         continue;
                     }
 
@@ -790,5 +867,88 @@ impl SfuServer {
                 let _ = peer.rtc.handle_input(Input::Timeout(now));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_forward_rid_non_simulcast() {
+        // No RID (non-simulcast sender) — always forward regardless
+        // of subscriber preference.
+        assert!(should_forward_rid(None, None));
+        assert!(should_forward_rid(None, Some("high")));
+        assert!(should_forward_rid(None, Some("medium")));
+        assert!(should_forward_rid(None, Some("low")));
+        assert!(should_forward_rid(None, Some("auto")));
+    }
+
+    #[test]
+    fn test_forward_rid_default_high() {
+        // No preference set → default to "high".
+        let high = Rid::from("high");
+        let medium = Rid::from("medium");
+        let low = Rid::from("low");
+
+        assert!(should_forward_rid(Some(&high), None));
+        assert!(!should_forward_rid(Some(&medium), None));
+        assert!(!should_forward_rid(Some(&low), None));
+    }
+
+    #[test]
+    fn test_forward_rid_explicit_high() {
+        let high = Rid::from("high");
+        let medium = Rid::from("medium");
+        let low = Rid::from("low");
+
+        assert!(should_forward_rid(Some(&high), Some("high")));
+        assert!(!should_forward_rid(Some(&medium), Some("high")));
+        assert!(!should_forward_rid(Some(&low), Some("high")));
+    }
+
+    #[test]
+    fn test_forward_rid_medium() {
+        let high = Rid::from("high");
+        let medium = Rid::from("medium");
+        let low = Rid::from("low");
+
+        assert!(!should_forward_rid(Some(&high), Some("medium")));
+        assert!(should_forward_rid(Some(&medium), Some("medium")));
+        assert!(!should_forward_rid(Some(&low), Some("medium")));
+    }
+
+    #[test]
+    fn test_forward_rid_low() {
+        let high = Rid::from("high");
+        let medium = Rid::from("medium");
+        let low = Rid::from("low");
+
+        assert!(!should_forward_rid(Some(&high), Some("low")));
+        assert!(!should_forward_rid(Some(&medium), Some("low")));
+        assert!(should_forward_rid(Some(&low), Some("low")));
+    }
+
+    #[test]
+    fn test_forward_rid_auto_maps_to_high() {
+        let high = Rid::from("high");
+        let medium = Rid::from("medium");
+        let low = Rid::from("low");
+
+        // "auto" forwards "high" layer only
+        assert!(should_forward_rid(Some(&high), Some("auto")));
+        assert!(!should_forward_rid(Some(&medium), Some("auto")));
+        assert!(!should_forward_rid(Some(&low), Some("auto")));
+    }
+
+    #[test]
+    fn test_forward_rid_unknown_preference_defaults_high() {
+        let high = Rid::from("high");
+        let medium = Rid::from("medium");
+
+        // Unknown preference string falls through to high
+        assert!(should_forward_rid(Some(&high), Some("ultra")));
+        assert!(!should_forward_rid(Some(&medium), Some("ultra")));
     }
 }
