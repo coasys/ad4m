@@ -1049,6 +1049,7 @@ mod tests {
             shape_uri: "".to_string(),
             properties: vec![],
             include_relations: vec![],
+            extraction_hint: None,
         }
     }
 

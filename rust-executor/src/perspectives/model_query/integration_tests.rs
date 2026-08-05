@@ -662,8 +662,10 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
             where_filter: None,
             where_predicates: None,
             transform: None,
+            extraction_hint: None,
         }],
         include_relations: vec![],
+        extraction_hint: None,
     }
 }
 
@@ -1234,8 +1236,10 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            extraction_hint: None,
         }],
         include_relations: vec![],
+        extraction_hint: None,
     };
 
     let mut instances = vec![serde_json::json!({"id": board})];
@@ -1798,8 +1802,10 @@ async fn test_where_filter_signed_expression_string() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            extraction_hint: None,
         }],
         include_relations: vec![],
+        extraction_hint: None,
     };
 
     let mut instances = vec![json!({"id": board})];
@@ -1872,8 +1878,10 @@ async fn test_where_filter_signed_expression_no_matches() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            extraction_hint: None,
         }],
         include_relations: vec![],
+        extraction_hint: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
@@ -1994,8 +2002,10 @@ async fn test_where_filter_multiple_conditions() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            extraction_hint: None,
         }],
         include_relations: vec![],
+        extraction_hint: None,
     };
 
     let mut instances = vec![json!({"id": board})];
@@ -2061,8 +2071,10 @@ async fn test_where_filter_missing_property_on_target() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            extraction_hint: None,
         }],
         include_relations: vec![],
+        extraction_hint: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
@@ -2126,8 +2138,10 @@ async fn test_where_filter_plain_literal_string() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            extraction_hint: None,
         }],
         include_relations: vec![],
+        extraction_hint: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
@@ -2214,8 +2228,10 @@ async fn test_where_filter_on_multiple_instances() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            extraction_hint: None,
         }],
         include_relations: vec![],
+        extraction_hint: None,
     };
 
     let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
@@ -2603,6 +2619,7 @@ fn scalar_prop(name: &str, predicate: &str, required: bool, flag: bool) -> Shape
         where_filter: None,
         where_predicates: None,
         transform: None,
+        extraction_hint: None,
     }
 }
 
@@ -2623,6 +2640,7 @@ fn collection_prop(name: &str, predicate: &str, getter: Option<&str>) -> ShapePr
         where_filter: None,
         where_predicates: None,
         transform: None,
+        extraction_hint: None,
     }
 }
 
@@ -2632,6 +2650,7 @@ fn make_shape(props: Vec<ShapeProperty>) -> ModelShape {
         shape_uri: String::new(),
         properties: props,
         include_relations: vec![],
+        extraction_hint: None,
     }
 }
 
@@ -4207,8 +4226,10 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
             where_filter: None,
             where_predicates: None,
             transform: None,
+            extraction_hint: None,
         }],
         include_relations: vec![],
+        extraction_hint: None,
     };
     resolver.register("Signal", signal_shape);
 
