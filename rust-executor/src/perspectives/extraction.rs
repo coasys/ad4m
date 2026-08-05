@@ -888,7 +888,7 @@ mod tests {
         use crate::prolog_service::init_prolog_service;
         use crate::test_utils::setup_wallet;
         use crate::types::{
-            LinkQuery, LocalModelInput, ModelInput, ModelType, PerspectiveHandle, PerspectiveState,
+            LinkQuery, ModelApiInput, ModelInput, ModelType, PerspectiveHandle, PerspectiveState,
         };
 
         setup_wallet();
@@ -896,26 +896,34 @@ mod tests {
         AgentService::init_global_test_instance();
         init_prolog_service().await;
 
-        // Spin up AIService and register a small local LLM as the default so
-        // that the `ensure_extraction_task` task (model_id = "default") has
-        // something to talk to.
+        // Spin up AIService and register an OpenAI-compatible remote LLM as the
+        // default so the `ensure_extraction_task` task (model_id = "default")
+        // has a real model to talk to. Endpoint + model are env-overridable so
+        // the run can select whatever fitting model is available; the defaults
+        // target Ollama (e.g. reached over an SSH tunnel to a GPU box).
         AIService::init_global_instance()
             .await
             .expect("AIService to initialize");
         let service = AIService::global_instance()
             .await
             .expect("AIService global instance");
+        let base_url = std::env::var("EXTRACTION_E2E_BASE_URL")
+            .unwrap_or_else(|_| "http://localhost:11434/v1".into());
+        let model = std::env::var("EXTRACTION_E2E_MODEL")
+            .unwrap_or_else(|_| "qwen3.5-27b-opus:latest".into());
+        eprintln!("[e2e] extraction against model '{model}' at {base_url}");
         let model_id = service
             .add_model(ModelInput {
                 name: "e2e extraction LLM".into(),
                 model_type: ModelType::Llm,
-                local: Some(LocalModelInput {
-                    file_name: "llama_tiny_1_1b_chat".into(),
-                    tokenizer_source: None,
-                    huggingface_repo: None,
-                    revision: None,
+                local: None,
+                api: Some(ModelApiInput {
+                    base_url,
+                    api_key: std::env::var("EXTRACTION_E2E_API_KEY")
+                        .unwrap_or_else(|_| "ollama".into()),
+                    model,
+                    api_type: crate::types::ModelApiType::OpenAi.to_string(),
                 }),
-                api: None,
             })
             .await
             .expect("add_model");
@@ -964,6 +972,16 @@ mod tests {
             .expect("run_extraction against real LLM to succeed");
 
         println!("e2e placements: {} instance(s)", placements.len());
+        for (base, links) in &placements {
+            println!("  instance {base}");
+            for l in links {
+                println!(
+                    "      {} -> {}",
+                    l.predicate.as_deref().unwrap_or("(none)"),
+                    l.target
+                );
+            }
+        }
         assert!(
             !placements.is_empty(),
             "expected at least one extracted instance from real LLM"
