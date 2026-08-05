@@ -55,6 +55,15 @@ export interface SfuNeighbourhoodApi {
             trackMapping?: TrackMapEntry[]
         }) => void,
     ): () => void
+    subscribeMigrateEvent(
+        targetDid: string,
+        callback: (event: {
+            targetDid: string
+            neighbourhoodUrl: string
+            roomName: string
+            migrateToDid: string
+        }) => void,
+    ): () => void
 }
 
 export type SfuTopology = "sfu" | "mesh" | "cascaded"
@@ -177,6 +186,7 @@ export class SfuManager {
     private midToParticipant: Map<string, string> = new Map()
     private trackDidIndex: number = 0
     private renegotiationUnsubscribe: (() => void) | null = null
+    private migrateUnsubscribe: (() => void) | null = null
 
     constructor(
         neighbourhood: SfuNeighbourhoodApi,
@@ -521,6 +531,76 @@ export class SfuManager {
                     }
                 },
             )
+
+        // Subscribe to cascade rebalance migration events.
+        // The server tells this participant to leave the current
+        // (overloaded) node and rejoin on a less-loaded peer.
+        // Same flow as cascade failover: leave → set target → rejoin.
+        this.migrateUnsubscribe =
+            this.neighbourhood.subscribeMigrateEvent(
+                this.agentDid,
+                async (event) => {
+                    if (event.neighbourhoodUrl !== this.neighbourhoodUrl)
+                        return
+                    if (event.roomName !== this.roomId) return
+
+                    console.info(
+                        `SFU rebalance: migrating to node ${event.migrateToDid}`,
+                    )
+
+                    const stream = this.state.localStream
+                    if (!stream) return
+
+                    // Clean up current connection without calling
+                    // the full leave() — we still hold the local
+                    // stream for the rejoin.
+                    if (this.renegotiationUnsubscribe) {
+                        try {
+                            this.renegotiationUnsubscribe()
+                        } catch {
+                            /* swallow */
+                        }
+                        this.renegotiationUnsubscribe = null
+                    }
+                    if (this.state.peerConnection) {
+                        this.state.peerConnection.close()
+                        this.state.peerConnection = null
+                    }
+                    try {
+                        await this.neighbourhood.callLeave(
+                            this.neighbourhoodUrl,
+                            this.roomId,
+                        )
+                    } catch {
+                        /* best-effort — the server already expects
+                         * us to leave */
+                    }
+
+                    // Clear participant state for the rejoin
+                    for (const [, participant] of this.state.participants) {
+                        this.emit("participant-left", participant)
+                    }
+                    this.state.participants.clear()
+                    this.state.participantId = null
+                    this.midToParticipant.clear()
+                    this.streamToParticipant.clear()
+                    this.trackDidIndex = 0
+                    this.state.knownParticipantDids = []
+
+                    // Point at the target node and rejoin
+                    this.state.connectedNodeDid = event.migrateToDid
+                    this.state.sfuPeerDid = event.migrateToDid
+                    try {
+                        await this.join(stream)
+                    } catch (err) {
+                        console.error(
+                            "SFU rebalance: rejoin failed:",
+                            err,
+                        )
+                        this.emit("error", err)
+                    }
+                },
+            )
     }
 
     async leave(): Promise<void> {
@@ -531,6 +611,14 @@ export class SfuManager {
                 /* swallow */
             }
             this.renegotiationUnsubscribe = null
+        }
+        if (this.migrateUnsubscribe) {
+            try {
+                this.migrateUnsubscribe()
+            } catch {
+                /* swallow */
+            }
+            this.migrateUnsubscribe = null
         }
         if (this.state.peerConnection) {
             this.state.peerConnection.close()

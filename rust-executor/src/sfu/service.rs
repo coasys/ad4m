@@ -17,6 +17,7 @@ use super::cascade::{CascadeManager, CascadeSignal};
 use super::gossip::{CascadeGossip, GossipTarget};
 use super::room::{ParticipantId, RoomError, RoomId, RoomManager, SfuRoom};
 use super::server::{SfuCommand, SfuPeer, SfuServer, SfuServerConfig};
+use super::types::SfuMigrateEvent;
 
 /// Global SFU service instance.
 static SFU_SERVICE: OnceCell<Arc<SfuService>> = OnceCell::new();
@@ -499,6 +500,64 @@ impl SfuService {
                             .command_tx
                             .send(SfuCommand::RemovePeer(pid))
                             .await;
+                    }
+
+                    // ── Rebalance check ──
+                    // Walk local rooms, ask the cascade manager if any
+                    // room exceeds the 90% threshold with a viable
+                    // target node.  suggest_rebalance() enforces its
+                    // own 30-second per-room cooldown, so running this
+                    // on every 5s tick adds no extra migration chatter.
+                    let migrate_events = {
+                        let rooms = self.rooms.read().await;
+                        let mut mgr = self.cascade_manager.write().await;
+                        let mut events: Vec<SfuMigrateEvent> = Vec::new();
+                        for room in rooms.list_rooms() {
+                            let local_count = room.participant_count() as u32;
+                            let room_id_str = room.id.to_string();
+                            if let Some(target_did) =
+                                mgr.suggest_rebalance(&room_id_str, local_count)
+                            {
+                                // Pick the most-recently-joined non-pipe
+                                // participant — least disruption to
+                                // established sessions.
+                                if let Some(victim) = room
+                                    .participants
+                                    .values()
+                                    .max_by_key(|p| p.joined_at)
+                                {
+                                    events.push(SfuMigrateEvent {
+                                        target_did: victim.agent_did.clone(),
+                                        neighbourhood_url: room.id.neighbourhood_url.clone(),
+                                        room_name: room.id.room_name.clone(),
+                                        migrate_to_did: target_did,
+                                    });
+                                    mgr.record_rebalance(&room_id_str);
+                                }
+                            }
+                        }
+                        events
+                    };
+                    // Publish outside the lock
+                    if !migrate_events.is_empty() {
+                        let pubsub = crate::pubsub::get_global_pubsub().await;
+                        for evt in migrate_events {
+                            info!(
+                                "SFU rebalance: migrating {} from {}:{} → {}",
+                                evt.target_did,
+                                evt.neighbourhood_url,
+                                evt.room_name,
+                                evt.migrate_to_did
+                            );
+                            if let Ok(json) = serde_json::to_string(&evt) {
+                                pubsub
+                                    .publish(
+                                        &crate::pubsub::SFU_MIGRATE_TOPIC,
+                                        &json,
+                                    )
+                                    .await;
+                            }
+                        }
                     }
                 }
             }

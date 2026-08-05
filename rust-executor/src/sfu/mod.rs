@@ -29,6 +29,7 @@ pub use gossip::{
 };
 pub use service::{get_sfu_service, SfuService};
 pub use types::{
-    CallSessionInfo, IceServer, SfuCallRenegotiationOffer, SfuConfig, SfuParticipantInfo,
-    SfuPipeRenegotiationAnswer, SfuPipeRenegotiationOffer, SfuRoomInfo, TrackMapEntry,
+    CallSessionInfo, IceServer, SfuCallRenegotiationOffer, SfuConfig, SfuMigrateEvent,
+    SfuParticipantInfo, SfuPipeRenegotiationAnswer, SfuPipeRenegotiationOffer, SfuRoomInfo,
+    TrackMapEntry,
 };

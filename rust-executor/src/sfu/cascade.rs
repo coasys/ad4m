@@ -672,4 +672,84 @@ mod tests {
             .is_none());
     }
 
+    #[test]
+    fn test_rebalance_below_threshold() {
+        // With capacity=10, threshold = ceil(10*0.9) = 9.
+        // local_count=8 stays below threshold → no suggestion.
+        let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10010), 10);
+        let room = "nh://test:room1";
+        mgr.handle_sfu_announce("did:key:peer".into(), room.into(), 2, 10);
+        assert!(mgr.suggest_rebalance(room, 8).is_none());
+    }
+
+    #[test]
+    fn test_rebalance_above_threshold_with_target() {
+        // capacity=10, threshold=9. local=9, peer has 2/10 (80% free).
+        // gap=9-2=7 >= 4. Peer has 80% free >= 30%.
+        let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10011), 10);
+        let room = "nh://test:room1";
+        mgr.handle_sfu_announce("did:key:peer".into(), room.into(), 2, 10);
+        let target = mgr.suggest_rebalance(room, 9);
+        assert_eq!(target.as_deref(), Some("did:key:peer"));
+    }
+
+    #[test]
+    fn test_rebalance_cooldown() {
+        let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10012), 10);
+        let room = "nh://test:room1";
+        mgr.handle_sfu_announce("did:key:peer".into(), room.into(), 2, 10);
+
+        // First call succeeds
+        assert!(mgr.suggest_rebalance(room, 9).is_some());
+        mgr.record_rebalance(room);
+
+        // Second call within 30s returns None (cooldown active)
+        assert!(mgr.suggest_rebalance(room, 9).is_none());
+    }
+
+    #[test]
+    fn test_rebalance_gap_too_small() {
+        // Peer has 7/10 participants. local=9. gap=9-7=2 < 4 → no migration.
+        let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10013), 10);
+        let room = "nh://test:room1";
+        mgr.handle_sfu_announce("did:key:peer".into(), room.into(), 7, 10);
+        assert!(mgr.suggest_rebalance(room, 9).is_none());
+    }
+
+    #[test]
+    fn test_rebalance_peer_too_full() {
+        // Peer has 8/10 (only 20% free < 30% threshold) → no migration.
+        let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10014), 10);
+        let room = "nh://test:room1";
+        mgr.handle_sfu_announce("did:key:peer".into(), room.into(), 8, 10);
+        assert!(mgr.suggest_rebalance(room, 10).is_none());
+    }
+
+    #[test]
+    fn test_rebalance_picks_emptiest_peer() {
+        let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10015), 20);
+        let room = "nh://test:room1";
+        mgr.handle_sfu_announce("did:key:peerA".into(), room.into(), 5, 20);
+        mgr.handle_sfu_announce("did:key:peerB".into(), room.into(), 2, 20);
+        // Both qualify (>= 30% free, gap >= 4). peerB has most headroom.
+        let target = mgr.suggest_rebalance(room, 18);
+        assert_eq!(target.as_deref(), Some("did:key:peerB"));
+    }
+
+    #[test]
+    fn test_rebalance_separate_room_cooldown() {
+        let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10016), 10);
+        let room_a = "nh://test:roomA";
+        let room_b = "nh://test:roomB";
+        mgr.handle_sfu_announce("did:key:peer".into(), room_a.into(), 2, 10);
+        mgr.handle_sfu_announce("did:key:peer".into(), room_b.into(), 2, 10);
+
+        // Rebalance room A and record cooldown
+        assert!(mgr.suggest_rebalance(room_a, 9).is_some());
+        mgr.record_rebalance(room_a);
+
+        // Room B should still allow rebalancing (independent cooldown)
+        assert!(mgr.suggest_rebalance(room_b, 9).is_some());
+    }
+
 }
