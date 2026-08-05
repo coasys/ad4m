@@ -18,6 +18,11 @@ pub struct AD4MAction {
 pub struct SHACLShape {
     pub target_class: String,
     pub properties: Vec<PropertyShape>,
+    /// Natural-language hint describing what this class represents, used to steer
+    /// LLM extraction (generic "English hint → model instance" mechanism).
+    /// Emitted as an `ad4m://extraction_hint` link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction_hint: Option<String>,
     /// Constructor actions for creating instances
     #[serde(default)]
     pub constructor_actions: Vec<AD4MAction>,
@@ -45,6 +50,11 @@ pub struct ConformanceCondition {
 pub struct PropertyShape {
     pub path: String,
     pub name: Option<String>,
+    /// Natural-language hint describing this property's meaning, injected into the
+    /// extraction prompt / generated tool schema as semantic guidance for the LLM.
+    /// Emitted as an `ad4m://extraction_hint` link on the property node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction_hint: Option<String>,
     pub datatype: Option<String>,
     pub min_count: Option<u32>,
     pub max_count: Option<u32>,
@@ -376,6 +386,15 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         target: shape.target_class.clone(),
     });
 
+    // Natural-language extraction hint (steers LLM extraction)
+    if let Some(hint) = &shape.extraction_hint {
+        links.push(Link {
+            source: shape_uri.clone(),
+            predicate: Some("ad4m://extraction_hint".to_string()),
+            target: format!("literal:string:{}", hint),
+        });
+    }
+
     // Constructor actions (stored as JSON in literal)
     if !shape.constructor_actions.is_empty() {
         let constructor_json =
@@ -433,6 +452,15 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             predicate: Some("sh://path".to_string()),
             target: prop.path.clone(),
         });
+
+        // Natural-language property extraction hint (semantic guidance for extraction/tooling)
+        if let Some(hint) = &prop.extraction_hint {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://extraction_hint".to_string()),
+                target: format!("literal:string:{}", hint),
+            });
+        }
 
         // Optional constraints
         if let Some(datatype) = &prop.datatype {
@@ -767,6 +795,66 @@ mod tests {
             .iter()
             .any(|l| l.source == "recipe://Recipe.name"
                 && l.predicate == Some("sh://path".to_string())));
+    }
+
+    #[test]
+    fn test_parse_shacl_with_extraction_hint() {
+        // Natural-language extraction hints on the class and on a property should be
+        // emitted as `ad4m://extraction_hint` links so the generic extractor / MCP
+        // tooling can inject them as semantic guidance for the LLM.
+        let shacl_json = r#"{
+            "target_class": "soa://Task",
+            "extraction_hint": "A concrete unit of work someone intends to do. Extract when there is an actionable outcome with a plausible owner; ignore vague aspirations.",
+            "properties": [
+                {
+                    "path": "soa://title",
+                    "name": "title",
+                    "extraction_hint": "Imperative one-line summary of the work, e.g. 'Extract LLM processing from Flux'.",
+                    "datatype": "xsd://string",
+                    "min_count": 1,
+                    "max_count": 1
+                }
+            ]
+        }"#;
+
+        let links = parse_shacl_to_links(shacl_json, "Task").unwrap();
+
+        // Class-level extraction-hint link on the shape node.
+        assert!(
+            links.iter().any(|l| l.source == "soa://TaskShape"
+                && l.predicate == Some("ad4m://extraction_hint".to_string())
+                && l.target
+                    .starts_with("literal:string:A concrete unit of work")),
+            "expected an ad4m://extraction_hint link on the class shape"
+        );
+
+        // Property-level extraction-hint link on the property shape node.
+        assert!(
+            links.iter().any(|l| l.source == "soa://Task.title"
+                && l.predicate == Some("ad4m://extraction_hint".to_string())
+                && l.target
+                    .starts_with("literal:string:Imperative one-line summary")),
+            "expected an ad4m://extraction_hint link on the property shape"
+        );
+    }
+
+    #[test]
+    fn test_parse_shacl_without_extraction_hint_emits_none() {
+        // Extraction hints are optional; absence must not emit an extraction_hint link.
+        let shacl_json = r#"{
+            "target_class": "recipe://Recipe",
+            "properties": [
+                { "path": "recipe://name", "name": "name", "datatype": "xsd://string" }
+            ]
+        }"#;
+
+        let links = parse_shacl_to_links(shacl_json, "Recipe").unwrap();
+        assert!(
+            !links
+                .iter()
+                .any(|l| l.predicate == Some("ad4m://extraction_hint".to_string())),
+            "no ad4m://extraction_hint link should be emitted when the hint is absent"
+        );
     }
 
     #[test]
