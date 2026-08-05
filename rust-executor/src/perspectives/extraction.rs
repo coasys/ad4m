@@ -11,6 +11,7 @@
 //!
 //! S2 is pure (no perspective, no LLM) and fully CI-tested.
 
+use crate::perspectives::model_query::types::ModelShape;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -54,9 +55,160 @@ fn clean_llm_json(raw: &str) -> String {
     s.trim().to_string()
 }
 
+/// S3: assemble the per-call LLM input from the target shapes' extraction hints
+/// plus the transcript. Pure — this is exactly where `extraction_hint` enters
+/// the prompt. Shape (matches the system prompt in S5):
+/// `{ "classes": [{ "name", "hint", "fields": [{ "name", "required", "hint" }] }],
+///    "transcript": [{ "speaker", "text" }] }`.
+pub fn build_extraction_input(shapes: &[ModelShape], transcript: &[(String, String)]) -> String {
+    let classes: Vec<serde_json::Value> = shapes
+        .iter()
+        .map(|s| {
+            let fields: Vec<serde_json::Value> = s
+                .properties
+                .iter()
+                // The type flag is set by instance_links (S4), not the LLM.
+                .filter(|p| !p.is_flag)
+                .map(|p| {
+                    serde_json::json!({
+                        "name": p.name,
+                        "required": p.is_required,
+                        "hint": p.extraction_hint,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "name": class_local_name(&s.target_class),
+                "hint": s.extraction_hint,
+                "fields": fields,
+            })
+        })
+        .collect();
+    let turns: Vec<serde_json::Value> = transcript
+        .iter()
+        .map(|(speaker, text)| serde_json::json!({ "speaker": speaker, "text": text }))
+        .collect();
+    serde_json::json!({ "classes": classes, "transcript": turns }).to_string()
+}
+
+/// Local class name from a class URI: `ns://Intention` -> `Intention`.
+pub(crate) fn class_local_name(target_class: &str) -> &str {
+    target_class
+        .rsplit(|c| c == '/' || c == ':')
+        .find(|seg| !seg.is_empty())
+        .unwrap_or(target_class)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::perspectives::model_query::shape::load_shape;
+    use crate::perspectives::shacl_parser::parse_shacl_to_links;
+    use crate::perspectives::sparql_store::SparqlStore;
+    use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
+
+    const BELIEF_SDNA: &str = r#"{
+      "target_class":"ns://Belief",
+      "extraction_hint":"A claim a participant holds to be true about the world or the group. Not a task or a question.",
+      "properties":[
+        {"path":"ns://type","name":"type","has_value":"ns://belief","min_count":1,"max_count":1},
+        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"One-sentence statement in the claimant's framing."}
+      ]
+    }"#;
+
+    const INTENTION_SDNA: &str = r#"{
+      "target_class":"ns://Intention",
+      "extraction_hint":"Something a participant commits to doing - an actionable outcome with a plausible owner.",
+      "properties":[
+        {"path":"ns://type","name":"type","has_value":"ns://intention","min_count":1,"max_count":1},
+        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the work."},
+        {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Who committed to it, if stated."}
+      ]
+    }"#;
+
+    /// Build a ModelShape via the real writer -> store -> loader path, so the
+    /// class/property `extraction_hint`s are actually populated (the direct
+    /// JSON path sets them to None).
+    fn shape_from_sdna(class: &str, sdna: &str) -> ModelShape {
+        let store = SparqlStore::new(None).unwrap();
+        let target = format!("ns://{class}");
+        let shape_uri = format!("ns://{class}Shape");
+        let mut links = vec![
+            Link {
+                source: target.clone(),
+                predicate: Some("rdf://type".into()),
+                target: "ad4m://SubjectClass".into(),
+            },
+            Link {
+                source: target,
+                predicate: Some("ad4m://shape".into()),
+                target: shape_uri,
+            },
+        ];
+        links.extend(parse_shacl_to_links(sdna, class).unwrap());
+        for l in links {
+            store
+                .add_link(&DecoratedLinkExpression {
+                    author: "did:key:test".into(),
+                    timestamp: "1700000000000".into(),
+                    data: l,
+                    proof: DecoratedExpressionProof {
+                        key: "k".into(),
+                        signature: "s".into(),
+                        valid: Some(true),
+                        invalid: Some(false),
+                    },
+                    status: None,
+                })
+                .unwrap();
+        }
+        load_shape(&store, class).unwrap()
+    }
+
+    #[test]
+    fn extraction_hint_lands_in_prompt() {
+        let shapes = vec![
+            shape_from_sdna("Belief", BELIEF_SDNA),
+            shape_from_sdna("Intention", INTENTION_SDNA),
+        ];
+        let input = build_extraction_input(
+            &shapes,
+            &[(
+                "Nico".into(),
+                "I'll extract the LLM processing into ADAM".into(),
+            )],
+        );
+
+        // class-level hints reach the prompt
+        assert!(input.contains("A claim a participant holds to be true"));
+        assert!(input.contains("actionable outcome with a plausible owner"));
+        // per-field hint + required flag
+        assert!(input.contains("Imperative summary of the work"));
+        assert!(input.contains("\"required\":true"));
+        // transcript included
+        assert!(input.contains("Nico") && input.contains("extract the LLM processing"));
+
+        // valid JSON, two classes, type-flag excluded from fields
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(v["classes"].as_array().unwrap().len(), 2);
+        let intention = v["classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "Intention")
+            .expect("Intention class in prompt");
+        let field_names: Vec<&str> = intention["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["name"].as_str())
+            .collect();
+        assert!(field_names.contains(&"title") && field_names.contains(&"owner"));
+        assert!(
+            !field_names.contains(&"type"),
+            "type flag must not be a field"
+        );
+    }
 
     fn titles(instances: &[ProposedInstance]) -> Vec<&str> {
         instances

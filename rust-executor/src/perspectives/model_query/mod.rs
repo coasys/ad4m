@@ -91,7 +91,7 @@ mod query;
 mod relations;
 #[cfg(test)]
 mod round_trip_tests;
-mod shape;
+pub(crate) mod shape;
 mod sparql_builder;
 #[cfg(test)]
 mod test_helpers;
