@@ -189,7 +189,12 @@ impl CascadeGossip for TcpGossip {
 /// Maximum line length the gossip reader accepts.  Lines exceeding
 /// this limit get dropped to prevent memory exhaustion from a
 /// malicious or misbehaving sender.
-const MAX_GOSSIP_LINE_BYTES: usize = 16_384;
+///
+/// SDP payloads with multiple renegotiation m-lines (pipe answers
+/// carrying audio + video per remote peer) routinely reach 20-30 KiB.
+/// 128 KiB gives comfortable headroom for large rooms while still
+/// capping memory from a misbehaving peer.
+const MAX_GOSSIP_LINE_BYTES: usize = 131_072;
 
 /// Reader: pull JSON lines off the socket, dispatch into the shared
 /// inbound channel.  Exits when the stream closes — its task
