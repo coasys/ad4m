@@ -49,6 +49,10 @@ pub struct SfuPeer {
     /// Reverse index: (origin_pid, origin_mid) -> outbound Mid on this peer.
     /// Provides O(1) lookup during media relay instead of scanning `tracks_out`.
     pub tracks_out_rev: HashMap<(ParticipantId, Mid), Mid>,
+    /// Tracks deferred because a pending offer blocked renegotiation
+    /// when the additions arrived.  Each entry stores:
+    /// (origin_pid, origin_mid, kind, origin_agent_did).
+    pub deferred_tracks: Vec<(ParticipantId, Mid, MediaKind, String)>,
     /// True for cross-node pipe transports — see [`SfuPeer`] docs.
     /// Affects how renegotiation offers are routed and how forward
     /// loops treat the participant.
@@ -73,6 +77,7 @@ impl SfuPeer {
             tracks_out_rev: HashMap::new(),
             pending_offer: None,
             pending_offer_sent: None,
+            deferred_tracks: Vec::new(),
             is_pipe,
         }
     }
@@ -87,6 +92,7 @@ impl std::fmt::Debug for SfuPeer {
             .field("tracks_in", &self.tracks_in.len())
             .field("tracks_out", &self.tracks_out.len())
             .field("tracks_out_rev", &self.tracks_out_rev.len())
+            .field("deferred_tracks", &self.deferred_tracks.len())
             .field("pending_offer", &self.pending_offer.is_some())
             .field("pending_offer_sent", &self.pending_offer_sent)
             .field("is_pipe", &self.is_pipe)
@@ -287,9 +293,11 @@ impl SfuServer {
                     }
                     Ok(SfuCommand::RemovePeer(pid)) => {
                         if let Some(peer) = peers.remove(&pid) {
-                            info!("SFU: peer {} left room {}", pid, peer.room_id);
+                            let room_id = peer.room_id.clone();
+                            info!("SFU: peer {} left room {}", pid, room_id);
                             relay.remove_participant(&pid);
                             quality_preferences.remove(&pid);
+                            clean_stale_track_refs(&mut peers, &pid, &room_id);
                         }
                     }
                     Ok(SfuCommand::SetQualityPreference {
@@ -380,6 +388,18 @@ impl SfuServer {
                                 "SFU: server-offer answer accepted for {} ({} outbound tracks live)",
                                 participant_id,
                                 peer.tracks_out.len()
+                            );
+                        }
+                        // Process deferred track additions now that the
+                        // pending offer cleared.
+                        if let Some((sdp_offer_json, track_mapping)) =
+                            apply_deferred_tracks(peer)
+                        {
+                            publish_renegotiation_offer(
+                                peer,
+                                &participant_id,
+                                sdp_offer_json,
+                                track_mapping,
                             );
                         }
                     }
@@ -500,6 +520,18 @@ impl SfuServer {
                             );
                             peer.pending_offer = None;
                             peer.pending_offer_sent = None;
+                            // Process deferred track additions now that
+                            // the stale pending offer cleared.
+                            if let Some((sdp_offer_json, track_mapping)) =
+                                apply_deferred_tracks(peer)
+                            {
+                                publish_renegotiation_offer(
+                                    peer,
+                                    pid,
+                                    sdp_offer_json,
+                                    track_mapping,
+                                );
+                            }
                         }
                     }
                 }
@@ -607,7 +639,7 @@ impl SfuServer {
                                 data.time,
                                 data.data.clone(),
                             ) {
-                                debug!(
+                                warn!(
                                     "SFU: failed to write media to peer {} mid {}: {:?}",
                                     target_pid, out_mid, e
                                 );
@@ -717,6 +749,21 @@ impl SfuServer {
                     continue;
                 };
                 if target_peer.pending_offer.is_some() {
+                    for (kind, origin_pid, origin_mid) in &additions {
+                        if !target_peer
+                            .tracks_out_rev
+                            .contains_key(&(origin_pid.clone(), *origin_mid))
+                        {
+                            if let Some(did) = pid_to_did.get(origin_pid) {
+                                target_peer.deferred_tracks.push((
+                                    origin_pid.clone(),
+                                    *origin_mid,
+                                    *kind,
+                                    did.clone(),
+                                ));
+                            }
+                        }
+                    }
                     continue;
                 }
                 let room_id = target_peer.room_id.clone();
@@ -870,6 +917,139 @@ impl SfuServer {
     }
 }
 
+/// Remove all `tracks_out` / `tracks_out_rev` entries that reference a
+/// departed participant from every remaining peer in the same room.
+/// Also purges any deferred tracks referencing the departed peer.
+fn clean_stale_track_refs(
+    peers: &mut HashMap<ParticipantId, SfuPeer>,
+    departed_pid: &ParticipantId,
+    room_id: &RoomId,
+) {
+    for (_pid, peer) in peers.iter_mut() {
+        if peer.room_id != *room_id {
+            continue;
+        }
+        let stale_mids: Vec<Mid> = peer
+            .tracks_out
+            .iter()
+            .filter(|(_, (origin_pid, _))| origin_pid == departed_pid)
+            .map(|(mid, _)| *mid)
+            .collect();
+        for mid in stale_mids {
+            if let Some((origin_pid, origin_mid)) = peer.tracks_out.remove(&mid) {
+                peer.tracks_out_rev.remove(&(origin_pid, origin_mid));
+            }
+        }
+        peer.deferred_tracks
+            .retain(|(origin_pid, _, _, _)| origin_pid != departed_pid);
+    }
+}
+
+/// Drain deferred tracks from a peer and produce a renegotiation
+/// offer.  Returns `(sdp_offer_json, track_mapping)` or `None` when
+/// no actionable tracks remain.
+fn apply_deferred_tracks(
+    peer: &mut SfuPeer,
+) -> Option<(String, Vec<crate::sfu::TrackMapEntry>)> {
+    if peer.deferred_tracks.is_empty() {
+        return None;
+    }
+    let deferred: Vec<_> = peer.deferred_tracks.drain(..).collect();
+
+    // Filter out tracks already plumbed — must happen before
+    // borrowing rtc via sdp_api().
+    let to_add: Vec<_> = deferred
+        .into_iter()
+        .filter(|(origin_pid, origin_mid, _, _)| {
+            !peer
+                .tracks_out_rev
+                .contains_key(&(origin_pid.clone(), *origin_mid))
+        })
+        .collect();
+
+    if to_add.is_empty() {
+        return None;
+    }
+
+    let mut api = peer.rtc.sdp_api();
+    let mut new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind, String)> = Vec::new();
+    for (origin_pid, origin_mid, kind, agent_did) in to_add {
+        let new_mid =
+            api.add_media(kind, str0m::media::Direction::SendOnly, None, None, None);
+        new_outbound.push((new_mid, origin_pid, origin_mid, kind, agent_did));
+    }
+
+    let (offer, pending) = api.apply()?;
+
+    let track_mapping: Vec<crate::sfu::TrackMapEntry> = new_outbound
+        .iter()
+        .map(|(new_mid, _, _, kind, agent_did)| crate::sfu::TrackMapEntry {
+            mid: new_mid.to_string(),
+            agent_did: agent_did.clone(),
+            media_kind: if kind.is_audio() {
+                "audio".to_string()
+            } else {
+                "video".to_string()
+            },
+        })
+        .collect();
+
+    for (new_mid, origin_pid, origin_mid, _, _) in new_outbound {
+        peer.tracks_out
+            .insert(new_mid, (origin_pid.clone(), origin_mid));
+        peer.tracks_out_rev
+            .insert((origin_pid, origin_mid), new_mid);
+    }
+
+    peer.pending_offer = Some(pending);
+    peer.pending_offer_sent = Some(Instant::now());
+
+    let sdp_offer_json = serde_json::to_string(&offer).ok()?;
+    Some((sdp_offer_json, track_mapping))
+}
+
+/// Publish a renegotiation offer for a peer's deferred tracks.
+/// Routes to the appropriate pubsub topic based on whether the peer
+/// represents a client or a pipe transport.
+fn publish_renegotiation_offer(
+    peer: &SfuPeer,
+    pid: &ParticipantId,
+    sdp_offer_json: String,
+    track_mapping: Vec<crate::sfu::TrackMapEntry>,
+) {
+    if peer.is_pipe {
+        let payload = crate::sfu::SfuPipeRenegotiationOffer {
+            remote_did: peer.agent_did.clone(),
+            room_id: peer.room_id.to_string(),
+            sdp_offer: sdp_offer_json,
+        };
+        if let Ok(payload_json) = serde_json::to_string(&payload) {
+            crate::pubsub::get_global_pubsub_sync().publish_sync(
+                &crate::pubsub::SFU_PIPE_RENEGOTIATION_OFFER_TOPIC,
+                &payload_json,
+            );
+        }
+    } else {
+        let payload = crate::sfu::SfuCallRenegotiationOffer {
+            target_did: peer.agent_did.clone(),
+            neighbourhood_url: peer.room_id.neighbourhood_url.clone(),
+            room_name: peer.room_id.room_name.clone(),
+            sdp_offer: sdp_offer_json,
+            track_mapping,
+        };
+        if let Ok(payload_json) = serde_json::to_string(&payload) {
+            crate::pubsub::get_global_pubsub_sync().publish_sync(
+                &crate::pubsub::SFU_CALL_RENEGOTIATION_OFFER_TOPIC,
+                &payload_json,
+            );
+        }
+    }
+    info!(
+        "SFU: deferred-track renegotiation offer published for peer {}",
+        pid
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -950,5 +1130,117 @@ mod tests {
         // Unknown preference string falls through to high
         assert!(should_forward_rid(Some(&high), Some("ultra")));
         assert!(!should_forward_rid(Some(&medium), Some("ultra")));
+    }
+
+    #[test]
+    fn test_stale_track_cleanup_after_peer_departure() {
+        let room_id = RoomId::new("neighbourhood://test", "room1");
+        let pid_a = ParticipantId::next();
+        let pid_b = ParticipantId::next();
+        let pid_c = ParticipantId::next();
+
+        let mut peer_b = SfuPeer::new(
+            pid_b.clone(),
+            room_id.clone(),
+            "did:key:peerB".to_string(),
+            Rtc::builder().build(),
+            false,
+        );
+        let mut peer_c = SfuPeer::new(
+            pid_c.clone(),
+            room_id.clone(),
+            "did:key:peerC".to_string(),
+            Rtc::builder().build(),
+            false,
+        );
+
+        // Allocate outbound Mids via sdp_api
+        let mid_b_out = peer_b.rtc.sdp_api().add_media(
+            MediaKind::Audio,
+            str0m::media::Direction::SendOnly,
+            None,
+            None,
+            None,
+        );
+        let mid_c_out = peer_c.rtc.sdp_api().add_media(
+            MediaKind::Audio,
+            str0m::media::Direction::SendOnly,
+            None,
+            None,
+            None,
+        );
+
+        // Use a separate Rtc to allocate an origin Mid
+        let mut scratch_rtc = Rtc::builder().build();
+        let origin_mid = scratch_rtc.sdp_api().add_media(
+            MediaKind::Audio,
+            str0m::media::Direction::RecvOnly,
+            None,
+            None,
+            None,
+        );
+
+        // Peer B has outbound track referencing peer A
+        peer_b
+            .tracks_out
+            .insert(mid_b_out, (pid_a.clone(), origin_mid));
+        peer_b
+            .tracks_out_rev
+            .insert((pid_a.clone(), origin_mid), mid_b_out);
+
+        // Peer C also has outbound track referencing peer A
+        peer_c
+            .tracks_out
+            .insert(mid_c_out, (pid_a.clone(), origin_mid));
+        peer_c
+            .tracks_out_rev
+            .insert((pid_a.clone(), origin_mid), mid_c_out);
+
+        // Peer B also has a deferred track referencing peer A
+        peer_b.deferred_tracks.push((
+            pid_a.clone(),
+            origin_mid,
+            MediaKind::Audio,
+            "did:key:peerA".to_string(),
+        ));
+
+        let mut peers: HashMap<ParticipantId, SfuPeer> = HashMap::new();
+        peers.insert(pid_b.clone(), peer_b);
+        peers.insert(pid_c.clone(), peer_c);
+
+        // Clean up after peer A departs
+        clean_stale_track_refs(&mut peers, &pid_a, &room_id);
+
+        // Verify no remaining peer references the departed PID
+        for (pid, peer) in &peers {
+            for (_, (ref_pid, _)) in &peer.tracks_out {
+                assert_ne!(
+                    ref_pid, &pid_a,
+                    "peer {} tracks_out still references departed peer",
+                    pid
+                );
+            }
+            for ((ref_pid, _), _) in &peer.tracks_out_rev {
+                assert_ne!(
+                    ref_pid, &pid_a,
+                    "peer {} tracks_out_rev still references departed peer",
+                    pid
+                );
+            }
+            for (ref_pid, _, _, _) in &peer.deferred_tracks {
+                assert_ne!(
+                    ref_pid, &pid_a,
+                    "peer {} deferred_tracks still references departed peer",
+                    pid
+                );
+            }
+        }
+
+        // All entries pointed to peer A — maps should now be empty
+        assert!(peers.get(&pid_b).unwrap().tracks_out.is_empty());
+        assert!(peers.get(&pid_b).unwrap().tracks_out_rev.is_empty());
+        assert!(peers.get(&pid_b).unwrap().deferred_tracks.is_empty());
+        assert!(peers.get(&pid_c).unwrap().tracks_out.is_empty());
+        assert!(peers.get(&pid_c).unwrap().tracks_out_rev.is_empty());
     }
 }
