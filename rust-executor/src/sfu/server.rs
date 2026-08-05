@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
@@ -144,12 +145,24 @@ impl Default for SfuServerConfig {
     }
 }
 
+/// Notification emitted by the event loop when a pipe peer's RTC dies.
+/// The service uses this to clean up the corresponding cascade entry.
+#[derive(Debug)]
+pub struct DeadPipe {
+    pub room_id: String,
+    pub remote_did: String,
+    pub participant_id: ParticipantId,
+}
+
 /// The SFU server. Owns the UDP socket and drives the str0m event loop.
 pub struct SfuServer {
     /// The bound local address of the UDP socket.
     pub local_addr: SocketAddr,
     /// Channel to send commands to the event loop.
     pub command_tx: mpsc::Sender<SfuCommand>,
+    /// Notifications about pipe peers whose RTC connection died.
+    /// The cascade cleanup task reads from the corresponding receiver.
+    pub dead_pipe_rx: StdMutex<Option<mpsc::Receiver<DeadPipe>>>,
 }
 
 impl SfuServer {
@@ -160,12 +173,14 @@ impl SfuServer {
         info!("SFU server bound to UDP {}", local_addr);
 
         let (command_tx, command_rx) = mpsc::channel(256);
+        let (dead_pipe_tx, dead_pipe_rx) = mpsc::channel(64);
 
-        tokio::spawn(Self::event_loop(socket, command_rx, local_addr));
+        tokio::spawn(Self::event_loop(socket, command_rx, local_addr, dead_pipe_tx));
 
         Ok(Self {
             local_addr,
             command_tx,
+            dead_pipe_rx: StdMutex::new(Some(dead_pipe_rx)),
         })
     }
 
@@ -197,6 +212,7 @@ impl SfuServer {
         socket: UdpSocket,
         mut command_rx: mpsc::Receiver<SfuCommand>,
         local_addr: SocketAddr,
+        dead_pipe_tx: mpsc::Sender<DeadPipe>,
     ) {
         let mut peers: HashMap<ParticipantId, SfuPeer> = HashMap::new();
         let mut relay = MediaRelay::new();
@@ -355,16 +371,32 @@ impl SfuServer {
                 }
             }
 
-            // Clean out disconnected peers
-            peers.retain(|pid, peer| {
-                if !peer.rtc.is_alive() {
-                    info!("SFU: peer {} disconnected", pid);
-                    relay.remove_participant(pid);
-                    false
-                } else {
-                    true
+            // Clean out disconnected peers.  For pipe peers, notify the
+            // cascade cleanup task so it can remove the stale PipeMeta
+            // entry — otherwise the cascade manager reports phantom
+            // established pipes after a remote node crash.
+            {
+                let mut dead_pipes: Vec<DeadPipe> = Vec::new();
+                peers.retain(|pid, peer| {
+                    if !peer.rtc.is_alive() {
+                        info!("SFU: peer {} disconnected", pid);
+                        relay.remove_participant(pid);
+                        if peer.is_pipe {
+                            dead_pipes.push(DeadPipe {
+                                room_id: peer.room_id.to_string(),
+                                remote_did: peer.agent_did.clone(),
+                                participant_id: pid.clone(),
+                            });
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
+                for dp in dead_pipes {
+                    let _ = dead_pipe_tx.try_send(dp);
                 }
-            });
+            }
 
             // Sweep stale pending offers — if the client (or remote SFU)
             // never answered within 10 seconds, clear the pending state

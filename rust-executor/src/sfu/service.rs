@@ -116,6 +116,23 @@ impl SfuService {
             });
         }
 
+        // Cascade cleanup: process dead pipe notifications from the
+        // server event loop and run periodic stale-node eviction.
+        {
+            let dead_pipe_rx = service
+                .server
+                .dead_pipe_rx
+                .lock()
+                .expect("dead_pipe_rx mutex poisoned")
+                .take();
+            if let Some(rx) = dead_pipe_rx {
+                let svc = Arc::clone(&service);
+                tokio::spawn(async move {
+                    svc.run_cascade_cleanup(rx).await;
+                });
+            }
+        }
+
         SFU_SERVICE
             .set(service.clone())
             .map_err(|_| "SFU service already initialized".to_string())?;
@@ -441,6 +458,70 @@ impl SfuService {
             for (target, signal) in outbound {
                 if let Err(e) = self.gossip.send(target, signal).await {
                     debug!("SFU cascade: gossip send failed: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Cascade cleanup loop: two duties.
+    ///
+    /// 1. **Dead pipe notifications** — the server event loop detects
+    ///    pipe peers whose `Rtc::is_alive()` returns false and pushes
+    ///    them here.  We remove the corresponding `PipeMeta` entry
+    ///    from the cascade manager so `cascade_established_pipe_count`
+    ///    reflects reality.
+    ///
+    /// 2. **Periodic stale-node sweep** — every 5 seconds, run
+    ///    `evict_stale_nodes(30s)` regardless of whether an Announce
+    ///    arrived.  Without this, a crashed node that stops announcing
+    ///    never gets evicted because the sweep only ran inside the
+    ///    Announce handler.
+    async fn run_cascade_cleanup(
+        self: Arc<Self>,
+        mut dead_pipe_rx: tokio::sync::mpsc::Receiver<super::server::DeadPipe>,
+    ) {
+        let mut sweep_interval = tokio::time::interval(Duration::from_secs(5));
+        // The first tick fires immediately; skip it so the sweep starts
+        // 5 seconds after boot (everything is healthy at startup).
+        sweep_interval.tick().await;
+
+        loop {
+            tokio::select! {
+                dp = dead_pipe_rx.recv() => {
+                    let Some(dp) = dp else { return; };
+                    info!(
+                        "SFU cascade cleanup: pipe peer {} (room {} ↔ {}) died, removing",
+                        dp.participant_id, dp.room_id, dp.remote_did
+                    );
+                    let mut cascade_lock = self.cascade_manager.write().await;
+                    if let Some(mgr) = cascade_lock.as_mut() {
+                        mgr.remove_node_from_room(&dp.room_id, &dp.remote_did);
+                    }
+                }
+                _ = sweep_interval.tick() => {
+                    let mut pipes_to_drop: Vec<ParticipantId> = Vec::new();
+                    {
+                        let mut cascade_lock = self.cascade_manager.write().await;
+                        if let Some(mgr) = cascade_lock.as_mut() {
+                            let evicted = mgr.evict_stale_nodes(Duration::from_secs(30));
+                            for (room_id, did) in evicted {
+                                info!(
+                                    "SFU cascade sweep: evicting stale node {} from room {}",
+                                    did, room_id
+                                );
+                                if let Some(pid) = mgr.remove_node_from_room(&room_id, &did) {
+                                    pipes_to_drop.push(pid);
+                                }
+                            }
+                        }
+                    }
+                    for pid in pipes_to_drop {
+                        let _ = self
+                            .server
+                            .command_tx
+                            .send(SfuCommand::RemovePeer(pid))
+                            .await;
+                    }
                 }
             }
         }
