@@ -459,6 +459,53 @@ mod tests {
       ]
     }"#;
 
+    const TASK_SDNA: &str = r#"{
+      "target_class":"ns://Task",
+      "extraction_hint":"A concrete, actionable unit of work to be done, ideally with an owner. Not a belief or a vague aspiration.",
+      "properties":[
+        {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
+        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task."},
+        {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Person responsible for the task, if stated."}
+      ]
+    }"#;
+
+    const OBSERVATION_SDNA: &str = r#"{
+      "target_class":"ns://Observation",
+      "extraction_hint":"A factual observation or reported state of the world or system - something seen, measured or reported, not an opinion, plan or task.",
+      "properties":[
+        {"path":"ns://type","name":"type","has_value":"ns://observation","min_count":1,"max_count":1},
+        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The observed fact, stated plainly."}
+      ]
+    }"#;
+
+    const QUESTION_SDNA: &str = r#"{
+      "target_class":"ns://Question",
+      "extraction_hint":"An open question raised in the conversation that still needs an answer.",
+      "properties":[
+        {"path":"ns://type","name":"type","has_value":"ns://question","min_count":1,"max_count":1},
+        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The question, phrased as a question."}
+      ]
+    }"#;
+
+    const VISION_SDNA: &str = r#"{
+      "target_class":"ns://Vision",
+      "extraction_hint":"A long-term aspiration or desired future state - directional and motivating, not a concrete task or plan.",
+      "properties":[
+        {"path":"ns://type","name":"type","has_value":"ns://vision","min_count":1,"max_count":1},
+        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The aspiration, stated concisely."}
+      ]
+    }"#;
+
+    const PLAN_SDNA: &str = r#"{
+      "target_class":"ns://Plan",
+      "extraction_hint":"A concrete approach or sequence of steps intended to achieve a goal.",
+      "properties":[
+        {"path":"ns://type","name":"type","has_value":"ns://plan","min_count":1,"max_count":1},
+        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Summary of the plan or approach."},
+        {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Who owns the plan, if stated."}
+      ]
+    }"#;
+
     /// Build a ModelShape via the real writer -> store -> loader path, so the
     /// class/property `extraction_hint`s are actually populated (the direct
     /// JSON path sets them to None).
@@ -1004,5 +1051,242 @@ mod tests {
                 "expected links written into perspective for {base}"
             );
         }
+    }
+
+    // ---- shared e2e harness for the real-LLM tests -----------------------
+
+    /// Register the Ollama-backed default model, stand up a private perspective,
+    /// register the given SoA classes, and run extraction over the transcript.
+    /// Returns (perspective, placements). Model/endpoint are env-overridable
+    /// (EXTRACTION_E2E_MODEL / _BASE_URL / _API_KEY); defaults hit Ollama at
+    /// localhost:11434 (e.g. via an SSH tunnel to a GPU box).
+    async fn run_e2e(
+        class_sdnas: &[(&str, &str)],
+        transcript: &[(&str, &str)],
+    ) -> (PerspectiveInstance, Vec<(String, Vec<Link>)>) {
+        use crate::agent::{AgentContext, AgentService};
+        use crate::ai_service::AIService;
+        use crate::prolog_service::init_prolog_service;
+        use crate::test_utils::setup_wallet;
+        use crate::types::{
+            ModelApiInput, ModelInput, ModelType, PerspectiveHandle, PerspectiveState,
+        };
+
+        setup_wallet();
+        ensure_db_init();
+        AgentService::init_global_test_instance();
+        init_prolog_service().await;
+
+        // init_global_instance always re-inits; each test adds its own model
+        // immediately after, so re-init between tests (--test-threads=1) is safe.
+        AIService::init_global_instance()
+            .await
+            .expect("AIService to initialize");
+        let service = AIService::global_instance()
+            .await
+            .expect("AIService global instance");
+        let base_url = std::env::var("EXTRACTION_E2E_BASE_URL")
+            .unwrap_or_else(|_| "http://localhost:11434/v1".into());
+        let model = std::env::var("EXTRACTION_E2E_MODEL")
+            .unwrap_or_else(|_| "qwen3.5-27b-opus:latest".into());
+        eprintln!("[e2e] extraction against model '{model}' at {base_url}");
+        let model_id = service
+            .add_model(ModelInput {
+                name: "e2e extraction LLM".into(),
+                model_type: ModelType::Llm,
+                local: None,
+                api: Some(ModelApiInput {
+                    base_url,
+                    api_key: std::env::var("EXTRACTION_E2E_API_KEY")
+                        .unwrap_or_else(|_| "ollama".into()),
+                    model,
+                    api_type: crate::types::ModelApiType::OpenAi.to_string(),
+                }),
+            })
+            .await
+            .expect("add_model");
+        service
+            .set_default_model(ModelType::Llm, model_id)
+            .await
+            .expect("set_default_model(Llm)");
+
+        let mut perspective = PerspectiveInstance::new(
+            PerspectiveHandle {
+                uuid: uuid::Uuid::new_v4().to_string(),
+                name: Some("Extraction e2e".into()),
+                shared_url: None,
+                neighbourhood: None,
+                state: PerspectiveState::Private,
+                owners: None,
+            },
+            None,
+        );
+        let ctx = AgentContext::main_agent();
+        perspective
+            .ensure_prolog_engine_pool_for_context(&ctx)
+            .await
+            .expect("prolog engine pool");
+
+        let shapes: Vec<ModelShape> = class_sdnas
+            .iter()
+            .map(|(class, sdna)| shape_from_sdna(class, sdna))
+            .collect();
+        let transcript: Vec<(String, String)> = transcript
+            .iter()
+            .map(|(s, t)| (s.to_string(), t.to_string()))
+            .collect();
+
+        let placements = run_extraction(&mut perspective, &shapes, &transcript, "soa://ext/", &ctx)
+            .await
+            .expect("run_extraction against real LLM to succeed");
+
+        println!("e2e placements: {} instance(s)", placements.len());
+        for (base, links) in &placements {
+            println!("  instance {base}");
+            for l in links {
+                println!(
+                    "      {} -> {}",
+                    l.predicate.as_deref().unwrap_or("(none)"),
+                    l.target
+                );
+            }
+        }
+        (perspective, placements)
+    }
+
+    /// Local `ns://type` names of the placed instances (e.g. "intention").
+    fn placed_type_names(placements: &[(String, Vec<Link>)]) -> Vec<String> {
+        placements
+            .iter()
+            .filter_map(|(_, links)| {
+                links
+                    .iter()
+                    .find(|l| l.predicate.as_deref() == Some("ns://type"))
+                    .map(|l| class_local_name(&l.target).to_string())
+            })
+            .collect()
+    }
+
+    async fn assert_persisted(
+        perspective: &PerspectiveInstance,
+        placements: &[(String, Vec<Link>)],
+    ) {
+        use crate::types::LinkQuery;
+        for (base, links) in placements {
+            assert!(!links.is_empty(), "empty link set for {base}");
+            let stored = perspective
+                .get_links(&LinkQuery {
+                    source: Some(base.clone()),
+                    ..Default::default()
+                })
+                .await
+                .expect("get_links after write");
+            assert!(
+                !stored.is_empty(),
+                "expected links written into perspective for {base}"
+            );
+        }
+    }
+
+    // ---- additional real-LLM e2e: different SoA classes + transcripts ----
+
+    // Task-tracking conversation -> Task instances (with owners).
+    #[ignore]
+    #[tokio::test]
+    async fn e2e_task_tracking_transcript() {
+        let (p, placements) = run_e2e(
+            &[("Task", TASK_SDNA)],
+            &[
+                (
+                    "Nico",
+                    "James, can you finish the WebRTC call module in WE by Monday?",
+                ),
+                (
+                    "James",
+                    "Yes, I'll wrap up the call module and port the transcription over.",
+                ),
+                (
+                    "Josh",
+                    "I'll set up the wind-tunnel Docker scenario for the agent test.",
+                ),
+            ],
+        )
+        .await;
+        assert!(
+            !placements.is_empty(),
+            "expected tasks from a task-assignment transcript"
+        );
+        assert_persisted(&p, &placements).await;
+        let types = placed_type_names(&placements);
+        assert!(
+            types.iter().all(|t| t == "task"),
+            "only Task was offered; got {types:?}"
+        );
+        let has_owner = placements.iter().any(|(_, links)| {
+            links
+                .iter()
+                .any(|l| l.predicate.as_deref() == Some("ns://owner"))
+        });
+        assert!(has_owner, "expected at least one task to carry an owner");
+    }
+
+    // Mixed epistemic conversation -> at least two distinct modalities.
+    #[ignore]
+    #[tokio::test]
+    async fn e2e_mixed_epistemic_transcript() {
+        let (p, placements) = run_e2e(
+            &[
+                ("Observation", OBSERVATION_SDNA),
+                ("Belief", BELIEF_SDNA),
+                ("Question", QUESTION_SDNA),
+            ],
+            &[
+                (
+                    "Josh",
+                    "The executor was sitting at 100% CPU during the whole call.",
+                ),
+                ("Nico", "I think named graphs would fix that."),
+                (
+                    "James",
+                    "But how do we merge when three LLMs write to the graph at once?",
+                ),
+            ],
+        )
+        .await;
+        assert!(!placements.is_empty());
+        assert_persisted(&p, &placements).await;
+        let types = placed_type_names(&placements);
+        let distinct: std::collections::HashSet<&String> = types.iter().collect();
+        assert!(
+            distinct.len() >= 2,
+            "expected >=2 distinct classes across observation/belief/question; got {types:?}"
+        );
+    }
+
+    // Strategy conversation -> Vision and/or Plan.
+    #[ignore]
+    #[tokio::test]
+    async fn e2e_vision_and_plan_transcript() {
+        let (p, placements) = run_e2e(
+            &[("Vision", VISION_SDNA), ("Plan", PLAN_SDNA)],
+            &[
+                (
+                    "Nico",
+                    "The dream is a holonic collective-intelligence network where humans and AIs think together.",
+                ),
+                (
+                    "Nico",
+                    "Concretely, we start by shipping the SoA-flow MVP, then layer Synergy Fuel on top.",
+                ),
+            ],
+        )
+        .await;
+        assert!(!placements.is_empty());
+        assert_persisted(&p, &placements).await;
+        let types = placed_type_names(&placements);
+        assert!(
+            types.iter().any(|t| t == "vision" || t == "plan"),
+            "expected a Vision or Plan; got {types:?}"
+        );
     }
 }
