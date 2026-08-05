@@ -3,16 +3,17 @@
 //! class/property (see `shacl_parser` S0 + `model_query` S1).
 //!
 //! Build sequence (planning/generic-extraction-spec.md §9):
-//!   S2 — `parse_extraction_response` (this commit): LLM JSON -> `ProposedInstance`s
-//!   S3 — `build_extraction_input`  : shapes' hints + transcript -> prompt
-//!   S4 — `instance_links`          : `ProposedInstance` -> perspective links
-//!   S5 — system prompt + `ensure_extraction_task`
-//!   S6 — `run_extraction`          : async shell wiring S1-S5 + AIService
+//!   S2 — `parse_extraction_response`: LLM JSON -> `ProposedInstance`s
+//!   S3 — `build_extraction_input`   : shapes' hints + transcript -> prompt
+//!   S4 — `instance_links`           : `ProposedInstance` -> perspective links
+//!   S5 — `EXTRACTION_SYSTEM_PROMPT` + `ensure_extraction_task` (this commit)
+//!   S6 — `run_extraction`           : async shell wiring S1-S5 + AIService
 //!
-//! S2 is pure (no perspective, no LLM) and fully CI-tested.
+//! S2–S5 are pure/DB-only (no LLM) and CI-tested.
 
+use crate::db::Ad4mDb;
 use crate::perspectives::model_query::types::ModelShape;
-use crate::types::Link;
+use crate::types::{AITask, Link};
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -155,6 +156,70 @@ fn value_to_literal_uri(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// S5: name under which the generic extraction task is registered with
+/// `AIService`. Kept stable so `ensure_extraction_task` can find it across
+/// executor restarts and multiple callers.
+pub const EXTRACTION_TASK_NAME: &str = "adam://extraction";
+
+/// S5: system prompt sent with every extraction call. Instance-specific
+/// scaffolding (available classes, their hints, the transcript) is added by
+/// `build_extraction_input` (S3), so this stays stable across calls and the
+/// task can be reused.
+pub const EXTRACTION_SYSTEM_PROMPT: &str = "\
+You extract typed instances from a conversation transcript.
+
+You receive a JSON object with two fields:
+  - `classes`: available subject classes. Each has a `name`, a natural-language
+    `hint` describing when to instantiate it, and a list of `fields`. Each field
+    has a `name`, optional `hint`, and `required` flag.
+  - `transcript`: an array of turns `{speaker, text}`.
+
+Emit a JSON array. Each element is `{\"class\": <class name>, ...fields}`, where
+the fields' values are strings drawn from what participants actually said or
+committed to in the transcript. Only include a class if the transcript clearly
+supports it — err on the side of fewer instances. Only include a field if the
+value is present or clearly implied; omit optional fields you cannot fill.
+
+Output rules:
+  - Return valid JSON only — no prose, no markdown fences, no <think> blocks.
+  - Return an empty array `[]` if nothing matches.
+  - Do not invent classes or fields not listed in `classes`.
+";
+
+/// S5: idempotently register the generic extraction task in the AI-task DB.
+///
+/// If a task with `EXTRACTION_TASK_NAME` already exists, returns it unchanged
+/// (so callers can safely invoke this on every executor startup or before every
+/// extraction run). Otherwise inserts a new row bound to the `\"default\"` LLM
+/// model — `AIService::replace_model_variables` resolves this to whatever LLM
+/// the user has configured as default at prompt time, so extraction works with
+/// any model without hard-coding one here.
+///
+/// DB-only: does not touch the running `AIService`. The runtime path (S6) is
+/// expected to call `service.spawn_task(task)` separately when it needs the
+/// model loaded for a `prompt` call; this split keeps registration testable in
+/// CI without a GPU.
+pub fn ensure_extraction_task() -> anyhow::Result<AITask> {
+    if let Some(existing) = Ad4mDb::with_global_instance(|db| db.get_tasks())?
+        .into_iter()
+        .find(|t| t.name == EXTRACTION_TASK_NAME)
+    {
+        return Ok(existing);
+    }
+    let task_id = Ad4mDb::with_global_instance(|db| {
+        db.add_task(
+            EXTRACTION_TASK_NAME.to_string(),
+            "default".to_string(),
+            EXTRACTION_SYSTEM_PROMPT.to_string(),
+            vec![],
+            None,
+        )
+    })?;
+    let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
+        .ok_or_else(|| anyhow::anyhow!("extraction task vanished immediately after insert"))?;
+    Ok(task)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +227,15 @@ mod tests {
     use crate::perspectives::shacl_parser::parse_shacl_to_links;
     use crate::perspectives::sparql_store::SparqlStore;
     use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
+    use std::sync::Once;
+
+    static INIT_DB: Once = Once::new();
+
+    fn ensure_db_init() {
+        INIT_DB.call_once(|| {
+            Ad4mDb::init_global_instance(":memory:").unwrap();
+        });
+    }
 
     const BELIEF_SDNA: &str = r#"{
       "target_class":"ns://Belief",
@@ -420,5 +494,39 @@ mod tests {
         assert!(links
             .iter()
             .any(|l| l.predicate.as_deref() == Some("ns://title")));
+    }
+
+    #[test]
+    fn ensure_extraction_task_registers_and_is_idempotent() {
+        ensure_db_init();
+
+        // Guard: some other test may have inserted the row already; wipe just
+        // our name so the first call below is a real insert. (Global DB is
+        // shared across the single-threaded test run.)
+        let existing: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.name == EXTRACTION_TASK_NAME)
+            .collect();
+        for t in existing {
+            Ad4mDb::with_global_instance(|db| db.remove_task(t.task_id.clone())).unwrap();
+        }
+
+        let first = ensure_extraction_task().unwrap();
+        assert_eq!(first.name, EXTRACTION_TASK_NAME);
+        assert_eq!(first.model_id, "default");
+        assert!(first.system_prompt.contains("You extract typed instances"));
+        assert!(!first.task_id.is_empty());
+
+        // Second call must find the same row, not insert a duplicate.
+        let second = ensure_extraction_task().unwrap();
+        assert_eq!(first.task_id, second.task_id);
+
+        let rows: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.name == EXTRACTION_TASK_NAME)
+            .collect();
+        assert_eq!(rows.len(), 1, "expected exactly one extraction task row");
     }
 }
