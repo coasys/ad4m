@@ -12,6 +12,7 @@
 //! S2 is pure (no perspective, no LLM) and fully CI-tested.
 
 use crate::perspectives::model_query::types::ModelShape;
+use crate::types::Link;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -97,6 +98,61 @@ pub(crate) fn class_local_name(target_class: &str) -> &str {
         .rsplit(|c| c == '/' || c == ':')
         .find(|seg| !seg.is_empty())
         .unwrap_or(target_class)
+}
+
+/// S4: turn a `ProposedInstance` (parsed LLM output) into perspective links
+/// anchored at `base`. Pure — no store, no LLM. Emits, in shape order:
+///   1. one link per type-flag property (predicate = flag path, target = the
+///      flag's constant `initial_value`), so downstream queries recognise the
+///      class;
+///   2. one link per non-flag shape property that appears in `inst.props`
+///      (predicate = property path, target = literal-encoded value).
+///
+/// Unknown/extra fields in `inst.props` are dropped — the LLM cannot inject
+/// links outside the declared class shape.
+pub fn instance_links(shape: &ModelShape, inst: &ProposedInstance, base: &str) -> Vec<Link> {
+    let mut out = Vec::new();
+    for prop in &shape.properties {
+        if prop.is_flag {
+            if let Some(target) = prop.initial_value.as_ref() {
+                out.push(Link {
+                    source: base.to_string(),
+                    predicate: Some(prop.predicate.clone()),
+                    target: target.clone(),
+                });
+            }
+            continue;
+        }
+        if let Some(value) = inst.props.get(&prop.name) {
+            if let Some(target) = value_to_literal_uri(value) {
+                out.push(Link {
+                    source: base.to_string(),
+                    predicate: Some(prop.predicate.clone()),
+                    target,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Encode a JSON scalar into an AD4M `literal:` URI (matches the encoding used
+/// by `languages/literal.rs`, mirrored in `model_query::utils`). Skips `null`.
+fn value_to_literal_uri(value: &serde_json::Value) -> Option<String> {
+    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(format!(
+            "literal:string:{}",
+            utf8_percent_encode(s, NON_ALPHANUMERIC)
+        )),
+        serde_json::Value::Number(n) => Some(format!("literal:number:{n}")),
+        serde_json::Value::Bool(b) => Some(format!("literal:boolean:{b}")),
+        other => Some(format!(
+            "literal:json:{}",
+            utf8_percent_encode(&other.to_string(), NON_ALPHANUMERIC)
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -276,5 +332,93 @@ mod tests {
     #[test]
     fn garbage_is_an_error_not_a_panic() {
         assert!(parse_extraction_response("not json at all").is_err());
+    }
+
+    // ---- S4: instance_links ---------------------------------------------
+
+    fn find_shape<'a>(shapes: &'a [ModelShape], class_uri: &str) -> &'a ModelShape {
+        shapes
+            .iter()
+            .find(|s| s.target_class == class_uri)
+            .unwrap_or_else(|| panic!("shape not found: {class_uri}"))
+    }
+
+    #[test]
+    fn instance_links_emit_type_flag_and_scalar_fields() {
+        let shapes = vec![
+            shape_from_sdna("Belief", BELIEF_SDNA),
+            shape_from_sdna("Intention", INTENTION_SDNA),
+        ];
+        let raw = r#"[
+          {"class":"Intention","title":"Extract LLM processing","owner":"Nico"},
+          {"class":"Belief","title":"This will work"}
+        ]"#;
+        let proposed = parse_extraction_response(raw).unwrap();
+
+        let intent_links = instance_links(
+            find_shape(&shapes, "ns://Intention"),
+            &proposed[0],
+            "soa://i1",
+        );
+        // Type flag: predicate = the flag's path, target = the flag's constant value.
+        assert!(
+            intent_links.iter().any(
+                |l| l.predicate.as_deref() == Some("ns://type") && l.target == "ns://intention"
+            ),
+            "expected intention type flag; got {intent_links:#?}"
+        );
+        // Owner (literal-string) landed as a link at the correct predicate.
+        assert!(intent_links
+            .iter()
+            .any(|l| l.predicate.as_deref() == Some("ns://owner")
+                && l.target == "literal:string:Nico"));
+        // Title (literal-string, percent-encoded space).
+        assert!(intent_links
+            .iter()
+            .any(|l| l.predicate.as_deref() == Some("ns://title")
+                && l.target == "literal:string:Extract%20LLM%20processing"));
+        // Every emitted link is anchored at the given base.
+        assert!(intent_links.iter().all(|l| l.source == "soa://i1"));
+
+        let belief_links =
+            instance_links(find_shape(&shapes, "ns://Belief"), &proposed[1], "soa://b1");
+        // Belief has no `owner` field → no owner link even though the JSON above
+        // does not carry it either (defensive: shape drives what gets emitted).
+        assert!(!belief_links
+            .iter()
+            .any(|l| l.predicate.as_deref() == Some("ns://owner")));
+        // Belief's own type flag with its own constant value.
+        assert!(belief_links
+            .iter()
+            .any(|l| l.predicate.as_deref() == Some("ns://type") && l.target == "ns://belief"));
+    }
+
+    #[test]
+    fn instance_links_drop_unknown_fields() {
+        // The LLM hallucinates a `secret` field the shape doesn't declare.
+        // instance_links must NOT emit a link for it (shape is the source of truth).
+        let shape = shape_from_sdna("Belief", BELIEF_SDNA);
+        let raw = r#"[{"class":"Belief","title":"X","secret":"leaked"}]"#;
+        let proposed = parse_extraction_response(raw).unwrap();
+        let links = instance_links(&shape, &proposed[0], "soa://b1");
+        assert!(
+            !links.iter().any(|l| l.target.contains("leaked")),
+            "unknown field must not become a link; got {links:#?}"
+        );
+    }
+
+    #[test]
+    fn instance_links_skip_missing_optional_fields() {
+        // Intention shape has an optional `owner`; instance omits it → no owner link.
+        let shape = shape_from_sdna("Intention", INTENTION_SDNA);
+        let raw = r#"[{"class":"Intention","title":"Ship it"}]"#;
+        let proposed = parse_extraction_response(raw).unwrap();
+        let links = instance_links(&shape, &proposed[0], "soa://i2");
+        assert!(!links
+            .iter()
+            .any(|l| l.predicate.as_deref() == Some("ns://owner")));
+        assert!(links
+            .iter()
+            .any(|l| l.predicate.as_deref() == Some("ns://title")));
     }
 }
