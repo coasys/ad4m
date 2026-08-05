@@ -1,5 +1,11 @@
 //! Cluster gossip abstraction for cascade signalling.
 //!
+//! **Security boundary**: the TCP gossip port accepts JSON-line frames
+//! from any connecting peer.  Deployments MUST restrict this port to
+//! cluster-internal networks (VPN, loopback, firewall rule).  Exposing
+//! it to untrusted networks enables denial-of-service via oversized
+//! frames or malicious cascade signals.
+//!
 //! The SFU's cascade layer needs to exchange [`CascadeSignal`] messages
 //! between SFU nodes — announce/leave for discovery + load updates, and
 //! pipe-offer/pipe-answer for inter-node media bridges.

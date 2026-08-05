@@ -186,34 +186,48 @@ impl CascadeGossip for TcpGossip {
     }
 }
 
+/// Maximum line length the gossip reader accepts.  Lines exceeding
+/// this limit get dropped to prevent memory exhaustion from a
+/// malicious or misbehaving sender.
+const MAX_GOSSIP_LINE_BYTES: usize = 16_384;
+
 /// Reader: pull JSON lines off the socket, dispatch into the shared
 /// inbound channel.  Exits when the stream closes — its task
 /// terminates cleanly so the listener can accept the peer again
 /// when it reconnects.
 async fn reader_loop(socket: TcpStream, inbound_tx: mpsc::Sender<CascadeSignal>) {
-    let mut reader = BufReader::new(socket);
+    let mut reader = BufReader::with_capacity(MAX_GOSSIP_LINE_BYTES, socket);
     let mut line = String::new();
     loop {
         line.clear();
         match reader.read_line(&mut line).await {
             Ok(0) => return, // peer closed
-            Ok(_) => match serde_json::from_str::<CascadeSignal>(line.trim()) {
-                Ok(signal) => {
-                    let variant = match &signal {
-                        CascadeSignal::Announce { .. } => "Announce",
-                        CascadeSignal::Leave { .. } => "Leave",
-                        CascadeSignal::PipeOffer { .. } => "PipeOffer",
-                        CascadeSignal::PipeAnswer { .. } => "PipeAnswer",
-                    };
-                    debug!("TcpGossip reader: inbound {} signal", variant);
-                    if inbound_tx.send(signal).await.is_err() {
-                        return; // SfuService dropped the receiver
+            Ok(_) => {
+                if line.len() > MAX_GOSSIP_LINE_BYTES {
+                    warn!(
+                        "TcpGossip reader: oversized frame ({} bytes), dropping",
+                        line.len()
+                    );
+                    continue;
+                }
+                match serde_json::from_str::<CascadeSignal>(line.trim()) {
+                    Ok(signal) => {
+                        let variant = match &signal {
+                            CascadeSignal::Announce { .. } => "Announce",
+                            CascadeSignal::Leave { .. } => "Leave",
+                            CascadeSignal::PipeOffer { .. } => "PipeOffer",
+                            CascadeSignal::PipeAnswer { .. } => "PipeAnswer",
+                        };
+                        debug!("TcpGossip reader: inbound {} signal", variant);
+                        if inbound_tx.send(signal).await.is_err() {
+                            return; // SfuService dropped the receiver
+                        }
+                    }
+                    Err(e) => {
+                        debug!("TcpGossip drop malformed frame: {} -- {:?}", e, line.trim());
                     }
                 }
-                Err(e) => {
-                    debug!("TcpGossip drop malformed frame: {} -- {:?}", e, line.trim());
-                }
-            },
+            }
             Err(e) => {
                 debug!("TcpGossip reader error: {}", e);
                 return;

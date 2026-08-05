@@ -104,7 +104,7 @@ async fn call_join(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     let room_name = params.require_str("roomName")?;
     let sdp_offer = params.require_str("sdpOffer")?;
     let agent_did = caller_did(&ctx)?;
-    let is_member = if ctx.is_admin_credential || ctx.user_did.is_some() {
+    let is_member = if ctx.is_admin_credential {
         true
     } else {
         Ad4mDb::with_global_instance(|db| db.get_neighbourhood_owners(&neighbourhood_url))

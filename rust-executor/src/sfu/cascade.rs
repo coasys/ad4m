@@ -21,8 +21,9 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
-use log::info;
+use log::{info, warn};
 use str0m::change::SdpOffer;
 use str0m::{Candidate, Rtc};
 
@@ -35,6 +36,9 @@ pub struct SfuNodeInfo {
     pub did: String,
     pub participant_count: u32,
     pub capacity_hint: u32,
+    /// Last time this node sent an Announce.  Used by the TTL eviction
+    /// sweep to prune nodes that stopped announcing.
+    pub last_seen: Instant,
 }
 
 /// Bookkeeping for an inter-SFU pipe transport — see the module docs.
@@ -147,8 +151,34 @@ impl CascadeManager {
                 did,
                 participant_count,
                 capacity_hint,
+                last_seen: Instant::now(),
             },
         );
+    }
+
+    /// Evict nodes that have not announced within `max_age`.  Returns
+    /// the list of evicted `(room_id_str, did)` pairs so the caller
+    /// can tear down any associated pipes.
+    pub fn evict_stale_nodes(&mut self, max_age: Duration) -> Vec<(String, String)> {
+        let mut evicted: Vec<(String, String)> = Vec::new();
+        for (room_id, nodes) in self.known_nodes.iter_mut() {
+            let stale_dids: Vec<String> = nodes
+                .iter()
+                .filter(|(_, info)| info.last_seen.elapsed() > max_age)
+                .map(|(did, _)| did.clone())
+                .collect();
+            for did in stale_dids {
+                nodes.remove(&did);
+                warn!(
+                    "Cascade: evicted stale node {} from room {} (no announce for {:?})",
+                    did, room_id, max_age
+                );
+                evicted.push((room_id.clone(), did));
+            }
+        }
+        // Clean up empty room entries.
+        self.known_nodes.retain(|_, nodes| !nodes.is_empty());
+        evicted
     }
 
     /// Create an SDP offer to establish a pipe transport to a remote SFU
@@ -198,7 +228,9 @@ impl CascadeManager {
             rtc,
             tracks_in: HashMap::new(),
             tracks_out: HashMap::new(),
+            tracks_out_rev: HashMap::new(),
             pending_offer: Some(pending),
+            pending_offer_sent: None,
             is_pipe: true,
         };
 
@@ -263,7 +295,9 @@ impl CascadeManager {
             rtc,
             tracks_in: HashMap::new(),
             tracks_out: HashMap::new(),
+            tracks_out_rev: HashMap::new(),
             pending_offer: None,
+            pending_offer_sent: None,
             is_pipe: true,
         };
 

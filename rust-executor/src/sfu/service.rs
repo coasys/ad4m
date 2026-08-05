@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use log::{debug, info, warn};
 use once_cell::sync::OnceCell;
@@ -251,6 +252,15 @@ impl SfuService {
                             participant_count,
                             capacity_hint,
                         );
+
+                        // Evict nodes that stopped announcing (>30s stale).
+                        // Cheap: one HashMap scan per Announce.
+                        let evicted = mgr.evict_stale_nodes(Duration::from_secs(30));
+                        for (evicted_room, evicted_did) in evicted {
+                            if let Some(pid) = mgr.remove_node_from_room(&evicted_room, &evicted_did) {
+                                pipes_to_drop.push(pid);
+                            }
+                        }
 
                         // Auto-establish pipe if we have local participants
                         // in this room and don't yet have a pipe to the
@@ -601,7 +611,9 @@ impl SfuService {
             rtc,
             tracks_in: HashMap::new(),
             tracks_out: HashMap::new(),
+            tracks_out_rev: HashMap::new(),
             pending_offer: None,
+            pending_offer_sent: None,
             is_pipe: false,
         };
 
@@ -891,7 +903,7 @@ impl SfuService {
                     is_active_speaker: p.is_active_speaker,
                 })
                 .collect(),
-            created_at_ms: room.created_at.elapsed().as_millis() as u64,
+            created_at_ms: room.created_at,
         }
     }
 }

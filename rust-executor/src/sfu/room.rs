@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+use std::time::SystemTime;
 
 /// Unique identifier for a participant in the SFU.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -74,7 +75,8 @@ pub struct SfuRoom {
     pub participants: HashMap<ParticipantId, ParticipantInfo>,
     /// Remote participants connected through pipe transports from peer SFU nodes.
     pub remote_participants: HashMap<String, RemoteParticipantInfo>,
-    pub created_at: Instant,
+    /// Epoch millis when the room was created.
+    pub created_at: u64,
     pub max_participants: Option<usize>,
 }
 
@@ -84,7 +86,10 @@ impl SfuRoom {
             id,
             participants: HashMap::new(),
             remote_participants: HashMap::new(),
-            created_at: Instant::now(),
+            created_at: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
             max_participants,
         }
     }

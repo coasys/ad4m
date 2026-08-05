@@ -42,6 +42,12 @@ pub struct SfuPeer {
     /// `sfu.callAnswerServerOffer` to land before we can renegotiate
     /// again — str0m doesn't allow multiple in-flight changes.
     pub pending_offer: Option<str0m::change::SdpPendingOffer>,
+    /// Timestamp when the pending offer was sent.  Used to detect
+    /// stale offers that never received an answer.
+    pub pending_offer_sent: Option<Instant>,
+    /// Reverse index: (origin_pid, origin_mid) -> outbound Mid on this peer.
+    /// Provides O(1) lookup during media relay instead of scanning `tracks_out`.
+    pub tracks_out_rev: HashMap<(ParticipantId, Mid), Mid>,
     /// True for cross-node pipe transports — see [`SfuPeer`] docs.
     /// Affects how renegotiation offers are routed and how forward
     /// loops treat the participant.
@@ -56,7 +62,9 @@ impl std::fmt::Debug for SfuPeer {
             .field("agent_did", &self.agent_did)
             .field("tracks_in", &self.tracks_in.len())
             .field("tracks_out", &self.tracks_out.len())
+            .field("tracks_out_rev", &self.tracks_out_rev.len())
             .field("pending_offer", &self.pending_offer.is_some())
+            .field("pending_offer_sent", &self.pending_offer_sent)
             .field("is_pipe", &self.is_pipe)
             .finish()
     }
@@ -249,6 +257,7 @@ impl SfuServer {
                             );
                             continue;
                         };
+                        peer.pending_offer_sent = None;
                         let answer: str0m::change::SdpAnswer =
                             match serde_json::from_str(&sdp_answer_json) {
                                 Ok(a) => a,
@@ -357,6 +366,25 @@ impl SfuServer {
                 }
             });
 
+            // Sweep stale pending offers — if the client (or remote SFU)
+            // never answered within 10 seconds, clear the pending state
+            // so the next renegotiation cycle can retry.
+            let stale_threshold = Duration::from_secs(10);
+            for (pid, peer) in peers.iter_mut() {
+                if peer.pending_offer.is_some() {
+                    if let Some(sent_at) = peer.pending_offer_sent {
+                        if sent_at.elapsed() > stale_threshold {
+                            warn!(
+                                "SFU: peer {} pending offer stale (>10s), clearing",
+                                pid
+                            );
+                            peer.pending_offer = None;
+                            peer.pending_offer_sent = None;
+                        }
+                    }
+                }
+            }
+
             // Poll all peers for output
             let mut earliest_timeout = Instant::now() + Duration::from_millis(100);
             let mut media_to_relay: Vec<(ParticipantId, MediaData)> = Vec::new();
@@ -455,13 +483,10 @@ impl SfuServer {
                     }
 
                     // Find the outgoing Mid on the target peer that maps to this origin track
-                    if let Some((&out_mid, _)) =
+                    if let Some(&out_mid) =
                         target_peer
-                            .tracks_out
-                            .iter()
-                            .find(|(_, (src_pid, src_mid))| {
-                                src_pid == origin_pid && *src_mid == data.mid
-                            })
+                            .tracks_out_rev
+                            .get(&(origin_pid.clone(), data.mid))
                     {
                         if let Some(writer) = target_peer.rtc.writer(out_mid) {
                             if let Err(e) = writer.write(
@@ -614,9 +639,13 @@ impl SfuServer {
                 for (new_mid, origin_pid, origin_mid, _kind) in new_outbound {
                     target_peer
                         .tracks_out
-                        .insert(new_mid, (origin_pid, origin_mid));
+                        .insert(new_mid, (origin_pid.clone(), origin_mid));
+                    target_peer
+                        .tracks_out_rev
+                        .insert((origin_pid, origin_mid), new_mid);
                 }
                 target_peer.pending_offer = Some(pending);
+                target_peer.pending_offer_sent = Some(Instant::now());
                 info!(
                     "SFU: peer {} renegotiation offer prepared ({} new outbound m-lines)",
                     target_pid,
