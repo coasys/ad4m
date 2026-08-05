@@ -45,6 +45,13 @@ export function buildSHACL(
      * directly (e.g. from a one-off SDNA build tool).
      */
     seedCache?: (partial: { shape: SHACLShape; name: string }) => void,
+    /**
+     * Natural-language hint declared on the `@Model` decorator that
+     * steers the generic LLM extractor when producing instances of
+     * this class.  Attached to the SHACL shape node and re-emitted as
+     * an `ad4m://extraction_hint` link by `SHACLShape.toLinks()`.
+     */
+    extractionHint?: string,
 ): { shape: SHACLShape; name: string } {
     const obj = target.prototype;
 
@@ -76,6 +83,9 @@ export function buildSHACL(
     const shapeUri = `${namespace}${subjectName}Shape`;
     const targetClass = `${namespace}${subjectName}`;
     const shape = new SHACLShape(shapeUri, targetClass);
+    if (extractionHint) {
+        shape.extractionHint = extractionHint;
+    }
 
     // ── Seed the memoisation cache while we keep building ──────────────
     // Any subsequent `target.generateSHACL()` call from inside this
@@ -174,6 +184,12 @@ export function buildSHACL(
         // Serializable transform expression (SHACL-AF Node Expression)
         if (propMeta.transform) {
             propShape.transform = propMeta.transform;
+        }
+
+        // Natural-language extraction hint (read by the generic LLM
+        // extractor via ShapeProperty.extraction_hint).
+        if (propMeta.extractionHint) {
+            propShape.extractionHint = propMeta.extractionHint;
         }
 
         // ── Setter actions ──────────────────────────────────────────────

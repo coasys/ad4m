@@ -194,4 +194,80 @@ describe("Decorators → SHACL writer round-trip", () => {
       findLinkTarget(links, "ns://Profile.name", "ad4m://resolveLanguage"),
     ).toBe("literal:string:literal");
   });
+
+  it("emits ad4m://extraction_hint on the class shape and per property", () => {
+    @Model({
+      name: "Belief",
+      extractionHint:
+        "A claim a participant holds to be true about the world or the group. Not a task or a question.",
+    })
+    class Belief extends Ad4mModel {
+      @Property({
+        through: "ns://title",
+        required: true,
+        resolveLanguage: "literal",
+        extractionHint: "One-sentence statement in the claimant's framing.",
+      })
+      title: string = "";
+
+      @Property({ through: "ns://body", resolveLanguage: "literal" })
+      body: string = "";
+    }
+
+    const { shape } = Belief.generateSHACL();
+    const links = flatten(shape);
+
+    expect(findLinkTarget(links, shape.nodeShapeUri, "ad4m://extraction_hint"))
+      .toBe(
+        "literal:string:A claim a participant holds to be true about the " +
+        "world or the group. Not a task or a question.",
+      );
+    expect(
+      findLinkTarget(links, "ns://Belief.title", "ad4m://extraction_hint"),
+    ).toBe(
+      "literal:string:One-sentence statement in the claimant's framing.",
+    );
+    expect(
+      findLinkTarget(links, "ns://Belief.body", "ad4m://extraction_hint"),
+    ).toBeUndefined();
+  });
+
+  it("round-trips extractionHint through toJSON/fromJSON", () => {
+    @Model({
+      name: "Task",
+      extractionHint:
+        "Something a participant commits to doing - actionable outcome.",
+    })
+    class Task extends Ad4mModel {
+      @Property({
+        through: "ns://title",
+        required: true,
+        resolveLanguage: "literal",
+        extractionHint: "Imperative summary of the work.",
+      })
+      title: string = "";
+    }
+
+    const { shape } = Task.generateSHACL();
+    const json: any = shape.toJSON();
+
+    expect(json.extraction_hint).toBe(
+      "Something a participant commits to doing - actionable outcome.",
+    );
+    const titleProp = json.properties.find((p: any) => p.name === "title");
+    expect(titleProp.extraction_hint).toBe(
+      "Imperative summary of the work.",
+    );
+
+    const rebuilt = (shape.constructor as any).fromJSON(json);
+    expect(rebuilt.extractionHint).toBe(
+      "Something a participant commits to doing - actionable outcome.",
+    );
+    const rebuiltTitle = rebuilt.properties.find(
+      (p: any) => p.name === "title",
+    );
+    expect(rebuiltTitle.extractionHint).toBe(
+      "Imperative summary of the work.",
+    );
+  });
 });
