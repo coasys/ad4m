@@ -34,6 +34,7 @@ Pre-downloads the default Kalosm models into the image so the executor can load 
 
 - **Embedding:** BAAI/bge-small-en-v1.5 (auto-loaded on startup)
 - **Transcription:** openai/whisper-small (registered as "Whisper")
+- **Transcription (fast preview):** lmz/candle-whisper tiny quantized (registered as "Whisper tiny quantized")
 - **LLM:** TinyLlama-1.1B-Chat Q4_K_M (registered as "TinyLlama", set as default)
 
 ### With Holochain enabled

@@ -274,6 +274,22 @@ setup_ai_models() {
         echo "  Whisper model already registered."
     fi
 
+    # Register Whisper tiny quantized (fast preview transcription) if not already present
+    if ! echo "${models_response}" | jq -e '.result[] | select(.name == "Whisper tiny quantized")' >/dev/null 2>&1; then
+        local whisper_tiny_result whisper_tiny_id
+        whisper_tiny_result=$(ws_rpc "ai.addModel" \
+            '{"model":{"name":"Whisper tiny quantized","type":"TRANSCRIPTION","local":{"fileName":"whisper_tiny_quantized"}}}' \
+            "add-whisper-tiny")
+        whisper_tiny_id=$(echo "${whisper_tiny_result}" | jq -r '.result // empty')
+        if [ -n "${whisper_tiny_id}" ]; then
+            echo "  Registered transcription model: Whisper tiny quantized (${whisper_tiny_id})"
+        else
+            echo "  WARNING: failed to register Whisper tiny quantized model." >&2
+        fi
+    else
+        echo "  Whisper tiny quantized model already registered."
+    fi
+
     # Register TinyLlama (LLM) if no LLM model exists
     local llm_id=""
     if echo "${models_response}" | jq -e '.result[] | select(.modelType == "LLM")' >/dev/null 2>&1; then
