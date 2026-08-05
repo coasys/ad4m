@@ -433,6 +433,12 @@ start_we_server() {
         reverse_proxy localhost:12000
     }
 
+    # Flux worklet: hardcoded root-relative path in addModule('/audio-processor.js')
+    handle /audio-processor.js {
+        root * /opt/ad4m/flux-dist
+        file_server
+    }
+
     handle_path /apps/flux/* {
         root * /opt/ad4m/flux-dist
         try_files {path} /index.html
