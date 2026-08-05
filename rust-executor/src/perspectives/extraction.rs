@@ -8,8 +8,11 @@
 //!   S4 — `instance_links`           : `ProposedInstance` -> perspective links
 //!   S5 — `EXTRACTION_SYSTEM_PROMPT` + `ensure_extraction_task`
 //!   S6 — `apply_extraction_raw` + `retry_extraction_parse` + `run_extraction`
-//!          (this commit): async shell + retry harness, wiring S1-S5 through
+//!          async shell + retry harness, wiring S1-S5 through
 //!          `AIService::prompt` and `PerspectiveInstance::add_link`.
+//!   S7 — `#[ignore]` real-LLM e2e (this commit): end-to-end sanity check
+//!          against a locally-installed default LLM. Skipped in CI; run
+//!          manually on Marvin CUDA / any box with a model installed.
 //!
 //! S2–S6 are pure/DB-only (no LLM) and CI-tested; the real-LLM e2e is S7.
 
@@ -863,5 +866,125 @@ mod tests {
             attempts.load(std::sync::atomic::Ordering::SeqCst),
             EXTRACTION_MAX_ATTEMPTS
         );
+    }
+
+    // ---- S7: end-to-end with a real LLM (ignored in CI) ------------------
+    //
+    // Exercises the whole pipeline against an actual local model:
+    //   shapes -> prompt -> AIService::prompt -> parse (with retry) ->
+    //   shape-driven links -> add_link on a real PerspectiveInstance.
+    //
+    // Skipped in CI. Run manually where a default LLM is available:
+    //
+    //   cargo test --release -p ad4m-executor \
+    //     perspectives::extraction::tests::e2e_run_extraction_with_real_llm \
+    //     -- --ignored --nocapture --test-threads=1
+
+    #[ignore]
+    #[tokio::test]
+    async fn e2e_run_extraction_with_real_llm() {
+        use crate::agent::{AgentContext, AgentService};
+        use crate::ai_service::AIService;
+        use crate::prolog_service::init_prolog_service;
+        use crate::test_utils::setup_wallet;
+        use crate::types::{
+            LinkQuery, LocalModelInput, ModelInput, ModelType, PerspectiveHandle, PerspectiveState,
+        };
+
+        setup_wallet();
+        ensure_db_init();
+        AgentService::init_global_test_instance();
+        init_prolog_service().await;
+
+        // Spin up AIService and register a small local LLM as the default so
+        // that the `ensure_extraction_task` task (model_id = "default") has
+        // something to talk to.
+        AIService::init_global_instance()
+            .await
+            .expect("AIService to initialize");
+        let service = AIService::global_instance()
+            .await
+            .expect("AIService global instance");
+        let model_id = service
+            .add_model(ModelInput {
+                name: "e2e extraction LLM".into(),
+                model_type: ModelType::Llm,
+                local: Some(LocalModelInput {
+                    file_name: "llama_tiny_1_1b_chat".into(),
+                    tokenizer_source: None,
+                    huggingface_repo: None,
+                    revision: None,
+                }),
+                api: None,
+            })
+            .await
+            .expect("add_model");
+        service
+            .set_default_model(ModelType::Llm, model_id.clone())
+            .await
+            .expect("set_default_model(Llm)");
+
+        // Real perspective — same setup pattern as PerspectiveInstance::tests.
+        let mut perspective = PerspectiveInstance::new(
+            PerspectiveHandle {
+                uuid: uuid::Uuid::new_v4().to_string(),
+                name: Some("Extraction e2e".into()),
+                shared_url: None,
+                neighbourhood: None,
+                state: PerspectiveState::Private,
+                owners: None,
+            },
+            None,
+        );
+        let ctx = AgentContext::main_agent();
+        perspective
+            .ensure_prolog_engine_pool_for_context(&ctx)
+            .await
+            .expect("prolog engine pool");
+
+        let shapes = vec![
+            shape_from_sdna("Belief", BELIEF_SDNA),
+            shape_from_sdna("Intention", INTENTION_SDNA),
+        ];
+        let transcript = vec![
+            (
+                "Nico".into(),
+                "I'll extract the LLM call-processing from Flux into a generic \
+                 AD4M core service."
+                    .into(),
+            ),
+            (
+                "James".into(),
+                "Cool. One English hint per class should be enough to steer this.".into(),
+            ),
+        ];
+
+        let placements = run_extraction(&mut perspective, &shapes, &transcript, "soa://ext/", &ctx)
+            .await
+            .expect("run_extraction against real LLM to succeed");
+
+        println!("e2e placements: {} instance(s)", placements.len());
+        assert!(
+            !placements.is_empty(),
+            "expected at least one extracted instance from real LLM"
+        );
+
+        // Every claimed instance base must actually have links in the
+        // perspective — this is what proves add_link ran, not just that
+        // placements were computed.
+        for (base, links) in &placements {
+            assert!(!links.is_empty(), "empty link set for {base}");
+            let stored = perspective
+                .get_links(&LinkQuery {
+                    source: Some(base.clone()),
+                    ..Default::default()
+                })
+                .await
+                .expect("get_links after write");
+            assert!(
+                !stored.is_empty(),
+                "expected links written into perspective for {base}"
+            );
+        }
     }
 }
