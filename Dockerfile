@@ -293,16 +293,16 @@ RUN if [ "${INCLUDE_WE}" != "true" ]; then \
 
 RUN if [ "${INCLUDE_WE}" != "true" ]; then exit 0; fi && \
     cd /flux && \
+    LOCAL_FS_HASH=$(cat /tmp/file-storage-hash.txt) && \
+    sed -i "s/QmzSYwddqhm49PrRMzSrJf3AvmmreXMKtr1u56nbTjBFVmCzS8N/${LOCAL_FS_HASH}/g" \
+      packages/constants/src/languages.ts && \
+    echo "Patched Flux FILE_STORAGE_LANGUAGE source → ${LOCAL_FS_HASH}" && \
     pnpm install --no-frozen-lockfile && \
     VITE_ALLOWED_ORIGINS="" VITE_BASE=/apps/flux/ NODE_OPTIONS='--max-old-space-size=4096' pnpm run build
 
 RUN mkdir -p /flux-dist && \
     if [ "${INCLUDE_WE}" = "true" ] && [ -d /flux/app/dist ]; then \
       cp -r /flux/app/dist/* /flux-dist/; \
-      LOCAL_FS_HASH=$(cat /tmp/file-storage-hash.txt) && \
-      find /flux-dist -name '*.js' -exec \
-        sed -i "s/QmzSYwddqhm49PrRMzSrJf3AvmmreXMKtr1u56nbTjBFVmCzS8N/${LOCAL_FS_HASH}/g" {} + && \
-      echo "Patched Flux FILE_STORAGE_LANGUAGE → ${LOCAL_FS_HASH}"; \
     fi
 
 # =============================================================================
