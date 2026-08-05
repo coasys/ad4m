@@ -256,6 +256,28 @@ async fn cascade_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     Ok(Value::Object(out))
 }
 
+// ── Membership whitelist (admin-only) ──────────────────────────────────────
+
+async fn add_member(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden("Admin credential required".to_string()));
+    }
+    let neighbourhood_url = params.require_str("neighbourhoodUrl")?;
+    let did = params.require_str("did")?;
+    let added = service()?.add_member(&neighbourhood_url, &did).await;
+    Ok(Value::Bool(added))
+}
+
+async fn remove_member(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden("Admin credential required".to_string()));
+    }
+    let neighbourhood_url = params.require_str("neighbourhoodUrl")?;
+    let did = params.require_str("did")?;
+    let removed = service()?.remove_member(&neighbourhood_url, &did).await;
+    Ok(Value::Bool(removed))
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -271,4 +293,6 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("sfu.sfuPeerForNeighbourhood", sfu_peer_for_neighbourhood);
     map.register("sfu.sfuPeersForNeighbourhood", sfu_peers_for_neighbourhood);
     map.register("sfu.cascadeStatus", cascade_status);
+    map.register("sfu.addMember", add_member);
+    map.register("sfu.removeMember", remove_member);
 }
