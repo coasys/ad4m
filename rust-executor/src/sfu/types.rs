@@ -28,6 +28,13 @@ pub struct SfuConfig {
     /// Max participants per SFU node in cascaded mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_participants_per_node: Option<u32>,
+    /// DID of the preferred SFU node in cascaded mode.  The cascade
+    /// manager routes new joins to this node first; overflow spills to
+    /// other nodes only when the preferred one reaches capacity.
+    /// Useful when a powerful hosted multi-user node serves most
+    /// participants and lighter personal executors act as fallbacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_sfu_did: Option<String>,
     /// ICE servers (STUN + TURN) the SFU advertises to clients.  Empty
     /// means "use whatever defaults the client ships with".  Clients
     /// MUST treat this as authoritative when present — running the
@@ -71,6 +78,7 @@ impl Default for SfuConfig {
             max_mesh_participants: default_max_mesh(),
             sfu_peers: Vec::new(),
             max_participants_per_node: None,
+            preferred_sfu_did: None,
             ice_servers: Vec::new(),
         }
     }

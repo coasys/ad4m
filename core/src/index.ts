@@ -25,6 +25,7 @@ export * from "./model";
 export * from "./neighbourhood/Neighbourhood";
 export * from "./neighbourhood/NeighbourhoodProxy";
 export * from "./neighbourhood/SfuTypes";
+export * from "./neighbourhood/SfuManager";
 export * from "./typeDefs";
 export * from "./DID";
 export * from "./utils";

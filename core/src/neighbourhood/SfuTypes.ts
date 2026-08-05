@@ -67,6 +67,12 @@ export interface SfuConfig {
     /** Max participants per SFU node in cascaded mode. */
     maxParticipantsPerNode?: number
     /**
+     * DID of the preferred SFU node in cascaded mode.  The cascade
+     * manager routes joins here first; overflow spills to other nodes
+     * only when the preferred one reaches capacity.
+     */
+    preferredSfuDid?: string
+    /**
      * ICE servers the SFU advertises to clients.  When set, clients
      * MUST use these instead of their hardcoded defaults so the host
      * application can rotate TURN credentials without a client

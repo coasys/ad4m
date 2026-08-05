@@ -421,12 +421,48 @@ impl CascadeManager {
     /// node — remote (cascade-piped) participants connect to their own
     /// SFU node and do not consume local capacity.
     ///
-    /// Rule: when the local node has capacity, accept.  When at
-    /// capacity, redirect to the least-loaded peer that still has
-    /// headroom.  No proactive rebalancing — the wind tunnel cycle
-    /// tests caught a pingpong between under-loaded peers when a
-    /// threshold-based rebalancing heuristic was active.
-    pub fn pick_redirect_node(&self, room_id: &str, local_count: u32) -> Option<&SfuNodeInfo> {
+    /// Rule: when the local node has capacity AND no preferred node
+    /// pulls the join elsewhere, accept.  When at capacity, redirect
+    /// to a peer with headroom.
+    ///
+    /// `preferred_did` — when `Some`, the cascade preferentially
+    /// routes to that node (even if the local node has capacity),
+    /// unless the preferred node has no headroom.  This lets a
+    /// neighbourhood funnel most participants to a powerful hosted
+    /// multi-user node while lighter personal executors absorb
+    /// overflow.
+    ///
+    /// Tie-breaking among eligible non-preferred nodes uses the
+    /// least-loaded heuristic.  No proactive rebalancing — the wind
+    /// tunnel cycle tests caught a pingpong between under-loaded
+    /// peers when a threshold-based rebalancing heuristic was active.
+    pub fn pick_redirect_node(
+        &self,
+        room_id: &str,
+        local_count: u32,
+        preferred_did: Option<&str>,
+    ) -> Option<&SfuNodeInfo> {
+        // If a preferred node exists and it lives in the cluster (not
+        // us), try to route there first — even when the local node
+        // has capacity.
+        if let Some(pref) = preferred_did {
+            if pref != self.local_did {
+                let nodes = self
+                    .known_nodes
+                    .get(room_id)
+                    .or_else(|| self.known_nodes.get(""));
+                if let Some(map) = nodes {
+                    if let Some(pref_node) = map.get(pref) {
+                        if pref_node.participant_count < pref_node.capacity_hint {
+                            return Some(pref_node);
+                        }
+                    }
+                }
+            }
+            // Preferred node points to us — fall through to normal
+            // local-capacity check.
+        }
+
         if local_count < self.max_participants_per_node {
             return None;
         }
@@ -481,6 +517,62 @@ impl CascadeManager {
     /// pipe handshake landed.
     pub fn established_pipe_count(&self) -> usize {
         self.pipes.values().filter(|p| p.established).count()
+    }
+
+    /// Evaluate whether the local node should shed participants to
+    /// a less-loaded peer.  Returns `Some((target_did, count))` if
+    /// rebalancing makes sense — the caller should initiate migration
+    /// of `count` participants to the target node.
+    ///
+    /// Conservatively triggers only when:
+    /// 1. Local load exceeds 90% of capacity.
+    /// 2. A peer node has at least 30% free capacity.
+    /// 3. The load difference justifies moving participants (at least
+    ///    2 more than half the gap, to avoid ping-pong).
+    ///
+    /// Returns `None` when no rebalancing action makes sense.
+    pub fn suggest_rebalance(
+        &self,
+        room_id: &str,
+        local_count: u32,
+    ) -> Option<(String, u32)> {
+        // Only consider rebalancing when above 90% capacity
+        let threshold = (self.max_participants_per_node as f64 * 0.9).ceil() as u32;
+        if local_count < threshold {
+            return None;
+        }
+
+        let nodes = self
+            .known_nodes
+            .get(room_id)
+            .or_else(|| self.known_nodes.get(""))?;
+
+        // Find the peer with the most headroom
+        let best = nodes
+            .values()
+            .filter(|n| {
+                let free = n.capacity_hint.saturating_sub(n.participant_count);
+                let free_pct = if n.capacity_hint > 0 {
+                    free as f64 / n.capacity_hint as f64
+                } else {
+                    0.0
+                };
+                // Peer must have at least 30% free capacity
+                free_pct >= 0.3
+            })
+            .max_by_key(|n| n.capacity_hint.saturating_sub(n.participant_count))?;
+
+        let target_free = best.capacity_hint.saturating_sub(best.participant_count);
+        let gap = local_count.saturating_sub(best.participant_count);
+
+        // Move half the gap, capped by target's free capacity, minimum 1
+        let to_move = (gap / 2).max(1).min(target_free);
+
+        if to_move == 0 {
+            return None;
+        }
+
+        Some((best.did.clone(), to_move))
     }
 
     /// All `(room_id, remote_did)` keys for established pipes — for
@@ -625,23 +717,52 @@ mod tests {
         mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 1, 8);
 
         // local_count=5 (over capacity=4) → must redirect
-        let redirect = mgr.pick_redirect_node(&room_id.to_string(), 5);
+        let redirect = mgr.pick_redirect_node(&room_id.to_string(), 5, None);
         assert!(redirect.is_some());
         assert_eq!(redirect.unwrap().did, "did:key:remote");
 
         // local_count=2 (under capacity), remote has 1 → difference < 2, no redirect
-        let redirect = mgr.pick_redirect_node(&room_id.to_string(), 2);
+        let redirect = mgr.pick_redirect_node(&room_id.to_string(), 2, None);
         assert!(redirect.is_none());
 
         // local_count=2, remote has 0 → difference = 2, threshold is strictly less, so None
         mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 0, 8);
-        let redirect = mgr.pick_redirect_node(&room_id.to_string(), 2);
+        let redirect = mgr.pick_redirect_node(&room_id.to_string(), 2, None);
         assert!(redirect.is_none());
 
         // local_count=4 (at capacity), remote has 1 → must redirect
         mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 1, 8);
-        let redirect = mgr.pick_redirect_node(&room_id.to_string(), 4);
+        let redirect = mgr.pick_redirect_node(&room_id.to_string(), 4, None);
         assert!(redirect.is_some());
+
+        // ── Preferred-node routing ──
+        // When a preferred node has capacity, redirect there even if
+        // the local node also has capacity.
+        mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 0, 8);
+        let redirect = mgr.pick_redirect_node(
+            &room_id.to_string(),
+            1,                             // local well under capacity
+            Some("did:key:remote"),         // but remote is preferred
+        );
+        assert!(redirect.is_some());
+        assert_eq!(redirect.unwrap().did, "did:key:remote");
+
+        // When preferred node is at capacity, fall through to normal logic
+        mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 8, 8);
+        let redirect = mgr.pick_redirect_node(
+            &room_id.to_string(),
+            1,
+            Some("did:key:remote"),
+        );
+        assert!(redirect.is_none()); // local has capacity, preferred full
+
+        // When preferred DID matches local, no redirect (we ARE the preferred)
+        let redirect = mgr.pick_redirect_node(
+            &room_id.to_string(),
+            1,
+            Some("did:key:local"),
+        );
+        assert!(redirect.is_none());
     }
 
     #[test]

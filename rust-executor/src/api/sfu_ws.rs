@@ -104,21 +104,23 @@ async fn call_join(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     let room_name = params.require_str("roomName")?;
     let sdp_offer = params.require_str("sdpOffer")?;
     let agent_did = caller_did(&ctx)?;
-    let is_member = if ctx.is_admin_credential {
-        true
-    } else {
+
+    // Neighbourhood membership gate — the sole check.
+    // If the caller's DID appears in the perspective owners for this
+    // neighbourhood URL, they have joined the neighbourhood and can
+    // join a call.  No admin bypass, no separate whitelist.
+    let is_member =
         Ad4mDb::with_global_instance(|db| db.get_neighbourhood_owners(&neighbourhood_url))
             .unwrap_or_default()
-            .contains(&agent_did)
-    };
+            .contains(&agent_did);
+    if !is_member {
+        return Err(WsRpcError::forbidden(
+            "Not a member of this neighbourhood".to_string(),
+        ));
+    }
+
     let session = service()?
-        .call_join(
-            &neighbourhood_url,
-            &room_name,
-            &agent_did,
-            &sdp_offer,
-            is_member,
-        )
+        .call_join(&neighbourhood_url, &room_name, &agent_did, &sdp_offer)
         .await
         .map_err(map_room_err)?;
     Ok(serde_json::to_value(session)?)
@@ -256,26 +258,25 @@ async fn cascade_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     Ok(Value::Object(out))
 }
 
-// ── Membership whitelist (admin-only) ──────────────────────────────────────
+// ── Neighbourhood membership registration ─────────────────────────────────
+//
+// Integration hook for registering DIDs as neighbourhood members on
+// this executor.  In production the neighbourhood join flow handles
+// this automatically; this RPC exists so test harnesses and bridge
+// deployments can set up membership for synthetic neighbourhood URLs.
+//
+// Writes directly to the perspective_handle owners list — the same
+// data that callJoin queries via get_neighbourhood_owners.  No
+// separate whitelist, no backdoor.
 
-async fn add_member(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
-        return Err(WsRpcError::forbidden("Admin credential required".to_string()));
-    }
+async fn ensure_membership(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+        .map_err(WsRpcError::forbidden)?;
     let neighbourhood_url = params.require_str("neighbourhoodUrl")?;
     let did = params.require_str("did")?;
-    let added = service()?.add_member(&neighbourhood_url, &did).await;
-    Ok(Value::Bool(added))
-}
-
-async fn remove_member(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
-        return Err(WsRpcError::forbidden("Admin credential required".to_string()));
-    }
-    let neighbourhood_url = params.require_str("neighbourhoodUrl")?;
-    let did = params.require_str("did")?;
-    let removed = service()?.remove_member(&neighbourhood_url, &did).await;
-    Ok(Value::Bool(removed))
+    Ad4mDb::with_global_instance(|db| db.ensure_neighbourhood_member(&neighbourhood_url, &did))
+        .map_err(|e| WsRpcError::internal(format!("Failed to register membership: {}", e)))?;
+    Ok(Value::Bool(true))
 }
 
 // ── Registration ────────────────────────────────────────────────────────────
@@ -293,6 +294,5 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("sfu.sfuPeerForNeighbourhood", sfu_peer_for_neighbourhood);
     map.register("sfu.sfuPeersForNeighbourhood", sfu_peers_for_neighbourhood);
     map.register("sfu.cascadeStatus", cascade_status);
-    map.register("sfu.addMember", add_member);
-    map.register("sfu.removeMember", remove_member);
+    map.register("sfu.ensureMembership", ensure_membership);
 }

@@ -4,7 +4,7 @@
 //! Provides room management, peer authentication, and the interface
 //! consumed by the WS RPC handlers in `crate::api::sfu_ws`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,12 +42,6 @@ pub struct SfuService {
     /// deployments pass a `NoopGossip` so the cascade plumbing stays
     /// uniform and the redirect logic falls through to "no peers".
     gossip: Arc<dyn CascadeGossip>,
-    /// Explicit member whitelist keyed by neighbourhood URL.  When a DID
-    /// appears here the SFU trusts it for callJoin without querying the
-    /// AD4M perspective database.  Populated by the admin-only
-    /// `sfu.addMember` RPC — useful for testing and for runtimes that
-    /// manage membership outside of AD4M's perspective system.
-    member_whitelist: Arc<RwLock<HashMap<String, HashSet<String>>>>,
 }
 
 impl SfuService {
@@ -86,7 +80,6 @@ impl SfuService {
             configs: Arc::new(RwLock::new(HashMap::new())),
             cascade_manager: Arc::new(RwLock::new(Some(cascade_manager))),
             gossip: Arc::clone(&gossip),
-            member_whitelist: Arc::new(RwLock::new(HashMap::new())),
         });
 
         if let Some(rx) = gossip.take_inbound() {
@@ -625,57 +618,18 @@ impl SfuService {
             .collect()
     }
 
-    // ---- Explicit member whitelist (admin-only) ----
-
-    /// Add `agent_did` to the explicit member whitelist for
-    /// `neighbourhood_url`.  Returns `true` if the DID was newly added.
-    pub async fn add_member(&self, neighbourhood_url: &str, agent_did: &str) -> bool {
-        let mut wl = self.member_whitelist.write().await;
-        wl.entry(neighbourhood_url.to_string())
-            .or_default()
-            .insert(agent_did.to_string())
-    }
-
-    /// Remove `agent_did` from the whitelist.  Returns `true` if the
-    /// DID was present.
-    pub async fn remove_member(&self, neighbourhood_url: &str, agent_did: &str) -> bool {
-        let mut wl = self.member_whitelist.write().await;
-        if let Some(set) = wl.get_mut(neighbourhood_url) {
-            set.remove(agent_did)
-        } else {
-            false
-        }
-    }
-
-    /// Check the explicit whitelist (does NOT query the AD4M DB).
-    pub async fn is_whitelisted(&self, neighbourhood_url: &str, agent_did: &str) -> bool {
-        let wl = self.member_whitelist.read().await;
-        wl.get(neighbourhood_url)
-            .map(|set| set.contains(agent_did))
-            .unwrap_or(false)
-    }
-
     // ---- Call join/leave ----
 
-    /// Join a call. Performs DID authentication check, creates an Rtc instance,
-    /// processes the SDP offer, and returns the answer.
+    /// Join a call.  Membership checking happens in the WS handler
+    /// layer (sfu_ws.rs) via `get_neighbourhood_owners` — this method
+    /// trusts that the caller already passed the gate.
     pub async fn call_join(
         &self,
         neighbourhood_url: &str,
         room_name: &str,
         agent_did: &str,
         sdp_offer_json: &str,
-        is_neighbourhood_member: bool,
     ) -> Result<CallSessionInfo, String> {
-        // DID authentication: verify neighbourhood membership.
-        // Three paths to membership:
-        //   1. Admin credential (is_neighbourhood_member == true, set by WS handler)
-        //   2. AD4M perspective DB (is_neighbourhood_member == true, set by WS handler)
-        //   3. Explicit whitelist (admin pre-registered the DID via sfu.addMember)
-        if !is_neighbourhood_member && !self.is_whitelisted(neighbourhood_url, agent_did).await {
-            return Err(RoomError::NotMember.to_string());
-        }
-
         let room_id = RoomId::new(neighbourhood_url, room_name);
         let pid = ParticipantId::next();
 
@@ -688,7 +642,15 @@ impl SfuService {
                     .get_room(&room_id)
                     .map(|r| r.participant_count() as u32)
                     .unwrap_or(0);
-                if let Some(node) = mgr.pick_redirect_node(&room_id.to_string(), local_count) {
+                let configs = self.configs.read().await;
+                let preferred = configs
+                    .get(neighbourhood_url)
+                    .and_then(|c| c.preferred_sfu_did.as_deref());
+                if let Some(node) = mgr.pick_redirect_node(
+                    &room_id.to_string(),
+                    local_count,
+                    preferred,
+                ) {
                     return Ok(CallSessionInfo {
                         room_name: room_name.to_string(),
                         neighbourhood_url: neighbourhood_url.to_string(),

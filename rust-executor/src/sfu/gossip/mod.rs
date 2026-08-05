@@ -33,6 +33,7 @@ use tokio::sync::mpsc;
 
 use super::cascade::CascadeSignal;
 
+pub mod signal;
 pub mod tcp;
 
 /// Where to direct an outgoing signal.

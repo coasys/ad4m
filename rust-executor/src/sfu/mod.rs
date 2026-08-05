@@ -16,11 +16,17 @@ pub mod gossip;
 pub mod relay;
 pub mod room;
 pub mod server;
+pub mod turn;
 pub mod types;
 
 mod service;
 
-pub use gossip::{tcp::GossipPeer, tcp::TcpGossip, CascadeGossip, GossipTarget, NoopGossip};
+pub use gossip::{
+    signal::{SignalGossip, SignalSender},
+    tcp::GossipPeer,
+    tcp::TcpGossip,
+    CascadeGossip, GossipTarget, NoopGossip,
+};
 pub use service::{get_sfu_service, SfuService};
 pub use types::{
     CallSessionInfo, IceServer, SfuCallRenegotiationOffer, SfuConfig, SfuParticipantInfo,
