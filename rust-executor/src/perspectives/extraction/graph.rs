@@ -79,7 +79,7 @@ pub(crate) fn class_local_name(target_class: &str) -> &str {
 /// links outside the declared class shape.
 pub fn instance_links(shape: &ModelShape, inst: &ProposedInstance, base: &str) -> Vec<Link> {
     let mut out = Vec::new();
-    let rel_preds = relation_predicates(shape);
+    // 1. type-flag links (constant value marking the class).
     for prop in &shape.properties {
         if prop.is_flag {
             if let Some(target) = prop.initial_value.as_ref() {
@@ -89,11 +89,24 @@ pub fn instance_links(shape: &ModelShape, inst: &ProposedInstance, base: &str) -
                     target: target.clone(),
                 });
             }
+        }
+    }
+    // 2. scalar field links (the LLM-filled values).
+    out.extend(scalar_property_links(shape, inst, base));
+    out
+}
+
+/// Just the scalar (non-flag, non-relation) property links the instance fills —
+/// the mutable part of a node. Used both by [`instance_links`] (create: flags +
+/// scalars) and by updates (patch scalars, leave the type flag in place).
+pub fn scalar_property_links(shape: &ModelShape, inst: &ProposedInstance, base: &str) -> Vec<Link> {
+    let rel_preds = relation_predicates(shape);
+    let mut out = Vec::new();
+    for prop in &shape.properties {
+        if prop.is_flag {
             continue;
         }
-        // Skip relation properties: their targets are instance URIs, not
-        // literals. Writing an LLM-proposed value here would mint a bogus
-        // literal link. Relation extraction is a later PR.
+        // Relation targets are instance URIs, not literals — never literal-encode.
         if rel_preds.contains(prop.predicate.as_str()) {
             continue;
         }
@@ -174,6 +187,62 @@ pub fn place_instances(
         );
         let links = instance_links(shape, inst, &base);
         out.push((base, links));
+    }
+    out
+}
+
+/// A single write the extractor wants to make. `Create` mints a new instance;
+/// `Update` patches the scalar fields of an existing one (its `id`), leaving the
+/// type flag in place — this is how the extractor grows/refines a tree node
+/// (Flux "grouping": continue an existing subgroup vs. start a new one).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExtractionOp {
+    Create { base: String, links: Vec<Link> },
+    Update { base: String, set: Vec<Link> },
+}
+
+/// Turn proposed instances into create/update ops. A proposal with an `id`
+/// becomes an `Update` on that existing base (scalar fields only); otherwise a
+/// `Create` under `base_prefix`. Unknown-class proposals are dropped.
+pub fn plan_extraction_ops(
+    shapes: &[ModelShape],
+    proposed: &[ProposedInstance],
+    base_prefix: &str,
+) -> Vec<ExtractionOp> {
+    let mut out = Vec::with_capacity(proposed.len());
+    for inst in proposed {
+        let Some(shape) = shapes
+            .iter()
+            .find(|s| class_local_name(&s.target_class) == inst.class)
+        else {
+            log::debug!(
+                "extraction: dropping proposed instance for unknown class '{}'",
+                inst.class
+            );
+            continue;
+        };
+        match &inst.id {
+            Some(existing) => {
+                let set = scalar_property_links(shape, inst, existing);
+                if !set.is_empty() {
+                    out.push(ExtractionOp::Update {
+                        base: existing.clone(),
+                        set,
+                    });
+                }
+            }
+            None => {
+                let base = format!(
+                    "{base_prefix}{}/{}",
+                    inst.class.to_lowercase(),
+                    Uuid::new_v4()
+                );
+                out.push(ExtractionOp::Create {
+                    base: base.clone(),
+                    links: instance_links(shape, inst, &base),
+                });
+            }
+        }
     }
     out
 }

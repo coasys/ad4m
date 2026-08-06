@@ -209,6 +209,61 @@ fn instance_links_skip_missing_optional_fields() {
 }
 
 #[test]
+fn plan_ops_creates_without_id_and_updates_with_id() {
+    // An `id` field marks an upsert: patch the existing node's scalar fields
+    // (no fresh base, no re-written type flag). Absence of `id` = a create.
+    let shapes = vec![shape_from_sdna("Intention", INTENTION_SDNA)];
+    let raw = r#"[
+      {"class":"Intention","title":"Write the design doc"},
+      {"class":"Intention","id":"soa://existing/intention/42","title":"Write the design doc and circulate it","owner":"Nico"}
+    ]"#;
+    let proposed = parse_extraction_response(raw).unwrap();
+    // `id` is parsed into its own field, kept out of `props`.
+    assert_eq!(
+        proposed[1].id.as_deref(),
+        Some("soa://existing/intention/42")
+    );
+    assert!(!proposed[1].props.contains_key("id"));
+
+    let ops = plan_extraction_ops(&shapes, &proposed, "soa://ext/");
+    assert_eq!(ops.len(), 2);
+
+    match &ops[0] {
+        ExtractionOp::Create { base, links } => {
+            assert!(base.starts_with("soa://ext/intention/"));
+            // create carries the type flag…
+            assert!(links.iter().any(
+                |l| l.predicate.as_deref() == Some("ns://type") && l.target == "ns://intention"
+            ));
+            assert!(links
+                .iter()
+                .any(|l| l.predicate.as_deref() == Some("ns://title")));
+        }
+        other => panic!("expected Create, got {other:?}"),
+    }
+    match &ops[1] {
+        ExtractionOp::Update { base, set } => {
+            assert_eq!(base, "soa://existing/intention/42");
+            // update patches scalar fields on the EXISTING base…
+            assert!(set
+                .iter()
+                .all(|l| l.source == "soa://existing/intention/42"));
+            // …and never re-writes the type flag.
+            assert!(!set
+                .iter()
+                .any(|l| l.predicate.as_deref() == Some("ns://type")));
+            assert!(set
+                .iter()
+                .any(|l| l.predicate.as_deref() == Some("ns://title")));
+            assert!(set
+                .iter()
+                .any(|l| l.predicate.as_deref() == Some("ns://owner")));
+        }
+        other => panic!("expected Update, got {other:?}"),
+    }
+}
+
+#[test]
 fn relation_properties_are_excluded_from_extraction() {
     // A shape whose extraction hint also declares a link-typed relation
     // (`blocks`). load_shape lists that relation in `properties` too, so

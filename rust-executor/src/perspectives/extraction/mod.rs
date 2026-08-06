@@ -35,12 +35,19 @@ pub use parse::*;
 pub use prompt::*;
 pub use run::*;
 
-/// One instance the LLM proposes creating: the target class name plus a flat
-/// map of field-name -> value. Extra/unknown fields are tolerated (kept in
-/// `props`); `instance_links` filters them against the class shape.
+/// One instance the LLM proposes. Normally a **create**: the target class name
+/// plus a flat map of field-name -> value. When `id` is present it is an
+/// **upsert/update** — the base URI of an existing instance whose scalar fields
+/// should be patched instead of minting a new node (this is how the extractor
+/// grows/refines an existing tree node à la Flux "grouping"). Extra/unknown
+/// fields are tolerated (kept in `props`); `instance_links` filters them against
+/// the class shape. `id` is a reserved field name for this reason.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ProposedInstance {
     pub class: String,
+    /// Present only for updates: the existing instance's base URI to patch.
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(flatten)]
     pub props: HashMap<String, serde_json::Value>,
 }

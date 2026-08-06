@@ -292,6 +292,7 @@ pub(crate) async fn seed_instance(
     props.insert("title".to_string(), serde_json::Value::String(title.into()));
     let inst = ProposedInstance {
         class: class_local_name(&shape.target_class).to_string(),
+        id: None,
         props,
     };
     let links = instance_links(shape, &inst, base);
