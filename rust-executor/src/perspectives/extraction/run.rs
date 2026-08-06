@@ -1,11 +1,13 @@
 use super::{
     build_extraction_input, ensure_extraction_task, existing_instance_titles,
-    filter_already_present, parse_extraction_response, place_instances, ProposedInstance,
+    filter_already_present, parse_extraction_response, plan_extraction_ops, ExtractionOp,
+    ProposedInstance,
 };
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{Link, LinkStatus};
+use crate::types::{LinkQuery, LinkStatus};
+use std::collections::HashSet;
 
 /// Max attempts for [`retry_extraction_parse`]. Mirrors Flux's `LLMutils`
 /// retry-×5 loop: local models occasionally emit half-valid JSON, so we ask
@@ -55,11 +57,118 @@ where
     }))
 }
 
+/// Persist a planned set of [`ExtractionOp`]s into the perspective. Creates are
+/// straight `add_links`; updates use SPARQL "set" semantics — for each scalar
+/// predicate being written, existing links `(base, predicate, *)` are removed
+/// before the new ones go in, so a scalar field ends up with exactly the new
+/// value(s) instead of accumulating stale ones.
+///
+/// Everything runs in a single batch: a mid-write failure (an update's remove
+/// succeeds but its add fails, for example) rolls back the whole run rather
+/// than leaving a half-patched node.
+pub async fn apply_extraction_ops(
+    perspective: &mut PerspectiveInstance,
+    ops: &[ExtractionOp],
+    link_status: LinkStatus,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
+    // Nothing to write? bail before opening a batch — an empty run should be
+    // a no-op, not a stray zero-diff commit.
+    let empty = ops.iter().all(|op| match op {
+        ExtractionOp::Create { links, .. } => links.is_empty(),
+        ExtractionOp::Update { set, .. } => set.is_empty(),
+    });
+    if empty {
+        return Ok(());
+    }
+
+    let batch_id = perspective.create_batch().await;
+
+    for op in ops {
+        match op {
+            ExtractionOp::Create { links, .. } => {
+                if links.is_empty() {
+                    continue;
+                }
+                perspective
+                    .add_links(
+                        links.clone(),
+                        link_status.clone(),
+                        Some(batch_id.clone()),
+                        context,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("apply_extraction_ops: add_links(create) failed: {e:#}")
+                    })?;
+            }
+            ExtractionOp::Update { base, set } => {
+                if set.is_empty() {
+                    continue;
+                }
+                // Replace-per-predicate: for every distinct predicate we're
+                // writing, drop the existing `(base, predicate, *)` links first.
+                // Guards against a "grouping" update leaving a stale
+                // summary/relevance in place next to the new one.
+                let mut cleared: HashSet<String> = HashSet::new();
+                for link in set {
+                    let Some(pred) = link.predicate.clone() else {
+                        continue;
+                    };
+                    if !cleared.insert(pred.clone()) {
+                        continue;
+                    }
+                    let existing = perspective
+                        .get_links(&LinkQuery {
+                            source: Some(base.clone()),
+                            predicate: Some(pred.clone()),
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "apply_extraction_ops: get_links(update {pred}) failed: {e:#}"
+                            )
+                        })?;
+                    for old in existing {
+                        perspective
+                            .remove_link(old.into(), Some(batch_id.clone()))
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "apply_extraction_ops: remove_link(update {pred}) failed: {e:#}"
+                                )
+                            })?;
+                    }
+                }
+                perspective
+                    .add_links(
+                        set.clone(),
+                        link_status.clone(),
+                        Some(batch_id.clone()),
+                        context,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("apply_extraction_ops: add_links(update) failed: {e:#}")
+                    })?;
+            }
+        }
+    }
+
+    perspective
+        .commit_batch(batch_id, context)
+        .await
+        .map_err(|e| anyhow::anyhow!("apply_extraction_ops: commit_batch failed: {e:#}"))?;
+    Ok(())
+}
+
 /// end-to-end extraction driver. Wires everything: build the input from
 /// shapes' hints + transcript, call `AIService::prompt` on the registered
 /// extraction task, retry parsing up to 5×, then for every proposed
 /// instance write its shape-driven links into the perspective via
-/// `add_link`. Returns the fresh base URI + links written per instance.
+/// [`apply_extraction_ops`] (creating or upserting per proposal `id`).
+/// Returns the planned ops so callers can inspect create/update splits.
 ///
 /// The `shapes` argument is exactly the classes to consider — callers pick
 /// which subject classes to extract into (usually all classes carrying an
@@ -77,7 +186,7 @@ pub async fn run_extraction(
     base_prefix: &str,
     link_status: LinkStatus,
     context: &AgentContext,
-) -> anyhow::Result<Vec<(String, Vec<Link>)>> {
+) -> anyhow::Result<Vec<ExtractionOp>> {
     let task = ensure_extraction_task()?;
     // Dedup context: what the graph already holds, so the model is steered away
     // from re-proposing known items and we can enforce it deterministically.
@@ -103,23 +212,15 @@ pub async fn run_extraction(
     .await?;
 
     // Hard dedup guarantee: even if the model ignored the `existing` hint, an
-    // already-present (class, title) never becomes a new instance.
-    let instances = filter_already_present(instances, &existing);
-    let placements = place_instances(shapes, &instances, base_prefix);
+    // already-present (class, title) never becomes a *new* instance. Updates
+    // (proposals that carry an `id`) bypass this — they name a specific target.
+    let (with_id, without_id): (Vec<_>, Vec<_>) =
+        instances.into_iter().partition(|i| i.id.is_some());
+    let deduped_creates = filter_already_present(without_id, &existing);
+    let mut all: Vec<ProposedInstance> = deduped_creates;
+    all.extend(with_id);
 
-    // Write all instance links in a single PerspectiveDiff (add_links) so a
-    // mid-write failure can't leave a half-formed instance — e.g. one carrying
-    // its `ns://type` flag but missing its `ns://title`. Status is the caller's
-    // choice (see `link_status`).
-    let all_links: Vec<Link> = placements
-        .iter()
-        .flat_map(|(_base, links)| links.iter().cloned())
-        .collect();
-    if !all_links.is_empty() {
-        perspective
-            .add_links(all_links, link_status, None, context)
-            .await
-            .map_err(|e| anyhow::anyhow!("run_extraction: add_links failed: {e:#}"))?;
-    }
-    Ok(placements)
+    let ops = plan_extraction_ops(shapes, &all, base_prefix);
+    apply_extraction_ops(perspective, &ops, link_status, context).await?;
+    Ok(ops)
 }

@@ -11,7 +11,9 @@
 
 #![cfg(test)]
 
-use super::extraction::{class_local_name, instance_links, run_extraction, ProposedInstance};
+use super::extraction::{
+    class_local_name, instance_links, run_extraction, ExtractionOp, ProposedInstance,
+};
 use super::model_query::shape::load_shape;
 use super::model_query::types::ModelShape;
 use super::perspective_instance::PerspectiveInstance;
@@ -153,22 +155,57 @@ pub(crate) fn shape_from_sdna(class: &str, sdna: &str) -> ModelShape {
 
 // ---- real-LLM harness (Ollama over the OpenAI-compatible API) --------------
 
-/// Stand up `AIService` with the Ollama-backed default model plus a fresh
-/// private perspective and the given SoA classes. Returns everything a test
-/// needs to drive extraction (optionally after pre-seeding the perspective).
-pub(crate) async fn setup_extraction_e2e(
+/// Bring up a fresh private perspective + shapes + agent context, without
+/// standing up `AIService` — for unit tests that exercise perspective writes
+/// (upsert / apply_extraction_ops) but don't need to call a model.
+pub(crate) async fn setup_perspective_no_llm(
     class_sdnas: &[(&str, &str)],
 ) -> (PerspectiveInstance, Vec<ModelShape>, AgentContext) {
     use crate::agent::AgentService;
-    use crate::ai_service::AIService;
     use crate::prolog_service::init_prolog_service;
     use crate::test_utils::setup_wallet;
-    use crate::types::{ModelApiInput, ModelInput, ModelType, PerspectiveHandle, PerspectiveState};
+    use crate::types::{PerspectiveHandle, PerspectiveState};
 
     setup_wallet();
     ensure_db_init();
     AgentService::init_global_test_instance();
     init_prolog_service().await;
+
+    let perspective = PerspectiveInstance::new(
+        PerspectiveHandle {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            name: Some("Extraction test".into()),
+            shared_url: None,
+            neighbourhood: None,
+            state: PerspectiveState::Private,
+            owners: None,
+        },
+        None,
+    );
+    let ctx = AgentContext::main_agent();
+    perspective
+        .ensure_prolog_engine_pool_for_context(&ctx)
+        .await
+        .expect("prolog engine pool");
+
+    let shapes: Vec<ModelShape> = class_sdnas
+        .iter()
+        .map(|(class, sdna)| shape_from_sdna(class, sdna))
+        .collect();
+
+    (perspective, shapes, ctx)
+}
+
+/// Stand up `AIService` with the Ollama-backed default model on top of
+/// [`setup_perspective_no_llm`]. Returns everything a test needs to drive
+/// extraction against a real LLM (optionally after pre-seeding the perspective).
+pub(crate) async fn setup_extraction_e2e(
+    class_sdnas: &[(&str, &str)],
+) -> (PerspectiveInstance, Vec<ModelShape>, AgentContext) {
+    use crate::ai_service::AIService;
+    use crate::types::{ModelApiInput, ModelInput, ModelType};
+
+    let (perspective, shapes, ctx) = setup_perspective_no_llm(class_sdnas).await;
 
     // init_global_instance re-inits; each test adds its own model immediately
     // after, so re-init between tests (--test-threads=1) is safe.
@@ -202,28 +239,6 @@ pub(crate) async fn setup_extraction_e2e(
         .await
         .expect("set_default_model(Llm)");
 
-    let perspective = PerspectiveInstance::new(
-        PerspectiveHandle {
-            uuid: uuid::Uuid::new_v4().to_string(),
-            name: Some("Extraction e2e".into()),
-            shared_url: None,
-            neighbourhood: None,
-            state: PerspectiveState::Private,
-            owners: None,
-        },
-        None,
-    );
-    let ctx = AgentContext::main_agent();
-    perspective
-        .ensure_prolog_engine_pool_for_context(&ctx)
-        .await
-        .expect("prolog engine pool");
-
-    let shapes: Vec<ModelShape> = class_sdnas
-        .iter()
-        .map(|(class, sdna)| shape_from_sdna(class, sdna))
-        .collect();
-
     (perspective, shapes, ctx)
 }
 
@@ -239,7 +254,7 @@ pub(crate) async fn run_extraction_e2e(
         .iter()
         .map(|(s, t)| (s.to_string(), t.to_string()))
         .collect();
-    let placements = run_extraction(
+    let ops = run_extraction(
         perspective,
         shapes,
         &transcript,
@@ -249,8 +264,23 @@ pub(crate) async fn run_extraction_e2e(
     )
     .await
     .expect("run_extraction against real LLM to succeed");
+    let placements = ops_to_placements(&ops);
     print_placements(&placements);
     placements
+}
+
+/// Flatten [`ExtractionOp`]s into the `(base, links_written)` shape the e2e
+/// assertion helpers expect. Both Create and Update contribute their base +
+/// the links that ended up on it — Update writes its `set` (scalar replacements),
+/// Create writes flags + scalars. This keeps the assertion surface uniform even
+/// once the extractor starts emitting upserts.
+pub(crate) fn ops_to_placements(ops: &[ExtractionOp]) -> Vec<(String, Vec<Link>)> {
+    ops.iter()
+        .map(|op| match op {
+            ExtractionOp::Create { base, links } => (base.clone(), links.clone()),
+            ExtractionOp::Update { base, set } => (base.clone(), set.clone()),
+        })
+        .collect()
 }
 
 /// Convenience for the simple single-shot tests: set up + run in one call.

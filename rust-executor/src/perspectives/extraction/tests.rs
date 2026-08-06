@@ -208,6 +208,96 @@ fn instance_links_skip_missing_optional_fields() {
         .any(|l| l.predicate.as_deref() == Some("ns://title")));
 }
 
+#[tokio::test]
+async fn apply_ops_upsert_replaces_scalar_link_in_perspective() {
+    // End-to-end (no LLM): seed a real perspective with an Intention whose
+    // title/owner are already set, then apply an Update op that patches the
+    // scalar fields on that same base. The old scalar links must be GONE
+    // (SPARQL "set" semantics per predicate) and the new ones present; the
+    // type flag stays untouched.
+    use crate::perspectives::extraction_test_support::{seed_instance, setup_perspective_no_llm};
+    use crate::types::{LinkQuery, LinkStatus};
+
+    let (mut perspective, shapes, ctx) =
+        setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+    let shape = &shapes[0];
+    let base = "soa://existing/intention/upsert-target";
+
+    // Seed: original title on the target instance.
+    seed_instance(&mut perspective, &ctx, shape, base, "Draft the design").await;
+
+    // Extra: give it an owner too (via ProposedInstance route).
+    let mut owner_props = HashMap::new();
+    owner_props.insert("owner".to_string(), serde_json::json!("Nico"));
+    let owner_seed_inst = ProposedInstance {
+        class: "Intention".to_string(),
+        id: Some(base.to_string()),
+        props: owner_props,
+    };
+    let owner_ops = plan_extraction_ops(
+        &shapes,
+        std::slice::from_ref(&owner_seed_inst),
+        "soa://ext/",
+    );
+    apply_extraction_ops(&mut perspective, &owner_ops, LinkStatus::Local, &ctx)
+        .await
+        .expect("seed owner via update");
+
+    // Now upsert: same base, revised title + new owner.
+    let mut props = HashMap::new();
+    props.insert(
+        "title".to_string(),
+        serde_json::json!("Draft the design and circulate it"),
+    );
+    props.insert("owner".to_string(), serde_json::json!("Josh"));
+    let upsert = ProposedInstance {
+        class: "Intention".to_string(),
+        id: Some(base.to_string()),
+        props,
+    };
+    let ops = plan_extraction_ops(&shapes, std::slice::from_ref(&upsert), "soa://ext/");
+    assert!(matches!(ops[0], ExtractionOp::Update { .. }));
+
+    apply_extraction_ops(&mut perspective, &ops, LinkStatus::Local, &ctx)
+        .await
+        .expect("apply upsert");
+
+    // Read back everything anchored on the base.
+    let stored = perspective
+        .get_links(&LinkQuery {
+            source: Some(base.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("get_links after upsert");
+    let by_pred: std::collections::HashMap<String, Vec<String>> = stored
+        .into_iter()
+        .filter_map(|l| l.data.predicate.map(|p| (p, l.data.target)))
+        .fold(std::collections::HashMap::new(), |mut m, (p, t)| {
+            m.entry(p).or_default().push(t);
+            m
+        });
+
+    // Type flag survives (create path wrote it; updates never touch it).
+    assert_eq!(
+        by_pred.get("ns://type").map(|v| v.as_slice()),
+        Some(&["ns://intention".to_string()][..]),
+        "type flag must remain; got {by_pred:?}"
+    );
+    // Title: exactly the new value, no residue of the old one.
+    assert_eq!(
+        by_pred.get("ns://title").map(|v| v.as_slice()),
+        Some(&["literal:string:Draft%20the%20design%20and%20circulate%20it".to_string()][..]),
+        "title must have been replaced (no old-value residue); got {by_pred:?}"
+    );
+    // Owner: exactly the new value (old "Nico" gone).
+    assert_eq!(
+        by_pred.get("ns://owner").map(|v| v.as_slice()),
+        Some(&["literal:string:Josh".to_string()][..]),
+        "owner must have been replaced; got {by_pred:?}"
+    );
+}
+
 #[test]
 fn plan_ops_creates_without_id_and_updates_with_id() {
     // An `id` field marks an upsert: patch the existing node's scalar fields
