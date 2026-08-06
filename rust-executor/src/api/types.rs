@@ -528,6 +528,52 @@ pub struct RemoveLinksBulkRequest {
     pub batch_id: Option<String>,
 }
 
+// ── Generic LLM extraction (perspective.runExtraction) ──
+
+/// One conversation turn fed to the extractor.
+#[derive(Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TranscriptTurn {
+    pub speaker: String,
+    pub text: String,
+}
+
+/// Run generic LLM extraction over a transcript into the perspective's own
+/// SHACL subject classes. Shapes are resolved server-side from the
+/// perspective's registered classes, so callers pass only the transcript.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RunExtractionRequest {
+    pub uuid: String,
+    pub transcript: Vec<TranscriptTurn>,
+    /// URI namespace new instance identities are minted under, e.g. `soa://ext/`.
+    pub base_prefix: String,
+    /// "local" (default) or "shared". Defaults to local so LLM-generated links
+    /// on shared/neighbourhood perspectives are not auto-published.
+    pub link_status: Option<String>,
+}
+
+/// A single link written for an extracted instance.
+#[derive(Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ExtractionLink {
+    pub source: String,
+    pub predicate: Option<String>,
+    pub target: String,
+}
+
+/// One extracted instance: its freshly minted base URI + the links written for it.
+#[derive(Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ExtractionPlacement {
+    pub base: String,
+    pub links: Vec<ExtractionLink>,
+}
+
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]

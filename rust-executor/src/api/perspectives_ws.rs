@@ -1012,6 +1012,89 @@ async fn model_subscribe_handler(
     }))?)
 }
 
+async fn run_extraction_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    check_credits(&ctx.user_email)?;
+
+    let body: RunExtractionRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let status = parse_link_status(body.link_status.as_deref());
+
+    // Resolve the target shapes from the perspective's own registered SHACL
+    // subject classes, so callers only pass the transcript.
+    let class_names = perspective
+        .get_subject_classes_from_shacl()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let mut shapes = Vec::with_capacity(class_names.len());
+    for name in class_names {
+        match perspective.get_shape(&name) {
+            Ok(shape) => shapes.push((*shape).clone()),
+            Err(e) => log::warn!("runExtraction: skipping class '{}': {}", name, e),
+        }
+    }
+    if shapes.is_empty() {
+        return Err(WsRpcError::bad_request(
+            "perspective has no subject classes to extract into",
+        ));
+    }
+
+    let transcript: Vec<(String, String)> = body
+        .transcript
+        .into_iter()
+        .map(|t| (t.speaker, t.text))
+        .collect();
+
+    let placements = crate::perspectives::extraction::run_extraction(
+        &mut perspective,
+        &shapes,
+        &transcript,
+        &body.base_prefix,
+        status,
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    let total_links: usize = placements.iter().map(|(_, links)| links.len()).sum();
+    if total_links > 0 {
+        if let Err(e) = reserve_credits(&ctx.user_email, total_links as f64 * DEFAULT_LINK_WRITE) {
+            log::warn!(
+                "Credit deduction failed for runExtraction (operation already committed): {}",
+                e
+            );
+        }
+    }
+
+    let result: Vec<ExtractionPlacement> = placements
+        .into_iter()
+        .map(|(base, links)| ExtractionPlacement {
+            base,
+            links: links
+                .into_iter()
+                .map(|l| ExtractionLink {
+                    source: l.source,
+                    predicate: l.predicate,
+                    target: l.target,
+                })
+                .collect(),
+        })
+        .collect();
+
+    Ok(serde_json::to_value(result)?)
+}
+
 // ── Registration ──
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -1047,4 +1130,5 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.modelQuery", model_query_handler);
     map.register("perspective.modelSubscribe", model_subscribe_handler);
     map.register("perspective.evaluateGetters", evaluate_getters_handler);
+    map.register("perspective.runExtraction", run_extraction_handler);
 }

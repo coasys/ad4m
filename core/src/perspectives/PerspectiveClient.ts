@@ -10,6 +10,7 @@ import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
+import type { ExtractionPlacement, TranscriptTurn } from "../generated/api";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -246,6 +247,18 @@ export class PerspectiveClient {
     async linkMutations(uuid: string, mutations: LinkMutations, status?: LinkStatus): Promise<LinkExpressionMutations> {
         return this.#apiClient.call<LinkExpressionMutations>(
             'perspective.linkMutations', { uuid, mutations, status }
+        )
+    }
+
+    /**
+     * Run generic LLM extraction over a transcript into this perspective's own
+     * SHACL subject classes. The target shapes are resolved server-side from the
+     * perspective's registered subject classes, so you pass only the transcript.
+     * Returns the freshly minted instances (their base URIs + the links written).
+     */
+    async runExtraction(uuid: string, transcript: TranscriptTurn[], basePrefix: string, linkStatus?: LinkStatus): Promise<ExtractionPlacement[]> {
+        return this.#apiClient.call<ExtractionPlacement[]>(
+            'perspective.runExtraction', { uuid, transcript, basePrefix, linkStatus }
         )
     }
 

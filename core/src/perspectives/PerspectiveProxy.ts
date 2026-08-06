@@ -12,6 +12,7 @@ import { AIClient } from "../ai/AIClient";
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
+import type { ExtractionPlacement, TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
@@ -544,6 +545,23 @@ export class PerspectiveProxy {
      */
     async get(query: LinkQuery): Promise<LinkExpression[]> {
         return await this.#client.queryLinks(this.#handle.uuid, query)
+    }
+
+    /**
+     * Runs generic LLM extraction over a conversation transcript, turning it
+     * into typed instances of this perspective's own SHACL subject classes
+     * (steered by each class's `@ExtractionHint`). The target shapes are
+     * resolved automatically from the perspective's registered classes, so you
+     * pass only the transcript. New instances are written as links into this
+     * perspective; the returned placements list each instance's base URI and
+     * the links written for it.
+     *
+     * @param transcript ordered `{ speaker, text }` turns
+     * @param basePrefix URI namespace for new instance identities, e.g. `soa://ext/`
+     * @param linkStatus `'local'` (default) or `'shared'`
+     */
+    async runExtraction(transcript: TranscriptTurn[], basePrefix: string, linkStatus?: LinkStatus): Promise<ExtractionPlacement[]> {
+        return await this.#client.runExtraction(this.#handle.uuid, transcript, basePrefix, linkStatus)
     }
 
     /**
