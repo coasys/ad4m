@@ -71,6 +71,7 @@ export async function mcpRequest(
   params: any = {},
   sessionId?: string,
   authToken?: string,
+  timeoutMs: number = 30000,
 ): Promise<McpResponse> {
   const id = ++requestIdCounter;
   const headers: Record<string, string> = {
@@ -80,21 +81,37 @@ export async function mcpRequest(
   if (sessionId) headers["Mcp-Session-Id"] = sessionId;
   if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
 
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
-  });
+  // Hard timeout across the whole request — including the SSE body read.
+  // The executor keeps the event-stream open, so parseSSEStream's reader.read()
+  // would block forever if a response frame never arrives; the abort turns that
+  // into a fast, surfaced error instead of a hang.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+      signal: controller.signal,
+    });
 
-  if (!response.ok) {
-    throw new Error(`MCP HTTP ${response.status}: ${response.statusText}`);
-  }
+    if (!response.ok) {
+      throw new Error(`MCP HTTP ${response.status}: ${response.statusText}`);
+    }
 
-  const ct = response.headers.get("content-type") ?? "";
-  if (ct.includes("text/event-stream")) {
-    return parseSSEStream(response);
+    const ct = response.headers.get("content-type") ?? "";
+    if (ct.includes("text/event-stream")) {
+      return await parseSSEStream(response);
+    }
+    return (await response.json()) as McpResponse;
+  } catch (e: any) {
+    if (e?.name === "AbortError") {
+      throw new Error(`MCP ${method} timed out after ${timeoutMs}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-  return (await response.json()) as McpResponse;
 }
 
 /**
@@ -106,6 +123,7 @@ export async function mcpNotify(
   params: any = {},
   sessionId?: string,
   authToken?: string,
+  timeoutMs: number = 10000,
 ): Promise<void> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -114,11 +132,27 @@ export async function mcpNotify(
   if (sessionId) headers["Mcp-Session-Id"] = sessionId;
   if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
 
-  await fetch(endpoint, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ jsonrpc: "2.0", method, params }),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ jsonrpc: "2.0", method, params }),
+      signal: controller.signal,
+    });
+    // A notification expects no response body; release the connection so the
+    // server's open event-stream cannot stall subsequent requests.
+    try {
+      await resp.body?.cancel();
+    } catch {
+      /* already closed */
+    }
+  } catch {
+    /* notification delivery is best-effort */
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -127,6 +161,7 @@ export async function mcpNotify(
 export async function mcpInitialize(
   endpoint: string,
   authToken?: string,
+  timeoutMs: number = 30000,
 ): Promise<{ sessionId: string; serverInfo: any }> {
   const id = ++requestIdCounter;
   const headers: Record<string, string> = {
@@ -135,32 +170,45 @@ export async function mcpInitialize(
   };
   if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
 
-  const resp = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id,
-      method: "initialize",
-      params: {
-        protocolVersion: "2024-11-05",
-        capabilities: { roots: { listChanged: false } },
-        clientInfo: { name: "openclaw-ad4m-plugin", version: "0.1.0" },
-      },
-    }),
-  });
-
-  if (!resp.ok) {
-    throw new Error(`MCP initialize HTTP ${resp.status}: ${resp.statusText}`);
-  }
-
-  const sessionId = resp.headers.get("mcp-session-id") ?? "";
-  const ct = resp.headers.get("content-type") ?? "";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let sessionId = "";
   let result: McpResponse;
-  if (ct.includes("text/event-stream")) {
-    result = await parseSSEStream(resp);
-  } else {
-    result = (await resp.json()) as McpResponse;
+  try {
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: { roots: { listChanged: false } },
+          clientInfo: { name: "openclaw-ad4m-plugin", version: "0.1.0" },
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    if (!resp.ok) {
+      throw new Error(`MCP initialize HTTP ${resp.status}: ${resp.statusText}`);
+    }
+
+    sessionId = resp.headers.get("mcp-session-id") ?? "";
+    const ct = resp.headers.get("content-type") ?? "";
+    if (ct.includes("text/event-stream")) {
+      result = await parseSSEStream(resp);
+    } else {
+      result = (await resp.json()) as McpResponse;
+    }
+  } catch (e: any) {
+    if (e?.name === "AbortError") {
+      throw new Error(`MCP initialize timed out after ${timeoutMs}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
 
   if (result.error) {
