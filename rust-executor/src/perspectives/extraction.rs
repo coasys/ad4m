@@ -21,7 +21,7 @@ use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{AITask, Link, LinkStatus};
+use crate::types::{AIPromptExamples, AITask, Link, LinkStatus};
 use serde::Deserialize;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -260,17 +260,30 @@ You receive a JSON object with these fields:
 
 Emit a JSON array. Each element is `{\"class\": <class name>, ...fields}`, where
 the fields' values are strings drawn from what participants actually said or
-committed to in the transcript. Only include a class if the transcript clearly
-supports it — err on the side of fewer instances. Only include a field if the
-value is present or clearly implied; omit optional fields you cannot fill.
+committed to in the transcript.
+
+How to decide what to extract:
+  - Consider EACH class independently against the WHOLE transcript, using its
+    `hint`. A turn can match one class, several, or none.
+  - Do not skip a clearly-stated item just because another one is also present:
+    a direct question is a Question even amid tasks; a stated claim or opinion is
+    a Belief; a reported fact or measurement is an Observation; a commitment to
+    act is a Task/Intention. Capture each on its own merits.
+  - At the same time, do not invent items the transcript does not support, and
+    do not manufacture instances from greetings or small talk.
+  - Only include a field if its value is present or clearly implied; omit
+    optional fields you cannot fill.
+
+Two worked examples follow (as prior turns) before your real input — study how
+every co-present item is captured, then apply the same to your input.
 
 Output rules:
   - Return valid JSON only — no prose, no markdown fences, no <think> blocks.
   - Return an empty array `[]` if nothing matches.
   - Do not invent classes or fields not listed in `classes`.
-  - Do NOT re-create something already present: if the transcript only restates
-    an item whose title is in that class's `existing` list, omit it. Only emit
-    genuinely new items.
+  - Dedup: skip an item ONLY when its title clearly matches one already in that
+    class's `existing` list. A brand-new item still counts even if an older,
+    different item of the same class exists — always extract genuinely new items.
 ";
 
 /// S5: idempotently register the generic extraction task in the AI-task DB.
@@ -286,6 +299,64 @@ Output rules:
 /// expected to call `service.spawn_task(task)` separately when it needs the
 /// model loaded for a `prompt` call; this split keeps registration testable in
 /// CI without a GPU.
+/// Few-shot examples sent as prior User/Assistant turns (via `prompt_examples`)
+/// ahead of the real input. Two generic, non-test scenarios that teach the
+/// failure modes small models hit: (1) a belief and a task in the same snippet
+/// must BOTH be captured; (2) a question raised amid tasks must be captured.
+/// Inputs mirror the JSON shape `build_extraction_input` produces.
+fn extraction_examples() -> Vec<AIPromptExamples> {
+    let ex1_in = serde_json::json!({
+        "classes": [
+            {"name":"Task","hint":"An action someone commits to doing.","existing":[],
+             "fields":[{"name":"title","required":true,"hint":"Imperative summary."},
+                       {"name":"owner","required":false,"hint":"Who will do it."}]},
+            {"name":"Belief","hint":"A claim someone holds to be true.","existing":[],
+             "fields":[{"name":"title","required":true,"hint":"The claim."}]}
+        ],
+        "transcript":[
+            {"speaker":"A","text":"Our error rate doubled after the last deploy."},
+            {"speaker":"B","text":"I'll roll back that deploy this afternoon."}
+        ]
+    })
+    .to_string();
+    let ex1_out = serde_json::json!([
+        {"class":"Belief","title":"The error rate doubled after the last deploy"},
+        {"class":"Task","title":"Roll back the last deploy","owner":"B"}
+    ])
+    .to_string();
+
+    let ex2_in = serde_json::json!({
+        "classes": [
+            {"name":"Task","hint":"An action someone commits to doing.","existing":[],
+             "fields":[{"name":"title","required":true,"hint":"Imperative summary."},
+                       {"name":"owner","required":false,"hint":"Who will do it."}]},
+            {"name":"Question","hint":"An open question that needs an answer.","existing":[],
+             "fields":[{"name":"title","required":true,"hint":"The question."}]}
+        ],
+        "transcript":[
+            {"speaker":"A","text":"I'll write the migration script today."},
+            {"speaker":"B","text":"Should we run it against staging first?"}
+        ]
+    })
+    .to_string();
+    let ex2_out = serde_json::json!([
+        {"class":"Task","title":"Write the migration script","owner":"A"},
+        {"class":"Question","title":"Should we run the migration against staging first?"}
+    ])
+    .to_string();
+
+    vec![
+        AIPromptExamples {
+            input: ex1_in,
+            output: ex1_out,
+        },
+        AIPromptExamples {
+            input: ex2_in,
+            output: ex2_out,
+        },
+    ]
+}
+
 pub fn ensure_extraction_task() -> anyhow::Result<AITask> {
     if let Some(existing) = Ad4mDb::with_global_instance(|db| db.get_tasks())?
         .into_iter()
@@ -298,7 +369,7 @@ pub fn ensure_extraction_task() -> anyhow::Result<AITask> {
             EXTRACTION_TASK_NAME.to_string(),
             "default".to_string(),
             EXTRACTION_SYSTEM_PROMPT.to_string(),
-            vec![],
+            extraction_examples(),
             None,
         )
     })?;

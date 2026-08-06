@@ -122,17 +122,19 @@ jobs:
           # suite. The e2e talks to Ollama over the OpenAI-compatible API (no
           # embedded-CUDA build needed); on this self-hosted runner (Marvin)
           # the endpoint is local. Requires the model to be pulled in Ollama.
-          # Model choice: qwen3.5-27b-opus is the known-reliable baseline (all
-          # 7 e2e classes pass consistently, ~15min). gemma4:26b MoE is ~2.6x
-          # faster but flaked e2e_intention_and_belief on 2026-08-06 (dropped
-          # the belief when an intention was co-present) — revisit once the
-          # prompt is hardened for multi-class capture. Override via
-          # EXTRACTION_E2E_MODEL.
+          # Model choice: gemma3:12b — fits the 3090 fully (100% GPU), runs the
+          # whole 7-class e2e suite in ~10s, and passes reliably (5/5 clean runs
+          # on 2026-08-06) once the prompt was hardened with few-shot examples
+          # delivered as User/Assistant turns (prompt_examples) that teach
+          # multi-class capture. This is the model Flux already uses for
+          # summaries. Larger models (qwen3.5-27b-opus ~15min half on CPU,
+          # gemma4:26b) work too but are slower/were flakier pre-hardening.
+          # Override via EXTRACTION_E2E_MODEL.
           name: Rust extraction tests (unit + real-LLM e2e via Ollama)
           no_output_timeout: 30m
           environment:
             EXTRACTION_E2E_BASE_URL: http://localhost:11434/v1
-            EXTRACTION_E2E_MODEL: qwen3.5-27b-opus:latest
+            EXTRACTION_E2E_MODEL: gemma3:12b
           command: cargo test --release -p ad4m-executor --lib perspectives::extraction -- --test-threads=1
       - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)

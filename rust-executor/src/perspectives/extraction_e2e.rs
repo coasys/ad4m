@@ -9,8 +9,9 @@
 //! LLM — so no GPU build is needed, only a reachable model. Endpoint + model are
 //! env-overridable (`EXTRACTION_E2E_BASE_URL` / `EXTRACTION_E2E_MODEL` /
 //! `EXTRACTION_E2E_API_KEY`); defaults hit Ollama at `localhost:11434` with
-//! `qwen3.5-27b-opus:latest`. On CI (self-hosted runner = Marvin) that endpoint
-//! is local; from a dev box, tunnel it (`ssh -L 11434:localhost:11434 marvin`).
+//! `gemma3:12b` (fits the GPU, ~10s for the suite, Flux's summary model). On CI
+//! (self-hosted runner = Marvin) that endpoint is local; from a dev box, tunnel
+//! it (`ssh -L 11434:localhost:11434 marvin`).
 //!
 //! Requires that endpoint to be up — they are NOT `#[ignore]`d, so a `cargo test`
 //! with no model reachable will fail here by design (that is the CI signal).

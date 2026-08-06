@@ -180,8 +180,7 @@ pub(crate) async fn setup_extraction_e2e(
         .expect("AIService global instance");
     let base_url = std::env::var("EXTRACTION_E2E_BASE_URL")
         .unwrap_or_else(|_| "http://localhost:11434/v1".into());
-    let model =
-        std::env::var("EXTRACTION_E2E_MODEL").unwrap_or_else(|_| "qwen3.5-27b-opus:latest".into());
+    let model = std::env::var("EXTRACTION_E2E_MODEL").unwrap_or_else(|_| "gemma3:12b".into());
     eprintln!("[e2e] extraction against model '{model}' at {base_url}");
     let model_id = service
         .add_model(ModelInput {
