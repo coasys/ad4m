@@ -388,6 +388,15 @@ pub async fn run_interpretation_with_strategy_and_model(
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
 
+    // The task is registered in the DB by `ensure_interpretation_task` but is not
+    // loaded into the running model worker until a `set_default_model` — which
+    // may already have happened before this task existed. Spawn it explicitly
+    // (idempotent) so `prompt` can find it.
+    service
+        .ensure_task_spawned(task.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("run_interpretation: failed to load interpretation task: {e:#}"))?;
+
     let instances = retry_interpretation_parse(|_attempt| {
         let service = service.clone();
         let task_id = task.task_id.clone();

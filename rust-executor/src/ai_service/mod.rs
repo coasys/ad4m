@@ -912,6 +912,16 @@ impl AIService {
         })
     }
 
+    /// Ensure a DB-registered task is loaded into the running model worker so
+    /// `prompt` can find it. Idempotent (re-spawning overwrites the worker's
+    /// copy). For callers that register a task via the DB directly — e.g.
+    /// generic extraction's `ensure_extraction_task` — rather than through
+    /// `add_task`, which are otherwise invisible to the worker until the next
+    /// `set_default_model`.
+    pub async fn ensure_task_spawned(&self, task: AITask) -> Result<()> {
+        self.spawn_task(task).await
+    }
+
     async fn spawn_task(&self, task: AITask) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let llm_channel = self.llm_channel.lock().await;
