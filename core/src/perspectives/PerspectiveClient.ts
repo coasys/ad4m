@@ -255,10 +255,17 @@ export class PerspectiveClient {
      * SHACL subject classes. The target shapes are resolved server-side from the
      * perspective's registered subject classes, so you pass only the transcript.
      * Returns the freshly minted instances (their base URIs + the links written).
+     *
+     * The server-side call prompts an LLM (up to `EXTRACTION_MAX_ATTEMPTS`
+     * retries on parse failure), so it can legitimately take minutes on slower
+     * or CPU-only models. We raise the default 30s RPC timeout here to 20 min
+     * (matches the CI `--timeout 1200000` for the extraction tests).
      */
     async runExtraction(uuid: string, transcript: TranscriptTurn[], basePrefix: string, classes?: string[], linkStatus?: LinkStatus): Promise<ExtractionPlacement[]> {
+        const RUN_EXTRACTION_TIMEOUT_MS = 20 * 60 * 1000
         return this.#apiClient.call<ExtractionPlacement[]>(
-            'perspective.runExtraction', { uuid, transcript, basePrefix, classes, linkStatus }
+            'perspective.runExtraction', { uuid, transcript, basePrefix, classes, linkStatus },
+            RUN_EXTRACTION_TIMEOUT_MS,
         )
     }
 
