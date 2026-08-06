@@ -279,6 +279,27 @@ async fn ensure_membership(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     Ok(Value::Bool(true))
 }
 
+/// Query the quality preferences the SFU event loop holds for each
+/// participant.  Returns `[{participantId, preference}, ...]`.
+/// Wind tunnel uses this to verify cascade propagation reached the
+/// sender's node.
+async fn quality_preferences(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+        .map_err(WsRpcError::forbidden)?;
+    let svc = service()?;
+    let prefs = svc.get_quality_preferences().await;
+    let list: Vec<Value> = prefs
+        .into_iter()
+        .map(|(pid, pref)| {
+            let mut o = serde_json::Map::new();
+            o.insert("participantId".to_string(), Value::String(pid));
+            o.insert("preference".to_string(), Value::String(pref));
+            Value::Object(o)
+        })
+        .collect();
+    Ok(Value::Array(list))
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -294,5 +315,6 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("sfu.sfuPeerForNeighbourhood", sfu_peer_for_neighbourhood);
     map.register("sfu.sfuPeersForNeighbourhood", sfu_peers_for_neighbourhood);
     map.register("sfu.cascadeStatus", cascade_status);
+    map.register("sfu.qualityPreferences", quality_preferences);
     map.register("sfu.ensureMembership", ensure_membership);
 }

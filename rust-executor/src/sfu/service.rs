@@ -31,6 +31,27 @@ pub fn get_sfu_service() -> Option<Arc<SfuService>> {
 // root so external callers can `use crate::sfu::SfuConfig` etc.
 use super::types::{CallSessionInfo, SfuConfig, SfuParticipantInfo, SfuRoomInfo};
 
+/// Compute the max quality preference across a set of values.
+///
+/// Quality ordering: high/auto > medium > low.
+/// Returns "high" when the iterator yields no values.
+fn max_quality_preference<'a>(values: impl Iterator<Item = &'a String>) -> String {
+    fn rank(pref: &str) -> u8 {
+        match pref {
+            "low" => 0,
+            "medium" => 1,
+            _ => 2, // "high", "auto", unknown → highest tier
+        }
+    }
+    let max_rank = values.map(|v| rank(v)).max().unwrap_or(2);
+    match max_rank {
+        0 => "low",
+        1 => "medium",
+        _ => "high",
+    }
+    .to_string()
+}
+
 /// The global SFU service, analogous to HolochainService.
 pub struct SfuService {
     server: SfuServer,
@@ -43,6 +64,12 @@ pub struct SfuService {
     /// deployments pass a `NoopGossip` so the cascade plumbing stays
     /// uniform and the redirect logic falls through to "no peers".
     gossip: Arc<dyn CascadeGossip>,
+    /// Local subscriber quality preferences tracked for cascade
+    /// aggregation.  Maps `room_id_str → (subscriber_did → preference)`.
+    /// When any subscriber changes preference, the aggregate (max) gets
+    /// gossiped to pipe peers so the sender node forwards the correct
+    /// simulcast layer.
+    local_quality_preferences: RwLock<HashMap<String, HashMap<String, String>>>,
 }
 
 impl SfuService {
@@ -81,6 +108,7 @@ impl SfuService {
             configs: Arc::new(RwLock::new(HashMap::new())),
             cascade_manager: Arc::new(RwLock::new(cascade_manager)),
             gossip: Arc::clone(&gossip),
+            local_quality_preferences: RwLock::new(HashMap::new()),
         });
 
         if let Some(rx) = gossip.take_inbound() {
@@ -240,6 +268,9 @@ impl SfuService {
             //         remote_did, room_id_str).
             let mut pipe_renegotiation_offers: Vec<(ParticipantId, String, String, String)> =
                 Vec::new();
+            // Quality preferences to set on pipe peers — collected from
+            // QualityPreference gossip messages.
+            let mut pipe_quality_prefs: Vec<(ParticipantId, String)> = Vec::new();
 
             // Resolve local-room state up front for the Announce branch
             // so we never hold the cascade lock + rooms lock at the same
@@ -381,6 +412,30 @@ impl SfuService {
                             }
                         }
                     }
+                    CascadeSignal::QualityPreference {
+                        from_did,
+                        room_id,
+                        preference,
+                    } => {
+                        // A remote node's subscribers want this quality
+                        // level for simulcast media we forward through
+                        // the pipe.  Look up the pipe peer for that
+                        // remote node and set its quality preference so
+                        // should_forward_rid() selects the right layer.
+                        if let Some(meta) = mgr.pipe_meta(&room_id, &from_did) {
+                            let pid = meta.participant_id.clone();
+                            info!(
+                                "SFU cascade: quality preference '{}' from {} for room {} → pipe peer {}",
+                                preference, from_did, room_id, pid
+                            );
+                            pipe_quality_prefs.push((pid, preference));
+                        } else {
+                            debug!(
+                                "SFU cascade: QualityPreference from {} for room {} but no pipe found",
+                                from_did, room_id
+                            );
+                        }
+                    }
                 }
             }
 
@@ -435,6 +490,23 @@ impl SfuService {
                         "SFU cascade: failed to enqueue pipe renegotiation offer: {}",
                         e
                     );
+                }
+            }
+
+            // Apply quality preferences received from remote cascade
+            // nodes — each one sets the pipe peer's preference so
+            // should_forward_rid() selects the correct simulcast layer.
+            for (pid, preference) in pipe_quality_prefs {
+                if let Err(e) = self
+                    .server
+                    .command_tx
+                    .send(SfuCommand::SetQualityPreference {
+                        participant_id: pid,
+                        preference,
+                    })
+                    .await
+                {
+                    warn!("SFU cascade: failed to enqueue pipe quality preference: {}", e);
                 }
             }
 
@@ -812,16 +884,30 @@ impl SfuService {
         // Leave, the lifetime of a known_nodes entry is bounded only
         // by the next non-zero Announce from us, which for a vacated
         // room will never come.
-        self.announce_room(&room_id.to_string(), local_count).await;
+        let room_key = room_id.to_string();
+        self.announce_room(&room_key, local_count).await;
         if is_empty {
             let signal = CascadeSignal::Leave {
                 did: self.gossip.local_did().to_string(),
-                room_id: room_id.to_string(),
+                room_id: room_key.clone(),
             };
             if let Err(e) = self.gossip.send(GossipTarget::Broadcast, signal).await {
                 warn!("SFU call_leave: gossip Leave broadcast failed: {}", e);
             }
         }
+
+        // Clean up local quality preference tracking and re-propagate
+        // the aggregate to pipe peers (the max may have changed).
+        {
+            let mut prefs = self.local_quality_preferences.write().await;
+            if let Some(room_prefs) = prefs.get_mut(&room_key) {
+                room_prefs.remove(agent_did);
+                if room_prefs.is_empty() {
+                    prefs.remove(&room_key);
+                }
+            }
+        }
+        self.propagate_quality_preference(&room_key).await;
 
         Ok(true)
     }
@@ -873,7 +959,35 @@ impl SfuService {
         mgr.established_pipes()
     }
 
+    /// Query the quality preferences map from the SFU event loop.
+    /// Returns `(participant_id_string, preference)` pairs.  Used by
+    /// wind tunnel tests to verify cascade quality preference propagation.
+    pub async fn get_quality_preferences(&self) -> Vec<(String, String)> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self
+            .server
+            .command_tx
+            .send(SfuCommand::GetQualityPreferences { reply: tx })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        match rx.await {
+            Ok(map) => map
+                .into_iter()
+                .map(|(pid, pref)| (pid.to_string(), pref))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Set the quality preference for a participant's received video streams.
+    ///
+    /// In cascade deployments, this also propagates the aggregate
+    /// preference (max across all local non-pipe subscribers) to each
+    /// connected pipe node so the sender's SFU forwards the correct
+    /// simulcast layer through the pipe.
     pub async fn call_set_quality_preference(
         &self,
         neighbourhood_url: &str,
@@ -912,7 +1026,77 @@ impl SfuService {
             .await
             .map_err(|e| format!("Failed to send quality preference command: {}", e))?;
 
+        // Drop rooms lock before acquiring other locks.
+        drop(rooms);
+
+        // Track this preference for cascade aggregation and propagate.
+        let room_key = room_id.to_string();
+        {
+            let mut prefs = self.local_quality_preferences.write().await;
+            prefs
+                .entry(room_key.clone())
+                .or_default()
+                .insert(agent_did.to_string(), preference.to_string());
+        }
+
+        self.propagate_quality_preference(&room_key).await;
+
         Ok(true)
+    }
+
+    /// Compute the max quality preference across all local subscribers
+    /// in a room and gossip it to each pipe peer so the sender node
+    /// forwards the correct simulcast layer.
+    ///
+    /// Quality ordering: high/auto > medium > low.
+    async fn propagate_quality_preference(&self, room_key: &str) {
+        let mgr = self.cascade_manager.read().await;
+        let pipe_peers = mgr.pipe_peers_for_room(room_key);
+        if pipe_peers.is_empty() {
+            return; // single-node room — nothing to propagate
+        }
+        let local_did = mgr.local_did().to_string();
+        drop(mgr);
+
+        // Compute aggregate (max across local subscribers).
+        let aggregate = {
+            let prefs = self.local_quality_preferences.read().await;
+            match prefs.get(room_key) {
+                Some(room_prefs) => max_quality_preference(room_prefs.values()),
+                None => "high".to_string(), // default when no preferences set
+            }
+        };
+
+        info!(
+            "SFU cascade: propagating quality preference '{}' to {} pipe peer(s) for room {}",
+            aggregate,
+            pipe_peers.len(),
+            room_key
+        );
+
+        // Send to each connected pipe node.
+        for (remote_did, _pid) in &pipe_peers {
+            let signal = CascadeSignal::QualityPreference {
+                from_did: local_did.clone(),
+                room_id: room_key.to_string(),
+                preference: aggregate.clone(),
+            };
+            if let Err(e) = self
+                .gossip
+                .send(GossipTarget::PeerDid(remote_did.clone()), signal)
+                .await
+            {
+                warn!(
+                    "SFU cascade: failed to send quality preference to {}: {}",
+                    remote_did, e
+                );
+            } else {
+                info!(
+                    "SFU cascade: quality preference '{}' sent to {} for room {}",
+                    aggregate, remote_did, room_key
+                );
+            }
+        }
     }
 
     // ---- SFU configuration (Social DNA) ----

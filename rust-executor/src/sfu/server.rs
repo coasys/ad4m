@@ -160,6 +160,11 @@ pub enum SfuCommand {
         /// String form of the [`crate::sfu::room::RoomId`].
         room_id: String,
     },
+    /// Query the quality preferences map.  Returns a snapshot via
+    /// oneshot so callers outside the event loop can read it.
+    GetQualityPreferences {
+        reply: tokio::sync::oneshot::Sender<HashMap<ParticipantId, String>>,
+    },
     /// Shut down the SFU server.
     Shutdown,
 }
@@ -462,6 +467,9 @@ impl SfuServer {
                                 );
                             }
                         }
+                    }
+                    Ok(SfuCommand::GetQualityPreferences { reply }) => {
+                        let _ = reply.send(quality_preferences.clone());
                     }
                     Ok(SfuCommand::Shutdown) => {
                         info!("SFU event loop shutting down");

@@ -88,6 +88,17 @@ pub enum CascadeSignal {
     /// SFU node is leaving the cluster
     #[serde(rename = "sfu-leave")]
     Leave { did: String, room_id: String },
+    /// Quality preference propagation — a remote node's local
+    /// subscribers want this quality level for simulcast media
+    /// forwarded through the pipe.
+    #[serde(rename = "sfu-quality-preference")]
+    QualityPreference {
+        from_did: String,
+        room_id: String,
+        /// Aggregate preference across all local subscribers on the
+        /// sending node: "low", "medium", "high", or "auto".
+        preference: String,
+    },
 }
 
 impl CascadeSignal {
@@ -98,6 +109,7 @@ impl CascadeSignal {
             CascadeSignal::Leave { .. } => "Leave",
             CascadeSignal::PipeOffer { .. } => "PipeOffer",
             CascadeSignal::PipeAnswer { .. } => "PipeAnswer",
+            CascadeSignal::QualityPreference { .. } => "QualityPreference",
         }
     }
 }
@@ -523,6 +535,17 @@ impl CascadeManager {
     pub fn record_rebalance(&mut self, room_id: &str) {
         self.rebalance_cooldowns
             .insert(room_id.to_string(), Instant::now());
+    }
+
+    /// All established pipes in a specific room, as
+    /// `(remote_did, participant_id)` pairs.  Used by the quality
+    /// preference propagation path to iterate pipe peers per room.
+    pub fn pipe_peers_for_room(&self, room_id: &str) -> Vec<(String, ParticipantId)> {
+        self.pipes
+            .iter()
+            .filter(|((rid, _), meta)| rid == room_id && meta.established)
+            .map(|((_, remote_did), meta)| (remote_did.clone(), meta.participant_id.clone()))
+            .collect()
     }
 
     /// All `(room_id, remote_did)` keys for established pipes — for
