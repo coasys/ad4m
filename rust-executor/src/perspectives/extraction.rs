@@ -9,12 +9,13 @@
 //!   S5 — `EXTRACTION_SYSTEM_PROMPT` + `ensure_extraction_task`
 //!   S6 — `apply_extraction_raw` + `retry_extraction_parse` + `run_extraction`
 //!          async shell + retry harness, wiring S1-S5 through
-//!          `AIService::prompt` and `PerspectiveInstance::add_link`.
-//!   S7 — `#[ignore]` real-LLM e2e (this commit): end-to-end sanity check
-//!          against a locally-installed default LLM. Skipped in CI; run
-//!          manually on Marvin CUDA / any box with a model installed.
+//!          `AIService::prompt` and `PerspectiveInstance::add_links`, plus
+//!          existing-instance dedup (`existing_instance_titles` +
+//!          `filter_already_present`).
 //!
-//! S2–S6 are pure/DB-only (no LLM) and CI-tested; the real-LLM e2e is S7.
+//! The pure/DB-only units here (S2-S6, no LLM) are unit-tested in-file. The
+//! real-LLM end-to-end suite lives in `extraction_e2e.rs`, and the shared test
+//! fixtures/harness in `extraction_test_support.rs`.
 
 use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
@@ -68,9 +69,18 @@ fn clean_llm_json(raw: &str) -> String {
 /// S3: assemble the per-call LLM input from the target shapes' extraction hints
 /// plus the transcript. Pure — this is exactly where `extraction_hint` enters
 /// the prompt. Shape (matches the system prompt in S5):
-/// `{ "classes": [{ "name", "hint", "fields": [{ "name", "required", "hint" }] }],
+/// `{ "classes": [{ "name", "hint", "existing": [title,…],
+///                  "fields": [{ "name", "required", "hint" }] }],
 ///    "transcript": [{ "speaker", "text" }] }`.
-pub fn build_extraction_input(shapes: &[ModelShape], transcript: &[(String, String)]) -> String {
+///
+/// `existing` maps a class's local name to the titles of instances already in
+/// the graph, so the model can avoid re-proposing them (soft dedup; the hard
+/// guarantee is [`filter_already_present`]). Pass an empty map for none.
+pub fn build_extraction_input(
+    shapes: &[ModelShape],
+    transcript: &[(String, String)],
+    existing: &HashMap<String, Vec<String>>,
+) -> String {
     let classes: Vec<serde_json::Value> = shapes
         .iter()
         .map(|s| {
@@ -89,9 +99,11 @@ pub fn build_extraction_input(shapes: &[ModelShape], transcript: &[(String, Stri
                     })
                 })
                 .collect();
+            let name = class_local_name(&s.target_class);
             serde_json::json!({
-                "name": class_local_name(&s.target_class),
+                "name": name,
                 "hint": s.extraction_hint,
+                "existing": existing.get(name).cloned().unwrap_or_default(),
                 "fields": fields,
             })
         })
@@ -101,6 +113,44 @@ pub fn build_extraction_input(shapes: &[ModelShape], transcript: &[(String, Stri
         .map(|(speaker, text)| serde_json::json!({ "speaker": speaker, "text": text }))
         .collect();
     serde_json::json!({ "classes": classes, "transcript": turns }).to_string()
+}
+
+/// Deterministic dedup safety-net (pure): drop proposed instances whose
+/// (class, title) already exists in the graph, case-insensitively. This is the
+/// hard guarantee behind the soft `existing` hint in [`build_extraction_input`]
+/// — even if the model re-proposes a known item, it never becomes a link.
+///
+/// `existing` maps a class's local name to the titles already present. Only the
+/// `title` field is compared (the human-facing identity of an SoA node);
+/// instances without a `title` are always kept.
+pub fn filter_already_present(
+    instances: Vec<ProposedInstance>,
+    existing: &HashMap<String, Vec<String>>,
+) -> Vec<ProposedInstance> {
+    let known: HashMap<&String, std::collections::HashSet<String>> = existing
+        .iter()
+        .map(|(class, titles)| (class, titles.iter().map(|t| t.to_lowercase()).collect()))
+        .collect();
+    instances
+        .into_iter()
+        .filter(|inst| {
+            let Some(title) = inst.props.get("title").and_then(|v| v.as_str()) else {
+                return true; // no title to compare on — keep it
+            };
+            let already = known
+                .get(&inst.class)
+                .map(|set| set.contains(&title.to_lowercase()))
+                .unwrap_or(false);
+            if already {
+                log::debug!(
+                    "extraction: dropping already-present {} '{}'",
+                    inst.class,
+                    title
+                );
+            }
+            !already
+        })
+        .collect()
 }
 
 /// Predicates of the shape's relation (link-typed) properties. `load_shape`
@@ -201,10 +251,11 @@ pub const EXTRACTION_TASK_NAME: &str = "adam://extraction";
 pub const EXTRACTION_SYSTEM_PROMPT: &str = "\
 You extract typed instances from a conversation transcript.
 
-You receive a JSON object with two fields:
+You receive a JSON object with these fields:
   - `classes`: available subject classes. Each has a `name`, a natural-language
-    `hint` describing when to instantiate it, and a list of `fields`. Each field
-    has a `name`, optional `hint`, and `required` flag.
+    `hint` describing when to instantiate it, a list of `fields` (each with a
+    `name`, optional `hint`, and `required` flag), and an `existing` array of
+    titles already present in the graph for that class.
   - `transcript`: an array of turns `{speaker, text}`.
 
 Emit a JSON array. Each element is `{\"class\": <class name>, ...fields}`, where
@@ -217,6 +268,9 @@ Output rules:
   - Return valid JSON only — no prose, no markdown fences, no <think> blocks.
   - Return an empty array `[]` if nothing matches.
   - Do not invent classes or fields not listed in `classes`.
+  - Do NOT re-create something already present: if the transcript only restates
+    an item whose title is in that class's `existing` list, omit it. Only emit
+    genuinely new items.
 ";
 
 /// S5: idempotently register the generic extraction task in the AI-task DB.
@@ -397,6 +451,74 @@ fn decode_literal_string(uri: &str) -> Option<String> {
         .map(|c| c.into_owned())
 }
 
+/// S6: read the titles of instances already present in the perspective for each
+/// target class, keyed by the class's local name. Used to steer the LLM away
+/// from re-proposing known items ([`build_extraction_input`]) and to enforce
+/// dedup deterministically ([`filter_already_present`]).
+///
+/// An instance is located by its class type-flag link (predicate + constant
+/// value); its identity is the `title` property. Classes without a type flag or
+/// a `title` property are skipped (no dedup key).
+pub async fn existing_instance_titles(
+    perspective: &PerspectiveInstance,
+    shapes: &[ModelShape],
+) -> anyhow::Result<HashMap<String, Vec<String>>> {
+    use crate::types::LinkQuery;
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for shape in shapes {
+        let Some(flag) = shape
+            .properties
+            .iter()
+            .find(|p| p.is_flag && p.initial_value.is_some())
+        else {
+            continue;
+        };
+        let Some(title_prop) = shape.properties.iter().find(|p| p.name == "title") else {
+            continue;
+        };
+        let flag_value = flag.initial_value.as_ref().unwrap();
+
+        // All instances of this class = sources of the type-flag link.
+        let flag_links = perspective
+            .get_links(&LinkQuery {
+                predicate: Some(flag.predicate.clone()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("existing_instance_titles: get_links(flag) failed: {e:#}")
+            })?;
+        let bases: Vec<String> = flag_links
+            .into_iter()
+            .filter(|l| &l.data.target == flag_value)
+            .map(|l| l.data.source)
+            .collect();
+
+        let mut titles = Vec::new();
+        for base in bases {
+            let title_links = perspective
+                .get_links(&LinkQuery {
+                    source: Some(base),
+                    predicate: Some(title_prop.predicate.clone()),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("existing_instance_titles: get_links(title) failed: {e:#}")
+                })?;
+            for tl in title_links {
+                if let Some(title) = decode_literal_string(&tl.data.target) {
+                    titles.push(title);
+                }
+            }
+        }
+        if !titles.is_empty() {
+            out.insert(class_local_name(&shape.target_class).to_string(), titles);
+        }
+    }
+    Ok(out)
+}
+
 /// S6: end-to-end extraction driver. Wires everything: build the input from
 /// shapes' hints + transcript (S3), call `AIService::prompt` on the registered
 /// extraction task (S5), retry parsing up to 5× (S6), then for every proposed
@@ -421,7 +543,10 @@ pub async fn run_extraction(
     context: &AgentContext,
 ) -> anyhow::Result<Vec<(String, Vec<Link>)>> {
     let task = ensure_extraction_task()?;
-    let prompt = build_extraction_input(shapes, transcript);
+    // Dedup context: what the graph already holds, so the model is steered away
+    // from re-proposing known items and we can enforce it deterministically.
+    let existing = existing_instance_titles(perspective, shapes).await?;
+    let prompt = build_extraction_input(shapes, transcript, &existing);
 
     let service = crate::ai_service::AIService::global_instance()
         .await
@@ -441,6 +566,9 @@ pub async fn run_extraction(
     })
     .await?;
 
+    // Hard dedup guarantee: even if the model ignored the `existing` hint, an
+    // already-present (class, title) never becomes a new instance.
+    let instances = filter_already_present(instances, &existing);
     let placements = place_instances(shapes, &instances, base_prefix);
 
     // Write all instance links in a single PerspectiveDiff (add_links) so a
@@ -463,137 +591,7 @@ pub async fn run_extraction(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perspectives::model_query::shape::load_shape;
-    use crate::perspectives::shacl_parser::parse_shacl_to_links;
-    use crate::perspectives::sparql_store::SparqlStore;
-    use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
-    use std::sync::Once;
-
-    static INIT_DB: Once = Once::new();
-
-    fn ensure_db_init() {
-        INIT_DB.call_once(|| {
-            Ad4mDb::init_global_instance(":memory:").unwrap();
-        });
-    }
-
-    const BELIEF_SDNA: &str = r#"{
-      "target_class":"ns://Belief",
-      "extraction_hint":"A claim a participant holds to be true about the world or the group. Not a task or a question.",
-      "properties":[
-        {"path":"ns://type","name":"type","has_value":"ns://belief","min_count":1,"max_count":1},
-        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"One-sentence statement in the claimant's framing."}
-      ]
-    }"#;
-
-    const INTENTION_SDNA: &str = r#"{
-      "target_class":"ns://Intention",
-      "extraction_hint":"Something a participant commits to doing - an actionable outcome with a plausible owner.",
-      "properties":[
-        {"path":"ns://type","name":"type","has_value":"ns://intention","min_count":1,"max_count":1},
-        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the work."},
-        {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Who committed to it, if stated."}
-      ]
-    }"#;
-
-    const TASK_SDNA: &str = r#"{
-      "target_class":"ns://Task",
-      "extraction_hint":"A concrete, actionable unit of work to be done, ideally with an owner. Not a belief or a vague aspiration.",
-      "properties":[
-        {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
-        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task."},
-        {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Person responsible for the task, if stated."}
-      ]
-    }"#;
-
-    /// A class carrying both a scalar (`title`) and a link-typed relation
-    /// (`blocks`, hasMany → Task). `load_shape` lists `blocks` in both
-    /// `properties` and `include_relations`; the extractor must exclude it.
-    const TASK_WITH_RELATION_SDNA: &str = r#"{
-      "target_class":"ns://Task",
-      "extraction_hint":"A concrete, actionable unit of work to be done.",
-      "properties":[
-        {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
-        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task."},
-        {"path":"ns://blocks","name":"blocks","relation_kind":"hasMany","target_class_name":"Task","class":"ns://TaskShape","extraction_hint":"Other tasks this one blocks."}
-      ]
-    }"#;
-
-    const OBSERVATION_SDNA: &str = r#"{
-      "target_class":"ns://Observation",
-      "extraction_hint":"A factual observation or reported state of the world or system - something seen, measured or reported, not an opinion, plan or task.",
-      "properties":[
-        {"path":"ns://type","name":"type","has_value":"ns://observation","min_count":1,"max_count":1},
-        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The observed fact, stated plainly."}
-      ]
-    }"#;
-
-    const QUESTION_SDNA: &str = r#"{
-      "target_class":"ns://Question",
-      "extraction_hint":"An open question raised in the conversation that still needs an answer.",
-      "properties":[
-        {"path":"ns://type","name":"type","has_value":"ns://question","min_count":1,"max_count":1},
-        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The question, phrased as a question."}
-      ]
-    }"#;
-
-    const VISION_SDNA: &str = r#"{
-      "target_class":"ns://Vision",
-      "extraction_hint":"A long-term aspiration or desired future state - directional and motivating, not a concrete task or plan.",
-      "properties":[
-        {"path":"ns://type","name":"type","has_value":"ns://vision","min_count":1,"max_count":1},
-        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The aspiration, stated concisely."}
-      ]
-    }"#;
-
-    const PLAN_SDNA: &str = r#"{
-      "target_class":"ns://Plan",
-      "extraction_hint":"A concrete approach or sequence of steps intended to achieve a goal.",
-      "properties":[
-        {"path":"ns://type","name":"type","has_value":"ns://plan","min_count":1,"max_count":1},
-        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Summary of the plan or approach."},
-        {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Who owns the plan, if stated."}
-      ]
-    }"#;
-
-    /// Build a ModelShape via the real writer -> store -> loader path, so the
-    /// class/property `extraction_hint`s are actually populated (the direct
-    /// JSON path sets them to None).
-    fn shape_from_sdna(class: &str, sdna: &str) -> ModelShape {
-        let store = SparqlStore::new(None).unwrap();
-        let target = format!("ns://{class}");
-        let shape_uri = format!("ns://{class}Shape");
-        let mut links = vec![
-            Link {
-                source: target.clone(),
-                predicate: Some("rdf://type".into()),
-                target: "ad4m://SubjectClass".into(),
-            },
-            Link {
-                source: target,
-                predicate: Some("ad4m://shape".into()),
-                target: shape_uri,
-            },
-        ];
-        links.extend(parse_shacl_to_links(sdna, class).unwrap());
-        for l in links {
-            store
-                .add_link(&DecoratedLinkExpression {
-                    author: "did:key:test".into(),
-                    timestamp: "1700000000000".into(),
-                    data: l,
-                    proof: DecoratedExpressionProof {
-                        key: "k".into(),
-                        signature: "s".into(),
-                        valid: Some(true),
-                        invalid: Some(false),
-                    },
-                    status: None,
-                })
-                .unwrap();
-        }
-        load_shape(&store, class).unwrap()
-    }
+    use crate::perspectives::extraction_test_support::*;
 
     #[test]
     fn extraction_hint_lands_in_prompt() {
@@ -607,6 +605,7 @@ mod tests {
                 "Nico".into(),
                 "I'll extract the LLM processing into ADAM".into(),
             )],
+            &HashMap::new(),
         );
 
         // class-level hints reach the prompt
@@ -814,7 +813,11 @@ mod tests {
         );
 
         // 1. build_extraction_input must not offer the relation as a field.
-        let input = build_extraction_input(&[shape.clone()], &[("Nico".into(), "block it".into())]);
+        let input = build_extraction_input(
+            &[shape.clone()],
+            &[("Nico".into(), "block it".into())],
+            &HashMap::new(),
+        );
         let v: serde_json::Value = serde_json::from_str(&input).unwrap();
         let field_names: Vec<&str> = v["classes"][0]["fields"]
             .as_array()
@@ -1018,392 +1021,38 @@ mod tests {
         );
     }
 
-    // ---- S7: end-to-end with a real LLM (ignored in CI) ------------------
-    //
-    // Exercises the whole pipeline against an actual local model:
-    //   shapes -> prompt -> AIService::prompt -> parse (with retry) ->
-    //   shape-driven links -> add_link on a real PerspectiveInstance.
-    //
-    // Skipped in CI. Run manually where a default LLM is available:
-    //
-    //   cargo test --release -p ad4m-executor \
-    //     perspectives::extraction::tests::e2e_run_extraction_with_real_llm \
-    //     -- --ignored --nocapture --test-threads=1
-
-    #[ignore]
-    #[tokio::test]
-    async fn e2e_run_extraction_with_real_llm() {
-        use crate::agent::{AgentContext, AgentService};
-        use crate::ai_service::AIService;
-        use crate::prolog_service::init_prolog_service;
-        use crate::test_utils::setup_wallet;
-        use crate::types::{
-            LinkQuery, ModelApiInput, ModelInput, ModelType, PerspectiveHandle, PerspectiveState,
-        };
-
-        setup_wallet();
-        ensure_db_init();
-        AgentService::init_global_test_instance();
-        init_prolog_service().await;
-
-        // Spin up AIService and register an OpenAI-compatible remote LLM as the
-        // default so the `ensure_extraction_task` task (model_id = "default")
-        // has a real model to talk to. Endpoint + model are env-overridable so
-        // the run can select whatever fitting model is available; the defaults
-        // target Ollama (e.g. reached over an SSH tunnel to a GPU box).
-        AIService::init_global_instance()
-            .await
-            .expect("AIService to initialize");
-        let service = AIService::global_instance()
-            .await
-            .expect("AIService global instance");
-        let base_url = std::env::var("EXTRACTION_E2E_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:11434/v1".into());
-        let model = std::env::var("EXTRACTION_E2E_MODEL")
-            .unwrap_or_else(|_| "qwen3.5-27b-opus:latest".into());
-        eprintln!("[e2e] extraction against model '{model}' at {base_url}");
-        let model_id = service
-            .add_model(ModelInput {
-                name: "e2e extraction LLM".into(),
-                model_type: ModelType::Llm,
-                local: None,
-                api: Some(ModelApiInput {
-                    base_url,
-                    api_key: std::env::var("EXTRACTION_E2E_API_KEY")
-                        .unwrap_or_else(|_| "ollama".into()),
-                    model,
-                    api_type: crate::types::ModelApiType::OpenAi.to_string(),
-                }),
-            })
-            .await
-            .expect("add_model");
-        service
-            .set_default_model(ModelType::Llm, model_id.clone())
-            .await
-            .expect("set_default_model(Llm)");
-
-        // Real perspective — same setup pattern as PerspectiveInstance::tests.
-        let mut perspective = PerspectiveInstance::new(
-            PerspectiveHandle {
-                uuid: uuid::Uuid::new_v4().to_string(),
-                name: Some("Extraction e2e".into()),
-                shared_url: None,
-                neighbourhood: None,
-                state: PerspectiveState::Private,
-                owners: None,
-            },
-            None,
-        );
-        let ctx = AgentContext::main_agent();
-        perspective
-            .ensure_prolog_engine_pool_for_context(&ctx)
-            .await
-            .expect("prolog engine pool");
-
-        let shapes = vec![
-            shape_from_sdna("Belief", BELIEF_SDNA),
-            shape_from_sdna("Intention", INTENTION_SDNA),
-        ];
-        let transcript = vec![
-            (
-                "Nico".into(),
-                "I'll extract the LLM call-processing from Flux into a generic \
-                 AD4M core service."
-                    .into(),
-            ),
-            (
-                "James".into(),
-                "Cool. One English hint per class should be enough to steer this.".into(),
-            ),
-        ];
-
-        let placements = run_extraction(
-            &mut perspective,
-            &shapes,
-            &transcript,
-            "soa://ext/",
-            LinkStatus::Local,
-            &ctx,
+    #[test]
+    fn filter_already_present_drops_known_titles() {
+        // Two Tasks proposed; one duplicates an existing title (case-insensitive),
+        // one is new. Only the new one survives; a same-title item of a DIFFERENT
+        // class is untouched (dedup is per class).
+        let proposed = parse_extraction_response(
+            r#"[
+              {"class":"Task","title":"Ship the MVP"},
+              {"class":"Task","title":"Write the docs"},
+              {"class":"Belief","title":"ship the mvp"}
+            ]"#,
         )
-        .await
-        .expect("run_extraction against real LLM to succeed");
+        .unwrap();
+        let mut existing = HashMap::new();
+        existing.insert("Task".to_string(), vec!["ship the MVP".to_string()]);
 
-        println!("e2e placements: {} instance(s)", placements.len());
-        for (base, links) in &placements {
-            println!("  instance {base}");
-            for l in links {
-                println!(
-                    "      {} -> {}",
-                    l.predicate.as_deref().unwrap_or("(none)"),
-                    l.target
-                );
-            }
-        }
-        assert!(
-            !placements.is_empty(),
-            "expected at least one extracted instance from real LLM"
-        );
-
-        // Every claimed instance base must actually have links in the
-        // perspective — this is what proves add_link ran, not just that
-        // placements were computed.
-        for (base, links) in &placements {
-            assert!(!links.is_empty(), "empty link set for {base}");
-            let stored = perspective
-                .get_links(&LinkQuery {
-                    source: Some(base.clone()),
-                    ..Default::default()
-                })
-                .await
-                .expect("get_links after write");
-            assert!(
-                !stored.is_empty(),
-                "expected links written into perspective for {base}"
-            );
-        }
-    }
-
-    // ---- shared e2e harness for the real-LLM tests -----------------------
-
-    /// Register the Ollama-backed default model, stand up a private perspective,
-    /// register the given SoA classes, and run extraction over the transcript.
-    /// Returns (perspective, placements). Model/endpoint are env-overridable
-    /// (EXTRACTION_E2E_MODEL / _BASE_URL / _API_KEY); defaults hit Ollama at
-    /// localhost:11434 (e.g. via an SSH tunnel to a GPU box).
-    async fn run_e2e(
-        class_sdnas: &[(&str, &str)],
-        transcript: &[(&str, &str)],
-    ) -> (PerspectiveInstance, Vec<(String, Vec<Link>)>) {
-        use crate::agent::{AgentContext, AgentService};
-        use crate::ai_service::AIService;
-        use crate::prolog_service::init_prolog_service;
-        use crate::test_utils::setup_wallet;
-        use crate::types::{
-            ModelApiInput, ModelInput, ModelType, PerspectiveHandle, PerspectiveState,
-        };
-
-        setup_wallet();
-        ensure_db_init();
-        AgentService::init_global_test_instance();
-        init_prolog_service().await;
-
-        // init_global_instance always re-inits; each test adds its own model
-        // immediately after, so re-init between tests (--test-threads=1) is safe.
-        AIService::init_global_instance()
-            .await
-            .expect("AIService to initialize");
-        let service = AIService::global_instance()
-            .await
-            .expect("AIService global instance");
-        let base_url = std::env::var("EXTRACTION_E2E_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:11434/v1".into());
-        let model = std::env::var("EXTRACTION_E2E_MODEL")
-            .unwrap_or_else(|_| "qwen3.5-27b-opus:latest".into());
-        eprintln!("[e2e] extraction against model '{model}' at {base_url}");
-        let model_id = service
-            .add_model(ModelInput {
-                name: "e2e extraction LLM".into(),
-                model_type: ModelType::Llm,
-                local: None,
-                api: Some(ModelApiInput {
-                    base_url,
-                    api_key: std::env::var("EXTRACTION_E2E_API_KEY")
-                        .unwrap_or_else(|_| "ollama".into()),
-                    model,
-                    api_type: crate::types::ModelApiType::OpenAi.to_string(),
-                }),
-            })
-            .await
-            .expect("add_model");
-        service
-            .set_default_model(ModelType::Llm, model_id)
-            .await
-            .expect("set_default_model(Llm)");
-
-        let mut perspective = PerspectiveInstance::new(
-            PerspectiveHandle {
-                uuid: uuid::Uuid::new_v4().to_string(),
-                name: Some("Extraction e2e".into()),
-                shared_url: None,
-                neighbourhood: None,
-                state: PerspectiveState::Private,
-                owners: None,
-            },
-            None,
-        );
-        let ctx = AgentContext::main_agent();
-        perspective
-            .ensure_prolog_engine_pool_for_context(&ctx)
-            .await
-            .expect("prolog engine pool");
-
-        let shapes: Vec<ModelShape> = class_sdnas
+        let kept = filter_already_present(proposed, &existing);
+        let kept_titles: Vec<&str> = kept
             .iter()
-            .map(|(class, sdna)| shape_from_sdna(class, sdna))
+            .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
             .collect();
-        let transcript: Vec<(String, String)> = transcript
-            .iter()
-            .map(|(s, t)| (s.to_string(), t.to_string()))
-            .collect();
-
-        let placements = run_extraction(
-            &mut perspective,
-            &shapes,
-            &transcript,
-            "soa://ext/",
-            LinkStatus::Local,
-            &ctx,
-        )
-        .await
-        .expect("run_extraction against real LLM to succeed");
-
-        println!("e2e placements: {} instance(s)", placements.len());
-        for (base, links) in &placements {
-            println!("  instance {base}");
-            for l in links {
-                println!(
-                    "      {} -> {}",
-                    l.predicate.as_deref().unwrap_or("(none)"),
-                    l.target
-                );
-            }
-        }
-        (perspective, placements)
-    }
-
-    /// Local `ns://type` names of the placed instances (e.g. "intention").
-    fn placed_type_names(placements: &[(String, Vec<Link>)]) -> Vec<String> {
-        placements
-            .iter()
-            .filter_map(|(_, links)| {
-                links
-                    .iter()
-                    .find(|l| l.predicate.as_deref() == Some("ns://type"))
-                    .map(|l| class_local_name(&l.target).to_string())
-            })
-            .collect()
-    }
-
-    async fn assert_persisted(
-        perspective: &PerspectiveInstance,
-        placements: &[(String, Vec<Link>)],
-    ) {
-        use crate::types::LinkQuery;
-        for (base, links) in placements {
-            assert!(!links.is_empty(), "empty link set for {base}");
-            let stored = perspective
-                .get_links(&LinkQuery {
-                    source: Some(base.clone()),
-                    ..Default::default()
-                })
-                .await
-                .expect("get_links after write");
-            assert!(
-                !stored.is_empty(),
-                "expected links written into perspective for {base}"
-            );
-        }
-    }
-
-    // ---- additional real-LLM e2e: different SoA classes + transcripts ----
-
-    // Task-tracking conversation -> Task instances (with owners).
-    #[ignore]
-    #[tokio::test]
-    async fn e2e_task_tracking_transcript() {
-        let (p, placements) = run_e2e(
-            &[("Task", TASK_SDNA)],
-            &[
-                (
-                    "Nico",
-                    "James, can you finish the WebRTC call module in WE by Monday?",
-                ),
-                (
-                    "James",
-                    "Yes, I'll wrap up the call module and port the transcription over.",
-                ),
-                (
-                    "Josh",
-                    "I'll set up the wind-tunnel Docker scenario for the agent test.",
-                ),
-            ],
-        )
-        .await;
         assert!(
-            !placements.is_empty(),
-            "expected tasks from a task-assignment transcript"
+            !kept_titles.contains(&"Ship the MVP"),
+            "existing Task title must be dropped (case-insensitive); got {kept_titles:?}"
         );
-        assert_persisted(&p, &placements).await;
-        let types = placed_type_names(&placements);
         assert!(
-            types.iter().all(|t| t == "task"),
-            "only Task was offered; got {types:?}"
+            kept_titles.contains(&"Write the docs"),
+            "new Task must survive"
         );
-        let has_owner = placements.iter().any(|(_, links)| {
-            links
-                .iter()
-                .any(|l| l.predicate.as_deref() == Some("ns://owner"))
-        });
-        assert!(has_owner, "expected at least one task to carry an owner");
-    }
-
-    // Mixed epistemic conversation -> at least two distinct modalities.
-    #[ignore]
-    #[tokio::test]
-    async fn e2e_mixed_epistemic_transcript() {
-        let (p, placements) = run_e2e(
-            &[
-                ("Observation", OBSERVATION_SDNA),
-                ("Belief", BELIEF_SDNA),
-                ("Question", QUESTION_SDNA),
-            ],
-            &[
-                (
-                    "Josh",
-                    "The executor was sitting at 100% CPU during the whole call.",
-                ),
-                ("Nico", "I think named graphs would fix that."),
-                (
-                    "James",
-                    "But how do we merge when three LLMs write to the graph at once?",
-                ),
-            ],
-        )
-        .await;
-        assert!(!placements.is_empty());
-        assert_persisted(&p, &placements).await;
-        let types = placed_type_names(&placements);
-        let distinct: std::collections::HashSet<&String> = types.iter().collect();
         assert!(
-            distinct.len() >= 2,
-            "expected >=2 distinct classes across observation/belief/question; got {types:?}"
-        );
-    }
-
-    // Strategy conversation -> Vision and/or Plan.
-    #[ignore]
-    #[tokio::test]
-    async fn e2e_vision_and_plan_transcript() {
-        let (p, placements) = run_e2e(
-            &[("Vision", VISION_SDNA), ("Plan", PLAN_SDNA)],
-            &[
-                (
-                    "Nico",
-                    "The dream is a holonic collective-intelligence network where humans and AIs think together.",
-                ),
-                (
-                    "Nico",
-                    "Concretely, we start by shipping the SoA-flow MVP, then layer Synergy Fuel on top.",
-                ),
-            ],
-        )
-        .await;
-        assert!(!placements.is_empty());
-        assert_persisted(&p, &placements).await;
-        let types = placed_type_names(&placements);
-        assert!(
-            types.iter().any(|t| t == "vision" || t == "plan"),
-            "expected a Vision or Plan; got {types:?}"
+            kept_titles.contains(&"ship the mvp"),
+            "same title on a different class must NOT be dropped; got {kept_titles:?}"
         );
     }
 }

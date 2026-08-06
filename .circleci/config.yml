@@ -118,6 +118,17 @@ jobs:
           no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
       - run:
+          # Generic-extraction Rust tests: the pure units + the real-LLM e2e
+          # suite. The e2e talks to Ollama over the OpenAI-compatible API (no
+          # embedded-CUDA build needed); on this self-hosted runner (Marvin)
+          # the endpoint is local. Requires the model to be pulled in Ollama.
+          name: Rust extraction tests (unit + real-LLM e2e via Ollama)
+          no_output_timeout: 30m
+          environment:
+            EXTRACTION_E2E_BASE_URL: http://localhost:11434/v1
+            EXTRACTION_E2E_MODEL: qwen3.5-27b-opus:latest
+          command: cargo test --release --lib perspectives::extraction -- --test-threads=1
+      - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
           command: |
             mkdir -p /tmp/circleci-artifacts/${CIRCLE_SHA1}
