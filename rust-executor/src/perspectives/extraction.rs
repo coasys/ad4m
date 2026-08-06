@@ -1,20 +1,25 @@
 //! Generic LLM extraction: turn conversation text into typed subject-class
 //! instances, steered by the natural-language `extraction_hint` declared on each
-//! class/property (see `shacl_parser` S0 + `model_query` S1).
+//! class/property.
 //!
-//! Build sequence (planning/generic-extraction-spec.md §9):
-//!   S2 — `parse_extraction_response`: LLM JSON -> `ProposedInstance`s
-//!   S3 — `build_extraction_input`   : shapes' hints + transcript -> prompt
-//!   S4 — `instance_links`           : `ProposedInstance` -> perspective links
-//!   S5 — `EXTRACTION_SYSTEM_PROMPT` + `ensure_extraction_task`
-//!   S6 — `apply_extraction_raw` + `retry_extraction_parse` + `run_extraction`
-//!          async shell + retry harness, wiring S1-S5 through
-//!          `AIService::prompt` and `PerspectiveInstance::add_links`, plus
-//!          existing-instance dedup (`existing_instance_titles` +
-//!          `filter_already_present`).
+//! Data flow of one extraction run (`run_extraction` wires it end to end):
+//!   1. Read the titles already present per class (`existing_instance_titles`)
+//!      so the model can be steered away from re-proposing known items.
+//!   2. Render those, plus each class's `extraction_hint` + fields and the
+//!      transcript, into a single prompt (`build_extraction_input`).
+//!   3. Ask the configured LLM (`AIService::prompt` on the task registered by
+//!      `ensure_extraction_task`), retrying the parse a few times because local
+//!      models emit half-valid JSON (`retry_extraction_parse` +
+//!      `parse_extraction_response` -> `ProposedInstance`s).
+//!   4. Drop anything already present (`filter_already_present`), then turn each
+//!      surviving instance into shape-driven perspective links anchored at a
+//!      freshly-minted base URI (`place_instances` -> `instance_links`, scalar
+//!      values encoded via `value_to_literal_uri`).
+//!   5. Write them all in one perspective diff (`add_links`).
 //!
-//! The pure/DB-only units here (S2-S6, no LLM) are unit-tested in-file. The
-//! real-LLM end-to-end suite lives in `extraction_e2e.rs`, and the shared test
+//! `apply_extraction_raw` exposes the pure parse+link steps (no LLM, no store)
+//! for callers and tests. Those pure/DB-only units are unit-tested in-file; the
+//! real-LLM end-to-end suite lives in `extraction_e2e.rs`, with shared
 //! fixtures/harness in `extraction_test_support.rs`.
 
 use crate::agent::AgentContext;
@@ -28,7 +33,7 @@ use uuid::Uuid;
 
 /// One instance the LLM proposes creating: the target class name plus a flat
 /// map of field-name -> value. Extra/unknown fields are tolerated (kept in
-/// `props`); `instance_links` (S4) filters them against the class shape.
+/// `props`); `instance_links` filters them against the class shape.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ProposedInstance {
     pub class: String,
@@ -66,9 +71,9 @@ fn clean_llm_json(raw: &str) -> String {
     s.trim().to_string()
 }
 
-/// S3: assemble the per-call LLM input from the target shapes' extraction hints
+/// assemble the per-call LLM input from the target shapes' extraction hints
 /// plus the transcript. Pure — this is exactly where `extraction_hint` enters
-/// the prompt. Shape (matches the system prompt in S5):
+/// the prompt. Shape (matches the system prompt):
 /// `{ "classes": [{ "name", "hint", "existing": [title,…],
 ///                  "fields": [{ "name", "required", "hint" }] }],
 ///    "transcript": [{ "speaker", "text" }] }`.
@@ -88,7 +93,7 @@ pub fn build_extraction_input(
             let fields: Vec<serde_json::Value> = s
                 .properties
                 .iter()
-                // The type flag is set by instance_links (S4), not the LLM;
+                // The type flag is set by instance_links, not the LLM;
                 // relations are link-typed and handled in a later PR.
                 .filter(|p| !p.is_flag && !rel_preds.contains(p.predicate.as_str()))
                 .map(|p| {
@@ -100,6 +105,11 @@ pub fn build_extraction_input(
                 })
                 .collect();
             let name = class_local_name(&s.target_class);
+            // `"hint"` is the prompt-facing key (short, cheap in tokens and what
+            // the system prompt + few-shot examples reference); its value is the
+            // schema's `extractionHint` decorator, surfaced here as
+            // `extraction_hint`. The key name is deliberately not "extractionHint"
+            // — the LLM never sees the decorator name, only this compact field.
             serde_json::json!({
                 "name": name,
                 "hint": s.extraction_hint,
@@ -177,7 +187,7 @@ pub(crate) fn class_local_name(target_class: &str) -> &str {
         .unwrap_or(target_class)
 }
 
-/// S4: turn a `ProposedInstance` (parsed LLM output) into perspective links
+/// turn a `ProposedInstance` (parsed LLM output) into perspective links
 /// anchored at `base`. Pure — no store, no LLM. Emits, in shape order:
 ///   1. one link per type-flag property (predicate = flag path, target = the
 ///      flag's constant `initial_value`), so downstream queries recognise the
@@ -236,14 +246,14 @@ fn value_to_literal_uri(value: &serde_json::Value) -> Option<String> {
     ))
 }
 
-/// S5: name under which the generic extraction task is registered with
+/// name under which the generic extraction task is registered with
 /// `AIService`. Kept stable so `ensure_extraction_task` can find it across
 /// executor restarts and multiple callers.
 pub const EXTRACTION_TASK_NAME: &str = "adam://extraction";
 
-/// S5: system prompt sent with every extraction call. Instance-specific
+/// system prompt sent with every extraction call. Instance-specific
 /// scaffolding (available classes, their hints, the transcript) is added by
-/// `build_extraction_input` (S3), so this stays stable across calls and the
+/// `build_extraction_input`, so this stays stable across calls and the
 /// task can be reused.
 pub const EXTRACTION_SYSTEM_PROMPT: &str = "\
 You extract typed instances from a conversation transcript.
@@ -283,7 +293,7 @@ Output rules:
     different item of the same class exists — always extract genuinely new items.
 ";
 
-/// S5: idempotently register the generic extraction task in the AI-task DB.
+/// idempotently register the generic extraction task in the AI-task DB.
 ///
 /// If a task with `EXTRACTION_TASK_NAME` already exists, returns it unchanged
 /// (so callers can safely invoke this on every executor startup or before every
@@ -292,7 +302,7 @@ Output rules:
 /// the user has configured as default at prompt time, so extraction works with
 /// any model without hard-coding one here.
 ///
-/// DB-only: does not touch the running `AIService`. The runtime path (S6) is
+/// DB-only: does not touch the running `AIService`. The runtime path is
 /// expected to call `service.spawn_task(task)` separately when it needs the
 /// model loaded for a `prompt` call; this split keeps registration testable in
 /// CI without a GPU.
@@ -376,7 +386,7 @@ pub fn ensure_extraction_task() -> anyhow::Result<AITask> {
 }
 
 // -----------------------------------------------------------------------------
-// S6: async shell + retry harness
+// async shell + retry harness
 // -----------------------------------------------------------------------------
 
 /// Max attempts for [`retry_extraction_parse`]. Mirrors Flux's `LLMutils`
@@ -384,10 +394,10 @@ pub fn ensure_extraction_task() -> anyhow::Result<AITask> {
 /// again a few times before giving up on the whole call.
 pub const EXTRACTION_MAX_ATTEMPTS: u8 = 5;
 
-/// S6 (pure): parse a raw LLM response and turn it into the set of links that
+/// parse a raw LLM response and turn it into the set of links that
 /// would be written into the perspective. Callers minted a fresh instance base
 /// URI per proposed instance under `base_prefix` and delegate to
-/// [`instance_links`] (S4) for the actual shape-driven link construction.
+/// [`instance_links`] for the actual shape-driven link construction.
 ///
 /// The lookup from `inst.class` to a `ModelShape` is by local class name
 /// (final segment of `target_class`). Proposed instances whose class doesn't
@@ -436,7 +446,7 @@ pub fn place_instances(
     out
 }
 
-/// S6: run `prompt_fn` up to [`EXTRACTION_MAX_ATTEMPTS`] times, parsing each
+/// run `prompt_fn` up to [`EXTRACTION_MAX_ATTEMPTS`] times, parsing each
 /// response as an extraction JSON payload. Returns the first successful parse;
 /// the last parse error propagates if every attempt fails. `prompt_fn` is an
 /// async closure so callers can inject anything (real `AIService`, a canned
@@ -479,7 +489,7 @@ where
     }))
 }
 
-/// S6: minimal transcript gatherer. Reads links `source ⇒ predicate ⇒ literal`
+/// minimal transcript gatherer. Reads links `source ⇒ predicate ⇒ literal`
 /// from a perspective where `predicate` matches `message_predicate` and the
 /// target is a `literal:string:` URI (i.e., a message body). Returns turns in
 /// the order the store returned them. Speaker is the link author.
@@ -519,7 +529,7 @@ fn decode_literal_string(uri: &str) -> Option<String> {
         .map(|c| c.into_owned())
 }
 
-/// S6: read the titles of instances already present in the perspective for each
+/// read the titles of instances already present in the perspective for each
 /// target class, keyed by the class's local name. Used to steer the LLM away
 /// from re-proposing known items ([`build_extraction_input`]) and to enforce
 /// dedup deterministically ([`filter_already_present`]).
@@ -587,10 +597,10 @@ pub async fn existing_instance_titles(
     Ok(out)
 }
 
-/// S6: end-to-end extraction driver. Wires everything: build the input from
-/// shapes' hints + transcript (S3), call `AIService::prompt` on the registered
-/// extraction task (S5), retry parsing up to 5× (S6), then for every proposed
-/// instance write its shape-driven links (S4) into the perspective via
+/// end-to-end extraction driver. Wires everything: build the input from
+/// shapes' hints + transcript, call `AIService::prompt` on the registered
+/// extraction task, retry parsing up to 5×, then for every proposed
+/// instance write its shape-driven links into the perspective via
 /// `add_link`. Returns the fresh base URI + links written per instance.
 ///
 /// The `shapes` argument is exactly the classes to consider — callers pick
@@ -775,7 +785,7 @@ mod tests {
         assert!(parse_extraction_response("not json at all").is_err());
     }
 
-    // ---- S4: instance_links ---------------------------------------------
+    // ---- instance_links ---------------------------------------------
 
     fn find_shape<'a>(shapes: &'a [ModelShape], class_uri: &str) -> &'a ModelShape {
         shapes
@@ -954,12 +964,12 @@ mod tests {
         assert_eq!(rows.len(), 1, "expected exactly one extraction task row");
     }
 
-    // ---- S6: apply_extraction_raw + retry_extraction_parse ---------------
+    // ---- apply_extraction_raw + retry_extraction_parse ---------------
 
     #[test]
     fn apply_extraction_raw_wires_parse_and_links() {
         // Hand-fed raw = what the LLM would return; no live model in the loop.
-        // We verify the whole S3→S4 wiring: each proposed instance gets a fresh
+        // We verify the whole parse→link wiring: each proposed instance gets a fresh
         // base under our prefix, its links are shape-driven (type flag + fields
         // only), and multi-class output is split correctly.
         let shapes = vec![
