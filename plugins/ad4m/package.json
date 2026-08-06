@@ -3,10 +3,11 @@
   "version": "0.0.2",
   "description": "OpenClaw plugin for AD4M — bridges AD4M's MCP tools as native agent tools and turns subscriptions into waker events",
   "license": "MIT",
-  "main": "index.ts",
+  "main": "dist/index.cjs",
   "openclaw": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./dist/index.cjs"]
   },
+  "files": ["dist", "openclaw.plugin.json", "skills", "README.md"],
   "repository": {
     "type": "git",
     "url": "https://github.com/coasys/ad4m",
@@ -14,6 +15,9 @@
   },
   "keywords": ["openclaw", "ad4m", "mcp", "p2p", "holochain", "neighbourhoods"],
   "scripts": {
+    "build": "esbuild index.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/index.cjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -21,6 +25,7 @@
     "@coasys/ad4m": "0.13.0-test-6"
   },
   "devDependencies": {
+    "esbuild": "^0.23.0",
     "vitest": "^3.0.0",
     "typescript": "^5.0.0"
   }
