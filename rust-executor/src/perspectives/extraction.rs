@@ -220,23 +220,20 @@ pub fn instance_links(shape: &ModelShape, inst: &ProposedInstance, base: &str) -
     out
 }
 
-/// Encode a JSON scalar into an AD4M `literal:` URI (matches the encoding used
-/// by `languages/literal.rs`, mirrored in `model_query::utils`). Skips `null`.
+/// Encode a JSON scalar into an AD4M `literal:` URI by delegating to the
+/// canonical [`crate::languages::literal::literal_encode`] — the same encoder
+/// the literal Language uses and that `model_query`'s `parse_literal_value`
+/// round-trips against — and prefixing the `literal:` scheme it omits. `null`
+/// is skipped so a missing optional field never becomes a `literal:json:null`
+/// link.
 fn value_to_literal_uri(value: &serde_json::Value) -> Option<String> {
-    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-    match value {
-        serde_json::Value::Null => None,
-        serde_json::Value::String(s) => Some(format!(
-            "literal:string:{}",
-            utf8_percent_encode(s, NON_ALPHANUMERIC)
-        )),
-        serde_json::Value::Number(n) => Some(format!("literal:number:{n}")),
-        serde_json::Value::Bool(b) => Some(format!("literal:boolean:{b}")),
-        other => Some(format!(
-            "literal:json:{}",
-            utf8_percent_encode(&other.to_string(), NON_ALPHANUMERIC)
-        )),
+    if value.is_null() {
+        return None;
     }
+    Some(format!(
+        "literal:{}",
+        crate::languages::literal::literal_encode(value)
+    ))
 }
 
 /// S5: name under which the generic extraction task is registered with
