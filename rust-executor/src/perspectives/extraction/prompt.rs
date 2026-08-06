@@ -1,0 +1,198 @@
+use super::{class_local_name, relation_predicates};
+use crate::db::Ad4mDb;
+use crate::perspectives::model_query::types::ModelShape;
+use crate::types::{AIPromptExamples, AITask};
+use std::collections::HashMap;
+
+/// assemble the per-call LLM input from the target shapes' extraction hints
+/// plus the transcript. Pure — this is exactly where `extraction_hint` enters
+/// the prompt. Shape (matches the system prompt):
+/// `{ "classes": [{ "name", "hint", "existing": [title,…],
+///                  "fields": [{ "name", "required", "hint" }] }],
+///    "transcript": [{ "speaker", "text" }] }`.
+///
+/// `existing` maps a class's local name to the titles of instances already in
+/// the graph, so the model can avoid re-proposing them (soft dedup; the hard
+/// guarantee is [`filter_already_present`]). Pass an empty map for none.
+pub fn build_extraction_input(
+    shapes: &[ModelShape],
+    transcript: &[(String, String)],
+    existing: &HashMap<String, Vec<String>>,
+) -> String {
+    let classes: Vec<serde_json::Value> = shapes
+        .iter()
+        .map(|s| {
+            let rel_preds = relation_predicates(s);
+            let fields: Vec<serde_json::Value> = s
+                .properties
+                .iter()
+                // The type flag is set by instance_links, not the LLM;
+                // relations are link-typed and handled in a later PR.
+                .filter(|p| !p.is_flag && !rel_preds.contains(p.predicate.as_str()))
+                .map(|p| {
+                    serde_json::json!({
+                        "name": p.name,
+                        "required": p.is_required,
+                        "hint": p.extraction_hint,
+                    })
+                })
+                .collect();
+            let name = class_local_name(&s.target_class);
+            // `"hint"` is the prompt-facing key (short, cheap in tokens and what
+            // the system prompt + few-shot examples reference); its value is the
+            // schema's `extractionHint` decorator, surfaced here as
+            // `extraction_hint`. The key name is deliberately not "extractionHint"
+            // — the LLM never sees the decorator name, only this compact field.
+            serde_json::json!({
+                "name": name,
+                "hint": s.extraction_hint,
+                "existing": existing.get(name).cloned().unwrap_or_default(),
+                "fields": fields,
+            })
+        })
+        .collect();
+    let turns: Vec<serde_json::Value> = transcript
+        .iter()
+        .map(|(speaker, text)| serde_json::json!({ "speaker": speaker, "text": text }))
+        .collect();
+    serde_json::json!({ "classes": classes, "transcript": turns }).to_string()
+}
+
+/// name under which the generic extraction task is registered with
+/// `AIService`. Kept stable so `ensure_extraction_task` can find it across
+/// executor restarts and multiple callers.
+pub const EXTRACTION_TASK_NAME: &str = "adam://extraction";
+
+/// system prompt sent with every extraction call. Instance-specific
+/// scaffolding (available classes, their hints, the transcript) is added by
+/// `build_extraction_input`, so this stays stable across calls and the
+/// task can be reused.
+pub const EXTRACTION_SYSTEM_PROMPT: &str = "\
+You extract typed instances from a conversation transcript.
+
+You receive a JSON object with these fields:
+  - `classes`: available subject classes. Each has a `name`, a natural-language
+    `hint` describing when to instantiate it, a list of `fields` (each with a
+    `name`, optional `hint`, and `required` flag), and an `existing` array of
+    titles already present in the graph for that class.
+  - `transcript`: an array of turns `{speaker, text}`.
+
+Emit a JSON array. Each element is `{\"class\": <class name>, ...fields}`, where
+the fields' values are strings drawn from what participants actually said or
+committed to in the transcript.
+
+How to decide what to extract:
+  - Consider EACH class independently against the WHOLE transcript, using its
+    `hint`. A turn can match one class, several, or none.
+  - Do not skip a clearly-stated item just because another one is also present:
+    a direct question is a Question even amid tasks; a stated claim or opinion is
+    a Belief; a reported fact or measurement is an Observation; a commitment to
+    act is a Task/Intention. Capture each on its own merits.
+  - At the same time, do not invent items the transcript does not support, and
+    do not manufacture instances from greetings or small talk.
+  - Only include a field if its value is present or clearly implied; omit
+    optional fields you cannot fill.
+
+Two worked examples follow (as prior turns) before your real input — study how
+every co-present item is captured, then apply the same to your input.
+
+Output rules:
+  - Return valid JSON only — no prose, no markdown fences, no <think> blocks.
+  - Return an empty array `[]` if nothing matches.
+  - Do not invent classes or fields not listed in `classes`.
+  - Dedup: skip an item ONLY when its title clearly matches one already in that
+    class's `existing` list. A brand-new item still counts even if an older,
+    different item of the same class exists — always extract genuinely new items.
+";
+
+/// idempotently register the generic extraction task in the AI-task DB.
+///
+/// If a task with `EXTRACTION_TASK_NAME` already exists, returns it unchanged
+/// (so callers can safely invoke this on every executor startup or before every
+/// extraction run). Otherwise inserts a new row bound to the `\"default\"` LLM
+/// model — `AIService::replace_model_variables` resolves this to whatever LLM
+/// the user has configured as default at prompt time, so extraction works with
+/// any model without hard-coding one here.
+///
+/// DB-only: does not touch the running `AIService`. The runtime path is
+/// expected to call `service.spawn_task(task)` separately when it needs the
+/// model loaded for a `prompt` call; this split keeps registration testable in
+/// CI without a GPU.
+/// Few-shot examples sent as prior User/Assistant turns (via `prompt_examples`)
+/// ahead of the real input. Two generic, non-test scenarios that teach the
+/// failure modes small models hit: (1) a belief and a task in the same snippet
+/// must BOTH be captured; (2) a question raised amid tasks must be captured.
+/// Inputs mirror the JSON shape `build_extraction_input` produces.
+fn extraction_examples() -> Vec<AIPromptExamples> {
+    let ex1_in = serde_json::json!({
+        "classes": [
+            {"name":"Task","hint":"An action someone commits to doing.","existing":[],
+             "fields":[{"name":"title","required":true,"hint":"Imperative summary."},
+                       {"name":"owner","required":false,"hint":"Who will do it."}]},
+            {"name":"Belief","hint":"A claim someone holds to be true.","existing":[],
+             "fields":[{"name":"title","required":true,"hint":"The claim."}]}
+        ],
+        "transcript":[
+            {"speaker":"A","text":"Our error rate doubled after the last deploy."},
+            {"speaker":"B","text":"I'll roll back that deploy this afternoon."}
+        ]
+    })
+    .to_string();
+    let ex1_out = serde_json::json!([
+        {"class":"Belief","title":"The error rate doubled after the last deploy"},
+        {"class":"Task","title":"Roll back the last deploy","owner":"B"}
+    ])
+    .to_string();
+
+    let ex2_in = serde_json::json!({
+        "classes": [
+            {"name":"Task","hint":"An action someone commits to doing.","existing":[],
+             "fields":[{"name":"title","required":true,"hint":"Imperative summary."},
+                       {"name":"owner","required":false,"hint":"Who will do it."}]},
+            {"name":"Question","hint":"An open question that needs an answer.","existing":[],
+             "fields":[{"name":"title","required":true,"hint":"The question."}]}
+        ],
+        "transcript":[
+            {"speaker":"A","text":"I'll write the migration script today."},
+            {"speaker":"B","text":"Should we run it against staging first?"}
+        ]
+    })
+    .to_string();
+    let ex2_out = serde_json::json!([
+        {"class":"Task","title":"Write the migration script","owner":"A"},
+        {"class":"Question","title":"Should we run the migration against staging first?"}
+    ])
+    .to_string();
+
+    vec![
+        AIPromptExamples {
+            input: ex1_in,
+            output: ex1_out,
+        },
+        AIPromptExamples {
+            input: ex2_in,
+            output: ex2_out,
+        },
+    ]
+}
+
+pub fn ensure_extraction_task() -> anyhow::Result<AITask> {
+    if let Some(existing) = Ad4mDb::with_global_instance(|db| db.get_tasks())?
+        .into_iter()
+        .find(|t| t.name == EXTRACTION_TASK_NAME)
+    {
+        return Ok(existing);
+    }
+    let task_id = Ad4mDb::with_global_instance(|db| {
+        db.add_task(
+            EXTRACTION_TASK_NAME.to_string(),
+            "default".to_string(),
+            EXTRACTION_SYSTEM_PROMPT.to_string(),
+            extraction_examples(),
+            None,
+        )
+    })?;
+    let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
+        .ok_or_else(|| anyhow::anyhow!("extraction task vanished immediately after insert"))?;
+    Ok(task)
+}
