@@ -37,3 +37,20 @@ Verified independently that `signup` → `login_email` over the MCP surface yiel
 a distinct `did:key` with gated access, so the executor already supports this;
 the gap sits in the plugin's external-mode flow. **Proposed:** detect multi-user
 mode and add a signup/login branch to external setup.
+
+## 3. Bundled dependency should move to devDependencies — OPEN
+
+`@coasys/ad4m` now gets bundled into `dist/index.cjs` by esbuild, so it acts as a
+build-time dependency, not a runtime one. It still sits in `dependencies`, so
+`openclaw plugins install` npm-installs it (needs network) even though the bundle
+already carries it. Moving `@coasys/ad4m` to `devDependencies` gives the
+published package zero runtime deps, so the plugin installs offline — which is
+what would let the wind tunnel's managed path run fully zero-egress.
+
+## 4. Managed mode cannot disable Holochain — OPEN
+
+In managed mode the plugin spawns the executor with Holochain on and exposes no
+option to turn it off, so a managed node performs P2P bootstrap egress
+(`bootstrap.ad4m.dev`) on start. A `runHolochain: false` (and bootstrap/proxy)
+plugin config option would let managed pods run without any outbound network,
+matching the isolation the external-path scenarios already reach.
