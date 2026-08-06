@@ -413,6 +413,7 @@ export async function ensureExecutorRunning(
   binaryPath?: string,
   rustLog?: string,
   logTarget: "file" | "openclaw" | "both" = "file",
+  runHolochain: boolean = true,
 ): Promise<ExecutorStartResult> {
   logger.info(`[ad4m] Checking if executor is running at ${endpoint}...`);
 
@@ -479,19 +480,24 @@ export async function ensureExecutorRunning(
     }
 
     // Start the executor as a child process
+    const runArgs = [
+      "run",
+      "--enable-mcp",
+      "true",
+      "--admin-credential",
+      adminCredential,
+      "--mcp-port",
+      "3001",
+      "--run-dapp-server",
+      "false",
+    ];
+    if (!runHolochain) {
+      logger.info("[ad4m] Starting executor with Holochain disabled (--run-holochain false)");
+      runArgs.push("--run-holochain", "false");
+    }
     executorProcess = spawn(
       executorPath,
-      [
-        "run",
-        "--enable-mcp",
-        "true",
-        "--admin-credential",
-        adminCredential,
-        "--mcp-port",
-        "3001",
-        "--run-dapp-server",
-        "false",
-      ],
+      runArgs,
       {
         stdio: ["ignore", "pipe", "pipe"],
         detached: false,

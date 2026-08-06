@@ -67,6 +67,11 @@
         "enum": ["file", "openclaw", "both"],
         "default": "file",
         "description": "Where to send executor logs: 'file' = ~/.ad4m/ad4m.log only (default), 'openclaw' = OpenClaw logs only, 'both' = both destinations."
+      },
+      "runHolochain": {
+        "type": "boolean",
+        "default": true,
+        "description": "Managed mode: run Holochain (default true). Set false to start the executor with --run-holochain false — no P2P/bootstrap egress, for isolated or offline nodes that do not need neighbourhood sync."
       }
     },
     "required": [],

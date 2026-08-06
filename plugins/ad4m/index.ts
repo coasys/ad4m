@@ -912,6 +912,7 @@ Notes:
           binaryPath,
           config.rustLog,
           config.executorLogTarget ?? "file",
+          config.runHolochain ?? true,
         );
         if (!executorStartResult) {
           logger.error(

@@ -54,6 +54,10 @@ export async function runSetup(
     logger.warn("[ad4m-setup] Could not read OpenClaw hooks config");
   }
 
+  // ── Managed-mode options from plugin config ──
+  const pluginCfg = openclawConfig?.plugins?.entries?.ad4m?.config ?? {};
+  const runHolochain = pluginCfg.runHolochain !== false; // default true
+
   // ── Step 2: Find binary ──
   const binaryPath = findExecutorBinary();
   if (binaryPath) {
@@ -74,10 +78,10 @@ export async function runSetup(
     await setupExternalMode(logger, endpoint, wakeToken, running, executorUrl);
   } else if (binaryPath) {
     // Branch A: No running executor, binary found
-    await setupManagedMode(logger, binaryPath, endpoint, executorUrl, wakeToken);
+    await setupManagedMode(logger, binaryPath, endpoint, executorUrl, wakeToken, runHolochain);
   } else {
     // Branch C: No binary, no executor — try to download, then set up managed mode
-    await setupWithDownload(logger, endpoint, executorUrl, wakeToken);
+    await setupWithDownload(logger, endpoint, executorUrl, wakeToken, runHolochain);
   }
 }
 
@@ -91,6 +95,7 @@ async function setupManagedMode(
   endpoint: string,
   executorUrl: string,
   wakeToken?: string,
+  runHolochain: boolean = true,
 ): Promise<void> {
   logger.info("[ad4m-setup] Setting up managed mode...");
 
@@ -127,6 +132,9 @@ async function setupManagedMode(
     endpoint,
     executorUrl,
     binaryPath,
+    undefined,
+    undefined,
+    runHolochain,
   );
 
   if (!startResult) {
@@ -440,6 +448,7 @@ async function setupWithDownload(
   endpoint: string,
   executorUrl: string,
   wakeToken?: string,
+  runHolochain: boolean = true,
 ): Promise<void> {
   logger.info(
     "[ad4m-setup] No ad4m-executor binary found and no running executor detected.",
@@ -477,7 +486,7 @@ async function setupWithDownload(
   logger.info(`[ad4m-setup] Downloaded ad4m-executor to: ${binaryPath}`);
 
   // Continue with managed mode setup using the downloaded binary
-  await setupManagedMode(logger, binaryPath, endpoint, executorUrl, wakeToken);
+  await setupManagedMode(logger, binaryPath, endpoint, executorUrl, wakeToken, runHolochain);
 }
 
 // ---------------------------------------------------------------------------
