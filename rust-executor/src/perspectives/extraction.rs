@@ -74,11 +74,13 @@ pub fn build_extraction_input(shapes: &[ModelShape], transcript: &[(String, Stri
     let classes: Vec<serde_json::Value> = shapes
         .iter()
         .map(|s| {
+            let rel_preds = relation_predicates(s);
             let fields: Vec<serde_json::Value> = s
                 .properties
                 .iter()
-                // The type flag is set by instance_links (S4), not the LLM.
-                .filter(|p| !p.is_flag)
+                // The type flag is set by instance_links (S4), not the LLM;
+                // relations are link-typed and handled in a later PR.
+                .filter(|p| !p.is_flag && !rel_preds.contains(p.predicate.as_str()))
                 .map(|p| {
                     serde_json::json!({
                         "name": p.name,
@@ -101,6 +103,22 @@ pub fn build_extraction_input(shapes: &[ModelShape], transcript: &[(String, Stri
     serde_json::json!({ "classes": classes, "transcript": turns }).to_string()
 }
 
+/// Predicates of the shape's relation (link-typed) properties. `load_shape`
+/// lists every relation both in `properties` (so the query pipeline sees its
+/// predicate) *and* in `include_relations`; we key off the latter to recognise
+/// them. Relations are excluded from generic scalar extraction: their targets
+/// are instance URIs, not literals, so we neither offer them to the LLM nor
+/// write LLM-proposed values through `value_to_literal_uri` (which would encode
+/// e.g. an array as a bogus `literal:json:` URI). Relation extraction is a
+/// later PR.
+fn relation_predicates(shape: &ModelShape) -> std::collections::HashSet<&str> {
+    shape
+        .include_relations
+        .iter()
+        .map(|r| r.predicate.as_str())
+        .collect()
+}
+
 /// Local class name from a class URI: `ns://Intention` -> `Intention`.
 pub(crate) fn class_local_name(target_class: &str) -> &str {
     target_class
@@ -121,6 +139,7 @@ pub(crate) fn class_local_name(target_class: &str) -> &str {
 /// links outside the declared class shape.
 pub fn instance_links(shape: &ModelShape, inst: &ProposedInstance, base: &str) -> Vec<Link> {
     let mut out = Vec::new();
+    let rel_preds = relation_predicates(shape);
     for prop in &shape.properties {
         if prop.is_flag {
             if let Some(target) = prop.initial_value.as_ref() {
@@ -130,6 +149,12 @@ pub fn instance_links(shape: &ModelShape, inst: &ProposedInstance, base: &str) -
                     target: target.clone(),
                 });
             }
+            continue;
+        }
+        // Skip relation properties: their targets are instance URIs, not
+        // literals. Writing an LLM-proposed value here would mint a bogus
+        // literal link. Relation extraction is a later PR.
+        if rel_preds.contains(prop.predicate.as_str()) {
             continue;
         }
         if let Some(value) = inst.props.get(&prop.name) {
@@ -382,11 +407,17 @@ fn decode_literal_string(uri: &str) -> Option<String> {
 /// which subject classes to extract into (usually all classes carrying an
 /// `extraction_hint`). `base_prefix` is the URI namespace under which new
 /// instance identities are minted, e.g. `"soa://ext/"`.
+///
+/// `link_status` is the caller's choice of [`LinkStatus`] for the written
+/// links. Pass [`LinkStatus::Local`] (the usual default) so LLM-generated
+/// links on shared/neighbourhood perspectives are not auto-published; pass
+/// [`LinkStatus::Shared`] only when the extraction is meant to sync.
 pub async fn run_extraction(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
     transcript: &[(String, String)],
     base_prefix: &str,
+    link_status: LinkStatus,
     context: &AgentContext,
 ) -> anyhow::Result<Vec<(String, Vec<Link>)>> {
     let task = ensure_extraction_task()?;
@@ -412,13 +443,19 @@ pub async fn run_extraction(
 
     let placements = place_instances(shapes, &instances, base_prefix);
 
-    for (_base, links) in &placements {
-        for link in links {
-            perspective
-                .add_link(link.clone(), LinkStatus::Shared, None, context)
-                .await
-                .map_err(|e| anyhow::anyhow!("run_extraction: add_link failed: {e:#}"))?;
-        }
+    // Write all instance links in a single PerspectiveDiff (add_links) so a
+    // mid-write failure can't leave a half-formed instance — e.g. one carrying
+    // its `ns://type` flag but missing its `ns://title`. Status is the caller's
+    // choice (see `link_status`).
+    let all_links: Vec<Link> = placements
+        .iter()
+        .flat_map(|(_base, links)| links.iter().cloned())
+        .collect();
+    if !all_links.is_empty() {
+        perspective
+            .add_links(all_links, link_status, None, context)
+            .await
+            .map_err(|e| anyhow::anyhow!("run_extraction: add_links failed: {e:#}"))?;
     }
     Ok(placements)
 }
@@ -466,6 +503,19 @@ mod tests {
         {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
         {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task."},
         {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Person responsible for the task, if stated."}
+      ]
+    }"#;
+
+    /// A class carrying both a scalar (`title`) and a link-typed relation
+    /// (`blocks`, hasMany → Task). `load_shape` lists `blocks` in both
+    /// `properties` and `include_relations`; the extractor must exclude it.
+    const TASK_WITH_RELATION_SDNA: &str = r#"{
+      "target_class":"ns://Task",
+      "extraction_hint":"A concrete, actionable unit of work to be done.",
+      "properties":[
+        {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
+        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task."},
+        {"path":"ns://blocks","name":"blocks","relation_kind":"hasMany","target_class_name":"Task","class":"ns://TaskShape","extraction_hint":"Other tasks this one blocks."}
       ]
     }"#;
 
@@ -747,6 +797,59 @@ mod tests {
     }
 
     #[test]
+    fn relation_properties_are_excluded_from_extraction() {
+        // A shape whose extraction hint also declares a link-typed relation
+        // (`blocks`). load_shape lists that relation in `properties` too, so
+        // without the guard it would be offered to the LLM and — if the LLM
+        // emits it — written through value_to_literal_uri as a bogus literal.
+        let shape = shape_from_sdna("Task", TASK_WITH_RELATION_SDNA);
+        // Sanity: the relation really is present in both lists.
+        assert!(
+            shape.include_relations.iter().any(|r| r.name == "blocks"),
+            "fixture must declare a `blocks` relation"
+        );
+        assert!(
+            shape.properties.iter().any(|p| p.name == "blocks"),
+            "load_shape is expected to also list the relation in properties"
+        );
+
+        // 1. build_extraction_input must not offer the relation as a field.
+        let input = build_extraction_input(&[shape.clone()], &[("Nico".into(), "block it".into())]);
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        let field_names: Vec<&str> = v["classes"][0]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["name"].as_str())
+            .collect();
+        assert!(field_names.contains(&"title"), "scalar field must remain");
+        assert!(
+            !field_names.contains(&"blocks"),
+            "relation must not be offered to the LLM; got {field_names:?}"
+        );
+
+        // 2. instance_links must not write a link even if the LLM emits the
+        //    relation (here as an array — exactly the bogus literal:json case).
+        let raw = r#"[{"class":"Task","title":"Do X","blocks":["soa://t2","soa://t3"]}]"#;
+        let proposed = parse_extraction_response(raw).unwrap();
+        let links = instance_links(&shape, &proposed[0], "soa://t1");
+        assert!(
+            !links
+                .iter()
+                .any(|l| l.predicate.as_deref() == Some("ns://blocks")),
+            "relation must not become a link; got {links:#?}"
+        );
+        assert!(
+            !links.iter().any(|l| l.target.starts_with("literal:json:")),
+            "no bogus literal:json relation target; got {links:#?}"
+        );
+        // The scalar title still lands.
+        assert!(links
+            .iter()
+            .any(|l| l.predicate.as_deref() == Some("ns://title")));
+    }
+
+    #[test]
     fn ensure_extraction_task_registers_and_is_idempotent() {
         ensure_db_init();
 
@@ -1014,9 +1117,16 @@ mod tests {
             ),
         ];
 
-        let placements = run_extraction(&mut perspective, &shapes, &transcript, "soa://ext/", &ctx)
-            .await
-            .expect("run_extraction against real LLM to succeed");
+        let placements = run_extraction(
+            &mut perspective,
+            &shapes,
+            &transcript,
+            "soa://ext/",
+            LinkStatus::Local,
+            &ctx,
+        )
+        .await
+        .expect("run_extraction against real LLM to succeed");
 
         println!("e2e placements: {} instance(s)", placements.len());
         for (base, links) in &placements {
@@ -1136,9 +1246,16 @@ mod tests {
             .map(|(s, t)| (s.to_string(), t.to_string()))
             .collect();
 
-        let placements = run_extraction(&mut perspective, &shapes, &transcript, "soa://ext/", &ctx)
-            .await
-            .expect("run_extraction against real LLM to succeed");
+        let placements = run_extraction(
+            &mut perspective,
+            &shapes,
+            &transcript,
+            "soa://ext/",
+            LinkStatus::Local,
+            &ctx,
+        )
+        .await
+        .expect("run_extraction against real LLM to succeed");
 
         println!("e2e placements: {} instance(s)", placements.len());
         for (base, links) in &placements {
