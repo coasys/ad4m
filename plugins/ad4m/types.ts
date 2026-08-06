@@ -33,5 +33,11 @@ export interface PluginConfig {
   executorLogTarget?: "file" | "openclaw" | "both";
   /** Run Holochain in managed mode (default true). Set false to start the executor with `--run-holochain false` — no P2P/bootstrap egress, for isolated or offline nodes that do not need neighbourhood sync. */
   runHolochain?: boolean;
+  /** External mode: on a multi-user node, provision the assistant's own user identity (signup + login) instead of requesting a capability against the node's base agent. */
+  multiUser?: boolean;
+  /** External multi-user: the assistant's user email/identifier (auto-generated on first setup if omitted). */
+  email?: string;
+  /** External multi-user: the assistant's user password (auto-generated on first setup if omitted). */
+  password?: string;
 }
 
