@@ -378,6 +378,9 @@ impl SfuServer {
                                         "SFU: ApplyServerAnswer parse failed for {}: {}",
                                         participant_id, e
                                     );
+                                    // Restore the pending offer so deferred
+                                    // tracks don't get orphaned.
+                                    peer.pending_offer = Some(pending);
                                     continue;
                                 }
                             };
@@ -390,18 +393,11 @@ impl SfuServer {
                                 peer.tracks_out.len()
                             );
                         }
-                        // Process deferred track additions now that the
-                        // pending offer cleared.
-                        if let Some((sdp_offer_json, track_mapping)) =
-                            apply_deferred_tracks(peer)
-                        {
-                            publish_renegotiation_offer(
-                                peer,
-                                &participant_id,
-                                sdp_offer_json,
-                                track_mapping,
-                            );
-                        }
+                        // Deferred tracks drain AFTER poll_output — see
+                        // the post-poll sweep below.  Draining here would
+                        // call sdp_api().apply() before str0m has
+                        // processed the accept_answer, producing offers
+                        // that never materialise into working media.
                     }
                     Ok(SfuCommand::ApplyPipeRenegotiationOffer {
                         participant_id,
@@ -520,18 +516,8 @@ impl SfuServer {
                             );
                             peer.pending_offer = None;
                             peer.pending_offer_sent = None;
-                            // Process deferred track additions now that
-                            // the stale pending offer cleared.
-                            if let Some((sdp_offer_json, track_mapping)) =
-                                apply_deferred_tracks(peer)
-                            {
-                                publish_renegotiation_offer(
-                                    peer,
-                                    pid,
-                                    sdp_offer_json,
-                                    track_mapping,
-                                );
-                            }
+                            // Deferred tracks drain in the post-poll
+                            // sweep — same reasoning as ApplyServerAnswer.
                         }
                     }
                 }
@@ -645,6 +631,27 @@ impl SfuServer {
                                 );
                             }
                         }
+                    }
+                }
+            }
+
+            // Drain deferred tracks for peers whose pending_offer just
+            // cleared.  Running here — AFTER poll_output — ensures str0m
+            // has fully processed the previous accept_answer before we
+            // create a new SDP offer via sdp_api().apply().  The command-
+            // processing phase (ApplyServerAnswer) and stale-offer sweep
+            // only clear pending_offer; the actual drain happens here.
+            for (pid, peer) in peers.iter_mut() {
+                if peer.pending_offer.is_none() && !peer.deferred_tracks.is_empty() {
+                    if let Some((sdp_offer_json, track_mapping)) =
+                        apply_deferred_tracks(peer)
+                    {
+                        publish_renegotiation_offer(
+                            peer,
+                            pid,
+                            sdp_offer_json,
+                            track_mapping,
+                        );
                     }
                 }
             }

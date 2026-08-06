@@ -616,7 +616,15 @@ impl SfuService {
             .map_err(|e| e.to_string())?;
 
         let room = rooms.get_room(&room_id).unwrap();
-        Ok(self.room_to_info(room))
+        let info = self.room_to_info(room);
+        // Drop the write lock before awaiting the async announce.
+        drop(configs);
+        drop(rooms);
+        // Broadcast the new room so cascade peers learn our capacity
+        // BEFORE any clients join.  Without this, pick_redirect_node
+        // sees an empty known_nodes map and accepts all joins locally.
+        self.announce_room(&room_id.to_string(), 0).await;
+        Ok(info)
     }
 
     /// Stop an SFU room, disconnecting all participants.
