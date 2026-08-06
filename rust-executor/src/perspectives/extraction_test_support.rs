@@ -281,7 +281,7 @@ pub(crate) fn print_placements(placements: &[(String, Vec<Link>)]) {
 /// Pre-seed the perspective with an already-existing typed instance (its
 /// type-flag + a `title`), exactly as `instance_links` would have written it.
 /// Used to test the selector against a non-empty graph and dedup against
-/// existing state. Returns the instance base URI.
+/// existing state.
 pub(crate) async fn seed_instance(
     perspective: &mut PerspectiveInstance,
     ctx: &AgentContext,

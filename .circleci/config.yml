@@ -127,7 +127,7 @@ jobs:
           environment:
             EXTRACTION_E2E_BASE_URL: http://localhost:11434/v1
             EXTRACTION_E2E_MODEL: qwen3.5-27b-opus:latest
-          command: cargo test --release --lib perspectives::extraction -- --test-threads=1
+          command: cargo test --release -p ad4m-executor --lib perspectives::extraction -- --test-threads=1
       - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
           command: |
