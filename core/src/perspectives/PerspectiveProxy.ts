@@ -558,10 +558,11 @@ export class PerspectiveProxy {
      *
      * @param transcript ordered `{ speaker, text }` turns
      * @param basePrefix URI namespace for new instance identities, e.g. `soa://ext/`
+     * @param classes local names of the subject classes to extract into; omit for all
      * @param linkStatus `'local'` (default) or `'shared'`
      */
-    async runExtraction(transcript: TranscriptTurn[], basePrefix: string, linkStatus?: LinkStatus): Promise<ExtractionPlacement[]> {
-        return await this.#client.runExtraction(this.#handle.uuid, transcript, basePrefix, linkStatus)
+    async runExtraction(transcript: TranscriptTurn[], basePrefix: string, classes?: string[], linkStatus?: LinkStatus): Promise<ExtractionPlacement[]> {
+        return await this.#client.runExtraction(this.#handle.uuid, transcript, basePrefix, classes, linkStatus)
     }
 
     /**

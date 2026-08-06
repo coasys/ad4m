@@ -100,4 +100,22 @@ describe("perspective.runExtraction (WS + real LLM)", function () {
       expect(knownTitles.has(decoded), `must not recreate existing task "${decoded}"`).to.be.false;
     }
   });
+
+  it("extracts only into the selected classes", async () => {
+    // Transcript has a task, a belief, and a question — but select ONLY ExtTask.
+    const transcript = [
+      { speaker: "Nico", text: "James, please add docs for the WS runExtraction endpoint." },
+      { speaker: "James", text: "Will do. I think good docs are underrated." },
+      { speaker: "Nico", text: "Should we version the WS API before release?" },
+    ];
+
+    const placements = await p.runExtraction(transcript, BASE_PREFIX, ["ExtTask"]);
+
+    expect(placements.length, "expected at least the task").to.be.greaterThan(0);
+    // Every placement must be an ExtTask — no Belief/Question leaked in.
+    for (const pl of placements) {
+      const typeTarget = pl.links.find((l) => l.predicate === "soa://type")?.target;
+      expect(typeTarget, `unexpected non-task type ${typeTarget}`).to.equal("soa://task");
+    }
+  });
 });

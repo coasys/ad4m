@@ -6,11 +6,16 @@ import type { TranscriptTurn } from "./TranscriptTurn";
  * SHACL subject classes. Shapes are resolved server-side from the
  * perspective's registered classes, so callers pass only the transcript.
  */
-export type RunExtractionRequest = { uuid: string, transcript: Array<TranscriptTurn>, 
+export type RunExtractionRequest = { uuid: string, transcript: Array<TranscriptTurn>,
 /**
  * URI namespace new instance identities are minted under, e.g. `soa://ext/`.
  */
-basePrefix: string, 
+basePrefix: string,
+/**
+ * Local names of the subject classes to extract into (e.g. `["Task","Belief"]`).
+ * `None`/empty selects all subject classes registered in the perspective.
+ */
+classes: Array<string> | null,
 /**
  * "local" (default) or "shared". Defaults to local so LLM-generated links
  * on shared/neighbourhood perspectives are not auto-published.

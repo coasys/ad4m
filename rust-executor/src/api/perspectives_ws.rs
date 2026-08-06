@@ -1031,12 +1031,15 @@ async fn run_extraction_handler(
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
     let status = parse_link_status(body.link_status.as_deref());
 
-    // Resolve the target shapes from the perspective's own registered SHACL
-    // subject classes, so callers only pass the transcript.
-    let class_names = perspective
-        .get_subject_classes_from_shacl()
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    // Target classes: the caller's explicit selection, or (default) all subject
+    // classes registered in the perspective.
+    let class_names = match &body.classes {
+        Some(sel) if !sel.is_empty() => sel.clone(),
+        _ => perspective
+            .get_subject_classes_from_shacl()
+            .await
+            .map_err(|e| WsRpcError::internal(e.to_string()))?,
+    };
     let mut shapes = Vec::with_capacity(class_names.len());
     for name in class_names {
         match perspective.get_shape(&name) {

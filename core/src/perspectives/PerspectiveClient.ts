@@ -256,9 +256,9 @@ export class PerspectiveClient {
      * perspective's registered subject classes, so you pass only the transcript.
      * Returns the freshly minted instances (their base URIs + the links written).
      */
-    async runExtraction(uuid: string, transcript: TranscriptTurn[], basePrefix: string, linkStatus?: LinkStatus): Promise<ExtractionPlacement[]> {
+    async runExtraction(uuid: string, transcript: TranscriptTurn[], basePrefix: string, classes?: string[], linkStatus?: LinkStatus): Promise<ExtractionPlacement[]> {
         return this.#apiClient.call<ExtractionPlacement[]>(
-            'perspective.runExtraction', { uuid, transcript, basePrefix, linkStatus }
+            'perspective.runExtraction', { uuid, transcript, basePrefix, classes, linkStatus }
         )
     }
 
