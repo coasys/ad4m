@@ -21,10 +21,9 @@
     "test": "vitest run",
     "test:watch": "vitest"
   },
-  "dependencies": {
-    "@coasys/ad4m": "0.13.0-test-6"
-  },
+  "dependencies": {},
   "devDependencies": {
+    "@coasys/ad4m": "0.13.0-test-6",
     "esbuild": "^0.23.0",
     "vitest": "^3.0.0",
     "typescript": "^5.0.0"
