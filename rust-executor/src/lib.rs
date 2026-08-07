@@ -410,7 +410,17 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     {
         info!("Initializing SFU service...");
         let gossip: std::sync::Arc<dyn crate::sfu::CascadeGossip> = build_sfu_gossip(&config).await;
-        match crate::sfu::SfuService::start(crate::sfu::server::SfuServerConfig::default(), gossip)
+        let mut sfu_config = crate::sfu::server::SfuServerConfig::default();
+        if let Some(ref addr) = config.sfu_bind_addr {
+            match format!("{}:0", addr).parse() {
+                Ok(sa) => {
+                    info!("SFU media bind address override: {}", addr);
+                    sfu_config.bind_addr = sa;
+                }
+                Err(e) => warn!("SFU bind address `{}` parse error: {} — using default", addr, e),
+            }
+        }
+        match crate::sfu::SfuService::start(sfu_config, gossip)
             .await
         {
             Ok(svc) => info!("SFU service ready on UDP {}", svc.local_addr()),

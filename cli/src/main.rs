@@ -184,6 +184,12 @@ enum Domain {
         /// `--sfu-cascade-peers did1=host:port,did2=host:port`.
         #[arg(long, value_delimiter = ',')]
         sfu_cascade_peers: Option<Vec<String>>,
+        /// IP address the SFU media server binds its UDP socket to.
+        /// str0m requires a real interface IP (not 0.0.0.0).
+        /// Defaults to 127.0.0.1 (loopback, local-only).  Set to the
+        /// machine's LAN or public IP for cross-machine media.
+        #[arg(long)]
+        sfu_bind_addr: Option<String>,
     },
     RunLocalHcServices {},
     Eve {
@@ -269,6 +275,7 @@ async fn main() -> Result<()> {
         sfu_max_participants_per_node,
         sfu_cascade_listen,
         sfu_cascade_peers,
+        sfu_bind_addr,
     } = args.domain
     {
         let _ = tokio::spawn(async move {
@@ -296,6 +303,7 @@ async fn main() -> Result<()> {
                 sfu_max_participants_per_node,
                 sfu_cascade_listen,
                 sfu_cascade_peers,
+                sfu_bind_addr,
                 localhost: None,
                 auto_permit_cap_requests: None,
                 tls: None,
@@ -378,6 +386,7 @@ async fn main() -> Result<()> {
             sfu_max_participants_per_node: _,
             sfu_cascade_listen: _,
             sfu_cascade_peers: _,
+            sfu_bind_addr: _,
         } => unreachable!(),
         Domain::RunLocalHcServices {} => unreachable!(),
         Domain::Eve { command: _ } => unreachable!(),

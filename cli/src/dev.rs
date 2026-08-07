@@ -65,6 +65,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     sfu_max_participants_per_node: None,
                     sfu_cascade_listen: None,
                     sfu_cascade_peers: None,
+                    sfu_bind_addr: None,
                 })
                 .await
                 .join()
@@ -224,6 +225,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     sfu_max_participants_per_node: None,
                     sfu_cascade_listen: None,
                     sfu_cascade_peers: None,
+                    sfu_bind_addr: None,
                 })
                 .await
                 .join()

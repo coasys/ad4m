@@ -106,6 +106,10 @@ pub struct Ad4mConfig {
     /// Peer SFU nodes in the cascade cluster, each `did=host:port`.
     /// Empty list = standalone SFU.
     pub sfu_cascade_peers: Option<Vec<String>>,
+    /// IP address the SFU media server binds to (e.g. `192.168.1.2`).
+    /// str0m rejects `0.0.0.0` as a candidate, so this must be a real
+    /// interface IP.  Defaults to `127.0.0.1` (loopback, local-only).
+    pub sfu_bind_addr: Option<String>,
 }
 
 impl Ad4mConfig {
@@ -200,6 +204,7 @@ impl Default for Ad4mConfig {
             sfu_max_participants_per_node: None,
             sfu_cascade_listen: None,
             sfu_cascade_peers: None,
+            sfu_bind_addr: None,
         };
         config.prepare();
         config

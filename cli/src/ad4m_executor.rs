@@ -186,6 +186,10 @@ enum Domain {
         /// Peer SFU nodes as `did=host:port`, comma separated.
         #[arg(long, value_delimiter = ',')]
         sfu_cascade_peers: Option<Vec<String>>,
+        /// IP address the SFU media server binds its UDP socket to.
+        /// Defaults to 127.0.0.1 (loopback).
+        #[arg(long)]
+        sfu_bind_addr: Option<String>,
     },
     RunLocalHcServices {},
 }
@@ -244,6 +248,7 @@ async fn main() -> Result<()> {
         sfu_max_participants_per_node,
         sfu_cascade_listen,
         sfu_cascade_peers,
+        sfu_bind_addr,
     } = args.domain
     {
         let tls = if tls_cert_file.is_some() && tls_key_file.is_some() {
@@ -289,6 +294,7 @@ async fn main() -> Result<()> {
                 sfu_max_participants_per_node,
                 sfu_cascade_listen,
                 sfu_cascade_peers,
+                sfu_bind_addr,
             })
             .await;
         })
