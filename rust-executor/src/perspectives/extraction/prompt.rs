@@ -9,7 +9,8 @@ use std::collections::HashMap;
 /// the prompt. Shape (matches the system prompt):
 /// `{ "classes": [{ "name", "hint",
 ///                  "existing": [{ "id", "title", "class" }, …],
-///                  "fields": [{ "name", "required", "hint" }] }],
+///                  "fields": [{ "name", "required", "hint" }],
+///                  "relations": [{ "name", "targetClass", "hint" }] }],
 ///    "transcript": [{ "speaker", "text" }] }`.
 ///
 /// `existing` maps a class's local name to the instances already in the graph
@@ -19,6 +20,18 @@ use std::collections::HashMap;
 /// `id` and [`plan_extraction_ops`] routes it into the update path instead of
 /// creating a duplicate. Titles still drive the deterministic dedup safety net
 /// in [`filter_already_present`]. Pass an empty map for none.
+///
+/// `relations` is the forward-direction, single-target-cardinality relation set
+/// (`hasOne` / `belongsToOne`) declared on the shape — the endpoints the LLM
+/// can fill with instance *references* (either an existing `id` from the same
+/// class's `existing` list, or a `new:<Class>:<n>` placeholder pointing at
+/// another instance minted in the same response). Reverse-direction relations
+/// and `belongsToMany` / `hasMany` collections are omitted in this phase and
+/// will be added when the parser learns to resolve arrays and inverse
+/// predicates. `hint` on each relation is the SDNA `extractionHint` declared on
+/// the property whose predicate matches the relation (matched via the
+/// `properties`/`include_relations` overlap that `load_shape` guarantees);
+/// `None` when no hint was declared.
 pub fn build_extraction_input(
     shapes: &[ModelShape],
     transcript: &[(String, String)],
@@ -32,13 +45,42 @@ pub fn build_extraction_input(
                 .properties
                 .iter()
                 // The type flag is set by instance_links, not the LLM;
-                // relations are link-typed and handled in a later PR.
+                // relations are rendered in the `relations` block below, not
+                // as fields.
                 .filter(|p| !p.is_flag && !rel_preds.contains(p.predicate.as_str()))
                 .map(|p| {
                     serde_json::json!({
                         "name": p.name,
                         "required": p.is_required,
                         "hint": p.extraction_hint,
+                    })
+                })
+                .collect();
+            // Relation-predicate -> property hint. load_shape lists each
+            // relation both in `properties` (carrying its extractionHint) and
+            // in `include_relations` (carrying the target class); we surface
+            // the hint via this predicate join.
+            let rel_hint_by_pred: HashMap<&str, Option<&str>> = s
+                .properties
+                .iter()
+                .filter(|p| rel_preds.contains(p.predicate.as_str()))
+                .map(|p| (p.predicate.as_str(), p.extraction_hint.as_deref()))
+                .collect();
+            let relations: Vec<serde_json::Value> = s
+                .include_relations
+                .iter()
+                // Phase 2 renders forward relations only. `belongsToOne` /
+                // `belongsToMany` are inherently reverse (target class holds
+                // the outbound edge), so writing them requires resolving the
+                // inverse predicate — out of scope until Phase 3. Forward
+                // `hasOne` and `hasMany` both surface here; cardinality is
+                // enforced downstream when the parser resolves refs.
+                .filter(|r| r.direction == "forward")
+                .map(|r| {
+                    serde_json::json!({
+                        "name": r.name,
+                        "targetClass": r.target_class_name,
+                        "hint": rel_hint_by_pred.get(r.predicate.as_str()).and_then(|h| *h),
                     })
                 })
                 .collect();
@@ -67,6 +109,7 @@ pub fn build_extraction_input(
                 "hint": s.extraction_hint,
                 "existing": existing_json,
                 "fields": fields,
+                "relations": relations,
             })
         })
         .collect();

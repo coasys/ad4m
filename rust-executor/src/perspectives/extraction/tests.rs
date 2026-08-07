@@ -49,6 +49,13 @@ fn extraction_hint_lands_in_prompt() {
         !field_names.contains(&"type"),
         "type flag must not be a field"
     );
+    // A relation-free shape still renders an empty `relations` array — a
+    // stable schema key means the LLM (and the future prompt-side few-shot
+    // for relations) can rely on the block always being present.
+    assert!(
+        intention["relations"].as_array().unwrap().is_empty(),
+        "relation-free shape must render an empty relations block"
+    );
 }
 
 #[test]
@@ -519,6 +526,26 @@ fn relation_properties_are_excluded_from_extraction() {
     assert!(
         !field_names.contains(&"blocks"),
         "relation must not be offered to the LLM; got {field_names:?}"
+    );
+
+    // Phase 2 rendering: forward relations surface in a dedicated `relations`
+    // block (so the LLM knows what refs it *can* fill), separate from the
+    // scalar `fields`. The `blocks` relation on `TASK_WITH_RELATION_SDNA` is
+    // `hasMany` forward, so it belongs there with its target class + hint.
+    let relations = v["classes"][0]["relations"].as_array().unwrap();
+    let blocks_rel = relations
+        .iter()
+        .find(|r| r["name"].as_str() == Some("blocks"))
+        .expect("hasMany forward relation must appear in `relations` block");
+    assert_eq!(
+        blocks_rel["targetClass"].as_str(),
+        Some("Task"),
+        "relation targetClass must reflect ShapeRelation.target_class_name"
+    );
+    assert_eq!(
+        blocks_rel["hint"].as_str(),
+        Some("Other tasks this one blocks."),
+        "relation hint must reflect the sibling property's extractionHint"
     );
 
     // 2. instance_links must not write a link even if the LLM emits the
