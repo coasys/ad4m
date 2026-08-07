@@ -4213,6 +4213,60 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// Patch property values on an instance that already exists: runs the
+    /// class's `ad4m://setter` actions for the given properties **without** the
+    /// constructor.
+    ///
+    /// This is [`Self::create_subject`] minus the class-minting half. Per
+    /// property the write is byte-for-byte what `create_subject` would do —
+    /// same setter commands, same `resolve_property_value` encoding, so a
+    /// `setSingleTarget` setter still replaces that predicate's current target
+    /// — but the constructor's type-flag link is left untouched, since the
+    /// instance is already of that class. Use it to refine an existing node
+    /// (rename, fill a missing field) rather than mint a duplicate.
+    ///
+    /// Properties with no declared setter are skipped, exactly as in
+    /// `create_subject`. An empty/absent value set is a no-op.
+    pub async fn update_subject(
+        &mut self,
+        subject_class: SubjectClassOption,
+        expression_address: String,
+        values: serde_json::Value,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let class_name = self
+            .subject_class_option_to_class_name(subject_class, context)
+            .await?;
+
+        let mut commands: Vec<Command> = Vec::new();
+        if let serde_json::Value::Object(obj) = values {
+            for (prop, value) in obj.iter() {
+                let Some(setter_commands) =
+                    self.get_property_setter_actions(&class_name, prop).await?
+                else {
+                    continue;
+                };
+                let target_value = self
+                    .resolve_property_value(&class_name, prop, value, context)
+                    .await?;
+                for setter_cmd in setter_commands.iter() {
+                    commands.push(Command {
+                        target: Some(target_value.clone()),
+                        ..setter_cmd.clone()
+                    });
+                }
+            }
+        }
+
+        if commands.is_empty() {
+            return Ok(());
+        }
+
+        self.execute_commands(commands, expression_address, vec![], batch_id, context)
+            .await
+    }
+
     pub async fn get_subject_data(
         &mut self,
         subject_class: SubjectClassOption,

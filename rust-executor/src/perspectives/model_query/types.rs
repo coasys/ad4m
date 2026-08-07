@@ -409,10 +409,15 @@ pub struct ShapeProperty {
     /// Applied in hydration for resolveLanguage properties.
     pub(super) transform: Option<TransformExpression>,
     /// Natural-language hint describing this property's meaning, read back from
-    /// the `ad4m://extraction_hint` link on the property node.  Surfaced so the
+    /// the `ad4m://interpretation_hint` link on the property node.  Surfaced so the
     /// generic LLM extractor (and MCP tool-schema generation) can inject it as
     /// semantic guidance.  `None` when the SDNA declared no hint.
-    pub(crate) extraction_hint: Option<String>,
+    pub(crate) interpretation_hint: Option<String>,
+    /// Whether this property is the class's dedup identity (its title-like
+    /// interpretation key), read back from the `ad4m://identity` link on the
+    /// property node.  `false` when the SDNA declared no identity — a class
+    /// with no identity property is never deduplicated.
+    pub(crate) identity: bool,
 }
 
 /// Enriched relation metadata for include (eager-loading) resolution.
@@ -450,10 +455,10 @@ pub struct ModelShape {
     /// directly from the perspective's SHACL triples.
     pub(crate) include_relations: Vec<ShapeRelation>,
     /// Class-level natural-language hint, read back from the
-    /// `ad4m://extraction_hint` link on the shape node.  Steers the generic
+    /// `ad4m://interpretation_hint` link on the shape node.  Steers the generic
     /// LLM extractor toward what instances of this class represent.  `None`
     /// when the SDNA declared no class hint.
-    pub(crate) extraction_hint: Option<String>,
+    pub(crate) interpretation_hint: Option<String>,
 }
 
 impl ModelShape {

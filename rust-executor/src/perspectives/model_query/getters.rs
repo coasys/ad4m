@@ -71,7 +71,7 @@ pub fn evaluate_getters_batch(
         shape_uri: shape.shape_uri.clone(),
         properties: filtered_props,
         include_relations: shape.include_relations.clone(),
-        extraction_hint: shape.extraction_hint.clone(),
+        interpretation_hint: shape.interpretation_hint.clone(),
     };
 
     let mut instances: Vec<Value> = instance_ids

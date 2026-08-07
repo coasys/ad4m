@@ -4,8 +4,8 @@ use crate::perspectives::model_query::types::ModelShape;
 use crate::types::{AIPromptExamples, AITask};
 use std::collections::HashMap;
 
-/// assemble the per-call LLM input from the target shapes' extraction hints
-/// plus the transcript. Pure — this is exactly where `extraction_hint` enters
+/// assemble the per-call LLM input from the target shapes' interpretation hints
+/// plus the transcript. Pure — this is exactly where `interpretation_hint` enters
 /// the prompt. Shape (matches the system prompt):
 /// `{ "classes": [{ "name", "hint",
 ///                  "existing": [{ "id", "title", "class" }, …],
@@ -14,25 +14,29 @@ use std::collections::HashMap;
 ///    "transcript": [{ "speaker", "text" }] }`.
 ///
 /// `existing` maps a class's local name to the instances already in the graph
-/// (`id` = base URI, `title` = human identity, `class` = local class name).
-/// The `id` gives the LLM the handle it needs to emit an upsert: when an
-/// extracted item continues an existing entry, the LLM outputs that entry's
-/// `id` and [`plan_extraction_ops`] routes it into the update path instead of
-/// creating a duplicate. Titles still drive the deterministic dedup safety net
-/// in [`filter_already_present`]. Pass an empty map for none.
+/// (`id` = base URI, `title` = the class's declared identity value, `class` =
+/// local class name). The `id` gives the LLM the handle it needs to emit an
+/// upsert: when an interpreted item continues an existing entry, the LLM outputs
+/// that entry's `id` and [`plan_interpretation_ops_with_context`] routes it into
+/// the update path instead of creating a duplicate. Identity values still drive
+/// the deterministic dedup safety net in [`filter_already_present`]. Pass an
+/// empty map for none.
 ///
-/// `relations` is the forward-direction, single-target-cardinality relation set
-/// (`hasOne` / `belongsToOne`) declared on the shape — the endpoints the LLM
-/// can fill with instance *references* (either an existing `id` from the same
-/// class's `existing` list, or a `new:<Class>:<n>` placeholder pointing at
-/// another instance minted in the same response). Reverse-direction relations
-/// and `belongsToMany` / `hasMany` collections are omitted in this phase and
-/// will be added when the parser learns to resolve arrays and inverse
-/// predicates. `hint` on each relation is the SDNA `extractionHint` declared on
-/// the property whose predicate matches the relation (matched via the
-/// `properties`/`include_relations` overlap that `load_shape` guarantees);
-/// `None` when no hint was declared.
-pub fn build_extraction_input(
+/// The prompt key stays `"title"` regardless of which property a class declares
+/// as its `identity` — it is the LLM-facing name for "the human-readable handle
+/// of this instance", and the system prompt plus few-shot examples all reference
+/// it under that name.
+///
+/// `relations` is the forward-direction relation set declared on the shape — the
+/// endpoints the LLM can fill with instance *references* (either an existing
+/// `id` from the target class's `existing` list, or a `new:<Class>:<n>`
+/// placeholder pointing at another instance minted in the same response).
+/// Reverse-direction relations are omitted in this phase: writing one requires
+/// resolving the inverse predicate on the target class. `hint` on each relation
+/// is the SDNA `interpretationHint` declared on the property whose predicate
+/// matches the relation (matched via the `properties`/`include_relations`
+/// overlap that `load_shape` guarantees); `None` when no hint was declared.
+pub fn build_interpretation_input(
     shapes: &[ModelShape],
     transcript: &[(String, String)],
     existing: &HashMap<String, Vec<InstanceContext>>,
@@ -44,7 +48,7 @@ pub fn build_extraction_input(
             let fields: Vec<serde_json::Value> = s
                 .properties
                 .iter()
-                // The type flag is set by instance_links, not the LLM;
+                // The type flag is set by the class constructor, not the LLM;
                 // relations are rendered in the `relations` block below, not
                 // as fields.
                 .filter(|p| !p.is_flag && !rel_preds.contains(p.predicate.as_str()))
@@ -52,19 +56,19 @@ pub fn build_extraction_input(
                     serde_json::json!({
                         "name": p.name,
                         "required": p.is_required,
-                        "hint": p.extraction_hint,
+                        "hint": p.interpretation_hint,
                     })
                 })
                 .collect();
             // Relation-predicate -> property hint. load_shape lists each
-            // relation both in `properties` (carrying its extractionHint) and
-            // in `include_relations` (carrying the target class); we surface
+            // relation both in `properties` (carrying its interpretationHint)
+            // and in `include_relations` (carrying the target class); we surface
             // the hint via this predicate join.
             let rel_hint_by_pred: HashMap<&str, Option<&str>> = s
                 .properties
                 .iter()
                 .filter(|p| rel_preds.contains(p.predicate.as_str()))
-                .map(|p| (p.predicate.as_str(), p.extraction_hint.as_deref()))
+                .map(|p| (p.predicate.as_str(), p.interpretation_hint.as_deref()))
                 .collect();
             let relations: Vec<serde_json::Value> = s
                 .include_relations
@@ -74,7 +78,7 @@ pub fn build_extraction_input(
                 // the outbound edge), so writing them requires resolving the
                 // inverse predicate — out of scope until Phase 3. Forward
                 // `hasOne` and `hasMany` both surface here; cardinality is
-                // enforced downstream when the parser resolves refs.
+                // enforced downstream when the planner resolves refs.
                 .filter(|r| r.direction == "forward")
                 .map(|r| {
                     serde_json::json!({
@@ -101,12 +105,12 @@ pub fn build_extraction_input(
                 .unwrap_or_default();
             // `"hint"` is the prompt-facing key (short, cheap in tokens and what
             // the system prompt + few-shot examples reference); its value is the
-            // schema's `extractionHint` decorator, surfaced here as
-            // `extraction_hint`. The key name is deliberately not "extractionHint"
+            // schema's `interpretationHint` decorator, surfaced here as
+            // `interpretation_hint`. The key name is deliberately not "interpretationHint"
             // — the LLM never sees the decorator name, only this compact field.
             serde_json::json!({
                 "name": name,
-                "hint": s.extraction_hint,
+                "hint": s.interpretation_hint,
                 "existing": existing_json,
                 "fields": fields,
                 "relations": relations,
@@ -120,16 +124,16 @@ pub fn build_extraction_input(
     serde_json::json!({ "classes": classes, "transcript": turns }).to_string()
 }
 
-/// name under which the generic extraction task is registered with
-/// `AIService`. Kept stable so `ensure_extraction_task` can find it across
+/// name under which the generic interpretation task is registered with
+/// `AIService`. Kept stable so `ensure_interpretation_task` can find it across
 /// executor restarts and multiple callers.
-pub const EXTRACTION_TASK_NAME: &str = "adam://extraction";
+pub const INTERPRETATION_TASK_NAME: &str = "adam://interpretation";
 
-/// system prompt sent with every extraction call. Instance-specific
+/// system prompt sent with every interpretation call. Instance-specific
 /// scaffolding (available classes, their hints, the transcript) is added by
-/// `build_extraction_input`, so this stays stable across calls and the
+/// `build_interpretation_input`, so this stays stable across calls and the
 /// task can be reused.
-pub const EXTRACTION_SYSTEM_PROMPT: &str = "\
+pub const INTERPRETATION_SYSTEM_PROMPT: &str = "\
 You extract typed instances from a conversation transcript.
 
 You receive a JSON object with these fields:
@@ -183,13 +187,13 @@ Output rules:
     that isn't in the `existing` list.
 ";
 
-/// idempotently register the generic extraction task in the AI-task DB.
+/// idempotently register the generic interpretation task in the AI-task DB.
 ///
-/// If a task with `EXTRACTION_TASK_NAME` already exists, returns it unchanged
+/// If a task with `INTERPRETATION_TASK_NAME` already exists, returns it unchanged
 /// (so callers can safely invoke this on every executor startup or before every
-/// extraction run). Otherwise inserts a new row bound to the `\"default\"` LLM
+/// interpretation run). Otherwise inserts a new row bound to the `\"default\"` LLM
 /// model — `AIService::replace_model_variables` resolves this to whatever LLM
-/// the user has configured as default at prompt time, so extraction works with
+/// the user has configured as default at prompt time, so interpretation works with
 /// any model without hard-coding one here.
 ///
 /// DB-only: does not touch the running `AIService`. The runtime path is
@@ -207,9 +211,9 @@ Output rules:
 /// behavior on small models, and putting the relations example (all new
 /// instances) in the recency slot made gemma3:12b create-happy and stopped it
 /// emitting `id`s to update. Relations sit second and still fire reliably.
-/// Inputs mirror the JSON shape `build_extraction_input` produces (existing
+/// Inputs mirror the JSON shape `build_interpretation_input` produces (existing
 /// entries carry `id`/`title`/`class`; each class carries a `relations` block).
-pub(crate) fn extraction_examples() -> Vec<AIPromptExamples> {
+pub(crate) fn interpretation_examples() -> Vec<AIPromptExamples> {
     let ex1_in = serde_json::json!({
         "classes": [
             {"name":"Task","hint":"An action someone commits to doing.","existing":[],
@@ -351,23 +355,23 @@ pub(crate) fn extraction_examples() -> Vec<AIPromptExamples> {
     ]
 }
 
-pub fn ensure_extraction_task() -> anyhow::Result<AITask> {
+pub fn ensure_interpretation_task() -> anyhow::Result<AITask> {
     if let Some(existing) = Ad4mDb::with_global_instance(|db| db.get_tasks())?
         .into_iter()
-        .find(|t| t.name == EXTRACTION_TASK_NAME)
+        .find(|t| t.name == INTERPRETATION_TASK_NAME)
     {
         return Ok(existing);
     }
     let task_id = Ad4mDb::with_global_instance(|db| {
         db.add_task(
-            EXTRACTION_TASK_NAME.to_string(),
+            INTERPRETATION_TASK_NAME.to_string(),
             "default".to_string(),
-            EXTRACTION_SYSTEM_PROMPT.to_string(),
-            extraction_examples(),
+            INTERPRETATION_SYSTEM_PROMPT.to_string(),
+            interpretation_examples(),
             None,
         )
     })?;
     let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
-        .ok_or_else(|| anyhow::anyhow!("extraction task vanished immediately after insert"))?;
+        .ok_or_else(|| anyhow::anyhow!("interpretation task vanished immediately after insert"))?;
     Ok(task)
 }

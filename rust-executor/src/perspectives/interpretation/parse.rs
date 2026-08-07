@@ -5,10 +5,10 @@ use super::ProposedInstance;
 /// Local models wrap JSON in reasoning/markdown noise, so we first strip the
 /// common wrappers (mirrors Flux `LLMutils.ts`): `<think>…</think>` blocks,
 /// ```-fences, and trailing commas. Then parse as a JSON array.
-pub fn parse_extraction_response(raw: &str) -> anyhow::Result<Vec<ProposedInstance>> {
+pub fn parse_interpretation_response(raw: &str) -> anyhow::Result<Vec<ProposedInstance>> {
     let cleaned = clean_llm_json(raw);
     let instances: Vec<ProposedInstance> = serde_json::from_str(&cleaned).map_err(|e| {
-        anyhow::anyhow!("extraction JSON parse failed: {e}; cleaned payload: {cleaned}")
+        anyhow::anyhow!("interpretation JSON parse failed: {e}; cleaned payload: {cleaned}")
     })?;
     Ok(instances)
 }

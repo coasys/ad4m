@@ -49,9 +49,9 @@ export function buildSHACL(
      * Natural-language hint declared on the `@Model` decorator that
      * steers the generic LLM extractor when producing instances of
      * this class.  Attached to the SHACL shape node and re-emitted as
-     * an `ad4m://extraction_hint` link by `SHACLShape.toLinks()`.
+     * an `ad4m://interpretation_hint` link by `SHACLShape.toLinks()`.
      */
-    extractionHint?: string,
+    interpretationHint?: string,
 ): { shape: SHACLShape; name: string } {
     const obj = target.prototype;
 
@@ -83,8 +83,8 @@ export function buildSHACL(
     const shapeUri = `${namespace}${subjectName}Shape`;
     const targetClass = `${namespace}${subjectName}`;
     const shape = new SHACLShape(shapeUri, targetClass);
-    if (extractionHint) {
-        shape.extractionHint = extractionHint;
+    if (interpretationHint) {
+        shape.interpretationHint = interpretationHint;
     }
 
     // ── Seed the memoisation cache while we keep building ──────────────
@@ -186,10 +186,10 @@ export function buildSHACL(
             propShape.transform = propMeta.transform;
         }
 
-        // Natural-language extraction hint (read by the generic LLM
-        // extractor via ShapeProperty.extraction_hint).
-        if (propMeta.extractionHint) {
-            propShape.extractionHint = propMeta.extractionHint;
+        // Natural-language interpretation hint (read by the generic LLM
+        // extractor via ShapeProperty.interpretation_hint).
+        if (propMeta.interpretationHint) {
+            propShape.interpretationHint = propMeta.interpretationHint;
         }
 
         // ── Setter actions ──────────────────────────────────────────────

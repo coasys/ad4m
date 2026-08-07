@@ -1,42 +1,87 @@
-//! Real-LLM end-to-end tests for generic extraction.
+//! Real-LLM end-to-end tests for generic interpretation.
 //!
 //! These are the "look, the whole thing works" tests: a transcript goes in, a
 //! real local model runs, and typed SoA instances come out and are persisted.
-//! Split into their own file (from the pure unit tests in `extraction.rs`) so a
+//! Split into their own file (from the pure unit tests in `interpretation.rs`) so a
 //! reviewer can read *just this* to understand what the feature does end-to-end.
 //!
 //! They talk to an OpenAI-compatible endpoint (Ollama), NOT the embedded CUDA
 //! LLM — so no GPU build is needed, only a reachable model. Endpoint + model are
-//! env-overridable (`EXTRACTION_E2E_BASE_URL` / `EXTRACTION_E2E_MODEL` /
-//! `EXTRACTION_E2E_API_KEY`); defaults hit Ollama at `localhost:11434` with
+//! env-overridable (`INTERPRETATION_E2E_BASE_URL` / `INTERPRETATION_E2E_MODEL` /
+//! `INTERPRETATION_E2E_API_KEY`); defaults hit Ollama at `localhost:11434` with
 //! `gemma3:12b` (fits the GPU, ~10s for the suite, Flux's summary model). On CI
 //! (self-hosted runner = Marvin) that endpoint is local; from a dev box, tunnel
 //! it (`ssh -L 11434:localhost:11434 marvin`).
 //!
 //! Requires that endpoint to be up — they are NOT `#[ignore]`d, so a `cargo test`
 //! with no model reachable will fail here by design (that is the CI signal).
-//! Run just this suite: `cargo test --release --lib perspectives::extraction_e2e
+//! Run just this suite: `cargo test --release --lib perspectives::interpretation_e2e
 //! -- --test-threads=1 --nocapture`.
 
 #![cfg(test)]
 
-use super::extraction::existing_instance_titles;
-use super::extraction_test_support::*;
+use super::interpretation_test_support::*;
 use super::model_query::types::ModelShape;
 use super::perspective_instance::PerspectiveInstance;
 use crate::types::Link;
 
-// ---- basic per-class extraction (DRY via the shared `run_e2e` harness) ------
+// ---- create_subject write path (no LLM — runs without Ollama) ---------------
+
+/// The interpretation write path goes through `create_subject`. This proves the
+/// SDNA fixtures are real subject classes: constructor mints the type flag, the
+/// `title` setter writes a literal that round-trips back through
+/// `parse_literal_value`. Calls no AIService, so it runs with no model up.
+#[tokio::test]
+async fn create_subject_roundtrips_soa_instance() {
+    use crate::perspectives::perspective_instance::SubjectClassOption;
+    use crate::types::LinkQuery;
+    let (mut perspective, _shapes, ctx) =
+        setup_interpretation_e2e(&[("Intention", INTENTION_SDNA)]).await;
+    let base = "soa://ext/intention/rt-test";
+    perspective
+        .create_subject(
+            SubjectClassOption {
+                class_name: Some("Intention".into()),
+                query: None,
+            },
+            base.to_string(),
+            Some(serde_json::json!({ "title": "Ship the MVP", "owner": "Nico" })),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("create_subject");
+    let links = perspective
+        .get_links(&LinkQuery {
+            source: Some(base.into()),
+            ..Default::default()
+        })
+        .await
+        .expect("get_links");
+    assert!(
+        links
+            .iter()
+            .any(|l| l.data.predicate.as_deref() == Some("ns://type")
+                && l.data.target == "ns://intention"),
+        "type flag; got {links:#?}"
+    );
+    let title = links
+        .iter()
+        .find(|l| l.data.predicate.as_deref() == Some("ns://title"))
+        .map(|l| crate::perspectives::model_query::utils::parse_literal_value(&l.data.target));
+    assert_eq!(
+        title,
+        Some(serde_json::Value::String("Ship the MVP".into())),
+        "title round-trip; got {title:?}"
+    );
+}
+
+// ---- basic per-class interpretation (DRY via the shared `run_e2e` harness) ------
 
 /// Intention + Belief: an intent with an owner and a claim.
-///
-/// Wrapped in [`run_e2e_retrying`] because gemma3:12b intermittently emits only
-/// the intention (~20% observed empirically on 5-run local sweeps). Two extra
-/// attempts push the flake rate well under 1% while keeping the assertion — we
-/// want to know when *both* modalities are picked up, not shrug at the miss.
 #[tokio::test]
 async fn e2e_intention_and_belief() {
-    let (p, placements) = run_e2e_retrying(
+    let (p, shapes, placements) = run_e2e(
         &[("Belief", BELIEF_SDNA), ("Intention", INTENTION_SDNA)],
         &[
             (
@@ -48,17 +93,11 @@ async fn e2e_intention_and_belief() {
                 "Cool. One English hint per class should be enough to steer this.",
             ),
         ],
-        3,
-        |pl| {
-            let c = count_by_type(pl);
-            c.get("intention").copied().unwrap_or(0) >= 1
-                && c.get("belief").copied().unwrap_or(0) >= 1
-        },
     )
     .await;
-    assert_persisted(&p, &placements).await;
+    assert_persisted(&p, &shapes, &placements).await;
 
-    let counts = count_by_type(&placements);
+    let counts = graph_count_by_type(&p, &shapes).await;
     assert!(
         counts.get("intention").copied().unwrap_or(0) >= 1,
         "expected an intention; got {counts:?}"
@@ -68,19 +107,18 @@ async fn e2e_intention_and_belief() {
         "expected a belief; got {counts:?}"
     );
     // The intention should carry Nico as owner.
-    let owner_is_nico = placements.iter().any(|(_, links)| {
-        links.iter().any(|l| {
-            l.predicate.as_deref() == Some("ns://owner") && l.target.to_lowercase().contains("nico")
-        })
-    });
-    assert!(owner_is_nico, "expected the intention to be owned by Nico");
+    let owners = graph_owners_lower(&p, &shapes).await;
+    assert!(
+        owners.iter().any(|o| o.contains("nico")),
+        "expected the intention to be owned by Nico; got {owners:?}"
+    );
 }
 
 /// Task-tracking conversation -> only Tasks, with owners. Three assignments in
 /// the transcript should yield 2–4 tasks (LLM may merge/split slightly).
 #[tokio::test]
 async fn e2e_task_tracking_counts() {
-    let (p, placements) = run_e2e(
+    let (p, shapes, placements) = run_e2e(
         &[("Task", TASK_SDNA)],
         &[
             (
@@ -98,9 +136,9 @@ async fn e2e_task_tracking_counts() {
         ],
     )
     .await;
-    assert_persisted(&p, &placements).await;
+    assert_persisted(&p, &shapes, &placements).await;
 
-    let counts = count_by_type(&placements);
+    let counts = graph_count_by_type(&p, &shapes).await;
     let tasks = counts.get("task").copied().unwrap_or(0);
     assert!(
         (2..=4).contains(&tasks),
@@ -110,22 +148,18 @@ async fn e2e_task_tracking_counts() {
         counts.keys().all(|k| k == "task"),
         "only Task was offered; got {counts:?}"
     );
-    let owners = placements
-        .iter()
-        .filter(|(_, links)| {
-            links
-                .iter()
-                .any(|l| l.predicate.as_deref() == Some("ns://owner"))
-        })
-        .count();
-    assert!(owners >= 1, "expected at least one task to carry an owner");
+    let owners = graph_owners_lower(&p, &shapes).await;
+    assert!(
+        !owners.is_empty(),
+        "expected at least one task to carry an owner; got {owners:?}"
+    );
 }
 
 /// Mixed epistemic conversation -> the three distinct modalities. The question
 /// (ends in "?") is the clearest signal and should always be picked up.
 #[tokio::test]
 async fn e2e_mixed_epistemic_modalities() {
-    let (p, placements) = run_e2e(
+    let (p, shapes, placements) = run_e2e(
         &[
             ("Observation", OBSERVATION_SDNA),
             ("Belief", BELIEF_SDNA),
@@ -144,9 +178,9 @@ async fn e2e_mixed_epistemic_modalities() {
         ],
     )
     .await;
-    assert_persisted(&p, &placements).await;
+    assert_persisted(&p, &shapes, &placements).await;
 
-    let counts = count_by_type(&placements);
+    let counts = graph_count_by_type(&p, &shapes).await;
     let distinct = counts.len();
     assert!(
         distinct >= 2,
@@ -161,7 +195,7 @@ async fn e2e_mixed_epistemic_modalities() {
 /// Strategy conversation -> a Vision (the dream) and a Plan (the concrete path).
 #[tokio::test]
 async fn e2e_vision_and_plan() {
-    let (p, placements) = run_e2e(
+    let (p, shapes, placements) = run_e2e(
         &[("Vision", VISION_SDNA), ("Plan", PLAN_SDNA)],
         &[
             (
@@ -175,9 +209,9 @@ async fn e2e_vision_and_plan() {
         ],
     )
     .await;
-    assert_persisted(&p, &placements).await;
+    assert_persisted(&p, &shapes, &placements).await;
 
-    let counts = count_by_type(&placements);
+    let counts = graph_count_by_type(&p, &shapes).await;
     assert!(
         counts.get("vision").copied().unwrap_or(0) >= 1
             || counts.get("plan").copied().unwrap_or(0) >= 1,
@@ -192,7 +226,7 @@ async fn e2e_vision_and_plan() {
 /// came out".
 #[tokio::test]
 async fn e2e_longer_standup_conversation() {
-    let (p, placements) = run_e2e(
+    let (p, shapes, placements) = run_e2e_until(
         &[
             ("Task", TASK_SDNA),
             ("Belief", BELIEF_SDNA),
@@ -211,14 +245,16 @@ async fn e2e_longer_standup_conversation() {
             ("Nico", "Josh, can you draft the conflict-resolution design doc by Thursday?"),
             ("Josh", "Sure, I'll write up the CRDT-vs-lattice comparison and share it."),
             ("Nico", "The long game is a network where every community runs its own Eve and they federate."),
-            ("James", "Concretely, the plan is: land extraction, then flows, then the Synergy ledger."),
-            ("Nico", "The extraction e2e suite is now green on Marvin, by the way."),
+            ("James", "Concretely, the plan is: land interpretation, then flows, then the Synergy ledger."),
+            ("Nico", "The interpretation e2e suite is now green on Marvin, by the way."),
         ],
+        3,
+        |c| c.get("task").copied().unwrap_or(0) >= 1,
     )
     .await;
-    assert_persisted(&p, &placements).await;
+    assert_persisted(&p, &shapes, &placements).await;
 
-    let counts = count_by_type(&placements);
+    let counts = graph_count_by_type(&p, &shapes).await;
     let total: usize = counts.values().sum();
     // A 10-turn transcript with several concrete items — but we err on fewer.
     assert!(
@@ -233,7 +269,7 @@ async fn e2e_longer_standup_conversation() {
         counts.get("question").copied().unwrap_or(0) >= 1,
         "the concurrency question should be captured; got {counts:?}"
     );
-    // Distinct modalities: a good extraction spans more than one class here.
+    // Distinct modalities: a good interpretation spans more than one class here.
     assert!(
         counts.len() >= 3,
         "expected >=3 distinct classes across a rich transcript; got {counts:?}"
@@ -242,16 +278,17 @@ async fn e2e_longer_standup_conversation() {
 
 // ---- selector against a non-empty graph -------------------------------------
 
-/// Extraction into a perspective that already holds an unrelated graph. The
+/// Interpretation into a perspective that already holds an unrelated graph. The
 /// selector must still place NEW instances correctly (fresh bases under
 /// `soa://ext/`) without disturbing or colliding with the pre-existing nodes.
 #[tokio::test]
 async fn e2e_selector_over_prepopulated_graph() {
     // gemma3:12b occasionally hijacks a seeded task's id when the transcript
     // participant matches the seeded owner (e.g. "James" appears both in the
-    // seeded task's owner and the new conversation). Retry up to 3× with a
-    // fresh perspective per attempt; if all attempts hit the same modality
-    // glitch, fall through to the assertion with a real failure message.
+    // seeded task's owner and the new conversation) — a legal upsert, but not
+    // what this test is about. Retry up to 3× with a fresh perspective per
+    // attempt; if every attempt hits the same glitch, fall through to the
+    // assertion with a real failure message.
     const MAX_ATTEMPTS: usize = 3;
     let mut last: Option<(
         PerspectiveInstance,
@@ -260,7 +297,7 @@ async fn e2e_selector_over_prepopulated_graph() {
     )> = None;
     for attempt in 1..=MAX_ATTEMPTS {
         let (mut perspective, shapes, ctx) =
-            setup_extraction_e2e(&[("Task", TASK_SDNA), ("Belief", BELIEF_SDNA)]).await;
+            setup_interpretation_e2e(&[("Task", TASK_SDNA), ("Belief", BELIEF_SDNA)]).await;
         let task_shape = &shapes[0];
         let belief_shape = &shapes[1];
 
@@ -290,17 +327,17 @@ async fn e2e_selector_over_prepopulated_graph() {
         )
         .await;
 
-        let placements = run_extraction_e2e(
+        let placements = run_interpretation_e2e(
             &mut perspective,
             &shapes,
             &[
                 (
                     "Nico",
-                    "James, please write the integration test for the extraction websocket endpoint.",
+                    "James, please write the integration test for the interpretation websocket endpoint.",
                 ),
                 (
                     "James",
-                    "On it — I'll add the WS runExtraction test this afternoon.",
+                    "On it — I'll add the WS runInterpretation test this afternoon.",
                 ),
             ],
             &ctx,
@@ -310,21 +347,22 @@ async fn e2e_selector_over_prepopulated_graph() {
         let clean = placements
             .iter()
             .all(|(base, _)| !base.starts_with("soa://existing/"));
+        last = Some((perspective, shapes, placements));
         if clean {
             if attempt > 1 {
                 println!("[e2e] selector predicate satisfied on attempt {attempt}/{MAX_ATTEMPTS}");
             }
-            last = Some((perspective, shapes, placements));
             break;
         }
         println!("[e2e] attempt {attempt}/{MAX_ATTEMPTS}: LLM emitted op on seeded base; retrying");
-        last = Some((perspective, shapes, placements));
     }
     let (perspective, shapes, placements) = last.expect("retry loop ran at least once");
 
-    assert_persisted(&perspective, &placements).await;
+    assert_persisted(&perspective, &shapes, &placements).await;
 
-    // New instances land under the extraction prefix, never on the seeded bases.
+    // New instances land under the interpretation prefix, never on the seeded bases.
+    // (Where an instance is *minted* is inherently a placement property, so these
+    // two checks stay on `placements`.)
     assert!(
         placements
             .iter()
@@ -335,34 +373,40 @@ async fn e2e_selector_over_prepopulated_graph() {
         placements
             .iter()
             .all(|(base, _)| !base.starts_with("soa://existing/")),
-        "extraction must not overwrite pre-existing instance bases"
+        "interpretation must not overwrite pre-existing instance bases"
     );
-    // And it should have found the new task in the conversation.
-    let counts = count_by_type(&placements);
+    // And it should have found the new task in the conversation: the graph now
+    // holds the 2 seeded tasks plus at least one freshly extracted one.
+    let counts = graph_count_by_type(&perspective, &shapes).await;
     assert!(
-        counts.get("task").copied().unwrap_or(0) >= 1,
-        "expected the new WS-test task; got {counts:?}"
+        counts.get("task").copied().unwrap_or(0) >= 3,
+        "expected the 2 seeded tasks + the new WS-test task; got {counts:?}"
     );
 
     // The pre-existing instances are still present in the graph afterwards.
-    let existing = existing_titles_snapshot(&perspective, &shapes).await;
+    let titles = graph_titles_lower(&perspective, &shapes).await;
     assert!(
-        existing
+        titles
             .iter()
             .any(|t| t.contains("migrate the shacl parser")),
-        "seeded task must survive extraction; got {existing:?}"
+        "seeded task must survive interpretation; got {titles:?}"
     );
 }
 
 // ---- dedup: don't recreate what's already in the graph ----------------------
 
-/// Pre-seed a Task, then run extraction on a transcript that *restates* that
+/// Pre-seed a Task, then run interpretation on a transcript that *restates* that
 /// same task and adds a genuinely new one. The existing task must NOT be
 /// recreated (deterministic guarantee via `filter_already_present`), while the
 /// new task is.
+///
+/// "Not recreated" is asserted on where instances live, not on title counts:
+/// now that the upsert path exists, the model may legitimately land an `id`
+/// update on the seeded base and reword its title. What must never happen is a
+/// *fresh* instance under `soa://ext/` carrying the already-present title.
 #[tokio::test]
 async fn e2e_does_not_recreate_existing_task() {
-    let (mut perspective, shapes, ctx) = setup_extraction_e2e(&[("Task", TASK_SDNA)]).await;
+    let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
     let task_shape = &shapes[0];
 
     let existing_title = "Finish the WebRTC call module";
@@ -375,7 +419,7 @@ async fn e2e_does_not_recreate_existing_task() {
     )
     .await;
 
-    let placements = run_extraction_e2e(
+    let placements = run_interpretation_e2e(
         &mut perspective,
         &shapes,
         &[
@@ -392,158 +436,155 @@ async fn e2e_does_not_recreate_existing_task() {
         &ctx,
     )
     .await;
-    assert_persisted(&perspective, &placements).await;
+    assert_persisted(&perspective, &shapes, &placements).await;
 
-    // The already-present task is never RECREATED as a fresh instance under
-    // the extraction prefix. An upsert that lands on the seeded base and
-    // preserves/refines the existing title is fine — that's the id-context
-    // upsert path doing its job, not a duplicate.
-    let newly_minted_titles: Vec<String> = placements
+    // The already-present task is never RECREATED: no freshly-minted instance
+    // carries the seeded title. (An upsert landing on the seeded base and
+    // refining its title is fine — that's the id-upsert path doing its job.)
+    let seeded_lower = existing_title.to_lowercase();
+    let rows = model_instances(&perspective, "Task", &["title"]).await;
+    let minted_with_seeded_title: Vec<&serde_json::Value> = rows
         .iter()
-        .filter(|(base, _)| !base.starts_with("soa://existing/"))
-        .flat_map(|(_, links)| {
-            links
-                .iter()
-                .filter(|l| l.predicate.as_deref() == Some("ns://title"))
-                .filter_map(|l| decode_literal_string(&l.target))
-                .map(|s| s.to_lowercase())
+        .filter(|r| {
+            r.get("id")
+                .and_then(|i| i.as_str())
+                .map(|id| id.starts_with("soa://ext/"))
+                .unwrap_or(false)
+                && r.get("title")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t.to_lowercase() == seeded_lower)
+                    .unwrap_or(false)
         })
         .collect();
     assert!(
-        !newly_minted_titles.contains(&existing_title.to_lowercase()),
-        "must not mint a fresh instance with the already-present title; \
-         newly-minted titles = {newly_minted_titles:?}"
+        minted_with_seeded_title.is_empty(),
+        "must not mint a fresh instance with the already-present title; graph rows = {rows:#?}"
     );
-    // A new task should still have been extracted (the CI docs task). Count
-    // Create placements: they're the ones under the extraction prefix.
-    let created_count = placements
-        .iter()
-        .filter(|(base, _)| base.starts_with("soa://ext/"))
-        .filter(|(_, links)| {
-            links
-                .iter()
-                .any(|l| l.predicate.as_deref() == Some("ns://type"))
-        })
-        .count();
+    // A new task should still have been interpreted (the CI docs task), so the
+    // graph holds the seeded task plus at least one new one.
+    let counts = graph_count_by_type(&perspective, &shapes).await;
     assert!(
-        created_count >= 1,
-        "expected at least one new task to be created; placements = {placements:#?}"
+        counts.get("task").copied().unwrap_or(0) >= 2,
+        "expected the seeded task + a newly interpreted one; got {counts:?}"
     );
 }
 
 // ---- upsert path: LLM chooses UPDATE over CREATE via `id` ------------------
 
-/// Pre-seed a Task, then run extraction on a transcript that explicitly RENAMES
-/// it and assigns a NEW OWNER. The extractor should recognise the continuity
-/// (same underlying task) and emit the existing `id`, driving the upsert path.
-/// The seeded instance's title/owner scalars end up REPLACED (SPARQL "set"
-/// semantics), and no duplicate Task base URI is minted.
+/// Pre-seed a Task, then run interpretation on a transcript that explicitly
+/// RENAMES it and assigns a NEW OWNER. The interpreter should recognise the
+/// continuity (same underlying task) and emit the existing `id`, driving the
+/// upsert path: the seeded instance's title/owner scalars end up REPLACED (the
+/// class's `setSingleTarget` setters), its type flag stays put, and no duplicate
+/// Task base is minted.
 ///
-/// This exercises the Phase 1B contract end-to-end: existing entries in the
-/// prompt now carry `{id, title, class}`, the system prompt + few-shot example
-/// teach `id`-emission, and `plan_extraction_ops` -> `apply_extraction_ops`
-/// routes those emissions to the update code path. If the LLM refuses to emit
-/// `id`, the test surfaces that as a real failure — the prompt/example
-/// engineering needs work.
+/// This exercises the tree-aware "attach" contract end-to-end: existing entries
+/// in the prompt carry `{id, title, class}`, the system prompt + few-shot example
+/// teach `id`-emission, and `plan_interpretation_ops_with_context` ->
+/// `apply_interpretation_ops` routes those emissions through `update_subject`.
+/// If the LLM refuses to emit `id`, the test surfaces that as a real failure —
+/// the prompt/example engineering needs work.
 #[tokio::test]
 async fn e2e_updates_existing_instance_via_id() {
-    use super::extraction::{run_extraction, ExtractionOp};
-    use super::extraction_test_support::seed_instance;
-    use crate::types::LinkStatus;
-
-    let (mut perspective, shapes, ctx) = setup_extraction_e2e(&[("Task", TASK_SDNA)]).await;
-    let task_shape = &shapes[0];
-
-    let seeded_base = "soa://existing/task/webrtc";
-    seed_instance(
-        &mut perspective,
-        &ctx,
-        task_shape,
-        seeded_base,
-        "Finish the WebRTC call module",
-    )
-    .await;
+    const SEEDED_BASE: &str = "soa://existing/task/webrtc";
+    const SEEDED_TITLE: &str = "Finish the WebRTC call module";
+    // Emitting an `id` is the most fragile behaviour on small models; retry with
+    // a fresh perspective rather than let one bad sample redden the suite.
+    const MAX_ATTEMPTS: usize = 3;
 
     // Transcript renames the seeded task and assigns a new owner — a clear
     // continuation, not a fresh idea. The `id` handle to the existing task is
     // in the prompt; the LLM should emit it.
-    let transcript: Vec<(String, String)> = vec![
+    let transcript = [
         (
-            "Nico".into(),
+            "Nico",
             "Update on the WebRTC work: let's rename that task to \
              'Complete the WebRTC call module and add a retry guard' and \
-             assign it to Josh."
-                .into(),
+             assign it to Josh.",
         ),
         (
-            "Josh".into(),
-            "Got it — I'll take over the WebRTC call module and add the retry guard.".into(),
+            "Josh",
+            "Got it — I'll take over the WebRTC call module and add the retry guard.",
         ),
     ];
 
-    let ops = run_extraction(
-        &mut perspective,
-        &shapes,
-        &transcript,
-        "soa://ext/",
-        LinkStatus::Local,
-        &ctx,
-    )
-    .await
-    .expect("run_extraction against real LLM");
+    let mut last: Option<(
+        PerspectiveInstance,
+        Vec<ModelShape>,
+        Vec<(String, Vec<Link>)>,
+    )> = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
+        seed_instance(&mut perspective, &ctx, &shapes[0], SEEDED_BASE, SEEDED_TITLE).await;
+        let placements =
+            run_interpretation_e2e(&mut perspective, &shapes, &transcript, &ctx).await;
+        let touched_seeded = placements.iter().any(|(base, _)| base == SEEDED_BASE);
+        last = Some((perspective, shapes, placements));
+        if touched_seeded {
+            if attempt > 1 {
+                println!("[e2e] upsert satisfied on attempt {attempt}/{MAX_ATTEMPTS}");
+            }
+            break;
+        }
+        println!("[e2e] attempt {attempt}/{MAX_ATTEMPTS}: LLM did not emit an id; retrying");
+    }
+    let (perspective, shapes, placements) = last.expect("retry loop ran at least once");
+    assert_persisted(&perspective, &shapes, &placements).await;
 
-    // Log the split for debugging when this ever regresses.
-    let updates: Vec<&ExtractionOp> = ops
-        .iter()
-        .filter(|o| matches!(o, ExtractionOp::Update { .. }))
-        .collect();
-    let creates: Vec<&ExtractionOp> = ops
-        .iter()
-        .filter(|o| matches!(o, ExtractionOp::Create { .. }))
-        .collect();
-    println!(
-        "e2e upsert: {} update(s), {} create(s); ops = {:#?}",
-        updates.len(),
-        creates.len(),
-        ops
+    // Primary assertion: the run touched the seeded base. Creates always mint a
+    // fresh UUID base under `soa://ext/`, so a placement on the seeded base can
+    // only come from an Update — i.e. the LLM emitted the existing `id`.
+    assert!(
+        placements.iter().any(|(base, _)| base == SEEDED_BASE),
+        "expected the LLM to emit id={SEEDED_BASE:?} for the renamed task \
+         (upsert path); got placements = {placements:#?}"
     );
 
-    // Primary assertion: at least one Update landed on the seeded base — that
-    // means the LLM chose to emit the existing `id`.
-    let updated_seeded = updates.iter().any(|op| match op {
-        ExtractionOp::Update { base, .. } => base == seeded_base,
-        _ => false,
-    });
-    assert!(
-        updated_seeded,
-        "expected the LLM to emit id={seeded_base:?} for the renamed task \
-         (upsert path); got ops={ops:#?}"
-    );
-
-    // Secondary: no fresh Task base collides with the seeded one, and the
-    // Update actually wrote a new owner link (proving the scalar replacement).
-    let placements = ops_to_placements(&ops);
-    let created_bases: Vec<&String> = ops
+    // The update wrote the new owner and replaced the title, and left the type
+    // flag alone — read back off the seeded base itself.
+    let seeded_links = &placements
         .iter()
-        .filter_map(|o| match o {
-            ExtractionOp::Create { base, .. } => Some(base),
-            _ => None,
-        })
-        .collect();
+        .find(|(base, _)| base == SEEDED_BASE)
+        .expect("seeded placement")
+        .1;
     assert!(
-        created_bases.iter().all(|b| b.as_str() != seeded_base),
-        "no Create must land on the seeded base"
+        seeded_links
+            .iter()
+            .any(|l| l.predicate.as_deref() == Some("ns://type") && l.target == "ns://task"),
+        "the update must leave the type flag in place; got {seeded_links:#?}"
     );
-    let owner_on_seeded = placements.iter().any(|(base, links)| {
-        base == seeded_base
-            && links
-                .iter()
-                .any(|l| l.predicate.as_deref() == Some("ns://owner"))
-    });
     assert!(
-        owner_on_seeded,
+        seeded_links
+            .iter()
+            .any(|l| l.predicate.as_deref() == Some("ns://owner")),
         "expected the upsert to write the new owner on the seeded base; \
-         placements = {placements:#?}"
+         got {seeded_links:#?}"
+    );
+    assert_eq!(
+        seeded_links
+            .iter()
+            .filter(|l| l.predicate.as_deref() == Some("ns://title"))
+            .count(),
+        1,
+        "title is single-cardinality: the setter must replace, not accumulate; \
+         got {seeded_links:#?}"
+    );
+
+    // And no duplicate: the seeded title must not also exist on a fresh base.
+    let seeded_lower = SEEDED_TITLE.to_lowercase();
+    let rows = model_instances(&perspective, "Task", &["title"]).await;
+    assert!(
+        !rows.iter().any(|r| {
+            r.get("id")
+                .and_then(|i| i.as_str())
+                .map(|id| id != SEEDED_BASE)
+                .unwrap_or(false)
+                && r.get("title")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t.to_lowercase() == seeded_lower)
+                    .unwrap_or(false)
+        }),
+        "the renamed task must not also exist as a duplicate; graph rows = {rows:#?}"
     );
 }
 
@@ -553,27 +594,30 @@ async fn e2e_updates_existing_instance_via_id() {
 /// tags. Declared inline so the relations e2e is self-contained.
 const TOPIC_SDNA: &str = r#"{
   "target_class":"ns://Topic",
-  "extraction_hint":"A distinct subject or theme the participants discuss.",
+  "interpretation_hint":"A distinct subject or theme the participants discuss.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://topic"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://topic","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Short topic label."}
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"Short topic label.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
   ]
 }"#;
 
 /// SDNA for a reified edge: a scalar `relevance` plus a forward `tag` relation
 /// to a `Topic`. This is the shape of Flux's `SemanticRelationship`, minus the
-/// second (Message) endpoint to keep the e2e's class set small.
+/// second (Message) endpoint to keep the e2e's class set small. No `identity`
+/// property — edges are not deduped by their relevance score.
 const SEMANTIC_RELATIONSHIP_SDNA: &str = r#"{
   "target_class":"ns://SemanticRelationship",
-  "extraction_hint":"An edge that tags a discussion point with a Topic and a relevance score.",
+  "interpretation_hint":"An edge that tags a discussion point with a Topic and a relevance score.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://semrel"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://semrel","min_count":1,"max_count":1},
-    {"path":"ns://relevance","name":"relevance","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"A number from 0 to 1: how strongly the tag applies."},
-    {"path":"ns://tag","name":"tag","relation_kind":"hasOne","target_class_name":"Topic","class":"ns://TopicShape","extraction_hint":"The Topic this edge tags. Reference an existing Topic id or a new:Topic:<n> sibling."}
+    {"path":"ns://relevance","name":"relevance","min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"A number from 0 to 1: how strongly the tag applies.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://relevance","target":"value"}]},
+    {"path":"ns://tag","name":"tag","relation_kind":"hasOne","target_class_name":"Topic","class":"ns://TopicShape","interpretation_hint":"The Topic this edge tags. Reference an existing Topic id or a new:Topic:<n> sibling."}
   ]
 }"#;
 
-fn has_type(links: &[crate::types::Link], type_value: &str) -> bool {
+fn has_type(links: &[Link], type_value: &str) -> bool {
     links
         .iter()
         .any(|l| l.predicate.as_deref() == Some("ns://type") && l.target == type_value)
@@ -583,7 +627,7 @@ fn has_type(links: &[crate::types::Link], type_value: &str) -> bool {
 /// target is the base of an emitted `Topic` — i.e. the model filled the relation
 /// with a resolvable reference (existing id or `new:Topic:<n>`) and the two-pass
 /// planner turned it into a real edge, not a dropped literal.
-fn tag_resolves_to_topic(pl: &[(String, Vec<crate::types::Link>)]) -> bool {
+fn tag_resolves_to_topic(pl: &[(String, Vec<Link>)]) -> bool {
     let topic_bases: std::collections::HashSet<&str> = pl
         .iter()
         .filter(|(_, links)| has_type(links, "ns://topic"))
@@ -596,16 +640,17 @@ fn tag_resolves_to_topic(pl: &[(String, Vec<crate::types::Link>)]) -> bool {
     })
 }
 
-/// The payoff test for Phase 2: from a two-topic transcript, the model must mint
-/// the Topics AND a SemanticRelationship whose `tag` relation *references* one of
-/// them (via `new:Topic:<n>` or an existing id), which the two-pass planner
-/// resolves into a real `ns://tag` link between the two minted nodes. gemma3:12b
-/// is the canary — if it emits the topic *title* instead of a ref, no edge lands
-/// and the retry predicate fails, surfacing prompt work rather than silently
-/// passing. Paraphrased from the few-shot so it isn't verbatim.
+/// The payoff test for the relations write path: from a two-topic transcript,
+/// the model must mint the Topics AND a SemanticRelationship whose `tag`
+/// relation *references* one of them (via `new:Topic:<n>` or an existing id),
+/// which the two-pass planner resolves into a real `ns://tag` link between the
+/// two minted nodes. gemma3:12b is the canary — if it emits the topic *title*
+/// instead of a ref, no edge lands and the retry predicate fails, surfacing
+/// prompt work rather than silently passing. Paraphrased from the few-shot so
+/// it isn't verbatim.
 #[tokio::test]
-async fn e2e_extracts_topic_relation_from_transcript() {
-    let (p, placements) = run_e2e_retrying(
+async fn e2e_interprets_topic_relation_from_transcript() {
+    let (p, shapes, placements) = run_e2e_until_placements(
         &[
             ("Topic", TOPIC_SDNA),
             ("SemanticRelationship", SEMANTIC_RELATIONSHIP_SDNA),
@@ -622,15 +667,18 @@ async fn e2e_extracts_topic_relation_from_transcript() {
         ],
         4,
         |pl| {
-            let c = count_by_type(pl);
-            c.get("topic").copied().unwrap_or(0) >= 2 && tag_resolves_to_topic(pl)
+            pl.iter()
+                .filter(|(_, links)| has_type(links, "ns://topic"))
+                .count()
+                >= 2
+                && tag_resolves_to_topic(pl)
         },
     )
     .await;
-    assert_persisted(&p, &placements).await;
+    assert_persisted(&p, &shapes, &placements).await;
 
-    let counts = count_by_type(&placements);
     // Two clear topics: webhook/retry logging and observability.
+    let counts = graph_count_by_type(&p, &shapes).await;
     assert!(
         counts.get("topic").copied().unwrap_or(0) >= 2,
         "expected >=2 Topics (retry logging + observability); got {counts:?}"
@@ -642,7 +690,8 @@ async fn e2e_extracts_topic_relation_from_transcript() {
          placements = {placements:#?}"
     );
     // The edge carries its scalar relevance too — the relation and the scalar
-    // came out of the same extraction pass.
+    // came out of the same interpretation pass, written by different halves of
+    // the pipeline (setter vs. additive AddLinks).
     let semrel_has_relevance = placements.iter().any(|(_, links)| {
         has_type(links, "ns://semrel")
             && links
@@ -654,19 +703,4 @@ async fn e2e_extracts_topic_relation_from_transcript() {
         "expected the SemanticRelationship to carry a relevance scalar; \
          placements = {placements:#?}"
     );
-}
-
-/// Snapshot of existing instance titles (lower-cased) across the given classes —
-/// small helper local to the selector test.
-async fn existing_titles_snapshot(
-    perspective: &super::perspective_instance::PerspectiveInstance,
-    shapes: &[super::model_query::types::ModelShape],
-) -> Vec<String> {
-    let map = existing_instance_titles(perspective, shapes)
-        .await
-        .expect("existing_instance_titles");
-    map.into_values()
-        .flatten()
-        .map(|t| t.to_lowercase())
-        .collect()
 }

@@ -195,10 +195,10 @@ describe("Decorators → SHACL writer round-trip", () => {
     ).toBe("literal:string:literal");
   });
 
-  it("emits ad4m://extraction_hint on the class shape and per property", () => {
+  it("emits ad4m://interpretation_hint on the class shape and per property", () => {
     @Model({
       name: "Belief",
-      extractionHint:
+      interpretationHint:
         "A claim a participant holds to be true about the world or the group. Not a task or a question.",
     })
     class Belief extends Ad4mModel {
@@ -206,7 +206,7 @@ describe("Decorators → SHACL writer round-trip", () => {
         through: "ns://title",
         required: true,
         resolveLanguage: "literal",
-        extractionHint: "One-sentence statement in the claimant's framing.",
+        interpretationHint: "One-sentence statement in the claimant's framing.",
       })
       title: string = "";
 
@@ -217,25 +217,25 @@ describe("Decorators → SHACL writer round-trip", () => {
     const { shape } = Belief.generateSHACL();
     const links = flatten(shape);
 
-    expect(findLinkTarget(links, shape.nodeShapeUri, "ad4m://extraction_hint"))
+    expect(findLinkTarget(links, shape.nodeShapeUri, "ad4m://interpretation_hint"))
       .toBe(
         "literal:string:A claim a participant holds to be true about the " +
         "world or the group. Not a task or a question.",
       );
     expect(
-      findLinkTarget(links, "ns://Belief.title", "ad4m://extraction_hint"),
+      findLinkTarget(links, "ns://Belief.title", "ad4m://interpretation_hint"),
     ).toBe(
       "literal:string:One-sentence statement in the claimant's framing.",
     );
     expect(
-      findLinkTarget(links, "ns://Belief.body", "ad4m://extraction_hint"),
+      findLinkTarget(links, "ns://Belief.body", "ad4m://interpretation_hint"),
     ).toBeUndefined();
   });
 
-  it("round-trips extractionHint through toJSON/fromJSON", () => {
+  it("round-trips interpretationHint through toJSON/fromJSON", () => {
     @Model({
       name: "Task",
-      extractionHint:
+      interpretationHint:
         "Something a participant commits to doing - actionable outcome.",
     })
     class Task extends Ad4mModel {
@@ -243,7 +243,7 @@ describe("Decorators → SHACL writer round-trip", () => {
         through: "ns://title",
         required: true,
         resolveLanguage: "literal",
-        extractionHint: "Imperative summary of the work.",
+        interpretationHint: "Imperative summary of the work.",
       })
       title: string = "";
     }
@@ -251,22 +251,22 @@ describe("Decorators → SHACL writer round-trip", () => {
     const { shape } = Task.generateSHACL();
     const json: any = shape.toJSON();
 
-    expect(json.extraction_hint).toBe(
+    expect(json.interpretation_hint).toBe(
       "Something a participant commits to doing - actionable outcome.",
     );
     const titleProp = json.properties.find((p: any) => p.name === "title");
-    expect(titleProp.extraction_hint).toBe(
+    expect(titleProp.interpretation_hint).toBe(
       "Imperative summary of the work.",
     );
 
     const rebuilt = (shape.constructor as any).fromJSON(json);
-    expect(rebuilt.extractionHint).toBe(
+    expect(rebuilt.interpretationHint).toBe(
       "Something a participant commits to doing - actionable outcome.",
     );
     const rebuiltTitle = rebuilt.properties.find(
       (p: any) => p.name === "title",
     );
-    expect(rebuiltTitle.extractionHint).toBe(
+    expect(rebuiltTitle.interpretationHint).toBe(
       "Imperative summary of the work.",
     );
   });

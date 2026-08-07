@@ -21,7 +21,8 @@ pub fn prop(name: &str, predicate: &str) -> ShapeProperty {
         where_filter: None,
         where_predicates: None,
         transform: None,
-        extraction_hint: None,
+        interpretation_hint: None,
+        identity: false,
     }
 }
 
@@ -42,7 +43,8 @@ pub fn relation(name: &str, predicate: &str) -> ShapeProperty {
         where_filter: None,
         where_predicates: None,
         transform: None,
-        extraction_hint: None,
+        interpretation_hint: None,
+        identity: false,
     }
 }
 
@@ -63,7 +65,8 @@ pub fn flag(name: &str, predicate: &str, initial: &str) -> ShapeProperty {
         where_filter: None,
         where_predicates: None,
         transform: None,
-        extraction_hint: None,
+        interpretation_hint: None,
+        identity: false,
     }
 }
 
@@ -74,7 +77,7 @@ pub fn shape(class: &str, properties: Vec<ShapeProperty>) -> ModelShape {
         shape_uri: format!("{class}Shape"),
         properties,
         include_relations: Vec::new(),
-        extraction_hint: None,
+        interpretation_hint: None,
     }
 }
 
