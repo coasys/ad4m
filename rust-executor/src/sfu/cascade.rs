@@ -150,6 +150,11 @@ impl CascadeManager {
         }
     }
 
+    /// Maximum participants this node accepts per room.
+    pub fn max_participants_per_node(&self) -> u32 {
+        self.max_participants_per_node
+    }
+
     /// Handle an incoming SFU announce from a peer node.
     pub fn handle_sfu_announce(
         &mut self,
@@ -400,6 +405,13 @@ impl CascadeManager {
     /// least-loaded heuristic.  No proactive rebalancing — the wind
     /// tunnel cycle tests caught a pingpong between under-loaded
     /// peers when a threshold-based rebalancing heuristic was active.
+    /// Decide whether to accept, redirect, or reject a join.
+    ///
+    /// Returns:
+    /// - `None` — accept locally (we have capacity, or no remote
+    ///   nodes exist / cluster view degraded).
+    /// - `Some(node)` — redirect to this remote node (it may also
+    ///   be full — client-side cycle detection handles that case).
     pub fn pick_redirect_node(
         &self,
         room_id: &str,
@@ -430,14 +442,28 @@ impl CascadeManager {
         if local_count < self.max_participants_per_node {
             return None;
         }
+        // Local node full — find a remote node with headroom, or
+        // redirect to the least-loaded one so the client can detect
+        // the redirect cycle.
         let nodes = self
             .known_nodes
             .get(room_id)
-            .or_else(|| self.known_nodes.get(""))?;
-        nodes
-            .values()
-            .filter(|n| n.participant_count < n.capacity_hint)
-            .min_by_key(|n| n.participant_count)
+            .or_else(|| self.known_nodes.get(""));
+        match nodes {
+            Some(map) if !map.is_empty() => {
+                // Prefer a node with actual headroom.
+                map.values()
+                    .filter(|n| n.participant_count < n.capacity_hint)
+                    .min_by_key(|n| n.participant_count)
+                    // All full — redirect to least-loaded anyway
+                    // (client detects the cycle and surfaces overflow).
+                    .or_else(|| map.values().min_by_key(|n| n.participant_count))
+            }
+            // No remote nodes known (single-node or partitioned).
+            // Accept locally — overflow beats rejection when the
+            // cluster view has degraded.
+            _ => None,
+        }
     }
 
     /// Lookup pipe metadata by `(room_id, remote_did)`.  The pipe's
@@ -640,11 +666,11 @@ mod tests {
         assert!(redirect.is_some());
         assert_eq!(redirect.unwrap().did, "did:key:remote");
 
-        // local_count=2 (under capacity), remote has 1 → difference < 2, no redirect
+        // local_count=2 (under capacity) → accept locally
         let redirect = mgr.pick_redirect_node(&room_id.to_string(), 2, None);
         assert!(redirect.is_none());
 
-        // local_count=2, remote has 0 → difference = 2, threshold is strictly less, so None
+        // local_count=2, remote has 0 → still under local cap, accept
         mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 0, 8);
         let redirect = mgr.pick_redirect_node(&room_id.to_string(), 2, None);
         assert!(redirect.is_none());
@@ -653,6 +679,18 @@ mod tests {
         mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 1, 8);
         let redirect = mgr.pick_redirect_node(&room_id.to_string(), 4, None);
         assert!(redirect.is_some());
+
+        // local_count=4, ALL remote nodes also full → still redirect
+        // (client-side cycle detection handles the overflow).
+        mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 8, 8);
+        let redirect = mgr.pick_redirect_node(&room_id.to_string(), 4, None);
+        assert!(redirect.is_some());
+        assert_eq!(redirect.unwrap().did, "did:key:remote");
+
+        // ── Partition-safe: no known nodes → accept locally ──
+        let fresh_mgr = CascadeManager::new("did:key:local".into(), test_addr(10008), 4);
+        let redirect = fresh_mgr.pick_redirect_node(&room_id.to_string(), 5, None);
+        assert!(redirect.is_none()); // overflow locally, no remote view
 
         // ── Preferred-node routing ──
         // When a preferred node has capacity, redirect there even if

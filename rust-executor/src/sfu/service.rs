@@ -747,23 +747,36 @@ impl SfuService {
         let room_id = RoomId::new(neighbourhood_url, room_name);
         let pid = ParticipantId::next();
 
-        // Check cascade redirect before accepting the participant
+        // Cascade redirect check + participant add in a single lock
+        // scope to prevent TOCTOU races where concurrent joins both
+        // read the same stale count and both accept.
         {
             let mgr = self.cascade_manager.read().await;
-            let rooms = self.rooms.read().await;
+            let mut rooms = self.rooms.write().await;
+            let configs = self.configs.read().await;
+
+            // Ensure room exists — use max_participants_per_node as the
+            // hard cap, not max_mesh_participants (which controls the
+            // mesh→SFU topology threshold).
+            let max = Some(mgr.max_participants_per_node() as usize);
+            rooms.create_room(room_id.clone(), max).ok(); // idempotent
+
             let local_count = rooms
                 .get_room(&room_id)
                 .map(|r| r.participant_count() as u32)
                 .unwrap_or(0);
-            let configs = self.configs.read().await;
             let preferred = configs
                 .get(neighbourhood_url)
                 .and_then(|c| c.preferred_sfu_did.as_deref());
+
             if let Some(node) = mgr.pick_redirect_node(
                 &room_id.to_string(),
                 local_count,
                 preferred,
             ) {
+                // Redirect to a remote node (may or may not have
+                // headroom — client-side cycle detection handles the
+                // all-full case).
                 return Ok(CallSessionInfo {
                     room_name: room_name.to_string(),
                     neighbourhood_url: neighbourhood_url.to_string(),
@@ -772,25 +785,15 @@ impl SfuService {
                     redirect_to: Some(node.did.clone()),
                     stream_mapping: Vec::new(),
                 });
+            } else {
+                // Accept locally — add participant while we still
+                // hold the write lock.
+                let room = rooms
+                    .get_room_mut(&room_id)
+                    .ok_or_else(|| RoomError::NotFound.to_string())?;
+                room.add_participant(pid.clone(), agent_did.to_string())
+                    .map_err(|e| e.to_string())?;
             }
-        }
-
-        // Ensure room exists
-        {
-            let mut rooms = self.rooms.write().await;
-            let configs = self.configs.read().await;
-            let max = configs
-                .get(neighbourhood_url)
-                .map(|c| c.max_mesh_participants as usize * 4);
-
-            rooms.create_room(room_id.clone(), max).ok(); // idempotent
-
-            let room = rooms
-                .get_room_mut(&room_id)
-                .ok_or_else(|| RoomError::NotFound.to_string())?;
-
-            room.add_participant(pid.clone(), agent_did.to_string())
-                .map_err(|e| e.to_string())?;
         }
 
         // Parse SDP offer and create Rtc instance
