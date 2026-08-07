@@ -46,7 +46,7 @@ pub(crate) const BELIEF_SDNA: &str = r#"{
 
 pub(crate) const INTENTION_SDNA: &str = r#"{
   "target_class":"ns://Intention",
-  "extraction_hint":"Something a participant commits to doing - an actionable outcome with a plausible owner.",
+  "extraction_hint":"A first-person commitment to do something - the speaker themselves saying they will act (e.g., 'I'll write X', 'I plan to do Y'). If work is being assigned to someone else, that is a Task, not an Intention.",
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://intention","min_count":1,"max_count":1},
     {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the work."},
@@ -56,7 +56,7 @@ pub(crate) const INTENTION_SDNA: &str = r#"{
 
 pub(crate) const TASK_SDNA: &str = r#"{
   "target_class":"ns://Task",
-  "extraction_hint":"A concrete, actionable unit of work to be done, ideally with an owner. Not a belief or a vague aspiration.",
+  "extraction_hint":"A concrete unit of work assigned to a person, typically by someone else (e.g., 'X, can you do Y by Z?', 'we need X to happen'). If the speaker is themselves committing to it in first person, that is an Intention. Not a belief or a vague aspiration.",
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
     {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task."},

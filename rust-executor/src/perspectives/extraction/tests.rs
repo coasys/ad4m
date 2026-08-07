@@ -22,7 +22,7 @@ fn extraction_hint_lands_in_prompt() {
 
     // class-level hints reach the prompt
     assert!(input.contains("A claim a participant holds to be true"));
-    assert!(input.contains("actionable outcome with a plausible owner"));
+    assert!(input.contains("first-person commitment to do something"));
     // per-field hint + required flag
     assert!(input.contains("Imperative summary of the work"));
     assert!(input.contains("\"required\":true"));
