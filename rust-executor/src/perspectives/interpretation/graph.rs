@@ -2,7 +2,7 @@ use super::ProposedInstance;
 use crate::perspectives::model_query::types::{ModelShape, ShapeProperty};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::Link;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
 /// The property a class declares as its dedup identity (its title-like
@@ -558,6 +558,15 @@ pub struct InstanceContext {
     pub title: String,
     /// Local class name (e.g. "Task"), matching the map key of the returned map.
     pub class: String,
+    /// Currently-set secondary scalar values, keyed by property name. Excludes
+    /// the identity property (already rendered as `title`), the class's type
+    /// flag, and every relation. Empty when the class declares no other
+    /// scalars, or when this instance has none set. Rendered into the prompt
+    /// so the LLM sees the existing instance's *state* — not just its
+    /// identity label — and can better judge whether a new turn continues an
+    /// existing instance or belongs to a fresh one on a different topic.
+    /// `BTreeMap` for deterministic prompt ordering across calls.
+    pub properties: BTreeMap<String, String>,
 }
 
 /// read the instances already present in the perspective for each target class,
@@ -597,7 +606,31 @@ pub async fn existing_instance_context(
         let idp_name = idp.name.clone();
         let class = class_local_name(&shape.target_class);
 
-        let query = format!(r#"{{"properties":["{idp_name}"]}}"#);
+        // Secondary scalars: everything the LLM can meaningfully see about an
+        // existing instance beyond its identity — excluding the class type
+        // flag (setter-managed) and every relation (link-typed, hydrated
+        // separately and not useful in the compact `existing` prompt view).
+        // Kept as `Vec<String>` (not a set) so property order is stable across
+        // calls, feeding a deterministic prompt.
+        let rel_preds = relation_predicates(shape);
+        let scalar_names: Vec<String> = shape
+            .properties
+            .iter()
+            .filter(|p| {
+                p.name != idp_name && !p.is_flag && !rel_preds.contains(p.predicate.as_str())
+            })
+            .map(|p| p.name.clone())
+            .collect();
+
+        let mut requested = Vec::with_capacity(1 + scalar_names.len());
+        requested.push(idp_name.clone());
+        requested.extend(scalar_names.iter().cloned());
+        let props_json = requested
+            .iter()
+            .map(|n| format!("\"{n}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let query = format!(r#"{{"properties":[{props_json}]}}"#);
         let result_json = match perspective.model_query(class, &query).await {
             Ok(json) => json,
             Err(e) => {
@@ -619,10 +652,31 @@ pub async fn existing_instance_context(
                         // model-query hydration for every row.
                         let id = inst.get("id").and_then(|v| v.as_str())?;
                         let title = inst.get(&idp_name).and_then(|v| v.as_str())?;
+                        let mut properties: BTreeMap<String, String> = BTreeMap::new();
+                        for name in &scalar_names {
+                            // Present only when hydrated to a non-empty
+                            // string. Numeric/bool scalars are stringified so
+                            // the prompt stays JSON-object-of-strings for the
+                            // LLM (matches how the model already renders
+                            // interpreted field values on the way in).
+                            let v = inst.get(name);
+                            let rendered = match v {
+                                Some(serde_json::Value::String(s)) if !s.is_empty() => {
+                                    Some(s.clone())
+                                }
+                                Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+                                Some(serde_json::Value::Bool(b)) => Some(b.to_string()),
+                                _ => None,
+                            };
+                            if let Some(rendered) = rendered {
+                                properties.insert(name.clone(), rendered);
+                            }
+                        }
                         Some(InstanceContext {
                             id: id.to_string(),
                             title: title.to_string(),
                             class: class.to_string(),
+                            properties,
                         })
                     })
                     .collect()

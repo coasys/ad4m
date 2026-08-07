@@ -2,7 +2,7 @@ use super::*;
 use crate::db::Ad4mDb;
 use crate::perspectives::interpretation_test_support::*;
 use crate::types::{AITask, Link};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// An empty existing-instance context, typed — `build_interpretation_input`
 /// takes the richer `InstanceContext` map now, so a bare `HashMap::new()` can't
@@ -76,6 +76,7 @@ fn existing_context_renders_id_title_class_in_prompt() {
             id: "soa://existing/task/42".to_string(),
             title: "Draft the design doc".to_string(),
             class: "Task".to_string(),
+            properties: BTreeMap::new(),
         }],
     );
     let input = build_interpretation_input(
@@ -97,11 +98,75 @@ fn existing_context_renders_id_title_class_in_prompt() {
     assert_eq!(existing_arr[0]["id"], "soa://existing/task/42");
     assert_eq!(existing_arr[0]["title"], "Draft the design doc");
     assert_eq!(existing_arr[0]["class"], "Task");
+    // Empty `properties` map must NOT render — keeps the prompt compact for
+    // identity-only classes (regression guard for the render-when-non-empty
+    // rule in `build_interpretation_input`).
+    assert!(
+        existing_arr[0].get("properties").is_none(),
+        "empty properties map must be omitted from the rendered entry, got {:?}",
+        existing_arr[0]
+    );
     // System prompt still teaches the id-upsert semantics — regression guard
     // against silently dropping that instruction while refactoring the schema.
     assert!(
         INTERPRETATION_SYSTEM_PROMPT.contains("id"),
         "system prompt must document the `id` upsert semantics"
+    );
+}
+
+#[test]
+fn existing_context_with_properties_renders_them_into_prompt() {
+    // When an `InstanceContext` carries secondary scalars (e.g. the rolling
+    // `summary` on a ConversationSubgroup), the prompt must include a
+    // `properties` object on the corresponding `existing` entry. This is what
+    // gives the LLM enough state to decide whether new turns continue an
+    // existing instance or belong to a fresh one on a different topic — the
+    // topic-shift discrimination the identity-only view could not support.
+    let shapes = vec![shape_from_sdna(
+        "ConversationSubgroup",
+        CONVERSATION_SUBGROUP_SDNA,
+    )];
+    let mut properties: BTreeMap<String, String> = BTreeMap::new();
+    properties.insert(
+        "summary".to_string(),
+        "The team discussed dropped webhook retries during a recent payments outage.".to_string(),
+    );
+    let mut existing: HashMap<String, Vec<InstanceContext>> = HashMap::new();
+    existing.insert(
+        "ConversationSubgroup".to_string(),
+        vec![InstanceContext {
+            id: "soa://existing/subgroup/payments".to_string(),
+            title: "Payments infrastructure".to_string(),
+            class: "ConversationSubgroup".to_string(),
+            properties,
+        }],
+    );
+    let input = build_interpretation_input(
+        &shapes,
+        &[("Ana".into(), "Switching topics — Q3 retro planning.".into())],
+        &existing,
+    );
+    let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+    let sg_class = v["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "ConversationSubgroup")
+        .expect("ConversationSubgroup class in prompt");
+    let entry = &sg_class["existing"].as_array().expect("existing array")[0];
+    let rendered_props = entry["properties"]
+        .as_object()
+        .expect("populated properties must render as an object");
+    assert_eq!(
+        rendered_props.get("summary").and_then(|v| v.as_str()),
+        Some("The team discussed dropped webhook retries during a recent payments outage.")
+    );
+    // System prompt must instruct the model to actually READ `properties`, not
+    // just be handed them silently — otherwise the topic-shift fix is dead on
+    // arrival for smaller local models.
+    assert!(
+        INTERPRETATION_SYSTEM_PROMPT.contains("properties"),
+        "system prompt must document the `properties` field on existing entries"
     );
 }
 
@@ -1000,6 +1065,13 @@ async fn existing_instance_context_reads_id_and_identity() {
     assert_eq!(rows[0].id, "soa://existing/task/1");
     assert_eq!(rows[0].title, "Migrate the SHACL parser");
     assert_eq!(rows[0].class, "Task");
+    // Task's `owner` scalar is unset on this seed → nothing to render;
+    // stays empty so the prompt does not carry an empty `properties` block.
+    assert!(
+        rows[0].properties.is_empty(),
+        "task with only identity set must carry no secondary scalars; got {:?}",
+        rows[0].properties
+    );
 
     // The two derived views feed the dedup net and the relation resolver.
     assert_eq!(
@@ -1007,6 +1079,49 @@ async fn existing_instance_context_reads_id_and_identity() {
         Some(&vec!["Migrate the SHACL parser".to_string()])
     );
     assert!(ids_from_context(&ctx_map).contains("soa://existing/task/1"));
+}
+
+#[tokio::test]
+async fn existing_instance_context_populates_secondary_scalars() {
+    // With the design-fork (i) enrichment, `existing_instance_context` must
+    // return each instance's currently-set non-identity scalar values in the
+    // `properties` map, so the prompt can show the LLM the full state of an
+    // existing entry (its rolling summary etc.) — not just the identity
+    // label. This is what unblocks the topic-shift discrimination on smaller
+    // local models.
+    let (mut perspective, shapes, ctx) =
+        setup_perspective_no_llm(&[("ConversationSubgroup", CONVERSATION_SUBGROUP_SDNA)]).await;
+    seed_instance_with_props(
+        &mut perspective,
+        &ctx,
+        &shapes[0],
+        "soa://existing/subgroup/payments",
+        serde_json::json!({
+            "name": "Payments infrastructure",
+            "summary": "The team discussed dropped webhook retries during a recent payments outage."
+        }),
+    )
+    .await;
+
+    let ctx_map = existing_instance_context(&perspective, &shapes)
+        .await
+        .expect("existing_instance_context");
+    let rows = ctx_map
+        .get("ConversationSubgroup")
+        .expect("ConversationSubgroup rows present");
+    assert_eq!(rows.len(), 1, "one seeded instance; got {rows:#?}");
+    assert_eq!(rows[0].title, "Payments infrastructure");
+    assert_eq!(
+        rows[0].properties.get("summary").map(String::as_str),
+        Some("The team discussed dropped webhook retries during a recent payments outage."),
+        "summary scalar must be populated; got {:?}",
+        rows[0].properties
+    );
+    // Identity value must not be duplicated under `properties` (it is
+    // already carried by `title`); the type flag must never leak in either
+    // (setter-managed, not LLM-visible state).
+    assert!(!rows[0].properties.contains_key("name"));
+    assert!(!rows[0].properties.contains_key("type"));
 }
 
 #[test]

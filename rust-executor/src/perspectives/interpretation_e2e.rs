@@ -857,31 +857,40 @@ async fn e2e_flux_grouping_updates_seeded_subgroup_on_topic_continuation() {
 /// proposed `id`.
 /// TODO(gemma3-model-gap, 2026-08-07): documents a known limitation, not a
 /// framework capability. With one existing `ConversationSubgroup` seeded,
-/// gemma3:12b unconditionally upserts against it — even on a transcript that
-/// is *explicitly* on an unrelated topic, and even with (a) a class-level
-/// hint spelling out "don't reuse an id for a different topic" and (b) a
-/// dedicated few-shot example in `interpretation_examples` (`ex_shift`)
-/// showing an existing Task alongside a new unrelated Task. The upsert
-/// example (`ex3`) sits in the recency slot to keep the *correct* upsert e2e
-/// green, and that pull is stronger than the counter-teaching. Ships as
-/// `#[ignore]` so CI is not blocked by a model-behavior gap the code layer
-/// can't paper over. Fix options (all deferred to a design-fork call with
-/// Nico): (i) enrich `existing_instance_context` to carry secondary scalars
-/// (e.g. the `summary`) so the model sees more than the identity label, and
-/// re-render `existing` in the prompt shape; (ii) drop back to the semantic
-/// safety net at write-time — reject an Update whose proposed identity value
-/// is far from the existing one in embedding space (parallels the
-/// `DedupStrategy::Semantic` path already wired for the Create side);
-/// (iii) leave gemma3 alone and require a larger local model (qwen3.5-27b)
-/// for grouping-shaped classes. The paired continuation test above already
-/// exercises the persistent-topics + rolling-summary half of the Flux-grouping
-/// checkbox — this test would exercise the topic-shift half if the framework
-/// gap is closed.
+/// The topic-shift half of the Flux-grouping e2e checkbox. Seeds one
+/// `ConversationSubgroup` on payments/webhooks, then feeds a transcript that
+/// explicitly switches topic to a Q3 retrospective. A well-behaved extractor
+/// mints a fresh subgroup for the new topic and leaves the seeded payments
+/// summary untouched.
+///
+/// Kept `#[ignore]` after design-fork (i) landed. Before the fork:
+/// `existing_instance_context` only carried the identity label, and
+/// gemma3:12b would unconditionally upsert against the single existing
+/// entry. AFTER the fork: `existing_instance_context` also carries each
+/// instance's secondary scalars (e.g. the rolling `summary`); the prompt
+/// renders them under `properties`; and the system prompt tells the model
+/// to read `title` + `properties` before deciding whether to reuse an `id`.
+/// This IS a real improvement — the model now sometimes correctly mints a
+/// fresh "Holograph retrospective" subgroup — but 12B is still not reliable:
+/// on 5-attempt local runs against Marvin gemma3:12b, the model falls into
+/// two failure modes across attempts: (a) mints the fresh subgroup AND ALSO
+/// emits an upsert on the seeded one that grows its `summary` with the
+/// unrelated topic (pollution), or (b) reuses the seeded id and renames it
+/// to something like "Holograph shipping retrospective" (semantic
+/// identity drift). Fork (i) alone does not deterministically prevent
+/// either. Next levers (deferred): (ii) semantic Update-rejection at
+/// write-time — reject an Update whose proposed identity is far from the
+/// existing one in embedding space (catches failure mode (b) but not
+/// (a)); (iii) larger local model (qwen3.5-27b) for grouping classes;
+/// or (iv) restrict the summary-growth `interpretation_hint` to same-topic
+/// continuations. The paired continuation test above already exercises
+/// the persistent-topics + rolling-summary half — this one would exercise
+/// topic-shift when the residual gap is closed.
 #[tokio::test]
 #[ignore]
 async fn e2e_flux_grouping_creates_new_subgroup_on_topic_shift() {
     let seeded_base = "soa://existing/subgroup/payments";
-    let attempts = 3u8;
+    let attempts = 5u8;
     let mut last_err: Option<String> = None;
     for i in 1..=attempts {
         let (mut perspective, shapes, ctx) =

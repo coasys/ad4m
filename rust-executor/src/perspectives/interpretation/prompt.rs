@@ -94,11 +94,24 @@ pub fn build_interpretation_input(
                 .map(|rows| {
                     rows.iter()
                         .map(|r| {
-                            serde_json::json!({
-                                "id": r.id,
-                                "title": r.title,
-                                "class": r.class,
-                            })
+                            // `properties` is the current secondary-scalar
+                            // state (e.g. rolling `summary` on a
+                            // ConversationSubgroup). Rendered only when
+                            // present so the prompt stays compact for
+                            // identity-only classes.
+                            let mut entry = serde_json::Map::new();
+                            entry.insert("id".into(), serde_json::json!(r.id));
+                            entry.insert("title".into(), serde_json::json!(r.title));
+                            entry.insert("class".into(), serde_json::json!(r.class));
+                            if !r.properties.is_empty() {
+                                let props: serde_json::Map<String, serde_json::Value> = r
+                                    .properties
+                                    .iter()
+                                    .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+                                    .collect();
+                                entry.insert("properties".into(), serde_json::Value::Object(props));
+                            }
+                            serde_json::Value::Object(entry)
                         })
                         .collect()
                 })
@@ -142,8 +155,12 @@ You receive a JSON object with these fields:
     `name`, optional `hint`, and `required` flag), a `relations` list of
     forward instance-reference slots (each with a `name`, `targetClass`, and
     optional `hint`), and an `existing` array of instances already present in
-    the graph for that class. Each existing entry is `{id, title, class}` —
-    `id` is that instance's stable handle.
+    the graph for that class. Each existing entry is `{id, title, class}`, and
+    may also carry a `properties` object holding the instance's current
+    secondary-scalar values (e.g. a rolling summary). `id` is the stable
+    handle you emit to update that entry; `title` is its identity label; the
+    optional `properties` object shows its *current state* so you can judge
+    whether new turns continue that instance or belong to a fresh one.
   - `transcript`: an array of turns `{speaker, text}`.
 
 Emit a JSON array. Each element is `{\"class\": <class name>, ...fields, ...relations}`,
@@ -185,6 +202,12 @@ Output rules:
     output to update it. A new item that is merely related or adjacent to an
     existing entry is still NEW: emit it WITHOUT `id`. Never invent an `id`
     that isn't in the `existing` list.
+  - When an existing entry carries `properties` (e.g. a `summary`), read both
+    its `title` AND its `properties` before deciding whether to reuse its
+    `id`. If the current turns are on a clearly different topic from what
+    that entry's title + properties describe, mint a NEW instance (no `id`)
+    even when it is the only existing entry — reusing an `id` for an
+    unrelated topic silently overwrites the existing state and destroys data.
 ";
 
 /// idempotently register the generic interpretation task in the AI-task DB.
