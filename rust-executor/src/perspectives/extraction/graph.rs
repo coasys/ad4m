@@ -98,64 +98,56 @@ fn decode_literal_string(uri: &str) -> Option<String> {
 /// from re-proposing known items ([`build_extraction_input`]) and to enforce
 /// dedup deterministically ([`filter_already_present`]).
 ///
-/// An instance is located by its class type-flag link (predicate + constant
-/// value); its identity is the `title` property. Classes without a type flag or
-/// a `title` property are skipped (no dedup key).
+/// Instances are read through the model-query API (`PerspectiveInstance::
+/// model_query`) — the symmetric counterpart to writing them via
+/// `create_subject` — so class conformance and field decoding go through the
+/// class's own shape/getters rather than hand-matched type-flag + title links.
+/// Classes without a `title` property are skipped (no dedup key). A per-class
+/// query failure (e.g. the class isn't registered in this perspective) is
+/// treated as "no existing instances" — dedup is a soft hint, guaranteed
+/// deterministically downstream by [`filter_already_present`].
 pub async fn existing_instance_titles(
     perspective: &PerspectiveInstance,
     shapes: &[ModelShape],
 ) -> anyhow::Result<HashMap<String, Vec<String>>> {
-    use crate::types::LinkQuery;
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
     for shape in shapes {
-        let Some(flag) = shape
-            .properties
-            .iter()
-            .find(|p| p.is_flag && p.initial_value.is_some())
-        else {
+        // Only classes carrying a `title` scalar have a dedup key.
+        if !shape.properties.iter().any(|p| p.name == "title") {
             continue;
-        };
-        let Some(title_prop) = shape.properties.iter().find(|p| p.name == "title") else {
-            continue;
-        };
-        let flag_value = flag.initial_value.as_ref().unwrap();
-
-        // All instances of this class = sources of the type-flag link.
-        let flag_links = perspective
-            .get_links(&LinkQuery {
-                predicate: Some(flag.predicate.clone()),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("existing_instance_titles: get_links(flag) failed: {e:#}")
-            })?;
-        let bases: Vec<String> = flag_links
-            .into_iter()
-            .filter(|l| &l.data.target == flag_value)
-            .map(|l| l.data.source)
-            .collect();
-
-        let mut titles = Vec::new();
-        for base in bases {
-            let title_links = perspective
-                .get_links(&LinkQuery {
-                    source: Some(base),
-                    predicate: Some(title_prop.predicate.clone()),
-                    ..Default::default()
-                })
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!("existing_instance_titles: get_links(title) failed: {e:#}")
-                })?;
-            for tl in title_links {
-                if let Some(title) = decode_literal_string(&tl.data.target) {
-                    titles.push(title);
-                }
-            }
         }
+        let class = class_local_name(&shape.target_class);
+
+        let result_json = match perspective
+            .model_query(class, r#"{"properties":["title"]}"#)
+            .await
+        {
+            Ok(json) => json,
+            Err(e) => {
+                log::warn!("existing_instance_titles: model_query({class}) failed, treating as no existing instances: {e:#}");
+                continue;
+            }
+        };
+        let result: serde_json::Value = serde_json::from_str(&result_json).map_err(|e| {
+            anyhow::anyhow!("existing_instance_titles: bad model_query result for {class}: {e:#}")
+        })?;
+
+        let titles: Vec<String> = result
+            .get("instances")
+            .and_then(|v| v.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|inst| {
+                        inst.get("title")
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         if !titles.is_empty() {
-            out.insert(class_local_name(&shape.target_class).to_string(), titles);
+            out.insert(class.to_string(), titles);
         }
     }
     Ok(out)
