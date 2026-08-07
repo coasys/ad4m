@@ -175,8 +175,11 @@ pub enum InterpretationOp {
 
 /// Turn proposed instances into create/update ops with no relation context.
 /// Thin wrapper over [`plan_interpretation_ops_with_context`] with an empty
-/// existing-id set — kept for callers/tests that don't need relations resolved
-/// against the graph's existing instances.
+/// existing-id set. Any proposed `id` is therefore treated as hallucinated and
+/// routed to `Create` — callers that need to exercise the id-becomes-`Update`
+/// path (or resolve relations against the graph's existing instances) must
+/// call the `_with_context` form directly with a real
+/// `known_existing_ids` set.
 pub fn plan_interpretation_ops(
     shapes: &[ModelShape],
     proposed: &[ProposedInstance],
@@ -186,11 +189,15 @@ pub fn plan_interpretation_ops(
 }
 
 /// Turn proposed instances into create/update/add-links ops (Phase 2:
-/// relation-aware). A proposal with an `id` becomes an `Update` on that existing
-/// base (scalar fields); otherwise a `Create` under `base_prefix`. On top of
-/// that, forward relation fields are resolved into real `Link`s and emitted as an
-/// additive `AddLinks` op on the proposal's base. Unknown-class proposals are
-/// dropped.
+/// relation-aware). A proposal with an `id` present in `known_existing_ids`
+/// becomes an `Update` on that existing base (scalar fields); a proposal with
+/// no `id` — OR with an `id` the graph doesn't recognise (the LLM
+/// hallucinated it) — becomes a `Create` under `base_prefix` with a fresh
+/// base. Hallucinated-id Updates against non-existent bases produce a silent
+/// no-op write, so routing them to Create yields a visible instance instead of
+/// data lost between the model and the graph. On top of that, forward relation
+/// fields are resolved into real `Link`s and emitted as an additive `AddLinks`
+/// op on the proposal's base. Unknown-class proposals are dropped.
 ///
 /// Two passes, because a relation ref can point *forward* to a sibling minted
 /// later in the same response:
@@ -234,15 +241,23 @@ pub fn plan_interpretation_ops_with_context(
             continue;
         };
         let (base, is_update) = match &inst.id {
-            Some(existing) => (existing.clone(), true),
-            None => (
-                format!(
-                    "{base_prefix}{}/{}",
-                    inst.class.to_lowercase(),
-                    Uuid::new_v4()
-                ),
-                false,
-            ),
+            Some(existing) if known_existing_ids.contains(existing) => (existing.clone(), true),
+            _ => {
+                if let Some(hallucinated) = &inst.id {
+                    log::debug!(
+                        "interpretation: proposed id {hallucinated:?} not in known_existing_ids for class {}; routing to Create",
+                        inst.class
+                    );
+                }
+                (
+                    format!(
+                        "{base_prefix}{}/{}",
+                        inst.class.to_lowercase(),
+                        Uuid::new_v4()
+                    ),
+                    false,
+                )
+            }
         };
         // Index under the class name the LLM uses (matches the relation's
         // `targetClass`, i.e. the bare local name), in output order.

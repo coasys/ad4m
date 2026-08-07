@@ -2,7 +2,7 @@ use super::*;
 use crate::db::Ad4mDb;
 use crate::perspectives::interpretation_test_support::*;
 use crate::types::{AITask, Link};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// An empty existing-instance context, typed — `build_interpretation_input`
 /// takes the richer `InstanceContext` map now, so a bare `HashMap::new()` can't
@@ -360,7 +360,14 @@ fn plan_ops_creates_without_id_and_updates_with_id() {
     );
     assert!(!proposed[1].props.contains_key("id"));
 
-    let ops = plan_interpretation_ops(&shapes, &proposed, "soa://ext/");
+    // The upsert only fires when the graph actually holds that id — seed
+    // known_existing_ids to mimic what `existing_instance_context` would
+    // return in production. Without this the planner treats the id as
+    // hallucinated and routes to Create.
+    let known: HashSet<String> = ["soa://existing/intention/42".to_string()]
+        .into_iter()
+        .collect();
+    let ops = plan_interpretation_ops_with_context(&shapes, &proposed, "soa://ext/", &known);
     assert_eq!(ops.len(), 2);
 
     match &ops[0] {
@@ -402,6 +409,43 @@ fn plan_ops_creates_without_id_and_updates_with_id() {
             assert!(!values.contains_key("type"));
         }
         other => panic!("expected Update, got {other:?}"),
+    }
+}
+
+#[test]
+fn plan_ops_hallucinated_id_routes_to_create() {
+    // The LLM sometimes invents an `id` that names no real base — copying the
+    // format from the prompt but with a made-up path. Trusting it produces an
+    // Update against a base that has no type flag, i.e. a scalar write no
+    // reader will ever find. The planner must fall back to Create so the
+    // instance lands somewhere visible.
+    let shapes = vec![shape_from_sdna("Intention", INTENTION_SDNA)];
+    let raw = r#"[
+      {"class":"Intention","id":"soa://existing/intention/999","title":"Ghost"}
+    ]"#;
+    let proposed = parse_interpretation_response(raw).unwrap();
+    // known_existing_ids intentionally does NOT contain the proposed id.
+    let ops =
+        plan_interpretation_ops_with_context(&shapes, &proposed, "soa://ext/", &HashSet::new());
+    assert_eq!(ops.len(), 1);
+    match &ops[0] {
+        InterpretationOp::Create {
+            base,
+            class,
+            values,
+        } => {
+            assert!(
+                base.starts_with("soa://ext/intention/"),
+                "hallucinated id must be replaced by a fresh minted base, got {base}"
+            );
+            assert_ne!(
+                base, "soa://existing/intention/999",
+                "planner must not reuse the hallucinated id"
+            );
+            assert_eq!(class, "Intention");
+            assert_eq!(values.get("title").and_then(|v| v.as_str()), Some("Ghost"));
+        }
+        other => panic!("expected Create for hallucinated id, got {other:?}"),
     }
 }
 
@@ -628,7 +672,8 @@ fn relations_from_update_target_emit_addlinks() {
         ]"#,
     );
     let proposed = parse_interpretation_response(&raw).unwrap();
-    let ops = plan_interpretation_ops(&[shape], &proposed, "soa://ext/");
+    let known: HashSet<String> = [existing_id.clone()].into_iter().collect();
+    let ops = plan_interpretation_ops_with_context(&[shape], &proposed, "soa://ext/", &known);
 
     // The Update carries the retitled scalar, no relation value.
     let update = ops
@@ -685,14 +730,27 @@ async fn decoded_targets(
     out
 }
 
-/// Plan + apply a single proposal against a live perspective.
+/// Plan + apply a single proposal against a live perspective. Mirrors
+/// `run_interpretation`: seeds `known_existing_ids` from
+/// `existing_instance_context` so an `id` on the proposal is trusted only when
+/// the perspective actually holds that base — a hallucinated id routes to
+/// Create, just like in production.
 async fn apply_one(
     perspective: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
     shapes: &[crate::perspectives::model_query::types::ModelShape],
     ctx: &crate::agent::AgentContext,
     inst: ProposedInstance,
 ) -> Vec<InterpretationOp> {
-    let ops = plan_interpretation_ops(shapes, std::slice::from_ref(&inst), "soa://ext/");
+    let existing_ctx = existing_instance_context(perspective, shapes)
+        .await
+        .expect("existing_instance_context");
+    let known_existing_ids = ids_from_context(&existing_ctx);
+    let ops = plan_interpretation_ops_with_context(
+        shapes,
+        std::slice::from_ref(&inst),
+        "soa://ext/",
+        &known_existing_ids,
+    );
     apply_interpretation_ops(perspective, &ops, ctx)
         .await
         .expect("apply_interpretation_ops");
@@ -855,7 +913,13 @@ async fn strip_noop_updates_drops_same_value_upsert_keeps_real_change() {
     )
     .await;
 
-    let planned = plan_interpretation_ops(
+    // Mirror `run_interpretation`: the graph's actual base is what makes an id
+    // trusted, otherwise the planner treats it as hallucinated and creates.
+    let existing_ctx = existing_instance_context(&perspective, &shapes)
+        .await
+        .expect("existing_instance_context");
+    let known = ids_from_context(&existing_ctx);
+    let planned = plan_interpretation_ops_with_context(
         &shapes,
         &[
             // No-op update: title + owner identical to the seeded state.
@@ -881,6 +945,7 @@ async fn strip_noop_updates_drops_same_value_upsert_keeps_real_change() {
             ),
         ],
         "soa://ext/",
+        &known,
     );
     assert_eq!(planned.len(), 3, "sanity: planner emitted all three");
 
