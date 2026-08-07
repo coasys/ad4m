@@ -1,8 +1,8 @@
 use super::{
     build_interpretation_input, class_local_name, ensure_interpretation_task,
-    existing_instance_context, filter_already_present, identities_from_context, identity_property,
-    ids_from_context, parse_interpretation_response, plan_interpretation_ops_with_context,
-    InterpretationOp, ProposedInstance,
+    existing_instance_context, filter_already_present_with_strategy, identities_from_context,
+    identity_property, ids_from_context, parse_interpretation_response,
+    plan_interpretation_ops_with_context, DedupStrategy, InterpretationOp, ProposedInstance,
 };
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::ModelShape;
@@ -299,6 +299,34 @@ pub async fn run_interpretation(
     base_prefix: &str,
     context: &AgentContext,
 ) -> anyhow::Result<Vec<(String, Vec<Link>)>> {
+    run_interpretation_with_strategy(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        &DedupStrategy::default(),
+    )
+    .await
+}
+
+/// [`run_interpretation`] with an explicit [`DedupStrategy`] — same pipeline,
+/// but the identity-dedup safety net switches between normalized-string
+/// matching (default) and semantic (embedding-based) matching per call.
+///
+/// This is the shape the future AutoProcessor / activity-runner uses to plug
+/// in a per-neighbourhood policy without touching the interpretation models
+/// themselves; [`run_interpretation`] is just this call with
+/// [`DedupStrategy::default`], so all existing callers observe zero behaviour
+/// change.
+pub async fn run_interpretation_with_strategy(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[(String, String)],
+    base_prefix: &str,
+    context: &AgentContext,
+    dedup_strategy: &DedupStrategy,
+) -> anyhow::Result<Vec<(String, Vec<Link>)>> {
     let task = ensure_interpretation_task()?;
     // Existing-instance snapshot: gives the model both the `id` handle to
     // upsert/reference (so it can refine or link an existing node instead of
@@ -349,7 +377,13 @@ pub async fn run_interpretation(
     // target. Crucially this filters **in place**, preserving the LLM's output
     // order so `new:<Class>:<n>` relation ordinals resolve against the same
     // ordering the model counted.
-    let instances = filter_already_present(instances, &existing_identities, &identity_props);
+    let instances = filter_already_present_with_strategy(
+        instances,
+        &existing_identities,
+        &identity_props,
+        dedup_strategy,
+    )
+    .await?;
 
     let planned =
         plan_interpretation_ops_with_context(shapes, &instances, base_prefix, &known_existing_ids);

@@ -1156,6 +1156,148 @@ fn filter_already_present_drops_known_titles() {
 }
 
 #[test]
+fn cosine_similarity_orthogonal_and_parallel() {
+    // Sanity floor for the semantic dedup: parallel vectors → 1, opposite → -1,
+    // orthogonal → 0, zero → 0 (not NaN, so threshold comparisons still work
+    // without a special case in the filter).
+    let a = vec![1.0f32, 0.0, 0.0];
+    let b = vec![1.0f32, 0.0, 0.0];
+    assert!((super::dedup::cosine_similarity(&a, &b) - 1.0).abs() < 1e-6);
+    let c = vec![-1.0f32, 0.0, 0.0];
+    assert!((super::dedup::cosine_similarity(&a, &c) - (-1.0)).abs() < 1e-6);
+    let d = vec![0.0f32, 1.0, 0.0];
+    assert!(super::dedup::cosine_similarity(&a, &d).abs() < 1e-6);
+    let z = vec![0.0f32; 3];
+    assert_eq!(super::dedup::cosine_similarity(&a, &z), 0.0);
+}
+
+#[test]
+fn semantic_dedup_pure_drops_near_duplicate_keeps_distinct() {
+    // The core invariant of the semantic dedup: a proposal whose embedding is
+    // near-parallel to an existing one (in this class) is dropped; one that
+    // isn't survives. Order of the survivors is preserved so relation
+    // `new:<Class>:<n>` ordinals still line up downstream. This test uses
+    // hand-crafted vectors so it exercises the filter without an HTTP round
+    // trip — the stub "embedder" is just the vectors we pass in.
+    let proposed = parse_interpretation_response(
+        r#"[
+              {"class":"Task","title":"Ship the MVP"},
+              {"class":"Task","title":"Ship MVP"},
+              {"class":"Task","title":"Write the docs"}
+            ]"#,
+    )
+    .unwrap();
+    // Existing vector for the only existing "Ship the MVP" task.
+    let mut existing_vecs: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
+    existing_vecs.insert("Task".to_string(), vec![vec![1.0, 0.0, 0.0]]);
+    // Proposed vectors keyed by their index in `proposed`.
+    let mut proposed_vecs: HashMap<String, Vec<(usize, Vec<f32>)>> = HashMap::new();
+    proposed_vecs.insert(
+        "Task".to_string(),
+        vec![
+            (0, vec![1.0, 0.0, 0.0]),  // identical → sim 1.0, dropped
+            (1, vec![0.98, 0.2, 0.0]), // very close → sim ≈ 0.98, dropped
+            (2, vec![0.0, 1.0, 0.0]),  // orthogonal → sim 0, kept
+        ],
+    );
+    let kept = super::dedup::semantic_dedup_pure(proposed, &existing_vecs, &proposed_vecs, 0.85);
+    let kept_titles: Vec<&str> = kept
+        .iter()
+        .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(
+        kept_titles,
+        vec!["Write the docs"],
+        "only the semantically distinct proposal survives; got {kept_titles:?}"
+    );
+}
+
+#[test]
+fn semantic_dedup_pure_preserves_order_and_upsert() {
+    // Mirrors `filter_already_present_keeps_upserts_and_preserves_order` for
+    // the semantic path: proposals with an `id` are treated by the caller
+    // (`filter_already_present_semantic`) as upsert targets and never appear
+    // in `proposed_vecs`, so `semantic_dedup_pure` never drops them.
+    // Distinct titles surrounding a near-dup keep their relative order.
+    let proposed = parse_interpretation_response(
+        r#"[
+              {"class":"Task","title":"Alpha"},
+              {"class":"Task","id":"soa://existing/task/1","title":"Ship the MVP"},
+              {"class":"Task","title":"Ship MVP"},
+              {"class":"Task","title":"Omega"}
+            ]"#,
+    )
+    .unwrap();
+    let mut existing_vecs: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
+    existing_vecs.insert("Task".to_string(), vec![vec![1.0, 0.0, 0.0]]);
+    // Only indices 0, 2, 3 are subject to dedup (index 1 has an `id`, so the
+    // outer caller skips it — mirror that here by NOT putting it in the map).
+    let mut proposed_vecs: HashMap<String, Vec<(usize, Vec<f32>)>> = HashMap::new();
+    proposed_vecs.insert(
+        "Task".to_string(),
+        vec![
+            (0, vec![0.0, 1.0, 0.0]),  // Alpha — orthogonal, kept
+            (2, vec![0.98, 0.2, 0.0]), // near-dup of existing, dropped
+            (3, vec![0.0, 0.0, 1.0]),  // Omega — orthogonal, kept
+        ],
+    );
+    let kept = super::dedup::semantic_dedup_pure(proposed, &existing_vecs, &proposed_vecs, 0.85);
+    let kept_titles: Vec<&str> = kept
+        .iter()
+        .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(
+        kept_titles,
+        vec!["Alpha", "Ship the MVP", "Omega"],
+        "upsert not touched, near-dup dropped, order preserved"
+    );
+    assert_eq!(
+        kept[1].id.as_deref(),
+        Some("soa://existing/task/1"),
+        "surviving Ship the MVP is the id-carrying upsert"
+    );
+}
+
+#[tokio::test]
+async fn dispatcher_normalized_string_matches_direct_call() {
+    // `filter_already_present_with_strategy(..., NormalizedString)` must
+    // behave identically to calling `filter_already_present` directly — the
+    // default path stays byte-for-byte compatible with existing callers.
+    let proposed = parse_interpretation_response(
+        r#"[
+              {"class":"Task","title":"Ship the MVP"},
+              {"class":"Task","title":"  ship   the   mvp  "},
+              {"class":"Task","title":"Write the docs"}
+            ]"#,
+    )
+    .unwrap();
+    let mut existing = HashMap::new();
+    existing.insert("Task".to_string(), vec!["ship the MVP".to_string()]);
+    let mut identity_props = HashMap::new();
+    identity_props.insert("Task".to_string(), "title".to_string());
+
+    let via_dispatcher = super::dedup::filter_already_present_with_strategy(
+        proposed.clone(),
+        &existing,
+        &identity_props,
+        &DedupStrategy::default(),
+    )
+    .await
+    .unwrap();
+    let via_direct = filter_already_present(proposed, &existing, &identity_props);
+    let d_titles: Vec<&str> = via_dispatcher
+        .iter()
+        .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
+        .collect();
+    let s_titles: Vec<&str> = via_direct
+        .iter()
+        .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(d_titles, s_titles);
+    assert_eq!(d_titles, vec!["Write the docs"]);
+}
+
+#[test]
 fn filter_already_present_keeps_upserts_and_preserves_order() {
     // An `id`-carrying proposal is an explicit upsert target: its title
     // deliberately matches an existing one, so dedup must never drop it. And

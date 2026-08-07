@@ -11,7 +11,9 @@
 
 #![cfg(test)]
 
-use super::interpretation::{class_local_name, run_interpretation};
+use super::interpretation::{
+    class_local_name, run_interpretation, run_interpretation_with_strategy, DedupStrategy,
+};
 use super::model_query::shape::load_shape;
 use super::model_query::types::ModelShape;
 use super::perspective_instance::{PerspectiveInstance, SdnaType, SubjectClassOption};
@@ -284,6 +286,34 @@ pub(crate) async fn run_interpretation_e2e(
     let placements = run_interpretation(perspective, shapes, &transcript, "soa://ext/", ctx)
         .await
         .expect("run_interpretation against real LLM to succeed");
+    print_placements(&placements);
+    placements
+}
+
+/// Like [`run_interpretation_e2e`] but with an explicit [`DedupStrategy`] —
+/// used by the semantic-dedup e2e to opt into the embedding-based dedup path
+/// without changing the default that every other e2e test relies on.
+pub(crate) async fn run_interpretation_e2e_with_strategy(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[(&str, &str)],
+    ctx: &AgentContext,
+    strategy: &DedupStrategy,
+) -> Vec<(String, Vec<Link>)> {
+    let transcript: Vec<(String, String)> = transcript
+        .iter()
+        .map(|(s, t)| (s.to_string(), t.to_string()))
+        .collect();
+    let placements = run_interpretation_with_strategy(
+        perspective,
+        shapes,
+        &transcript,
+        "soa://ext/",
+        ctx,
+        strategy,
+    )
+    .await
+    .expect("run_interpretation_with_strategy against real LLM to succeed");
     print_placements(&placements);
     placements
 }

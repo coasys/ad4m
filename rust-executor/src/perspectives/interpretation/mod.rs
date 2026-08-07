@@ -40,11 +40,13 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
+mod dedup;
 mod graph;
 mod parse;
 mod prompt;
 mod run;
 
+pub use dedup::*;
 pub use graph::*;
 pub use parse::*;
 pub use prompt::*;

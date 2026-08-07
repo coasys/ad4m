@@ -710,3 +710,89 @@ async fn e2e_interprets_topic_relation_from_transcript() {
          placements = {placements:#?}"
     );
 }
+
+// ---- semantic dedup: reject SEMANTICALLY-similar duplicate identity ---------
+
+/// The `DedupStrategy::Semantic` path drops proposals whose identity string is
+/// close in embedding space to something already in the graph — not just those
+/// that string-normalize equal (the default). This test seeds a Task with one
+/// wording, then feeds a transcript that reintroduces the SAME task under
+/// different words + adds a genuinely new one. The default (`NormalizedString`)
+/// strategy would let the reworded duplicate through; the semantic strategy
+/// (via `nomic-embed-text` on the same Ollama base URL as the LLM) must catch
+/// it, so no fresh instance carries a title semantically equal to the seed.
+///
+/// Requires `nomic-embed-text` to be pulled on the embeddings endpoint
+/// (`ollama pull nomic-embed-text` on Marvin). Base URL/model overridable via
+/// `INTERPRETATION_EMBED_BASE_URL` / `INTERPRETATION_EMBED_MODEL` (defaults
+/// hit `http://localhost:11434/v1` + `nomic-embed-text`, matching the LLM
+/// tunnel).
+#[tokio::test]
+async fn e2e_semantic_dedup_drops_reworded_duplicate() {
+    use crate::perspectives::interpretation::DedupStrategy;
+
+    let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
+    let task_shape = &shapes[0];
+
+    // Seed with one wording; transcript uses a different wording for the SAME
+    // work + genuinely-new work. String-normalize would keep the rewording.
+    let seeded_title = "Finish the WebRTC call module";
+    seed_instance(
+        &mut perspective,
+        &ctx,
+        task_shape,
+        "soa://existing/task/webrtc",
+        seeded_title,
+    )
+    .await;
+
+    let placements = run_interpretation_e2e_with_strategy(
+        &mut perspective,
+        &shapes,
+        &[
+            (
+                "Nico",
+                "Reminder: James still needs to wrap up the WebRTC calling module for the app.",
+            ),
+            ("Josh", "I'll update the CI documentation this evening."),
+        ],
+        &ctx,
+        &DedupStrategy::semantic_from_env(0.75),
+    )
+    .await;
+    assert_persisted(&perspective, &shapes, &placements).await;
+
+    // No fresh instance under `soa://ext/` may carry a title whose embedding
+    // is close to the seeded title. Rather than re-embed here, we just check
+    // that no *newly-minted* task exists whose title lexically overlaps the
+    // seeded one on the key salient tokens ("webrtc" + a "call/calling" or
+    // "module"/"wrap up" verb). If the semantic filter did its job, the LLM's
+    // reworded proposal was dropped BEFORE it reached the write path.
+    let rows = model_instances(&perspective, "Task", &["title"]).await;
+    let minted_dup: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|r| {
+            r.get("id")
+                .and_then(|i| i.as_str())
+                .map(|id| id.starts_with("soa://ext/"))
+                .unwrap_or(false)
+                && r.get("title")
+                    .and_then(|t| t.as_str())
+                    .map(|t| {
+                        let l = t.to_lowercase();
+                        l.contains("webrtc") && (l.contains("call") || l.contains("module"))
+                    })
+                    .unwrap_or(false)
+        })
+        .collect();
+    assert!(
+        minted_dup.is_empty(),
+        "semantic dedup must drop the reworded WebRTC task; freshly-minted duplicates = {minted_dup:#?}"
+    );
+    // The genuinely-new CI-docs task should still land.
+    let counts = graph_count_by_type(&perspective, &shapes).await;
+    assert!(
+        counts.get("task").copied().unwrap_or(0) >= 2,
+        "expected the seeded task + the new CI-docs task; got {counts:?}"
+    );
+}
