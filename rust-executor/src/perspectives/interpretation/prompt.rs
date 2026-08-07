@@ -75,7 +75,7 @@ pub const INTERPRETATION_TASK_NAME: &str = "adam://interpretation";
 /// scaffolding (available classes, their hints, the transcript) is added by
 /// `build_interpretation_input`, so this stays stable across calls and the
 /// task can be reused.
-pub const EXTRACTION_SYSTEM_PROMPT: &str = "\
+pub const INTERPRETATION_SYSTEM_PROMPT: &str = "\
 You extract typed instances from a conversation transcript.
 
 You receive a JSON object with these fields:
@@ -195,7 +195,7 @@ pub fn ensure_interpretation_task() -> anyhow::Result<AITask> {
         db.add_task(
             INTERPRETATION_TASK_NAME.to_string(),
             "default".to_string(),
-            EXTRACTION_SYSTEM_PROMPT.to_string(),
+            INTERPRETATION_SYSTEM_PROMPT.to_string(),
             interpretation_examples(),
             None,
         )
