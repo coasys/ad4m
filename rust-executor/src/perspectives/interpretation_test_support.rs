@@ -134,7 +134,7 @@ pub(crate) const CONVERSATION_SUBGROUP_SDNA: &str = r#"{
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://conversationsubgroup","min_count":1,"max_count":1},
     {"path":"ns://name","name":"name","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"Short label for the topic (2-5 words).","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://name","target":"value"}]},
-    {"path":"ns://summary","name":"summary","min_count":0,"max_count":1,"resolve_language":"literal","interpretation_hint":"1-2 sentence rolling summary of what has been discussed in this subgroup. When updating an existing subgroup, INCORPORATE the new content into the existing summary rather than replacing it wholesale.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://summary","target":"value"}]}
+    {"path":"ns://summary","name":"summary","min_count":0,"max_count":1,"resolve_language":"literal","interpretation_hint":"1-2 sentence rolling summary of what has been discussed in THIS subgroup specifically — its own topic only. When updating an existing subgroup, incorporate ONLY the new turns that belong to this subgroup's topic, extending the existing summary rather than replacing it. NEVER fold in turns about a different topic: if the current turns are on a new topic they belong to a NEW subgroup, so leave this one's `id` and `summary` out of your output entirely and let it stay exactly as it is.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://summary","target":"value"}]}
   ]
 }"#;
 

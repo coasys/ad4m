@@ -863,31 +863,22 @@ async fn e2e_flux_grouping_updates_seeded_subgroup_on_topic_continuation() {
 /// mints a fresh subgroup for the new topic and leaves the seeded payments
 /// summary untouched.
 ///
-/// Kept `#[ignore]` after design-fork (i) landed. Before the fork:
-/// `existing_instance_context` only carried the identity label, and
-/// gemma3:12b would unconditionally upsert against the single existing
-/// entry. AFTER the fork: `existing_instance_context` also carries each
-/// instance's secondary scalars (e.g. the rolling `summary`); the prompt
-/// renders them under `properties`; and the system prompt tells the model
-/// to read `title` + `properties` before deciding whether to reuse an `id`.
-/// This IS a real improvement — the model now sometimes correctly mints a
-/// fresh "Holograph retrospective" subgroup — but 12B is still not reliable:
-/// on 5-attempt local runs against Marvin gemma3:12b, the model falls into
-/// two failure modes across attempts: (a) mints the fresh subgroup AND ALSO
-/// emits an upsert on the seeded one that grows its `summary` with the
-/// unrelated topic (pollution), or (b) reuses the seeded id and renames it
-/// to something like "Holograph shipping retrospective" (semantic
-/// identity drift). Fork (i) alone does not deterministically prevent
-/// either. Next levers (deferred): (ii) semantic Update-rejection at
-/// write-time — reject an Update whose proposed identity is far from the
-/// existing one in embedding space (catches failure mode (b) but not
-/// (a)); (iii) larger local model (qwen3.5-27b) for grouping classes;
-/// or (iv) restrict the summary-growth `interpretation_hint` to same-topic
-/// continuations. The paired continuation test above already exercises
-/// the persistent-topics + rolling-summary half — this one would exercise
-/// topic-shift when the residual gap is closed.
+/// Reliably green on Marvin gemma3:12b (first-attempt on repeated local runs)
+/// once three model-centric levers combine — no external code guardrail:
+///   1. `existing_instance_context` carries each instance's secondary scalars
+///      (the rolling `summary`), rendered into the prompt under `properties`,
+///      so the model sees an existing subgroup's *state*, not just its label.
+///   2. The system prompt's "partition, do not broadcast" rule: each turn's
+///      content belongs to exactly one instance; minting a new instance must
+///      not also fold that content into an unrelated existing entry.
+///   3. The `summary` property's `interpretation_hint` scopes incorporation to
+///      *this* subgroup's own topic and tells the model to leave an off-topic
+///      subgroup's `id`/`summary` out of its output entirely.
+/// Together these stop the two prior failure modes (pollution: minting the
+/// fresh subgroup but also growing the seeded one's summary; and reuse-drift:
+/// upserting the seeded id under a renamed topic). The retry loop stays as a
+/// cheap guard against LLM non-determinism.
 #[tokio::test]
-#[ignore]
 async fn e2e_flux_grouping_creates_new_subgroup_on_topic_shift() {
     let seeded_base = "soa://existing/subgroup/payments";
     let attempts = 5u8;

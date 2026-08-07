@@ -208,6 +208,15 @@ Output rules:
     that entry's title + properties describe, mint a NEW instance (no `id`)
     even when it is the only existing entry — reusing an `id` for an
     unrelated topic silently overwrites the existing state and destroys data.
+  - Partition, do not broadcast: each turn's content belongs to exactly ONE
+    instance per class. When some turns open a new topic and you mint a NEW
+    instance for them, put that content ONLY in the new instance. Do NOT also
+    emit an update to an unrelated existing entry (e.g. do not grow another
+    subgroup's `summary` with the new topic). Emit an existing entry's `id`
+    ONLY when the current turns are about THAT entry's own topic; otherwise
+    leave it out of your output entirely so it stays exactly as it is. It is
+    correct and expected to both mint a new instance AND leave every unrelated
+    existing entry untouched in the same response.
 ";
 
 /// idempotently register the generic interpretation task in the AI-task DB.
