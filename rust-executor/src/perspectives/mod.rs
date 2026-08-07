@@ -1,3 +1,4 @@
+pub mod auto_processor;
 pub mod interpretation;
 #[cfg(test)]
 mod interpretation_e2e;
