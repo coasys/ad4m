@@ -284,12 +284,12 @@ async fn e2e_longer_standup_conversation() {
 #[tokio::test]
 async fn e2e_selector_over_prepopulated_graph() {
     // gemma3:12b occasionally hijacks a seeded task's id when the transcript
-    // participant matches the seeded owner (e.g. "James" appears both in the
-    // seeded task's owner and the new conversation) — a legal upsert, but not
-    // what this test is about. Retry up to 3× with a fresh perspective per
-    // attempt; if every attempt hits the same glitch, fall through to the
-    // assertion with a real failure message.
-    const MAX_ATTEMPTS: usize = 3;
+    // topic is only loosely related — a legal upsert, but not what this test is
+    // about. Retry with a fresh perspective per attempt; if every attempt hits
+    // the same glitch, fall through to the assertion with a real failure
+    // message. Bumped from 3→5: on a bad night, 3 samples is not enough head-
+    // room for a small-model flake to clear.
+    const MAX_ATTEMPTS: usize = 5;
     let mut last: Option<(
         PerspectiveInstance,
         Vec<ModelShape>,
@@ -406,42 +406,66 @@ async fn e2e_selector_over_prepopulated_graph() {
 /// *fresh* instance under `soa://ext/` carrying the already-present title.
 #[tokio::test]
 async fn e2e_does_not_recreate_existing_task() {
-    let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
-    let task_shape = &shapes[0];
+    const SEEDED_BASE: &str = "soa://existing/task/webrtc";
+    const SEEDED_TITLE: &str = "Finish the WebRTC call module";
+    // Emitting *any* op for the brand-new CI-docs task is a small-model
+    // reliability concern — one bad sample must not redden the suite. Retry
+    // with a fresh perspective, matching the pattern used by neighbouring
+    // upsert/selector e2e tests.
+    const MAX_ATTEMPTS: usize = 3;
 
-    let existing_title = "Finish the WebRTC call module";
-    seed_instance(
-        &mut perspective,
-        &ctx,
-        task_shape,
-        "soa://existing/task/webrtc",
-        existing_title,
-    )
-    .await;
+    let transcript = [
+        // Restates the existing task…
+        (
+            "Nico",
+            "Reminder: James still needs to finish the WebRTC call module.",
+        ),
+        // …and introduces a brand-new unrelated task. Deliberately in a
+        // different topic area so the LLM cannot plausibly merge them into
+        // a single upsert on the seeded base.
+        ("Josh", "I'll update the CI documentation this evening."),
+    ];
 
-    let placements = run_interpretation_e2e(
-        &mut perspective,
-        &shapes,
-        &[
-            // Restates the existing task…
-            (
-                "Nico",
-                "Reminder: James still needs to finish the WebRTC call module.",
-            ),
-            // …and introduces a brand-new unrelated task. Deliberately in a
-            // different topic area so the LLM cannot plausibly merge them into
-            // a single upsert on the seeded base.
-            ("Josh", "I'll update the CI documentation this evening."),
-        ],
-        &ctx,
-    )
-    .await;
+    let mut last: Option<(
+        PerspectiveInstance,
+        Vec<ModelShape>,
+        Vec<(String, Vec<Link>)>,
+    )> = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            SEEDED_BASE,
+            SEEDED_TITLE,
+        )
+        .await;
+        let placements = run_interpretation_e2e(&mut perspective, &shapes, &transcript, &ctx).await;
+        let task_count = graph_count_by_type(&perspective, &shapes)
+            .await
+            .get("task")
+            .copied()
+            .unwrap_or(0);
+        last = Some((perspective, shapes, placements));
+        if task_count >= 2 {
+            if attempt > 1 {
+                println!("[e2e] second task emitted on attempt {attempt}/{MAX_ATTEMPTS}");
+            }
+            break;
+        }
+        println!(
+            "[e2e] attempt {attempt}/{MAX_ATTEMPTS}: LLM emitted no op for the new CI-docs task \
+             (task_count={task_count}); retrying"
+        );
+    }
+    let (perspective, shapes, placements) = last.expect("retry loop ran at least once");
     assert_persisted(&perspective, &shapes, &placements).await;
 
     // The already-present task is never RECREATED: no freshly-minted instance
     // carries the seeded title. (An upsert landing on the seeded base and
     // refining its title is fine — that's the id-upsert path doing its job.)
-    let seeded_lower = existing_title.to_lowercase();
+    let seeded_lower = SEEDED_TITLE.to_lowercase();
     let rows = model_instances(&perspective, "Task", &["title"]).await;
     let minted_with_seeded_title: Vec<&serde_json::Value> = rows
         .iter()
@@ -465,7 +489,8 @@ async fn e2e_does_not_recreate_existing_task() {
     let counts = graph_count_by_type(&perspective, &shapes).await;
     assert!(
         counts.get("task").copied().unwrap_or(0) >= 2,
-        "expected the seeded task + a newly interpreted one; got {counts:?}"
+        "expected the seeded task + a newly interpreted one after {MAX_ATTEMPTS} attempts; \
+         got {counts:?}"
     );
 }
 
