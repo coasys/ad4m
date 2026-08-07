@@ -99,7 +99,7 @@ This eliminates the need for a separate `add_child` call. The parent parameter i
 When creating a message or other child item, you can now pass the `parent` parameter to automatically add it as a child of a channel:
 
 ```
-ad4m_message_create(perspective_id="...", expression_address="literal://string:...", body="Hello!", parent="literal://string:<channel-id>")
+ad4m_message_create(perspective_id="...", expression_address="literal:string:...", body="Hello!", parent="literal:string:<channel-id>")
 ```
 
 This is equivalent to calling `message_create` + `add_child` in one step. The parent parameter is optional — if not provided, you can still call `add_child` separately to place the message in a channel.
@@ -210,7 +210,7 @@ Use `ad4m_list_waker_subscriptions()` to see active subscriptions, and `ad4m_uns
 
 ## Model base expressions / IDs
 
-Model instances are constructed around a base node (called base expression, also ID). Usually those are random literal strings (`literal://string:xyz`). Their properties hang off of that base node with predicates as defined by the class.
+Model instances are constructed around a base node (called base expression, also ID). Usually those are random literal strings (`literal:string:xyz`). Their properties hang off of that base node with predicates as defined by the class.
 
 ## Tree structure
 
@@ -234,23 +234,23 @@ Community (ad4m://self)
               └── ConversationSubgroup (AI-generated summary/grouping)
 ```
 
-There are two kinds of channels in Flux which are displayed differently: 
+There are two kinds of channels in Flux which are displayed differently:
  - Conversation channels
    - is_conversation=true
    - always has a Conversation child
-   - displayed channel name is title of conversation (upates automatically from message content)
+   - displayed channel name is title of conversation (updates automatically from message content)
    => EPHEMERAL - when users start a new conversation without putting it into a persistent channel
    => UI only shows a couple of recent conversation channels
    => can be dragged into a space channel to keep it
 
  - Space channels
    - is_conversation=false
-   - does not neccessarily include a Conversation instance
+   - does not necessarily include a Conversation instance
    - could also have multiple Conversation children
    - property `name` displayed as channel name
-   => LONG LASTING - all spaces channels are displayed
+   => LONG LASTING - all space channels are displayed
    => Tree structure - can have sub-channels
-   => used to organized conversations that should be kept
+   => used to organize conversations that should be kept
 
 
 #### Posts, Tasks etc.
@@ -263,14 +263,14 @@ so humans have a UI to interact with those.
 
 Posts can have messages as comments which would be displayed under the post.
 
-Tasks need to be added to TaskColumns (in orderedTAskIds)
+Tasks need to be added to TaskColumns (in orderedTaskIds)
 The TaskBoard is (currently) applying a hack: for ordering, 
 it stores JSON arrays of IDs (addresses) in its orderedColumnIds, 
 and the TaskColumns do the same, they store Task IDs (addresses)
 as stringified JSON array in TaskColumn's orderedColumnIds property.
 
 So these are not collections but properties holding stringified JSON.
-Be carefule when changing those!
+Be careful when changing those!
 You can add Tasks by appending their IDs but make sure you write a well-
 formed stringified JSON array again!
 
@@ -331,7 +331,7 @@ The waker POSTs to your `/hooks/wake` endpoint with this JSON body:
 
 ```json
 {
-  "text": "You were @mentioned in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: mention-abc\nEvent type: mention\n\nMentioned messages (2):\n  Message: literal://string:msg-123\n  Parents: literal://string:channel-1, literal://string:conv-thread-5\n  Message: literal://string:msg-456\n  Parents: literal://string:channel-1",
+  "text": "You were @mentioned in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: mention-abc\nEvent type: mention\n\nMentioned messages (2):\n  Message: literal:string:msg-123\n  Parents: literal:string:channel-1, literal:string:conv-thread-5\n  Message: literal:string:msg-456\n  Parents: literal:string:channel-1",
   "mode": "now"
 }
 ```
@@ -420,7 +420,7 @@ That's it. Do not call `ad4m_message_set_body` after `ad4m_message_create`.
 The waker makes your bot **autonomous** — it watches for changes in AD4M perspectives and wakes you via OpenClaw hooks. The waker runs inside the plugin — no separate process needed.
 
 ```
-AD4M Executor ──GraphQL WS──→ Plugin (ad4m-waker service) ──HTTP POST──→ OpenClaw /hooks/wake
+AD4M Executor ──WS-RPC──→ Plugin (ad4m-waker service) ──HTTP POST──→ OpenClaw /hooks/wake
      │                              │                                          │
   SPARQL subscription        Debounce + filter                           Agent wakes up
   detects new links          (2s default)                                reads new data via MCP
@@ -460,7 +460,7 @@ AD4M's MCP server introspects SHACL subject class definitions and auto-generates
 
 Class and property names are **lowercased** in tool names. Example: `Channel` with `name` and `messages` → `channel_create`, `channel_set_name`, `channel_add_messages`, etc.
 
-**Use `parent` parameter to create + add to channel in one step:** `ad4m_message_create(..., parent="literal://string:<channel-id>")`
+**Use `parent` parameter to create + add to channel in one step:** `ad4m_message_create(..., parent="literal:string:<channel-id>")`
 
 **Use `{class}_list` for quick channel message listing:** `ad4m_message_list(perspective_id, parent="<channel-id>")`
 

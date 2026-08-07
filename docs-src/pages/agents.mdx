@@ -112,7 +112,7 @@ The perspective uses semantic links to create a rich web of information:
 const { did } = await ad4m.agent.me();
 await ad4m.agent.updatePublicPerspective({
   links: [
-    { source: did, predicate: "foaf://name", target: "literal://string:Alice" },
+    { source: did, predicate: "foaf://name", target: "literal:string:Alice" },
     { source: did, predicate: "foaf://knows", target: "did:key:other-agent" }
   ]
 });
