@@ -211,11 +211,11 @@ pub async fn gather_transcript(
 }
 
 fn decode_literal_string(uri: &str) -> Option<String> {
-    let rest = uri.strip_prefix("literal:string:")?;
-    percent_encoding::percent_decode_str(rest)
-        .decode_utf8()
-        .ok()
-        .map(|c| c.into_owned())
+    use ad4m_client::literal::{Literal, LiteralValue};
+    match Literal::from_url(uri.to_string()).ok()?.get().ok()? {
+        LiteralValue::String(s) => Some(s),
+        _ => None,
+    }
 }
 
 /// read the titles of instances already present in the perspective for each
