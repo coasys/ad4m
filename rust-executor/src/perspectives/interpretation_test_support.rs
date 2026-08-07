@@ -122,6 +122,22 @@ pub(crate) const PLAN_SDNA: &str = r#"{
   ]
 }"#;
 
+/// The Flux-shaped grouping class: `name` is the identity (dedup key), `summary`
+/// is a mutable rolling scalar the extractor is asked to *grow* rather than
+/// replace. Used by the Flux-grouping / persistent-topics e2e tests: the model
+/// must resolve continuing turns to an existing subgroup's `id` (upsert path)
+/// and a topic shift must mint a fresh one.
+pub(crate) const CONVERSATION_SUBGROUP_SDNA: &str = r#"{
+  "target_class":"ns://ConversationSubgroup",
+  "interpretation_hint":"A coherent conversational thread — a set of turns focused on the same topic. Group turns discussing the same subject under one subgroup; a clear shift in subject starts a new subgroup. When an existing subgroup already covers the topic being discussed, REUSE its id (via the `id` field on the proposed instance) instead of creating a duplicate. CRITICAL DECISION RULE: read each `existing` entry's `title` (its topic name) BEFORE deciding whether to reuse an id. Only reuse an existing subgroup's id when the current turns are clearly on the SAME topic as that subgroup's title. If the current turns are on a different topic — even if there is only one existing subgroup — leave `id` unset and mint a NEW subgroup. Reusing an id for a genuinely unrelated topic silently overwrites the existing subgroup and destroys data.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://conversationsubgroup"}],
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://conversationsubgroup","min_count":1,"max_count":1},
+    {"path":"ns://name","name":"name","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"Short label for the topic (2-5 words).","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://name","target":"value"}]},
+    {"path":"ns://summary","name":"summary","min_count":0,"max_count":1,"resolve_language":"literal","interpretation_hint":"1-2 sentence rolling summary of what has been discussed in this subgroup. When updating an existing subgroup, INCORPORATE the new content into the existing summary rather than replacing it wholesale.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://summary","target":"value"}]}
+  ]
+}"#;
+
 /// Build a `ModelShape` via the real writer -> store -> loader path, so the
 /// class/property `interpretation_hint`s are actually populated (the direct JSON
 /// path sets them to `None`).
@@ -415,6 +431,27 @@ pub(crate) async fn seed_instance(
     base: &str,
     title: &str,
 ) {
+    seed_instance_with_props(
+        perspective,
+        ctx,
+        shape,
+        base,
+        serde_json::json!({ "title": title }),
+    )
+    .await;
+}
+
+/// Like [`seed_instance`] but accepts an arbitrary props object — used when the
+/// class's identity is a non-`title` field (e.g. `ConversationSubgroup.name`) or
+/// the seed needs to carry secondary scalars (e.g. `summary`) so a subsequent
+/// interpretation pass can *update* them in place.
+pub(crate) async fn seed_instance_with_props(
+    perspective: &mut PerspectiveInstance,
+    ctx: &AgentContext,
+    shape: &ModelShape,
+    base: &str,
+    props: serde_json::Value,
+) {
     perspective
         .create_subject(
             SubjectClassOption {
@@ -422,12 +459,12 @@ pub(crate) async fn seed_instance(
                 query: None,
             },
             base.to_string(),
-            Some(serde_json::json!({ "title": title })),
+            Some(props),
             None,
             ctx,
         )
         .await
-        .expect("seed_instance create_subject");
+        .expect("seed_instance_with_props create_subject");
 }
 
 // ---- graph-state accessors / assertions (read back via `model_query`) -------

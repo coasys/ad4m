@@ -254,6 +254,32 @@ pub(crate) fn interpretation_examples() -> Vec<AIPromptExamples> {
     ])
     .to_string();
 
+    // Topic-shift example: a Task already exists, and the transcript is on a
+    // completely unrelated topic. The model must NOT reuse the existing Task's
+    // `id` for the new work — reusing an id silently overwrites the existing
+    // instance and destroys data. The correct output is a fresh Task without
+    // an `id`, plus whatever else the transcript introduces. This directly
+    // counter-teaches the bias gemma3:12b shows without it: whenever an
+    // `existing` entry is present, unconditionally upsert against it.
+    let ex_shift_in = serde_json::json!({
+        "classes": [
+            {"name":"Task","hint":"An action someone commits to doing.",
+             "existing":[
+                 {"id":"soa://existing/task/design-doc","title":"Draft the design doc","class":"Task"}
+             ],
+             "fields":[{"name":"title","required":true,"hint":"Imperative summary."},
+                       {"name":"owner","required":false,"hint":"Who will do it."}]}
+        ],
+        "transcript":[
+            {"speaker":"A","text":"Switching topics — the CI pipeline has been flaky for a week, I'll dig into the retry stanza tomorrow."}
+        ]
+    })
+    .to_string();
+    let ex_shift_out = serde_json::json!([
+        {"class":"Task","title":"Investigate CI pipeline flakiness in the retry stanza","owner":"A"}
+    ])
+    .to_string();
+
     // Upsert example: a Task already exists ("Draft the design doc"). The
     // transcript continues that same task with more detail and adds a new
     // Question. The model must emit the existing Task's `id` (so it upserts
@@ -329,12 +355,16 @@ pub(crate) fn interpretation_examples() -> Vec<AIPromptExamples> {
     // - ex4 (relations) second — teaches the `new:<Class>:<n>` ref syntax.
     // - ex1 (belief + task) third — keeps modality completeness fresh
     //   (`e2e_intention_and_belief` also wraps this in `run_e2e_retrying`).
+    // - ex_shift (existing + unrelated new) fourth — counter-teaches the
+    //   always-upsert-when-existing bias without displacing ex3 from recency.
     // - ex3 (upsert) LAST — the id-upsert behavior is the most fragile on
     //   small models: with ex4's all-new-instances output in the last slot,
     //   gemma3:12b became create-happy and stopped emitting `id` to update an
     //   existing node (regressed `e2e_updates_existing_instance_via_id` 0/5).
     //   Relations proved robust even off the last slot (the topic-relation e2e
-    //   still fires 3/3), so upsert gets the recency bump instead.
+    //   still fires 3/3), so upsert gets the recency bump instead. ex_shift
+    //   sits just before it so the two adjacent examples teach the full
+    //   attach-vs-mint decision paired.
     vec![
         AIPromptExamples {
             input: ex2_in,
@@ -347,6 +377,10 @@ pub(crate) fn interpretation_examples() -> Vec<AIPromptExamples> {
         AIPromptExamples {
             input: ex1_in,
             output: ex1_out,
+        },
+        AIPromptExamples {
+            input: ex_shift_in,
+            output: ex_shift_out,
         },
         AIPromptExamples {
             input: ex3_in,

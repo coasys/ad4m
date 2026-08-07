@@ -900,7 +900,8 @@ mod tests {
         // `ad4m://input_scope_query` literal on the class shape node so the
         // interpretation pipeline can read it back and pull only the relevant
         // slice of the perspective for this class's LLM input.
-        let sparql = "SELECT ?speaker ?text WHERE { ?m <soa://body> ?text . ?m <soa://author> ?speaker . }";
+        let sparql =
+            "SELECT ?speaker ?text WHERE { ?m <soa://body> ?text . ?m <soa://author> ?speaker . }";
         let shacl_json = format!(
             r#"{{
                 "target_class": "soa://Intention",

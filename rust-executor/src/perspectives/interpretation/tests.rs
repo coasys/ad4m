@@ -160,7 +160,7 @@ fn relations_few_shot_example_is_present_and_upsert_is_last() {
     // behavior (`e2e_updates_existing_instance_via_id` 0/5). So the *upsert*
     // example owns the last slot; relations sit earlier and still fire reliably.
     let examples = interpretation_examples();
-    assert_eq!(examples.len(), 4, "expected exactly four few-shot examples");
+    assert_eq!(examples.len(), 5, "expected exactly five few-shot examples");
 
     // Find the relations example wherever it sits: the one whose output uses
     // the `new:<Class>:<n>` ref syntax on both endpoints of a
@@ -1320,9 +1320,7 @@ fn shape_from_sdna_reads_back_input_scope_query() {
     );
     assert_eq!(
         shape.input_scope_query.as_deref(),
-        Some(
-            "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . }"
-        ),
+        Some("SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . }"),
         "input_scope_query must round-trip via ad4m://input_scope_query link"
     );
 }
@@ -1390,8 +1388,24 @@ async fn gather_transcript_sparql_returns_speaker_and_decoded_text() {
     use super::graph::gather_transcript_sparql;
     let (mut perspective, _shapes, ctx) =
         setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
-    seed_message(&mut perspective, &ctx, "msg://1", "did:key:alice", "hello world", "ns://body").await;
-    seed_message(&mut perspective, &ctx, "msg://2", "did:key:bob", "second turn", "ns://body").await;
+    seed_message(
+        &mut perspective,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "hello world",
+        "ns://body",
+    )
+    .await;
+    seed_message(
+        &mut perspective,
+        &ctx,
+        "msg://2",
+        "did:key:bob",
+        "second turn",
+        "ns://body",
+    )
+    .await;
 
     let query = r#"
         SELECT ?speaker ?text WHERE {
@@ -1422,11 +1436,21 @@ async fn gather_transcript_sparql_scopes_to_predicate() {
     let (mut perspective, _shapes, ctx) =
         setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
     seed_message(
-        &mut perspective, &ctx, "msg://human", "did:key:alice", "I'll ship the doc", "ns://body",
+        &mut perspective,
+        &ctx,
+        "msg://human",
+        "did:key:alice",
+        "I'll ship the doc",
+        "ns://body",
     )
     .await;
     seed_message(
-        &mut perspective, &ctx, "msg://bot", "did:key:bot", "system boot", "ns://system_log",
+        &mut perspective,
+        &ctx,
+        "msg://bot",
+        "did:key:bot",
+        "system boot",
+        "ns://system_log",
     )
     .await;
 
@@ -1452,8 +1476,24 @@ async fn gather_transcript_for_shapes_unions_and_dedups() {
     use super::graph::gather_transcript_for_shapes;
     let (mut perspective, _shapes, ctx) =
         setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
-    seed_message(&mut perspective, &ctx, "msg://1", "did:key:alice", "commit A", "ns://body").await;
-    seed_message(&mut perspective, &ctx, "msg://2", "did:key:bob", "commit B", "ns://body").await;
+    seed_message(
+        &mut perspective,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "commit A",
+        "ns://body",
+    )
+    .await;
+    seed_message(
+        &mut perspective,
+        &ctx,
+        "msg://2",
+        "did:key:bob",
+        "commit B",
+        "ns://body",
+    )
+    .await;
 
     // Two classes: intention-scope (both) and task-scope (only bob). Overlap
     // on bob must dedup, order stays from the first query that saw each turn.
