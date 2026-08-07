@@ -78,6 +78,7 @@ pub fn shape(class: &str, properties: Vec<ShapeProperty>) -> ModelShape {
         properties,
         include_relations: Vec::new(),
         interpretation_hint: None,
+        input_scope_query: None,
     }
 }
 

@@ -1297,6 +1297,210 @@ async fn dispatcher_normalized_string_matches_direct_call() {
     assert_eq!(d_titles, vec!["Write the docs"]);
 }
 
+// ---- input-scope SPARQL: shape roundtrip + gather_transcript_sparql -------
+
+#[test]
+fn shape_from_sdna_reads_back_input_scope_query() {
+    // The SDNA-declared class-level `input_scope_query` must round-trip through
+    // the SHACL writer + `load_shape` so `run_interpretation` (and the
+    // AutoProcessor to come) can read a per-class SPARQL scope off `ModelShape`.
+    let sdna = r#"{
+        "target_class":"ns://Intention",
+        "interpretation_hint":"A first-person commitment.",
+        "input_scope_query":"SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . }",
+        "properties":[
+          {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1}
+        ]
+    }"#;
+    let shape = shape_from_sdna("Intention", sdna);
+    assert_eq!(
+        shape.interpretation_hint.as_deref(),
+        Some("A first-person commitment."),
+        "class hint still round-trips (regression guard)"
+    );
+    assert_eq!(
+        shape.input_scope_query.as_deref(),
+        Some(
+            "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . }"
+        ),
+        "input_scope_query must round-trip via ad4m://input_scope_query link"
+    );
+}
+
+#[test]
+fn shape_from_sdna_without_scope_yields_none() {
+    // Absence is a first-class signal: the caller falls back to the flat
+    // channel view. `None` must survive the SDNA → shape roundtrip.
+    let shape = shape_from_sdna("Intention", INTENTION_SDNA);
+    assert!(
+        shape.input_scope_query.is_none(),
+        "no input_scope_query declared ⇒ ModelShape.input_scope_query = None"
+    );
+}
+
+/// Seed the perspective with `(msg_uri, author, body_text)` triples wired as
+/// two direct links per message: `<msg> <ns://body> <literal:string:...>` and
+/// `<msg> <ns://author> <did:key:...>`. Mirrors the shape a Flux-style channel
+/// perspective would present and the SPARQL queries in these tests target.
+async fn seed_message(
+    perspective: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
+    ctx: &crate::agent::AgentContext,
+    msg_uri: &str,
+    author: &str,
+    body: &str,
+    body_predicate: &str,
+) {
+    use crate::types::{Link, LinkStatus};
+    perspective
+        .add_link(
+            Link {
+                source: msg_uri.into(),
+                predicate: Some(body_predicate.into()),
+                target: format!("literal:string:{body}"),
+            },
+            LinkStatus::Local,
+            None,
+            ctx,
+        )
+        .await
+        .expect("seed_message body");
+    perspective
+        .add_link(
+            Link {
+                source: msg_uri.into(),
+                predicate: Some("ns://author".into()),
+                target: author.into(),
+            },
+            LinkStatus::Local,
+            None,
+            ctx,
+        )
+        .await
+        .expect("seed_message author");
+}
+
+#[tokio::test]
+async fn gather_transcript_sparql_returns_speaker_and_decoded_text() {
+    // The generic SPARQL gather must:
+    //   1. run an arbitrary SELECT against the perspective's Oxigraph store,
+    //   2. bind `?speaker` (the raw NamedNode string, e.g. "did:key:alice"),
+    //   3. bind `?text` and, when it's a `literal:string:...` URI, decode it,
+    //   4. preserve caller-visible ordering by returning rows as SPARQL gave
+    //      them (deterministic when ORDER BY is in the query).
+    use super::graph::gather_transcript_sparql;
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+    seed_message(&mut perspective, &ctx, "msg://1", "did:key:alice", "hello world", "ns://body").await;
+    seed_message(&mut perspective, &ctx, "msg://2", "did:key:bob", "second turn", "ns://body").await;
+
+    let query = r#"
+        SELECT ?speaker ?text WHERE {
+            ?m <ns://body> ?text .
+            ?m <ns://author> ?speaker .
+        }
+        ORDER BY ?m
+    "#;
+    let turns = gather_transcript_sparql(&perspective, query)
+        .await
+        .expect("gather_transcript_sparql");
+    assert_eq!(
+        turns,
+        vec![
+            ("did:key:alice".to_string(), "hello world".to_string()),
+            ("did:key:bob".to_string(), "second turn".to_string()),
+        ],
+        "SPARQL rows must materialise as (speaker, decoded text) turns in order"
+    );
+}
+
+#[tokio::test]
+async fn gather_transcript_sparql_scopes_to_predicate() {
+    // Proves this is a real scope, not a rebranded gather-everything. Seed one
+    // "body"-predicated message and one "system-log" message; a query that
+    // filters on `ns://body` must return exactly the first.
+    use super::graph::gather_transcript_sparql;
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+    seed_message(
+        &mut perspective, &ctx, "msg://human", "did:key:alice", "I'll ship the doc", "ns://body",
+    )
+    .await;
+    seed_message(
+        &mut perspective, &ctx, "msg://bot", "did:key:bot", "system boot", "ns://system_log",
+    )
+    .await;
+
+    let scoped = gather_transcript_sparql(
+        &perspective,
+        "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . }",
+    )
+    .await
+    .expect("gather_transcript_sparql");
+    assert_eq!(
+        scoped,
+        vec![("did:key:alice".to_string(), "I'll ship the doc".to_string())],
+        "scoped query must exclude messages under other predicates"
+    );
+}
+
+#[tokio::test]
+async fn gather_transcript_for_shapes_unions_and_dedups() {
+    // Multiple classes may each declare their own input scope. The union
+    // helper runs every declared query, dedups identical (speaker, text) turns
+    // (preserving first-seen order), and returns `Some(...)` when at least
+    // one shape contributed a query.
+    use super::graph::gather_transcript_for_shapes;
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+    seed_message(&mut perspective, &ctx, "msg://1", "did:key:alice", "commit A", "ns://body").await;
+    seed_message(&mut perspective, &ctx, "msg://2", "did:key:bob", "commit B", "ns://body").await;
+
+    // Two classes: intention-scope (both) and task-scope (only bob). Overlap
+    // on bob must dedup, order stays from the first query that saw each turn.
+    let intention_scope = "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . } ORDER BY ?m";
+    let task_scope = "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . FILTER(STRENDS(STR(?m), \"/2\")) }";
+    let intention_sdna = format!(
+        r#"{{"target_class":"ns://Intention","input_scope_query":{intention_scope:?},"properties":[{{"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1}}]}}"#
+    );
+    let task_sdna = format!(
+        r#"{{"target_class":"ns://Task","input_scope_query":{task_scope:?},"properties":[{{"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1}}]}}"#
+    );
+    let shapes = vec![
+        shape_from_sdna("Intention", &intention_sdna),
+        shape_from_sdna("Task", &task_sdna),
+    ];
+
+    let turns = gather_transcript_for_shapes(&perspective, &shapes)
+        .await
+        .expect("gather_transcript_for_shapes")
+        .expect("Some(_) when at least one shape declares a scope");
+    assert_eq!(
+        turns,
+        vec![
+            ("did:key:alice".to_string(), "commit A".to_string()),
+            ("did:key:bob".to_string(), "commit B".to_string()),
+        ],
+        "union preserves first-seen order and drops the duplicate bob turn"
+    );
+}
+
+#[tokio::test]
+async fn gather_transcript_for_shapes_returns_none_when_no_scope_declared() {
+    // With no shape carrying an input_scope_query, the helper must signal
+    // "nothing declared" via `None` so the caller can fall back to the
+    // channel-flat `gather_transcript`, not silently hand the LLM `[]`.
+    use super::graph::gather_transcript_for_shapes;
+    let (perspective, shapes, _ctx) =
+        setup_perspective_no_llm(&[("Intention", INTENTION_SDNA), ("Task", TASK_SDNA)]).await;
+    let out = gather_transcript_for_shapes(&perspective, &shapes)
+        .await
+        .expect("gather_transcript_for_shapes");
+    assert!(
+        out.is_none(),
+        "no scope declared ⇒ None (fallback trigger), got {out:?}"
+    );
+}
+
 #[test]
 fn filter_already_present_keeps_upserts_and_preserves_order() {
     // An `id`-carrying proposal is an explicit upsert target: its title

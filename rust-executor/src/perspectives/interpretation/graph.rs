@@ -459,6 +459,88 @@ pub(crate) fn decode_literal_string(uri: &str) -> Option<String> {
     }
 }
 
+/// Assemble an interpretation transcript from an arbitrary SPARQL SELECT
+/// against the perspective. The query MUST bind `?speaker` and `?text` in
+/// its solutions — each row becomes a `(speaker, text)` turn in the order
+/// the store returned them. `?text` may be either a plain string literal
+/// (returned as-is) or a `literal:string:...` URI (decoded via
+/// [`decode_literal_string`]); rows that decode to non-string literals or
+/// bind neither cleanly are skipped rather than failing the whole gather.
+///
+/// This is the generic counterpart to [`gather_transcript`]: it lets a
+/// class declare its own input-scope query (via the SDNA
+/// `ad4m://input_scope_query` link, read back as
+/// [`ModelShape::input_scope_query`]) so an Intention-only or Task-only
+/// interpretation can pull just the relevant subset of the transcript
+/// perspective instead of the full channel. Callers that just want the
+/// flat "all messages on this source under this predicate" view should
+/// keep using the source+predicate wrapper.
+pub async fn gather_transcript_sparql(
+    perspective: &PerspectiveInstance,
+    sparql: &str,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let rows_json = perspective.sparql_query(sparql.to_string()).map_err(|e| {
+        anyhow::anyhow!("gather_transcript_sparql: SPARQL query failed: {e:#}")
+    })?;
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&rows_json).map_err(|e| {
+            anyhow::anyhow!("gather_transcript_sparql: bad SPARQL result JSON: {e:#}")
+        })?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let Some(speaker) = row.get("speaker").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(raw_text) = row.get("text").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let text = if raw_text.starts_with("literal:") {
+            match decode_literal_string(raw_text) {
+                Some(s) => s,
+                None => continue, // non-string literal — not a message body
+            }
+        } else {
+            raw_text.to_string()
+        };
+        out.push((speaker.to_string(), text));
+    }
+    Ok(out)
+}
+
+/// Union of every declared input-scope query across `shapes`, deduplicating
+/// identical `(speaker, text)` turns while preserving first-seen order. Shapes
+/// without an `input_scope_query` contribute nothing. Returns `None` when no
+/// shape declared one — the caller should then fall back to the flat
+/// [`gather_transcript`] channel view rather than passing an empty transcript
+/// to the LLM.
+pub async fn gather_transcript_for_shapes(
+    perspective: &PerspectiveInstance,
+    shapes: &[ModelShape],
+) -> anyhow::Result<Option<Vec<(String, String)>>> {
+    let mut any_declared = false;
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for shape in shapes {
+        let Some(query) = &shape.input_scope_query else {
+            continue;
+        };
+        any_declared = true;
+        let turns = gather_transcript_sparql(perspective, query).await?;
+        for (speaker, text) in turns {
+            let key = (speaker.clone(), text.clone());
+            if seen.insert(key) {
+                out.push((speaker, text));
+            }
+        }
+    }
+    if any_declared {
+        Ok(Some(out))
+    } else {
+        Ok(None)
+    }
+}
+
 /// One existing instance the interpreter should know about — the LLM sees these
 /// so it can decide whether an interpreted item is a genuinely new node (no `id`
 /// on the output) or the continuation/refinement of an existing one (emit this

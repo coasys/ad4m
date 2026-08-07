@@ -23,6 +23,17 @@ pub struct SHACLShape {
     /// Emitted as an `ad4m://interpretation_hint` link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpretation_hint: Option<String>,
+    /// Optional SPARQL query declaring which slice of the perspective this
+    /// class wants to see as its interpretation input. The query must bind
+    /// `?speaker` and `?text` (text may be a plain literal or a
+    /// `literal:string:...` URI which is decoded downstream). Callers of
+    /// [`crate::perspectives::interpretation::graph::gather_transcript_sparql`]
+    /// run this query to build the transcript passed to the LLM, letting an
+    /// Intention-only or Task-only interpretation pull just the relevant
+    /// messages rather than the whole channel. Emitted as an
+    /// `ad4m://input_scope_query` link on the class shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_scope_query: Option<String>,
     /// Constructor actions for creating instances
     #[serde(default)]
     pub constructor_actions: Vec<AD4MAction>,
@@ -397,6 +408,17 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             source: shape_uri.clone(),
             predicate: Some("ad4m://interpretation_hint".to_string()),
             target: format!("literal:string:{}", hint),
+        });
+    }
+
+    // Optional SPARQL query that narrows the interpretation input to the
+    // subset of the perspective this class cares about (e.g. only messages
+    // that mention an intent verb). Consumed by `gather_transcript_sparql`.
+    if let Some(query) = &shape.input_scope_query {
+        links.push(Link {
+            source: shape_uri.clone(),
+            predicate: Some("ad4m://input_scope_query".to_string()),
+            target: format!("literal:string:{}", query),
         });
     }
 
@@ -869,6 +891,53 @@ mod tests {
                 .iter()
                 .any(|l| l.predicate == Some("ad4m://interpretation_hint".to_string())),
             "no ad4m://interpretation_hint link should be emitted when the hint is absent"
+        );
+    }
+
+    #[test]
+    fn test_parse_shacl_with_input_scope_query() {
+        // Class-level input-scope SPARQL query should be emitted as an
+        // `ad4m://input_scope_query` literal on the class shape node so the
+        // interpretation pipeline can read it back and pull only the relevant
+        // slice of the perspective for this class's LLM input.
+        let sparql = "SELECT ?speaker ?text WHERE { ?m <soa://body> ?text . ?m <soa://author> ?speaker . }";
+        let shacl_json = format!(
+            r#"{{
+                "target_class": "soa://Intention",
+                "input_scope_query": {sparql:?},
+                "properties": [
+                    {{ "path": "soa://title", "name": "title", "datatype": "xsd://string" }}
+                ]
+            }}"#
+        );
+
+        let links = parse_shacl_to_links(&shacl_json, "Intention").unwrap();
+
+        assert!(
+            links.iter().any(|l| l.source == "soa://IntentionShape"
+                && l.predicate == Some("ad4m://input_scope_query".to_string())
+                && l.target == format!("literal:string:{sparql}")),
+            "expected an ad4m://input_scope_query link on the class shape"
+        );
+    }
+
+    #[test]
+    fn test_parse_shacl_without_input_scope_query_emits_none() {
+        // input_scope_query is optional; absence must not emit a link (the
+        // caller then falls back to the flat gather_transcript view).
+        let shacl_json = r#"{
+            "target_class": "recipe://Recipe",
+            "properties": [
+                { "path": "recipe://name", "name": "name", "datatype": "xsd://string" }
+            ]
+        }"#;
+
+        let links = parse_shacl_to_links(shacl_json, "Recipe").unwrap();
+        assert!(
+            !links
+                .iter()
+                .any(|l| l.predicate == Some("ad4m://input_scope_query".to_string())),
+            "no ad4m://input_scope_query link should be emitted when the field is absent"
         );
     }
 

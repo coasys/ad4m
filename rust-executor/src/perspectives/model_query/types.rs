@@ -459,6 +459,14 @@ pub struct ModelShape {
     /// LLM extractor toward what instances of this class represent.  `None`
     /// when the SDNA declared no class hint.
     pub(crate) interpretation_hint: Option<String>,
+    /// Optional SPARQL query on the perspective that scopes which messages
+    /// the interpretation pipeline should feed to the LLM for this class.
+    /// Read back from the `ad4m://input_scope_query` link on the shape node.
+    /// The query must bind `?speaker` and `?text` — see
+    /// [`crate::perspectives::interpretation::graph::gather_transcript_sparql`].
+    /// `None` when the SDNA didn't declare a scope (caller falls back to the
+    /// flat channel view).
+    pub(crate) input_scope_query: Option<String>,
 }
 
 impl ModelShape {
