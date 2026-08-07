@@ -287,8 +287,34 @@ pub(crate) async fn setup_interpretation_e2e(
     (perspective, shapes, ctx)
 }
 
+/// Read back the links written under each affected `base`. Production
+/// `run_interpretation` is link-free (it returns only base URIs), but a few e2e
+/// tests assert on the *edges* a run wrote (a resolved `topic-of` relation, a
+/// reified `SemanticRelationship`), which live on links rather than in
+/// model_query scalar state. The test harness reads them back here so those
+/// tests keep working without production returning links.
+pub(crate) async fn read_back_placements(
+    perspective: &PerspectiveInstance,
+    bases: &[String],
+) -> Vec<(String, Vec<Link>)> {
+    let mut out = Vec::with_capacity(bases.len());
+    for base in bases {
+        let stored = perspective
+            .get_links(&crate::types::LinkQuery {
+                source: Some(base.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links readback");
+        let links: Vec<Link> = stored.into_iter().map(|d| d.data.clone()).collect();
+        out.push((base.clone(), links));
+    }
+    out
+}
+
 /// Run interpretation against the real LLM under the standard `soa://ext/` prefix,
-/// writing `Local` links, and dump the placements for the test log.
+/// returning the affected instances with their written links read back (see
+/// [`read_back_placements`]).
 pub(crate) async fn run_interpretation_e2e(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
@@ -299,9 +325,10 @@ pub(crate) async fn run_interpretation_e2e(
         .iter()
         .map(|(s, t)| (s.to_string(), t.to_string()))
         .collect();
-    let placements = run_interpretation(perspective, shapes, &transcript, "soa://ext/", ctx)
+    let bases = run_interpretation(perspective, shapes, &transcript, "soa://ext/", ctx)
         .await
         .expect("run_interpretation against real LLM to succeed");
+    let placements = read_back_placements(perspective, &bases).await;
     print_placements(&placements);
     placements
 }
@@ -320,7 +347,7 @@ pub(crate) async fn run_interpretation_e2e_with_strategy(
         .iter()
         .map(|(s, t)| (s.to_string(), t.to_string()))
         .collect();
-    let placements = run_interpretation_with_strategy(
+    let bases = run_interpretation_with_strategy(
         perspective,
         shapes,
         &transcript,
@@ -330,13 +357,14 @@ pub(crate) async fn run_interpretation_e2e_with_strategy(
     )
     .await
     .expect("run_interpretation_with_strategy against real LLM to succeed");
+    let placements = read_back_placements(perspective, &bases).await;
     print_placements(&placements);
     placements
 }
 
 /// Convenience for the simple single-shot tests: set up + run in one call.
 /// Returns the perspective, the shapes (so tests can read graph state back via
-/// `model_query`), and the placements.
+/// `model_query`), and the affected instance base URIs.
 pub(crate) async fn run_e2e(
     class_sdnas: &[(&str, &str)],
     transcript: &[(&str, &str)],
@@ -409,14 +437,7 @@ pub(crate) async fn run_e2e_until_placements(
 pub(crate) fn print_placements(placements: &[(String, Vec<Link>)]) {
     println!("e2e placements: {} instance(s)", placements.len());
     for (base, links) in placements {
-        println!("  instance {base}");
-        for l in links {
-            println!(
-                "      {} -> {}",
-                l.predicate.as_deref().unwrap_or("(none)"),
-                l.target
-            );
-        }
+        println!("  instance {base} ({} link(s))", links.len());
     }
 }
 
@@ -566,23 +587,29 @@ pub(crate) async fn graph_owners_lower(
     owners
 }
 
-/// The placements must be readable back as persisted instances via `model_query`
-/// (proves the writes happened, not just that placements were computed). Robust
-/// for seeded runs too: the graph holds seeded + created instances, so the total
-/// count read via model_query must be at least the number of placements.
+/// Every affected base must be readable back as a persisted instance via
+/// `model_query` (proves the writes happened, not just that the interpretation
+/// computed some ids). Reads each class's instances through the model-query API
+/// — hydrated instances carry their base URI under `id` — and asserts every
+/// returned base appears among them.
 pub(crate) async fn assert_persisted(
     perspective: &PerspectiveInstance,
     shapes: &[ModelShape],
     placements: &[(String, Vec<Link>)],
 ) {
-    for (base, links) in placements {
-        assert!(!links.is_empty(), "empty link set for {base}");
+    let mut persisted_ids = std::collections::HashSet::new();
+    for shape in shapes {
+        let class = class_local_name(&shape.target_class);
+        for inst in model_instances(perspective, class, &["title"]).await {
+            if let Some(id) = inst.get("id").and_then(|v| v.as_str()) {
+                persisted_ids.insert(id.to_string());
+            }
+        }
     }
-    let counts = graph_count_by_type(perspective, shapes).await;
-    let total: usize = counts.values().sum();
-    assert!(
-        total >= placements.len(),
-        "expected >= {} instance(s) readable via model_query; graph has {total}: {counts:?}",
-        placements.len()
-    );
+    for (base, _links) in placements {
+        assert!(
+            persisted_ids.contains(base),
+            "base {base} not readable back as a model instance; persisted ids: {persisted_ids:?}"
+        );
+    }
 }

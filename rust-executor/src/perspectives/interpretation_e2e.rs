@@ -81,7 +81,7 @@ async fn create_subject_roundtrips_soa_instance() {
 /// Intention + Belief: an intent with an owner and a claim.
 #[tokio::test]
 async fn e2e_intention_and_belief() {
-    let (p, shapes, placements) = run_e2e(
+    let (p, shapes, bases) = run_e2e(
         &[("Belief", BELIEF_SDNA), ("Intention", INTENTION_SDNA)],
         &[
             (
@@ -95,7 +95,7 @@ async fn e2e_intention_and_belief() {
         ],
     )
     .await;
-    assert_persisted(&p, &shapes, &placements).await;
+    assert_persisted(&p, &shapes, &bases).await;
 
     let counts = graph_count_by_type(&p, &shapes).await;
     assert!(
@@ -118,7 +118,7 @@ async fn e2e_intention_and_belief() {
 /// the transcript should yield 2–4 tasks (LLM may merge/split slightly).
 #[tokio::test]
 async fn e2e_task_tracking_counts() {
-    let (p, shapes, placements) = run_e2e(
+    let (p, shapes, bases) = run_e2e(
         &[("Task", TASK_SDNA)],
         &[
             (
@@ -136,7 +136,7 @@ async fn e2e_task_tracking_counts() {
         ],
     )
     .await;
-    assert_persisted(&p, &shapes, &placements).await;
+    assert_persisted(&p, &shapes, &bases).await;
 
     let counts = graph_count_by_type(&p, &shapes).await;
     let tasks = counts.get("task").copied().unwrap_or(0);
@@ -159,7 +159,7 @@ async fn e2e_task_tracking_counts() {
 /// (ends in "?") is the clearest signal and should always be picked up.
 #[tokio::test]
 async fn e2e_mixed_epistemic_modalities() {
-    let (p, shapes, placements) = run_e2e(
+    let (p, shapes, bases) = run_e2e(
         &[
             ("Observation", OBSERVATION_SDNA),
             ("Belief", BELIEF_SDNA),
@@ -178,7 +178,7 @@ async fn e2e_mixed_epistemic_modalities() {
         ],
     )
     .await;
-    assert_persisted(&p, &shapes, &placements).await;
+    assert_persisted(&p, &shapes, &bases).await;
 
     let counts = graph_count_by_type(&p, &shapes).await;
     let distinct = counts.len();
@@ -195,7 +195,7 @@ async fn e2e_mixed_epistemic_modalities() {
 /// Strategy conversation -> a Vision (the dream) and a Plan (the concrete path).
 #[tokio::test]
 async fn e2e_vision_and_plan() {
-    let (p, shapes, placements) = run_e2e(
+    let (p, shapes, bases) = run_e2e(
         &[("Vision", VISION_SDNA), ("Plan", PLAN_SDNA)],
         &[
             (
@@ -209,7 +209,7 @@ async fn e2e_vision_and_plan() {
         ],
     )
     .await;
-    assert_persisted(&p, &shapes, &placements).await;
+    assert_persisted(&p, &shapes, &bases).await;
 
     let counts = graph_count_by_type(&p, &shapes).await;
     assert!(
@@ -226,7 +226,7 @@ async fn e2e_vision_and_plan() {
 /// came out".
 #[tokio::test]
 async fn e2e_longer_standup_conversation() {
-    let (p, shapes, placements) = run_e2e_until(
+    let (p, shapes, bases) = run_e2e_until(
         &[
             ("Task", TASK_SDNA),
             ("Belief", BELIEF_SDNA),
@@ -252,7 +252,7 @@ async fn e2e_longer_standup_conversation() {
         |c| c.get("task").copied().unwrap_or(0) >= 1,
     )
     .await;
-    assert_persisted(&p, &shapes, &placements).await;
+    assert_persisted(&p, &shapes, &bases).await;
 
     let counts = graph_count_by_type(&p, &shapes).await;
     let total: usize = counts.values().sum();
@@ -362,7 +362,7 @@ async fn e2e_selector_over_prepopulated_graph() {
 
     // New instances land under the interpretation prefix, never on the seeded bases.
     // (Where an instance is *minted* is inherently a placement property, so these
-    // two checks stay on `placements`.)
+    // two checks stay on the affected placements.)
     assert!(
         placements
             .iter()

@@ -8,7 +8,7 @@ use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
-use crate::types::{Link, LinkQuery, LinkStatus};
+use crate::types::{LinkQuery, LinkStatus};
 use std::collections::HashMap;
 
 /// Max attempts for [`retry_interpretation_parse`]. Mirrors Flux's `LLMutils`
@@ -268,8 +268,9 @@ fn touched_bases(ops: &[InterpretationOp]) -> Vec<String> {
 /// interpretation task, retry parsing up to 5×, plan the writes, then apply them
 /// through `create_subject` / `update_subject` / `add_links` — the same pipeline
 /// app code uses, reading each class's `ad4m://constructor` + per-property
-/// `ad4m://setter` actions from the SDNA. Returns the base URI + links read back
-/// for every instance the run touched (created, updated, or given new relations).
+/// `ad4m://setter` actions from the SDNA. Returns the base URIs of the affected
+/// instances (created, updated, or given new relations); the links are owned by
+/// `create_subject` / `update_subject`, not this function.
 ///
 /// The run is tree-aware: the model is shown the instances already in the graph
 /// (`id` + identity value per class), so it can
@@ -298,7 +299,7 @@ pub async fn run_interpretation(
     transcript: &[(String, String)],
     base_prefix: &str,
     context: &AgentContext,
-) -> anyhow::Result<Vec<(String, Vec<Link>)>> {
+) -> anyhow::Result<Vec<String>> {
     run_interpretation_with_strategy(
         perspective,
         shapes,
@@ -326,7 +327,7 @@ pub async fn run_interpretation_with_strategy(
     base_prefix: &str,
     context: &AgentContext,
     dedup_strategy: &DedupStrategy,
-) -> anyhow::Result<Vec<(String, Vec<Link>)>> {
+) -> anyhow::Result<Vec<String>> {
     let task = ensure_interpretation_task()?;
     // Existing-instance snapshot: gives the model both the `id` handle to
     // upsert/reference (so it can refine or link an existing node instead of
@@ -392,22 +393,8 @@ pub async fn run_interpretation_with_strategy(
     let ops = strip_noop_updates(perspective, shapes, planned).await?;
     apply_interpretation_ops(perspective, &ops, context).await?;
 
-    // Read back the links per touched instance, so callers/tests see exactly
-    // what landed in the store (proves the write and yields the real targets).
+    // The affected instance base URIs (created, updated, or given new
+    // relations). Links are owned by `create_subject` / `update_subject`.
     let bases = touched_bases(&ops);
-    let mut out = Vec::with_capacity(bases.len());
-    for base in bases {
-        let stored = perspective
-            .get_links(&LinkQuery {
-                source: Some(base.clone()),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("run_interpretation: get_links(readback) failed: {e:#}")
-            })?;
-        let links: Vec<Link> = stored.into_iter().map(|d| d.data.clone()).collect();
-        out.push((base, links));
-    }
-    Ok(out)
+    Ok(bases)
 }

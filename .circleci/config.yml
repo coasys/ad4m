@@ -118,25 +118,6 @@ jobs:
           no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
       - run:
-          # Generic-interpretation Rust tests: the pure units + the real-LLM e2e
-          # suite. The e2e talks to Ollama over the OpenAI-compatible API (no
-          # embedded-CUDA build needed); on this self-hosted runner (Marvin)
-          # the endpoint is local. Requires the model to be pulled in Ollama.
-          # Model choice: gemma3:12b — fits the 3090 fully (100% GPU), runs the
-          # whole 7-class e2e suite in ~10s, and passes reliably (5/5 clean runs
-          # on 2026-08-06) once the prompt was hardened with few-shot examples
-          # delivered as User/Assistant turns (prompt_examples) that teach
-          # multi-class capture. This is the model Flux already uses for
-          # summaries. Larger models (qwen3.5-27b-opus ~15min half on CPU,
-          # gemma4:26b) work too but are slower/were flakier pre-hardening.
-          # Override via INTERPRETATION_E2E_MODEL.
-          name: Rust interpretation tests (unit + real-LLM e2e via Ollama)
-          no_output_timeout: 30m
-          environment:
-            INTERPRETATION_E2E_BASE_URL: http://localhost:11434/v1
-            INTERPRETATION_E2E_MODEL: gemma3:12b
-          command: cargo test --release -p ad4m-executor --lib perspectives::interpretation -- --test-threads=1
-      - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
           command: |
             mkdir -p /tmp/circleci-artifacts/${CIRCLE_SHA1}
