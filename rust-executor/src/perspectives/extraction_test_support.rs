@@ -293,6 +293,41 @@ pub(crate) async fn run_e2e(
     (perspective, placements)
 }
 
+/// Like [`run_e2e`], but retries the whole setup+run up to `max_attempts` times
+/// until `predicate` returns true. Each attempt uses a fresh perspective so
+/// previous writes don't bias the next extraction. Returns the first placement
+/// set that satisfies the predicate; if none do, returns the last attempt (so
+/// the caller's regular assertions still fire with a real failure message).
+///
+/// Use only for tests that probe small-model modality coverage on gemma3:12b —
+/// intermittent under-extraction is a known behaviour of small models, not a
+/// regression to punish on every CI run. Keep `max_attempts` ≤ 3 so the test
+/// stays fast (≤ ~30 s wall-clock even in the worst case).
+pub(crate) async fn run_e2e_retrying<F>(
+    class_sdnas: &[(&str, &str)],
+    transcript: &[(&str, &str)],
+    max_attempts: usize,
+    predicate: F,
+) -> (PerspectiveInstance, Vec<(String, Vec<Link>)>)
+where
+    F: Fn(&[(String, Vec<Link>)]) -> bool,
+{
+    assert!(max_attempts >= 1, "max_attempts must be >= 1");
+    let mut last: Option<(PerspectiveInstance, Vec<(String, Vec<Link>)>)> = None;
+    for attempt in 1..=max_attempts {
+        let (perspective, placements) = run_e2e(class_sdnas, transcript).await;
+        if predicate(&placements) {
+            if attempt > 1 {
+                println!("[e2e] predicate satisfied on attempt {attempt}/{max_attempts}");
+            }
+            return (perspective, placements);
+        }
+        println!("[e2e] attempt {attempt}/{max_attempts} did not satisfy predicate; retrying");
+        last = Some((perspective, placements));
+    }
+    last.expect("retry loop ran at least once")
+}
+
 pub(crate) fn print_placements(placements: &[(String, Vec<Link>)]) {
     println!("e2e placements: {} instance(s)", placements.len());
     for (base, links) in placements {

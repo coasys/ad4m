@@ -26,9 +26,14 @@ use super::extraction_test_support::*;
 // ---- basic per-class extraction (DRY via the shared `run_e2e` harness) ------
 
 /// Intention + Belief: an intent with an owner and a claim.
+///
+/// Wrapped in [`run_e2e_retrying`] because gemma3:12b intermittently emits only
+/// the intention (~20% observed empirically on 5-run local sweeps). Two extra
+/// attempts push the flake rate well under 1% while keeping the assertion — we
+/// want to know when *both* modalities are picked up, not shrug at the miss.
 #[tokio::test]
 async fn e2e_intention_and_belief() {
-    let (p, placements) = run_e2e(
+    let (p, placements) = run_e2e_retrying(
         &[("Belief", BELIEF_SDNA), ("Intention", INTENTION_SDNA)],
         &[
             (
@@ -40,6 +45,12 @@ async fn e2e_intention_and_belief() {
                 "Cool. One English hint per class should be enough to steer this.",
             ),
         ],
+        3,
+        |pl| {
+            let c = count_by_type(pl);
+            c.get("intention").copied().unwrap_or(0) >= 1
+                && c.get("belief").copied().unwrap_or(0) >= 1
+        },
     )
     .await;
     assert_persisted(&p, &placements).await;
