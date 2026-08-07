@@ -212,9 +212,9 @@ export interface SHACLPropertyShape {
 
   /** AD4M-specific: Natural-language hint that steers the generic LLM
    *  extractor when producing typed instances from a transcript.  Emitted
-   *  as an `ad4m://extraction_hint` link on the property shape node and
-   *  surfaced on `ShapeProperty.extraction_hint` by the Rust model query. */
-  extractionHint?: string;
+   *  as an `ad4m://interpretation_hint` link on the property shape node and
+   *  surfaced on `ShapeProperty.interpretation_hint` by the Rust model query. */
+  interpretationHint?: string;
 }
 
 /**
@@ -242,9 +242,9 @@ export class SHACLShape {
 
   /** AD4M-specific: Natural-language hint that steers the generic LLM
    *  extractor when producing instances of this class.  Emitted as an
-   *  `ad4m://extraction_hint` link on the shape node itself and surfaced
-   *  on `ModelShape.extraction_hint` by the Rust model query. */
-  extractionHint?: string;
+   *  `ad4m://interpretation_hint` link on the shape node itself and surfaced
+   *  on `ModelShape.interpretation_hint` by the Rust model query. */
+  interpretationHint?: string;
 
   /**
    * Create a new SHACL Shape
@@ -423,13 +423,13 @@ export class SHACLShape {
       });
     }
 
-    // Class-level extraction hint — read by the Rust model query as
-    // `ModelShape.extraction_hint` and fed to the generic LLM extractor.
-    if (this.extractionHint) {
+    // Class-level interpretation hint — read by the Rust model query as
+    // `ModelShape.interpretation_hint` and fed to the generic LLM extractor.
+    if (this.interpretationHint) {
       links.push({
         source: this.nodeShapeUri,
-        predicate: "ad4m://extraction_hint",
-        target: `literal:string:${this.extractionHint}`
+        predicate: "ad4m://interpretation_hint",
+        target: `literal:string:${this.interpretationHint}`
       });
     }
 
@@ -659,11 +659,11 @@ export class SHACLShape {
         });
       }
 
-      if (prop.extractionHint) {
+      if (prop.interpretationHint) {
         links.push({
           source: propShapeId,
-          predicate: "ad4m://extraction_hint",
-          target: `literal:string:${prop.extractionHint}`
+          predicate: "ad4m://interpretation_hint",
+          target: `literal:string:${prop.interpretationHint}`
         });
       }
     }
@@ -708,12 +708,12 @@ export class SHACLShape {
       }
     }
 
-    // Class-level extraction hint (mirror of the emit in toLinks())
+    // Class-level interpretation hint (mirror of the emit in toLinks())
     const classHintLink = links.find(l =>
-      l.source === shapeUri && l.predicate === "ad4m://extraction_hint"
+      l.source === shapeUri && l.predicate === "ad4m://interpretation_hint"
     );
     if (classHintLink) {
-      shape.extractionHint = classHintLink.target.replace(
+      shape.interpretationHint = classHintLink.target.replace(
         /^literal:\/\/string:|^literal:string:/, ''
       );
     }
@@ -970,11 +970,11 @@ export class SHACLShape {
         prop.filter = val === 'true';
       }
 
-      const extractionHintLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://extraction_hint"
+      const interpretationHintLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://interpretation_hint"
       );
-      if (extractionHintLink) {
-        prop.extractionHint = extractionHintLink.target.replace(
+      if (interpretationHintLink) {
+        prop.interpretationHint = interpretationHintLink.target.replace(
           /^literal:\/\/string:|^literal:string:/, ''
         );
       }
@@ -1018,7 +1018,7 @@ export class SHACLShape {
       node_shape_uri: this.nodeShapeUri,
       target_class: this.targetClass,
       parent_shapes: this.parentShapes.length > 0 ? this.parentShapes : undefined,
-      extraction_hint: this.extractionHint,
+      interpretation_hint: this.interpretationHint,
       properties: this.properties.map(p => ({
         path: p.path,
         name: p.name,
@@ -1046,7 +1046,7 @@ export class SHACLShape {
         where_predicates: p.wherePredicates,
         filter: p.filter,
         transform: p.transform,
-        extraction_hint: p.extractionHint,
+        interpretation_hint: p.interpretationHint,
       })),
       constructor_actions: this.constructor_actions,
       destructor_actions: this.destructor_actions,
@@ -1097,7 +1097,7 @@ export class SHACLShape {
         wherePredicates: p.where_predicates,
         filter: p.filter,
         transform: p.transform,
-        extractionHint: p.extraction_hint,
+        interpretationHint: p.interpretation_hint,
       });
     }
 
@@ -1112,8 +1112,8 @@ export class SHACLShape {
         shape.addParentShape(ps);
       }
     }
-    if (json.extraction_hint) {
-      shape.extractionHint = json.extraction_hint;
+    if (json.interpretation_hint) {
+      shape.interpretationHint = json.interpretation_hint;
     }
 
     return shape;

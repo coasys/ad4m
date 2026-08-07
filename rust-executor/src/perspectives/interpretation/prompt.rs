@@ -4,8 +4,8 @@ use crate::perspectives::model_query::types::ModelShape;
 use crate::types::{AIPromptExamples, AITask};
 use std::collections::{HashMap, HashSet};
 
-/// assemble the per-call LLM input from the target shapes' extraction hints
-/// plus the transcript. Pure — this is exactly where `extraction_hint` enters
+/// assemble the per-call LLM input from the target shapes' interpretation hints
+/// plus the transcript. Pure — this is exactly where `interpretation_hint` enters
 /// the prompt. Shape (matches the system prompt):
 /// `{ "classes": [{ "name", "hint", "existing": [title,…],
 ///                  "fields": [{ "name", "required", "hint" }] }],
@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 /// `existing` maps a class's local name to the titles of instances already in
 /// the graph, so the model can avoid re-proposing them (soft dedup; the hard
 /// guarantee is [`filter_already_present`]). Pass an empty map for none.
-pub fn build_extraction_input(
+pub fn build_interpretation_input(
     shapes: &[ModelShape],
     transcript: &[(String, String)],
     existing: &HashMap<String, Vec<String>>,
@@ -41,19 +41,19 @@ pub fn build_extraction_input(
                     serde_json::json!({
                         "name": p.name,
                         "required": p.is_required,
-                        "hint": p.extraction_hint,
+                        "hint": p.interpretation_hint,
                     })
                 })
                 .collect();
             let name = class_local_name(&s.target_class);
             // `"hint"` is the prompt-facing key (short, cheap in tokens and what
             // the system prompt + few-shot examples reference); its value is the
-            // schema's `extractionHint` decorator, surfaced here as
-            // `extraction_hint`. The key name is deliberately not "extractionHint"
+            // schema's `interpretationHint` decorator, surfaced here as
+            // `interpretation_hint`. The key name is deliberately not "interpretationHint"
             // — the LLM never sees the decorator name, only this compact field.
             serde_json::json!({
                 "name": name,
-                "hint": s.extraction_hint,
+                "hint": s.interpretation_hint,
                 "existing": existing.get(name).cloned().unwrap_or_default(),
                 "fields": fields,
             })
@@ -66,14 +66,14 @@ pub fn build_extraction_input(
     serde_json::json!({ "classes": classes, "transcript": turns }).to_string()
 }
 
-/// name under which the generic extraction task is registered with
-/// `AIService`. Kept stable so `ensure_extraction_task` can find it across
+/// name under which the generic interpretation task is registered with
+/// `AIService`. Kept stable so `ensure_interpretation_task` can find it across
 /// executor restarts and multiple callers.
-pub const EXTRACTION_TASK_NAME: &str = "adam://extraction";
+pub const INTERPRETATION_TASK_NAME: &str = "adam://interpretation";
 
-/// system prompt sent with every extraction call. Instance-specific
+/// system prompt sent with every interpretation call. Instance-specific
 /// scaffolding (available classes, their hints, the transcript) is added by
-/// `build_extraction_input`, so this stays stable across calls and the
+/// `build_interpretation_input`, so this stays stable across calls and the
 /// task can be reused.
 pub const EXTRACTION_SYSTEM_PROMPT: &str = "\
 You extract typed instances from a conversation transcript.
@@ -113,13 +113,13 @@ Output rules:
     different item of the same class exists — always extract genuinely new items.
 ";
 
-/// idempotently register the generic extraction task in the AI-task DB.
+/// idempotently register the generic interpretation task in the AI-task DB.
 ///
-/// If a task with `EXTRACTION_TASK_NAME` already exists, returns it unchanged
+/// If a task with `INTERPRETATION_TASK_NAME` already exists, returns it unchanged
 /// (so callers can safely invoke this on every executor startup or before every
-/// extraction run). Otherwise inserts a new row bound to the `\"default\"` LLM
+/// interpretation run). Otherwise inserts a new row bound to the `\"default\"` LLM
 /// model — `AIService::replace_model_variables` resolves this to whatever LLM
-/// the user has configured as default at prompt time, so extraction works with
+/// the user has configured as default at prompt time, so interpretation works with
 /// any model without hard-coding one here.
 ///
 /// DB-only: does not touch the running `AIService`. The runtime path is
@@ -130,8 +130,8 @@ Output rules:
 /// ahead of the real input. Two generic, non-test scenarios that teach the
 /// failure modes small models hit: (1) a belief and a task in the same snippet
 /// must BOTH be captured; (2) a question raised amid tasks must be captured.
-/// Inputs mirror the JSON shape `build_extraction_input` produces.
-fn extraction_examples() -> Vec<AIPromptExamples> {
+/// Inputs mirror the JSON shape `build_interpretation_input` produces.
+fn interpretation_examples() -> Vec<AIPromptExamples> {
     let ex1_in = serde_json::json!({
         "classes": [
             {"name":"Task","hint":"An action someone commits to doing.","existing":[],
@@ -184,23 +184,23 @@ fn extraction_examples() -> Vec<AIPromptExamples> {
     ]
 }
 
-pub fn ensure_extraction_task() -> anyhow::Result<AITask> {
+pub fn ensure_interpretation_task() -> anyhow::Result<AITask> {
     if let Some(existing) = Ad4mDb::with_global_instance(|db| db.get_tasks())?
         .into_iter()
-        .find(|t| t.name == EXTRACTION_TASK_NAME)
+        .find(|t| t.name == INTERPRETATION_TASK_NAME)
     {
         return Ok(existing);
     }
     let task_id = Ad4mDb::with_global_instance(|db| {
         db.add_task(
-            EXTRACTION_TASK_NAME.to_string(),
+            INTERPRETATION_TASK_NAME.to_string(),
             "default".to_string(),
             EXTRACTION_SYSTEM_PROMPT.to_string(),
-            extraction_examples(),
+            interpretation_examples(),
             None,
         )
     })?;
     let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
-        .ok_or_else(|| anyhow::anyhow!("extraction task vanished immediately after insert"))?;
+        .ok_or_else(|| anyhow::anyhow!("interpretation task vanished immediately after insert"))?;
     Ok(task)
 }

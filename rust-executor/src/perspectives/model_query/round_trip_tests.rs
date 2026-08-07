@@ -427,16 +427,16 @@ fn round_trip_preserves_empty_resolve_language() {
     );
 }
 
-/// S1 (generic-extraction): the natural-language extraction hint declared on a
+/// S1 (generic-interpretation): the natural-language interpretation hint declared on a
 /// subject class and its properties must survive the writer → store → loader
-/// round-trip and surface on `ModelShape.extraction_hint` /
-/// `ShapeProperty.extraction_hint`, so the generic LLM extractor can read them
+/// round-trip and surface on `ModelShape.interpretation_hint` /
+/// `ShapeProperty.interpretation_hint`, so the generic LLM extractor can read them
 /// via `get_shape` without re-querying the SHACL graph.
 #[test]
-fn round_trip_surfaces_extraction_hint_on_class_and_property() {
+fn round_trip_surfaces_interpretation_hint_on_class_and_property() {
     let shacl_json = r#"{
         "target_class": "ns://Intention",
-        "extraction_hint": "A concrete unit of work someone intends to do. Extract when there is an actionable outcome with a plausible owner; ignore vague aspirations.",
+        "interpretation_hint": "A concrete unit of work someone intends to do. Extract when there is an actionable outcome with a plausible owner; ignore vague aspirations.",
         "properties": [
             {
                 "path": "ns://title",
@@ -444,16 +444,16 @@ fn round_trip_surfaces_extraction_hint_on_class_and_property() {
                 "datatype": "xsd://string",
                 "min_count": 1,
                 "max_count": 1,
-                "extraction_hint": "Imperative one-line summary of the work, e.g. 'Extract LLM processing from Flux'."
+                "interpretation_hint": "Imperative one-line summary of the work, e.g. 'Extract LLM processing from Flux'."
             }
         ]
     }"#;
     let shape = round_trip("Intention", shacl_json);
 
     assert_eq!(
-        shape.extraction_hint.as_deref(),
+        shape.interpretation_hint.as_deref(),
         Some("A concrete unit of work someone intends to do. Extract when there is an actionable outcome with a plausible owner; ignore vague aspirations."),
-        "class-level extraction hint should surface on ModelShape",
+        "class-level interpretation hint should surface on ModelShape",
     );
 
     let title = shape
@@ -462,16 +462,16 @@ fn round_trip_surfaces_extraction_hint_on_class_and_property() {
         .find(|p| p.name == "title")
         .expect("title property");
     assert_eq!(
-        title.extraction_hint.as_deref(),
+        title.interpretation_hint.as_deref(),
         Some("Imperative one-line summary of the work, e.g. 'Extract LLM processing from Flux'."),
-        "per-property extraction hint should surface on ShapeProperty",
+        "per-property interpretation hint should surface on ShapeProperty",
     );
 }
 
 /// Absence of a hint must round-trip to `None` (no spurious link, no empty
 /// string) — the extractor treats `None` as "no guidance for this field".
 #[test]
-fn round_trip_absent_extraction_hint_is_none() {
+fn round_trip_absent_interpretation_hint_is_none() {
     let shacl_json = r#"{
         "target_class": "ns://Plain",
         "properties": [
@@ -480,8 +480,8 @@ fn round_trip_absent_extraction_hint_is_none() {
     }"#;
     let shape = round_trip("Plain", shacl_json);
     assert!(
-        shape.extraction_hint.is_none(),
-        "no class hint declared → ModelShape.extraction_hint must be None",
+        shape.interpretation_hint.is_none(),
+        "no class hint declared → ModelShape.interpretation_hint must be None",
     );
     let name = shape
         .properties
@@ -489,7 +489,7 @@ fn round_trip_absent_extraction_hint_is_none() {
         .find(|p| p.name == "name")
         .expect("name property");
     assert!(
-        name.extraction_hint.is_none(),
-        "no property hint declared → ShapeProperty.extraction_hint must be None",
+        name.interpretation_hint.is_none(),
+        "no property hint declared → ShapeProperty.interpretation_hint must be None",
     );
 }

@@ -25,7 +25,7 @@ pub(crate) fn normalize_identity(s: &str) -> String {
 /// Deterministic dedup safety-net (pure): drop proposed instances whose
 /// (class, identity-value) already exists in the graph, compared under
 /// [`normalize_identity`]. This is the hard guarantee behind the soft
-/// `existing` hint in [`build_extraction_input`] — even if the model
+/// `existing` hint in [`build_interpretation_input`] — even if the model
 /// re-proposes a known item, it never becomes a link.
 ///
 /// `existing` maps a class's local name to the already-present identity
@@ -64,7 +64,7 @@ pub fn filter_already_present(
                 .unwrap_or(false);
             if already {
                 log::debug!(
-                    "extraction: dropping already-present {} '{}'",
+                    "interpretation: dropping already-present {} '{}'",
                     inst.class,
                     value
                 );
@@ -89,7 +89,7 @@ pub(crate) fn class_local_name(target_class: &str) -> &str {
 ///
 /// Kept intentionally small — flows/channel-aware traversal is deferred to a
 /// later PR. Callers that already have a curated `Vec<(speaker, text)>` should
-/// pass it straight to [`run_extraction`] and skip this helper.
+/// pass it straight to [`run_interpretation`] and skip this helper.
 pub async fn gather_transcript(
     perspective: &PerspectiveInstance,
     source: &str,
@@ -128,7 +128,7 @@ fn decode_literal_string(uri: &str) -> Option<String> {
 
 /// read the identity values of instances already present in the perspective
 /// for each target class, keyed by the class's local name. Used to steer the
-/// LLM away from re-proposing known items ([`build_extraction_input`]) and to
+/// LLM away from re-proposing known items ([`build_interpretation_input`]) and to
 /// enforce dedup deterministically ([`filter_already_present`]).
 ///
 /// The dedup key is whichever property the class declares as its `identity`

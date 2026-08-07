@@ -1,30 +1,30 @@
-//! Real-LLM end-to-end tests for generic extraction.
+//! Real-LLM end-to-end tests for generic interpretation.
 //!
 //! These are the "look, the whole thing works" tests: a transcript goes in, a
 //! real local model runs, and typed SoA instances come out and are persisted.
-//! Split into their own file (from the pure unit tests in `extraction.rs`) so a
+//! Split into their own file (from the pure unit tests in `interpretation.rs`) so a
 //! reviewer can read *just this* to understand what the feature does end-to-end.
 //!
 //! They talk to an OpenAI-compatible endpoint (Ollama), NOT the embedded CUDA
 //! LLM — so no GPU build is needed, only a reachable model. Endpoint + model are
-//! env-overridable (`EXTRACTION_E2E_BASE_URL` / `EXTRACTION_E2E_MODEL` /
-//! `EXTRACTION_E2E_API_KEY`); defaults hit Ollama at `localhost:11434` with
+//! env-overridable (`INTERPRETATION_E2E_BASE_URL` / `INTERPRETATION_E2E_MODEL` /
+//! `INTERPRETATION_E2E_API_KEY`); defaults hit Ollama at `localhost:11434` with
 //! `gemma3:12b` (fits the GPU, ~10s for the suite, Flux's summary model). On CI
 //! (self-hosted runner = Marvin) that endpoint is local; from a dev box, tunnel
 //! it (`ssh -L 11434:localhost:11434 marvin`).
 //!
 //! Requires that endpoint to be up — they are NOT `#[ignore]`d, so a `cargo test`
 //! with no model reachable will fail here by design (that is the CI signal).
-//! Run just this suite: `cargo test --release --lib perspectives::extraction_e2e
+//! Run just this suite: `cargo test --release --lib perspectives::interpretation_e2e
 //! -- --test-threads=1 --nocapture`.
 
 #![cfg(test)]
 
-use super::extraction_test_support::*;
+use super::interpretation_test_support::*;
 
 // ---- create_subject write path (no LLM — runs without Ollama) ---------------
 
-/// The extraction write path goes through `create_subject`. This proves the
+/// The interpretation write path goes through `create_subject`. This proves the
 /// SDNA fixtures are real subject classes: constructor mints the type flag, the
 /// `title` setter writes a literal that round-trips back through
 /// `parse_literal_value`. Calls no AIService, so it runs with no model up.
@@ -33,7 +33,7 @@ async fn create_subject_roundtrips_soa_instance() {
     use crate::perspectives::perspective_instance::SubjectClassOption;
     use crate::types::LinkQuery;
     let (mut perspective, _shapes, ctx) =
-        setup_extraction_e2e(&[("Intention", INTENTION_SDNA)]).await;
+        setup_interpretation_e2e(&[("Intention", INTENTION_SDNA)]).await;
     let base = "soa://ext/intention/rt-test";
     perspective
         .create_subject(
@@ -73,7 +73,7 @@ async fn create_subject_roundtrips_soa_instance() {
     );
 }
 
-// ---- basic per-class extraction (DRY via the shared `run_e2e` harness) ------
+// ---- basic per-class interpretation (DRY via the shared `run_e2e` harness) ------
 
 /// Intention + Belief: an intent with an owner and a claim.
 #[tokio::test]
@@ -242,8 +242,8 @@ async fn e2e_longer_standup_conversation() {
             ("Nico", "Josh, can you draft the conflict-resolution design doc by Thursday?"),
             ("Josh", "Sure, I'll write up the CRDT-vs-lattice comparison and share it."),
             ("Nico", "The long game is a network where every community runs its own Eve and they federate."),
-            ("James", "Concretely, the plan is: land extraction, then flows, then the Synergy ledger."),
-            ("Nico", "The extraction e2e suite is now green on Marvin, by the way."),
+            ("James", "Concretely, the plan is: land interpretation, then flows, then the Synergy ledger."),
+            ("Nico", "The interpretation e2e suite is now green on Marvin, by the way."),
         ],
         3,
         |c| c.get("task").copied().unwrap_or(0) >= 1,
@@ -266,7 +266,7 @@ async fn e2e_longer_standup_conversation() {
         counts.get("question").copied().unwrap_or(0) >= 1,
         "the concurrency question should be captured; got {counts:?}"
     );
-    // Distinct modalities: a good extraction spans more than one class here.
+    // Distinct modalities: a good interpretation spans more than one class here.
     assert!(
         counts.len() >= 3,
         "expected >=3 distinct classes across a rich transcript; got {counts:?}"
@@ -275,13 +275,13 @@ async fn e2e_longer_standup_conversation() {
 
 // ---- selector against a non-empty graph -------------------------------------
 
-/// Extraction into a perspective that already holds an unrelated graph. The
+/// Interpretation into a perspective that already holds an unrelated graph. The
 /// selector must still place NEW instances correctly (fresh bases under
 /// `soa://ext/`) without disturbing or colliding with the pre-existing nodes.
 #[tokio::test]
 async fn e2e_selector_over_prepopulated_graph() {
     let (mut perspective, shapes, ctx) =
-        setup_extraction_e2e(&[("Task", TASK_SDNA), ("Belief", BELIEF_SDNA)]).await;
+        setup_interpretation_e2e(&[("Task", TASK_SDNA), ("Belief", BELIEF_SDNA)]).await;
     let task_shape = &shapes[0];
     let belief_shape = &shapes[1];
 
@@ -311,17 +311,17 @@ async fn e2e_selector_over_prepopulated_graph() {
     )
     .await;
 
-    let placements = run_extraction_e2e(
+    let placements = run_interpretation_e2e(
         &mut perspective,
         &shapes,
         &[
             (
                 "Nico",
-                "James, please write the integration test for the extraction websocket endpoint.",
+                "James, please write the integration test for the interpretation websocket endpoint.",
             ),
             (
                 "James",
-                "On it — I'll add the WS runExtraction test this afternoon.",
+                "On it — I'll add the WS runInterpretation test this afternoon.",
             ),
         ],
         &ctx,
@@ -329,7 +329,7 @@ async fn e2e_selector_over_prepopulated_graph() {
     .await;
     assert_persisted(&perspective, &shapes, &placements).await;
 
-    // New instances land under the extraction prefix, never on the seeded bases.
+    // New instances land under the interpretation prefix, never on the seeded bases.
     // (Where an instance is *minted* is inherently a placement property, so these
     // two checks stay on `placements`.)
     assert!(
@@ -342,7 +342,7 @@ async fn e2e_selector_over_prepopulated_graph() {
         placements
             .iter()
             .all(|(base, _)| !base.starts_with("soa://existing/")),
-        "extraction must not overwrite pre-existing instance bases"
+        "interpretation must not overwrite pre-existing instance bases"
     );
     // And it should have found the new task in the conversation: the graph now
     // holds the 2 seeded tasks plus at least one freshly extracted one.
@@ -358,19 +358,19 @@ async fn e2e_selector_over_prepopulated_graph() {
         titles
             .iter()
             .any(|t| t.contains("migrate the shacl parser")),
-        "seeded task must survive extraction; got {titles:?}"
+        "seeded task must survive interpretation; got {titles:?}"
     );
 }
 
 // ---- dedup: don't recreate what's already in the graph ----------------------
 
-/// Pre-seed a Task, then run extraction on a transcript that *restates* that
+/// Pre-seed a Task, then run interpretation on a transcript that *restates* that
 /// same task and adds a genuinely new one. The existing task must NOT be
 /// recreated (deterministic guarantee via `filter_already_present`), while the
 /// new task is.
 #[tokio::test]
 async fn e2e_does_not_recreate_existing_task() {
-    let (mut perspective, shapes, ctx) = setup_extraction_e2e(&[("Task", TASK_SDNA)]).await;
+    let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
     let task_shape = &shapes[0];
 
     let existing_title = "Finish the WebRTC call module";
@@ -383,7 +383,7 @@ async fn e2e_does_not_recreate_existing_task() {
     )
     .await;
 
-    let placements = run_extraction_e2e(
+    let placements = run_interpretation_e2e(
         &mut perspective,
         &shapes,
         &[

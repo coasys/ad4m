@@ -1,17 +1,17 @@
-//! Shared test scaffolding for the generic-extraction tests.
+//! Shared test scaffolding for the generic-interpretation tests.
 //!
-//! Split out of `extraction.rs` so the pure unit tests there and the real-LLM
-//! e2e suite in `extraction_e2e.rs` share one set of fixtures + one harness
+//! Split out of `interpretation.rs` so the pure unit tests there and the real-LLM
+//! e2e suite in `interpretation_e2e.rs` share one set of fixtures + one harness
 //! (DRY). Nothing here is compiled outside `cfg(test)`.
 //!
 //! The real-LLM harness targets an **OpenAI-compatible endpoint** (Ollama),
-//! env-overridable via `EXTRACTION_E2E_BASE_URL` / `EXTRACTION_E2E_MODEL` /
-//! `EXTRACTION_E2E_API_KEY`; the defaults hit Ollama at `localhost:11434`
+//! env-overridable via `INTERPRETATION_E2E_BASE_URL` / `INTERPRETATION_E2E_MODEL` /
+//! `INTERPRETATION_E2E_API_KEY`; the defaults hit Ollama at `localhost:11434`
 //! (directly on the CI runner = Marvin, or over an SSH tunnel from a dev box).
 
 #![cfg(test)]
 
-use super::extraction::{class_local_name, run_extraction};
+use super::interpretation::{class_local_name, run_interpretation};
 use super::model_query::shape::load_shape;
 use super::model_query::types::ModelShape;
 use super::perspective_instance::{PerspectiveInstance, SdnaType, SubjectClassOption};
@@ -31,37 +31,37 @@ pub(crate) fn ensure_db_init() {
     });
 }
 
-// ---- SoA class fixtures (one `extraction_hint` per class + per property) ----
+// ---- SoA class fixtures (one `interpretation_hint` per class + per property) ----
 
 pub(crate) const BELIEF_SDNA: &str = r#"{
   "target_class":"ns://Belief",
-  "extraction_hint":"A claim a participant holds to be true about the world or the group. Not a task or a question.",
+  "interpretation_hint":"A claim a participant holds to be true about the world or the group. Not a task or a question.",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://belief"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://belief","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"One-sentence statement in the claimant's framing.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"One-sentence statement in the claimant's framing.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
   ]
 }"#;
 
 pub(crate) const INTENTION_SDNA: &str = r#"{
   "target_class":"ns://Intention",
-  "extraction_hint":"Something a participant commits to doing - an actionable outcome with a plausible owner.",
+  "interpretation_hint":"Something a participant commits to doing - an actionable outcome with a plausible owner.",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://intention"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://intention","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the work.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
-    {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Who committed to it, if stated.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]}
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"Imperative summary of the work.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","interpretation_hint":"Who committed to it, if stated.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]}
   ]
 }"#;
 
 pub(crate) const TASK_SDNA: &str = r#"{
   "target_class":"ns://Task",
-  "extraction_hint":"A concrete, actionable unit of work to be done, ideally with an owner. Not a belief or a vague aspiration.",
+  "interpretation_hint":"A concrete, actionable unit of work to be done, ideally with an owner. Not a belief or a vague aspiration.",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://task"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
-    {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Person responsible for the task, if stated.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]}
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"Imperative summary of the task.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","interpretation_hint":"Person responsible for the task, if stated.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]}
   ]
 }"#;
 
@@ -70,58 +70,58 @@ pub(crate) const TASK_SDNA: &str = r#"{
 /// `properties` and `include_relations`; the extractor must exclude it.
 pub(crate) const TASK_WITH_RELATION_SDNA: &str = r#"{
   "target_class":"ns://Task",
-  "extraction_hint":"A concrete, actionable unit of work to be done.",
+  "interpretation_hint":"A concrete, actionable unit of work to be done.",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://task"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
-    {"path":"ns://blocks","name":"blocks","relation_kind":"hasMany","target_class_name":"Task","class":"ns://TaskShape","extraction_hint":"Other tasks this one blocks."}
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"Imperative summary of the task.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://blocks","name":"blocks","relation_kind":"hasMany","target_class_name":"Task","class":"ns://TaskShape","interpretation_hint":"Other tasks this one blocks."}
   ]
 }"#;
 
 pub(crate) const OBSERVATION_SDNA: &str = r#"{
   "target_class":"ns://Observation",
-  "extraction_hint":"A factual observation or reported state of the world or system - something seen, measured or reported, not an opinion, plan or task.",
+  "interpretation_hint":"A factual observation or reported state of the world or system - something seen, measured or reported, not an opinion, plan or task.",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://observation"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://observation","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The observed fact, stated plainly.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"The observed fact, stated plainly.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
   ]
 }"#;
 
 pub(crate) const QUESTION_SDNA: &str = r#"{
   "target_class":"ns://Question",
-  "extraction_hint":"An open question raised in the conversation that still needs an answer.",
+  "interpretation_hint":"An open question raised in the conversation that still needs an answer.",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://question"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://question","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The question, phrased as a question.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"The question, phrased as a question.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
   ]
 }"#;
 
 pub(crate) const VISION_SDNA: &str = r#"{
   "target_class":"ns://Vision",
-  "extraction_hint":"A long-term aspiration or desired future state - directional and motivating, not a concrete task or plan.",
+  "interpretation_hint":"A long-term aspiration or desired future state - directional and motivating, not a concrete task or plan.",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://vision"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://vision","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The aspiration, stated concisely.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"The aspiration, stated concisely.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
   ]
 }"#;
 
 pub(crate) const PLAN_SDNA: &str = r#"{
   "target_class":"ns://Plan",
-  "extraction_hint":"A concrete approach or sequence of steps intended to achieve a goal.",
+  "interpretation_hint":"A concrete approach or sequence of steps intended to achieve a goal.",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://plan"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://plan","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Summary of the plan or approach.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
-    {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Who owns the plan, if stated.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]}
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"Summary of the plan or approach.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","interpretation_hint":"Who owns the plan, if stated.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]}
   ]
 }"#;
 
 /// Build a `ModelShape` via the real writer -> store -> loader path, so the
-/// class/property `extraction_hint`s are actually populated (the direct JSON
+/// class/property `interpretation_hint`s are actually populated (the direct JSON
 /// path sets them to `None`).
 pub(crate) fn shape_from_sdna(class: &str, sdna: &str) -> ModelShape {
     let store = SparqlStore::new(None).unwrap();
@@ -163,8 +163,8 @@ pub(crate) fn shape_from_sdna(class: &str, sdna: &str) -> ModelShape {
 
 /// Stand up `AIService` with the Ollama-backed default model plus a fresh
 /// private perspective and the given SoA classes. Returns everything a test
-/// needs to drive extraction (optionally after pre-seeding the perspective).
-pub(crate) async fn setup_extraction_e2e(
+/// needs to drive interpretation (optionally after pre-seeding the perspective).
+pub(crate) async fn setup_interpretation_e2e(
     class_sdnas: &[(&str, &str)],
 ) -> (PerspectiveInstance, Vec<ModelShape>, AgentContext) {
     use crate::agent::AgentService;
@@ -186,18 +186,18 @@ pub(crate) async fn setup_extraction_e2e(
     let service = AIService::global_instance()
         .await
         .expect("AIService global instance");
-    let base_url = std::env::var("EXTRACTION_E2E_BASE_URL")
+    let base_url = std::env::var("INTERPRETATION_E2E_BASE_URL")
         .unwrap_or_else(|_| "http://localhost:11434/v1".into());
-    let model = std::env::var("EXTRACTION_E2E_MODEL").unwrap_or_else(|_| "gemma3:12b".into());
-    eprintln!("[e2e] extraction against model '{model}' at {base_url}");
+    let model = std::env::var("INTERPRETATION_E2E_MODEL").unwrap_or_else(|_| "gemma3:12b".into());
+    eprintln!("[e2e] interpretation against model '{model}' at {base_url}");
     let model_id = service
         .add_model(ModelInput {
-            name: "e2e extraction LLM".into(),
+            name: "e2e interpretation LLM".into(),
             model_type: ModelType::Llm,
             local: None,
             api: Some(ModelApiInput {
                 base_url,
-                api_key: std::env::var("EXTRACTION_E2E_API_KEY")
+                api_key: std::env::var("INTERPRETATION_E2E_API_KEY")
                     .unwrap_or_else(|_| "ollama".into()),
                 model,
                 api_type: crate::types::ModelApiType::OpenAi.to_string(),
@@ -213,7 +213,7 @@ pub(crate) async fn setup_extraction_e2e(
     let mut perspective = PerspectiveInstance::new(
         PerspectiveHandle {
             uuid: uuid::Uuid::new_v4().to_string(),
-            name: Some("Extraction e2e".into()),
+            name: Some("Interpretation e2e".into()),
             shared_url: None,
             neighbourhood: None,
             state: PerspectiveState::Private,
@@ -251,9 +251,9 @@ pub(crate) async fn setup_extraction_e2e(
     (perspective, shapes, ctx)
 }
 
-/// Run extraction against the real LLM under the standard `soa://ext/` prefix,
+/// Run interpretation against the real LLM under the standard `soa://ext/` prefix,
 /// writing `Local` links, and dump the placements for the test log.
-pub(crate) async fn run_extraction_e2e(
+pub(crate) async fn run_interpretation_e2e(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
     transcript: &[(&str, &str)],
@@ -263,9 +263,9 @@ pub(crate) async fn run_extraction_e2e(
         .iter()
         .map(|(s, t)| (s.to_string(), t.to_string()))
         .collect();
-    let placements = run_extraction(perspective, shapes, &transcript, "soa://ext/", ctx)
+    let placements = run_interpretation(perspective, shapes, &transcript, "soa://ext/", ctx)
         .await
-        .expect("run_extraction against real LLM to succeed");
+        .expect("run_interpretation against real LLM to succeed");
     print_placements(&placements);
     placements
 }
@@ -281,12 +281,12 @@ pub(crate) async fn run_e2e(
     Vec<ModelShape>,
     Vec<(String, Vec<Link>)>,
 ) {
-    let (mut perspective, shapes, ctx) = setup_extraction_e2e(class_sdnas).await;
-    let placements = run_extraction_e2e(&mut perspective, &shapes, transcript, &ctx).await;
+    let (mut perspective, shapes, ctx) = setup_interpretation_e2e(class_sdnas).await;
+    let placements = run_interpretation_e2e(&mut perspective, &shapes, transcript, &ctx).await;
     (perspective, shapes, placements)
 }
 
-/// Like [`run_e2e`], but retries the whole extraction up to `attempts` times
+/// Like [`run_e2e`], but retries the whole interpretation up to `attempts` times
 /// until `ok(&graph_count_by_type)` holds — a guard for LLM non-determinism on
 /// borderline classifications (e.g. gemma3 occasionally files an action item as
 /// `intention` instead of `task`). Returns the first satisfying run, or the last
@@ -331,7 +331,7 @@ pub(crate) fn print_placements(placements: &[(String, Vec<Link>)]) {
 }
 
 /// Pre-seed the perspective with an already-existing typed instance (its
-/// type-flag + a `title`) via `create_subject`, the same write path extraction
+/// type-flag + a `title`) via `create_subject`, the same write path interpretation
 /// uses. Used to test the selector against a non-empty graph and dedup against
 /// existing state.
 pub(crate) async fn seed_instance(
@@ -361,7 +361,7 @@ pub(crate) async fn seed_instance(
 // These read the *final graph state* through `PerspectiveInstance::model_query`
 // — the symmetric counterpart to the write side (`create_subject`) and the read
 // side (`existing_instance_identities`) — rather than inspecting the placement links
-// `run_extraction` returned. Tests assert what's actually persisted in the
+// `run_interpretation` returned. Tests assert what's actually persisted in the
 // perspective, decoded through each class's own shape/getters.
 
 /// Read back the instances of `class` via the model-query API, requesting the

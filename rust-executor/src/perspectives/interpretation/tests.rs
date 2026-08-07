@@ -1,16 +1,16 @@
 use super::*;
 use crate::db::Ad4mDb;
-use crate::perspectives::extraction_test_support::*;
+use crate::perspectives::interpretation_test_support::*;
 use crate::types::AITask;
 use std::collections::HashMap;
 
 #[test]
-fn extraction_hint_lands_in_prompt() {
+fn interpretation_hint_lands_in_prompt() {
     let shapes = vec![
         shape_from_sdna("Belief", BELIEF_SDNA),
         shape_from_sdna("Intention", INTENTION_SDNA),
     ];
-    let input = build_extraction_input(
+    let input = build_interpretation_input(
         &shapes,
         &[(
             "Nico".into(),
@@ -63,7 +63,7 @@ fn parses_clean_json_array() {
           {"class":"Intention","title":"Extract LLM processing from Flux into ADAM","owner":"Nico"},
           {"class":"Belief","title":"Graph viz is the hardest part"}
         ]"#;
-    let out = parse_extraction_response(raw).unwrap();
+    let out = parse_interpretation_response(raw).unwrap();
     assert_eq!(out.len(), 2);
     assert_eq!(out[0].class, "Intention");
     assert_eq!(out[0].props.get("owner").unwrap().as_str(), Some("Nico"));
@@ -79,7 +79,7 @@ fn parses_clean_json_array() {
 #[test]
 fn strips_code_fences() {
     let raw = "```json\n[{\"class\":\"Belief\",\"title\":\"X\"}]\n```";
-    let out = parse_extraction_response(raw).unwrap();
+    let out = parse_interpretation_response(raw).unwrap();
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].class, "Belief");
 }
@@ -88,7 +88,7 @@ fn strips_code_fences() {
 fn strips_think_block() {
     let raw =
             "<think>Let me find the intentions...</think>\n[{\"class\":\"Intention\",\"title\":\"Do X\"}]";
-    let out = parse_extraction_response(raw).unwrap();
+    let out = parse_interpretation_response(raw).unwrap();
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].class, "Intention");
 }
@@ -99,30 +99,30 @@ fn tolerates_trailing_commas() {
           {"class":"Task","title":"A",},
           {"class":"Task","title":"B"},
         ]"#;
-    let out = parse_extraction_response(raw).unwrap();
+    let out = parse_interpretation_response(raw).unwrap();
     assert_eq!(out.len(), 2);
     assert_eq!(titles(&out), vec!["A", "B"]);
 }
 
 #[test]
 fn empty_array_yields_no_instances() {
-    assert!(parse_extraction_response("[]").unwrap().is_empty());
+    assert!(parse_interpretation_response("[]").unwrap().is_empty());
     // and empty inside a fence / with whitespace
-    assert!(parse_extraction_response("```json\n[]\n```")
+    assert!(parse_interpretation_response("```json\n[]\n```")
         .unwrap()
         .is_empty());
 }
 
 #[test]
 fn garbage_is_an_error_not_a_panic() {
-    assert!(parse_extraction_response("not json at all").is_err());
+    assert!(parse_interpretation_response("not json at all").is_err());
 }
 
 // ---- relation exclusion ------------------------------------------
 
 #[test]
-fn relation_properties_are_excluded_from_extraction() {
-    // A shape whose extraction hint also declares a link-typed relation
+fn relation_properties_are_excluded_from_interpretation() {
+    // A shape whose interpretation hint also declares a link-typed relation
     // (`blocks`). load_shape lists that relation in `properties` too, so
     // without the guard it would be offered to the LLM and — if the LLM
     // emits it — written through value_to_literal_uri as a bogus literal.
@@ -137,8 +137,8 @@ fn relation_properties_are_excluded_from_extraction() {
         "load_shape is expected to also list the relation in properties"
     );
 
-    // 1. build_extraction_input must not offer the relation as a field.
-    let input = build_extraction_input(
+    // 1. build_interpretation_input must not offer the relation as a field.
+    let input = build_interpretation_input(
         &[shape.clone()],
         &[("Nico".into(), "block it".into())],
         &HashMap::new(),
@@ -158,7 +158,7 @@ fn relation_properties_are_excluded_from_extraction() {
 }
 
 #[test]
-fn ensure_extraction_task_registers_and_is_idempotent() {
+fn ensure_interpretation_task_registers_and_is_idempotent() {
     ensure_db_init();
 
     // Guard: some other test may have inserted the row already; wipe just
@@ -167,37 +167,41 @@ fn ensure_extraction_task_registers_and_is_idempotent() {
     let existing: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
         .unwrap()
         .into_iter()
-        .filter(|t| t.name == EXTRACTION_TASK_NAME)
+        .filter(|t| t.name == INTERPRETATION_TASK_NAME)
         .collect();
     for t in existing {
         Ad4mDb::with_global_instance(|db| db.remove_task(t.task_id.clone())).unwrap();
     }
 
-    let first = ensure_extraction_task().unwrap();
-    assert_eq!(first.name, EXTRACTION_TASK_NAME);
+    let first = ensure_interpretation_task().unwrap();
+    assert_eq!(first.name, INTERPRETATION_TASK_NAME);
     assert_eq!(first.model_id, "default");
     assert!(first.system_prompt.contains("You extract typed instances"));
     assert!(!first.task_id.is_empty());
 
     // Second call must find the same row, not insert a duplicate.
-    let second = ensure_extraction_task().unwrap();
+    let second = ensure_interpretation_task().unwrap();
     assert_eq!(first.task_id, second.task_id);
 
     let rows: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
         .unwrap()
         .into_iter()
-        .filter(|t| t.name == EXTRACTION_TASK_NAME)
+        .filter(|t| t.name == INTERPRETATION_TASK_NAME)
         .collect();
-    assert_eq!(rows.len(), 1, "expected exactly one extraction task row");
+    assert_eq!(
+        rows.len(),
+        1,
+        "expected exactly one interpretation task row"
+    );
 }
 
-// ---- retry_extraction_parse --------------------------------------
+// ---- retry_interpretation_parse --------------------------------------
 
 #[tokio::test]
-async fn retry_extraction_parse_succeeds_on_first_attempt() {
+async fn retry_interpretation_parse_succeeds_on_first_attempt() {
     let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
     let attempts_clone = attempts.clone();
-    let out = retry_extraction_parse(move |_| {
+    let out = retry_interpretation_parse(move |_| {
         let a = attempts_clone.clone();
         async move {
             a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -211,12 +215,12 @@ async fn retry_extraction_parse_succeeds_on_first_attempt() {
 }
 
 #[tokio::test]
-async fn retry_extraction_parse_recovers_after_bad_parse() {
+async fn retry_interpretation_parse_recovers_after_bad_parse() {
     // First attempt returns unparseable garbage; second returns valid JSON.
-    // retry_extraction_parse must call again and succeed within budget.
+    // retry_interpretation_parse must call again and succeed within budget.
     let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
     let attempts_clone = attempts.clone();
-    let out = retry_extraction_parse(move |_| {
+    let out = retry_interpretation_parse(move |_| {
         let a = attempts_clone.clone();
         async move {
             let n = a.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
@@ -234,12 +238,12 @@ async fn retry_extraction_parse_recovers_after_bad_parse() {
 }
 
 #[tokio::test]
-async fn retry_extraction_parse_fails_after_max_attempts() {
-    // Every attempt returns garbage → we exhaust EXTRACTION_MAX_ATTEMPTS
+async fn retry_interpretation_parse_fails_after_max_attempts() {
+    // Every attempt returns garbage → we exhaust INTERPRETATION_MAX_ATTEMPTS
     // and propagate the last parse error rather than looping forever.
     let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
     let attempts_clone = attempts.clone();
-    let result: anyhow::Result<Vec<ProposedInstance>> = retry_extraction_parse(move |_| {
+    let result: anyhow::Result<Vec<ProposedInstance>> = retry_interpretation_parse(move |_| {
         let a = attempts_clone.clone();
         async move {
             a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -250,7 +254,7 @@ async fn retry_extraction_parse_fails_after_max_attempts() {
     assert!(result.is_err());
     assert_eq!(
         attempts.load(std::sync::atomic::Ordering::SeqCst),
-        EXTRACTION_MAX_ATTEMPTS
+        INTERPRETATION_MAX_ATTEMPTS
     );
 }
 
@@ -261,7 +265,7 @@ fn filter_already_present_drops_known_titles() {
     // whitespace normalization, one is new, and a same-title item of a
     // DIFFERENT class (which has no identity here) is untouched (dedup is per
     // class, and only for classes with a declared identity).
-    let proposed = parse_extraction_response(
+    let proposed = parse_interpretation_response(
         r#"[
               {"class":"Task","title":"Ship the MVP"},
               {"class":"Task","title":"  ship   the   mvp  "},

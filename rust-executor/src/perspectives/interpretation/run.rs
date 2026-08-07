@@ -1,6 +1,7 @@
 use super::{
-    build_extraction_input, class_local_name, ensure_extraction_task, existing_instance_identities,
-    filter_already_present, identity_property, parse_extraction_response, ProposedInstance,
+    build_interpretation_input, class_local_name, ensure_interpretation_task,
+    existing_instance_identities, filter_already_present, identity_property,
+    parse_interpretation_response, ProposedInstance,
 };
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::ModelShape;
@@ -9,21 +10,21 @@ use crate::types::{Link, LinkQuery};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-/// Max attempts for [`retry_extraction_parse`]. Mirrors Flux's `LLMutils`
+/// Max attempts for [`retry_interpretation_parse`]. Mirrors Flux's `LLMutils`
 /// retry-×5 loop: local models occasionally emit half-valid JSON, so we ask
 /// again a few times before giving up on the whole call.
-pub const EXTRACTION_MAX_ATTEMPTS: u8 = 5;
+pub const INTERPRETATION_MAX_ATTEMPTS: u8 = 5;
 
-/// run `prompt_fn` up to [`EXTRACTION_MAX_ATTEMPTS`] times, parsing each
-/// response as an extraction JSON payload. Returns the first successful parse;
+/// run `prompt_fn` up to [`INTERPRETATION_MAX_ATTEMPTS`] times, parsing each
+/// response as an interpretation JSON payload. Returns the first successful parse;
 /// the last parse error propagates if every attempt fails. `prompt_fn` is an
 /// async closure so callers can inject anything (real `AIService`, a canned
 /// script, a mock) without a live LLM.
 ///
 /// This is deliberately a thin generic wrapper: it never mutates state, and it
 /// is the only place we tolerate LLM flake. Any bug in prompt assembly should
-/// fail deterministically in [`build_extraction_input`], not here.
-pub async fn retry_extraction_parse<F, Fut>(
+/// fail deterministically in [`build_interpretation_input`], not here.
+pub async fn retry_interpretation_parse<F, Fut>(
     mut prompt_fn: F,
 ) -> anyhow::Result<Vec<ProposedInstance>>
 where
@@ -31,20 +32,20 @@ where
     Fut: std::future::Future<Output = anyhow::Result<String>>,
 {
     let mut last_err: Option<anyhow::Error> = None;
-    for attempt in 1..=EXTRACTION_MAX_ATTEMPTS {
+    for attempt in 1..=INTERPRETATION_MAX_ATTEMPTS {
         let raw = match prompt_fn(attempt).await {
             Ok(r) => r,
             Err(e) => {
-                log::warn!("extraction: prompt attempt {attempt} failed: {e:#}");
+                log::warn!("interpretation: prompt attempt {attempt} failed: {e:#}");
                 last_err = Some(e);
                 continue;
             }
         };
-        match parse_extraction_response(&raw) {
+        match parse_interpretation_response(&raw) {
             Ok(instances) => return Ok(instances),
             Err(e) => {
                 log::warn!(
-                    "extraction: parse attempt {attempt} failed: {e:#}; will retry (max {EXTRACTION_MAX_ATTEMPTS})"
+                    "interpretation: parse attempt {attempt} failed: {e:#}; will retry (max {INTERPRETATION_MAX_ATTEMPTS})"
                 );
                 last_err = Some(e);
             }
@@ -52,14 +53,14 @@ where
     }
     Err(last_err.unwrap_or_else(|| {
         anyhow::anyhow!(
-            "extraction: failed after {EXTRACTION_MAX_ATTEMPTS} attempts with no captured error"
+            "interpretation: failed after {INTERPRETATION_MAX_ATTEMPTS} attempts with no captured error"
         )
     }))
 }
 
-/// end-to-end extraction driver. Wires everything: build the input from
+/// end-to-end interpretation driver. Wires everything: build the input from
 /// shapes' hints + transcript, call `AIService::prompt` on the registered
-/// extraction task, retry parsing up to 5×, then for every proposed instance
+/// interpretation task, retry parsing up to 5×, then for every proposed instance
 /// write it into the perspective via `create_subject` — the same pipeline app
 /// code uses, reading each class's `ad4m://constructor` + per-property
 /// `ad4m://setter` actions from the SDNA. Returns the fresh base URI + links
@@ -67,7 +68,7 @@ where
 ///
 /// The `shapes` argument is exactly the classes to consider — callers pick
 /// which subject classes to extract into (usually all classes carrying an
-/// `extraction_hint`). `base_prefix` is the URI namespace under which new
+/// `interpretation_hint`). `base_prefix` is the URI namespace under which new
 /// instance identities are minted, e.g. `"soa://ext/"`.
 ///
 /// Link status is no longer a caller choice: it now derives from the SDNA's
@@ -75,14 +76,14 @@ where
 /// be registered as real subject classes in the perspective (constructor +
 /// setter actions) or `create_subject` errors with "No SHACL constructor
 /// found".
-pub async fn run_extraction(
+pub async fn run_interpretation(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
     transcript: &[(String, String)],
     base_prefix: &str,
     context: &AgentContext,
 ) -> anyhow::Result<Vec<(String, Vec<Link>)>> {
-    let task = ensure_extraction_task()?;
+    let task = ensure_interpretation_task()?;
     // Dedup context: what the graph already holds, so the model is steered away
     // from re-proposing known items and we can enforce it deterministically.
     // Keyed by each class's declared `identity` property; classes without one
@@ -101,13 +102,13 @@ pub async fn run_extraction(
             })
         })
         .collect();
-    let prompt = build_extraction_input(shapes, transcript, &existing);
+    let prompt = build_interpretation_input(shapes, transcript, &existing);
 
     let service = crate::ai_service::AIService::global_instance()
         .await
-        .map_err(|e| anyhow::anyhow!("run_extraction: AIService not ready: {e:#}"))?;
+        .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
 
-    let instances = retry_extraction_parse(|_attempt| {
+    let instances = retry_interpretation_parse(|_attempt| {
         let service = service.clone();
         let task_id = task.task_id.clone();
         let prompt = prompt.clone();
@@ -129,7 +130,7 @@ pub async fn run_extraction(
     // constructor+setter pipeline app code uses — inside one batch so a
     // mid-write failure can't leave a half-formed instance. Relation-typed
     // properties are excluded from `initial_values`: their targets are instance
-    // URIs, not literals (relation extraction is a later PR).
+    // URIs, not literals (relation interpretation is a later PR).
     let batch_id = perspective.create_batch().await;
     let mut bases: Vec<String> = Vec::new();
     for inst in &instances {
@@ -138,7 +139,7 @@ pub async fn run_extraction(
             .find(|s| class_local_name(&s.target_class) == inst.class)
         else {
             log::debug!(
-                "extraction: dropping proposed instance for unknown class '{}'",
+                "interpretation: dropping proposed instance for unknown class '{}'",
                 inst.class
             );
             continue;
@@ -173,7 +174,7 @@ pub async fn run_extraction(
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "run_extraction: create_subject({}) failed: {e:#}",
+                    "run_interpretation: create_subject({}) failed: {e:#}",
                     inst.class
                 )
             })?;
@@ -182,7 +183,7 @@ pub async fn run_extraction(
     perspective
         .commit_batch(batch_id, context)
         .await
-        .map_err(|e| anyhow::anyhow!("run_extraction: commit_batch failed: {e:#}"))?;
+        .map_err(|e| anyhow::anyhow!("run_interpretation: commit_batch failed: {e:#}"))?;
 
     // Read back the links written per instance, so callers/tests see exactly
     // what landed in the store (proves the write and yields the real targets).
@@ -194,7 +195,9 @@ pub async fn run_extraction(
                 ..Default::default()
             })
             .await
-            .map_err(|e| anyhow::anyhow!("run_extraction: get_links(readback) failed: {e:#}"))?;
+            .map_err(|e| {
+                anyhow::anyhow!("run_interpretation: get_links(readback) failed: {e:#}")
+            })?;
         let links: Vec<Link> = stored.into_iter().map(|d| d.data.clone()).collect();
         out.push((base, links));
     }

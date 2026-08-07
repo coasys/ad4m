@@ -1,8 +1,8 @@
-pub mod extraction;
+pub mod interpretation;
 #[cfg(test)]
-mod extraction_e2e;
+mod interpretation_e2e;
 #[cfg(test)]
-mod extraction_test_support;
+mod interpretation_test_support;
 pub mod memory_diagnostics;
 pub mod migration;
 pub mod model_query;
