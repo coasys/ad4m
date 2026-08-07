@@ -515,9 +515,15 @@ async fn e2e_updates_existing_instance_via_id() {
     )> = None;
     for attempt in 1..=MAX_ATTEMPTS {
         let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
-        seed_instance(&mut perspective, &ctx, &shapes[0], SEEDED_BASE, SEEDED_TITLE).await;
-        let placements =
-            run_interpretation_e2e(&mut perspective, &shapes, &transcript, &ctx).await;
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            SEEDED_BASE,
+            SEEDED_TITLE,
+        )
+        .await;
+        let placements = run_interpretation_e2e(&mut perspective, &shapes, &transcript, &ctx).await;
         let touched_seeded = placements.iter().any(|(base, _)| base == SEEDED_BASE);
         last = Some((perspective, shapes, placements));
         if touched_seeded {

@@ -609,7 +609,10 @@ fn relations_from_update_target_emit_addlinks() {
         !update.contains_key("blocks"),
         "scalar Update must not carry the relation; got {update:?}"
     );
-    assert_eq!(update.get("title").and_then(|v| v.as_str()), Some("Renamed"));
+    assert_eq!(
+        update.get("title").and_then(|v| v.as_str()),
+        Some("Renamed")
+    );
 
     // The relation lands as an additive AddLinks on the same base, pointing at
     // the fresh sibling.
@@ -663,7 +666,11 @@ async fn apply_one(
     ops
 }
 
-fn proposal(class: &str, id: Option<&str>, props: &[(&str, serde_json::Value)]) -> ProposedInstance {
+fn proposal(
+    class: &str,
+    id: Option<&str>,
+    props: &[(&str, serde_json::Value)],
+) -> ProposedInstance {
     ProposedInstance {
         class: class.to_string(),
         id: id.map(|s| s.to_string()),
