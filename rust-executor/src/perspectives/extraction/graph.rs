@@ -1,6 +1,5 @@
 use super::ProposedInstance;
 use crate::perspectives::model_query::types::ModelShape;
-use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use std::collections::HashMap;
 
@@ -83,12 +82,13 @@ pub async fn gather_transcript(
 }
 
 /// Decode a `literal:` URI to a plain `String`, but only when it holds a
-/// string value. Delegates to the canonical [`parse_literal_value`] (which also
-/// unwraps signed-expression envelopes); non-string literals (number/bool/json)
-/// and non-literal URIs yield `None`.
+/// string value. Reuses `ad4m-client`'s `Literal` (the canonical
+/// parse/serialize type); non-string literals (number/bool/json) and
+/// non-literal URIs yield `None`.
 fn decode_literal_string(uri: &str) -> Option<String> {
-    match parse_literal_value(uri) {
-        serde_json::Value::String(s) => Some(s),
+    use ad4m_client::literal::{Literal, LiteralValue};
+    match Literal::from_url(uri.to_string()).ok()?.get().ok()? {
+        LiteralValue::String(s) => Some(s),
         _ => None,
     }
 }
