@@ -1029,7 +1029,10 @@ async fn run_extraction_handler(
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
-    let status = parse_link_status(body.link_status.as_deref());
+    // `body.link_status` is accepted for backward-compat but is now ignored:
+    // extraction writes via `create_subject`, so link status derives from each
+    // class's SDNA `local` flags (same rule as app code).
+    let _ = body.link_status.as_ref();
 
     // Target classes: the caller's explicit selection, or (default) all subject
     // classes registered in the perspective.
@@ -1064,7 +1067,6 @@ async fn run_extraction_handler(
         &shapes,
         &transcript,
         &body.base_prefix,
-        status,
         &agent_context,
     )
     .await
