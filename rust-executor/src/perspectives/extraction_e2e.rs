@@ -342,28 +342,166 @@ async fn e2e_does_not_recreate_existing_task() {
                 "Nico",
                 "Reminder: James still needs to finish the WebRTC call module.",
             ),
-            // …and introduces a brand-new one.
-            (
-                "James",
-                "Right. I'll also write the end-to-end test for the call module afterwards.",
-            ),
+            // …and introduces a brand-new unrelated task. Deliberately in a
+            // different topic area so the LLM cannot plausibly merge them into
+            // a single upsert on the seeded base.
+            ("Josh", "I'll update the CI documentation this evening."),
         ],
         &ctx,
     )
     .await;
     assert_persisted(&perspective, &placements).await;
 
-    // The already-present task is never re-created as a NEW instance.
-    let new_titles = placed_titles_lower(&placements);
+    // The already-present task is never RECREATED as a fresh instance under
+    // the extraction prefix. An upsert that lands on the seeded base and
+    // preserves/refines the existing title is fine — that's the id-context
+    // upsert path doing its job, not a duplicate.
+    let newly_minted_titles: Vec<String> = placements
+        .iter()
+        .filter(|(base, _)| !base.starts_with("soa://existing/"))
+        .flat_map(|(_, links)| {
+            links
+                .iter()
+                .filter(|l| l.predicate.as_deref() == Some("ns://title"))
+                .filter_map(|l| decode_literal_string(&l.target))
+                .map(|s| s.to_lowercase())
+        })
+        .collect();
     assert!(
-        !new_titles.contains(&existing_title.to_lowercase()),
-        "must not recreate the already-present task; new placements = {new_titles:?}"
+        !newly_minted_titles.contains(&existing_title.to_lowercase()),
+        "must not mint a fresh instance with the already-present title; \
+         newly-minted titles = {newly_minted_titles:?}"
     );
-    // A new task should still have been extracted (the e2e test task).
-    let counts = count_by_type(&placements);
+    // A new task should still have been extracted (the CI docs task). Count
+    // Create placements: they're the ones under the extraction prefix.
+    let created_count = placements
+        .iter()
+        .filter(|(base, _)| base.starts_with("soa://ext/"))
+        .filter(|(_, links)| {
+            links
+                .iter()
+                .any(|l| l.predicate.as_deref() == Some("ns://type"))
+        })
+        .count();
     assert!(
-        counts.get("task").copied().unwrap_or(0) >= 1,
-        "expected the new task to be extracted; got {counts:?}"
+        created_count >= 1,
+        "expected at least one new task to be created; placements = {placements:#?}"
+    );
+}
+
+// ---- upsert path: LLM chooses UPDATE over CREATE via `id` ------------------
+
+/// Pre-seed a Task, then run extraction on a transcript that explicitly RENAMES
+/// it and assigns a NEW OWNER. The extractor should recognise the continuity
+/// (same underlying task) and emit the existing `id`, driving the upsert path.
+/// The seeded instance's title/owner scalars end up REPLACED (SPARQL "set"
+/// semantics), and no duplicate Task base URI is minted.
+///
+/// This exercises the Phase 1B contract end-to-end: existing entries in the
+/// prompt now carry `{id, title, class}`, the system prompt + few-shot example
+/// teach `id`-emission, and `plan_extraction_ops` -> `apply_extraction_ops`
+/// routes those emissions to the update code path. If the LLM refuses to emit
+/// `id`, the test surfaces that as a real failure — the prompt/example
+/// engineering needs work.
+#[tokio::test]
+async fn e2e_updates_existing_instance_via_id() {
+    use super::extraction::{run_extraction, ExtractionOp};
+    use super::extraction_test_support::seed_instance;
+    use crate::types::LinkStatus;
+
+    let (mut perspective, shapes, ctx) = setup_extraction_e2e(&[("Task", TASK_SDNA)]).await;
+    let task_shape = &shapes[0];
+
+    let seeded_base = "soa://existing/task/webrtc";
+    seed_instance(
+        &mut perspective,
+        &ctx,
+        task_shape,
+        seeded_base,
+        "Finish the WebRTC call module",
+    )
+    .await;
+
+    // Transcript renames the seeded task and assigns a new owner — a clear
+    // continuation, not a fresh idea. The `id` handle to the existing task is
+    // in the prompt; the LLM should emit it.
+    let transcript: Vec<(String, String)> = vec![
+        (
+            "Nico".into(),
+            "Update on the WebRTC work: let's rename that task to \
+             'Complete the WebRTC call module and add a retry guard' and \
+             assign it to Josh."
+                .into(),
+        ),
+        (
+            "Josh".into(),
+            "Got it — I'll take over the WebRTC call module and add the retry guard.".into(),
+        ),
+    ];
+
+    let ops = run_extraction(
+        &mut perspective,
+        &shapes,
+        &transcript,
+        "soa://ext/",
+        LinkStatus::Local,
+        &ctx,
+    )
+    .await
+    .expect("run_extraction against real LLM");
+
+    // Log the split for debugging when this ever regresses.
+    let updates: Vec<&ExtractionOp> = ops
+        .iter()
+        .filter(|o| matches!(o, ExtractionOp::Update { .. }))
+        .collect();
+    let creates: Vec<&ExtractionOp> = ops
+        .iter()
+        .filter(|o| matches!(o, ExtractionOp::Create { .. }))
+        .collect();
+    println!(
+        "e2e upsert: {} update(s), {} create(s); ops = {:#?}",
+        updates.len(),
+        creates.len(),
+        ops
+    );
+
+    // Primary assertion: at least one Update landed on the seeded base — that
+    // means the LLM chose to emit the existing `id`.
+    let updated_seeded = updates.iter().any(|op| match op {
+        ExtractionOp::Update { base, .. } => base == seeded_base,
+        _ => false,
+    });
+    assert!(
+        updated_seeded,
+        "expected the LLM to emit id={seeded_base:?} for the renamed task \
+         (upsert path); got ops={ops:#?}"
+    );
+
+    // Secondary: no fresh Task base collides with the seeded one, and the
+    // Update actually wrote a new owner link (proving the scalar replacement).
+    let placements = ops_to_placements(&ops);
+    let created_bases: Vec<&String> = ops
+        .iter()
+        .filter_map(|o| match o {
+            ExtractionOp::Create { base, .. } => Some(base),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        created_bases.iter().all(|b| b.as_str() != seeded_base),
+        "no Create must land on the seeded base"
+    );
+    let owner_on_seeded = placements.iter().any(|(base, links)| {
+        base == seeded_base
+            && links
+                .iter()
+                .any(|l| l.predicate.as_deref() == Some("ns://owner"))
+    });
+    assert!(
+        owner_on_seeded,
+        "expected the upsert to write the new owner on the seeded base; \
+         placements = {placements:#?}"
     );
 }
 

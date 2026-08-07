@@ -287,20 +287,39 @@ fn decode_literal_string(uri: &str) -> Option<String> {
     }
 }
 
-/// read the titles of instances already present in the perspective for each
-/// target class, keyed by the class's local name. Used to steer the LLM away
-/// from re-proposing known items ([`build_extraction_input`]) and to enforce
-/// dedup deterministically ([`filter_already_present`]).
+/// One existing instance the extractor should know about — the LLM sees these
+/// so it can decide whether an extracted item is a genuinely new node (no `id`
+/// on the output) or the continuation/refinement of an existing one (emit this
+/// entry's `id` to trigger the upsert path in [`plan_extraction_ops`]).
 ///
-/// An instance is located by its class type-flag link (predicate + constant
-/// value); its identity is the `title` property. Classes without a type flag or
-/// a `title` property are skipped (no dedup key).
-pub async fn existing_instance_titles(
+/// `class` is redundant with the enclosing map key, but kept on each row so the
+/// JSON entry rendered into the prompt is self-contained and unambiguous when
+/// the LLM scans a mixed-class list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstanceContext {
+    /// Base URI of the existing instance — what the LLM emits as `id` to update.
+    pub id: String,
+    /// The `title` scalar, decoded (no `literal:string:` wrapper).
+    pub title: String,
+    /// Local class name (e.g. "Task"), matching the map key of the returned map.
+    pub class: String,
+}
+
+/// Snapshot the graph's existing instances per class, richer than
+/// [`existing_instance_titles`]: each entry carries the instance's `id` (base
+/// URI) alongside its title and class. Feeds [`build_extraction_input`] so the
+/// LLM can emit an `id` to upsert an existing node instead of creating a
+/// duplicate.
+///
+/// Locates instances the same way as [`existing_instance_titles`] (type-flag
+/// link -> title link), so both paths agree on what counts as an "existing"
+/// instance. Instances without a decodable `title` literal are skipped.
+pub async fn existing_instance_context(
     perspective: &PerspectiveInstance,
     shapes: &[ModelShape],
-) -> anyhow::Result<HashMap<String, Vec<String>>> {
+) -> anyhow::Result<HashMap<String, Vec<InstanceContext>>> {
     use crate::types::LinkQuery;
-    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    let mut out: HashMap<String, Vec<InstanceContext>> = HashMap::new();
     for shape in shapes {
         let Some(flag) = shape
             .properties
@@ -313,8 +332,8 @@ pub async fn existing_instance_titles(
             continue;
         };
         let flag_value = flag.initial_value.as_ref().unwrap();
+        let class_name = class_local_name(&shape.target_class).to_string();
 
-        // All instances of this class = sources of the type-flag link.
         let flag_links = perspective
             .get_links(&LinkQuery {
                 predicate: Some(flag.predicate.clone()),
@@ -322,7 +341,7 @@ pub async fn existing_instance_titles(
             })
             .await
             .map_err(|e| {
-                anyhow::anyhow!("existing_instance_titles: get_links(flag) failed: {e:#}")
+                anyhow::anyhow!("existing_instance_context: get_links(flag) failed: {e:#}")
             })?;
         let bases: Vec<String> = flag_links
             .into_iter()
@@ -330,27 +349,62 @@ pub async fn existing_instance_titles(
             .map(|l| l.data.source)
             .collect();
 
-        let mut titles = Vec::new();
+        let mut rows = Vec::new();
         for base in bases {
             let title_links = perspective
                 .get_links(&LinkQuery {
-                    source: Some(base),
+                    source: Some(base.clone()),
                     predicate: Some(title_prop.predicate.clone()),
                     ..Default::default()
                 })
                 .await
                 .map_err(|e| {
-                    anyhow::anyhow!("existing_instance_titles: get_links(title) failed: {e:#}")
+                    anyhow::anyhow!("existing_instance_context: get_links(title) failed: {e:#}")
                 })?;
-            for tl in title_links {
-                if let Some(title) = decode_literal_string(&tl.data.target) {
-                    titles.push(title);
-                }
-            }
+            // Take the first decodable title link — a well-formed instance has
+            // exactly one under max_count=1.
+            let Some(title) = title_links
+                .into_iter()
+                .find_map(|tl| decode_literal_string(&tl.data.target))
+            else {
+                continue;
+            };
+            rows.push(InstanceContext {
+                id: base,
+                title,
+                class: class_name.clone(),
+            });
         }
-        if !titles.is_empty() {
-            out.insert(class_local_name(&shape.target_class).to_string(), titles);
+        if !rows.is_empty() {
+            out.insert(class_name, rows);
         }
     }
     Ok(out)
+}
+
+/// Derive the title-only view of an [`existing_instance_context`] snapshot for
+/// [`filter_already_present`], which only compares titles. Keeps the dedup path
+/// working unchanged against the richer context type.
+pub fn titles_from_context(
+    ctx: &HashMap<String, Vec<InstanceContext>>,
+) -> HashMap<String, Vec<String>> {
+    ctx.iter()
+        .map(|(class, rows)| {
+            (
+                class.clone(),
+                rows.iter().map(|r| r.title.clone()).collect(),
+            )
+        })
+        .collect()
+}
+
+/// Legacy title-only view of the graph, kept for callers/tests that only need
+/// titles (e.g. dedup snapshots). Prefer [`existing_instance_context`] when
+/// building the LLM prompt — it also carries `id`s so the model can upsert.
+pub async fn existing_instance_titles(
+    perspective: &PerspectiveInstance,
+    shapes: &[ModelShape],
+) -> anyhow::Result<HashMap<String, Vec<String>>> {
+    let ctx = existing_instance_context(perspective, shapes).await?;
+    Ok(titles_from_context(&ctx))
 }

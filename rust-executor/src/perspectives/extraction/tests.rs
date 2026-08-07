@@ -17,7 +17,7 @@ fn extraction_hint_lands_in_prompt() {
             "Nico".into(),
             "I'll extract the LLM processing into ADAM".into(),
         )],
-        &HashMap::new(),
+        &HashMap::<String, Vec<InstanceContext>>::new(),
     );
 
     // class-level hints reach the prompt
@@ -48,6 +48,50 @@ fn extraction_hint_lands_in_prompt() {
     assert!(
         !field_names.contains(&"type"),
         "type flag must not be a field"
+    );
+}
+
+#[test]
+fn existing_context_renders_id_title_class_in_prompt() {
+    // With the richer `existing_instance_context` snapshot in play,
+    // build_extraction_input must render each existing entry as an object
+    // carrying `id`, `title`, and `class` — that's the handle the LLM needs to
+    // emit an upsert instead of a duplicate create. Also proves the system
+    // prompt still describes the `id` upsert path.
+    let shapes = vec![shape_from_sdna("Task", TASK_SDNA)];
+    let mut existing: HashMap<String, Vec<InstanceContext>> = HashMap::new();
+    existing.insert(
+        "Task".to_string(),
+        vec![InstanceContext {
+            id: "soa://existing/task/42".to_string(),
+            title: "Draft the design doc".to_string(),
+            class: "Task".to_string(),
+        }],
+    );
+    let input = build_extraction_input(
+        &shapes,
+        &[("Nico".into(), "About that design doc…".into())],
+        &existing,
+    );
+    let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+    let task_class = v["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "Task")
+        .expect("Task class in prompt");
+    let existing_arr = task_class["existing"]
+        .as_array()
+        .expect("existing must be an array");
+    assert_eq!(existing_arr.len(), 1);
+    assert_eq!(existing_arr[0]["id"], "soa://existing/task/42");
+    assert_eq!(existing_arr[0]["title"], "Draft the design doc");
+    assert_eq!(existing_arr[0]["class"], "Task");
+    // System prompt still teaches the id-upsert semantics — regression guard
+    // against silently dropping that instruction while refactoring the schema.
+    assert!(
+        EXTRACTION_SYSTEM_PROMPT.contains("id"),
+        "system prompt must document the `id` upsert semantics"
     );
 }
 
@@ -298,6 +342,94 @@ async fn apply_ops_upsert_replaces_scalar_link_in_perspective() {
     );
 }
 
+#[tokio::test]
+async fn strip_noop_updates_drops_same_value_upsert_keeps_real_change() {
+    // Seed an Intention with title+owner. Then plan two Updates on it:
+    //   (1) same title + same owner   -> no-op, must be dropped.
+    //   (2) new title (different value) -> real change, must survive.
+    // The Create arm is passed through unchanged (dedup happens elsewhere).
+    use crate::perspectives::extraction_test_support::{seed_instance, setup_perspective_no_llm};
+    use crate::types::LinkStatus;
+
+    let (mut perspective, shapes, ctx) =
+        setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+    let shape = &shapes[0];
+    let base = "soa://existing/intention/noop-target";
+    seed_instance(&mut perspective, &ctx, shape, base, "Ship the parser").await;
+    // Seed an owner too so the noop check covers a multi-field state.
+    let mut owner_props = HashMap::new();
+    owner_props.insert("owner".to_string(), serde_json::json!("Nico"));
+    let seed_owner = ProposedInstance {
+        class: "Intention".to_string(),
+        id: Some(base.to_string()),
+        props: owner_props,
+    };
+    let owner_ops = plan_extraction_ops(&shapes, std::slice::from_ref(&seed_owner), "soa://ext/");
+    apply_extraction_ops(&mut perspective, &owner_ops, LinkStatus::Local, &ctx)
+        .await
+        .expect("seed owner");
+
+    // No-op update: title + owner identical to the seeded state.
+    let mut noop_props = HashMap::new();
+    noop_props.insert("title".to_string(), serde_json::json!("Ship the parser"));
+    noop_props.insert("owner".to_string(), serde_json::json!("Nico"));
+    let noop = ProposedInstance {
+        class: "Intention".to_string(),
+        id: Some(base.to_string()),
+        props: noop_props,
+    };
+    // Real update: same base, but a rewritten title.
+    let mut real_props = HashMap::new();
+    real_props.insert(
+        "title".to_string(),
+        serde_json::json!("Ship the parser this week"),
+    );
+    let real = ProposedInstance {
+        class: "Intention".to_string(),
+        id: Some(base.to_string()),
+        props: real_props,
+    };
+    // A Create (no id) — should pass through unchanged; strip_noop_updates
+    // only looks at Update ops.
+    let mut create_props = HashMap::new();
+    create_props.insert("title".to_string(), serde_json::json!("A brand new idea"));
+    let create = ProposedInstance {
+        class: "Intention".to_string(),
+        id: None,
+        props: create_props,
+    };
+
+    let planned = plan_extraction_ops(&shapes, &[noop, real, create], "soa://ext/");
+    assert_eq!(planned.len(), 3, "sanity: planner emitted all three");
+    let kept = strip_noop_updates(&perspective, planned)
+        .await
+        .expect("strip_noop_updates");
+
+    // No-op update must be gone; real update + create must remain.
+    let updates: Vec<&ExtractionOp> = kept
+        .iter()
+        .filter(|op| matches!(op, ExtractionOp::Update { .. }))
+        .collect();
+    let creates: Vec<&ExtractionOp> = kept
+        .iter()
+        .filter(|op| matches!(op, ExtractionOp::Create { .. }))
+        .collect();
+    assert_eq!(
+        updates.len(),
+        1,
+        "no-op Update dropped, real Update kept; got {kept:#?}"
+    );
+    assert_eq!(creates.len(), 1, "Create pass-through; got {kept:#?}");
+    if let ExtractionOp::Update { set, .. } = updates[0] {
+        assert!(
+            set.iter()
+                .any(|l| l.predicate.as_deref() == Some("ns://title")
+                    && l.target == "literal:string:Ship%20the%20parser%20this%20week"),
+            "kept Update must be the real one; got {set:#?}"
+        );
+    }
+}
+
 #[test]
 fn plan_ops_creates_without_id_and_updates_with_id() {
     // An `id` field marks an upsert: patch the existing node's scalar fields
@@ -374,7 +506,7 @@ fn relation_properties_are_excluded_from_extraction() {
     let input = build_extraction_input(
         &[shape.clone()],
         &[("Nico".into(), "block it".into())],
-        &HashMap::new(),
+        &HashMap::<String, Vec<InstanceContext>>::new(),
     );
     let v: serde_json::Value = serde_json::from_str(&input).unwrap();
     let field_names: Vec<&str> = v["classes"][0]["fields"]

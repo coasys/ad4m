@@ -1,4 +1,4 @@
-use super::{class_local_name, relation_predicates};
+use super::{class_local_name, relation_predicates, InstanceContext};
 use crate::db::Ad4mDb;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::types::{AIPromptExamples, AITask};
@@ -7,17 +7,22 @@ use std::collections::HashMap;
 /// assemble the per-call LLM input from the target shapes' extraction hints
 /// plus the transcript. Pure — this is exactly where `extraction_hint` enters
 /// the prompt. Shape (matches the system prompt):
-/// `{ "classes": [{ "name", "hint", "existing": [title,…],
+/// `{ "classes": [{ "name", "hint",
+///                  "existing": [{ "id", "title", "class" }, …],
 ///                  "fields": [{ "name", "required", "hint" }] }],
 ///    "transcript": [{ "speaker", "text" }] }`.
 ///
-/// `existing` maps a class's local name to the titles of instances already in
-/// the graph, so the model can avoid re-proposing them (soft dedup; the hard
-/// guarantee is [`filter_already_present`]). Pass an empty map for none.
+/// `existing` maps a class's local name to the instances already in the graph
+/// (`id` = base URI, `title` = human identity, `class` = local class name).
+/// The `id` gives the LLM the handle it needs to emit an upsert: when an
+/// extracted item continues an existing entry, the LLM outputs that entry's
+/// `id` and [`plan_extraction_ops`] routes it into the update path instead of
+/// creating a duplicate. Titles still drive the deterministic dedup safety net
+/// in [`filter_already_present`]. Pass an empty map for none.
 pub fn build_extraction_input(
     shapes: &[ModelShape],
     transcript: &[(String, String)],
-    existing: &HashMap<String, Vec<String>>,
+    existing: &HashMap<String, Vec<InstanceContext>>,
 ) -> String {
     let classes: Vec<serde_json::Value> = shapes
         .iter()
@@ -38,6 +43,20 @@ pub fn build_extraction_input(
                 })
                 .collect();
             let name = class_local_name(&s.target_class);
+            let existing_json: Vec<serde_json::Value> = existing
+                .get(name)
+                .map(|rows| {
+                    rows.iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "id": r.id,
+                                "title": r.title,
+                                "class": r.class,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             // `"hint"` is the prompt-facing key (short, cheap in tokens and what
             // the system prompt + few-shot examples reference); its value is the
             // schema's `extractionHint` decorator, surfaced here as
@@ -46,7 +65,7 @@ pub fn build_extraction_input(
             serde_json::json!({
                 "name": name,
                 "hint": s.extraction_hint,
-                "existing": existing.get(name).cloned().unwrap_or_default(),
+                "existing": existing_json,
                 "fields": fields,
             })
         })
@@ -74,7 +93,8 @@ You receive a JSON object with these fields:
   - `classes`: available subject classes. Each has a `name`, a natural-language
     `hint` describing when to instantiate it, a list of `fields` (each with a
     `name`, optional `hint`, and `required` flag), and an `existing` array of
-    titles already present in the graph for that class.
+    instances already present in the graph for that class. Each existing entry
+    is `{id, title, class}` — `id` is that instance's stable handle.
   - `transcript`: an array of turns `{speaker, text}`.
 
 Emit a JSON array. Each element is `{\"class\": <class name>, ...fields}`, where
@@ -93,16 +113,19 @@ How to decide what to extract:
   - Only include a field if its value is present or clearly implied; omit
     optional fields you cannot fill.
 
-Two worked examples follow (as prior turns) before your real input — study how
+Worked examples follow (as prior turns) before your real input — study how
 every co-present item is captured, then apply the same to your input.
 
 Output rules:
   - Return valid JSON only — no prose, no markdown fences, no <think> blocks.
   - Return an empty array `[]` if nothing matches.
   - Do not invent classes or fields not listed in `classes`.
-  - Dedup: skip an item ONLY when its title clearly matches one already in that
-    class's `existing` list. A brand-new item still counts even if an older,
-    different item of the same class exists — always extract genuinely new items.
+  - Dedup / update: an `existing` entry is a real instance already in the
+    graph. If the transcript adds new field information for the SAME item
+    (a missing owner, a small rewording), include that entry's `id` on your
+    output to update it. A new item that is merely related or adjacent to an
+    existing entry is still NEW: emit it WITHOUT `id`. Never invent an `id`
+    that isn't in the `existing` list.
 ";
 
 /// idempotently register the generic extraction task in the AI-task DB.
@@ -119,10 +142,16 @@ Output rules:
 /// model loaded for a `prompt` call; this split keeps registration testable in
 /// CI without a GPU.
 /// Few-shot examples sent as prior User/Assistant turns (via `prompt_examples`)
-/// ahead of the real input. Two generic, non-test scenarios that teach the
+/// ahead of the real input. Three generic, non-test scenarios that teach the
 /// failure modes small models hit: (1) a belief and a task in the same snippet
-/// must BOTH be captured; (2) a question raised amid tasks must be captured.
-/// Inputs mirror the JSON shape `build_extraction_input` produces.
+/// must BOTH be captured; (2) a question raised amid tasks must be captured;
+/// (3) a transcript that refines an existing entry must emit that entry's `id`
+/// as an upsert instead of minting a duplicate. The upsert case is added last
+/// (recency-weighted in small LLMs) but the negative "adjacent tasks don't
+/// upsert" case is left to the prose rules — extra negative examples were
+/// found to bias small models toward under-extraction (dropped modalities).
+/// Inputs mirror the JSON shape `build_extraction_input` produces (existing
+/// entries carry `id`/`title`/`class`).
 fn extraction_examples() -> Vec<AIPromptExamples> {
     let ex1_in = serde_json::json!({
         "classes": [
@@ -164,14 +193,51 @@ fn extraction_examples() -> Vec<AIPromptExamples> {
     ])
     .to_string();
 
+    // Upsert example: a Task already exists ("Draft the design doc"). The
+    // transcript continues that same task with more detail and adds a new
+    // Question. The model must emit the existing Task's `id` (so it upserts
+    // the title/owner) rather than creating a duplicate Task.
+    let ex3_in = serde_json::json!({
+        "classes": [
+            {"name":"Task","hint":"An action someone commits to doing.",
+             "existing":[
+                 {"id":"soa://existing/task/design-doc","title":"Draft the design doc","class":"Task"}
+             ],
+             "fields":[{"name":"title","required":true,"hint":"Imperative summary."},
+                       {"name":"owner","required":false,"hint":"Who will do it."}]},
+            {"name":"Question","hint":"An open question that needs an answer.","existing":[],
+             "fields":[{"name":"title","required":true,"hint":"The question."}]}
+        ],
+        "transcript":[
+            {"speaker":"A","text":"About that design doc — I'll draft it and circulate it to the team by Friday."},
+            {"speaker":"B","text":"Should we include the migration section in v1?"}
+        ]
+    })
+    .to_string();
+    let ex3_out = serde_json::json!([
+        {"class":"Task","id":"soa://existing/task/design-doc",
+         "title":"Draft the design doc and circulate it to the team by Friday","owner":"A"},
+        {"class":"Question","title":"Should we include the migration section in v1?"}
+    ])
+    .to_string();
+
+    // Order matters: small LLMs weight the last example most (recency).
+    // Put the upsert case in the MIDDLE so it's learned but doesn't dominate;
+    // end on ex1 (belief + task in one turn) so "capture every modality"
+    // remains the freshest signal — losing that was the failure mode when
+    // ex3 was placed last.
     vec![
-        AIPromptExamples {
-            input: ex1_in,
-            output: ex1_out,
-        },
         AIPromptExamples {
             input: ex2_in,
             output: ex2_out,
+        },
+        AIPromptExamples {
+            input: ex3_in,
+            output: ex3_out,
+        },
+        AIPromptExamples {
+            input: ex1_in,
+            output: ex1_out,
         },
     ]
 }

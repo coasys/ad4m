@@ -1,13 +1,13 @@
 use super::{
-    build_extraction_input, ensure_extraction_task, existing_instance_titles,
-    filter_already_present, parse_extraction_response, plan_extraction_ops, ExtractionOp,
-    ProposedInstance,
+    build_extraction_input, ensure_extraction_task, existing_instance_context,
+    filter_already_present, parse_extraction_response, plan_extraction_ops, titles_from_context,
+    ExtractionOp, ProposedInstance,
 };
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{LinkQuery, LinkStatus};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Max attempts for [`retry_extraction_parse`]. Mirrors Flux's `LLMutils`
 /// retry-×5 loop: local models occasionally emit half-valid JSON, so we ask
@@ -55,6 +55,65 @@ where
             "extraction: failed after {EXTRACTION_MAX_ATTEMPTS} attempts with no captured error"
         )
     }))
+}
+
+/// Drop [`ExtractionOp::Update`] ops whose new field values already match the
+/// perspective's current state (per-predicate target set equality). Small LLMs
+/// occasionally re-emit an existing `existing` entry verbatim after being
+/// taught the upsert path — that's a semantic no-op (SPARQL "set" of the same
+/// value), and letting it through would clear-and-rewrite scalar links for
+/// nothing, producing spurious link churn and confusing test placement counts.
+///
+/// Only Updates are considered: Creates are already deduped upstream by
+/// [`filter_already_present`]. Purely additive Updates (new predicate not yet
+/// on the base) survive naturally — the current target set is empty, so it
+/// can't equal a non-empty new set.
+pub async fn strip_noop_updates(
+    perspective: &PerspectiveInstance,
+    ops: Vec<ExtractionOp>,
+) -> anyhow::Result<Vec<ExtractionOp>> {
+    let mut kept = Vec::with_capacity(ops.len());
+    for op in ops {
+        match &op {
+            ExtractionOp::Update { base, set } => {
+                let mut new_by_pred: HashMap<String, HashSet<String>> = HashMap::new();
+                for link in set {
+                    if let Some(pred) = link.predicate.clone() {
+                        new_by_pred
+                            .entry(pred)
+                            .or_default()
+                            .insert(link.target.clone());
+                    }
+                }
+                let mut all_noop = !new_by_pred.is_empty();
+                for (pred, new_targets) in &new_by_pred {
+                    let existing = perspective
+                        .get_links(&LinkQuery {
+                            source: Some(base.clone()),
+                            predicate: Some(pred.clone()),
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "strip_noop_updates: get_links({base} {pred}) failed: {e:#}"
+                            )
+                        })?;
+                    let existing_targets: HashSet<String> =
+                        existing.iter().map(|l| l.data.target.clone()).collect();
+                    if &existing_targets != new_targets {
+                        all_noop = false;
+                        break;
+                    }
+                }
+                if !all_noop {
+                    kept.push(op);
+                }
+            }
+            _ => kept.push(op),
+        }
+    }
+    Ok(kept)
 }
 
 /// Persist a planned set of [`ExtractionOp`]s into the perspective. Creates are
@@ -188,10 +247,13 @@ pub async fn run_extraction(
     context: &AgentContext,
 ) -> anyhow::Result<Vec<ExtractionOp>> {
     let task = ensure_extraction_task()?;
-    // Dedup context: what the graph already holds, so the model is steered away
-    // from re-proposing known items and we can enforce it deterministically.
-    let existing = existing_instance_titles(perspective, shapes).await?;
-    let prompt = build_extraction_input(shapes, transcript, &existing);
+    // Existing-instance snapshot: gives the model both the `id` handle to
+    // upsert (so it can refine an existing node instead of duplicating) and the
+    // title to recognise it. The title-only projection feeds the deterministic
+    // dedup safety net below, so both paths agree on what counts as "existing".
+    let existing_ctx = existing_instance_context(perspective, shapes).await?;
+    let existing_titles = titles_from_context(&existing_ctx);
+    let prompt = build_extraction_input(shapes, transcript, &existing_ctx);
 
     let service = crate::ai_service::AIService::global_instance()
         .await
@@ -216,11 +278,16 @@ pub async fn run_extraction(
     // (proposals that carry an `id`) bypass this — they name a specific target.
     let (with_id, without_id): (Vec<_>, Vec<_>) =
         instances.into_iter().partition(|i| i.id.is_some());
-    let deduped_creates = filter_already_present(without_id, &existing);
+    let deduped_creates = filter_already_present(without_id, &existing_titles);
     let mut all: Vec<ProposedInstance> = deduped_creates;
     all.extend(with_id);
 
-    let ops = plan_extraction_ops(shapes, &all, base_prefix);
+    let planned = plan_extraction_ops(shapes, &all, base_prefix);
+    // Filter no-op Updates: the LLM occasionally re-emits an unchanged existing
+    // entry, and applying that would clear-and-rewrite scalar links for
+    // nothing. Effective ops are what we apply *and* what we return, so
+    // downstream callers/tests never see spurious upserts.
+    let ops = strip_noop_updates(perspective, planned).await?;
     apply_extraction_ops(perspective, &ops, link_status, context).await?;
     Ok(ops)
 }

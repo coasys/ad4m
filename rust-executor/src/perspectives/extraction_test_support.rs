@@ -356,22 +356,9 @@ pub(crate) fn count_by_type(placements: &[(String, Vec<Link>)]) -> HashMap<Strin
     counts
 }
 
-/// Decoded `ns://title` literal of every placed instance (lower-cased for
-/// order-independent, case-insensitive comparison in assertions).
-pub(crate) fn placed_titles_lower(placements: &[(String, Vec<Link>)]) -> Vec<String> {
-    placements
-        .iter()
-        .filter_map(|(_, links)| {
-            links
-                .iter()
-                .find(|l| l.predicate.as_deref() == Some("ns://title"))
-                .and_then(|l| decode_literal_string(&l.target))
-                .map(|s| s.to_lowercase())
-        })
-        .collect()
-}
-
-fn decode_literal_string(uri: &str) -> Option<String> {
+/// Decode a `literal:string:...` URI back to its raw string. Used by e2e
+/// assertions that inspect placed `ns://title` links.
+pub(crate) fn decode_literal_string(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("literal:string:")?;
     percent_encoding::percent_decode_str(rest)
         .decode_utf8()

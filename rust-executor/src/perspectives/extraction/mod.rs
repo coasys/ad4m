@@ -3,8 +3,9 @@
 //! class/property.
 //!
 //! Data flow of one extraction run (`run_extraction` wires it end to end):
-//!   1. Read the titles already present per class (`existing_instance_titles`)
-//!      so the model can be steered away from re-proposing known items.
+//!   1. Snapshot the existing instances per class (`existing_instance_context`
+//!      returns `{id, title, class}` rows) so the model can either skip
+//!      known items or upsert them via their `id`.
 //!   2. Render those, plus each class's `extraction_hint` + fields and the
 //!      transcript, into a single prompt (`build_extraction_input`).
 //!   3. Ask the configured LLM (`AIService::prompt` on the task registered by
