@@ -61,7 +61,7 @@ pub(super) const MAX_INCLUDE_DEPTH: u8 = 8;
 /// Since the signed-envelope migration (v3), all literal values are stored
 /// as plain `literal:string:X`, `literal:number:X`, `literal:boolean:X`,
 /// or `literal:json:X` (for non-envelope JSON objects/arrays).
-pub(super) fn parse_literal_value(uri: &str) -> Value {
+pub(crate) fn parse_literal_value(uri: &str) -> Value {
     let body = if let Some(rest) = uri.strip_prefix("literal:") {
         rest
     } else {

@@ -1,7 +1,6 @@
 use super::*;
 use crate::db::Ad4mDb;
 use crate::perspectives::extraction_test_support::*;
-use crate::perspectives::model_query::types::ModelShape;
 use crate::types::AITask;
 use std::collections::HashMap;
 
@@ -119,94 +118,7 @@ fn garbage_is_an_error_not_a_panic() {
     assert!(parse_extraction_response("not json at all").is_err());
 }
 
-// ---- instance_links ---------------------------------------------
-
-fn find_shape<'a>(shapes: &'a [ModelShape], class_uri: &str) -> &'a ModelShape {
-    shapes
-        .iter()
-        .find(|s| s.target_class == class_uri)
-        .unwrap_or_else(|| panic!("shape not found: {class_uri}"))
-}
-
-#[test]
-fn instance_links_emit_type_flag_and_scalar_fields() {
-    let shapes = vec![
-        shape_from_sdna("Belief", BELIEF_SDNA),
-        shape_from_sdna("Intention", INTENTION_SDNA),
-    ];
-    let raw = r#"[
-          {"class":"Intention","title":"Extract LLM processing","owner":"Nico"},
-          {"class":"Belief","title":"This will work"}
-        ]"#;
-    let proposed = parse_extraction_response(raw).unwrap();
-
-    let intent_links = instance_links(
-        find_shape(&shapes, "ns://Intention"),
-        &proposed[0],
-        "soa://i1",
-    );
-    // Type flag: predicate = the flag's path, target = the flag's constant value.
-    assert!(
-        intent_links
-            .iter()
-            .any(|l| l.predicate.as_deref() == Some("ns://type") && l.target == "ns://intention"),
-        "expected intention type flag; got {intent_links:#?}"
-    );
-    // Owner (literal-string) landed as a link at the correct predicate.
-    assert!(
-        intent_links
-            .iter()
-            .any(|l| l.predicate.as_deref() == Some("ns://owner")
-                && l.target == "literal:string:Nico")
-    );
-    // Title (literal-string, percent-encoded space).
-    assert!(intent_links
-        .iter()
-        .any(|l| l.predicate.as_deref() == Some("ns://title")
-            && l.target == "literal:string:Extract%20LLM%20processing"));
-    // Every emitted link is anchored at the given base.
-    assert!(intent_links.iter().all(|l| l.source == "soa://i1"));
-
-    let belief_links = instance_links(find_shape(&shapes, "ns://Belief"), &proposed[1], "soa://b1");
-    // Belief has no `owner` field → no owner link even though the JSON above
-    // does not carry it either (defensive: shape drives what gets emitted).
-    assert!(!belief_links
-        .iter()
-        .any(|l| l.predicate.as_deref() == Some("ns://owner")));
-    // Belief's own type flag with its own constant value.
-    assert!(belief_links
-        .iter()
-        .any(|l| l.predicate.as_deref() == Some("ns://type") && l.target == "ns://belief"));
-}
-
-#[test]
-fn instance_links_drop_unknown_fields() {
-    // The LLM hallucinates a `secret` field the shape doesn't declare.
-    // instance_links must NOT emit a link for it (shape is the source of truth).
-    let shape = shape_from_sdna("Belief", BELIEF_SDNA);
-    let raw = r#"[{"class":"Belief","title":"X","secret":"leaked"}]"#;
-    let proposed = parse_extraction_response(raw).unwrap();
-    let links = instance_links(&shape, &proposed[0], "soa://b1");
-    assert!(
-        !links.iter().any(|l| l.target.contains("leaked")),
-        "unknown field must not become a link; got {links:#?}"
-    );
-}
-
-#[test]
-fn instance_links_skip_missing_optional_fields() {
-    // Intention shape has an optional `owner`; instance omits it → no owner link.
-    let shape = shape_from_sdna("Intention", INTENTION_SDNA);
-    let raw = r#"[{"class":"Intention","title":"Ship it"}]"#;
-    let proposed = parse_extraction_response(raw).unwrap();
-    let links = instance_links(&shape, &proposed[0], "soa://i2");
-    assert!(!links
-        .iter()
-        .any(|l| l.predicate.as_deref() == Some("ns://owner")));
-    assert!(links
-        .iter()
-        .any(|l| l.predicate.as_deref() == Some("ns://title")));
-}
+// ---- relation exclusion ------------------------------------------
 
 #[test]
 fn relation_properties_are_excluded_from_extraction() {
@@ -243,26 +155,6 @@ fn relation_properties_are_excluded_from_extraction() {
         !field_names.contains(&"blocks"),
         "relation must not be offered to the LLM; got {field_names:?}"
     );
-
-    // 2. instance_links must not write a link even if the LLM emits the
-    //    relation (here as an array — exactly the bogus literal:json case).
-    let raw = r#"[{"class":"Task","title":"Do X","blocks":["soa://t2","soa://t3"]}]"#;
-    let proposed = parse_extraction_response(raw).unwrap();
-    let links = instance_links(&shape, &proposed[0], "soa://t1");
-    assert!(
-        !links
-            .iter()
-            .any(|l| l.predicate.as_deref() == Some("ns://blocks")),
-        "relation must not become a link; got {links:#?}"
-    );
-    assert!(
-        !links.iter().any(|l| l.target.starts_with("literal:json:")),
-        "no bogus literal:json relation target; got {links:#?}"
-    );
-    // The scalar title still lands.
-    assert!(links
-        .iter()
-        .any(|l| l.predicate.as_deref() == Some("ns://title")));
 }
 
 #[test]
@@ -299,81 +191,7 @@ fn ensure_extraction_task_registers_and_is_idempotent() {
     assert_eq!(rows.len(), 1, "expected exactly one extraction task row");
 }
 
-// ---- apply_extraction_raw + retry_extraction_parse ---------------
-
-#[test]
-fn apply_extraction_raw_wires_parse_and_links() {
-    // Hand-fed raw = what the LLM would return; no live model in the loop.
-    // We verify the whole parse→link wiring: each proposed instance gets a fresh
-    // base under our prefix, its links are shape-driven (type flag + fields
-    // only), and multi-class output is split correctly.
-    let shapes = vec![
-        shape_from_sdna("Belief", BELIEF_SDNA),
-        shape_from_sdna("Intention", INTENTION_SDNA),
-    ];
-    let raw = r#"[
-          {"class":"Intention","title":"Extract LLM processing","owner":"Nico"},
-          {"class":"Belief","title":"This will work"}
-        ]"#;
-
-    let placements = apply_extraction_raw(&shapes, raw, "soa://ext/").unwrap();
-    assert_eq!(placements.len(), 2, "expected two placements");
-
-    // Bases are unique, prefixed, and class-tagged (lowercased).
-    let (b0, links0) = &placements[0];
-    let (b1, links1) = &placements[1];
-    assert_ne!(b0, b1, "each instance must get its own base URI");
-    assert!(b0.starts_with("soa://ext/intention/"));
-    assert!(b1.starts_with("soa://ext/belief/"));
-    assert!(links0.iter().all(|l| &l.source == b0));
-    assert!(links1.iter().all(|l| &l.source == b1));
-
-    // Intention: type flag + title + owner reached the link set.
-    assert!(links0
-        .iter()
-        .any(|l| l.predicate.as_deref() == Some("ns://type") && l.target == "ns://intention"));
-    assert!(links0
-        .iter()
-        .any(|l| l.predicate.as_deref() == Some("ns://title")
-            && l.target == "literal:string:Extract%20LLM%20processing"));
-    assert!(
-        links0
-            .iter()
-            .any(|l| l.predicate.as_deref() == Some("ns://owner")
-                && l.target == "literal:string:Nico")
-    );
-
-    // Belief: type flag with its own constant, no owner predicate.
-    assert!(links1
-        .iter()
-        .any(|l| l.predicate.as_deref() == Some("ns://type") && l.target == "ns://belief"));
-    assert!(!links1
-        .iter()
-        .any(|l| l.predicate.as_deref() == Some("ns://owner")));
-}
-
-#[test]
-fn apply_extraction_raw_drops_unknown_class() {
-    // Only Belief is registered; the LLM hallucinates a Frob. It must be
-    // silently dropped (defensive: shapes are the source of truth for which
-    // classes can be instantiated).
-    let shapes = vec![shape_from_sdna("Belief", BELIEF_SDNA)];
-    let raw = r#"[
-          {"class":"Belief","title":"A"},
-          {"class":"Frob","title":"B"}
-        ]"#;
-    let placements = apply_extraction_raw(&shapes, raw, "soa://ext/").unwrap();
-    assert_eq!(placements.len(), 1);
-    assert!(placements[0].0.starts_with("soa://ext/belief/"));
-}
-
-#[test]
-fn apply_extraction_raw_empty_array_yields_no_placements() {
-    let shapes = vec![shape_from_sdna("Belief", BELIEF_SDNA)];
-    assert!(apply_extraction_raw(&shapes, "[]", "soa://ext/")
-        .unwrap()
-        .is_empty());
-}
+// ---- retry_extraction_parse --------------------------------------
 
 #[tokio::test]
 async fn retry_extraction_parse_succeeds_on_first_attempt() {

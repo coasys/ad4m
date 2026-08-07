@@ -1,11 +1,13 @@
 use super::{
-    build_extraction_input, ensure_extraction_task, existing_instance_titles,
-    filter_already_present, parse_extraction_response, place_instances, ProposedInstance,
+    build_extraction_input, class_local_name, ensure_extraction_task, existing_instance_titles,
+    filter_already_present, parse_extraction_response, ProposedInstance,
 };
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::ModelShape;
-use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{Link, LinkStatus};
+use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
+use crate::types::{Link, LinkQuery};
+use std::collections::HashSet;
+use uuid::Uuid;
 
 /// Max attempts for [`retry_extraction_parse`]. Mirrors Flux's `LLMutils`
 /// retry-×5 loop: local models occasionally emit half-valid JSON, so we ask
@@ -57,25 +59,27 @@ where
 
 /// end-to-end extraction driver. Wires everything: build the input from
 /// shapes' hints + transcript, call `AIService::prompt` on the registered
-/// extraction task, retry parsing up to 5×, then for every proposed
-/// instance write its shape-driven links into the perspective via
-/// `add_link`. Returns the fresh base URI + links written per instance.
+/// extraction task, retry parsing up to 5×, then for every proposed instance
+/// write it into the perspective via `create_subject` — the same pipeline app
+/// code uses, reading each class's `ad4m://constructor` + per-property
+/// `ad4m://setter` actions from the SDNA. Returns the fresh base URI + links
+/// read back per instance.
 ///
 /// The `shapes` argument is exactly the classes to consider — callers pick
 /// which subject classes to extract into (usually all classes carrying an
 /// `extraction_hint`). `base_prefix` is the URI namespace under which new
 /// instance identities are minted, e.g. `"soa://ext/"`.
 ///
-/// `link_status` is the caller's choice of [`LinkStatus`] for the written
-/// links. Pass [`LinkStatus::Local`] (the usual default) so LLM-generated
-/// links on shared/neighbourhood perspectives are not auto-published; pass
-/// [`LinkStatus::Shared`] only when the extraction is meant to sync.
+/// Link status is no longer a caller choice: it now derives from the SDNA's
+/// `local` flags via `create_subject`, exactly like app code. The classes must
+/// be registered as real subject classes in the perspective (constructor +
+/// setter actions) or `create_subject` errors with "No SHACL constructor
+/// found".
 pub async fn run_extraction(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
     transcript: &[(String, String)],
     base_prefix: &str,
-    link_status: LinkStatus,
     context: &AgentContext,
 ) -> anyhow::Result<Vec<(String, Vec<Link>)>> {
     let task = ensure_extraction_task()?;
@@ -105,21 +109,79 @@ pub async fn run_extraction(
     // Hard dedup guarantee: even if the model ignored the `existing` hint, an
     // already-present (class, title) never becomes a new instance.
     let instances = filter_already_present(instances, &existing);
-    let placements = place_instances(shapes, &instances, base_prefix);
 
-    // Write all instance links in a single PerspectiveDiff (add_links) so a
-    // mid-write failure can't leave a half-formed instance — e.g. one carrying
-    // its `ns://type` flag but missing its `ns://title`. Status is the caller's
-    // choice (see `link_status`).
-    let all_links: Vec<Link> = placements
-        .iter()
-        .flat_map(|(_base, links)| links.iter().cloned())
-        .collect();
-    if !all_links.is_empty() {
+    // Write each surviving instance through `create_subject` — the same
+    // constructor+setter pipeline app code uses — inside one batch so a
+    // mid-write failure can't leave a half-formed instance. Relation-typed
+    // properties are excluded from `initial_values`: their targets are instance
+    // URIs, not literals (relation extraction is a later PR).
+    let batch_id = perspective.create_batch().await;
+    let mut bases: Vec<String> = Vec::new();
+    for inst in &instances {
+        let Some(shape) = shapes
+            .iter()
+            .find(|s| class_local_name(&s.target_class) == inst.class)
+        else {
+            log::debug!(
+                "extraction: dropping proposed instance for unknown class '{}'",
+                inst.class
+            );
+            continue;
+        };
+        let rel_names: HashSet<&str> = shape
+            .include_relations
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        let initial_values: serde_json::Map<String, serde_json::Value> = inst
+            .props
+            .iter()
+            .filter(|(k, _)| !rel_names.contains(k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let base = format!(
+            "{base_prefix}{}/{}",
+            inst.class.to_lowercase(),
+            Uuid::new_v4()
+        );
         perspective
-            .add_links(all_links, link_status, None, context)
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some(inst.class.clone()),
+                    query: None,
+                },
+                base.clone(),
+                Some(serde_json::Value::Object(initial_values)),
+                Some(batch_id.clone()),
+                context,
+            )
             .await
-            .map_err(|e| anyhow::anyhow!("run_extraction: add_links failed: {e:#}"))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "run_extraction: create_subject({}) failed: {e:#}",
+                    inst.class
+                )
+            })?;
+        bases.push(base);
     }
-    Ok(placements)
+    perspective
+        .commit_batch(batch_id, context)
+        .await
+        .map_err(|e| anyhow::anyhow!("run_extraction: commit_batch failed: {e:#}"))?;
+
+    // Read back the links written per instance, so callers/tests see exactly
+    // what landed in the store (proves the write and yields the real targets).
+    let mut out = Vec::with_capacity(bases.len());
+    for base in bases {
+        let stored = perspective
+            .get_links(&LinkQuery {
+                source: Some(base.clone()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("run_extraction: get_links(readback) failed: {e:#}"))?;
+        let links: Vec<Link> = stored.into_iter().map(|d| d.data.clone()).collect();
+        out.push((base, links));
+    }
+    Ok(out)
 }

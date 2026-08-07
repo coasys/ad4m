@@ -1,9 +1,8 @@
-use super::{parse_extraction_response, ProposedInstance};
+use super::ProposedInstance;
 use crate::perspectives::model_query::types::ModelShape;
+use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::Link;
 use std::collections::HashMap;
-use uuid::Uuid;
 
 /// Deterministic dedup safety-net (pure): drop proposed instances whose
 /// (class, title) already exists in the graph, case-insensitively. This is the
@@ -43,139 +42,12 @@ pub fn filter_already_present(
         .collect()
 }
 
-/// Predicates of the shape's relation (link-typed) properties. `load_shape`
-/// lists every relation both in `properties` (so the query pipeline sees its
-/// predicate) *and* in `include_relations`; we key off the latter to recognise
-/// them. Relations are excluded from generic scalar extraction: their targets
-/// are instance URIs, not literals, so we neither offer them to the LLM nor
-/// write LLM-proposed values through `value_to_literal_uri` (which would encode
-/// e.g. an array as a bogus `literal:json:` URI). Relation extraction is a
-/// later PR.
-pub(crate) fn relation_predicates(shape: &ModelShape) -> std::collections::HashSet<&str> {
-    shape
-        .include_relations
-        .iter()
-        .map(|r| r.predicate.as_str())
-        .collect()
-}
-
 /// Local class name from a class URI: `ns://Intention` -> `Intention`.
 pub(crate) fn class_local_name(target_class: &str) -> &str {
     target_class
         .rsplit(|c| c == '/' || c == ':')
         .find(|seg| !seg.is_empty())
         .unwrap_or(target_class)
-}
-
-/// turn a `ProposedInstance` (parsed LLM output) into perspective links
-/// anchored at `base`. Pure — no store, no LLM. Emits, in shape order:
-///   1. one link per type-flag property (predicate = flag path, target = the
-///      flag's constant `initial_value`), so downstream queries recognise the
-///      class;
-///   2. one link per non-flag shape property that appears in `inst.props`
-///      (predicate = property path, target = literal-encoded value).
-///
-/// Unknown/extra fields in `inst.props` are dropped — the LLM cannot inject
-/// links outside the declared class shape.
-pub fn instance_links(shape: &ModelShape, inst: &ProposedInstance, base: &str) -> Vec<Link> {
-    let mut out = Vec::new();
-    let rel_preds = relation_predicates(shape);
-    for prop in &shape.properties {
-        if prop.is_flag {
-            if let Some(target) = prop.initial_value.as_ref() {
-                out.push(Link {
-                    source: base.to_string(),
-                    predicate: Some(prop.predicate.clone()),
-                    target: target.clone(),
-                });
-            }
-            continue;
-        }
-        // Skip relation properties: their targets are instance URIs, not
-        // literals. Writing an LLM-proposed value here would mint a bogus
-        // literal link. Relation extraction is a later PR.
-        if rel_preds.contains(prop.predicate.as_str()) {
-            continue;
-        }
-        if let Some(value) = inst.props.get(&prop.name) {
-            if let Some(target) = value_to_literal_uri(value) {
-                out.push(Link {
-                    source: base.to_string(),
-                    predicate: Some(prop.predicate.clone()),
-                    target,
-                });
-            }
-        }
-    }
-    out
-}
-
-/// Encode a JSON scalar into an AD4M `literal:` URI by delegating to the
-/// canonical [`crate::languages::literal::literal_encode`] — the same encoder
-/// the literal Language uses and that `model_query`'s `parse_literal_value`
-/// round-trips against — and prefixing the `literal:` scheme it omits. `null`
-/// is skipped so a missing optional field never becomes a `literal:json:null`
-/// link.
-fn value_to_literal_uri(value: &serde_json::Value) -> Option<String> {
-    if value.is_null() {
-        return None;
-    }
-    Some(format!(
-        "literal:{}",
-        crate::languages::literal::literal_encode(value)
-    ))
-}
-
-/// parse a raw LLM response and turn it into the set of links that
-/// would be written into the perspective. Callers minted a fresh instance base
-/// URI per proposed instance under `base_prefix` and delegate to
-/// [`instance_links`] for the actual shape-driven link construction.
-///
-/// The lookup from `inst.class` to a `ModelShape` is by local class name
-/// (final segment of `target_class`). Proposed instances whose class doesn't
-/// match any provided shape are silently dropped — the LLM cannot inject
-/// links outside the caller's declared shape set.
-///
-/// Returned tuples pair each fresh base URI with the links anchored on it, so
-/// the caller ([`run_extraction`] or a test) can decide how to persist them.
-pub fn apply_extraction_raw(
-    shapes: &[ModelShape],
-    raw: &str,
-    base_prefix: &str,
-) -> anyhow::Result<Vec<(String, Vec<Link>)>> {
-    let proposed = parse_extraction_response(raw)?;
-    Ok(place_instances(shapes, &proposed, base_prefix))
-}
-
-/// Core of [`apply_extraction_raw`], factored out so [`run_extraction`] can
-/// reuse it without a redundant JSON round-trip. Same semantics: unknown-class
-/// instances are dropped; every kept instance gets a fresh UUID-tagged base.
-pub fn place_instances(
-    shapes: &[ModelShape],
-    proposed: &[ProposedInstance],
-    base_prefix: &str,
-) -> Vec<(String, Vec<Link>)> {
-    let mut out = Vec::with_capacity(proposed.len());
-    for inst in proposed {
-        let Some(shape) = shapes
-            .iter()
-            .find(|s| class_local_name(&s.target_class) == inst.class)
-        else {
-            log::debug!(
-                "extraction: dropping proposed instance for unknown class '{}'",
-                inst.class
-            );
-            continue;
-        };
-        let base = format!(
-            "{base_prefix}{}/{}",
-            inst.class.to_lowercase(),
-            Uuid::new_v4()
-        );
-        let links = instance_links(shape, inst, &base);
-        out.push((base, links));
-    }
-    out
 }
 
 /// minimal transcript gatherer. Reads links `source ⇒ predicate ⇒ literal`
@@ -210,12 +82,15 @@ pub async fn gather_transcript(
     Ok(out)
 }
 
+/// Decode a `literal:` URI to a plain `String`, but only when it holds a
+/// string value. Delegates to the canonical [`parse_literal_value`] (which also
+/// unwraps signed-expression envelopes); non-string literals (number/bool/json)
+/// and non-literal URIs yield `None`.
 fn decode_literal_string(uri: &str) -> Option<String> {
-    let rest = uri.strip_prefix("literal:string:")?;
-    percent_encoding::percent_decode_str(rest)
-        .decode_utf8()
-        .ok()
-        .map(|c| c.into_owned())
+    match parse_literal_value(uri) {
+        serde_json::Value::String(s) => Some(s),
+        _ => None,
+    }
 }
 
 /// read the titles of instances already present in the perspective for each

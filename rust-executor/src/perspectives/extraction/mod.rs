@@ -11,16 +11,17 @@
 //!      `ensure_extraction_task`), retrying the parse a few times because local
 //!      models emit half-valid JSON (`retry_extraction_parse` +
 //!      `parse_extraction_response` -> `ProposedInstance`s).
-//!   4. Drop anything already present (`filter_already_present`), then turn each
-//!      surviving instance into shape-driven perspective links anchored at a
-//!      freshly-minted base URI (`place_instances` -> `instance_links`, scalar
-//!      values encoded via `value_to_literal_uri`).
-//!   5. Write them all in one perspective diff (`add_links`).
+//!   4. Drop anything already present (`filter_already_present`), then write
+//!      each surviving instance through `create_subject` — the same
+//!      constructor+setter pipeline app code uses — inside one batch, minting a
+//!      fresh base URI per instance. Scalar values are literal-encoded by the
+//!      class's `ad4m://setter` actions; link status derives from the SDNA's
+//!      `local` flags, not a caller choice.
 //!
-//! `apply_extraction_raw` exposes the pure parse+link steps (no LLM, no store)
-//! for callers and tests. Those pure/DB-only units are unit-tested in-file; the
-//! real-LLM end-to-end suite lives in `extraction_e2e.rs`, with shared
-//! fixtures/harness in `extraction_test_support.rs`.
+//! The pure parse/DB-only units (`parse_extraction_response`,
+//! `filter_already_present`, `existing_instance_titles`) are unit-tested
+//! in-file; the real-LLM end-to-end suite lives in `extraction_e2e.rs`, with
+//! shared fixtures/harness in `extraction_test_support.rs`.
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -37,7 +38,8 @@ pub use run::*;
 
 /// One instance the LLM proposes creating: the target class name plus a flat
 /// map of field-name -> value. Extra/unknown fields are tolerated (kept in
-/// `props`); `instance_links` filters them against the class shape.
+/// `props`); `create_subject` only writes those that have a declared
+/// `ad4m://setter` on the class, so unknown/relation fields never become links.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ProposedInstance {
     pub class: String,
