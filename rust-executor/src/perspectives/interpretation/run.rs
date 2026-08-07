@@ -6,7 +6,6 @@ use super::{
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
-use crate::types::{Link, LinkQuery};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
@@ -63,8 +62,9 @@ where
 /// interpretation task, retry parsing up to 5×, then for every proposed instance
 /// write it into the perspective via `create_subject` — the same pipeline app
 /// code uses, reading each class's `ad4m://constructor` + per-property
-/// `ad4m://setter` actions from the SDNA. Returns the fresh base URI + links
-/// read back per instance.
+/// `ad4m://setter` actions from the SDNA. Returns the base URIs of the affected
+/// instances (created or updated); the links are owned by `create_subject`, not
+/// this function.
 ///
 /// The `shapes` argument is exactly the classes to consider — callers pick
 /// which subject classes to extract into (usually all classes carrying an
@@ -82,7 +82,7 @@ pub async fn run_interpretation(
     transcript: &[(String, String)],
     base_prefix: &str,
     context: &AgentContext,
-) -> anyhow::Result<Vec<(String, Vec<Link>)>> {
+) -> anyhow::Result<Vec<String>> {
     let task = ensure_interpretation_task()?;
     // Dedup context: what the graph already holds, so the model is steered away
     // from re-proposing known items and we can enforce it deterministically.
@@ -185,21 +185,5 @@ pub async fn run_interpretation(
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation: commit_batch failed: {e:#}"))?;
 
-    // Read back the links written per instance, so callers/tests see exactly
-    // what landed in the store (proves the write and yields the real targets).
-    let mut out = Vec::with_capacity(bases.len());
-    for base in bases {
-        let stored = perspective
-            .get_links(&LinkQuery {
-                source: Some(base.clone()),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("run_interpretation: get_links(readback) failed: {e:#}")
-            })?;
-        let links: Vec<Link> = stored.into_iter().map(|d| d.data.clone()).collect();
-        out.push((base, links));
-    }
-    Ok(out)
+    Ok(bases)
 }
