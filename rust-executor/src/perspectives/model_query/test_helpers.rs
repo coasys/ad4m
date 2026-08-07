@@ -22,6 +22,7 @@ pub fn prop(name: &str, predicate: &str) -> ShapeProperty {
         where_predicates: None,
         transform: None,
         extraction_hint: None,
+        identity: false,
     }
 }
 
@@ -43,6 +44,7 @@ pub fn relation(name: &str, predicate: &str) -> ShapeProperty {
         where_predicates: None,
         transform: None,
         extraction_hint: None,
+        identity: false,
     }
 }
 
@@ -64,6 +66,7 @@ pub fn flag(name: &str, predicate: &str, initial: &str) -> ShapeProperty {
         where_predicates: None,
         transform: None,
         extraction_hint: None,
+        identity: false,
     }
 }
 

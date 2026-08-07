@@ -55,6 +55,11 @@ pub struct PropertyShape {
     /// Emitted as an `ad4m://extraction_hint` link on the property node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction_hint: Option<String>,
+    /// Marks this property as the class's dedup identity (the "title-like"
+    /// interpretation key). Emitted as an `ad4m://identity` link on the
+    /// property node when `Some(true)`. No identity declared ⇒ no dedup.
+    #[serde(default)]
+    pub identity: Option<bool>,
     pub datatype: Option<String>,
     pub min_count: Option<u32>,
     pub max_count: Option<u32>,
@@ -459,6 +464,16 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://extraction_hint".to_string()),
                 target: format!("literal:string:{}", hint),
+            });
+        }
+
+        // Dedup identity marker: the property the extractor treats as the
+        // class's title-like interpretation key. No identity ⇒ no dedup.
+        if prop.identity == Some(true) {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://identity".to_string()),
+                target: "literal:string:true".to_string(),
             });
         }
 

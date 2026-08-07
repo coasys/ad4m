@@ -663,6 +663,7 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
             where_predicates: None,
             transform: None,
             extraction_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         extraction_hint: None,
@@ -1237,6 +1238,7 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
             where_predicates: Some(where_predicates),
             transform: None,
             extraction_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         extraction_hint: None,
@@ -1803,6 +1805,7 @@ async fn test_where_filter_signed_expression_string() {
             where_predicates: Some(where_predicates),
             transform: None,
             extraction_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         extraction_hint: None,
@@ -1879,6 +1882,7 @@ async fn test_where_filter_signed_expression_no_matches() {
             where_predicates: Some(where_predicates),
             transform: None,
             extraction_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         extraction_hint: None,
@@ -2003,6 +2007,7 @@ async fn test_where_filter_multiple_conditions() {
             where_predicates: Some(where_predicates),
             transform: None,
             extraction_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         extraction_hint: None,
@@ -2072,6 +2077,7 @@ async fn test_where_filter_missing_property_on_target() {
             where_predicates: Some(where_predicates),
             transform: None,
             extraction_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         extraction_hint: None,
@@ -2139,6 +2145,7 @@ async fn test_where_filter_plain_literal_string() {
             where_predicates: Some(where_predicates),
             transform: None,
             extraction_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         extraction_hint: None,
@@ -2229,6 +2236,7 @@ async fn test_where_filter_on_multiple_instances() {
             where_predicates: Some(where_predicates),
             transform: None,
             extraction_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         extraction_hint: None,
@@ -2620,6 +2628,7 @@ fn scalar_prop(name: &str, predicate: &str, required: bool, flag: bool) -> Shape
         where_predicates: None,
         transform: None,
         extraction_hint: None,
+        identity: false,
     }
 }
 
@@ -2641,6 +2650,7 @@ fn collection_prop(name: &str, predicate: &str, getter: Option<&str>) -> ShapePr
         where_predicates: None,
         transform: None,
         extraction_hint: None,
+        identity: false,
     }
 }
 
@@ -4227,6 +4237,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
             where_predicates: None,
             transform: None,
             extraction_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         extraction_hint: None,

@@ -1,39 +1,72 @@
 use super::ProposedInstance;
-use crate::perspectives::model_query::types::ModelShape;
+use crate::perspectives::model_query::types::{ModelShape, ShapeProperty};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use std::collections::HashMap;
 
+/// The property a class declares as its dedup identity (its title-like
+/// interpretation key) — the first property with `identity == true`. `None`
+/// when the SDNA declared no identity, in which case the class is never
+/// deduplicated (still interpreted and created, just not deduped).
+pub(crate) fn identity_property(shape: &ModelShape) -> Option<&ShapeProperty> {
+    shape.properties.iter().find(|p| p.identity)
+}
+
+/// Canonicalize an identity value for equality: trim, collapse internal
+/// whitespace to single spaces, and lowercase. So "Ship  the MVP " and
+/// "ship the mvp" compare equal. Semantic/embedding dedup is a later
+/// follow-up; this is deliberately a cheap normalized string match.
+pub(crate) fn normalize_identity(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 /// Deterministic dedup safety-net (pure): drop proposed instances whose
-/// (class, title) already exists in the graph, case-insensitively. This is the
-/// hard guarantee behind the soft `existing` hint in [`build_extraction_input`]
-/// — even if the model re-proposes a known item, it never becomes a link.
+/// (class, identity-value) already exists in the graph, compared under
+/// [`normalize_identity`]. This is the hard guarantee behind the soft
+/// `existing` hint in [`build_extraction_input`] — even if the model
+/// re-proposes a known item, it never becomes a link.
 ///
-/// `existing` maps a class's local name to the titles already present. Only the
-/// `title` field is compared (the human-facing identity of an SoA node);
-/// instances without a `title` are always kept.
+/// `existing` maps a class's local name to the already-present identity
+/// values (already normalized by [`existing_instance_identities`]).
+/// `identity_props` maps a class's local name to the NAME of its declared
+/// identity property. An instance whose class has no identity property is
+/// always kept (no dedup); likewise one missing that property's value.
 pub fn filter_already_present(
     instances: Vec<ProposedInstance>,
     existing: &HashMap<String, Vec<String>>,
+    identity_props: &HashMap<String, String>,
 ) -> Vec<ProposedInstance> {
     let known: HashMap<&String, std::collections::HashSet<String>> = existing
         .iter()
-        .map(|(class, titles)| (class, titles.iter().map(|t| t.to_lowercase()).collect()))
+        .map(|(class, values)| {
+            (
+                class,
+                values.iter().map(|v| normalize_identity(v)).collect(),
+            )
+        })
         .collect();
     instances
         .into_iter()
         .filter(|inst| {
-            let Some(title) = inst.props.get("title").and_then(|v| v.as_str()) else {
-                return true; // no title to compare on — keep it
+            // No declared identity for this class ⇒ no dedup.
+            let Some(idp_name) = identity_props.get(&inst.class) else {
+                return true;
             };
+            let Some(value) = inst.props.get(idp_name).and_then(|v| v.as_str()) else {
+                return true; // no identity value to compare on — keep it
+            };
+            let normalized = normalize_identity(value);
             let already = known
                 .get(&inst.class)
-                .map(|set| set.contains(&title.to_lowercase()))
+                .map(|set| set.contains(&normalized))
                 .unwrap_or(false);
             if already {
                 log::debug!(
                     "extraction: dropping already-present {} '{}'",
                     inst.class,
-                    title
+                    value
                 );
             }
             !already
@@ -93,61 +126,67 @@ fn decode_literal_string(uri: &str) -> Option<String> {
     }
 }
 
-/// read the titles of instances already present in the perspective for each
-/// target class, keyed by the class's local name. Used to steer the LLM away
-/// from re-proposing known items ([`build_extraction_input`]) and to enforce
-/// dedup deterministically ([`filter_already_present`]).
+/// read the identity values of instances already present in the perspective
+/// for each target class, keyed by the class's local name. Used to steer the
+/// LLM away from re-proposing known items ([`build_extraction_input`]) and to
+/// enforce dedup deterministically ([`filter_already_present`]).
+///
+/// The dedup key is whichever property the class declares as its `identity`
+/// (via [`identity_property`]), not a hard-coded `title`. Classes with no
+/// identity property are skipped entirely — no identity ⇒ no dedup. Values are
+/// normalized ([`normalize_identity`]) as they are read, so downstream
+/// comparison is a plain set lookup.
 ///
 /// Instances are read through the model-query API (`PerspectiveInstance::
 /// model_query`) — the symmetric counterpart to writing them via
 /// `create_subject` — so class conformance and field decoding go through the
-/// class's own shape/getters rather than hand-matched type-flag + title links.
-/// Classes without a `title` property are skipped (no dedup key). A per-class
-/// query failure (e.g. the class isn't registered in this perspective) is
-/// treated as "no existing instances" — dedup is a soft hint, guaranteed
-/// deterministically downstream by [`filter_already_present`].
-pub async fn existing_instance_titles(
+/// class's own shape/getters rather than hand-matched type-flag links. A
+/// per-class query failure (e.g. the class isn't registered in this
+/// perspective) is treated as "no existing instances" — dedup is a soft hint,
+/// guaranteed deterministically downstream by [`filter_already_present`].
+pub async fn existing_instance_identities(
     perspective: &PerspectiveInstance,
     shapes: &[ModelShape],
 ) -> anyhow::Result<HashMap<String, Vec<String>>> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
     for shape in shapes {
-        // Only classes carrying a `title` scalar have a dedup key.
-        if !shape.properties.iter().any(|p| p.name == "title") {
+        // No declared identity property ⇒ no dedup key ⇒ skip.
+        let Some(idp) = identity_property(shape) else {
             continue;
-        }
+        };
+        let idp_name = idp.name.clone();
         let class = class_local_name(&shape.target_class);
 
-        let result_json = match perspective
-            .model_query(class, r#"{"properties":["title"]}"#)
-            .await
-        {
+        let query = format!(r#"{{"properties":["{idp_name}"]}}"#);
+        let result_json = match perspective.model_query(class, &query).await {
             Ok(json) => json,
             Err(e) => {
-                log::warn!("existing_instance_titles: model_query({class}) failed, treating as no existing instances: {e:#}");
+                log::warn!("existing_instance_identities: model_query({class}) failed, treating as no existing instances: {e:#}");
                 continue;
             }
         };
         let result: serde_json::Value = serde_json::from_str(&result_json).map_err(|e| {
-            anyhow::anyhow!("existing_instance_titles: bad model_query result for {class}: {e:#}")
+            anyhow::anyhow!(
+                "existing_instance_identities: bad model_query result for {class}: {e:#}"
+            )
         })?;
 
-        let titles: Vec<String> = result
+        let values: Vec<String> = result
             .get("instances")
             .and_then(|v| v.as_array())
             .map(|rows| {
                 rows.iter()
                     .filter_map(|inst| {
-                        inst.get("title")
+                        inst.get(&idp_name)
                             .and_then(|t| t.as_str())
-                            .map(|s| s.to_string())
+                            .map(normalize_identity)
                     })
                     .collect()
             })
             .unwrap_or_default();
 
-        if !titles.is_empty() {
-            out.insert(class.to_string(), titles);
+        if !values.is_empty() {
+            out.insert(class.to_string(), values);
         }
     }
     Ok(out)

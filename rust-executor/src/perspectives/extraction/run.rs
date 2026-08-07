@@ -1,12 +1,12 @@
 use super::{
-    build_extraction_input, class_local_name, ensure_extraction_task, existing_instance_titles,
-    filter_already_present, parse_extraction_response, ProposedInstance,
+    build_extraction_input, class_local_name, ensure_extraction_task, existing_instance_identities,
+    filter_already_present, identity_property, parse_extraction_response, ProposedInstance,
 };
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::{Link, LinkQuery};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 /// Max attempts for [`retry_extraction_parse`]. Mirrors Flux's `LLMutils`
@@ -85,7 +85,22 @@ pub async fn run_extraction(
     let task = ensure_extraction_task()?;
     // Dedup context: what the graph already holds, so the model is steered away
     // from re-proposing known items and we can enforce it deterministically.
-    let existing = existing_instance_titles(perspective, shapes).await?;
+    // Keyed by each class's declared `identity` property; classes without one
+    // are absent (no dedup).
+    let existing = existing_instance_identities(perspective, shapes).await?;
+    // class local name → identity property name, for the deterministic
+    // safety-net below. Classes with no identity property are omitted.
+    let identity_props: HashMap<String, String> = shapes
+        .iter()
+        .filter_map(|s| {
+            identity_property(s).map(|idp| {
+                (
+                    class_local_name(&s.target_class).to_string(),
+                    idp.name.clone(),
+                )
+            })
+        })
+        .collect();
     let prompt = build_extraction_input(shapes, transcript, &existing);
 
     let service = crate::ai_service::AIService::global_instance()
@@ -107,8 +122,8 @@ pub async fn run_extraction(
     .await?;
 
     // Hard dedup guarantee: even if the model ignored the `existing` hint, an
-    // already-present (class, title) never becomes a new instance.
-    let instances = filter_already_present(instances, &existing);
+    // already-present (class, identity value) never becomes a new instance.
+    let instances = filter_already_present(instances, &existing, &identity_props);
 
     // Write each surviving instance through `create_subject` — the same
     // constructor+setter pipeline app code uses — inside one batch so a

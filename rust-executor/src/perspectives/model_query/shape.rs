@@ -89,12 +89,13 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             ?getter ?hasValue ?className
             ?relationKind ?targetClassName
             ?whereFilter ?wherePredicates ?filterEnabled
-            ?transform ?extractionHint
+            ?transform ?extractionHint ?identity
         WHERE {{
             <{shape_uri}> <sh://property> ?propUri .
             ?propUri <sh://path> ?path .
             ?propUri <rdf://type> ?propType .
             OPTIONAL {{ ?propUri <ad4m://extraction_hint> ?extractionHint . }}
+            OPTIONAL {{ ?propUri <ad4m://identity> ?identity . }}
             OPTIONAL {{ ?propUri <sh://datatype> ?datatype . }}
             OPTIONAL {{ ?propUri <sh://minCount> ?minCount . }}
             OPTIONAL {{ ?propUri <sh://maxCount> ?maxCount . }}
@@ -168,6 +169,13 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         let extraction_hint = first["extractionHint"]
             .as_str()
             .map(decode_literal_string_target);
+        // Identity marker: the `ad4m://identity` literal decodes to "true"
+        // only when the SDNA explicitly declared this property the dedup key.
+        let identity = first["identity"]
+            .as_str()
+            .map(decode_literal_string_target)
+            .map(|v| v == "true")
+            .unwrap_or(false);
 
         let min_count = parse_count_literal(first["minCount"].as_str());
         let max_count = parse_count_literal(first["maxCount"].as_str());
@@ -257,6 +265,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 where_predicates: where_predicates.clone(),
                 transform: transform.clone(),
                 extraction_hint: extraction_hint.clone(),
+                identity,
             });
 
             let resolved_target_class_name = target_class_name.clone().unwrap_or_else(|| {
@@ -297,6 +306,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 where_predicates,
                 transform,
                 extraction_hint,
+                identity,
             });
         }
     }
@@ -572,6 +582,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 where_predicates: None,
                 transform,
                 extraction_hint: None,
+                identity: false,
             });
         }
     }
@@ -620,6 +631,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 where_predicates,
                 transform: None,
                 extraction_hint: None,
+                identity: false,
             });
 
             if rel_meta.get("targetShape").is_some() || rel_meta.get("targetClassName").is_some() {

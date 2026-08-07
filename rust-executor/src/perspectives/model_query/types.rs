@@ -413,6 +413,11 @@ pub struct ShapeProperty {
     /// generic LLM extractor (and MCP tool-schema generation) can inject it as
     /// semantic guidance.  `None` when the SDNA declared no hint.
     pub(crate) extraction_hint: Option<String>,
+    /// Whether this property is the class's dedup identity (its title-like
+    /// interpretation key), read back from the `ad4m://identity` link on the
+    /// property node.  `false` when the SDNA declared no identity — a class
+    /// with no identity property is never deduplicated.
+    pub(crate) identity: bool,
 }
 
 /// Enriched relation metadata for include (eager-loading) resolution.

@@ -256,12 +256,15 @@ async fn retry_extraction_parse_fails_after_max_attempts() {
 
 #[test]
 fn filter_already_present_drops_known_titles() {
-    // Two Tasks proposed; one duplicates an existing title (case-insensitive),
-    // one is new. Only the new one survives; a same-title item of a DIFFERENT
-    // class is untouched (dedup is per class).
+    // Tasks declare `title` as their identity. Four Tasks proposed: one
+    // duplicates an existing title (case-insensitive), one duplicates it under
+    // whitespace normalization, one is new, and a same-title item of a
+    // DIFFERENT class (which has no identity here) is untouched (dedup is per
+    // class, and only for classes with a declared identity).
     let proposed = parse_extraction_response(
         r#"[
               {"class":"Task","title":"Ship the MVP"},
+              {"class":"Task","title":"  ship   the   mvp  "},
               {"class":"Task","title":"Write the docs"},
               {"class":"Belief","title":"ship the mvp"}
             ]"#,
@@ -269,8 +272,11 @@ fn filter_already_present_drops_known_titles() {
     .unwrap();
     let mut existing = HashMap::new();
     existing.insert("Task".to_string(), vec!["ship the MVP".to_string()]);
+    // Only Task declares `title` as its identity; Belief has none ⇒ no dedup.
+    let mut identity_props = HashMap::new();
+    identity_props.insert("Task".to_string(), "title".to_string());
 
-    let kept = filter_already_present(proposed, &existing);
+    let kept = filter_already_present(proposed, &existing, &identity_props);
     let kept_titles: Vec<&str> = kept
         .iter()
         .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
@@ -280,11 +286,15 @@ fn filter_already_present_drops_known_titles() {
         "existing Task title must be dropped (case-insensitive); got {kept_titles:?}"
     );
     assert!(
+        !kept_titles.contains(&"  ship   the   mvp  "),
+        "whitespace-normalized duplicate Task title must be dropped; got {kept_titles:?}"
+    );
+    assert!(
         kept_titles.contains(&"Write the docs"),
         "new Task must survive"
     );
     assert!(
         kept_titles.contains(&"ship the mvp"),
-        "same title on a different class must NOT be dropped; got {kept_titles:?}"
+        "same title on a class with no declared identity must NOT be dropped; got {kept_titles:?}"
     );
 }

@@ -3,8 +3,10 @@
 //! class/property.
 //!
 //! Data flow of one extraction run (`run_extraction` wires it end to end):
-//!   1. Read the titles already present per class (`existing_instance_titles`)
-//!      so the model can be steered away from re-proposing known items.
+//!   1. Read the identity values already present per class
+//!      (`existing_instance_identities`, keyed by each class's declared
+//!      `identity` property) so the model can be steered away from
+//!      re-proposing known items.
 //!   2. Render those, plus each class's `extraction_hint` + fields and the
 //!      transcript, into a single prompt (`build_extraction_input`).
 //!   3. Ask the configured LLM (`AIService::prompt` on the task registered by
@@ -19,7 +21,7 @@
 //!      `local` flags, not a caller choice.
 //!
 //! The pure parse/DB-only units (`parse_extraction_response`,
-//! `filter_already_present`, `existing_instance_titles`) are unit-tested
+//! `filter_already_present`, `existing_instance_identities`) are unit-tested
 //! in-file; the real-LLM end-to-end suite lives in `extraction_e2e.rs`, with
 //! shared fixtures/harness in `extraction_test_support.rs`.
 

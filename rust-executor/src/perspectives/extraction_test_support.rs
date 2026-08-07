@@ -39,7 +39,7 @@ pub(crate) const BELIEF_SDNA: &str = r#"{
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://belief"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://belief","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"One-sentence statement in the claimant's framing.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"One-sentence statement in the claimant's framing.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
   ]
 }"#;
 
@@ -49,7 +49,7 @@ pub(crate) const INTENTION_SDNA: &str = r#"{
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://intention"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://intention","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the work.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the work.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
     {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Who committed to it, if stated.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]}
   ]
 }"#;
@@ -60,7 +60,7 @@ pub(crate) const TASK_SDNA: &str = r#"{
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://task"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
     {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Person responsible for the task, if stated.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]}
   ]
 }"#;
@@ -74,7 +74,7 @@ pub(crate) const TASK_WITH_RELATION_SDNA: &str = r#"{
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://task"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
     {"path":"ns://blocks","name":"blocks","relation_kind":"hasMany","target_class_name":"Task","class":"ns://TaskShape","extraction_hint":"Other tasks this one blocks."}
   ]
 }"#;
@@ -85,7 +85,7 @@ pub(crate) const OBSERVATION_SDNA: &str = r#"{
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://observation"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://observation","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The observed fact, stated plainly.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The observed fact, stated plainly.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
   ]
 }"#;
 
@@ -95,7 +95,7 @@ pub(crate) const QUESTION_SDNA: &str = r#"{
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://question"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://question","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The question, phrased as a question.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The question, phrased as a question.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
   ]
 }"#;
 
@@ -105,7 +105,7 @@ pub(crate) const VISION_SDNA: &str = r#"{
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://vision"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://vision","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The aspiration, stated concisely.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The aspiration, stated concisely.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
   ]
 }"#;
 
@@ -115,7 +115,7 @@ pub(crate) const PLAN_SDNA: &str = r#"{
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://plan"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://plan","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Summary of the plan or approach.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Summary of the plan or approach.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
     {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Who owns the plan, if stated.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]}
   ]
 }"#;
@@ -360,14 +360,14 @@ pub(crate) async fn seed_instance(
 //
 // These read the *final graph state* through `PerspectiveInstance::model_query`
 // — the symmetric counterpart to the write side (`create_subject`) and the read
-// side (`existing_instance_titles`) — rather than inspecting the placement links
+// side (`existing_instance_identities`) — rather than inspecting the placement links
 // `run_extraction` returned. Tests assert what's actually persisted in the
 // perspective, decoded through each class's own shape/getters.
 
 /// Read back the instances of `class` via the model-query API, requesting the
 /// given `props`. Returns the parsed `instances` array; a query/parse failure
 /// (e.g. the class isn't registered here) is logged and treated as "no
-/// instances", mirroring `existing_instance_titles`.
+/// instances", mirroring `existing_instance_identities`.
 pub(crate) async fn model_instances(
     perspective: &PerspectiveInstance,
     class: &str,
