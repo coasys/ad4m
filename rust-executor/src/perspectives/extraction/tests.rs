@@ -148,6 +148,65 @@ fn system_prompt_documents_relation_ref_syntax() {
     );
 }
 
+#[test]
+fn relations_few_shot_example_is_present_and_upsert_is_last() {
+    // Phase 2 step 3: the few-shot set must include a dedicated relations
+    // example demonstrating the `new:<Class>:<n>` ref syntax the system prompt
+    // teaches. It need NOT be last: empirically, putting the relations example
+    // (all-new-instances) in the recency slot made gemma3:12b create-happy and
+    // regressed the id-upsert behavior (`e2e_updates_existing_instance_via_id`
+    // 0/5). So the *upsert* example owns the last slot; relations sit earlier
+    // and still fire reliably (the topic-relation e2e is 3/3).
+    let examples = extraction_examples();
+    assert_eq!(examples.len(), 4, "expected exactly four few-shot examples");
+
+    // Find the relations example wherever it sits: the one whose output uses
+    // the `new:<Class>:<n>` ref syntax on both endpoints of a
+    // SemanticRelationship.
+    let relations_ex = examples
+        .iter()
+        .find(|e| e.output.contains("\"new:Topic:1\"") && e.output.contains("\"new:Message:1\""))
+        .expect(
+            "a relations few-shot example demonstrating `new:<Class>:<n>` refs must be present",
+        );
+    // Its input must render the `relations` block so the LLM sees the schema
+    // half of the ref-syntax lesson.
+    let v: serde_json::Value = serde_json::from_str(&relations_ex.input).unwrap();
+    let rel_class = v["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "SemanticRelationship")
+        .expect("relations few-shot must declare a SemanticRelationship class");
+    let rels = rel_class["relations"]
+        .as_array()
+        .expect("SemanticRelationship must render a relations block");
+    let rel_names: Vec<&str> = rels.iter().filter_map(|r| r["name"].as_str()).collect();
+    assert!(
+        rel_names.contains(&"tag") && rel_names.contains(&"expression"),
+        "relations example must declare both `tag` and `expression` relations; got {rel_names:?}"
+    );
+
+    // The LAST example must be the upsert one — it carries an `existing` entry
+    // with an `id` and re-emits that `id` in its output (the fragile behavior
+    // that needs the recency slot). Guard against a future reshuffle silently
+    // regressing upsert recall again.
+    let last = examples.last().unwrap();
+    let lv: serde_json::Value = serde_json::from_str(&last.input).unwrap();
+    let has_existing_with_id = lv["classes"].as_array().unwrap().iter().any(|c| {
+        c["existing"]
+            .as_array()
+            .map(|xs| xs.iter().any(|x| x.get("id").is_some()))
+            .unwrap_or(false)
+    });
+    assert!(
+        has_existing_with_id,
+        "the last few-shot example must be the upsert one (an `existing` entry \
+         carrying an `id`), so id-upsert keeps the recency slot; last input was: {}",
+        last.input
+    );
+}
+
 fn titles(instances: &[ProposedInstance]) -> Vec<&str> {
     instances
         .iter()
@@ -613,6 +672,207 @@ fn relation_properties_are_excluded_from_extraction() {
     assert!(links
         .iter()
         .any(|l| l.predicate.as_deref() == Some("ns://title")));
+}
+
+// --- Phase 2: relation write-path (pure planner) --------------------------
+
+/// Base URI of the Nth (0-based) `Create` op, in op order. Panics if absent.
+fn nth_create_base(ops: &[ExtractionOp], n: usize) -> String {
+    ops.iter()
+        .filter_map(|op| match op {
+            ExtractionOp::Create { base, .. } => Some(base.clone()),
+            _ => None,
+        })
+        .nth(n)
+        .expect("expected a Create op at that index")
+}
+
+/// All links of the first `Create` op whose base matches `base`.
+fn create_links_for<'a>(ops: &'a [ExtractionOp], base: &str) -> &'a [crate::types::Link] {
+    ops.iter()
+        .find_map(|op| match op {
+            ExtractionOp::Create { base: b, links } if b == base => Some(links.as_slice()),
+            _ => None,
+        })
+        .expect("no Create op for that base")
+}
+
+fn blocks_targets(links: &[crate::types::Link]) -> Vec<String> {
+    links
+        .iter()
+        .filter(|l| l.predicate.as_deref() == Some("ns://blocks"))
+        .map(|l| l.target.clone())
+        .collect()
+}
+
+#[test]
+fn apply_relations_writes_link_to_new_sibling() {
+    // Two Tasks minted in one pass; the first `blocks` the second via a
+    // `new:Task:2` ref. The relation must resolve to the second Task's freshly
+    // minted base and land as a real `ns://blocks` link (not a literal).
+    let shape = shape_from_sdna("Task", TASK_WITH_RELATION_SDNA);
+    let raw = r#"[
+      {"class":"Task","title":"Ship the API","blocks":["new:Task:2"]},
+      {"class":"Task","title":"Write the client"}
+    ]"#;
+    let proposed = parse_extraction_response(raw).unwrap();
+    let ops = plan_extraction_ops(&[shape], &proposed, "soa://ext/");
+
+    let first_base = nth_create_base(&ops, 0);
+    let second_base = nth_create_base(&ops, 1);
+    let targets = blocks_targets(create_links_for(&ops, &first_base));
+    assert_eq!(
+        targets,
+        vec![second_base],
+        "blocks ref `new:Task:2` must point at the second Task's base"
+    );
+    // The target is an instance base, never a literal URI.
+    assert!(
+        !targets[0].starts_with("literal:"),
+        "relation target must be an instance URI, not a literal"
+    );
+}
+
+#[test]
+fn apply_relations_writes_link_to_existing_id() {
+    // A single new Task blocks an existing one, referenced by its id. Only ids
+    // the model was shown (in `known_existing_ids`) are accepted as targets.
+    let shape = shape_from_sdna("Task", TASK_WITH_RELATION_SDNA);
+    let existing_id = "soa://ext/task/already-here".to_string();
+    let known: std::collections::HashSet<String> = [existing_id.clone()].into_iter().collect();
+    let raw = format!(r#"[{{"class":"Task","title":"New work","blocks":["{existing_id}"]}}]"#,);
+    let proposed = parse_extraction_response(&raw).unwrap();
+    let ops = plan_extraction_ops_with_context(&[shape], &proposed, "soa://ext/", &known);
+
+    let base = nth_create_base(&ops, 0);
+    assert_eq!(
+        blocks_targets(create_links_for(&ops, &base)),
+        vec![existing_id],
+        "existing-id blocks ref must resolve to that id"
+    );
+}
+
+#[test]
+fn apply_relations_drops_unresolved_ref() {
+    // An out-of-range ordinal and an invented id are both unresolvable — the
+    // node still lands, just with no relation link and no panic.
+    let shape = shape_from_sdna("Task", TASK_WITH_RELATION_SDNA);
+    let raw = r#"[
+      {"class":"Task","title":"Lonely","blocks":["new:Task:99","soa://ext/task/never-shown"]}
+    ]"#;
+    let proposed = parse_extraction_response(raw).unwrap();
+    // Empty known-ids: the bare id ref is "invented" from the model's POV.
+    let ops = plan_extraction_ops(&[shape], &proposed, "soa://ext/");
+
+    let base = nth_create_base(&ops, 0);
+    let links = create_links_for(&ops, &base);
+    assert!(
+        blocks_targets(links).is_empty(),
+        "unresolved refs must not become links; got {links:#?}"
+    );
+    // The scalar title still lands — a dropped relation never drops the node.
+    assert!(links
+        .iter()
+        .any(|l| l.predicate.as_deref() == Some("ns://title")));
+}
+
+#[test]
+fn apply_relations_hasone_takes_first_of_array() {
+    // A single-cardinality (`hasOne`) relation given an array keeps only the
+    // first resolved ref. `parent` is hasOne forward -> Task.
+    let sdna = r#"{
+      "target_class":"ns://Task",
+      "extraction_hint":"A task.",
+      "properties":[
+        {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
+        {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal"},
+        {"path":"ns://parent","name":"parent","relation_kind":"hasOne","target_class_name":"Task","class":"ns://TaskShape","extraction_hint":"The parent task."}
+      ]
+    }"#;
+    let shape = shape_from_sdna("Task", sdna);
+    // Sanity: the fixture really is single-cardinality forward.
+    let parent_rel = shape
+        .include_relations
+        .iter()
+        .find(|r| r.name == "parent")
+        .expect("parent relation present");
+    assert_eq!(parent_rel.direction, "forward");
+    assert!(
+        parent_rel.kind == "hasOne" || parent_rel.max_count == Some(1),
+        "parent must be single-cardinality"
+    );
+
+    let raw = r#"[
+      {"class":"Task","title":"Child","parent":["new:Task:2","new:Task:3"]},
+      {"class":"Task","title":"First parent"},
+      {"class":"Task","title":"Second parent"}
+    ]"#;
+    let proposed = parse_extraction_response(raw).unwrap();
+    let ops = plan_extraction_ops(&[shape], &proposed, "soa://ext/");
+
+    let child_base = nth_create_base(&ops, 0);
+    let first_parent_base = nth_create_base(&ops, 1);
+    let parent_targets: Vec<String> = create_links_for(&ops, &child_base)
+        .iter()
+        .filter(|l| l.predicate.as_deref() == Some("ns://parent"))
+        .map(|l| l.target.clone())
+        .collect();
+    assert_eq!(
+        parent_targets,
+        vec![first_parent_base],
+        "hasOne must keep only the first resolved ref (new:Task:2)"
+    );
+}
+
+#[test]
+fn apply_relations_from_update_target_emits_addlinks() {
+    // A relation whose source is an *existing* (upsert) instance must not fold
+    // into that instance's scalar Update — it becomes an additive `AddLinks`
+    // op (relations to a fresh sibling grow the graph, never replace scalars).
+    let shape = shape_from_sdna("Task", TASK_WITH_RELATION_SDNA);
+    let existing_id = "soa://ext/task/existing".to_string();
+    let raw = format!(
+        r#"[
+          {{"class":"Task","id":"{existing_id}","title":"Renamed","blocks":["new:Task:2"]}},
+          {{"class":"Task","title":"Fresh sibling"}}
+        ]"#,
+    );
+    let proposed = parse_extraction_response(&raw).unwrap();
+    let ops = plan_extraction_ops(&[shape], &proposed, "soa://ext/");
+
+    // The Update carries the retitled scalar, no relation link.
+    let update = ops
+        .iter()
+        .find_map(|op| match op {
+            ExtractionOp::Update { base, set } if base == &existing_id => Some(set),
+            _ => None,
+        })
+        .expect("expected an Update on the existing id");
+    assert!(
+        update
+            .iter()
+            .all(|l| l.predicate.as_deref() != Some("ns://blocks")),
+        "scalar Update must not carry relation links"
+    );
+    assert!(update
+        .iter()
+        .any(|l| l.predicate.as_deref() == Some("ns://title")));
+
+    // The relation lands as an additive AddLinks on the same base, pointing at
+    // the fresh sibling.
+    let sibling_base = nth_create_base(&ops, 0);
+    let add = ops
+        .iter()
+        .find_map(|op| match op {
+            ExtractionOp::AddLinks { base, links } if base == &existing_id => Some(links),
+            _ => None,
+        })
+        .expect("expected an AddLinks op on the existing id");
+    assert_eq!(
+        blocks_targets(add),
+        vec![sibling_base],
+        "AddLinks must point the blocks relation at the fresh sibling's base"
+    );
 }
 
 #[test]

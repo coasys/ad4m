@@ -197,17 +197,19 @@ Output rules:
 /// model loaded for a `prompt` call; this split keeps registration testable in
 /// CI without a GPU.
 /// Few-shot examples sent as prior User/Assistant turns (via `prompt_examples`)
-/// ahead of the real input. Three generic, non-test scenarios that teach the
+/// ahead of the real input. Four generic, non-test scenarios that teach the
 /// failure modes small models hit: (1) a belief and a task in the same snippet
 /// must BOTH be captured; (2) a question raised amid tasks must be captured;
 /// (3) a transcript that refines an existing entry must emit that entry's `id`
-/// as an upsert instead of minting a duplicate. The upsert case is added last
-/// (recency-weighted in small LLMs) but the negative "adjacent tasks don't
-/// upsert" case is left to the prose rules — extra negative examples were
-/// found to bias small models toward under-extraction (dropped modalities).
+/// as an upsert instead of minting a duplicate; (4) instances co-created in one
+/// pass can be linked by relation using the `new:<Class>:<n>` ref syntax
+/// (Phase 2). The *upsert* example is added LAST — it's the most fragile
+/// behavior on small models, and putting the relations example (all new
+/// instances) in the recency slot made gemma3:12b create-happy and stopped it
+/// emitting `id`s to update. Relations sit second and still fire reliably.
 /// Inputs mirror the JSON shape `build_extraction_input` produces (existing
-/// entries carry `id`/`title`/`class`).
-fn extraction_examples() -> Vec<AIPromptExamples> {
+/// entries carry `id`/`title`/`class`; each class carries a `relations` block).
+pub(crate) fn extraction_examples() -> Vec<AIPromptExamples> {
     let ex1_in = serde_json::json!({
         "classes": [
             {"name":"Task","hint":"An action someone commits to doing.","existing":[],
@@ -276,23 +278,75 @@ fn extraction_examples() -> Vec<AIPromptExamples> {
     ])
     .to_string();
 
+    // Relations example (Phase 2): two Messages and two Topics are minted in
+    // the same pass, and two SemanticRelationships link each Topic to a
+    // Message via `new:<Class>:<n>` refs. Teaches the LLM (a) the per-class
+    // 1-based ordinal counting, (b) that BOTH endpoints can be freshly-minted
+    // siblings, (c) how relation fields carry references not free-form
+    // strings. A dedicated Message class is preferred over stuffing a
+    // literal-URI value into `expression` — using only `new:` refs keeps the
+    // example consistent with the "never invent an `id`" rule in the system
+    // prompt.
+    let ex4_in = serde_json::json!({
+        "classes": [
+            {"name":"Message","hint":"An utterance exchanged in the transcript.","existing":[],
+             "fields":[{"name":"content","required":true,"hint":"Short summary of what was said."}]},
+            {"name":"Topic","hint":"A subject the participants discuss.","existing":[],
+             "fields":[{"name":"title","required":true,"hint":"Short topic label."}]},
+            {"name":"SemanticRelationship",
+             "hint":"An edge that tags a Message with a Topic and a relevance score.",
+             "existing":[],
+             "fields":[{"name":"relevance","required":true,"hint":"0..1 confidence that the tag applies."}],
+             "relations":[
+                 {"name":"tag","targetClass":"Topic","hint":"The topic being tagged."},
+                 {"name":"expression","targetClass":"Message","hint":"The message the topic tags."}
+             ]}
+        ],
+        "transcript":[
+            {"speaker":"A","text":"We should log all failed webhook retries — that would help debug the payments outage."},
+            {"speaker":"B","text":"Agreed. Retry logging is basically an observability question."}
+        ]
+    })
+    .to_string();
+    let ex4_out = serde_json::json!([
+        {"class":"Message","content":"We should log all failed webhook retries to debug the payments outage."},
+        {"class":"Message","content":"Retry logging is basically an observability question."},
+        {"class":"Topic","title":"Webhook retry logging"},
+        {"class":"Topic","title":"Observability"},
+        {"class":"SemanticRelationship","relevance":0.9,
+         "tag":"new:Topic:1","expression":"new:Message:1"},
+        {"class":"SemanticRelationship","relevance":0.8,
+         "tag":"new:Topic:2","expression":"new:Message:2"}
+    ])
+    .to_string();
+
     // Order matters: small LLMs weight the last example most (recency).
-    // Put the upsert case in the MIDDLE so it's learned but doesn't dominate;
-    // end on ex1 (belief + task in one turn) so "capture every modality"
-    // remains the freshest signal — losing that was the failure mode when
-    // ex3 was placed last.
+    // - ex2 (question amid tasks) first — teaches modal separation.
+    // - ex4 (relations) second — teaches the `new:<Class>:<n>` ref syntax.
+    // - ex1 (belief + task) third — keeps modality completeness fresh
+    //   (`e2e_intention_and_belief` also wraps this in `run_e2e_retrying`).
+    // - ex3 (upsert) LAST — the id-upsert behavior is the most fragile on
+    //   small models: with ex4's all-new-instances output in the last slot,
+    //   gemma3:12b became create-happy and stopped emitting `id` to update an
+    //   existing node (regressed `e2e_updates_existing_instance_via_id` 0/5).
+    //   Relations proved robust even off the last slot (the topic-relation e2e
+    //   still fires 3/3), so upsert gets the recency bump instead.
     vec![
         AIPromptExamples {
             input: ex2_in,
             output: ex2_out,
         },
         AIPromptExamples {
-            input: ex3_in,
-            output: ex3_out,
+            input: ex4_in,
+            output: ex4_out,
         },
         AIPromptExamples {
             input: ex1_in,
             output: ex1_out,
+        },
+        AIPromptExamples {
+            input: ex3_in,
+            output: ex3_out,
         },
     ]
 }

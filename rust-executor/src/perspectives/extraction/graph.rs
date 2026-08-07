@@ -2,7 +2,7 @@ use super::{parse_extraction_response, ProposedInstance};
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::Link;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 /// Deterministic dedup safety-net (pure): drop proposed instances whose
@@ -24,6 +24,14 @@ pub fn filter_already_present(
     instances
         .into_iter()
         .filter(|inst| {
+            // An instance carrying an `id` is an explicit upsert target — it
+            // names a specific existing node, so its title *should* match one
+            // already present. Never title-dedup it, and (crucially) keep it in
+            // place: callers rely on this to preserve the LLM's output order,
+            // which is what `new:<Class>:<n>` relation ordinals resolve against.
+            if inst.id.is_some() {
+                return true;
+            }
             let Some(title) = inst.props.get("title").and_then(|v| v.as_str()) else {
                 return true; // no title to compare on — keep it
             };
@@ -197,19 +205,74 @@ pub fn place_instances(
 /// (Flux "grouping": continue an existing subgroup vs. start a new one).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExtractionOp {
-    Create { base: String, links: Vec<Link> },
-    Update { base: String, set: Vec<Link> },
+    Create {
+        base: String,
+        links: Vec<Link>,
+    },
+    Update {
+        base: String,
+        set: Vec<Link>,
+    },
+    /// Append relation links onto an existing (Update-target) instance. Purely
+    /// additive — a relation from an existing node to a freshly-minted one grows
+    /// the graph and must not clear sibling relations (unlike scalar `Update`,
+    /// which replaces-per-predicate). Removing a relation is out of scope
+    /// (Phase 3 semantic diff).
+    AddLinks {
+        base: String,
+        links: Vec<Link>,
+    },
 }
 
-/// Turn proposed instances into create/update ops. A proposal with an `id`
-/// becomes an `Update` on that existing base (scalar fields only); otherwise a
-/// `Create` under `base_prefix`. Unknown-class proposals are dropped.
+/// Turn proposed instances into create/update ops with no relation context.
+/// Thin wrapper over [`plan_extraction_ops_with_context`] with an empty
+/// existing-id set — kept for callers/tests that don't need relations resolved
+/// against the graph's existing instances.
 pub fn plan_extraction_ops(
     shapes: &[ModelShape],
     proposed: &[ProposedInstance],
     base_prefix: &str,
 ) -> Vec<ExtractionOp> {
-    let mut out = Vec::with_capacity(proposed.len());
+    plan_extraction_ops_with_context(shapes, proposed, base_prefix, &HashSet::new())
+}
+
+/// Turn proposed instances into create/update/add-links ops (Phase 2:
+/// relation-aware). A proposal with an `id` becomes an `Update` on that existing
+/// base (scalar fields); otherwise a `Create` under `base_prefix`. On top of
+/// that, forward relation fields are resolved into real `Link`s and either
+/// folded into a `Create`'s links or emitted as an additive `AddLinks` on an
+/// Update target. Unknown-class proposals are dropped.
+///
+/// Two passes, because a relation ref can point *forward* to a sibling minted
+/// later in the same response:
+///   1. Place every proposal — mint or reuse its base — and index bases per
+///      class **in the LLM's output order**, so `new:<Class>:<n>` ordinals
+///      resolve deterministically. `known_existing_ids` seeds the set of valid
+///      existing-id relation targets (what the model was shown in `existing`).
+///   2. Resolve each proposal's relation refs against the full index and emit
+///      links. Unresolvable refs (typo'd id, out-of-range ordinal) are dropped
+///      with a `log::warn!` — the node still lands, just without that edge.
+///
+/// `proposed` **must be in the LLM's emission order** for the ordinals to line
+/// up; `run_extraction` guarantees this by dedup-filtering in place rather than
+/// re-partitioning.
+pub fn plan_extraction_ops_with_context(
+    shapes: &[ModelShape],
+    proposed: &[ProposedInstance],
+    base_prefix: &str,
+    known_existing_ids: &HashSet<String>,
+) -> Vec<ExtractionOp> {
+    struct Placed<'a> {
+        shape: &'a ModelShape,
+        inst: &'a ProposedInstance,
+        base: String,
+        is_update: bool,
+    }
+
+    // Pass 1: place proposals + build the per-class ordinal index.
+    let mut per_class: HashMap<String, Vec<String>> = HashMap::new();
+    let mut existing_ids: HashSet<String> = known_existing_ids.clone();
+    let mut placed: Vec<Placed> = Vec::with_capacity(proposed.len());
     for inst in proposed {
         let Some(shape) = shapes
             .iter()
@@ -221,30 +284,180 @@ pub fn plan_extraction_ops(
             );
             continue;
         };
-        match &inst.id {
-            Some(existing) => {
-                let set = scalar_property_links(shape, inst, existing);
-                if !set.is_empty() {
-                    out.push(ExtractionOp::Update {
-                        base: existing.clone(),
-                        set,
-                    });
-                }
-            }
-            None => {
-                let base = format!(
+        let (base, is_update) = match &inst.id {
+            Some(existing) => (existing.clone(), true),
+            None => (
+                format!(
                     "{base_prefix}{}/{}",
                     inst.class.to_lowercase(),
                     Uuid::new_v4()
-                );
-                out.push(ExtractionOp::Create {
-                    base: base.clone(),
-                    links: instance_links(shape, inst, &base),
+                ),
+                false,
+            ),
+        };
+        // Index under the class name the LLM uses (matches the relation's
+        // `targetClass`, i.e. the bare local name), in output order.
+        per_class
+            .entry(inst.class.clone())
+            .or_default()
+            .push(base.clone());
+        if is_update {
+            existing_ids.insert(base.clone());
+        }
+        placed.push(Placed {
+            shape,
+            inst,
+            base,
+            is_update,
+        });
+    }
+
+    // Pass 2: build ops, resolving relations against the full index.
+    let mut out = Vec::with_capacity(placed.len());
+    for p in &placed {
+        let rel_links = resolve_relation_links(p.shape, p.inst, &p.base, &per_class, &existing_ids);
+        if p.is_update {
+            let set = scalar_property_links(p.shape, p.inst, &p.base);
+            if !set.is_empty() {
+                out.push(ExtractionOp::Update {
+                    base: p.base.clone(),
+                    set,
                 });
             }
+            if !rel_links.is_empty() {
+                out.push(ExtractionOp::AddLinks {
+                    base: p.base.clone(),
+                    links: rel_links,
+                });
+            }
+        } else {
+            let mut links = instance_links(p.shape, p.inst, &p.base);
+            links.extend(rel_links);
+            out.push(ExtractionOp::Create {
+                base: p.base.clone(),
+                links,
+            });
         }
     }
     out
+}
+
+/// Resolve a proposed instance's forward relation fields into perspective
+/// links. Each relation field's value is a ref (or array of refs), each of the
+/// two forms taught in the system prompt: an existing instance's `id`, or
+/// `new:<Class>:<n>` (1-based ordinal into that class's output-order bases).
+/// Reverse-direction relations are skipped (they need the inverse predicate on
+/// the target class — Phase 3). Single-cardinality relations keep only the
+/// first resolved ref. Unresolved/malformed refs are dropped with `log::warn!`.
+fn resolve_relation_links(
+    shape: &ModelShape,
+    inst: &ProposedInstance,
+    source_base: &str,
+    per_class: &HashMap<String, Vec<String>>,
+    existing_ids: &HashSet<String>,
+) -> Vec<Link> {
+    let mut links = Vec::new();
+    for rel in &shape.include_relations {
+        if rel.direction != "forward" {
+            // Reverse relations (belongsTo*) store the edge on the other class;
+            // writing one requires the inverse predicate. Deferred to Phase 3.
+            continue;
+        }
+        let Some(value) = inst.props.get(&rel.name) else {
+            continue;
+        };
+        let Some(raw_refs) = normalize_refs(value) else {
+            log::warn!(
+                "extraction: relation '{}' on '{}' had a non-string ref value; skipping",
+                rel.name,
+                inst.class
+            );
+            continue;
+        };
+        let single =
+            matches!(rel.kind.as_str(), "hasOne" | "belongsToOne") || rel.max_count == Some(1);
+        let mut emitted = 0usize;
+        for raw in raw_refs {
+            match resolve_ref(&raw, per_class, existing_ids) {
+                Some(target) => {
+                    if single && emitted >= 1 {
+                        log::warn!(
+                            "extraction: single-cardinality relation '{}' on '{}' got extra ref '{}'; ignoring",
+                            rel.name,
+                            inst.class,
+                            raw
+                        );
+                        continue;
+                    }
+                    links.push(Link {
+                        source: source_base.to_string(),
+                        predicate: Some(rel.predicate.clone()),
+                        target,
+                    });
+                    emitted += 1;
+                }
+                None => {
+                    log::warn!(
+                        "extraction: dropping unresolved relation ref '{}' on '{}.{}'",
+                        raw,
+                        inst.class,
+                        rel.name
+                    );
+                }
+            }
+        }
+    }
+    links
+}
+
+/// Normalise a relation field value into a list of raw ref strings. A single
+/// string becomes a 1-element vec; an array of strings passes through; anything
+/// else (number, object, array with a non-string element) yields `None` so the
+/// caller can warn and skip.
+fn normalize_refs(value: &serde_json::Value) -> Option<Vec<String>> {
+    match value {
+        serde_json::Value::String(s) => Some(vec![s.clone()]),
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        _ => None,
+    }
+}
+
+/// Resolve one raw relation ref to a target base URI. `new:<Class>:<n>` looks up
+/// the (n-1)th base of `<Class>` in `per_class`; anything else is treated as an
+/// existing-id ref, accepted only if present in `existing_ids` (what the LLM was
+/// shown). Returns `None` for out-of-range ordinals, unknown classes, unparsable
+/// `<n>`, or invented ids.
+fn resolve_ref(
+    raw: &str,
+    per_class: &HashMap<String, Vec<String>>,
+    existing_ids: &HashSet<String>,
+) -> Option<String> {
+    if let Some(rest) = raw.strip_prefix("new:") {
+        // `<Class>:<n>` — split on the LAST colon so class names are free to
+        // contain none (they never contain one in practice, but be safe).
+        let (class, n_str) = rest.rsplit_once(':')?;
+        let n: usize = n_str.trim().parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        per_class.get(class)?.get(n - 1).cloned()
+    } else if existing_ids.contains(raw) {
+        Some(raw.to_string())
+    } else {
+        None
+    }
+}
+
+/// The set of all existing instance `id`s across a context snapshot — the valid
+/// targets for an existing-id relation ref (exactly what the LLM was shown in
+/// each class's `existing` list). Feeds [`plan_extraction_ops_with_context`].
+pub fn ids_from_context(ctx: &HashMap<String, Vec<InstanceContext>>) -> HashSet<String> {
+    ctx.values()
+        .flat_map(|rows| rows.iter().map(|r| r.id.clone()))
+        .collect()
 }
 
 /// minimal transcript gatherer. Reads links `source ⇒ predicate ⇒ literal`

@@ -279,6 +279,9 @@ pub(crate) fn ops_to_placements(ops: &[ExtractionOp]) -> Vec<(String, Vec<Link>)
         .map(|op| match op {
             ExtractionOp::Create { base, links } => (base.clone(), links.clone()),
             ExtractionOp::Update { base, set } => (base.clone(), set.clone()),
+            // Additive relation edges onto an existing instance — surface them
+            // as placements too so e2e assertions can see relation links.
+            ExtractionOp::AddLinks { base, links } => (base.clone(), links.clone()),
         })
         .collect()
 }

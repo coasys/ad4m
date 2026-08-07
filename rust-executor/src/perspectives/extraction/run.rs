@@ -1,7 +1,7 @@
 use super::{
     build_extraction_input, ensure_extraction_task, existing_instance_context,
-    filter_already_present, parse_extraction_response, plan_extraction_ops, titles_from_context,
-    ExtractionOp, ProposedInstance,
+    filter_already_present, ids_from_context, parse_extraction_response,
+    plan_extraction_ops_with_context, titles_from_context, ExtractionOp, ProposedInstance,
 };
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::ModelShape;
@@ -136,6 +136,7 @@ pub async fn apply_extraction_ops(
     let empty = ops.iter().all(|op| match op {
         ExtractionOp::Create { links, .. } => links.is_empty(),
         ExtractionOp::Update { set, .. } => set.is_empty(),
+        ExtractionOp::AddLinks { links, .. } => links.is_empty(),
     });
     if empty {
         return Ok(());
@@ -212,6 +213,26 @@ pub async fn apply_extraction_ops(
                         anyhow::anyhow!("apply_extraction_ops: add_links(update) failed: {e:#}")
                     })?;
             }
+            ExtractionOp::AddLinks { links, .. } => {
+                // Purely additive: relation edges from an existing node to a
+                // freshly-minted one. No replace-per-predicate — a node can
+                // hold many relations under the same predicate (hasMany), and
+                // removing an edge is out of scope (Phase 3).
+                if links.is_empty() {
+                    continue;
+                }
+                perspective
+                    .add_links(
+                        links.clone(),
+                        link_status.clone(),
+                        Some(batch_id.clone()),
+                        context,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("apply_extraction_ops: add_links(addlinks) failed: {e:#}")
+                    })?;
+            }
         }
     }
 
@@ -253,6 +274,9 @@ pub async fn run_extraction(
     // dedup safety net below, so both paths agree on what counts as "existing".
     let existing_ctx = existing_instance_context(perspective, shapes).await?;
     let existing_titles = titles_from_context(&existing_ctx);
+    // Valid targets for existing-id relation refs — exactly the ids the model is
+    // shown in each class's `existing` list.
+    let known_existing_ids = ids_from_context(&existing_ctx);
     let prompt = build_extraction_input(shapes, transcript, &existing_ctx);
 
     let service = crate::ai_service::AIService::global_instance()
@@ -275,14 +299,13 @@ pub async fn run_extraction(
 
     // Hard dedup guarantee: even if the model ignored the `existing` hint, an
     // already-present (class, title) never becomes a *new* instance. Updates
-    // (proposals that carry an `id`) bypass this — they name a specific target.
-    let (with_id, without_id): (Vec<_>, Vec<_>) =
-        instances.into_iter().partition(|i| i.id.is_some());
-    let deduped_creates = filter_already_present(without_id, &existing_titles);
-    let mut all: Vec<ProposedInstance> = deduped_creates;
-    all.extend(with_id);
+    // (proposals that carry an `id`) bypass this inside `filter_already_present`
+    // — they name a specific target. Crucially this filters **in place**,
+    // preserving the LLM's output order so `new:<Class>:<n>` relation ordinals
+    // resolve against the same ordering the model counted.
+    let all = filter_already_present(instances, &existing_titles);
 
-    let planned = plan_extraction_ops(shapes, &all, base_prefix);
+    let planned = plan_extraction_ops_with_context(shapes, &all, base_prefix, &known_existing_ids);
     // Filter no-op Updates: the LLM occasionally re-emits an unchanged existing
     // entry, and applying that would clear-and-rewrite scalar links for
     // nothing. Effective ops are what we apply *and* what we return, so

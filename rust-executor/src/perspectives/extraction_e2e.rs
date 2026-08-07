@@ -516,6 +516,115 @@ async fn e2e_updates_existing_instance_via_id() {
     );
 }
 
+// ---- relations: a reified edge links two freshly-minted nodes ---------------
+
+/// SDNA for a `Topic` node (title only) — the endpoint a `SemanticRelationship`
+/// tags. Declared inline so the relations e2e is self-contained.
+const TOPIC_SDNA: &str = r#"{
+  "target_class":"ns://Topic",
+  "extraction_hint":"A distinct subject or theme the participants discuss.",
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://topic","min_count":1,"max_count":1},
+    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Short topic label."}
+  ]
+}"#;
+
+/// SDNA for a reified edge: a scalar `relevance` plus a forward `tag` relation
+/// to a `Topic`. This is the shape of Flux's `SemanticRelationship`, minus the
+/// second (Message) endpoint to keep the e2e's class set small.
+const SEMANTIC_RELATIONSHIP_SDNA: &str = r#"{
+  "target_class":"ns://SemanticRelationship",
+  "extraction_hint":"An edge that tags a discussion point with a Topic and a relevance score.",
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://semrel","min_count":1,"max_count":1},
+    {"path":"ns://relevance","name":"relevance","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"A number from 0 to 1: how strongly the tag applies."},
+    {"path":"ns://tag","name":"tag","relation_kind":"hasOne","target_class_name":"Topic","class":"ns://TopicShape","extraction_hint":"The Topic this edge tags. Reference an existing Topic id or a new:Topic:<n> sibling."}
+  ]
+}"#;
+
+fn has_type(links: &[crate::types::Link], type_value: &str) -> bool {
+    links
+        .iter()
+        .any(|l| l.predicate.as_deref() == Some("ns://type") && l.target == type_value)
+}
+
+/// True if some `SemanticRelationship` placement carries a `ns://tag` link whose
+/// target is the base of an emitted `Topic` — i.e. the model filled the relation
+/// with a resolvable reference (existing id or `new:Topic:<n>`) and the two-pass
+/// planner turned it into a real edge, not a dropped literal.
+fn tag_resolves_to_topic(pl: &[(String, Vec<crate::types::Link>)]) -> bool {
+    let topic_bases: std::collections::HashSet<&str> = pl
+        .iter()
+        .filter(|(_, links)| has_type(links, "ns://topic"))
+        .map(|(b, _)| b.as_str())
+        .collect();
+    pl.iter().any(|(_, links)| {
+        links.iter().any(|l| {
+            l.predicate.as_deref() == Some("ns://tag") && topic_bases.contains(l.target.as_str())
+        })
+    })
+}
+
+/// The payoff test for Phase 2: from a two-topic transcript, the model must mint
+/// the Topics AND a SemanticRelationship whose `tag` relation *references* one of
+/// them (via `new:Topic:<n>` or an existing id), which the two-pass planner
+/// resolves into a real `ns://tag` link between the two minted nodes. gemma3:12b
+/// is the canary — if it emits the topic *title* instead of a ref, no edge lands
+/// and the retry predicate fails, surfacing prompt work rather than silently
+/// passing. Paraphrased from the few-shot so it isn't verbatim.
+#[tokio::test]
+async fn e2e_extracts_topic_relation_from_transcript() {
+    let (p, placements) = run_e2e_retrying(
+        &[
+            ("Topic", TOPIC_SDNA),
+            ("SemanticRelationship", SEMANTIC_RELATIONSHIP_SDNA),
+        ],
+        &[
+            (
+                "Ana",
+                "We keep dropping failed webhook retries on the floor — if we logged every one, chasing down that payments outage would be far less painful.",
+            ),
+            (
+                "Ben",
+                "Agreed. Honestly retry logging is an observability problem more than a payments one.",
+            ),
+        ],
+        4,
+        |pl| {
+            let c = count_by_type(pl);
+            c.get("topic").copied().unwrap_or(0) >= 2 && tag_resolves_to_topic(pl)
+        },
+    )
+    .await;
+    assert_persisted(&p, &placements).await;
+
+    let counts = count_by_type(&placements);
+    // Two clear topics: webhook/retry logging and observability.
+    assert!(
+        counts.get("topic").copied().unwrap_or(0) >= 2,
+        "expected >=2 Topics (retry logging + observability); got {counts:?}"
+    );
+    // At least one SemanticRelationship whose `tag` resolves to an emitted Topic.
+    assert!(
+        tag_resolves_to_topic(&placements),
+        "expected a SemanticRelationship whose tag references an emitted Topic; \
+         placements = {placements:#?}"
+    );
+    // The edge carries its scalar relevance too — the relation and the scalar
+    // came out of the same extraction pass.
+    let semrel_has_relevance = placements.iter().any(|(_, links)| {
+        has_type(links, "ns://semrel")
+            && links
+                .iter()
+                .any(|l| l.predicate.as_deref() == Some("ns://relevance"))
+    });
+    assert!(
+        semrel_has_relevance,
+        "expected the SemanticRelationship to carry a relevance scalar; \
+         placements = {placements:#?}"
+    );
+}
+
 /// Snapshot of existing instance titles (lower-cased) across the given classes —
 /// small helper local to the selector test.
 async fn existing_titles_snapshot(
