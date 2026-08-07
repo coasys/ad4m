@@ -2,11 +2,11 @@
 import type { TranscriptTurn } from "./TranscriptTurn";
 
 /**
- * Run generic LLM extraction over a transcript into the perspective's own
+ * Run generic LLM interpretation over a transcript into the perspective's own
  * SHACL subject classes. Shapes are resolved server-side from the
  * perspective's registered classes, so callers pass only the transcript.
  */
-export type RunExtractionRequest = { uuid: string, transcript: Array<TranscriptTurn>,
+export type RunInterpretationRequest = { uuid: string, transcript: Array<TranscriptTurn>,
 /**
  * URI namespace new instance identities are minted under, e.g. `soa://ext/`.
  */

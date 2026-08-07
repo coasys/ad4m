@@ -10,7 +10,7 @@ import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
-import type { ExtractionPlacement, TranscriptTurn } from "../generated/api";
+import type { InterpretationPlacement, TranscriptTurn } from "../generated/api";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -251,21 +251,21 @@ export class PerspectiveClient {
     }
 
     /**
-     * Run generic LLM extraction over a transcript into this perspective's own
+     * Run generic LLM interpretation over a transcript into this perspective's own
      * SHACL subject classes. The target shapes are resolved server-side from the
      * perspective's registered subject classes, so you pass only the transcript.
      * Returns the freshly minted instances (their base URIs + the links written).
      *
-     * The server-side call prompts an LLM (up to `EXTRACTION_MAX_ATTEMPTS`
+     * The server-side call prompts an LLM (up to `INTERPRETATION_MAX_ATTEMPTS`
      * retries on parse failure), so it can legitimately take minutes on slower
      * or CPU-only models. We raise the default 30s RPC timeout here to 20 min
-     * (matches the CI `--timeout 1200000` for the extraction tests).
+     * (matches the CI `--timeout 1200000` for the interpretation tests).
      */
-    async runExtraction(uuid: string, transcript: TranscriptTurn[], basePrefix: string, classes?: string[], linkStatus?: LinkStatus): Promise<ExtractionPlacement[]> {
-        const RUN_EXTRACTION_TIMEOUT_MS = 20 * 60 * 1000
-        return this.#apiClient.call<ExtractionPlacement[]>(
-            'perspective.runExtraction', { uuid, transcript, basePrefix, classes, linkStatus },
-            RUN_EXTRACTION_TIMEOUT_MS,
+    async runInterpretation(uuid: string, transcript: TranscriptTurn[], basePrefix: string, classes?: string[], linkStatus?: LinkStatus): Promise<InterpretationPlacement[]> {
+        const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
+        return this.#apiClient.call<InterpretationPlacement[]>(
+            'perspective.runInterpretation', { uuid, transcript, basePrefix, classes, linkStatus },
+            RUN_INTERPRETATION_TIMEOUT_MS,
         )
     }
 

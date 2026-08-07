@@ -528,7 +528,7 @@ pub struct RemoveLinksBulkRequest {
     pub batch_id: Option<String>,
 }
 
-// ── Generic LLM extraction (perspective.runExtraction) ──
+// ── Generic LLM interpretation (perspective.runInterpretation) ──
 
 /// One conversation turn fed to the extractor.
 #[derive(Deserialize, Serialize, TS)]
@@ -539,13 +539,13 @@ pub struct TranscriptTurn {
     pub text: String,
 }
 
-/// Run generic LLM extraction over a transcript into the perspective's own
+/// Run generic LLM interpretation over a transcript into the perspective's own
 /// SHACL subject classes. Shapes are resolved server-side from the
 /// perspective's registered classes, so callers pass only the transcript.
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub struct RunExtractionRequest {
+pub struct RunInterpretationRequest {
     pub uuid: String,
     pub transcript: Vec<TranscriptTurn>,
     /// URI namespace new instance identities are minted under, e.g. `soa://ext/`.
@@ -562,7 +562,7 @@ pub struct RunExtractionRequest {
 #[derive(Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub struct ExtractionLink {
+pub struct InterpretationLink {
     pub source: String,
     pub predicate: Option<String>,
     pub target: String,
@@ -572,9 +572,9 @@ pub struct ExtractionLink {
 #[derive(Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub struct ExtractionPlacement {
+pub struct InterpretationPlacement {
     pub base: String,
-    pub links: Vec<ExtractionLink>,
+    pub links: Vec<InterpretationLink>,
 }
 
 #[derive(Deserialize, TS)]

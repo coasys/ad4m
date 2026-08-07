@@ -3,4 +3,4 @@
 /**
  * A single link written for an extracted instance.
  */
-export type ExtractionLink = { source: string, predicate: string | null, target: string, };
+export type InterpretationLink = { source: string, predicate: string | null, target: string, };

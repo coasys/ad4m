@@ -1,30 +1,30 @@
 /**
- * perspective.runExtraction — full TypeScript integration test.
+ * perspective.runInterpretation — full TypeScript integration test.
  *
- * Drives the generic LLM extraction end-to-end over the real WS API:
- *   register SoA subject classes  ->  p.runExtraction(transcript)  ->
+ * Drives the generic LLM interpretation end-to-end over the real WS API:
+ *   register SoA subject classes  ->  p.runInterpretation(transcript)  ->
  *   typed instances written into the perspective, queryable via the model API.
  *
  * Requires a reachable LLM (Ollama over the OpenAI-compatible API). On the
  * self-hosted CI runner (Marvin) the endpoint is local; from a dev box, tunnel
  * it. Endpoint + model are env-overridable to match the Rust e2e suite:
- *   EXTRACTION_E2E_BASE_URL (default http://localhost:11434/v1)
- *   EXTRACTION_E2E_MODEL    (default qwen3.5-27b-opus:latest)
+ *   INTERPRETATION_E2E_BASE_URL (default http://localhost:11434/v1)
+ *   INTERPRETATION_E2E_MODEL    (default qwen3.5-27b-opus:latest)
  *
  * Run with (from tests/js, executor built + `pnpm run prepare-test` once):
- *   pnpm ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/model/run-extraction.test.ts
+ *   pnpm ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/model/run-interpretation.test.ts
  */
 
 import { expect } from "chai";
 import { Ad4mClient, LinkQuery, PerspectiveProxy } from "@coasys/ad4m";
 import { startAgent } from "../../helpers/index.js";
-import { ExtBelief, ExtQuestion, ExtTask } from "./extraction-models.js";
+import { ExtBelief, ExtQuestion, ExtTask } from "./interpretation-models.js";
 
-const BASE_URL = process.env.EXTRACTION_E2E_BASE_URL || "http://localhost:11434/v1";
-const MODEL = process.env.EXTRACTION_E2E_MODEL || "qwen3.5-27b-opus:latest";
+const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
+const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.5-27b-opus:latest";
 const BASE_PREFIX = "soa://ext/";
 
-describe("perspective.runExtraction (WS + real LLM)", function () {
+describe("perspective.runInterpretation (WS + real LLM)", function () {
   this.timeout(1_200_000);
 
   let ad4m: Ad4mClient;
@@ -32,19 +32,19 @@ describe("perspective.runExtraction (WS + real LLM)", function () {
   let p: PerspectiveProxy;
 
   before(async () => {
-    const agent = await startAgent("run-extraction");
+    const agent = await startAgent("run-interpretation");
     ad4m = agent.client;
     stop = agent.stop;
 
     // Register the Ollama-backed default LLM the extractor prompts against.
     const modelId = await ad4m.ai.addModel({
-      name: "extraction-llm",
+      name: "interpretation-llm",
       api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
       modelType: "LLM",
     } as any);
     await ad4m.ai.setDefaultModel("LLM", modelId);
 
-    p = await ad4m.perspective.add("run-extraction-test");
+    p = await ad4m.perspective.add("run-interpretation-test");
     await ExtTask.register(p);
     await ExtBelief.register(p);
     await ExtQuestion.register(p);
@@ -56,12 +56,12 @@ describe("perspective.runExtraction (WS + real LLM)", function () {
 
   it("extracts typed instances from a transcript into the perspective's classes", async () => {
     const transcript = [
-      { speaker: "Nico", text: "James, can you write the integration test for the extraction endpoint?" },
+      { speaker: "Nico", text: "James, can you write the integration test for the interpretation endpoint?" },
       { speaker: "James", text: "Sure. I still think the WS layer is the cleanest way to expose this." },
       { speaker: "Nico", text: "How do we handle a perspective that has no subject classes registered?" },
     ];
 
-    const placements = await p.runExtraction(transcript, BASE_PREFIX);
+    const placements = await p.runInterpretation(transcript, BASE_PREFIX);
 
     // Something typed came out, minted under our prefix, with links.
     expect(placements.length).to.be.greaterThan(0);
@@ -88,7 +88,7 @@ describe("perspective.runExtraction (WS + real LLM)", function () {
     const knownTitles = new Set(before.map((t) => t.title.toLowerCase()));
 
     // Restate an existing task (no new information) + nothing else actionable.
-    const placements = await p.runExtraction(
+    const placements = await p.runInterpretation(
       [{ speaker: "Nico", text: `Reminder: ${before[0].title}.` }],
       BASE_PREFIX,
     );
@@ -104,12 +104,12 @@ describe("perspective.runExtraction (WS + real LLM)", function () {
   it("extracts only into the selected classes", async () => {
     // Transcript has a task, a belief, and a question — but select ONLY ExtTask.
     const transcript = [
-      { speaker: "Nico", text: "James, please add docs for the WS runExtraction endpoint." },
+      { speaker: "Nico", text: "James, please add docs for the WS runInterpretation endpoint." },
       { speaker: "James", text: "Will do. I think good docs are underrated." },
       { speaker: "Nico", text: "Should we version the WS API before release?" },
     ];
 
-    const placements = await p.runExtraction(transcript, BASE_PREFIX, ["ExtTask"]);
+    const placements = await p.runInterpretation(transcript, BASE_PREFIX, ["ExtTask"]);
 
     expect(placements.length, "expected at least the task").to.be.greaterThan(0);
     // Every placement must be an ExtTask — no Belief/Question leaked in.

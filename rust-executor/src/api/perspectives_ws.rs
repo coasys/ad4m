@@ -1012,7 +1012,7 @@ async fn model_subscribe_handler(
     }))?)
 }
 
-async fn run_extraction_handler(
+async fn run_interpretation_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
@@ -1024,13 +1024,13 @@ async fn run_extraction_handler(
     .map_err(|e| WsRpcError::forbidden(e))?;
     check_credits(&ctx.user_email)?;
 
-    let body: RunExtractionRequest = serde_json::from_value(params.clone())
+    let body: RunInterpretationRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
     // `body.link_status` is accepted for backward-compat but is now ignored:
-    // extraction writes via `create_subject`, so link status derives from each
+    // interpretation writes via `create_subject`, so link status derives from each
     // class's SDNA `local` flags (same rule as app code).
     let _ = body.link_status.as_ref();
 
@@ -1047,7 +1047,7 @@ async fn run_extraction_handler(
     for name in class_names {
         match perspective.get_shape(&name) {
             Ok(shape) => shapes.push((*shape).clone()),
-            Err(e) => log::warn!("runExtraction: skipping class '{}': {}", name, e),
+            Err(e) => log::warn!("runInterpretation: skipping class '{}': {}", name, e),
         }
     }
     if shapes.is_empty() {
@@ -1062,7 +1062,7 @@ async fn run_extraction_handler(
         .map(|t| (t.speaker, t.text))
         .collect();
 
-    let placements = crate::perspectives::extraction::run_extraction(
+    let placements = crate::perspectives::interpretation::run_interpretation(
         &mut perspective,
         &shapes,
         &transcript,
@@ -1076,19 +1076,19 @@ async fn run_extraction_handler(
     if total_links > 0 {
         if let Err(e) = reserve_credits(&ctx.user_email, total_links as f64 * DEFAULT_LINK_WRITE) {
             log::warn!(
-                "Credit deduction failed for runExtraction (operation already committed): {}",
+                "Credit deduction failed for runInterpretation (operation already committed): {}",
                 e
             );
         }
     }
 
-    let result: Vec<ExtractionPlacement> = placements
+    let result: Vec<InterpretationPlacement> = placements
         .into_iter()
-        .map(|(base, links)| ExtractionPlacement {
+        .map(|(base, links)| InterpretationPlacement {
             base,
             links: links
                 .into_iter()
-                .map(|l| ExtractionLink {
+                .map(|l| InterpretationLink {
                     source: l.source,
                     predicate: l.predicate,
                     target: l.target,
@@ -1135,5 +1135,5 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.modelQuery", model_query_handler);
     map.register("perspective.modelSubscribe", model_subscribe_handler);
     map.register("perspective.evaluateGetters", evaluate_getters_handler);
-    map.register("perspective.runExtraction", run_extraction_handler);
+    map.register("perspective.runInterpretation", run_interpretation_handler);
 }

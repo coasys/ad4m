@@ -395,7 +395,9 @@ pub async fn run_interpretation_with_strategy_and_model(
     service
         .ensure_task_spawned(task.clone())
         .await
-        .map_err(|e| anyhow::anyhow!("run_interpretation: failed to load interpretation task: {e:#}"))?;
+        .map_err(|e| {
+            anyhow::anyhow!("run_interpretation: failed to load interpretation task: {e:#}")
+        })?;
 
     let instances = retry_interpretation_parse(|_attempt| {
         let service = service.clone();
