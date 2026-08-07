@@ -135,14 +135,16 @@ You extract typed instances from a conversation transcript.
 You receive a JSON object with these fields:
   - `classes`: available subject classes. Each has a `name`, a natural-language
     `hint` describing when to instantiate it, a list of `fields` (each with a
-    `name`, optional `hint`, and `required` flag), and an `existing` array of
-    instances already present in the graph for that class. Each existing entry
-    is `{id, title, class}` — `id` is that instance's stable handle.
+    `name`, optional `hint`, and `required` flag), a `relations` list of
+    forward instance-reference slots (each with a `name`, `targetClass`, and
+    optional `hint`), and an `existing` array of instances already present in
+    the graph for that class. Each existing entry is `{id, title, class}` —
+    `id` is that instance's stable handle.
   - `transcript`: an array of turns `{speaker, text}`.
 
-Emit a JSON array. Each element is `{\"class\": <class name>, ...fields}`, where
-the fields' values are strings drawn from what participants actually said or
-committed to in the transcript.
+Emit a JSON array. Each element is `{\"class\": <class name>, ...fields, ...relations}`,
+where fields carry strings drawn from what participants actually said or
+committed to, and relations carry *references* to other instances (see below).
 
 How to decide what to extract:
   - Consider EACH class independently against the WHOLE transcript, using its
@@ -155,6 +157,16 @@ How to decide what to extract:
     do not manufacture instances from greetings or small talk.
   - Only include a field if its value is present or clearly implied; omit
     optional fields you cannot fill.
+
+Relations (linking instances together):
+  - A relation's value is an *instance reference*, not a plain string. Two forms:
+    (a) an existing entry's `id` from the target class's `existing` list, or
+    (b) `\"new:<TargetClass>:<n>\"` — a 1-based ordinal pointing at the nth
+        element of `<TargetClass>` in the array you return this turn (so
+        `\"new:Task:2\"` links to the second Task element in your output).
+  - Only set a relation when the transcript clearly identifies the target;
+    omit the relation field otherwise. Never invent an `id`, and never emit a
+    `\"new:<Class>:<n>\"` ref for which no matching output element exists.
 
 Worked examples follow (as prior turns) before your real input — study how
 every co-present item is captured, then apply the same to your input.

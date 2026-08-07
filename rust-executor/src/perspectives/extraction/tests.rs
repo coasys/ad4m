@@ -102,6 +102,52 @@ fn existing_context_renders_id_title_class_in_prompt() {
     );
 }
 
+#[test]
+fn system_prompt_documents_relation_ref_syntax() {
+    // Phase 2 step 2: the system prompt must teach the LLM both the shape of
+    // the per-class `relations` block AND the two allowed reference forms it
+    // can put into a relation value. Without this instruction the LLM only
+    // sees an unfamiliar array in the input schema — the parser can only
+    // resolve refs it was told to emit.
+    let p = EXTRACTION_SYSTEM_PROMPT;
+    assert!(
+        p.contains("`relations`"),
+        "system prompt must introduce the relations block on each class"
+    );
+    assert!(
+        p.contains("instance-reference") || p.contains("instance reference"),
+        "system prompt must frame a relation value as an instance reference"
+    );
+    // The `new:<TargetClass>:<n>` placeholder is the only way to link two
+    // freshly-minted siblings in the same response; a missing description
+    // would silently downgrade sibling-linking to unresolved refs at parse
+    // time. Assert both the literal token and the 1-based ordinal wording.
+    assert!(
+        p.contains("new:<TargetClass>:<n>"),
+        "system prompt must document the `new:<TargetClass>:<n>` ref form"
+    );
+    assert!(
+        p.contains("1-based"),
+        "system prompt must state the ordinal is 1-based"
+    );
+    // Existing-id path must still be described alongside the new-ref path so
+    // the LLM picks the right form per case (upsert-target vs sibling-mint).
+    assert!(
+        p.contains("existing") && p.contains("`id`") && p.contains("existing entry's `id`"),
+        "system prompt must document linking via an existing entry's id"
+    );
+    // Guardrail wording: unresolved refs and fabricated ids are the two
+    // failure modes; without explicit prohibitions small LLMs invent both.
+    assert!(
+        p.contains("Never invent an `id`"),
+        "system prompt must forbid fabricated ids"
+    );
+    assert!(
+        p.contains("never emit a") || p.contains("Never emit a"),
+        "system prompt must forbid unresolved `new:` refs"
+    );
+}
+
 fn titles(instances: &[ProposedInstance]) -> Vec<&str> {
     instances
         .iter()
