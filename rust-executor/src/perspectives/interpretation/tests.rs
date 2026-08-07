@@ -50,10 +50,15 @@ fn interpretation_hint_lands_in_prompt() {
     );
 }
 
-fn titles(instances: &[ProposedInstance]) -> Vec<&str> {
+/// Pull a named property's string value off each parsed instance. These are
+/// pure parse-level assertions over the raw LLM JSON — there is no graph and no
+/// dedup here, so this takes the field name explicitly rather than assuming a
+/// `title`. (Dedup identity is class-declared and handled graph-side in
+/// `filter_already_present` / `existing_instance_identities`.)
+fn prop_values<'a>(instances: &'a [ProposedInstance], key: &str) -> Vec<&'a str> {
     instances
         .iter()
-        .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
+        .filter_map(|i| i.props.get(key).and_then(|v| v.as_str()))
         .collect()
 }
 
@@ -68,7 +73,7 @@ fn parses_clean_json_array() {
     assert_eq!(out[0].class, "Intention");
     assert_eq!(out[0].props.get("owner").unwrap().as_str(), Some("Nico"));
     assert_eq!(
-        titles(&out),
+        prop_values(&out, "title"),
         vec![
             "Extract LLM processing from Flux into ADAM",
             "Graph viz is the hardest part"
@@ -101,7 +106,7 @@ fn tolerates_trailing_commas() {
         ]"#;
     let out = parse_interpretation_response(raw).unwrap();
     assert_eq!(out.len(), 2);
-    assert_eq!(titles(&out), vec!["A", "B"]);
+    assert_eq!(prop_values(&out, "title"), vec!["A", "B"]);
 }
 
 #[test]
