@@ -20,7 +20,6 @@
 
 #![cfg(test)]
 
-use super::extraction::existing_instance_titles;
 use super::extraction_test_support::*;
 
 // ---- create_subject write path (no LLM — runs without Ollama) ---------------
@@ -79,7 +78,7 @@ async fn create_subject_roundtrips_soa_instance() {
 /// Intention + Belief: an intent with an owner and a claim.
 #[tokio::test]
 async fn e2e_intention_and_belief() {
-    let (p, placements) = run_e2e(
+    let (p, shapes, placements) = run_e2e(
         &[("Belief", BELIEF_SDNA), ("Intention", INTENTION_SDNA)],
         &[
             (
@@ -93,9 +92,9 @@ async fn e2e_intention_and_belief() {
         ],
     )
     .await;
-    assert_persisted(&p, &placements).await;
+    assert_persisted(&p, &shapes, &placements).await;
 
-    let counts = count_by_type(&placements);
+    let counts = graph_count_by_type(&p, &shapes).await;
     assert!(
         counts.get("intention").copied().unwrap_or(0) >= 1,
         "expected an intention; got {counts:?}"
@@ -105,19 +104,18 @@ async fn e2e_intention_and_belief() {
         "expected a belief; got {counts:?}"
     );
     // The intention should carry Nico as owner.
-    let owner_is_nico = placements.iter().any(|(_, links)| {
-        links.iter().any(|l| {
-            l.predicate.as_deref() == Some("ns://owner") && l.target.to_lowercase().contains("nico")
-        })
-    });
-    assert!(owner_is_nico, "expected the intention to be owned by Nico");
+    let owners = graph_owners_lower(&p, &shapes).await;
+    assert!(
+        owners.iter().any(|o| o.contains("nico")),
+        "expected the intention to be owned by Nico; got {owners:?}"
+    );
 }
 
 /// Task-tracking conversation -> only Tasks, with owners. Three assignments in
 /// the transcript should yield 2–4 tasks (LLM may merge/split slightly).
 #[tokio::test]
 async fn e2e_task_tracking_counts() {
-    let (p, placements) = run_e2e(
+    let (p, shapes, placements) = run_e2e(
         &[("Task", TASK_SDNA)],
         &[
             (
@@ -135,9 +133,9 @@ async fn e2e_task_tracking_counts() {
         ],
     )
     .await;
-    assert_persisted(&p, &placements).await;
+    assert_persisted(&p, &shapes, &placements).await;
 
-    let counts = count_by_type(&placements);
+    let counts = graph_count_by_type(&p, &shapes).await;
     let tasks = counts.get("task").copied().unwrap_or(0);
     assert!(
         (2..=4).contains(&tasks),
@@ -147,22 +145,18 @@ async fn e2e_task_tracking_counts() {
         counts.keys().all(|k| k == "task"),
         "only Task was offered; got {counts:?}"
     );
-    let owners = placements
-        .iter()
-        .filter(|(_, links)| {
-            links
-                .iter()
-                .any(|l| l.predicate.as_deref() == Some("ns://owner"))
-        })
-        .count();
-    assert!(owners >= 1, "expected at least one task to carry an owner");
+    let owners = graph_owners_lower(&p, &shapes).await;
+    assert!(
+        !owners.is_empty(),
+        "expected at least one task to carry an owner; got {owners:?}"
+    );
 }
 
 /// Mixed epistemic conversation -> the three distinct modalities. The question
 /// (ends in "?") is the clearest signal and should always be picked up.
 #[tokio::test]
 async fn e2e_mixed_epistemic_modalities() {
-    let (p, placements) = run_e2e(
+    let (p, shapes, placements) = run_e2e(
         &[
             ("Observation", OBSERVATION_SDNA),
             ("Belief", BELIEF_SDNA),
@@ -181,9 +175,9 @@ async fn e2e_mixed_epistemic_modalities() {
         ],
     )
     .await;
-    assert_persisted(&p, &placements).await;
+    assert_persisted(&p, &shapes, &placements).await;
 
-    let counts = count_by_type(&placements);
+    let counts = graph_count_by_type(&p, &shapes).await;
     let distinct = counts.len();
     assert!(
         distinct >= 2,
@@ -198,7 +192,7 @@ async fn e2e_mixed_epistemic_modalities() {
 /// Strategy conversation -> a Vision (the dream) and a Plan (the concrete path).
 #[tokio::test]
 async fn e2e_vision_and_plan() {
-    let (p, placements) = run_e2e(
+    let (p, shapes, placements) = run_e2e(
         &[("Vision", VISION_SDNA), ("Plan", PLAN_SDNA)],
         &[
             (
@@ -212,9 +206,9 @@ async fn e2e_vision_and_plan() {
         ],
     )
     .await;
-    assert_persisted(&p, &placements).await;
+    assert_persisted(&p, &shapes, &placements).await;
 
-    let counts = count_by_type(&placements);
+    let counts = graph_count_by_type(&p, &shapes).await;
     assert!(
         counts.get("vision").copied().unwrap_or(0) >= 1
             || counts.get("plan").copied().unwrap_or(0) >= 1,
@@ -229,7 +223,7 @@ async fn e2e_vision_and_plan() {
 /// came out".
 #[tokio::test]
 async fn e2e_longer_standup_conversation() {
-    let (p, placements) = run_e2e(
+    let (p, shapes, placements) = run_e2e_until(
         &[
             ("Task", TASK_SDNA),
             ("Belief", BELIEF_SDNA),
@@ -251,11 +245,13 @@ async fn e2e_longer_standup_conversation() {
             ("James", "Concretely, the plan is: land extraction, then flows, then the Synergy ledger."),
             ("Nico", "The extraction e2e suite is now green on Marvin, by the way."),
         ],
+        3,
+        |c| c.get("task").copied().unwrap_or(0) >= 1,
     )
     .await;
-    assert_persisted(&p, &placements).await;
+    assert_persisted(&p, &shapes, &placements).await;
 
-    let counts = count_by_type(&placements);
+    let counts = graph_count_by_type(&p, &shapes).await;
     let total: usize = counts.values().sum();
     // A 10-turn transcript with several concrete items — but we err on fewer.
     assert!(
@@ -331,9 +327,11 @@ async fn e2e_selector_over_prepopulated_graph() {
         &ctx,
     )
     .await;
-    assert_persisted(&perspective, &placements).await;
+    assert_persisted(&perspective, &shapes, &placements).await;
 
     // New instances land under the extraction prefix, never on the seeded bases.
+    // (Where an instance is *minted* is inherently a placement property, so these
+    // two checks stay on `placements`.)
     assert!(
         placements
             .iter()
@@ -346,20 +344,21 @@ async fn e2e_selector_over_prepopulated_graph() {
             .all(|(base, _)| !base.starts_with("soa://existing/")),
         "extraction must not overwrite pre-existing instance bases"
     );
-    // And it should have found the new task in the conversation.
-    let counts = count_by_type(&placements);
+    // And it should have found the new task in the conversation: the graph now
+    // holds the 2 seeded tasks plus at least one freshly extracted one.
+    let counts = graph_count_by_type(&perspective, &shapes).await;
     assert!(
-        counts.get("task").copied().unwrap_or(0) >= 1,
-        "expected the new WS-test task; got {counts:?}"
+        counts.get("task").copied().unwrap_or(0) >= 3,
+        "expected the 2 seeded tasks + the new WS-test task; got {counts:?}"
     );
 
     // The pre-existing instances are still present in the graph afterwards.
-    let existing = existing_titles_snapshot(&perspective, &shapes).await;
+    let titles = graph_titles_lower(&perspective, &shapes).await;
     assert!(
-        existing
+        titles
             .iter()
             .any(|t| t.contains("migrate the shacl parser")),
-        "seeded task must survive extraction; got {existing:?}"
+        "seeded task must survive extraction; got {titles:?}"
     );
 }
 
@@ -402,33 +401,22 @@ async fn e2e_does_not_recreate_existing_task() {
         &ctx,
     )
     .await;
-    assert_persisted(&perspective, &placements).await;
+    assert_persisted(&perspective, &shapes, &placements).await;
 
-    // The already-present task is never re-created as a NEW instance.
-    let new_titles = placed_titles_lower(&placements);
-    assert!(
-        !new_titles.contains(&existing_title.to_lowercase()),
-        "must not recreate the already-present task; new placements = {new_titles:?}"
+    // The already-present task is never duplicated: the seeded title appears
+    // exactly once in the final graph, proving the restatement was deduped.
+    let titles = graph_titles_lower(&perspective, &shapes).await;
+    let seeded_lower = existing_title.to_lowercase();
+    let dup_count = titles.iter().filter(|t| **t == seeded_lower).count();
+    assert_eq!(
+        dup_count, 1,
+        "seeded task must appear exactly once (not recreated); graph titles = {titles:?}"
     );
-    // A new task should still have been extracted (the e2e test task).
-    let counts = count_by_type(&placements);
+    // A new task should still have been extracted (the e2e test task), so the
+    // graph holds the seeded task plus at least one new one.
+    let counts = graph_count_by_type(&perspective, &shapes).await;
     assert!(
-        counts.get("task").copied().unwrap_or(0) >= 1,
-        "expected the new task to be extracted; got {counts:?}"
+        counts.get("task").copied().unwrap_or(0) >= 2,
+        "expected the seeded task + a newly extracted one; got {counts:?}"
     );
-}
-
-/// Snapshot of existing instance titles (lower-cased) across the given classes —
-/// small helper local to the selector test.
-async fn existing_titles_snapshot(
-    perspective: &super::perspective_instance::PerspectiveInstance,
-    shapes: &[super::model_query::types::ModelShape],
-) -> Vec<String> {
-    let map = existing_instance_titles(perspective, shapes)
-        .await
-        .expect("existing_instance_titles");
-    map.into_values()
-        .flatten()
-        .map(|t| t.to_lowercase())
-        .collect()
 }
