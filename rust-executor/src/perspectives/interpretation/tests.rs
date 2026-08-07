@@ -277,6 +277,39 @@ fn garbage_is_an_error_not_a_panic() {
     assert!(parse_interpretation_response("not json at all").is_err());
 }
 
+#[test]
+fn extracts_array_from_surrounding_prose() {
+    // Real gemma3:12b output observed on CI 2026-08-07 (job 19580):
+    // wrapped its reply in <analysis> narration followed by the JSON array.
+    let raw = r#"<analysis>
+    Turn 1: Nico assigns work to James.
+    Turn 2: Sure -> commitment (Task); "still think the WS layer is cleanest" -> Belief.
+    Turn 3: Nico asks about perspectives with no subject classes -> Question.
+</analysis>
+
+
+[
+  {"class": "ExtTask", "title": "Write the integration test for the interpretation endpoint", "owner": "James"},
+  {"class": "ExtBelief", "title": "The WS layer is the cleanest way to expose this"},
+  {"class": "ExtQuestion", "title": "How do we handle a perspective that has no subject classes registered?"}
+]"#;
+    let out = parse_interpretation_response(raw).unwrap();
+    assert_eq!(out.len(), 3);
+    assert_eq!(out[0].class, "ExtTask");
+    assert_eq!(out[0].props.get("owner").unwrap().as_str(), Some("James"));
+    assert_eq!(out[2].class, "ExtQuestion");
+}
+
+#[test]
+fn extracts_single_object_when_no_array() {
+    let raw = "Here is the extracted item:\n{\"class\":\"Belief\",\"title\":\"X\"}\nthanks";
+    // A bare object isn't the interpretation contract (array of instances) so
+    // this must still error — but extract_bracketed shouldn't panic.
+    let err = parse_interpretation_response(raw).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("expected a sequence"), "got: {msg}");
+}
+
 // ---- planner: create vs. update ------------------------------------------
 
 /// Base URI of the Nth (0-based) `Create` op, in op order. Panics if absent.
