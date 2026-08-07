@@ -11,15 +11,15 @@
 
 #![cfg(test)]
 
-use super::extraction::{class_local_name, instance_links, run_extraction, ProposedInstance};
+use super::extraction::{class_local_name, run_extraction};
 use super::model_query::shape::load_shape;
 use super::model_query::types::ModelShape;
-use super::perspective_instance::PerspectiveInstance;
+use super::perspective_instance::{PerspectiveInstance, SdnaType, SubjectClassOption};
 use super::shacl_parser::parse_shacl_to_links;
 use super::sparql_store::SparqlStore;
 use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link, LinkStatus};
+use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
 use std::collections::HashMap;
 use std::sync::Once;
 
@@ -36,29 +36,32 @@ pub(crate) fn ensure_db_init() {
 pub(crate) const BELIEF_SDNA: &str = r#"{
   "target_class":"ns://Belief",
   "extraction_hint":"A claim a participant holds to be true about the world or the group. Not a task or a question.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://belief"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://belief","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"One-sentence statement in the claimant's framing."}
+    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"One-sentence statement in the claimant's framing.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
   ]
 }"#;
 
 pub(crate) const INTENTION_SDNA: &str = r#"{
   "target_class":"ns://Intention",
   "extraction_hint":"Something a participant commits to doing - an actionable outcome with a plausible owner.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://intention"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://intention","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the work."},
-    {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Who committed to it, if stated."}
+    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the work.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Who committed to it, if stated.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]}
   ]
 }"#;
 
 pub(crate) const TASK_SDNA: &str = r#"{
   "target_class":"ns://Task",
   "extraction_hint":"A concrete, actionable unit of work to be done, ideally with an owner. Not a belief or a vague aspiration.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://task"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task."},
-    {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Person responsible for the task, if stated."}
+    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Person responsible for the task, if stated.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]}
   ]
 }"#;
 
@@ -68,9 +71,10 @@ pub(crate) const TASK_SDNA: &str = r#"{
 pub(crate) const TASK_WITH_RELATION_SDNA: &str = r#"{
   "target_class":"ns://Task",
   "extraction_hint":"A concrete, actionable unit of work to be done.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://task"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task."},
+    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Imperative summary of the task.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
     {"path":"ns://blocks","name":"blocks","relation_kind":"hasMany","target_class_name":"Task","class":"ns://TaskShape","extraction_hint":"Other tasks this one blocks."}
   ]
 }"#;
@@ -78,37 +82,41 @@ pub(crate) const TASK_WITH_RELATION_SDNA: &str = r#"{
 pub(crate) const OBSERVATION_SDNA: &str = r#"{
   "target_class":"ns://Observation",
   "extraction_hint":"A factual observation or reported state of the world or system - something seen, measured or reported, not an opinion, plan or task.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://observation"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://observation","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The observed fact, stated plainly."}
+    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The observed fact, stated plainly.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
   ]
 }"#;
 
 pub(crate) const QUESTION_SDNA: &str = r#"{
   "target_class":"ns://Question",
   "extraction_hint":"An open question raised in the conversation that still needs an answer.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://question"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://question","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The question, phrased as a question."}
+    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The question, phrased as a question.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
   ]
 }"#;
 
 pub(crate) const VISION_SDNA: &str = r#"{
   "target_class":"ns://Vision",
   "extraction_hint":"A long-term aspiration or desired future state - directional and motivating, not a concrete task or plan.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://vision"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://vision","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The aspiration, stated concisely."}
+    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"The aspiration, stated concisely.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
   ]
 }"#;
 
 pub(crate) const PLAN_SDNA: &str = r#"{
   "target_class":"ns://Plan",
   "extraction_hint":"A concrete approach or sequence of steps intended to achieve a goal.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://plan"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://plan","min_count":1,"max_count":1},
-    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Summary of the plan or approach."},
-    {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Who owns the plan, if stated."}
+    {"path":"ns://title","name":"title","min_count":1,"max_count":1,"resolve_language":"literal","extraction_hint":"Summary of the plan or approach.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","extraction_hint":"Who owns the plan, if stated.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]}
   ]
 }"#;
 
@@ -202,7 +210,7 @@ pub(crate) async fn setup_extraction_e2e(
         .await
         .expect("set_default_model(Llm)");
 
-    let perspective = PerspectiveInstance::new(
+    let mut perspective = PerspectiveInstance::new(
         PerspectiveHandle {
             uuid: uuid::Uuid::new_v4().to_string(),
             name: Some("Extraction e2e".into()),
@@ -218,6 +226,22 @@ pub(crate) async fn setup_extraction_e2e(
         .ensure_prolog_engine_pool_for_context(&ctx)
         .await
         .expect("prolog engine pool");
+
+    // Register each class as a REAL subject class (constructor + setter actions)
+    // in the perspective, so `create_subject` can read its SDNA. Without this it
+    // errors with "No SHACL constructor found".
+    for (class, sdna) in class_sdnas {
+        perspective
+            .add_sdna(
+                (*class).to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some((*sdna).to_string()),
+                &ctx,
+            )
+            .await
+            .expect("add_sdna");
+    }
 
     let shapes: Vec<ModelShape> = class_sdnas
         .iter()
@@ -239,16 +263,9 @@ pub(crate) async fn run_extraction_e2e(
         .iter()
         .map(|(s, t)| (s.to_string(), t.to_string()))
         .collect();
-    let placements = run_extraction(
-        perspective,
-        shapes,
-        &transcript,
-        "soa://ext/",
-        LinkStatus::Local,
-        ctx,
-    )
-    .await
-    .expect("run_extraction against real LLM to succeed");
+    let placements = run_extraction(perspective, shapes, &transcript, "soa://ext/", ctx)
+        .await
+        .expect("run_extraction against real LLM to succeed");
     print_placements(&placements);
     placements
 }
@@ -278,8 +295,8 @@ pub(crate) fn print_placements(placements: &[(String, Vec<Link>)]) {
 }
 
 /// Pre-seed the perspective with an already-existing typed instance (its
-/// type-flag + a `title`), exactly as `instance_links` would have written it.
-/// Used to test the selector against a non-empty graph and dedup against
+/// type-flag + a `title`) via `create_subject`, the same write path extraction
+/// uses. Used to test the selector against a non-empty graph and dedup against
 /// existing state.
 pub(crate) async fn seed_instance(
     perspective: &mut PerspectiveInstance,
@@ -288,17 +305,19 @@ pub(crate) async fn seed_instance(
     base: &str,
     title: &str,
 ) {
-    let mut props = HashMap::new();
-    props.insert("title".to_string(), serde_json::Value::String(title.into()));
-    let inst = ProposedInstance {
-        class: class_local_name(&shape.target_class).to_string(),
-        props,
-    };
-    let links = instance_links(shape, &inst, base);
     perspective
-        .add_links(links, LinkStatus::Local, None, ctx)
+        .create_subject(
+            SubjectClassOption {
+                class_name: Some(class_local_name(&shape.target_class).to_string()),
+                query: None,
+            },
+            base.to_string(),
+            Some(serde_json::json!({ "title": title })),
+            None,
+            ctx,
+        )
         .await
-        .expect("seed_instance add_links");
+        .expect("seed_instance create_subject");
 }
 
 // ---- assertions / accessors over placements --------------------------------
@@ -341,11 +360,10 @@ pub(crate) fn placed_titles_lower(placements: &[(String, Vec<Link>)]) -> Vec<Str
 }
 
 fn decode_literal_string(uri: &str) -> Option<String> {
-    let rest = uri.strip_prefix("literal:string:")?;
-    percent_encoding::percent_decode_str(rest)
-        .decode_utf8()
-        .ok()
-        .map(|c| c.into_owned())
+    match crate::perspectives::model_query::utils::parse_literal_value(uri) {
+        serde_json::Value::String(s) => Some(s),
+        _ => None,
+    }
 }
 
 /// Every placement's links must actually be readable back from the perspective

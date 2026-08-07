@@ -23,6 +23,57 @@
 use super::extraction::existing_instance_titles;
 use super::extraction_test_support::*;
 
+// ---- create_subject write path (no LLM — runs without Ollama) ---------------
+
+/// The extraction write path goes through `create_subject`. This proves the
+/// SDNA fixtures are real subject classes: constructor mints the type flag, the
+/// `title` setter writes a literal that round-trips back through
+/// `parse_literal_value`. Calls no AIService, so it runs with no model up.
+#[tokio::test]
+async fn create_subject_roundtrips_soa_instance() {
+    use crate::perspectives::perspective_instance::SubjectClassOption;
+    use crate::types::LinkQuery;
+    let (mut perspective, _shapes, ctx) =
+        setup_extraction_e2e(&[("Intention", INTENTION_SDNA)]).await;
+    let base = "soa://ext/intention/rt-test";
+    perspective
+        .create_subject(
+            SubjectClassOption {
+                class_name: Some("Intention".into()),
+                query: None,
+            },
+            base.to_string(),
+            Some(serde_json::json!({ "title": "Ship the MVP", "owner": "Nico" })),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("create_subject");
+    let links = perspective
+        .get_links(&LinkQuery {
+            source: Some(base.into()),
+            ..Default::default()
+        })
+        .await
+        .expect("get_links");
+    assert!(
+        links
+            .iter()
+            .any(|l| l.data.predicate.as_deref() == Some("ns://type")
+                && l.data.target == "ns://intention"),
+        "type flag; got {links:#?}"
+    );
+    let title = links
+        .iter()
+        .find(|l| l.data.predicate.as_deref() == Some("ns://title"))
+        .map(|l| crate::perspectives::model_query::utils::parse_literal_value(&l.data.target));
+    assert_eq!(
+        title,
+        Some(serde_json::Value::String("Ship the MVP".into())),
+        "title round-trip; got {title:?}"
+    );
+}
+
 // ---- basic per-class extraction (DRY via the shared `run_e2e` harness) ------
 
 /// Intention + Belief: an intent with an owner and a claim.

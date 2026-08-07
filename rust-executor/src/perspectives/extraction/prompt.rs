@@ -1,8 +1,8 @@
-use super::{class_local_name, relation_predicates};
+use super::class_local_name;
 use crate::db::Ad4mDb;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::types::{AIPromptExamples, AITask};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// assemble the per-call LLM input from the target shapes' extraction hints
 /// plus the transcript. Pure — this is exactly where `extraction_hint` enters
@@ -22,11 +22,19 @@ pub fn build_extraction_input(
     let classes: Vec<serde_json::Value> = shapes
         .iter()
         .map(|s| {
-            let rel_preds = relation_predicates(s);
+            // Relations are link-typed (targets are instance URIs, not literals)
+            // and handled in a later PR, so they're excluded from the fields
+            // offered to the LLM. `load_shape` lists each relation in both
+            // `properties` and `include_relations`; we key off the latter.
+            let rel_preds: HashSet<&str> = s
+                .include_relations
+                .iter()
+                .map(|r| r.predicate.as_str())
+                .collect();
             let fields: Vec<serde_json::Value> = s
                 .properties
                 .iter()
-                // The type flag is set by instance_links, not the LLM;
+                // The type flag is set by the class constructor, not the LLM;
                 // relations are link-typed and handled in a later PR.
                 .filter(|p| !p.is_flag && !rel_preds.contains(p.predicate.as_str()))
                 .map(|p| {
