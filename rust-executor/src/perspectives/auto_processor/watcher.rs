@@ -26,7 +26,25 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use super::claim::{try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
 
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+
+/// Stable id for a `(speaker, text)` transcript turn — the atom the polling
+/// watch loop feeds to [`WatcherState::record_item`] and (indirectly) to
+/// [`crate::perspectives::auto_processor::claim::batch_key`]. SHA-256 over
+/// `speaker || \0 || text` keeps it injective across the field boundary; a
+/// hex prefix keeps claim-link URIs short.
+///
+/// The value is only meaningful within a single processor's pending window;
+/// consumers should not persist it or compare across processors.
+pub fn turn_id(speaker: &str, text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(speaker.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(text.as_bytes());
+    let digest = hasher.finalize();
+    format!("{:x}", digest)[..16].to_string()
+}
 
 /// Per-processor observation state. Kept in a `BTreeMap` inside
 /// [`WatcherState`] so iteration is deterministic (mattering for tests, not
@@ -310,6 +328,24 @@ mod tests {
             llm_model: None,
             dedup_strategy_json: None,
         }
+    }
+
+    // ---- turn_id -----------------------------------------------------------
+
+    /// `turn_id` is deterministic (same inputs → same output every call) and
+    /// injective across the (speaker, text) field boundary — swapping bytes
+    /// between the fields must yield a different id. Also short (16 hex
+    /// chars) so a batch of turn ids doesn't blow up the claim-link URI.
+    #[test]
+    fn turn_id_is_deterministic_and_field_injective() {
+        assert_eq!(turn_id("alice", "hi"), turn_id("alice", "hi"));
+        assert_ne!(turn_id("alice", "hi"), turn_id("alic", "ehi"));
+        assert_ne!(turn_id("alice", "hi"), turn_id("bob", "hi"));
+        assert_eq!(turn_id("alice", "hi").len(), 16);
+        // Field content is hex.
+        assert!(turn_id("alice", "hi")
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()));
     }
 
     // ---- WatcherState -------------------------------------------------------

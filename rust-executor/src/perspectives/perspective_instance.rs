@@ -396,7 +396,8 @@ impl PerspectiveInstance {
             self.nh_sync_loop(),
             self.pending_diffs_loop(),
             self.subscribed_queries_loop(),
-            self.fallback_sync_loop()
+            self.fallback_sync_loop(),
+            self.auto_processor_watch_loop(),
         );
     }
 
@@ -5054,6 +5055,156 @@ impl PerspectiveInstance {
         }
 
         log::debug!("Fallback sync loop ended for perspective {}", uuid);
+    }
+
+    /// Auto-processor watch loop (P-B2b2 polling MVP).
+    ///
+    /// One instance per perspective, joined into `start_background_tasks`.
+    /// Every `TICK_MS`:
+    ///   1. Load every `AutoProcessorConfig` declared on this perspective's
+    ///      shared graph (`load_processors`). Zero configs = no-op tick.
+    ///   2. Per config, run its `source_scope_query` to gather the current
+    ///      transcript, hash each `(speaker, text)` turn into a stable id, and
+    ///      feed only new-since-last-processed ids into `WatcherState`. The
+    ///      per-processor `processed_ids` set defends against
+    ///      re-processing after `drain_ready_batch` empties the pending queue.
+    ///   3. Per config, `drain_ready_batch(cfg, now_ms)` — if a batch is ready
+    ///      (i.e. `debounce_ms` elapsed since the last `record_item`), run
+    ///      `run_one_pass` in-line. `Won` and `BackedOff` both add the batch
+    ///      to `processed_ids` (a peer won → their write reaches us via link
+    ///      sync, no reason to re-race); `ShapesMissing` and `EmptyTranscript`
+    ///      do not, so the ids are retried once the shape or transcript lands.
+    ///
+    /// This is the "polling MVP" per the design decision in
+    /// `planning/p-b2b2-watcher-wireup.md`. The event-driven variant
+    /// (subscribe to `PERSPECTIVE_LINK_ADDED_TOPIC`, record `link.data.source`
+    /// deltas) is a follow-up optimisation — the coordination correctness
+    /// envelope is the same because the `ProcessingClaim` (P-A) is the real
+    /// double-processing guard, not the trigger latency.
+    async fn auto_processor_watch_loop(&self) {
+        use crate::perspectives::auto_processor::{
+            config::load_processors,
+            watcher::{turn_id, PassOutcome, WatcherState},
+        };
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        const TICK_MS: u64 = 500;
+
+        let uuid = self.uuid.clone();
+        let mut watcher = WatcherState::new();
+        // Per-processor `HashSet<turn-id>` — turn ids already handed to a
+        // successful (Won or BackedOff) pass. Prevents the polling design
+        // from re-processing the same transcript row every tick after
+        // WatcherState's pending queue drains.
+        let mut processed_per_processor: HashMap<String, HashSet<String>> = HashMap::new();
+
+        while !self.is_teardown.load(Ordering::Acquire) {
+            sleep(Duration::from_millis(TICK_MS)).await;
+            if self.is_teardown.load(Ordering::Acquire) {
+                return;
+            }
+
+            let configs = match load_processors(self).await {
+                Ok(cs) => cs,
+                Err(e) => {
+                    log::warn!(
+                        "auto_processor_watch_loop [{}]: load_processors failed: {e:#}",
+                        uuid
+                    );
+                    continue;
+                }
+            };
+            if configs.is_empty() {
+                continue;
+            }
+
+            let now_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(d) => d.as_millis() as i64,
+                Err(_) => continue, // clock before epoch — skip tick
+            };
+
+            // 1. Record new-since-last-processed turn ids per config.
+            for cfg in &configs {
+                let transcript =
+                    match crate::perspectives::interpretation::gather_transcript_sparql(
+                        self,
+                        &cfg.source_scope_query,
+                    )
+                    .await
+                    {
+                        Ok(t) => t,
+                        Err(e) => {
+                            log::warn!(
+                                "auto_processor `{}` [{}]: gather_transcript_sparql failed: {e:#}",
+                                cfg.processor_id,
+                                uuid
+                            );
+                            continue;
+                        }
+                    };
+                if transcript.is_empty() {
+                    continue;
+                }
+                let processed = processed_per_processor
+                    .entry(cfg.processor_id.clone())
+                    .or_default();
+                for (speaker, text) in &transcript {
+                    let id = turn_id(speaker, text);
+                    if !processed.contains(&id) {
+                        watcher.record_item(&cfg.processor_id, id, now_ms);
+                    }
+                }
+            }
+
+            // 2. Drain + spawn pass per config.
+            for cfg in &configs {
+                let Some(batch) = watcher.drain_ready_batch(cfg, now_ms) else {
+                    continue;
+                };
+                let mut perspective_clone = self.clone();
+                let ctx = AgentContext::main_agent();
+                let outcome = match crate::perspectives::auto_processor::watcher::run_one_pass(
+                    &mut perspective_clone,
+                    cfg,
+                    &batch,
+                    now_ms,
+                    &ctx,
+                )
+                .await
+                {
+                    Ok(o) => o,
+                    Err(e) => {
+                        log::warn!(
+                            "auto_processor `{}` [{}]: run_one_pass errored (batch len={}): {e:#}",
+                            cfg.processor_id,
+                            uuid,
+                            batch.len()
+                        );
+                        continue;
+                    }
+                };
+                match outcome {
+                    PassOutcome::Won { .. } | PassOutcome::BackedOff { .. } => {
+                        // Either we processed the batch or a peer holds the
+                        // claim and will — both cases mean "do not re-race
+                        // these ids on the next tick".
+                        let processed = processed_per_processor
+                            .entry(cfg.processor_id.clone())
+                            .or_default();
+                        for id in &batch {
+                            processed.insert(id.clone());
+                        }
+                    }
+                    PassOutcome::ShapesMissing { .. } | PassOutcome::EmptyTranscript => {
+                        // Do NOT mark as processed — the shape may land later
+                        // (partial-sync SDNA) or the transcript may fill in;
+                        // let the next debounce window retry the same ids.
+                    }
+                }
+            }
+        }
+
+        log::debug!("auto_processor_watch_loop ended for perspective {}", uuid);
     }
 
     /// Reset the fallback sync interval to 30 seconds when new links are added
