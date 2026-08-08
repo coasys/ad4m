@@ -363,33 +363,31 @@ pub(crate) async fn seed_instance(
 // perspective, decoded through each class's own shape/getters.
 
 /// Read back the instances of `class` via the model-query API, requesting the
-/// given `props`. Returns the parsed `instances` array; a query/parse failure
-/// (e.g. the class isn't registered here) is logged and treated as "no
-/// instances", mirroring `existing_instance_identities`.
+/// given `props`. Returns the parsed `instances` array.
+///
+/// Fails loud on `model_query` errors or malformed responses: this is a
+/// test-only assertion helper, and a silently-empty result would let e2e tests
+/// pass with false positives (an assertion of "no instances present" would
+/// succeed even when the class truly can't be queried). model_query returns Ok
+/// with an empty `instances` array when the class is registered but has no
+/// persisted instances — that path is preserved as `Vec::new()`.
 pub(crate) async fn model_instances(
     perspective: &PerspectiveInstance,
     class: &str,
     props: &[&str],
 ) -> Vec<serde_json::Value> {
     let query = serde_json::json!({ "properties": props }).to_string();
-    let result_json = match perspective.model_query(class, &query).await {
-        Ok(json) => json,
-        Err(e) => {
-            log::warn!("model_instances: model_query({class}) failed, treating as none: {e:#}");
-            return Vec::new();
-        }
-    };
-    match serde_json::from_str::<serde_json::Value>(&result_json) {
-        Ok(v) => v
-            .get("instances")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default(),
-        Err(e) => {
-            log::warn!("model_instances: bad model_query result for {class}: {e:#}");
-            Vec::new()
-        }
-    }
+    let result_json = perspective
+        .model_query(class, &query)
+        .await
+        .unwrap_or_else(|e| panic!("model_instances: model_query({class}) failed: {e:#}"));
+    let v: serde_json::Value = serde_json::from_str(&result_json).unwrap_or_else(|e| {
+        panic!("model_instances: bad model_query result for {class}: {e:#}; raw={result_json}")
+    });
+    v.get("instances")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Count of persisted instances per lower-cased class local name, read from the
