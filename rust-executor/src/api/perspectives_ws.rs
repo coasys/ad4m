@@ -1062,7 +1062,7 @@ async fn run_interpretation_handler(
         .map(|t| (t.speaker, t.text))
         .collect();
 
-    let placements = crate::perspectives::interpretation::run_interpretation(
+    let bases = crate::perspectives::interpretation::run_interpretation(
         &mut perspective,
         &shapes,
         &transcript,
@@ -1072,9 +1072,8 @@ async fn run_interpretation_handler(
     .await
     .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let total_links: usize = placements.iter().map(|(_, links)| links.len()).sum();
-    if total_links > 0 {
-        if let Err(e) = reserve_credits(&ctx.user_email, total_links as f64 * DEFAULT_LINK_WRITE) {
+    if !bases.is_empty() {
+        if let Err(e) = reserve_credits(&ctx.user_email, bases.len() as f64 * DEFAULT_LINK_WRITE) {
             log::warn!(
                 "Credit deduction failed for runInterpretation (operation already committed): {}",
                 e
@@ -1082,22 +1081,7 @@ async fn run_interpretation_handler(
         }
     }
 
-    let result: Vec<InterpretationPlacement> = placements
-        .into_iter()
-        .map(|(base, links)| InterpretationPlacement {
-            base,
-            links: links
-                .into_iter()
-                .map(|l| InterpretationLink {
-                    source: l.source,
-                    predicate: l.predicate,
-                    target: l.target,
-                })
-                .collect(),
-        })
-        .collect();
-
-    Ok(serde_json::to_value(result)?)
+    Ok(serde_json::to_value(bases)?)
 }
 
 // ── Registration ──

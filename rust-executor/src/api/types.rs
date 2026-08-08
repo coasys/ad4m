@@ -558,25 +558,6 @@ pub struct RunInterpretationRequest {
     pub link_status: Option<String>,
 }
 
-/// A single link written for an extracted instance.
-#[derive(Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct InterpretationLink {
-    pub source: String,
-    pub predicate: Option<String>,
-    pub target: String,
-}
-
-/// One extracted instance: its freshly minted base URI + the links written for it.
-#[derive(Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct InterpretationPlacement {
-    pub base: String,
-    pub links: Vec<InterpretationLink>,
-}
-
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]

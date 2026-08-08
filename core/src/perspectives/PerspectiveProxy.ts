@@ -12,7 +12,7 @@ import { AIClient } from "../ai/AIClient";
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
-import type { InterpretationPlacement, TranscriptTurn } from "../generated/api";
+import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
@@ -561,7 +561,7 @@ export class PerspectiveProxy {
      * @param classes local names of the subject classes to extract into; omit for all
      * @param linkStatus `'local'` (default) or `'shared'`
      */
-    async runInterpretation(transcript: TranscriptTurn[], basePrefix: string, classes?: string[], linkStatus?: LinkStatus): Promise<InterpretationPlacement[]> {
+    async runInterpretation(transcript: TranscriptTurn[], basePrefix: string, classes?: string[], linkStatus?: LinkStatus): Promise<string[]> {
         return await this.#client.runInterpretation(this.#handle.uuid, transcript, basePrefix, classes, linkStatus)
     }
 

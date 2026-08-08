@@ -24,6 +24,18 @@ const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11
 const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.5-27b-opus:latest";
 const BASE_PREFIX = "soa://ext/";
 
+async function typeOf(p: PerspectiveProxy, base: string): Promise<string | undefined> {
+  const links = await p.get(new LinkQuery({ source: base, predicate: "soa://type" }));
+  return links[0]?.data.target;
+}
+
+async function titleOf(p: PerspectiveProxy, base: string): Promise<string | undefined> {
+  const links = await p.get(new LinkQuery({ source: base, predicate: "soa://title" }));
+  const t = links[0]?.data.target;
+  if (!t) return undefined;
+  return decodeURIComponent(t.replace(/^literal:string:/, ""));
+}
+
 describe("perspective.runInterpretation (WS + real LLM)", function () {
   this.timeout(1_200_000);
 
@@ -61,15 +73,14 @@ describe("perspective.runInterpretation (WS + real LLM)", function () {
       { speaker: "Nico", text: "How do we handle a perspective that has no subject classes registered?" },
     ];
 
-    const placements = await p.runInterpretation(transcript, BASE_PREFIX);
+    const bases = await p.runInterpretation(transcript, BASE_PREFIX);
 
-    // Something typed came out, minted under our prefix, with links.
-    expect(placements.length).to.be.greaterThan(0);
-    for (const pl of placements) {
-      expect(pl.base.startsWith(BASE_PREFIX), `base ${pl.base}`).to.be.true;
-      expect(pl.links.length).to.be.greaterThan(0);
-      // every instance carries its class type-flag link
-      expect(pl.links.some((l) => l.predicate === "soa://type")).to.be.true;
+    // Something typed came out, minted under our prefix, with a type flag.
+    expect(bases.length).to.be.greaterThan(0);
+    for (const base of bases) {
+      expect(base.startsWith(BASE_PREFIX), `base ${base}`).to.be.true;
+      const typeTarget = await typeOf(p, base);
+      expect(typeTarget, `every instance must carry soa://type; missing on ${base}`).to.be.a("string");
     }
 
     // The task assignment should have produced at least one queryable ExtTask.
@@ -88,16 +99,18 @@ describe("perspective.runInterpretation (WS + real LLM)", function () {
     const knownTitles = new Set(before.map((t) => t.title.toLowerCase()));
 
     // Restate an existing task (no new information) + nothing else actionable.
-    const placements = await p.runInterpretation(
+    const bases = await p.runInterpretation(
       [{ speaker: "Nico", text: `Reminder: ${before[0].title}.` }],
       BASE_PREFIX,
     );
 
     // None of the newly placed instances may duplicate a known task title.
-    for (const pl of placements) {
-      const title = pl.links.find((l) => l.predicate === "soa://title")?.target ?? "";
-      const decoded = decodeURIComponent(title.replace(/^literal:string:/, "")).toLowerCase();
-      expect(knownTitles.has(decoded), `must not recreate existing task "${decoded}"`).to.be.false;
+    for (const base of bases) {
+      const title = (await titleOf(p, base)) ?? "";
+      expect(
+        knownTitles.has(title.toLowerCase()),
+        `must not recreate existing task "${title}"`,
+      ).to.be.false;
     }
   });
 
@@ -109,13 +122,13 @@ describe("perspective.runInterpretation (WS + real LLM)", function () {
       { speaker: "Nico", text: "Should we version the WS API before release?" },
     ];
 
-    const placements = await p.runInterpretation(transcript, BASE_PREFIX, ["ExtTask"]);
+    const bases = await p.runInterpretation(transcript, BASE_PREFIX, ["ExtTask"]);
 
-    expect(placements.length, "expected at least the task").to.be.greaterThan(0);
-    // Every placement must be an ExtTask — no Belief/Question leaked in.
-    for (const pl of placements) {
-      const typeTarget = pl.links.find((l) => l.predicate === "soa://type")?.target;
-      expect(typeTarget, `unexpected non-task type ${typeTarget}`).to.equal("soa://task");
+    expect(bases.length, "expected at least the task").to.be.greaterThan(0);
+    // Every base must be an ExtTask — no Belief/Question leaked in.
+    for (const base of bases) {
+      const typeTarget = await typeOf(p, base);
+      expect(typeTarget, `unexpected non-task type ${typeTarget} on ${base}`).to.equal("soa://task");
     }
   });
 });

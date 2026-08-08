@@ -10,7 +10,7 @@ import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
-import type { InterpretationPlacement, TranscriptTurn } from "../generated/api";
+import type { TranscriptTurn } from "../generated/api";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -261,9 +261,9 @@ export class PerspectiveClient {
      * or CPU-only models. We raise the default 30s RPC timeout here to 20 min
      * (matches the CI `--timeout 1200000` for the interpretation tests).
      */
-    async runInterpretation(uuid: string, transcript: TranscriptTurn[], basePrefix: string, classes?: string[], linkStatus?: LinkStatus): Promise<InterpretationPlacement[]> {
+    async runInterpretation(uuid: string, transcript: TranscriptTurn[], basePrefix: string, classes?: string[], linkStatus?: LinkStatus): Promise<string[]> {
         const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
-        return this.#apiClient.call<InterpretationPlacement[]>(
+        return this.#apiClient.call<string[]>(
             'perspective.runInterpretation', { uuid, transcript, basePrefix, classes, linkStatus },
             RUN_INTERPRETATION_TIMEOUT_MS,
         )

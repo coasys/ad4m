@@ -16,8 +16,6 @@ export type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
 export type { CreateSubjectRequest } from "./CreateSubjectRequest";
 export type { EmbedRequest } from "./EmbedRequest";
 export type { ExecuteCommandsRequest } from "./ExecuteCommandsRequest";
-export type { InterpretationLink } from "./InterpretationLink";
-export type { InterpretationPlacement } from "./InterpretationPlacement";
 export type { ExportRequest } from "./ExportRequest";
 export type { ExpressionManyRequest } from "./ExpressionManyRequest";
 export type { FriendSendMessageRequest } from "./FriendSendMessageRequest";
