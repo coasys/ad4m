@@ -448,3 +448,108 @@ pub async fn run_interpretation_with_strategy_and_model(
     let bases = touched_bases(&ops);
     Ok(bases)
 }
+
+/// Placeholder string the partitioned variant substitutes with each
+/// URL-encoded partition value when rendering the per-group `base_prefix`.
+pub const PARTITION_PLACEHOLDER: &str = "{partition}";
+
+/// Render `base_prefix_template` for one partition value: substitute
+/// [`PARTITION_PLACEHOLDER`] with the URL-encoded `partition`. Kept as a
+/// standalone helper so the partition-templating contract is unit-testable
+/// without spinning up a perspective. Errors if the template omits the
+/// placeholder — silent absence would collapse every partition to the same
+/// base and collide their new instances.
+pub fn render_partitioned_base_prefix(
+    base_prefix_template: &str,
+    partition: &str,
+) -> anyhow::Result<String> {
+    if !base_prefix_template.contains(PARTITION_PLACEHOLDER) {
+        return Err(anyhow::anyhow!(
+            "run_interpretation_partitioned: base_prefix_template {base_prefix_template:?} \
+             must contain the {PARTITION_PLACEHOLDER:?} placeholder; \
+             without it every partition writes under the same base and \
+             new-instance URIs collide across partitions"
+        ));
+    }
+    let encoded = urlencoding::encode(partition).to_string();
+    Ok(base_prefix_template.replace(PARTITION_PLACEHOLDER, &encoded))
+}
+
+/// Wildcard/partitioned counterpart of
+/// [`run_interpretation_with_strategy_and_model`]. Runs the interpretation
+/// pipeline once per input partition, writing each group's new instances
+/// under a per-partition `base_prefix` derived from
+/// `base_prefix_template` (see [`render_partitioned_base_prefix`]).
+///
+/// Shape parity with the non-partitioned entrypoint: same shapes, same
+/// dedup strategy, same optional model override. The only differences are
+/// (a) transcript is a `Vec<(partition, turns)>` (what
+/// [`gather_transcript_sparql_partitioned`] returns) and (b) the write
+/// target is templated per partition.
+///
+/// **Return value:** `Vec<(partition, Vec<base>)>` — parallel to the input
+/// order, so a caller can zip inputs and outputs deterministically. A
+/// partition whose interpretation call fails is dropped with a
+/// `log::warn!`; other partitions still run. This mirrors "one flaky
+/// partition should not black-hole a whole watcher batch".
+///
+/// **Existing-snapshot scope (spike caveat).** The existing-instance
+/// snapshot fed to the LLM (dedup + `id`-reference hints) is
+/// perspective-wide today — same as the non-partitioned path. For the
+/// SoA-tree pattern where each parent-node owns its own child interpret
+/// output, we'd instead want a partition-scoped snapshot so partition A's
+/// LLM does not dedup a new node into partition B's existing instances.
+/// That's follow-up work in the auto-processor build list (see
+/// working-buffer.md); this spike keeps the snapshot shared so the diff
+/// surface stays in one file and the templating semantics are easy to
+/// audit.
+///
+/// Sequential (not parallel) across partitions on purpose: same LLM task
+/// row, same underlying HTTP connection to Ollama, and the per-partition
+/// claim election that would make parallel safe is a downstream
+/// build-list item.
+pub async fn run_interpretation_partitioned(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    partitions: &[(String, Vec<(String, String)>)],
+    base_prefix_template: &str,
+    context: &AgentContext,
+    dedup_strategy: &DedupStrategy,
+    model_override: Option<&str>,
+) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+    // Fail early on a broken template — before we spend an LLM call finding
+    // out every partition would collide.
+    let _ = render_partitioned_base_prefix(base_prefix_template, "__probe__")?;
+
+    let mut out: Vec<(String, Vec<String>)> = Vec::with_capacity(partitions.len());
+    for (partition, turns) in partitions {
+        if turns.is_empty() {
+            // Empty groups can't reach the LLM by definition, but this
+            // guard also keeps the log line quiet and skips an
+            // unnecessary AIService round-trip.
+            out.push((partition.clone(), Vec::new()));
+            continue;
+        }
+        let base_prefix = render_partitioned_base_prefix(base_prefix_template, partition)?;
+        match run_interpretation_with_strategy_and_model(
+            perspective,
+            shapes,
+            turns,
+            &base_prefix,
+            context,
+            dedup_strategy,
+            model_override,
+        )
+        .await
+        {
+            Ok(bases) => out.push((partition.clone(), bases)),
+            Err(err) => {
+                log::warn!(
+                    "run_interpretation_partitioned: partition {partition:?} failed: {err:#}; \
+                     other partitions still run"
+                );
+            }
+        }
+    }
+    Ok(out)
+}

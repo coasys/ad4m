@@ -2144,3 +2144,63 @@ fn filter_already_present_dedupes_within_same_response() {
         "intra-response duplicates must be dropped after the first occurrence; got {kept_titles:?}"
     );
 }
+
+#[test]
+fn render_partitioned_base_prefix_substitutes_placeholder() {
+    // Happy path: the placeholder is replaced with the URL-encoded partition
+    // value, everything around it is preserved verbatim. Encoding matters —
+    // partition IDs are commonly full URIs (`soa://.../node/<uuid>`) whose
+    // `:` and `/` bytes are illegal in a URI path segment.
+    let out = render_partitioned_base_prefix(
+        "ad4m://autoprocessor/proc-1/{partition}/instance/",
+        "soa://parent/node/abc",
+    )
+    .expect("render_partitioned_base_prefix");
+    assert_eq!(
+        out, "ad4m://autoprocessor/proc-1/soa%3A%2F%2Fparent%2Fnode%2Fabc/instance/",
+        "partition value must be URL-encoded inside the rendered base_prefix"
+    );
+}
+
+#[test]
+fn render_partitioned_base_prefix_errors_when_placeholder_missing() {
+    // A silent no-op substitution would collapse every partition onto the
+    // same `base_prefix` and let their new-instance UUIDs land under the same
+    // parent — the exact collision the partitioned path exists to prevent.
+    let err = render_partitioned_base_prefix(
+        "ad4m://autoprocessor/proc-1/instance/",
+        "soa://parent/node/abc",
+    )
+    .expect_err("template without placeholder must error");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("{partition}"),
+        "error message should name the missing placeholder; got: {msg}"
+    );
+}
+
+#[test]
+fn render_partitioned_base_prefix_replaces_every_occurrence() {
+    // No footgun if a template mentions the placeholder in multiple slots —
+    // all copies get the same encoded value, so a caller can e.g. embed the
+    // partition once in a namespace segment and once in a subject name.
+    let out =
+        render_partitioned_base_prefix("ad4m://ap/{partition}/inst/{partition}/", "soa://p/1")
+            .expect("render_partitioned_base_prefix");
+    assert_eq!(
+        out, "ad4m://ap/soa%3A%2F%2Fp%2F1/inst/soa%3A%2F%2Fp%2F1/",
+        "every occurrence of the placeholder must be substituted"
+    );
+}
+
+#[test]
+fn render_partitioned_base_prefix_encodes_ascii_specials_and_utf8() {
+    // Realistic partition IDs can carry query strings, spaces, or non-ASCII
+    // bytes; the encoding must land them safely inside a URI path segment.
+    let out = render_partitioned_base_prefix("ad4m://ap/{partition}/", "topic:Ähnlich & Co?/x")
+        .expect("render_partitioned_base_prefix");
+    assert_eq!(
+        out, "ad4m://ap/topic%3A%C3%84hnlich%20%26%20Co%3F%2Fx/",
+        "URL encoding must cover ASCII specials and UTF-8 bytes"
+    );
+}
