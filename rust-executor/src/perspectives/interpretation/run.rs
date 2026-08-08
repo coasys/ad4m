@@ -102,7 +102,7 @@ pub async fn run_interpretation(
             })
         })
         .collect();
-    let prompt = build_interpretation_input(shapes, transcript, &existing);
+    let prompt = build_interpretation_input(shapes, transcript, &existing, &identity_props);
 
     let service = crate::ai_service::AIService::global_instance()
         .await

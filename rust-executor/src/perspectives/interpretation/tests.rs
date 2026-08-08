@@ -17,6 +17,7 @@ fn interpretation_hint_lands_in_prompt() {
             "I'll extract the LLM processing into ADAM".into(),
         )],
         &HashMap::new(),
+        &HashMap::new(),
     );
 
     // class-level hints reach the prompt
@@ -47,6 +48,83 @@ fn interpretation_hint_lands_in_prompt() {
     assert!(
         !field_names.contains(&"type"),
         "type flag must not be a field"
+    );
+}
+
+#[test]
+fn identity_field_name_lands_in_prompt_for_non_title_identity() {
+    // A class whose `identity` is `name` (not `title`) must have its identity
+    // field name surfaced in the prompt so the model emits that field for
+    // dedup to work. Two `existing` values simulate previously-seen persons.
+    let shape = shape_from_sdna("Person", PERSON_SDNA);
+    let mut existing = HashMap::new();
+    existing.insert("Person".to_string(), vec!["Alice".into(), "Bob".into()]);
+    let mut identity_props = HashMap::new();
+    identity_props.insert("Person".to_string(), "name".to_string());
+
+    let input = build_interpretation_input(
+        &[shape],
+        &[("Nico".into(), "Carol joined us today.".into())],
+        &existing,
+        &identity_props,
+    );
+
+    let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+    let person = v["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "Person")
+        .expect("Person class in prompt");
+    assert_eq!(
+        person["identity"].as_str(),
+        Some("name"),
+        "prompt must expose the declared identity field name"
+    );
+    let existing_values: Vec<&str> = person["existing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(existing_values, vec!["Alice", "Bob"]);
+
+    // System prompt must describe `existing` in terms of the identity field,
+    // not hard-coded titles — otherwise the model may emit `title` for a
+    // class whose identity is `name` and bypass dedup.
+    assert!(
+        INTERPRETATION_SYSTEM_PROMPT.contains("`identity`"),
+        "system prompt must mention the identity field"
+    );
+    assert!(
+        !INTERPRETATION_SYSTEM_PROMPT.contains("titles already present"),
+        "system prompt must not hard-code 'titles'"
+    );
+}
+
+#[test]
+fn identity_field_absent_for_class_without_declared_identity() {
+    // A class with no `identity` property in the SDNA must NOT get an
+    // `identity` key emitted — otherwise the model would infer a dedup field
+    // where the framework does not perform dedup.
+    let shape = shape_from_sdna("Belief", BELIEF_SDNA);
+    let input = build_interpretation_input(
+        &[shape],
+        &[("A".into(), "It rained.".into())],
+        &HashMap::new(),
+        &HashMap::new(), // no identity_props entry ⇒ no identity key
+    );
+
+    let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+    let belief = v["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "Belief")
+        .expect("Belief class in prompt");
+    assert!(
+        belief.get("identity").is_none(),
+        "identity key must be omitted when no identity property was declared"
     );
 }
 
@@ -199,6 +277,7 @@ fn relation_properties_are_excluded_from_interpretation() {
     let input = build_interpretation_input(
         &[shape.clone()],
         &[("Nico".into(), "block it".into())],
+        &HashMap::new(),
         &HashMap::new(),
     );
     let v: serde_json::Value = serde_json::from_str(&input).unwrap();

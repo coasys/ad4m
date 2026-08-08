@@ -109,6 +109,19 @@ pub(crate) const VISION_SDNA: &str = r#"{
   ]
 }"#;
 
+/// A class whose declared identity is `name`, not the default `title`. Used to
+/// verify the prompt exposes the identity field name so the model does not
+/// silently emit `title` for a non-`title`-identity class and bypass dedup.
+pub(crate) const PERSON_SDNA: &str = r#"{
+  "target_class":"ns://Person",
+  "interpretation_hint":"A person mentioned in the conversation.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://person"}],
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://person","min_count":1,"max_count":1},
+    {"path":"ns://name","name":"name","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"Person's name as used in the transcript.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://name","target":"value"}]}
+  ]
+}"#;
+
 pub(crate) const PLAN_SDNA: &str = r#"{
   "target_class":"ns://Plan",
   "interpretation_hint":"A concrete approach or sequence of steps intended to achieve a goal.",

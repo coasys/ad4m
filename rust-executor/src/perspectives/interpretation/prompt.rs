@@ -7,17 +7,25 @@ use std::collections::{HashMap, HashSet};
 /// assemble the per-call LLM input from the target shapes' interpretation hints
 /// plus the transcript. Pure — this is exactly where `interpretation_hint` enters
 /// the prompt. Shape (matches the system prompt):
-/// `{ "classes": [{ "name", "hint", "existing": [title,…],
+/// `{ "classes": [{ "name", "hint", "identity"?: <field name>,
+///                  "existing": [value,…],
 ///                  "fields": [{ "name", "required", "hint" }] }],
 ///    "transcript": [{ "speaker", "text" }] }`.
 ///
-/// `existing` maps a class's local name to the titles of instances already in
-/// the graph, so the model can avoid re-proposing them (soft dedup; the hard
-/// guarantee is [`filter_already_present`]). Pass an empty map for none.
+/// `existing` maps a class's local name to the identity values of instances
+/// already in the graph, so the model can avoid re-proposing them (soft dedup;
+/// the hard guarantee is [`filter_already_present`]). Pass an empty map for none.
+/// `identity_props` maps a class's local name to the NAME of the property it
+/// declares as its identity (e.g. `"title"`, `"name"`) — surfaced in the prompt
+/// as `identity` so the model knows which field the `existing` values belong to
+/// and which field it must use in its own output for dedup to work. Classes
+/// missing from this map have no declared identity (no dedup) and no `identity`
+/// key is emitted for them.
 pub fn build_interpretation_input(
     shapes: &[ModelShape],
     transcript: &[(String, String)],
     existing: &HashMap<String, Vec<String>>,
+    identity_props: &HashMap<String, String>,
 ) -> String {
     let classes: Vec<serde_json::Value> = shapes
         .iter()
@@ -51,12 +59,18 @@ pub fn build_interpretation_input(
             // schema's `interpretationHint` decorator, surfaced here as
             // `interpretation_hint`. The key name is deliberately not "interpretationHint"
             // — the LLM never sees the decorator name, only this compact field.
-            serde_json::json!({
+            let mut class_obj = serde_json::json!({
                 "name": name,
                 "hint": s.interpretation_hint,
                 "existing": existing.get(name).cloned().unwrap_or_default(),
                 "fields": fields,
-            })
+            });
+            // Only emit `identity` when the class declared one — otherwise
+            // the LLM should not infer a dedup field where none exists.
+            if let Some(id_field) = identity_props.get(name) {
+                class_obj["identity"] = serde_json::Value::String(id_field.clone());
+            }
+            class_obj
         })
         .collect();
     let turns: Vec<serde_json::Value> = transcript
@@ -81,8 +95,9 @@ You extract typed instances from a conversation transcript.
 You receive a JSON object with these fields:
   - `classes`: available subject classes. Each has a `name`, a natural-language
     `hint` describing when to instantiate it, a list of `fields` (each with a
-    `name`, optional `hint`, and `required` flag), and an `existing` array of
-    titles already present in the graph for that class.
+    `name`, optional `hint`, and `required` flag), an optional `identity`
+    naming the dedup field, and an `existing` array of identity values already
+    present in the graph for that class.
   - `transcript`: an array of turns `{speaker, text}`.
 
 Emit a JSON array. Each element is `{\"class\": <class name>, ...fields}`, where
@@ -108,9 +123,10 @@ Output rules:
   - Return valid JSON only — no prose, no markdown fences, no <think> blocks.
   - Return an empty array `[]` if nothing matches.
   - Do not invent classes or fields not listed in `classes`.
-  - Dedup: skip an item ONLY when its title clearly matches one already in that
-    class's `existing` list. A brand-new item still counts even if an older,
-    different item of the same class exists — always extract genuinely new items.
+  - Dedup: skip an item ONLY when its `identity` value clearly matches one
+    already in that class's `existing` list. A brand-new item still counts
+    even if an older, different item of the same class exists — always
+    extract genuinely new items.
 ";
 
 /// idempotently register the generic interpretation task in the AI-task DB.
