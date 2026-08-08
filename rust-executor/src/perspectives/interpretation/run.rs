@@ -1,8 +1,9 @@
 use super::{
     build_interpretation_input, class_local_name, ensure_interpretation_task_for_model,
-    existing_instance_context, filter_already_present_with_strategy, identities_from_context,
-    identity_property, ids_from_context, parse_interpretation_response,
-    plan_interpretation_ops_with_context, DedupStrategy, InterpretationOp, ProposedInstance,
+    existing_instance_context, filter_already_present_with_strategy,
+    gather_transcript_sparql_partitioned, identities_from_context, identity_property,
+    ids_from_context, parse_interpretation_response, plan_interpretation_ops_with_context,
+    DedupStrategy, InterpretationOp, ProposedInstance,
 };
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::ModelShape;
@@ -552,4 +553,52 @@ pub async fn run_interpretation_partitioned(
         }
     }
     Ok(out)
+}
+
+/// One-shot convenience: run [`gather_transcript_sparql_partitioned`] against
+/// the perspective, then feed the resulting partitioned turns straight into
+/// [`run_interpretation_partitioned`]. Same partitioning + templating
+/// semantics as the two-step form; useful for callers (auto-processor watch
+/// loop, per-partition e2e tests) that always want gather-then-interpret in
+/// one call under the same `base_prefix_template`.
+///
+/// The SPARQL SELECT must bind `?partition` + `?speaker` + `?text` — same
+/// contract as [`gather_transcript_sparql_partitioned`]. Rows missing any of
+/// those bindings are skipped there. Empty partitions (no matching rows) are
+/// simply not produced; if the SPARQL yields no partitions at all the return
+/// is `Ok(Vec::new())` and no LLM call fires.
+///
+/// The `base_prefix_template` must contain [`PARTITION_PLACEHOLDER`]; the
+/// partitioned runner enforces this via
+/// [`render_partitioned_base_prefix`] and errors up-front rather than after
+/// the SPARQL round-trip.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_interpretation_partitioned_from_sparql(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    sparql: &str,
+    base_prefix_template: &str,
+    context: &AgentContext,
+    dedup_strategy: &DedupStrategy,
+    model_override: Option<&str>,
+) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+    // Fail early on a broken template — before we spend a SPARQL round-trip.
+    let _ = render_partitioned_base_prefix(base_prefix_template, "__probe__")?;
+
+    let partitions = gather_transcript_sparql_partitioned(perspective, sparql).await?;
+    if partitions.is_empty() {
+        // Nothing to interpret — mirrors run_interpretation_partitioned's
+        // zero-partition happy path so callers don't need a special case.
+        return Ok(Vec::new());
+    }
+    run_interpretation_partitioned(
+        perspective,
+        shapes,
+        &partitions,
+        base_prefix_template,
+        context,
+        dedup_strategy,
+        model_override,
+    )
+    .await
 }

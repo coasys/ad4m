@@ -1484,3 +1484,216 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         );
     }
 }
+
+// ---- wildcard/partitioned processor — spike e2e (real LLM) -----------------
+
+/// Wildcard/partitioned interpretation end-to-end: one perspective, one
+/// class, one `AutoProcessorConfig`-shaped SPARQL scope that binds a
+/// `?partition` variable in addition to `?speaker`+`?text`, and one call to
+/// [`run_interpretation_partitioned_from_sparql`]. Proves the whole
+/// gather → partition → per-partition interpret → per-partition write path
+/// under a templated `base_prefix`.
+///
+/// This is what the future auto-processor watcher will call once the
+/// wildcard build-list lands in real #885 — the convenience wraps the two
+/// spike primitives (`gather_transcript_sparql_partitioned` +
+/// `run_interpretation_partitioned`) into one round-trip so the watcher can
+/// stay small.
+///
+/// Invariants asserted (in order of stringency):
+///   1. **Both partitions produce output.** With two clear first-person
+///      commitments per partition, gemma3:12b classifies each as an
+///      Intention with high reliability; the retry loop inside the engine
+///      absorbs the rare bad sample. If a partition returns zero bases, the
+///      partitioning is degenerate.
+///   2. **Namespaces are disjoint by partition.** Every base under
+///      partition A starts with A's URL-encoded prefix and none under B —
+///      structural, not LLM-dependent (the template-substituted
+///      `base_prefix` uniquely names the write namespace).
+///   3. **The engine ran once per partition.** The return is
+///      `Vec<(partition, Vec<base>)>` with entries whose partition values
+///      match the seeded partitions exactly, in the SPARQL result's
+///      first-seen order.
+///
+/// Skips `auto_processor_watch_loop` on purpose — the async polling is
+/// unit-tested in `auto_processor::watcher::tests` and the smoke test
+/// [`auto_processor_pass_lands_interpretation_instance`] already covers the
+/// non-partitioned path through it.
+#[tokio::test]
+async fn partitioned_from_sparql_writes_bases_per_partition() {
+    use crate::perspectives::interpretation::{
+        run_interpretation_partitioned_from_sparql, DedupStrategy,
+    };
+    use crate::types::{LinkQuery, LinkStatus};
+
+    let (mut perspective, shapes, ctx) =
+        setup_interpretation_e2e(&[("Intention", INTENTION_SDNA)]).await;
+
+    // Seed 4 turns split across 2 subgroup partitions. Each partition holds two
+    // clear first-person commitments so gemma3:12b reliably classifies them as
+    // Intentions inside their own group. Every message is linked to its
+    // partition via `ns://in_subgroup`; the SPARQL scope below joins on that
+    // link to emit `?partition`.
+    let partition_a = "soa://subgroup/payments";
+    let partition_b = "soa://subgroup/onboarding";
+    let seeded: [(&str, &str, &str, &str); 4] = [
+        (
+            "msg://part-a-1",
+            partition_a,
+            "did:key:alice",
+            "I'll ship the payments retry fix by tomorrow.",
+        ),
+        (
+            "msg://part-a-2",
+            partition_a,
+            "did:key:bob",
+            "I plan to publish the payments migration doc this afternoon.",
+        ),
+        (
+            "msg://part-b-1",
+            partition_b,
+            "did:key:alice",
+            "I'll rewrite the onboarding email templates tonight.",
+        ),
+        (
+            "msg://part-b-2",
+            partition_b,
+            "did:key:carol",
+            "I plan to record the onboarding walkthrough video by Friday.",
+        ),
+    ];
+    for (uri, partition, author, body) in seeded {
+        perspective
+            .add_link(
+                Link {
+                    source: uri.into(),
+                    predicate: Some("ns://body".into()),
+                    target: format!("literal:string:{body}"),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed body");
+        perspective
+            .add_link(
+                Link {
+                    source: uri.into(),
+                    predicate: Some("ns://author".into()),
+                    target: author.into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed author");
+        perspective
+            .add_link(
+                Link {
+                    source: uri.into(),
+                    predicate: Some("ns://in_subgroup".into()),
+                    target: partition.into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed partition");
+    }
+
+    // Wildcard scope: `?partition` binds the subgroup URI; `?m` is ordered so
+    // the partitions appear in the fixed sequence A, B for the assertion below.
+    let sparql = "SELECT ?partition ?speaker ?text WHERE { \
+                  ?m <ns://in_subgroup> ?partition . \
+                  ?m <ns://body> ?text . \
+                  ?m <ns://author> ?speaker . \
+                  } ORDER BY ?m";
+
+    let base_prefix_template = "ad4m://autoprocessor/wildcard-proc/{partition}/instance/";
+
+    let partitions = run_interpretation_partitioned_from_sparql(
+        &mut perspective,
+        &shapes,
+        sparql,
+        base_prefix_template,
+        &ctx,
+        &DedupStrategy::default(),
+        None,
+    )
+    .await
+    .expect("run_interpretation_partitioned_from_sparql");
+
+    // Invariant 3: exactly the two seeded partitions, in first-seen SPARQL
+    // order (guaranteed by `ORDER BY ?m` + msg::part-a-* sorts before
+    // msg::part-b-*).
+    let observed: Vec<&str> = partitions.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(
+        observed,
+        vec![partition_a, partition_b],
+        "expected both seeded partitions in first-seen SPARQL order; got {observed:?}"
+    );
+
+    // Invariant 1: each partition produced at least one Intention base.
+    for (partition, bases) in &partitions {
+        assert!(
+            !bases.is_empty(),
+            "partition `{partition}` must mint at least one Intention; got empty bases"
+        );
+    }
+
+    // Invariant 2: each partition's bases live under its own URL-encoded
+    // `base_prefix`, and no partition's bases leak into another's namespace.
+    for (partition, bases) in &partitions {
+        let expected_prefix = format!(
+            "ad4m://autoprocessor/wildcard-proc/{}/instance/",
+            urlencoding::encode(partition)
+        );
+        for base in bases {
+            assert!(
+                base.starts_with(&expected_prefix),
+                "partition `{partition}` base `{base}` must carry its own \
+                 templated prefix `{expected_prefix}`"
+            );
+            // Also readback-check: the base actually carries the Intention
+            // type flag — proves the pass wrote through `create_subject`, not
+            // just returned a URI templated in isolation.
+            let links = perspective
+                .get_links(&LinkQuery {
+                    source: Some(base.clone()),
+                    ..Default::default()
+                })
+                .await
+                .expect("get_links readback");
+            assert!(
+                links
+                    .iter()
+                    .any(|l| l.data.predicate.as_deref() == Some("ns://type")
+                        && l.data.target == "ns://intention"),
+                "partition `{partition}` base `{base}` must carry the Intention type flag; \
+                 got links={links:#?}"
+            );
+        }
+    }
+
+    // Cross-partition disjointness: no base from partition A appears in B
+    // and vice versa. Structural, but worth a direct assert so a future
+    // template regression that stripped the partition segment fails here.
+    let a_bases: std::collections::HashSet<&String> = partitions
+        .iter()
+        .find(|(p, _)| p == partition_a)
+        .map(|(_, b)| b.iter().collect())
+        .expect("partition A captured");
+    let b_bases: std::collections::HashSet<&String> = partitions
+        .iter()
+        .find(|(p, _)| p == partition_b)
+        .map(|(_, b)| b.iter().collect())
+        .expect("partition B captured");
+    let overlap: Vec<&&String> = a_bases.intersection(&b_bases).collect();
+    assert!(
+        overlap.is_empty(),
+        "per-partition base URI sets must be disjoint; overlap = {overlap:?}"
+    );
+}
