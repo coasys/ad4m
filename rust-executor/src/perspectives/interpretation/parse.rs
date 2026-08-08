@@ -8,7 +8,10 @@ use super::ProposedInstance;
 pub fn parse_interpretation_response(raw: &str) -> anyhow::Result<Vec<ProposedInstance>> {
     let cleaned = clean_llm_json(raw);
     let instances: Vec<ProposedInstance> = serde_json::from_str(&cleaned).map_err(|e| {
-        anyhow::anyhow!("interpretation JSON parse failed: {e}; cleaned payload: {cleaned}")
+        anyhow::anyhow!(
+            "interpretation JSON parse failed: {e}; cleaned payload length: {} bytes",
+            cleaned.len()
+        )
     })?;
     Ok(instances)
 }
