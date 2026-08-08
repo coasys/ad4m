@@ -96,6 +96,12 @@ export async function mcpRequest(
     });
 
     if (!response.ok) {
+      // Release the unread body so the socket is not held open on error.
+      try {
+        await response.body?.cancel();
+      } catch {
+        /* already closed */
+      }
       throw new Error(`MCP HTTP ${response.status}: ${response.statusText}`);
     }
 
@@ -192,6 +198,12 @@ export async function mcpInitialize(
     });
 
     if (!resp.ok) {
+      // Release the unread body so the socket is not held open on error.
+      try {
+        await resp.body?.cancel();
+      } catch {
+        /* already closed */
+      }
       throw new Error(`MCP initialize HTTP ${resp.status}: ${resp.statusText}`);
     }
 

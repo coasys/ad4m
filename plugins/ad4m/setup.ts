@@ -255,10 +255,16 @@ async function setupExternalMode(
     // via signup + login, rather than a capability against the node's base agent.
     if (multiUser && email && password) {
       logger.info(`[ad4m-setup] Multi-user node — provisioning own identity (${email})...`);
+      // mcpCallTool returns a JSON-RPC error as result text rather than throwing,
+      // so inspect the result — the catch alone only sees transport failures.
       try {
-        await mcpCallTool(endpoint, "signup", { email, password }, initResp.sessionId);
+        const signupResult = await mcpCallTool(endpoint, "signup", { email, password }, initResp.sessionId);
+        const signupData = extractMcpResultData(signupResult);
+        if (signupData?.error) {
+          logger.info(`[ad4m-setup] signup: ${signupData.error} (user may already exist — continuing to login)`);
+        }
       } catch (e: any) {
-        logger.info(`[ad4m-setup] signup: ${e.message} (user may already exist — continuing to login)`);
+        logger.info(`[ad4m-setup] signup failed (transport): ${e.message} (continuing to login)`);
       }
       const loginResult = await mcpCallTool(
         endpoint,

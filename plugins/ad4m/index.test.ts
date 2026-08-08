@@ -1124,6 +1124,21 @@ describe("mcpRequest", () => {
       mcpRequest("http://localhost:3001/mcp", "tools/list"),
     ).rejects.toThrow("MCP HTTP 401");
   });
+
+  it("cancels the response body on non-OK status (no socket leak)", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: "Internal Server Error",
+      headers: new Headers(),
+      body: { cancel },
+    } as any);
+    await expect(
+      mcpRequest("http://localhost:3001/mcp", "tools/list"),
+    ).rejects.toThrow("MCP HTTP 500");
+    expect(cancel).toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1212,6 +1227,21 @@ describe("mcpInitialize", () => {
     await expect(mcpInitialize("http://localhost:3001/mcp")).rejects.toThrow(
       "MCP initialize error: Auth required",
     );
+  });
+
+  it("cancels the response body on non-OK status (no socket leak)", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false,
+      status: 503,
+      statusText: "Service Unavailable",
+      headers: new Headers(),
+      body: { cancel },
+    } as any);
+    await expect(mcpInitialize("http://localhost:3001/mcp")).rejects.toThrow(
+      "MCP initialize HTTP 503",
+    );
+    expect(cancel).toHaveBeenCalled();
   });
 });
 
