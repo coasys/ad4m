@@ -24,3 +24,6 @@ pub mod watcher;
 
 #[cfg(test)]
 mod multi_agent_contention_spike;
+
+#[cfg(test)]
+mod signal_wire_sketch;
