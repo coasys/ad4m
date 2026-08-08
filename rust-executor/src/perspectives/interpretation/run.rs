@@ -133,7 +133,8 @@ pub async fn run_interpretation(
     // URIs, not literals (relation interpretation is a later PR).
     let batch_id = perspective.create_batch().await;
     let mut bases: Vec<String> = Vec::new();
-    for inst in &instances {
+    let mut create_err: Option<anyhow::Error> = None;
+    'build: for inst in &instances {
         let Some(shape) = shapes
             .iter()
             .find(|s| class_local_name(&s.target_class) == inst.class)
@@ -160,7 +161,7 @@ pub async fn run_interpretation(
             inst.class.to_lowercase(),
             Uuid::new_v4()
         );
-        perspective
+        match perspective
             .create_subject(
                 SubjectClassOption {
                     class_name: Some(inst.class.clone()),
@@ -172,18 +173,38 @@ pub async fn run_interpretation(
                 context,
             )
             .await
-            .map_err(|e| {
-                anyhow::anyhow!(
+        {
+            Ok(_) => bases.push(base),
+            Err(e) => {
+                create_err = Some(anyhow::anyhow!(
                     "run_interpretation: create_subject({}) failed: {e:#}",
                     inst.class
-                )
-            })?;
-        bases.push(base);
+                ));
+                break 'build;
+            }
+        }
     }
-    perspective
-        .commit_batch(batch_id, context)
-        .await
-        .map_err(|e| anyhow::anyhow!("run_interpretation: commit_batch failed: {e:#}"))?;
 
-    Ok(bases)
+    if let Some(e) = create_err {
+        // Drop the half-built batch so it does not sit in `batch_store` for
+        // BATCH_TIMEOUT_SECS. `commit_batch` removes the batch itself on
+        // success, but a mid-loop `create_subject` failure never reaches it.
+        let _ = perspective.discard_batch(&batch_id).await;
+        return Err(e);
+    }
+
+    match perspective.commit_batch(batch_id.clone(), context).await {
+        Ok(_) => Ok(bases),
+        Err(e) => {
+            // Defense-in-depth: `commit_batch` already removes the batch on
+            // entry (perspective_instance.rs `commit_batch`), so this is a
+            // no-op today. Kept explicit so the invariant "no lingering batch
+            // on any error path from run_interpretation" survives future
+            // changes to `commit_batch`'s control flow.
+            let _ = perspective.discard_batch(&batch_id).await;
+            Err(anyhow::anyhow!(
+                "run_interpretation: commit_batch failed: {e:#}"
+            ))
+        }
+    }
 }
