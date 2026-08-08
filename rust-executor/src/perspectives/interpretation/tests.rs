@@ -278,7 +278,7 @@ fn relations_few_shot_example_is_present_and_upsert_is_last() {
 /// pure parse-level assertions over the raw LLM JSON — there is no graph and no
 /// dedup here, so this takes the field name explicitly rather than assuming a
 /// `title`. (Dedup identity is class-declared and handled graph-side in
-/// `filter_already_present` / `existing_instance_identities`.)
+/// `filter_already_present` / `existing_instance_context`.)
 fn prop_values<'a>(instances: &'a [ProposedInstance], key: &str) -> Vec<&'a str> {
     instances
         .iter()
@@ -378,6 +378,26 @@ fn extracts_single_object_when_no_array() {
     let err = parse_interpretation_response(raw).unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("expected a sequence"), "got: {msg}");
+}
+
+#[test]
+fn parse_error_does_not_leak_llm_payload() {
+    // The cleaned LLM payload can carry the raw conversation transcript. It
+    // must not appear in the error message, because retry_interpretation_parse
+    // logs this error on every failed attempt. Only safe metadata (length) is
+    // allowed to surface.
+    let secret = "TOP_SECRET_DINNER_PLAN alice met bob at the safehouse";
+    let raw = format!("[{{ \"class\":\"Note\", \"title\":\"{secret}\", NOT_JSON");
+    let err = parse_interpretation_response(&raw).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        !msg.contains(secret),
+        "parse error must not include the LLM payload; got: {msg}"
+    );
+    assert!(
+        msg.contains("payload length"),
+        "parse error must include the payload length metadata; got: {msg}"
+    );
 }
 
 // ---- planner: create vs. update ------------------------------------------
@@ -539,6 +559,7 @@ fn plan_ops_empty_input_yields_no_ops() {
 }
 
 // ---- relation write-path (pure planner) ----------------------------------
+// ---- relation exclusion ------------------------------------------
 
 #[test]
 fn relation_properties_are_excluded_from_interpretation() {
@@ -1780,5 +1801,41 @@ fn filter_already_present_keeps_upserts_and_preserves_order() {
         kept[1].id.as_deref(),
         Some("soa://existing/task/1"),
         "the surviving 'Ship the MVP' must be the id-carrying upsert"
+    );
+}
+
+#[test]
+fn filter_already_present_dedupes_within_same_response() {
+    // The LLM sometimes emits the same (class, identity) twice in one response
+    // (verbatim, or under whitespace/case variation). Without intra-response
+    // dedup those slip past `filter_already_present` because the pre-existing
+    // `known` set does not yet contain them — and `run_interpretation` then
+    // mints two subjects for the same identity. Fix: accumulate accepted
+    // identities as we scan the response, dropping later same-key proposals
+    // exactly like already-persisted ones.
+    let proposed = parse_interpretation_response(
+        r#"[
+              {"class":"Task","title":"Ship the MVP"},
+              {"class":"Task","title":"  SHIP  the  mvp  "},
+              {"class":"Task","title":"Ship the MVP"},
+              {"class":"Task","title":"Write the docs"}
+            ]"#,
+    )
+    .unwrap();
+    let existing: HashMap<String, Vec<String>> = HashMap::new(); // graph empty
+    let mut identity_props = HashMap::new();
+    identity_props.insert("Task".to_string(), "title".to_string());
+
+    let kept = filter_already_present(proposed, &existing, &identity_props);
+    let kept_titles: Vec<&str> = kept
+        .iter()
+        .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
+        .collect();
+
+    // First occurrence wins; every subsequent normalized-equal proposal drops.
+    assert_eq!(
+        kept_titles,
+        vec!["Ship the MVP", "Write the docs"],
+        "intra-response duplicates must be dropped after the first occurrence; got {kept_titles:?}"
     );
 }
