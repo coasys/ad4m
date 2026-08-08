@@ -1034,3 +1034,178 @@ async fn e2e_semantic_dedup_drops_reworded_duplicate() {
         "expected the seeded task + the new CI-docs task; got {counts:?}"
     );
 }
+
+// ---- auto_processor P-B2b smoke (real LLM) ---------------------------------
+
+/// P-B2b end-to-end smoke: the full auto-processor wiring — config written to
+/// the shared graph, read back via `load_processors`, transcript surfaced via
+/// the config's SPARQL scope, `WatcherState` batches the turns, `run_one_pass`
+/// wins the claim and drives the real LLM through the interpretation engine —
+/// produces an actual typed instance on the perspective.
+///
+/// This is the "does the whole stack breathe end-to-end with a real model"
+/// gate before P-C (multi-peer demo). The async polling of
+/// `auto_processor_watch_loop` itself is exhaustively unit-tested elsewhere;
+/// what this test uniquely exercises is the LLM round-trip on top of that
+/// scaffolding.
+#[tokio::test]
+async fn auto_processor_pass_lands_interpretation_instance() {
+    use crate::perspectives::auto_processor::config::{
+        load_processors, write_processor, AutoProcessorConfig,
+    };
+    use crate::perspectives::auto_processor::watcher::{
+        run_one_pass, turn_id, PassOutcome, WatcherState,
+    };
+    use crate::perspectives::interpretation::gather_transcript_sparql;
+    use crate::types::{LinkQuery, LinkStatus};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let (mut perspective, _shapes, ctx) =
+        setup_interpretation_e2e(&[("Intention", INTENTION_SDNA)]).await;
+
+    // Seed two transcript turns as (msg -> body, msg -> author) link pairs.
+    // Both are first-person commitments so gemma3:12b classifies them as
+    // Intentions with reasonable reliability.
+    for (uri, author, body) in [
+        (
+            "msg://smoke-1",
+            "did:key:alice",
+            "I'll finish the interpretation refactor tonight.",
+        ),
+        (
+            "msg://smoke-2",
+            "did:key:bob",
+            "I plan to review the diff first thing tomorrow morning.",
+        ),
+    ] {
+        perspective
+            .add_link(
+                Link {
+                    source: uri.into(),
+                    predicate: Some("ns://body".into()),
+                    target: format!("literal:string:{body}"),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed body");
+        perspective
+            .add_link(
+                Link {
+                    source: uri.into(),
+                    predicate: Some("ns://author".into()),
+                    target: author.into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed author");
+    }
+
+    // Write the processor config into the shared graph.
+    let cfg = AutoProcessorConfig {
+        processor_id: "smoke-auto-processor".into(),
+        source_scope_query: "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
+                             ?m <ns://author> ?speaker . } ORDER BY ?m"
+            .into(),
+        interpretation_classes: vec!["ns://Intention".into()],
+        debounce_ms: 50,
+        batch_max: 32,
+        claim_ttl_ms: 60_000,
+        llm_base_url: None,
+        llm_model: None,
+        dedup_strategy_json: None,
+    };
+    write_processor(&mut perspective, &cfg, &ctx)
+        .await
+        .expect("write_processor");
+
+    // Round-trip the config back through `load_processors` — validates the
+    // shared-graph link shape holds under the same perspective the watcher
+    // would poll in production.
+    let loaded = load_processors(&perspective)
+        .await
+        .expect("load_processors");
+    assert_eq!(loaded.len(), 1, "single processor written and loaded back");
+    let cfg_loaded = &loaded[0];
+    assert_eq!(cfg_loaded.processor_id, "smoke-auto-processor");
+    assert_eq!(
+        cfg_loaded.interpretation_classes,
+        vec!["ns://Intention".to_string()]
+    );
+
+    // Mimic one watch-loop tick: fetch transcript, feed WatcherState, drain,
+    // run. The polling loop itself is not driven here; the pure state and its
+    // debounce/cap contract are covered by unit tests in
+    // `auto_processor::watcher::tests`.
+    let transcript = gather_transcript_sparql(&perspective, &cfg_loaded.source_scope_query)
+        .await
+        .expect("gather_transcript_sparql");
+    assert_eq!(
+        transcript.len(),
+        2,
+        "SPARQL scope must surface both seeded turns; got {transcript:#?}"
+    );
+
+    let mut watcher = WatcherState::new();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    for (speaker, text) in &transcript {
+        watcher.record_item(&cfg_loaded.processor_id, turn_id(speaker, text), now_ms);
+    }
+    // Advance `now` past the debounce window so `drain_ready_batch` releases.
+    let drain_at = now_ms + cfg_loaded.debounce_ms + 10;
+    let batch = watcher
+        .drain_ready_batch(cfg_loaded, drain_at)
+        .expect("drain returns the ready batch");
+    assert_eq!(
+        batch.len(),
+        2,
+        "both seeded turns should drain in one batch"
+    );
+
+    let outcome = run_one_pass(&mut perspective, cfg_loaded, &batch, drain_at, &ctx)
+        .await
+        .expect("run_one_pass");
+    let bases = match outcome {
+        PassOutcome::Won { bases } => bases,
+        other => panic!(
+            "expected PassOutcome::Won; got {other:?}. Bare private perspective has no other \
+             claimants or online peers, so Won is the only legitimate outcome once shapes and \
+             transcript both resolve."
+        ),
+    };
+    assert!(
+        !bases.is_empty(),
+        "at least one Intention instance must have been minted"
+    );
+
+    // Confirm each base actually carries state in the perspective — proves the
+    // pass wrote through `create_subject`, not just returned a URI.
+    for base in &bases {
+        let links = perspective
+            .get_links(&LinkQuery {
+                source: Some(base.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links readback");
+        assert!(
+            !links.is_empty(),
+            "instance `{base}` must carry at least one link (type flag + title setter)"
+        );
+        assert!(
+            links
+                .iter()
+                .any(|l| l.data.predicate.as_deref() == Some("ns://type")
+                    && l.data.target == "ns://intention"),
+            "instance `{base}` must carry the Intention type flag; got links={links:#?}"
+        );
+    }
+}
