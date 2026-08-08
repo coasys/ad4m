@@ -1167,6 +1167,89 @@ fn ensure_interpretation_task_registers_and_is_idempotent() {
     );
 }
 
+// ---- interpretation_task_name_for_model + ensure_..._for_model --------
+
+/// Default (None) is the shared name; Some(model) yields a distinct
+/// `?model=<id>` variant so the DB row and the AIService routing key are
+/// keyed per model. Colons inside the model id (`gemma3:12b`) are preserved.
+#[test]
+fn task_name_default_vs_per_model_variants() {
+    assert_eq!(
+        interpretation_task_name_for_model(None),
+        INTERPRETATION_TASK_NAME
+    );
+    assert_eq!(
+        interpretation_task_name_for_model(Some("gemma3:12b")),
+        format!("{INTERPRETATION_TASK_NAME}?model=gemma3:12b")
+    );
+    assert_ne!(
+        interpretation_task_name_for_model(Some("gemma3:12b")),
+        interpretation_task_name_for_model(Some("qwen3.5-27b")),
+        "per-model names must be distinct"
+    );
+}
+
+/// `ensure_interpretation_task_for_model` creates a separate DB row per model,
+/// re-uses that row on the next call (idempotent), and never touches the
+/// shared default row when a model is specified.
+#[test]
+fn ensure_for_model_creates_isolated_row_per_model_and_is_idempotent() {
+    ensure_db_init();
+
+    // Wipe any leftover rows for the two model-specific names we're about to
+    // create so this test is a real insert path regardless of order.
+    let target_names = [
+        interpretation_task_name_for_model(Some("gemma3:12b")),
+        interpretation_task_name_for_model(Some("qwen3.5-27b")),
+    ];
+    let leftover: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+        .unwrap()
+        .into_iter()
+        .filter(|t| target_names.contains(&t.name))
+        .collect();
+    for t in leftover {
+        Ad4mDb::with_global_instance(|db| db.remove_task(t.task_id.clone())).unwrap();
+    }
+
+    let gemma_first = ensure_interpretation_task_for_model(Some("gemma3:12b")).unwrap();
+    assert_eq!(gemma_first.name, target_names[0]);
+    assert_eq!(gemma_first.model_id, "gemma3:12b");
+    assert!(gemma_first
+        .system_prompt
+        .contains("You extract typed instances"));
+
+    // Idempotent: second call must return the same row, not insert a duplicate.
+    let gemma_second = ensure_interpretation_task_for_model(Some("gemma3:12b")).unwrap();
+    assert_eq!(gemma_first.task_id, gemma_second.task_id);
+
+    // Distinct model → distinct DB row.
+    let qwen = ensure_interpretation_task_for_model(Some("qwen3.5-27b")).unwrap();
+    assert_ne!(qwen.task_id, gemma_first.task_id);
+    assert_eq!(qwen.model_id, "qwen3.5-27b");
+
+    // The default row is untouched — model overrides never mutate the shared
+    // task every other caller depends on.
+    let default_row = ensure_interpretation_task().unwrap();
+    assert_eq!(default_row.model_id, "default");
+    assert_ne!(default_row.task_id, gemma_first.task_id);
+    assert_ne!(default_row.task_id, qwen.task_id);
+
+    // Exactly one row per (target_name), no accidental duplicates left behind.
+    for name in &target_names {
+        let rows: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+            .unwrap()
+            .into_iter()
+            .filter(|t| &t.name == name)
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "expected exactly one row for {name}, got {}",
+            rows.len()
+        );
+    }
+}
+
 // ---- retry_interpretation_parse --------------------------------------
 
 #[tokio::test]

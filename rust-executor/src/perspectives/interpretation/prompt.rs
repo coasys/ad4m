@@ -421,17 +421,40 @@ pub(crate) fn interpretation_examples() -> Vec<AIPromptExamples> {
     ]
 }
 
+/// Deterministic task name for a per-model interpretation task. `None` returns
+/// the shared default name ([`INTERPRETATION_TASK_NAME`]); `Some(model_id)`
+/// returns `"adam://interpretation?model=<model_id>"`. Model ids may contain
+/// colons (e.g. `"gemma3:12b"`); the `?model=` query-style separator keeps the
+/// name unambiguous regardless of embedded punctuation.
+pub fn interpretation_task_name_for_model(model_id: Option<&str>) -> String {
+    match model_id {
+        None => INTERPRETATION_TASK_NAME.to_string(),
+        Some(id) => format!("{INTERPRETATION_TASK_NAME}?model={id}"),
+    }
+}
+
 pub fn ensure_interpretation_task() -> anyhow::Result<AITask> {
+    ensure_interpretation_task_for_model(None)
+}
+
+/// [`ensure_interpretation_task`] with an optional model override — routes the
+/// interpretation prompt through a specific AI-task DB row bound to
+/// `model_id` (e.g. per-processor `AutoProcessorConfig::llm_model`). `None`
+/// preserves the shared-default row so every existing caller behaves
+/// byte-for-byte the same as before.
+pub fn ensure_interpretation_task_for_model(model_id: Option<&str>) -> anyhow::Result<AITask> {
+    let name = interpretation_task_name_for_model(model_id);
     if let Some(existing) = Ad4mDb::with_global_instance(|db| db.get_tasks())?
         .into_iter()
-        .find(|t| t.name == INTERPRETATION_TASK_NAME)
+        .find(|t| t.name == name)
     {
         return Ok(existing);
     }
+    let db_model_id = model_id.unwrap_or("default").to_string();
     let task_id = Ad4mDb::with_global_instance(|db| {
         db.add_task(
-            INTERPRETATION_TASK_NAME.to_string(),
-            "default".to_string(),
+            name.clone(),
+            db_model_id,
             INTERPRETATION_SYSTEM_PROMPT.to_string(),
             interpretation_examples(),
             None,

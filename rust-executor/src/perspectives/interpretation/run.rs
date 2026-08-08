@@ -1,5 +1,5 @@
 use super::{
-    build_interpretation_input, class_local_name, ensure_interpretation_task,
+    build_interpretation_input, class_local_name, ensure_interpretation_task_for_model,
     existing_instance_context, filter_already_present_with_strategy, identities_from_context,
     identity_property, ids_from_context, parse_interpretation_response,
     plan_interpretation_ops_with_context, DedupStrategy, InterpretationOp, ProposedInstance,
@@ -328,7 +328,37 @@ pub async fn run_interpretation_with_strategy(
     context: &AgentContext,
     dedup_strategy: &DedupStrategy,
 ) -> anyhow::Result<Vec<String>> {
-    let task = ensure_interpretation_task()?;
+    run_interpretation_with_strategy_and_model(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        dedup_strategy,
+        None,
+    )
+    .await
+}
+
+/// [`run_interpretation_with_strategy`] with an optional per-call LLM model
+/// override — routes the interpretation prompt through the AI-task DB row
+/// bound to `model_override` (falling back to the shared default row when
+/// `None`). This is the plumbing the neighbourhood auto-processor uses to
+/// honor `AutoProcessorConfig::llm_model` without touching the global default
+/// or any other caller.
+///
+/// `model_override = None` reuses the exact task row every existing caller
+/// already uses, so behaviour is unchanged for all non-processor callers.
+pub async fn run_interpretation_with_strategy_and_model(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[(String, String)],
+    base_prefix: &str,
+    context: &AgentContext,
+    dedup_strategy: &DedupStrategy,
+    model_override: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let task = ensure_interpretation_task_for_model(model_override)?;
     // Existing-instance snapshot: gives the model both the `id` handle to
     // upsert/reference (so it can refine or link an existing node instead of
     // duplicating) and the identity value to recognise it by. The
