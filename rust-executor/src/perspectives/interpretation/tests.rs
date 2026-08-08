@@ -1765,6 +1765,311 @@ async fn gather_transcript_for_shapes_returns_none_when_no_scope_declared() {
     );
 }
 
+// ---- partitioned SPARQL: groups turns by ?partition ---------------------
+
+#[tokio::test]
+async fn gather_transcript_sparql_partitioned_groups_by_partition() {
+    // A query binding ?speaker, ?text, and ?partition must group turns by
+    // ?partition value — one bucket per distinct partition, each carrying its
+    // own (speaker, text) turns in the SPARQL-result order.
+    use super::graph::gather_transcript_sparql_partitioned;
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+
+    // Seed two subgroups (soa://sg/a, soa://sg/b) each with two messages via
+    // a ns://in_subgroup link on each message. First alice+bob under A, then
+    // carol+dave under B — the SPARQL ORDER BY ?m below preserves this order.
+    for (msg, author, body, sg) in [
+        ("msg://1", "did:key:alice", "a-first", "soa://sg/a"),
+        ("msg://2", "did:key:bob", "a-second", "soa://sg/a"),
+        ("msg://3", "did:key:carol", "b-first", "soa://sg/b"),
+        ("msg://4", "did:key:dave", "b-second", "soa://sg/b"),
+    ] {
+        seed_message(&mut perspective, &ctx, msg, author, body, "ns://body").await;
+        use crate::types::{Link, LinkStatus};
+        perspective
+            .add_link(
+                Link {
+                    source: msg.into(),
+                    predicate: Some("ns://in_subgroup".into()),
+                    target: sg.into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed subgroup link");
+    }
+
+    let query = r#"
+        SELECT ?partition ?speaker ?text WHERE {
+            ?m <ns://body> ?text .
+            ?m <ns://author> ?speaker .
+            ?m <ns://in_subgroup> ?partition .
+        }
+        ORDER BY ?m
+    "#;
+    let groups = gather_transcript_sparql_partitioned(&perspective, query)
+        .await
+        .expect("gather_transcript_sparql_partitioned");
+
+    assert_eq!(
+        groups,
+        vec![
+            (
+                "soa://sg/a".to_string(),
+                vec![
+                    ("did:key:alice".to_string(), "a-first".to_string()),
+                    ("did:key:bob".to_string(), "a-second".to_string()),
+                ]
+            ),
+            (
+                "soa://sg/b".to_string(),
+                vec![
+                    ("did:key:carol".to_string(), "b-first".to_string()),
+                    ("did:key:dave".to_string(), "b-second".to_string()),
+                ]
+            ),
+        ],
+        "each ?partition value must own its (speaker, text) turns, in SPARQL order"
+    );
+}
+
+#[tokio::test]
+async fn gather_transcript_sparql_partitioned_skips_rows_missing_partition() {
+    // A row that binds ?speaker + ?text but no ?partition has no writer
+    // target under the templated write-back. Silently bucketing it under ""
+    // would collide with a real partition whose URI is empty, so it must be
+    // skipped (never merged into a synthetic null bucket).
+    use super::graph::gather_transcript_sparql_partitioned;
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+
+    // Two messages — only the first has a subgroup link.
+    seed_message(
+        &mut perspective,
+        &ctx,
+        "msg://in",
+        "did:key:alice",
+        "with partition",
+        "ns://body",
+    )
+    .await;
+    seed_message(
+        &mut perspective,
+        &ctx,
+        "msg://loose",
+        "did:key:bob",
+        "no partition",
+        "ns://body",
+    )
+    .await;
+    use crate::types::{Link, LinkStatus};
+    perspective
+        .add_link(
+            Link {
+                source: "msg://in".into(),
+                predicate: Some("ns://in_subgroup".into()),
+                target: "soa://sg/only".into(),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed partition link");
+
+    // OPTIONAL binding: partition-less messages come back with an unbound
+    // ?partition and must be dropped, not folded into "".
+    let query = r#"
+        SELECT ?partition ?speaker ?text WHERE {
+            ?m <ns://body> ?text .
+            ?m <ns://author> ?speaker .
+            OPTIONAL { ?m <ns://in_subgroup> ?partition . }
+        }
+        ORDER BY ?m
+    "#;
+    let groups = gather_transcript_sparql_partitioned(&perspective, query)
+        .await
+        .expect("gather_transcript_sparql_partitioned");
+    assert_eq!(
+        groups,
+        vec![(
+            "soa://sg/only".to_string(),
+            vec![("did:key:alice".to_string(), "with partition".to_string())]
+        )],
+        "partition-less rows must be skipped, not merged into a null bucket"
+    );
+}
+
+#[tokio::test]
+async fn gather_transcript_sparql_partitioned_preserves_first_seen_order() {
+    // First-seen order matters for claim-election determinism: two nodes
+    // running the same processor over the same store MUST group the SAME set
+    // of partitions in the SAME order, so per-partition `batch_key`s land on
+    // the same claim node in the same tiebreak sequence.
+    use super::graph::gather_transcript_sparql_partitioned;
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+
+    // Interleave partitions: B, A, B, A — first-seen order should be [B, A].
+    for (msg, author, body, sg) in [
+        ("msg://01", "did:key:alice", "b1", "soa://sg/b"),
+        ("msg://02", "did:key:bob", "a1", "soa://sg/a"),
+        ("msg://03", "did:key:carol", "b2", "soa://sg/b"),
+        ("msg://04", "did:key:dave", "a2", "soa://sg/a"),
+    ] {
+        seed_message(&mut perspective, &ctx, msg, author, body, "ns://body").await;
+        use crate::types::{Link, LinkStatus};
+        perspective
+            .add_link(
+                Link {
+                    source: msg.into(),
+                    predicate: Some("ns://in_subgroup".into()),
+                    target: sg.into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed subgroup link");
+    }
+
+    let query = r#"
+        SELECT ?partition ?speaker ?text WHERE {
+            ?m <ns://body> ?text .
+            ?m <ns://author> ?speaker .
+            ?m <ns://in_subgroup> ?partition .
+        }
+        ORDER BY ?m
+    "#;
+    let groups = gather_transcript_sparql_partitioned(&perspective, query)
+        .await
+        .expect("gather_transcript_sparql_partitioned");
+    let partition_order: Vec<&str> = groups.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(
+        partition_order,
+        vec!["soa://sg/b", "soa://sg/a"],
+        "outer partition order must be first-seen (SPARQL result order), not sorted"
+    );
+    // And per-partition turns preserve intra-partition SPARQL order.
+    assert_eq!(
+        groups[0].1,
+        vec![
+            ("did:key:alice".to_string(), "b1".to_string()),
+            ("did:key:carol".to_string(), "b2".to_string()),
+        ]
+    );
+    assert_eq!(
+        groups[1].1,
+        vec![
+            ("did:key:bob".to_string(), "a1".to_string()),
+            ("did:key:dave".to_string(), "a2".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn gather_transcript_sparql_partitioned_decodes_literal_string_text() {
+    // `?text` bound to a `literal:string:...` URI must decode via the same
+    // path as the non-partitioned variant. Any other `literal:*` value that
+    // is not a string is dropped (never leaks as an opaque URI into the LLM
+    // prompt).
+    use super::graph::gather_transcript_sparql_partitioned;
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+
+    // Seed a message whose ns://body target is a literal:string URI (default
+    // path used by seed_message), plus a partition link. Then also seed a
+    // literal:number "body" on a second message — that row must be dropped.
+    seed_message(
+        &mut perspective,
+        &ctx,
+        "msg://s",
+        "did:key:alice",
+        "decoded body",
+        "ns://body",
+    )
+    .await;
+    use crate::types::{Link, LinkStatus};
+    perspective
+        .add_link(
+            Link {
+                source: "msg://s".into(),
+                predicate: Some("ns://in_subgroup".into()),
+                target: "soa://sg/x".into(),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed subgroup link");
+
+    // Non-string literal — must be silently skipped by the decode-or-skip path.
+    perspective
+        .add_link(
+            Link {
+                source: "msg://n".into(),
+                predicate: Some("ns://body".into()),
+                target: "literal:number:42".into(),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed numeric body");
+    perspective
+        .add_link(
+            Link {
+                source: "msg://n".into(),
+                predicate: Some("ns://author".into()),
+                target: "did:key:bob".into(),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed author");
+    perspective
+        .add_link(
+            Link {
+                source: "msg://n".into(),
+                predicate: Some("ns://in_subgroup".into()),
+                target: "soa://sg/x".into(),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed subgroup link");
+
+    let query = r#"
+        SELECT ?partition ?speaker ?text WHERE {
+            ?m <ns://body> ?text .
+            ?m <ns://author> ?speaker .
+            ?m <ns://in_subgroup> ?partition .
+        }
+        ORDER BY ?m
+    "#;
+    let groups = gather_transcript_sparql_partitioned(&perspective, query)
+        .await
+        .expect("gather_transcript_sparql_partitioned");
+    assert_eq!(
+        groups,
+        vec![(
+            "soa://sg/x".to_string(),
+            vec![("did:key:alice".to_string(), "decoded body".to_string())]
+        )],
+        "literal:string decodes; non-string literal must be dropped"
+    );
+}
+
 #[test]
 fn filter_already_present_keeps_upserts_and_preserves_order() {
     // An `id`-carrying proposal is an explicit upsert target: its title

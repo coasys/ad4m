@@ -546,6 +546,83 @@ pub async fn gather_transcript_for_shapes(
     }
 }
 
+/// Partitioned counterpart to [`gather_transcript_sparql`]: the query MUST bind
+/// `?speaker`, `?text`, AND `?partition`. Turns are grouped by the `?partition`
+/// binding — one entry per distinct partition value, in first-seen order — so
+/// downstream code can run one interpretation pass per partition and write the
+/// resulting instances back into the matched partition instance (templated
+/// write-target, follow-up).
+///
+/// Rationale (Nico's Q2 resolution, 2026-08-08): a channel-level processor with
+/// a scope query that binds `?partition` lets the SoA-tree pattern —
+/// *for each node, interpret its children back into it* — collapse into ONE
+/// AutoProcessorConfig instead of one-config-per-subgroup. Same coordination
+/// primitives (claim, batch, dedup), just fanned out by partition.
+///
+/// Rows missing `?partition` are skipped (never merged into a synthetic "null"
+/// bucket): a partition-less turn is not addressable by a per-partition writer
+/// and silently including it under `""` would collide with a real partition
+/// whose URI happens to be empty. Rows with an unparseable/non-string
+/// `?speaker` or `?text` are skipped just like in
+/// [`gather_transcript_sparql`]. `?text` supports the same `literal:string:`
+/// decoding.
+///
+/// Returns `Vec<(partition, Vec<(speaker, text)>)>` — `Vec` (not `HashMap`) so
+/// the outer ordering is deterministic and matches the SPARQL result stream,
+/// which lets callers reason about "same input → same claim election order"
+/// under the P-A coordinator.
+pub async fn gather_transcript_sparql_partitioned(
+    perspective: &PerspectiveInstance,
+    sparql: &str,
+) -> anyhow::Result<Vec<(String, Vec<(String, String)>)>> {
+    let rows_json = perspective.sparql_query(sparql.to_string()).map_err(|e| {
+        anyhow::anyhow!("gather_transcript_sparql_partitioned: SPARQL query failed: {e:#}")
+    })?;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&rows_json).map_err(|e| {
+        anyhow::anyhow!("gather_transcript_sparql_partitioned: bad SPARQL result JSON: {e:#}")
+    })?;
+
+    // First-seen order for partitions + O(1) index lookup. `HashMap<String, usize>`
+    // is cheaper than an IndexMap and keeps the crate deps unchanged.
+    let mut order: Vec<String> = Vec::new();
+    let mut idx: HashMap<String, usize> = HashMap::new();
+    let mut buckets: Vec<Vec<(String, String)>> = Vec::new();
+
+    for row in rows {
+        let Some(partition) = row.get("partition").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(speaker) = row.get("speaker").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(raw_text) = row.get("text").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let text = if raw_text.starts_with("literal:") {
+            match decode_literal_string(raw_text) {
+                Some(s) => s,
+                None => continue,
+            }
+        } else {
+            raw_text.to_string()
+        };
+
+        let bucket_ix = match idx.get(partition) {
+            Some(i) => *i,
+            None => {
+                let i = order.len();
+                order.push(partition.to_string());
+                buckets.push(Vec::new());
+                idx.insert(partition.to_string(), i);
+                i
+            }
+        };
+        buckets[bucket_ix].push((speaker.to_string(), text));
+    }
+
+    Ok(order.into_iter().zip(buckets).collect())
+}
+
 /// One existing instance the interpreter should know about — the LLM sees these
 /// so it can decide whether an interpreted item is a genuinely new node (no `id`
 /// on the output) or the continuation/refinement of an existing one (emit this
