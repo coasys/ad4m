@@ -16,7 +16,7 @@
 //! events + telepresence presence — it will still delegate the actual pass
 //! to [`run_one_pass`], so the coordination contract stays in one place.
 
-use crate::agent::AgentContext;
+use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
     gather_transcript_sparql, run_interpretation_with_strategy_and_model, DedupStrategy,
 };
@@ -128,6 +128,13 @@ pub enum PassOutcome {
     /// not touch the LLM and did not write anything. The winner's result will
     /// reach us via link sync.
     BackedOff { holder: String },
+    /// Telepresence fast-path stood us down before writing a claim: another
+    /// online peer's DID sorts lexicographically before ours, so they are the
+    /// earliest-eligible-author for this pass. No claim was written; no
+    /// contention was added to the shared graph. `earliest` is that peer's
+    /// DID. `try_claim` (P-A) is still the real correctness guard — this only
+    /// reduces contention when telepresence data is available.
+    NotCandidate { earliest: String },
     /// The claim was ours, but at least one of `cfg.interpretation_classes`
     /// did not resolve via `load_shape` (partial-sync SDNA / config typo).
     /// We logged, skipped the LLM call and let the claim TTL-expire so a
@@ -136,6 +143,28 @@ pub enum PassOutcome {
     /// Won the claim but `source_scope_query` returned zero `(speaker, text)`
     /// rows. Nothing to interpret; no LLM round-trip.
     EmptyTranscript,
+}
+
+/// Pure winner-selection over an online-agent set plus this agent's own DID.
+///
+/// The min-DID rule mirrors [`super::claim::try_claim`]'s tiebreak — same
+/// deterministic ordering, same "lexicographically smallest DID wins"
+/// convention — so a losing candidate can stand down BEFORE writing a claim
+/// and still be sure the winner it inferred will be the one that
+/// [`try_claim`] elects if a race happens. Callers pass their own DID
+/// separately so this function works regardless of whether the telepresence
+/// provider echoes the local agent in `online_agents()`.
+///
+/// Returns the earliest DID over the union `{self_did} ∪ online_dids`;
+/// when the union is just `self_did`, self is trivially the earliest.
+pub fn earliest_eligible_did(online_dids: &[String], self_did: &str) -> String {
+    let mut earliest = self_did.to_string();
+    for did in online_dids {
+        if did.as_str() < earliest.as_str() {
+            earliest = did.clone();
+        }
+    }
+    earliest
 }
 
 /// Turn an [`AutoProcessorConfig::dedup_strategy_json`] blob into a live
@@ -212,6 +241,14 @@ pub fn parse_dedup_strategy_json(blob: Option<&str>) -> DedupStrategy {
 /// changing its guarantees.
 ///
 /// Ordering:
+/// 0. Telepresence fast-path (P-B2b3) — read
+///    [`PerspectiveInstance::online_agents`] and short-circuit with
+///    [`PassOutcome::NotCandidate`] when some other online peer's DID sorts
+///    before ours. This never writes anything to the shared graph, so it
+///    keeps contention (and claim links) off perspectives with a busy
+///    online set. A missing / erroring telepresence adapter is treated as
+///    "no candidacy signal" and falls through — correctness still rests on
+///    step 1's claim.
 /// 1. `try_claim` — reserve the batch in the shared graph. Loss = back off
 ///    silently; the winner's result reaches us via link sync.
 /// 2. Resolve each `cfg.interpretation_classes` entry via [`load_shape`]. A
@@ -244,6 +281,38 @@ pub async fn run_one_pass(
             cfg.llm_model.as_deref().unwrap_or("<default model>"),
         );
     }
+
+    // 0. Telepresence-bounded candidacy (fast-path, P-B2b3). Best-effort: a
+    //    missing/erroring telepresence adapter (no link-language, no online
+    //    peers, transport hiccup) falls through to `try_claim`, which is the
+    //    real correctness guard. Only short-circuits when we can positively
+    //    identify some other online peer with a smaller DID.
+    let me = did_for_context(context)
+        .map_err(|e| anyhow::anyhow!("run_one_pass: did_for_context: {e:#}"))?;
+    match perspective.online_agents().await {
+        Ok(agents) => {
+            let dids: Vec<String> = agents.into_iter().map(|a| a.did).collect();
+            let earliest = earliest_eligible_did(&dids, &me);
+            if earliest != me {
+                log::info!(
+                    "auto_processor `{}`: standing down — `{earliest}` is the earliest online \
+                     eligible author",
+                    cfg.processor_id
+                );
+                return Ok(PassOutcome::NotCandidate { earliest });
+            }
+        }
+        Err(e) => {
+            // Expected on perspectives without a telepresence-capable
+            // link-language. Correctness is unaffected — `try_claim` below is
+            // the real guard.
+            log::debug!(
+                "auto_processor `{}`: online_agents unavailable ({e:#}); proceeding to try_claim",
+                cfg.processor_id
+            );
+        }
+    }
+
     // 1. Reserve the batch.
     let claim = try_claim(
         perspective,
@@ -346,6 +415,69 @@ mod tests {
         assert!(turn_id("alice", "hi")
             .chars()
             .all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ---- earliest_eligible_did ---------------------------------------------
+
+    /// Only self is a candidate — self wins trivially. This is the state
+    /// telepresence-less perspectives hit if we ever pass an empty list
+    /// (though `run_one_pass` never actually calls the fast-path in that
+    /// case — the `online_agents()` error path is taken instead).
+    #[test]
+    fn earliest_eligible_did_returns_self_when_no_online_peers() {
+        assert_eq!(
+            earliest_eligible_did(&[], "did:key:zzz-me"),
+            "did:key:zzz-me"
+        );
+    }
+
+    /// Some other online peer sorts lexicographically before us — that peer
+    /// is the earliest, so self stands down. Mirrors P-A's min-DID tiebreak.
+    #[test]
+    fn earliest_eligible_did_returns_smaller_online_peer() {
+        let online = vec!["did:key:mmm".into(), "did:key:zzz-peer".into()];
+        assert_eq!(
+            earliest_eligible_did(&online, "did:key:yyy-me"),
+            "did:key:mmm"
+        );
+    }
+
+    /// Self sorts before every online peer → self is the earliest. Proves
+    /// self does not need to be echoed in `online_agents()` for the fast-path
+    /// to elect us; it is inserted into the comparison set explicitly.
+    #[test]
+    fn earliest_eligible_did_returns_self_when_lexicographically_smallest() {
+        let online = vec!["did:key:mmm".into(), "did:key:zzz".into()];
+        assert_eq!(
+            earliest_eligible_did(&online, "did:key:aaa-me"),
+            "did:key:aaa-me"
+        );
+    }
+
+    /// If the telepresence provider *does* echo self in `online_agents()`,
+    /// the answer must still be self (not the empty string, not something
+    /// smaller). Idempotent under self-inclusion.
+    #[test]
+    fn earliest_eligible_did_handles_self_in_online_list_idempotently() {
+        let me = "did:key:mmm-me";
+        let online = vec![me.into(), "did:key:zzz-peer".into()];
+        assert_eq!(earliest_eligible_did(&online, me), me);
+    }
+
+    /// Sort is total on the DIDs — ties don't occur in practice, but the
+    /// function must be deterministic even if the online list has repeated
+    /// entries (a mis-behaving telepresence adapter could send duplicates).
+    #[test]
+    fn earliest_eligible_did_is_deterministic_on_duplicate_online_entries() {
+        let online = vec![
+            "did:key:mmm".into(),
+            "did:key:mmm".into(),
+            "did:key:zzz".into(),
+        ];
+        assert_eq!(
+            earliest_eligible_did(&online, "did:key:yyy-me"),
+            "did:key:mmm"
+        );
     }
 
     // ---- WatcherState -------------------------------------------------------

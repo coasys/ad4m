@@ -5195,10 +5195,21 @@ impl PerspectiveInstance {
                             processed.insert(id.clone());
                         }
                     }
-                    PassOutcome::ShapesMissing { .. } | PassOutcome::EmptyTranscript => {
-                        // Do NOT mark as processed — the shape may land later
-                        // (partial-sync SDNA) or the transcript may fill in;
-                        // let the next debounce window retry the same ids.
+                    PassOutcome::NotCandidate { .. }
+                    | PassOutcome::ShapesMissing { .. }
+                    | PassOutcome::EmptyTranscript => {
+                        // Do NOT mark as processed:
+                        //   * NotCandidate — the earliest online peer may go
+                        //     offline before finishing; next tick's fast-path
+                        //     could rightly elect us. If we suppressed the ids
+                        //     now and no peer follows through, the batch would
+                        //     silently drop.
+                        //   * ShapesMissing — the SDNA may land later
+                        //     (partial-sync).
+                        //   * EmptyTranscript — the transcript may fill in.
+                        // Retrying the same ids costs a fast-path/claim
+                        // round-trip; the interpretation LLM still only fires
+                        // when the underlying condition changes.
                     }
                 }
             }
