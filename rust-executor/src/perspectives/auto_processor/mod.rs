@@ -19,6 +19,7 @@
 pub mod claim;
 pub mod config;
 pub mod signals;
+pub mod sparql_detect;
 pub mod watcher;
 
 #[cfg(test)]
