@@ -245,7 +245,7 @@ async fn e2e_longer_standup_conversation() {
             ("James", "Concretely, the plan is: land interpretation, then flows, then the Synergy ledger."),
             ("Nico", "The interpretation e2e suite is now green on Marvin, by the way."),
         ],
-        3,
+        5,
         |c| c.get("task").copied().unwrap_or(0) >= 1,
     )
     .await;
