@@ -38,40 +38,46 @@ pub fn filter_already_present(
     existing: &HashMap<String, Vec<String>>,
     identity_props: &HashMap<String, String>,
 ) -> Vec<ProposedInstance> {
-    let known: HashMap<&String, std::collections::HashSet<String>> = existing
+    // Seed per-class known sets with pre-existing identities; each accepted
+    // proposal is added to its class's set so a same-response duplicate is
+    // dropped like an already-persisted one. Without this, an LLM that emits
+    // the same (class, identity) twice would slip through and `run_interpretation`
+    // would create two subjects for it.
+    let mut known: HashMap<String, std::collections::HashSet<String>> = existing
         .iter()
         .map(|(class, values)| {
             (
-                class,
+                class.clone(),
                 values.iter().map(|v| normalize_identity(v)).collect(),
             )
         })
         .collect();
-    instances
-        .into_iter()
-        .filter(|inst| {
-            // No declared identity for this class ⇒ no dedup.
-            let Some(idp_name) = identity_props.get(&inst.class) else {
-                return true;
-            };
-            let Some(value) = inst.props.get(idp_name).and_then(|v| v.as_str()) else {
-                return true; // no identity value to compare on — keep it
-            };
-            let normalized = normalize_identity(value);
-            let already = known
-                .get(&inst.class)
-                .map(|set| set.contains(&normalized))
-                .unwrap_or(false);
-            if already {
-                log::debug!(
-                    "interpretation: dropping already-present {} '{}'",
-                    inst.class,
-                    value
-                );
-            }
-            !already
-        })
-        .collect()
+    let mut out = Vec::with_capacity(instances.len());
+    for inst in instances {
+        // No declared identity for this class ⇒ no dedup.
+        let Some(idp_name) = identity_props.get(&inst.class) else {
+            out.push(inst);
+            continue;
+        };
+        let Some(value) = inst.props.get(idp_name).and_then(|v| v.as_str()) else {
+            // no identity value to compare on — keep it
+            out.push(inst);
+            continue;
+        };
+        let normalized = normalize_identity(value);
+        let set = known.entry(inst.class.clone()).or_default();
+        if set.contains(&normalized) {
+            log::debug!(
+                "interpretation: dropping already-present {} '{}'",
+                inst.class,
+                value
+            );
+            continue;
+        }
+        set.insert(normalized);
+        out.push(inst);
+    }
+    out
 }
 
 /// Local class name from a class URI: `ns://Intention` -> `Intention`.
@@ -140,10 +146,14 @@ fn decode_literal_string(uri: &str) -> Option<String> {
 /// Instances are read through the model-query API (`PerspectiveInstance::
 /// model_query`) — the symmetric counterpart to writing them via
 /// `create_subject` — so class conformance and field decoding go through the
-/// class's own shape/getters rather than hand-matched type-flag links. A
-/// per-class query failure (e.g. the class isn't registered in this
-/// perspective) is treated as "no existing instances" — dedup is a soft hint,
-/// guaranteed deterministically downstream by [`filter_already_present`].
+/// class's own shape/getters rather than hand-matched type-flag links.
+///
+/// A per-class `model_query` failure is propagated. Silently treating it as
+/// "no existing instances" would break [`filter_already_present`]'s deterministic
+/// dedup guarantee: an empty `known` set for the failing class lets the LLM's
+/// re-proposal of an existing item slip through and mint a duplicate subject.
+/// Callers can exclude affected classes upstream (via `interpretation_classes`)
+/// if they want a soft-skip.
 pub async fn existing_instance_identities(
     perspective: &PerspectiveInstance,
     shapes: &[ModelShape],
@@ -158,13 +168,12 @@ pub async fn existing_instance_identities(
         let class = class_local_name(&shape.target_class);
 
         let query = format!(r#"{{"properties":["{idp_name}"]}}"#);
-        let result_json = match perspective.model_query(class, &query).await {
-            Ok(json) => json,
-            Err(e) => {
-                log::warn!("existing_instance_identities: model_query({class}) failed, treating as no existing instances: {e:#}");
-                continue;
-            }
-        };
+        let result_json = perspective.model_query(class, &query).await.map_err(|e| {
+            anyhow::anyhow!(
+                "existing_instance_identities: model_query({class}) failed — refusing to \
+                 proceed because an empty existing-set here would silently break dedup: {e:#}"
+            )
+        })?;
         let result: serde_json::Value = serde_json::from_str(&result_json).map_err(|e| {
             anyhow::anyhow!(
                 "existing_instance_identities: bad model_query result for {class}: {e:#}"

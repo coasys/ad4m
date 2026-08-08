@@ -156,6 +156,26 @@ fn extracts_single_object_when_no_array() {
     assert!(msg.contains("expected a sequence"), "got: {msg}");
 }
 
+#[test]
+fn parse_error_does_not_leak_llm_payload() {
+    // The cleaned LLM payload can carry the raw conversation transcript. It
+    // must not appear in the error message, because retry_interpretation_parse
+    // logs this error on every failed attempt. Only safe metadata (length) is
+    // allowed to surface.
+    let secret = "TOP_SECRET_DINNER_PLAN alice met bob at the safehouse";
+    let raw = format!("[{{ \"class\":\"Note\", \"title\":\"{secret}\", NOT_JSON");
+    let err = parse_interpretation_response(&raw).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        !msg.contains(secret),
+        "parse error must not include the LLM payload; got: {msg}"
+    );
+    assert!(
+        msg.contains("payload length"),
+        "parse error must include the payload length metadata; got: {msg}"
+    );
+}
+
 // ---- relation exclusion ------------------------------------------
 
 #[test]
@@ -338,5 +358,41 @@ fn filter_already_present_drops_known_titles() {
     assert!(
         kept_titles.contains(&"ship the mvp"),
         "same title on a class with no declared identity must NOT be dropped; got {kept_titles:?}"
+    );
+}
+
+#[test]
+fn filter_already_present_dedupes_within_same_response() {
+    // The LLM sometimes emits the same (class, identity) twice in one response
+    // (verbatim, or under whitespace/case variation). Without intra-response
+    // dedup those slip past `filter_already_present` because the pre-existing
+    // `known` set does not yet contain them — and `run_interpretation` then
+    // mints two subjects for the same identity. Fix: accumulate accepted
+    // identities as we scan the response, dropping later same-key proposals
+    // exactly like already-persisted ones.
+    let proposed = parse_interpretation_response(
+        r#"[
+              {"class":"Task","title":"Ship the MVP"},
+              {"class":"Task","title":"  SHIP  the  mvp  "},
+              {"class":"Task","title":"Ship the MVP"},
+              {"class":"Task","title":"Write the docs"}
+            ]"#,
+    )
+    .unwrap();
+    let existing: HashMap<String, Vec<String>> = HashMap::new(); // graph empty
+    let mut identity_props = HashMap::new();
+    identity_props.insert("Task".to_string(), "title".to_string());
+
+    let kept = filter_already_present(proposed, &existing, &identity_props);
+    let kept_titles: Vec<&str> = kept
+        .iter()
+        .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
+        .collect();
+
+    // First occurrence wins; every subsequent normalized-equal proposal drops.
+    assert_eq!(
+        kept_titles,
+        vec!["Ship the MVP", "Write the docs"],
+        "intra-response duplicates must be dropped after the first occurrence; got {kept_titles:?}"
     );
 }
