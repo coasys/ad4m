@@ -171,55 +171,53 @@ pub async fn apply_interpretation_ops(
     }
 
     let batch_id = perspective.create_batch().await;
+    let mut apply_err: Option<anyhow::Error> = None;
 
-    for op in ops {
-        match op {
+    'apply: for op in ops {
+        let step = match op {
             InterpretationOp::Create {
                 base,
                 class,
                 values,
-            } => {
-                perspective
-                    .create_subject(
-                        SubjectClassOption {
-                            class_name: Some(class.clone()),
-                            query: None,
-                        },
-                        base.clone(),
-                        Some(serde_json::Value::Object(values.clone())),
-                        Some(batch_id.clone()),
-                        context,
+            } => perspective
+                .create_subject(
+                    SubjectClassOption {
+                        class_name: Some(class.clone()),
+                        query: None,
+                    },
+                    base.clone(),
+                    Some(serde_json::Value::Object(values.clone())),
+                    Some(batch_id.clone()),
+                    context,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "apply_interpretation_ops: create_subject({class}) failed: {e:#}"
                     )
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "apply_interpretation_ops: create_subject({class}) failed: {e:#}"
-                        )
-                    })?;
-            }
+                }),
             InterpretationOp::Update {
                 base,
                 class,
                 values,
-            } => {
-                perspective
-                    .update_subject(
-                        SubjectClassOption {
-                            class_name: Some(class.clone()),
-                            query: None,
-                        },
-                        base.clone(),
-                        serde_json::Value::Object(values.clone()),
-                        Some(batch_id.clone()),
-                        context,
+            } => perspective
+                .update_subject(
+                    SubjectClassOption {
+                        class_name: Some(class.clone()),
+                        query: None,
+                    },
+                    base.clone(),
+                    serde_json::Value::Object(values.clone()),
+                    Some(batch_id.clone()),
+                    context,
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "apply_interpretation_ops: update_subject({class}) failed: {e:#}"
                     )
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "apply_interpretation_ops: update_subject({class}) failed: {e:#}"
-                        )
-                    })?;
-            }
+                }),
             InterpretationOp::AddLinks { links, .. } => {
                 if links.is_empty() {
                     continue;
@@ -232,18 +230,40 @@ pub async fn apply_interpretation_ops(
                         context,
                     )
                     .await
+                    .map(|_| ())
                     .map_err(|e| {
                         anyhow::anyhow!("apply_interpretation_ops: add_links failed: {e:#}")
-                    })?;
+                    })
             }
+        };
+        if let Err(e) = step {
+            apply_err = Some(e);
+            break 'apply;
         }
     }
 
-    perspective
-        .commit_batch(batch_id, context)
-        .await
-        .map_err(|e| anyhow::anyhow!("apply_interpretation_ops: commit_batch failed: {e:#}"))?;
-    Ok(())
+    if let Some(e) = apply_err {
+        // Drop the half-built batch so it does not sit in `batch_store` for
+        // BATCH_TIMEOUT_SECS. `commit_batch` removes the batch itself on
+        // success, but a mid-loop op failure never reaches it.
+        let _ = perspective.discard_batch(&batch_id).await;
+        return Err(e);
+    }
+
+    match perspective.commit_batch(batch_id.clone(), context).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // Defense-in-depth: `commit_batch` already removes the batch on
+            // entry (perspective_instance.rs `commit_batch`), so this is a
+            // no-op today. Kept explicit so the invariant "no lingering batch
+            // on any error path from apply_interpretation_ops" survives future
+            // changes to `commit_batch`'s control flow.
+            let _ = perspective.discard_batch(&batch_id).await;
+            Err(anyhow::anyhow!(
+                "apply_interpretation_ops: commit_batch failed: {e:#}"
+            ))
+        }
+    }
 }
 
 /// The instance bases an op set touches, in op order and de-duplicated — what
