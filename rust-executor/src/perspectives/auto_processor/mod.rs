@@ -20,3 +20,6 @@ pub mod claim;
 pub mod config;
 pub mod signals;
 pub mod watcher;
+
+#[cfg(test)]
+mod multi_agent_contention_spike;

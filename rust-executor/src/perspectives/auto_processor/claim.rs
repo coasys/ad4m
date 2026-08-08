@@ -257,6 +257,38 @@ pub async fn try_claim(
     }
 }
 
+/// Try to reserve a batch of items scoped to a partition for processing.
+///
+/// Identical semantics to [`try_claim`] modulo the batch key: uses
+/// [`batch_key_for_partition`] so that different `(processor, partition)` pairs
+/// live in disjoint claim key-spaces. Wildcard/partitioned processors (spec
+/// §6.5) call this per partition so different peers can process different
+/// partitions of the same processor in parallel, while still guaranteeing no
+/// two peers claim the *same* `(processor, partition)` pair.
+pub async fn try_claim_for_partition(
+    perspective: &mut PerspectiveInstance,
+    processor: &str,
+    partition: &str,
+    item_ids: &[String],
+    ttl_ms: i64,
+    now_ms: i64,
+    context: &AgentContext,
+) -> anyhow::Result<ClaimOutcome> {
+    let me = did_for_context(context).map_err(|e| anyhow::anyhow!("did_for_context: {e:#}"))?;
+    let key = batch_key_for_partition(partition, item_ids);
+
+    write_claim(perspective, processor, &key, &me, now_ms + ttl_ms, context).await?;
+
+    let holders = active_claimants(perspective, processor, &key, now_ms).await?;
+    match holders.first() {
+        Some(winner) if winner == &me => Ok(ClaimOutcome::Won),
+        Some(winner) => Ok(ClaimOutcome::BackedOff {
+            holder: winner.clone(),
+        }),
+        None => Ok(ClaimOutcome::Won),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
