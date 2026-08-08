@@ -1209,3 +1209,278 @@ async fn auto_processor_pass_lands_interpretation_instance() {
         );
     }
 }
+
+// ---- auto_processor P-C — Flux-parity concurrent-processors demo -----------
+
+/// P-C: two [`AutoProcessorConfig`]s on ONE perspective, sharing one SPARQL
+/// scope over the same seeded turns, but with DISJOINT
+/// `interpretation_classes` (`ns://Intention` vs. `ns://Task`). Proves the
+/// Flux-parity invariant that a single perspective can host multiple
+/// concurrent processors without cross-contamination:
+///
+/// * `run_one_pass` only feeds each processor its OWN configured shape into
+///   the interpretation engine, so the Intention-only processor can NEVER
+///   mint a Task and vice versa — an isolation guarantee that holds under
+///   any LLM classification (code-enforced, not model-dependent).
+/// * Distinct `processor_id`s produce distinct `batch_key`s → each processor
+///   claims independently; neither pass backs off, both win.
+/// * Distinct `base_prefix`es (`ad4m://autoprocessor/<processor_id>/instance/`)
+///   guarantee the two processors' base URI sets are disjoint at the write
+///   layer — no double-writing to the same base for the same turn.
+///
+/// This is the P-B closure milestone: the whole auto-processor stack
+/// (config → shared graph → SPARQL scope → WatcherState → claim election →
+/// per-processor interpretation) has now been driven end-to-end for a
+/// multi-processor perspective with a real model.
+#[tokio::test]
+async fn auto_processor_two_configs_no_cross_contamination() {
+    use crate::perspectives::auto_processor::config::{
+        load_processors, write_processor, AutoProcessorConfig,
+    };
+    use crate::perspectives::auto_processor::watcher::{
+        run_one_pass, turn_id, PassOutcome, WatcherState,
+    };
+    use crate::perspectives::interpretation::gather_transcript_sparql;
+    use crate::types::{LinkQuery, LinkStatus};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Both classes registered on the same perspective so each processor's
+    // shape resolves under `load_shape_from_store`.
+    let (mut perspective, _shapes, ctx) =
+        setup_interpretation_e2e(&[("Intention", INTENTION_SDNA), ("Task", TASK_SDNA)]).await;
+
+    // Seed one clear first-person commitment (Intention-shaped) and one
+    // clear third-person assignment (Task-shaped). Note that whichever way
+    // gemma3:12b classifies each turn is IRRELEVANT to the invariants
+    // asserted here — the class isolation is code-enforced (each processor
+    // only receives its own shape). The realism of the transcript is just
+    // to keep the model's output non-degenerate.
+    for (uri, author, body) in [
+        (
+            "msg://pc-1",
+            "did:key:alice",
+            "I'll finalize the executor watcher wiring tonight.",
+        ),
+        (
+            "msg://pc-2",
+            "did:key:bob",
+            "Alice, can you get the CI dashboards live by Friday?",
+        ),
+    ] {
+        perspective
+            .add_link(
+                Link {
+                    source: uri.into(),
+                    predicate: Some("ns://body".into()),
+                    target: format!("literal:string:{body}"),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed body");
+        perspective
+            .add_link(
+                Link {
+                    source: uri.into(),
+                    predicate: Some("ns://author".into()),
+                    target: author.into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed author");
+    }
+
+    let source_scope = "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
+                        ?m <ns://author> ?speaker . } ORDER BY ?m";
+
+    let intent_cfg = AutoProcessorConfig {
+        processor_id: "pc-intent-proc".into(),
+        source_scope_query: source_scope.into(),
+        interpretation_classes: vec!["ns://Intention".into()],
+        debounce_ms: 50,
+        batch_max: 32,
+        claim_ttl_ms: 60_000,
+        llm_base_url: None,
+        llm_model: None,
+        dedup_strategy_json: None,
+    };
+    let task_cfg = AutoProcessorConfig {
+        processor_id: "pc-task-proc".into(),
+        source_scope_query: source_scope.into(),
+        interpretation_classes: vec!["ns://Task".into()],
+        debounce_ms: 50,
+        batch_max: 32,
+        claim_ttl_ms: 60_000,
+        llm_base_url: None,
+        llm_model: None,
+        dedup_strategy_json: None,
+    };
+
+    write_processor(&mut perspective, &intent_cfg, &ctx)
+        .await
+        .expect("write intent");
+    write_processor(&mut perspective, &task_cfg, &ctx)
+        .await
+        .expect("write task");
+
+    let loaded = load_processors(&perspective)
+        .await
+        .expect("load_processors");
+    assert_eq!(loaded.len(), 2, "both processors written and loaded back");
+
+    let transcript = gather_transcript_sparql(&perspective, source_scope)
+        .await
+        .expect("gather_transcript_sparql");
+    assert_eq!(
+        transcript.len(),
+        2,
+        "SPARQL scope must surface both seeded turns; got {transcript:#?}"
+    );
+
+    // Feed both processors the same turns via one WatcherState. Per-processor
+    // pending state is isolated (unit-tested in
+    // `auto_processor::watcher::tests::per_processor_state_is_isolated`); each
+    // drain returns that processor's own copy of the batch.
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let mut watcher = WatcherState::new();
+    for cfg_ref in &loaded {
+        for (speaker, text) in &transcript {
+            watcher.record_item(&cfg_ref.processor_id, turn_id(speaker, text), now_ms);
+        }
+    }
+
+    // Advance past the debounce window so `drain_ready_batch` releases.
+    let drain_at = now_ms + intent_cfg.debounce_ms + 10;
+
+    // Run each processor once and collect (processor_id, class_uri, bases).
+    let mut runs: Vec<(String, String, Vec<String>)> = Vec::with_capacity(2);
+    for cfg_ref in &loaded {
+        let batch = watcher
+            .drain_ready_batch(cfg_ref, drain_at)
+            .unwrap_or_else(|| {
+                panic!(
+                    "processor `{}` must have a ready batch after debounce",
+                    cfg_ref.processor_id
+                )
+            });
+        assert_eq!(
+            batch.len(),
+            2,
+            "each processor's batch must contain both turns; got {batch:?} for `{}`",
+            cfg_ref.processor_id
+        );
+        let outcome = run_one_pass(&mut perspective, cfg_ref, &batch, drain_at, &ctx)
+            .await
+            .expect("run_one_pass");
+        let bases = match outcome {
+            PassOutcome::Won { bases } => bases,
+            other => panic!(
+                "processor `{}` expected PassOutcome::Won; got {other:?}. Distinct \
+                 processor_ids produce distinct batch_keys, so each pass MUST win its \
+                 own claim election on this bare private perspective.",
+                cfg_ref.processor_id
+            ),
+        };
+        assert!(
+            !bases.is_empty(),
+            "processor `{}` must mint at least one instance for its class `{}`",
+            cfg_ref.processor_id,
+            cfg_ref.interpretation_classes[0]
+        );
+        runs.push((
+            cfg_ref.processor_id.clone(),
+            cfg_ref.interpretation_classes[0].clone(),
+            bases,
+        ));
+    }
+
+    // Invariant 1: each base carries its processor's expected type flag, and
+    // NEVER the other processor's flag.
+    let flag_for = |class_uri: &str| -> String {
+        // `ns://Intention` → `ns://intention` (the constructor's type-flag
+        // target — lowercase local name).
+        let local = class_uri
+            .rsplit_once("://")
+            .map(|(_, l)| l)
+            .unwrap_or(class_uri);
+        format!("ns://{}", local.to_lowercase())
+    };
+    for (proc_id, class_uri, bases) in &runs {
+        let own_flag = flag_for(class_uri);
+        let foreign_flag = if own_flag == "ns://intention" {
+            "ns://task".to_string()
+        } else {
+            "ns://intention".to_string()
+        };
+        for base in bases {
+            let links = perspective
+                .get_links(&LinkQuery {
+                    source: Some(base.clone()),
+                    ..Default::default()
+                })
+                .await
+                .expect("get_links readback");
+            assert!(
+                !links.is_empty(),
+                "instance `{base}` (from `{proc_id}`) must carry at least one link"
+            );
+            assert!(
+                links
+                    .iter()
+                    .any(|l| l.data.predicate.as_deref() == Some("ns://type")
+                        && l.data.target == own_flag),
+                "instance `{base}` (from `{proc_id}`) must carry its own class flag \
+                 `{own_flag}`; got links={links:#?}"
+            );
+            assert!(
+                !links
+                    .iter()
+                    .any(|l| l.data.predicate.as_deref() == Some("ns://type")
+                        && l.data.target == foreign_flag),
+                "instance `{base}` (from `{proc_id}`) MUST NOT carry the foreign class \
+                 flag `{foreign_flag}` — cross-contamination between processors on the \
+                 same perspective is a P-C invariant violation; got links={links:#?}"
+            );
+        }
+    }
+
+    // Invariant 2: base URI sets are disjoint. Distinct `base_prefix`es
+    // (`ad4m://autoprocessor/<processor_id>/instance/`) make double-writing
+    // to the same base for the same turn structurally impossible.
+    let intent_bases: std::collections::HashSet<&String> = runs
+        .iter()
+        .find(|(id, _, _)| id == "pc-intent-proc")
+        .map(|(_, _, b)| b.iter().collect())
+        .expect("intent-proc run captured");
+    let task_bases: std::collections::HashSet<&String> = runs
+        .iter()
+        .find(|(id, _, _)| id == "pc-task-proc")
+        .map(|(_, _, b)| b.iter().collect())
+        .expect("task-proc run captured");
+    let overlap: Vec<&&String> = intent_bases.intersection(&task_bases).collect();
+    assert!(
+        overlap.is_empty(),
+        "processor base URI sets must be disjoint (distinct base_prefix per \
+         processor_id); overlap = {overlap:?}"
+    );
+    for b in &intent_bases {
+        assert!(
+            b.starts_with("ad4m://autoprocessor/pc-intent-proc/instance/"),
+            "intent-proc base `{b}` must carry the intent-proc base_prefix"
+        );
+    }
+    for b in &task_bases {
+        assert!(
+            b.starts_with("ad4m://autoprocessor/pc-task-proc/instance/"),
+            "task-proc base `{b}` must carry the task-proc base_prefix"
+        );
+    }
+}
