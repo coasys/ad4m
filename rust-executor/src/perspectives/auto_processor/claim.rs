@@ -69,6 +69,38 @@ pub fn batch_key(item_ids: &[String]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Order-independent key for a batch of source items scoped to a *partition*.
+///
+/// Wildcard/partitioned processors (spec §6.5) bind an extra `?partition`
+/// variable in their `source_scope_query`; the engine groups the SPARQL result
+/// by that binding and runs one pass per partition. Each partition must claim
+/// independently so different peers can process different partitions of the
+/// same processor in parallel — while still guaranteeing no two peers claim the
+/// *same* `(processor, partition)` pair. This function returns the batch key
+/// for that per-partition claim.
+///
+/// Design (matches [`batch_key`] modulo the partition prefix):
+/// - Partition is hashed *before* the id-set, so `(partition, item_ids)` and
+///   `(item_ids)` land in different key-spaces even for the same id-set.
+/// - `\0` separator between the partition and the id-set (and between ids)
+///   keeps the hash injective over the partition/id boundary — `partition="ab"
+///   ids=["c"]` and `partition="a" ids=["bc"]` produce distinct keys.
+/// - The empty-string partition is a valid, distinct partition value; it is
+///   NOT the same key-space as the unpartitioned [`batch_key`].
+pub fn batch_key_for_partition(partition: &str, item_ids: &[String]) -> String {
+    let mut ids: Vec<&str> = item_ids.iter().map(String::as_str).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut hasher = Sha256::new();
+    hasher.update(partition.as_bytes());
+    hasher.update([0u8]);
+    for id in ids {
+        hasher.update(id.as_bytes());
+        hasher.update([0u8]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 /// The shared node under which every claimant's claim node for this batch hangs.
 /// Deterministic in `(processor, key)` so all peers address the same batch.
 pub fn batch_node(processor: &str, key: &str) -> String {
@@ -245,6 +277,65 @@ mod tests {
         assert_ne!(
             batch_key(&["ab".into(), "c".into()]),
             batch_key(&["a".into(), "bc".into()]),
+        );
+    }
+
+    #[test]
+    fn batch_key_for_partition_is_order_and_dup_independent() {
+        let a = batch_key_for_partition("p1", &["i1".into(), "i2".into(), "i3".into()]);
+        let b =
+            batch_key_for_partition("p1", &["i3".into(), "i1".into(), "i2".into(), "i1".into()]);
+        assert_eq!(
+            a, b,
+            "same partition + id-set (any order, dups) => same key"
+        );
+        let c = batch_key_for_partition("p1", &["i1".into(), "i2".into()]);
+        assert_ne!(a, c, "different id-set => different key");
+    }
+
+    #[test]
+    fn batch_key_for_partition_differs_across_partitions() {
+        // Same id-set under two different partitions must claim independently.
+        let items = vec!["i1".to_string(), "i2".to_string()];
+        let p1 = batch_key_for_partition("payments", &items);
+        let p2 = batch_key_for_partition("onboarding", &items);
+        assert_ne!(
+            p1, p2,
+            "different partition => different key (parallel claim safety)"
+        );
+    }
+
+    #[test]
+    fn batch_key_for_partition_is_distinct_from_unpartitioned() {
+        // The empty-string partition is a valid partition — it must NOT collide
+        // with the unpartitioned key-space. Otherwise a wildcard config with an
+        // empty binding would silently share claims with a plain config on the
+        // same id-set.
+        let items = vec!["i1".to_string(), "i2".to_string()];
+        assert_ne!(
+            batch_key(&items),
+            batch_key_for_partition("", &items),
+            "empty partition != unpartitioned"
+        );
+        assert_ne!(
+            batch_key(&items),
+            batch_key_for_partition("p", &items),
+            "any partition != unpartitioned"
+        );
+    }
+
+    #[test]
+    fn batch_key_for_partition_is_injective_over_partition_boundary() {
+        // The `\0` separator must keep the partition/id-set boundary unambiguous:
+        // partition="ab" ids=["c"] and partition="a" ids=["bc"] must differ.
+        assert_ne!(
+            batch_key_for_partition("ab", &["c".into()]),
+            batch_key_for_partition("a", &["bc".into()]),
+        );
+        // And likewise across a partition-vs-empty-id-set flip.
+        assert_ne!(
+            batch_key_for_partition("a", &["b".into()]),
+            batch_key_for_partition("ab", &[]),
         );
     }
 
