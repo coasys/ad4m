@@ -115,7 +115,7 @@ async fn e2e_intention_and_belief() {
 /// the transcript should yield 2–4 tasks (LLM may merge/split slightly).
 #[tokio::test]
 async fn e2e_task_tracking_counts() {
-    let (p, shapes, bases) = run_e2e(
+    let (p, shapes, bases) = run_e2e_until(
         &[("Task", TASK_SDNA)],
         &[
             (
@@ -131,6 +131,8 @@ async fn e2e_task_tracking_counts() {
                 "I'll set up the wind-tunnel Docker scenario for the agent test.",
             ),
         ],
+        3,
+        |c| (2..=4).contains(&c.get("task").copied().unwrap_or(0)),
     )
     .await;
     assert_persisted(&p, &shapes, &bases).await;
@@ -156,7 +158,7 @@ async fn e2e_task_tracking_counts() {
 /// (ends in "?") is the clearest signal and should always be picked up.
 #[tokio::test]
 async fn e2e_mixed_epistemic_modalities() {
-    let (p, shapes, bases) = run_e2e(
+    let (p, shapes, bases) = run_e2e_until(
         &[
             ("Observation", OBSERVATION_SDNA),
             ("Belief", BELIEF_SDNA),
@@ -173,6 +175,8 @@ async fn e2e_mixed_epistemic_modalities() {
                 "But how do we merge when three LLMs write to the graph at once?",
             ),
         ],
+        3,
+        |c| c.len() >= 2 && c.get("question").copied().unwrap_or(0) >= 1,
     )
     .await;
     assert_persisted(&p, &shapes, &bases).await;
@@ -192,7 +196,7 @@ async fn e2e_mixed_epistemic_modalities() {
 /// Strategy conversation -> a Vision (the dream) and a Plan (the concrete path).
 #[tokio::test]
 async fn e2e_vision_and_plan() {
-    let (p, shapes, bases) = run_e2e(
+    let (p, shapes, bases) = run_e2e_until(
         &[("Vision", VISION_SDNA), ("Plan", PLAN_SDNA)],
         &[
             (
@@ -204,6 +208,11 @@ async fn e2e_vision_and_plan() {
                 "Concretely, we start by shipping the SoA-flow MVP, then layer Synergy Fuel on top.",
             ),
         ],
+        3,
+        |c| {
+            c.get("vision").copied().unwrap_or(0) >= 1
+                || c.get("plan").copied().unwrap_or(0) >= 1
+        },
     )
     .await;
     assert_persisted(&p, &shapes, &bases).await;
