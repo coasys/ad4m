@@ -79,7 +79,7 @@ export {
 export { buildWakeMessage, postWake } from "./wakerHelpers";
 export { WakerSubscriptionManager } from "./wakerSubscriptionManager";
 export type { WakerSubscriptionManagerOptions, WakerLogger } from "./wakerSubscriptionManager";
-export { runSetup } from "./setup";
+export { runSetup, loginViaEmailVerification } from "./setup";
 
 // ---------------------------------------------------------------------------
 // MCP HTTP Client (Streamable HTTP with SSE support)

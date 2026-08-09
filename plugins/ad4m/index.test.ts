@@ -46,6 +46,7 @@ import {
   extractMcpResultData,
   buildWakeMessage,
   postWake,
+  loginViaEmailVerification,
   type PluginConfig,
   type WakerSubscription,
   type McpTool,
@@ -1330,6 +1331,52 @@ describe("mcpCallTool", () => {
 // ---------------------------------------------------------------------------
 // extractMcpResultData
 // ---------------------------------------------------------------------------
+
+describe("loginViaEmailVerification (auth-both fallback)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("exchanges an email code for a JWT via verify_email_code", async () => {
+    let n = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      n++;
+      // 1: request_login_verification, 2: verify_email_code → token
+      const payload = n === 1 ? { success: true } : { token: "jwt-xyz" };
+      return fakeJsonResponse({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { content: [{ type: "text", text: JSON.stringify(payload) }] },
+      });
+    });
+    const token = await loginViaEmailVerification(
+      makeMockLogger(),
+      "http://localhost:3001/mcp",
+      "a@b.c",
+      "sess",
+      async () => "123456",
+    );
+    expect(token).toBe("jwt-xyz");
+    expect(n).toBe(2);
+  });
+
+  it("returns null when no code is entered (does not call verify_email_code)", async () => {
+    let n = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      n++;
+      return fakeJsonResponse({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "{}" }] } });
+    });
+    const token = await loginViaEmailVerification(
+      makeMockLogger(),
+      "http://localhost:3001/mcp",
+      "a@b.c",
+      "sess",
+      async () => "",
+    );
+    expect(token).toBeNull();
+    expect(n).toBe(1); // only request_login_verification, not verify_email_code
+  });
+});
 
 describe("extractMcpResultData", () => {
   it("extracts and parses JSON from content[0].text", () => {

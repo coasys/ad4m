@@ -286,6 +286,22 @@ async function setupExternalMode(
         });
         return;
       }
+      // login_email returned no token — the node may enforce SMTP-backed email
+      // verification. Fall back to the code-verification flow: request a code,
+      // read it (interactive prompt / /dev/tty), and exchange it for a JWT.
+      const verifiedToken = await loginViaEmailVerification(logger, endpoint, email, initResp.sessionId);
+      if (verifiedToken) {
+        logger.info(`[ad4m-setup] Verified ${email} via email code; own user identity ready.`);
+        printConfigSnippet(logger, "external", {
+          mcpEndpoint: endpoint,
+          token: verifiedToken,
+          email,
+          password,
+          multiUser: "true",
+          wakeToken,
+        });
+        return;
+      }
       logger.warn("[ad4m-setup] Multi-user login returned no token; falling back to the capability flow.");
     }
 
@@ -376,6 +392,42 @@ function promptUser(question: string): Promise<string> {
  * 2. User enters the 6-digit code from the launcher UI
  * 3. generateJwt(requestId, code) → returns JWT
  */
+/**
+ * Email-verification fallback for multi-user login. Used when a node enforces
+ * SMTP-backed email verification, so `login_email` alone returns no token: the
+ * plugin requests a code, reads it, and exchanges it for a JWT via
+ * `verify_email_code`. `readCode` defaults to an interactive prompt; tests
+ * inject a fixed reader. Returns the JWT, or null when no token results.
+ */
+export async function loginViaEmailVerification(
+  logger: any,
+  endpoint: string,
+  email: string,
+  sessionId: string,
+  readCode: () => Promise<string> = () =>
+    promptUser("[ad4m-setup] Enter the 6-digit code from your email (blank to skip): "),
+): Promise<string | null> {
+  try {
+    // Trigger the verification email (best-effort — the user already signed up).
+    await mcpCallTool(endpoint, "request_login_verification", { email }, sessionId);
+  } catch (e: any) {
+    logger.info(`[ad4m-setup] request_login_verification: ${e.message}`);
+  }
+  logger.info("[ad4m-setup] A verification code has been sent to your email (if the node has SMTP configured).");
+  const code = await readCode();
+  if (!code) {
+    logger.info("[ad4m-setup] No code entered — skipping email-verification login.");
+    return null;
+  }
+  const verifyResult = await mcpCallTool(endpoint, "verify_email_code", { email, code, type: "login" }, sessionId);
+  const verifyData = extractMcpResultData(verifyResult);
+  const token = verifyData?.token ?? verifyData?.jwt ?? null;
+  if (!token) {
+    logger.warn(`[ad4m-setup] verify_email_code failed: ${JSON.stringify(verifyData?.error ?? verifyData)}`);
+  }
+  return token;
+}
+
 async function setupExternalModeViaHttp(
   logger: any,
   executorUrl: string,
