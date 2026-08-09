@@ -377,7 +377,10 @@ fn extracts_single_object_when_no_array() {
     // this must still error — but extract_bracketed shouldn't panic.
     let err = parse_interpretation_response(raw).unwrap_err();
     let msg = format!("{err}");
-    assert!(msg.contains("expected a sequence"), "got: {msg}");
+    assert!(
+        msg.contains("interpretation JSON parse failed"),
+        "got: {msg}"
+    );
 }
 
 #[test]
