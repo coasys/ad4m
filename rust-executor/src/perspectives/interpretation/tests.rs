@@ -2,13 +2,55 @@ use super::*;
 use crate::db::Ad4mDb;
 use crate::perspectives::interpretation_test_support::*;
 use crate::types::{AITask, Link};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
-/// An empty existing-instance context, typed — `build_interpretation_input`
-/// takes the richer `InstanceContext` map now, so a bare `HashMap::new()` can't
+/// An empty existing-instance context, typed — the interpretation path takes
+/// the id-keyed [`ExistingInstances`] map now, so a bare `HashMap::new()` can't
 /// be inferred.
-fn no_existing() -> HashMap<String, Vec<InstanceContext>> {
+fn no_existing() -> ExistingInstances {
     HashMap::new()
+}
+
+/// Build an [`ExistingInstances`] map (id → context) from a list of instances,
+/// keyed by each instance's own `id`. The single-source shape the production
+/// code threads everywhere; tests that used to hand-build class→identity or
+/// id-set projections construct this instead.
+fn existing_map(instances: Vec<InstanceContext>) -> ExistingInstances {
+    instances.into_iter().map(|i| (i.id.clone(), i)).collect()
+}
+
+/// Convenience for planner tests that only exercise id membership (Create vs
+/// Update routing / relation-ref validation) and don't read identity/props:
+/// build minimal entries keyed by the given ids.
+fn existing_ids(ids: &[&str]) -> ExistingInstances {
+    existing_map(
+        ids.iter()
+            .map(|id| InstanceContext {
+                id: (*id).to_string(),
+                title: String::new(),
+                class: String::new(),
+                properties: BTreeMap::new(),
+            })
+            .collect(),
+    )
+}
+
+/// Convenience for dedup tests that only care about (class, identity) pairs:
+/// synthesize a deterministic id per entry so the instance is addressable in
+/// the id-keyed map without the test spelling one out.
+fn existing_by_identity(entries: &[(&str, &str)]) -> ExistingInstances {
+    existing_map(
+        entries
+            .iter()
+            .enumerate()
+            .map(|(i, (class, title))| InstanceContext {
+                id: format!("test://existing/{class}/{i}"),
+                title: (*title).to_string(),
+                class: (*class).to_string(),
+                properties: BTreeMap::new(),
+            })
+            .collect(),
+    )
 }
 
 #[test]
@@ -69,16 +111,12 @@ fn existing_context_renders_id_title_class_in_prompt() {
     // emit an upsert instead of a duplicate create. Also proves the system
     // prompt still describes the `id` upsert path.
     let shapes = vec![shape_from_sdna("Task", TASK_SDNA)];
-    let mut existing: HashMap<String, Vec<InstanceContext>> = HashMap::new();
-    existing.insert(
-        "Task".to_string(),
-        vec![InstanceContext {
-            id: "soa://existing/task/42".to_string(),
-            title: "Draft the design doc".to_string(),
-            class: "Task".to_string(),
-            properties: BTreeMap::new(),
-        }],
-    );
+    let existing = existing_map(vec![InstanceContext {
+        id: "soa://existing/task/42".to_string(),
+        title: "Draft the design doc".to_string(),
+        class: "Task".to_string(),
+        properties: BTreeMap::new(),
+    }]);
     let input = build_interpretation_input(
         &shapes,
         &[("Nico".into(), "About that design doc…".into())],
@@ -131,16 +169,12 @@ fn existing_context_with_properties_renders_them_into_prompt() {
         "summary".to_string(),
         "The team discussed dropped webhook retries during a recent payments outage.".to_string(),
     );
-    let mut existing: HashMap<String, Vec<InstanceContext>> = HashMap::new();
-    existing.insert(
-        "ConversationSubgroup".to_string(),
-        vec![InstanceContext {
-            id: "soa://existing/subgroup/payments".to_string(),
-            title: "Payments infrastructure".to_string(),
-            class: "ConversationSubgroup".to_string(),
-            properties,
-        }],
-    );
+    let existing = existing_map(vec![InstanceContext {
+        id: "soa://existing/subgroup/payments".to_string(),
+        title: "Payments infrastructure".to_string(),
+        class: "ConversationSubgroup".to_string(),
+        properties,
+    }]);
     let input = build_interpretation_input(
         &shapes,
         &[("Ana".into(), "Switching topics — Q3 retro planning.".into())],
@@ -475,9 +509,7 @@ fn plan_ops_creates_without_id_and_updates_with_id() {
     // known_existing_ids to mimic what `existing_instance_context` would
     // return in production. Without this the planner treats the id as
     // hallucinated and routes to Create.
-    let known: HashSet<String> = ["soa://existing/intention/42".to_string()]
-        .into_iter()
-        .collect();
+    let known = existing_ids(&["soa://existing/intention/42"]);
     let ops = plan_interpretation_ops_with_context(&shapes, &proposed, "soa://ext/", &known);
     assert_eq!(ops.len(), 2);
 
@@ -535,9 +567,13 @@ fn plan_ops_hallucinated_id_routes_to_create() {
       {"class":"Intention","id":"soa://existing/intention/999","title":"Ghost"}
     ]"#;
     let proposed = parse_interpretation_response(raw).unwrap();
-    // known_existing_ids intentionally does NOT contain the proposed id.
-    let ops =
-        plan_interpretation_ops_with_context(&shapes, &proposed, "soa://ext/", &HashSet::new());
+    // existing intentionally does NOT contain the proposed id.
+    let ops = plan_interpretation_ops_with_context(
+        &shapes,
+        &proposed,
+        "soa://ext/",
+        &ExistingInstances::new(),
+    );
     assert_eq!(ops.len(), 1);
     match &ops[0] {
         InterpretationOp::Create {
@@ -689,7 +725,7 @@ fn relations_write_link_to_existing_id() {
     // the model was shown (in `known_existing_ids`) are accepted as targets.
     let shape = shape_from_sdna("Task", TASK_WITH_RELATION_SDNA);
     let existing_id = "soa://ext/task/already-here".to_string();
-    let known: std::collections::HashSet<String> = [existing_id.clone()].into_iter().collect();
+    let known = existing_ids(&[existing_id.as_str()]);
     let raw = format!(r#"[{{"class":"Task","title":"New work","blocks":["{existing_id}"]}}]"#,);
     let proposed = parse_interpretation_response(&raw).unwrap();
     let ops = plan_interpretation_ops_with_context(&[shape], &proposed, "soa://ext/", &known);
@@ -784,7 +820,7 @@ fn relations_from_update_target_emit_addlinks() {
         ]"#,
     );
     let proposed = parse_interpretation_response(&raw).unwrap();
-    let known: HashSet<String> = [existing_id.clone()].into_iter().collect();
+    let known = existing_ids(&[existing_id.as_str()]);
     let ops = plan_interpretation_ops_with_context(&[shape], &proposed, "soa://ext/", &known);
 
     // The Update carries the retitled scalar, no relation value.
@@ -856,12 +892,11 @@ async fn apply_one(
     let existing_ctx = existing_instance_context(perspective, shapes, None)
         .await
         .expect("existing_instance_context");
-    let known_existing_ids = ids_from_context(&existing_ctx);
     let ops = plan_interpretation_ops_with_context(
         shapes,
         std::slice::from_ref(&inst),
         "soa://ext/",
-        &known_existing_ids,
+        &existing_ctx,
     );
     apply_interpretation_ops(perspective, &ops, ctx)
         .await
@@ -1030,7 +1065,6 @@ async fn strip_noop_updates_drops_same_value_upsert_keeps_real_change() {
     let existing_ctx = existing_instance_context(&perspective, &shapes, None)
         .await
         .expect("existing_instance_context");
-    let known = ids_from_context(&existing_ctx);
     let planned = plan_interpretation_ops_with_context(
         &shapes,
         &[
@@ -1057,7 +1091,7 @@ async fn strip_noop_updates_drops_same_value_upsert_keeps_real_change() {
             ),
         ],
         "soa://ext/",
-        &known,
+        &existing_ctx,
     );
     assert_eq!(planned.len(), 3, "sanity: planner emitted all three");
 
@@ -1107,25 +1141,29 @@ async fn existing_instance_context_reads_id_and_identity() {
     let ctx_map = existing_instance_context(&perspective, &shapes, None)
         .await
         .expect("existing_instance_context");
-    let rows = ctx_map.get("Task").expect("Task rows present");
-    assert_eq!(rows.len(), 1, "one seeded instance; got {rows:#?}");
-    assert_eq!(rows[0].id, "soa://existing/task/1");
-    assert_eq!(rows[0].title, "Migrate the SHACL parser");
-    assert_eq!(rows[0].class, "Task");
+    assert_eq!(ctx_map.len(), 1, "one seeded instance; got {ctx_map:#?}");
+    // Id-keyed single source: look the instance up by its base URI.
+    let inst = ctx_map
+        .get("soa://existing/task/1")
+        .expect("instance keyed by its id");
+    assert_eq!(inst.id, "soa://existing/task/1");
+    assert_eq!(inst.title, "Migrate the SHACL parser");
+    assert_eq!(inst.class, "Task");
     // Task's `owner` scalar is unset on this seed → nothing to render;
     // stays empty so the prompt does not carry an empty `properties` block.
     assert!(
-        rows[0].properties.is_empty(),
+        inst.properties.is_empty(),
         "task with only identity set must carry no secondary scalars; got {:?}",
-        rows[0].properties
+        inst.properties
     );
 
-    // The two derived views feed the dedup net and the relation resolver.
+    // The projections consumers derive from this one map: per-class identity
+    // values (dedup net) and the id key-set (relation resolver).
     assert_eq!(
-        identities_from_context(&ctx_map).get("Task"),
+        identity_values_by_class(&ctx_map).get("Task"),
         Some(&vec!["Migrate the SHACL parser".to_string()])
     );
-    assert!(ids_from_context(&ctx_map).contains("soa://existing/task/1"));
+    assert!(ctx_map.contains_key("soa://existing/task/1"));
 }
 
 #[tokio::test]
@@ -1180,7 +1218,7 @@ async fn existing_instance_context_scope_constrains_to_subtree() {
         .await
         .expect("unscoped context");
     assert_eq!(
-        all.get("Task").map(|r| r.len()).unwrap_or(0),
+        all.len(),
         2,
         "unscoped context must see both tasks; got {all:#?}"
     );
@@ -1193,14 +1231,16 @@ async fn existing_instance_context_scope_constrains_to_subtree() {
     let scoped = existing_instance_context(&perspective, &shapes, Some(&scope))
         .await
         .expect("scoped context");
-    let rows = scoped.get("Task").expect("Task rows present");
     assert_eq!(
-        rows.len(),
+        scoped.len(),
         1,
-        "parent-scoped context must exclude tree B; got {rows:#?}"
+        "parent-scoped context must exclude tree B; got {scoped:#?}"
     );
-    assert_eq!(rows[0].id, "soa://tree-a/task/1");
-    assert_eq!(rows[0].title, "Task under tree A");
+    let inst = scoped
+        .get("soa://tree-a/task/1")
+        .expect("tree-A task present");
+    assert_eq!(inst.id, "soa://tree-a/task/1");
+    assert_eq!(inst.title, "Task under tree A");
 }
 
 #[tokio::test]
@@ -1228,22 +1268,22 @@ async fn existing_instance_context_populates_secondary_scalars() {
     let ctx_map = existing_instance_context(&perspective, &shapes, None)
         .await
         .expect("existing_instance_context");
-    let rows = ctx_map
-        .get("ConversationSubgroup")
-        .expect("ConversationSubgroup rows present");
-    assert_eq!(rows.len(), 1, "one seeded instance; got {rows:#?}");
-    assert_eq!(rows[0].title, "Payments infrastructure");
+    assert_eq!(ctx_map.len(), 1, "one seeded instance; got {ctx_map:#?}");
+    let inst = ctx_map
+        .get("soa://existing/subgroup/payments")
+        .expect("subgroup keyed by its id");
+    assert_eq!(inst.title, "Payments infrastructure");
     assert_eq!(
-        rows[0].properties.get("summary").map(String::as_str),
+        inst.properties.get("summary").map(String::as_str),
         Some("The team discussed dropped webhook retries during a recent payments outage."),
         "summary scalar must be populated; got {:?}",
-        rows[0].properties
+        inst.properties
     );
     // Identity value must not be duplicated under `properties` (it is
     // already carried by `title`); the type flag must never leak in either
     // (setter-managed, not LLM-visible state).
-    assert!(!rows[0].properties.contains_key("name"));
-    assert!(!rows[0].properties.contains_key("type"));
+    assert!(!inst.properties.contains_key("name"));
+    assert!(!inst.properties.contains_key("type"));
 }
 
 #[test]
@@ -1363,18 +1403,12 @@ fn filter_already_present_drops_known_titles() {
             ]"#,
     )
     .unwrap();
-    let mut existing = HashMap::new();
-    existing.insert("Task".to_string(), vec!["ship the MVP".to_string()]);
+    let existing = existing_by_identity(&[("Task", "ship the MVP")]);
     // Only Task declares `title` as its identity; Belief has none ⇒ no dedup.
     let mut identity_props = HashMap::new();
     identity_props.insert("Task".to_string(), "title".to_string());
 
-    let kept = filter_already_present(
-        proposed,
-        &existing,
-        &identity_props,
-        &std::collections::HashSet::new(),
-    );
+    let kept = filter_already_present(proposed, &existing, &identity_props);
     let kept_titles: Vec<&str> = kept
         .iter()
         .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
@@ -1513,8 +1547,7 @@ async fn dispatcher_normalized_string_matches_direct_call() {
             ]"#,
     )
     .unwrap();
-    let mut existing = HashMap::new();
-    existing.insert("Task".to_string(), vec!["ship the MVP".to_string()]);
+    let existing = existing_by_identity(&[("Task", "ship the MVP")]);
     let mut identity_props = HashMap::new();
     identity_props.insert("Task".to_string(), "title".to_string());
 
@@ -1523,16 +1556,10 @@ async fn dispatcher_normalized_string_matches_direct_call() {
         &existing,
         &identity_props,
         &DedupStrategy::default(),
-        &std::collections::HashSet::new(),
     )
     .await
     .unwrap();
-    let via_direct = filter_already_present(
-        proposed,
-        &existing,
-        &identity_props,
-        &std::collections::HashSet::new(),
-    );
+    let via_direct = filter_already_present(proposed, &existing, &identity_props);
     let d_titles: Vec<&str> = via_dispatcher
         .iter()
         .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
@@ -1693,19 +1720,18 @@ fn filter_already_present_keeps_upserts_and_preserves_order() {
             ]"#,
     )
     .unwrap();
-    let mut existing = HashMap::new();
-    existing.insert("Task".to_string(), vec!["Ship the MVP".to_string()]);
+    // The existing instance carries both its id (the trusted upsert target) and
+    // its title (the dedup identity) — one row in the single-source map.
+    let existing = existing_map(vec![InstanceContext {
+        id: "soa://existing/task/1".to_string(),
+        title: "Ship the MVP".to_string(),
+        class: "Task".to_string(),
+        properties: BTreeMap::new(),
+    }]);
     let mut identity_props = HashMap::new();
     identity_props.insert("Task".to_string(), "title".to_string());
 
-    let kept = filter_already_present(
-        proposed,
-        &existing,
-        &identity_props,
-        &["soa://existing/task/1".to_string()]
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>(),
-    );
+    let kept = filter_already_present(proposed, &existing, &identity_props);
     let kept_titles: Vec<&str> = kept
         .iter()
         .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
@@ -1735,27 +1761,27 @@ fn filter_already_present_dedups_hallucinated_id_but_keeps_trusted() {
             ]"#,
     )
     .unwrap();
-    let mut existing = HashMap::new();
-    existing.insert("Task".to_string(), vec!["Ship the MVP".to_string()]);
     let mut identity_props = HashMap::new();
     identity_props.insert("Task".to_string(), "title".to_string());
 
-    // Untrusted id → must be deduped away (identity matches an existing one).
-    let dropped = filter_already_present(
-        proposed.clone(),
-        &existing,
-        &identity_props,
-        &HashSet::new(),
-    );
+    // Untrusted id → the graph does not hold `soa://hallucinated/999`, only a
+    // same-title Task under a different id, so the proposal is deduped away.
+    let existing_untrusted = existing_by_identity(&[("Task", "Ship the MVP")]);
+    let dropped = filter_already_present(proposed.clone(), &existing_untrusted, &identity_props);
     assert!(
         dropped.is_empty(),
         "hallucinated id + duplicate identity must be deduped, not minted; got {dropped:#?}"
     );
 
-    // Same proposal, but now the id is trusted (the graph holds it) → kept as an
-    // explicit upsert target.
-    let trusted: HashSet<String> = ["soa://hallucinated/999".to_string()].into_iter().collect();
-    let kept = filter_already_present(proposed, &existing, &identity_props, &trusted);
+    // Same proposal, but now the graph actually holds that id (title matches) →
+    // it is a real upsert target and bypasses dedup.
+    let existing_trusted = existing_map(vec![InstanceContext {
+        id: "soa://hallucinated/999".to_string(),
+        title: "Ship the MVP".to_string(),
+        class: "Task".to_string(),
+        properties: BTreeMap::new(),
+    }]);
+    let kept = filter_already_present(proposed, &existing_trusted, &identity_props);
     assert_eq!(kept.len(), 1, "a trusted id bypasses dedup; got {kept:#?}");
 }
 
@@ -1777,16 +1803,11 @@ fn filter_already_present_dedupes_within_same_response() {
             ]"#,
     )
     .unwrap();
-    let existing: HashMap<String, Vec<String>> = HashMap::new(); // graph empty
+    let existing = ExistingInstances::new(); // graph empty
     let mut identity_props = HashMap::new();
     identity_props.insert("Task".to_string(), "title".to_string());
 
-    let kept = filter_already_present(
-        proposed,
-        &existing,
-        &identity_props,
-        &std::collections::HashSet::new(),
-    );
+    let kept = filter_already_present(proposed, &existing, &identity_props);
     let kept_titles: Vec<&str> = kept
         .iter()
         .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))

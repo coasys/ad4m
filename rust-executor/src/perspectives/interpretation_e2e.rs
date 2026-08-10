@@ -1060,19 +1060,25 @@ async fn e2e_semantic_dedup_drops_reworded_duplicate() {
 #[tokio::test]
 async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
     use crate::perspectives::interpretation::{
-        filter_already_present_with_strategy, DedupStrategy, ProposedInstance,
+        filter_already_present_with_strategy, DedupStrategy, ExistingInstances, InstanceContext,
+        ProposedInstance,
     };
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     // Reuse the standard harness to initialise the DB + AIService global, then
     // register the embedding model. (The LLM this also registers is unused here.)
     let _ = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
     super::interpretation_test_support::register_interpretation_embedding_model().await;
 
-    let existing: HashMap<String, Vec<String>> = HashMap::from([(
-        "Task".to_string(),
-        vec!["Finish the WebRTC call module".to_string()],
-    )]);
+    let existing: ExistingInstances = [InstanceContext {
+        id: "soa://existing/task/webrtc".to_string(),
+        title: "Finish the WebRTC call module".to_string(),
+        class: "Task".to_string(),
+        properties: BTreeMap::new(),
+    }]
+    .into_iter()
+    .map(|i| (i.id.clone(), i))
+    .collect();
     let identity_props: HashMap<String, String> =
         HashMap::from([("Task".to_string(), "title".to_string())]);
 
@@ -1097,7 +1103,6 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
             model: "interpretation-embed".to_string(),
             threshold: 0.6,
         },
-        &std::collections::HashSet::new(),
     )
     .await
     .expect("semantic dedup");

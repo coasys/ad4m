@@ -1,4 +1,4 @@
-use super::{class_local_name, relation_predicates, InstanceContext};
+use super::{class_local_name, instances_by_class, relation_predicates, ExistingInstances};
 use crate::db::Ad4mDb;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::types::{AIPromptExamples, AITask};
@@ -39,8 +39,11 @@ use std::collections::HashMap;
 pub fn build_interpretation_input(
     shapes: &[ModelShape],
     transcript: &[(String, String)],
-    existing: &HashMap<String, Vec<InstanceContext>>,
+    existing: &ExistingInstances,
 ) -> String {
+    // Group the id-keyed source by class once for the per-class `existing`
+    // blocks below (deterministically ordered — see `instances_by_class`).
+    let existing_by_class = instances_by_class(existing);
     let classes: Vec<serde_json::Value> = shapes
         .iter()
         .map(|s| {
@@ -89,7 +92,7 @@ pub fn build_interpretation_input(
                 })
                 .collect();
             let name = class_local_name(&s.target_class);
-            let existing_json: Vec<serde_json::Value> = existing
+            let existing_json: Vec<serde_json::Value> = existing_by_class
                 .get(name)
                 .map(|rows| {
                     rows.iter()

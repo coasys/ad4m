@@ -1,8 +1,8 @@
 use super::{
     build_interpretation_input, class_local_name, ensure_interpretation_task,
-    existing_instance_context, filter_already_present_with_strategy, identities_from_context,
-    identity_property, ids_from_context, parse_interpretation_response,
-    plan_interpretation_ops_with_context, DedupStrategy, InterpretationOp, ProposedInstance,
+    existing_instance_context, filter_already_present_with_strategy, identity_property,
+    parse_interpretation_response, plan_interpretation_ops_with_context, DedupStrategy,
+    InterpretationOp, ProposedInstance,
 };
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::{ModelShape, ParentScope};
@@ -352,14 +352,11 @@ pub async fn run_interpretation_with_strategy(
     let task = ensure_interpretation_task()?;
     // Existing-instance snapshot: gives the model both the `id` handle to
     // upsert/reference (so it can refine or link an existing node instead of
-    // duplicating) and the identity value to recognise it by. The
-    // identity-only projection feeds the deterministic dedup safety net below,
-    // so both paths agree on what counts as "existing".
+    // duplicating) and the identity value to recognise it by. This one
+    // id-keyed map is the single source: the prompt, the dedup safety net, and
+    // Create-vs-Update routing all project what they need from it, so every
+    // path agrees on what counts as "existing".
     let existing_ctx = existing_instance_context(perspective, shapes, scope).await?;
-    let existing_identities = identities_from_context(&existing_ctx);
-    // Valid targets for existing-id relation refs — exactly the ids the model is
-    // shown in each class's `existing` list.
-    let known_existing_ids = ids_from_context(&existing_ctx);
     // class local name → identity property name, for the deterministic
     // safety-net below. Classes with no identity property are omitted.
     let identity_props: HashMap<String, String> = shapes
@@ -401,15 +398,14 @@ pub async fn run_interpretation_with_strategy(
     // ordering the model counted.
     let instances = filter_already_present_with_strategy(
         instances,
-        &existing_identities,
+        &existing_ctx,
         &identity_props,
         dedup_strategy,
-        &known_existing_ids,
     )
     .await?;
 
     let planned =
-        plan_interpretation_ops_with_context(shapes, &instances, base_prefix, &known_existing_ids);
+        plan_interpretation_ops_with_context(shapes, &instances, base_prefix, &existing_ctx);
     // Filter no-op Updates: the LLM occasionally re-emits an unchanged existing
     // entry, and applying that would clear-and-rewrite scalar links for nothing.
     let ops = strip_noop_updates(perspective, shapes, planned).await?;

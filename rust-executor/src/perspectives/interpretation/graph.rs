@@ -5,6 +5,47 @@ use crate::types::Link;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
+/// The existing instances in scope for an interpretation pass, keyed by base
+/// URI (`id`). This is the **single source of truth** the whole pass reads:
+/// the prompt view ([`build_interpretation_input`]), the deterministic dedup
+/// safety net ([`filter_already_present`] / semantic), and Create-vs-Update
+/// routing ([`plan_interpretation_ops_with_context`]) all project what they
+/// need from this one map — instead of separately-threaded `class → identity`
+/// and `id-set` views that could drift out of sync. Each [`InstanceContext`]
+/// still carries its own `id`, so the value is self-describing; the key is
+/// that same id, promoted for O(1) "does the graph hold this id?" checks.
+pub type ExistingInstances = HashMap<String, InstanceContext>;
+
+/// Group existing instances by class local name for the per-class reasoning
+/// the prompt and dedup paths do. Each class's instances are sorted by `id` so
+/// the prompt text and the semantic-embedding batch order are deterministic
+/// across runs (an id-keyed map has no inherent order).
+pub(crate) fn instances_by_class(
+    existing: &ExistingInstances,
+) -> BTreeMap<String, Vec<&InstanceContext>> {
+    let mut out: BTreeMap<String, Vec<&InstanceContext>> = BTreeMap::new();
+    for inst in existing.values() {
+        out.entry(inst.class.clone()).or_default().push(inst);
+    }
+    for rows in out.values_mut() {
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+    }
+    out
+}
+
+/// Per-class raw identity values (titles) projected from the id-keyed existing
+/// set — the comparison basis for both dedup paths (the string path normalizes
+/// them, the semantic path embeds them). Deterministic order (by `id`) so the
+/// semantic embedding batch is stable.
+pub(crate) fn identity_values_by_class(
+    existing: &ExistingInstances,
+) -> HashMap<String, Vec<String>> {
+    instances_by_class(existing)
+        .into_iter()
+        .map(|(class, rows)| (class, rows.into_iter().map(|r| r.title.clone()).collect()))
+        .collect()
+}
+
 /// The property a class declares as its dedup identity (its title-like
 /// interpretation key) — the first property with `identity == true`. `None`
 /// when the SDNA declared no identity, in which case the class is never
@@ -63,30 +104,30 @@ pub(crate) fn relation_predicates(shape: &ModelShape) -> HashSet<&str> {
 /// which calls this for the (default) string strategy and the embedding path
 /// for `DedupStrategy::Semantic`. No production caller invokes this directly.
 ///
-/// `existing` maps a class's local name to the already-present identity
-/// values. `identity_props` maps a class's local name to the NAME of its
-/// declared identity property. An instance whose class has no identity property
-/// is always kept (no dedup); likewise one missing that property's value.
+/// `existing` is the id-keyed [`ExistingInstances`] source of truth; the
+/// per-class identity values are projected from it here. `identity_props` maps
+/// a class's local name to the NAME of its declared identity property. An
+/// instance whose class has no identity property is always kept (no dedup);
+/// likewise one missing that property's value.
 ///
 /// Filters **in place**: the surviving instances keep the LLM's emission order,
 /// which is what the `new:<Class>:<n>` relation ordinals in
 /// [`plan_interpretation_ops_with_context`] resolve against.
 pub fn filter_already_present(
     instances: Vec<ProposedInstance>,
-    existing: &HashMap<String, Vec<String>>,
+    existing: &ExistingInstances,
     identity_props: &HashMap<String, String>,
-    known_existing_ids: &HashSet<String>,
 ) -> Vec<ProposedInstance> {
     // Seed per-class known sets with pre-existing identities; each accepted
     // proposal is added to its class's set so a same-response duplicate is
     // dropped like an already-persisted one. Without this, an LLM that emits
     // the same (class, identity) twice would slip through and `run_interpretation`
     // would create two subjects for it.
-    let mut known: HashMap<String, HashSet<String>> = existing
-        .iter()
+    let mut known: HashMap<String, HashSet<String>> = identity_values_by_class(existing)
+        .into_iter()
         .map(|(class, values)| {
             (
-                class.clone(),
+                class,
                 values.iter().map(|v| normalize_identity(v)).collect(),
             )
         })
@@ -96,14 +137,14 @@ pub fn filter_already_present(
         // A *trusted* id is an explicit upsert target — it names a specific
         // existing node, so its identity value *should* match one already
         // present; never dedup it away. But the planner only routes to Update
-        // for ids in `known_existing_ids`; a hallucinated id absent from that
-        // set would be routed to Create, so it must still be dedup-checked
-        // like an ordinary proposal (else a made-up id + duplicate identity
-        // mints a duplicate node).
+        // for ids the graph actually holds; a hallucinated id absent from
+        // `existing` would be routed to Create, so it must still be
+        // dedup-checked like an ordinary proposal (else a made-up id +
+        // duplicate identity mints a duplicate node).
         if inst
             .id
             .as_deref()
-            .is_some_and(|id| known_existing_ids.contains(id))
+            .is_some_and(|id| existing.contains_key(id))
         {
             out.push(inst);
             continue;
@@ -201,13 +242,13 @@ pub enum InterpretationOp {
 /// routed to `Create` — callers that need to exercise the id-becomes-`Update`
 /// path (or resolve relations against the graph's existing instances) must
 /// call the `_with_context` form directly with a real
-/// `known_existing_ids` set.
+/// [`ExistingInstances`] map.
 pub fn plan_interpretation_ops(
     shapes: &[ModelShape],
     proposed: &[ProposedInstance],
     base_prefix: &str,
 ) -> Vec<InterpretationOp> {
-    plan_interpretation_ops_with_context(shapes, proposed, base_prefix, &HashSet::new())
+    plan_interpretation_ops_with_context(shapes, proposed, base_prefix, &ExistingInstances::new())
 }
 
 /// Turn proposed instances into create/update/add-links ops (Phase 2:
@@ -238,7 +279,7 @@ pub fn plan_interpretation_ops_with_context(
     shapes: &[ModelShape],
     proposed: &[ProposedInstance],
     base_prefix: &str,
-    known_existing_ids: &HashSet<String>,
+    existing: &ExistingInstances,
 ) -> Vec<InterpretationOp> {
     struct Placed<'a> {
         shape: &'a ModelShape,
@@ -249,7 +290,9 @@ pub fn plan_interpretation_ops_with_context(
 
     // Pass 1: place proposals + build the per-class ordinal index.
     let mut per_class: HashMap<String, Vec<String>> = HashMap::new();
-    let mut existing_ids: HashSet<String> = known_existing_ids.clone();
+    // Ids the graph holds, extended with proposals we route to Update, so
+    // relation refs can resolve against real *and* just-planned bases.
+    let mut existing_ids: HashSet<String> = existing.keys().cloned().collect();
     let mut placed: Vec<Placed> = Vec::with_capacity(proposed.len());
     for inst in proposed {
         let Some(shape) = shapes
@@ -263,11 +306,11 @@ pub fn plan_interpretation_ops_with_context(
             continue;
         };
         let (base, is_update) = match &inst.id {
-            Some(existing) if known_existing_ids.contains(existing) => (existing.clone(), true),
+            Some(id) if existing.contains_key(id) => (id.clone(), true),
             _ => {
                 if let Some(hallucinated) = &inst.id {
                     log::debug!(
-                        "interpretation: proposed id {hallucinated:?} not in known_existing_ids for class {}; routing to Create",
+                        "interpretation: proposed id {hallucinated:?} not among existing instances for class {}; routing to Create",
                         inst.class
                     );
                 }
@@ -556,17 +599,20 @@ pub struct InstanceContext {
     pub properties: BTreeMap<String, String>,
 }
 
-/// read the instances already present in the perspective for each target class,
-/// keyed by the class's local name. Each row carries the instance's `id` (base
-/// URI) alongside its declared identity value.
+/// read the instances already present in the perspective for each target class
+/// into the id-keyed [`ExistingInstances`] map. Each [`InstanceContext`] carries
+/// the instance's `id` (base URI) alongside its declared identity value and
+/// secondary scalars.
 ///
-/// Serves both halves of the interpretation contract:
+/// This one map serves both halves of the interpretation contract; consumers
+/// project what they need from it (see [`instances_by_class`] /
+/// [`identity_values_by_class`]):
 ///   * the prompt ([`build_interpretation_input`]) shows `id` + identity so the
 ///     model can steer away from re-proposing known items *and* emit an `id` to
 ///     upsert one, or reference it as a relation target;
-///   * the identity values ([`identities_from_context`]) feed the deterministic
-///     dedup safety net ([`filter_already_present`]), and the ids
-///     ([`ids_from_context`]) bound which existing-id relation refs are accepted.
+///   * the identity values feed the deterministic dedup safety net
+///     ([`filter_already_present`]), and the id key-set bounds which existing-id
+///     relation refs are accepted ([`plan_interpretation_ops_with_context`]).
 ///
 /// The dedup/display key is whichever property the class declares as its
 /// `identity` (via [`identity_property`]), not a hard-coded `title`. Classes
@@ -588,8 +634,8 @@ pub async fn existing_instance_context(
     perspective: &PerspectiveInstance,
     shapes: &[ModelShape],
     scope: Option<&ParentScope>,
-) -> anyhow::Result<HashMap<String, Vec<InstanceContext>>> {
-    let mut out: HashMap<String, Vec<InstanceContext>> = HashMap::new();
+) -> anyhow::Result<ExistingInstances> {
+    let mut out: ExistingInstances = HashMap::new();
     for shape in shapes {
         // No declared identity property ⇒ no dedup key ⇒ skip.
         let Some(idp) = identity_property(shape) else {
@@ -682,34 +728,11 @@ pub async fn existing_instance_context(
             })
             .unwrap_or_default();
 
-        if !rows.is_empty() {
-            out.insert(class.to_string(), rows);
+        // Key each instance by its own base URI (the single-source id-keyed
+        // map). Ids are globally unique across classes, so no collision.
+        for row in rows {
+            out.insert(row.id.clone(), row);
         }
     }
     Ok(out)
-}
-
-/// The identity-value-only view of an [`existing_instance_context`] snapshot,
-/// for [`filter_already_present`] (which compares identity values, not ids).
-pub fn identities_from_context(
-    ctx: &HashMap<String, Vec<InstanceContext>>,
-) -> HashMap<String, Vec<String>> {
-    ctx.iter()
-        .map(|(class, rows)| {
-            (
-                class.clone(),
-                rows.iter().map(|r| r.title.clone()).collect(),
-            )
-        })
-        .collect()
-}
-
-/// The set of all existing instance `id`s across a context snapshot — the valid
-/// targets for an existing-id relation ref (exactly what the LLM was shown in
-/// each class's `existing` list). Feeds
-/// [`plan_interpretation_ops_with_context`].
-pub fn ids_from_context(ctx: &HashMap<String, Vec<InstanceContext>>) -> HashSet<String> {
-    ctx.values()
-        .flat_map(|rows| rows.iter().map(|r| r.id.clone()))
-        .collect()
 }

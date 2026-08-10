@@ -1,4 +1,4 @@
-use super::graph::filter_already_present;
+use super::graph::{filter_already_present, identity_values_by_class, ExistingInstances};
 use super::ProposedInstance;
 use std::collections::{HashMap, HashSet};
 
@@ -160,12 +160,14 @@ pub(crate) fn semantic_dedup_pure(
 /// proposals missing that property's value, always survive.
 pub async fn filter_already_present_semantic(
     instances: Vec<ProposedInstance>,
-    existing: &HashMap<String, Vec<String>>,
+    existing: &ExistingInstances,
     identity_props: &HashMap<String, String>,
     model: &str,
     threshold: f32,
-    known_existing_ids: &HashSet<String>,
 ) -> anyhow::Result<Vec<ProposedInstance>> {
+    // Per-class identity values projected from the id-keyed source (raw, since
+    // embeddings run on the same text the prompt showed the model).
+    let existing_by_class = identity_values_by_class(existing);
     // Bucket proposal indices by class, but only those subject to dedup.
     let mut per_class: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     for (i, inst) in instances.iter().enumerate() {
@@ -175,7 +177,7 @@ pub async fn filter_already_present_semantic(
         if inst
             .id
             .as_deref()
-            .is_some_and(|id| known_existing_ids.contains(id))
+            .is_some_and(|id| existing.contains_key(id))
         {
             continue;
         }
@@ -194,7 +196,7 @@ pub async fn filter_already_present_semantic(
     let mut existing_vecs: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
     let mut proposed_vecs: HashMap<String, Vec<(usize, Vec<f32>)>> = HashMap::new();
     for (class, entries) in per_class.iter() {
-        let existing_vals: Vec<String> = existing
+        let existing_vals: Vec<String> = existing_by_class
             .get(class)
             .cloned()
             .unwrap_or_default()
@@ -231,28 +233,17 @@ pub async fn filter_already_present_semantic(
 /// downstream `new:<Class>:<n>` ordinals still line up.
 pub async fn filter_already_present_with_strategy(
     instances: Vec<ProposedInstance>,
-    existing: &HashMap<String, Vec<String>>,
+    existing: &ExistingInstances,
     identity_props: &HashMap<String, String>,
     strategy: &DedupStrategy,
-    known_existing_ids: &HashSet<String>,
 ) -> anyhow::Result<Vec<ProposedInstance>> {
     match strategy {
-        DedupStrategy::NormalizedString => Ok(filter_already_present(
-            instances,
-            existing,
-            identity_props,
-            known_existing_ids,
-        )),
+        DedupStrategy::NormalizedString => {
+            Ok(filter_already_present(instances, existing, identity_props))
+        }
         DedupStrategy::Semantic { model, threshold } => {
-            filter_already_present_semantic(
-                instances,
-                existing,
-                identity_props,
-                model,
-                *threshold,
-                known_existing_ids,
-            )
-            .await
+            filter_already_present_semantic(instances, existing, identity_props, model, *threshold)
+                .await
         }
     }
 }
