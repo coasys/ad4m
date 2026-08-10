@@ -1,5 +1,7 @@
 use super::*;
-use crate::perspectives::interpretation::ProposedInstance;
+use crate::perspectives::interpretation::types::{
+    ExistingInstances, InterpretationOp, ProposedInstance,
+};
 use crate::perspectives::model_query::types::ModelShape;
 use crate::types::Link;
 use std::collections::{HashMap, HashSet};
@@ -24,38 +26,6 @@ pub(crate) fn scalar_values(
         .filter(|(k, v)| !rel_names.contains(k.as_str()) && !v.is_null())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
-}
-
-/// A single write the interpreter wants to make.
-///
-/// Post-#884 the scalar write path is `create_subject` / `update_subject`, which
-/// own literal encoding (each property's `ad4m://setter` + `resolveLanguage`).
-/// So `Create` and `Update` carry the *values* to write, not pre-encoded links —
-/// they differ only in whether the class constructor runs (minting the type
-/// flag). `AddLinks` is the one op that still carries raw links: relation targets
-/// are instance URIs, so there is nothing to encode.
-#[derive(Debug, Clone, PartialEq)]
-pub enum InterpretationOp {
-    /// Mint a new instance at `base`: constructor (type flag) + setters.
-    Create {
-        base: String,
-        class: String,
-        values: serde_json::Map<String, serde_json::Value>,
-    },
-    /// Patch the scalar fields of an existing instance, leaving its type flag in
-    /// place — this is how the interpreter grows/refines a tree node (Flux
-    /// "grouping": continue an existing subgroup vs. start a new one). Same
-    /// per-predicate replace semantics as `Create`, minus the constructor.
-    Update {
-        base: String,
-        class: String,
-        values: serde_json::Map<String, serde_json::Value>,
-    },
-    /// Append relation links onto an instance. Purely additive — a relation to a
-    /// freshly-minted node grows the graph and must not clear sibling relations
-    /// (unlike scalar `Update`, which replaces-per-predicate). Removing a
-    /// relation is out of scope (Phase 3 semantic diff).
-    AddLinks { source: String, links: Vec<Link> },
 }
 
 /// Turn proposed instances into create/update ops with no relation context.

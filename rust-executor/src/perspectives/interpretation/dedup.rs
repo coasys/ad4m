@@ -1,5 +1,5 @@
-use super::graph::{identity_values_by_class, normalize_identity, ExistingInstances};
-use super::ProposedInstance;
+use super::graph::{identity_values_by_class, normalize_identity};
+use super::types::{ExistingInstances, ProposedInstance};
 use std::collections::{HashMap, HashSet};
 
 /// How to decide whether a proposed instance is "already present" in the graph

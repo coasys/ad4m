@@ -1,3 +1,4 @@
+use crate::perspectives::interpretation::types::{ExistingInstances, InstanceContext};
 use crate::perspectives::model_query::types::{ModelShape, ShapeProperty};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -5,17 +6,6 @@ mod read;
 mod write;
 pub use read::*;
 pub use write::*;
-
-/// The existing instances in scope for an interpretation pass, keyed by base
-/// URI (`id`). This is the **single source of truth** the whole pass reads:
-/// the prompt view ([`build_interpretation_input`]), the deterministic dedup
-/// safety net ([`filter_already_present`] / semantic), and Create-vs-Update
-/// routing ([`plan_interpretation_ops_with_context`]) all project what they
-/// need from this one map — instead of separately-threaded `class → identity`
-/// and `id-set` views that could drift out of sync. Each [`InstanceContext`]
-/// still carries its own `id`, so the value is self-describing; the key is
-/// that same id, promoted for O(1) "does the graph hold this id?" checks.
-pub type ExistingInstances = HashMap<String, InstanceContext>;
 
 /// Group existing instances by class local name for the per-class reasoning
 /// the prompt and dedup paths do. Each class's instances are sorted by `id` so
@@ -99,34 +89,4 @@ pub(crate) fn class_local_name(target_class: &str) -> &str {
         .rsplit(|c| c == '/' || c == ':')
         .find(|seg| !seg.is_empty())
         .unwrap_or(target_class)
-}
-
-/// One existing instance the interpreter should know about — the LLM sees these
-/// so it can decide whether an interpreted item is a genuinely new node (no `id`
-/// on the output) or the continuation/refinement of an existing one (emit this
-/// entry's `id` to trigger the upsert path in
-/// [`plan_interpretation_ops_with_context`]).
-///
-/// `class` is redundant with the enclosing map key, but kept on each row so the
-/// JSON entry rendered into the prompt is self-contained and unambiguous when
-/// the LLM scans a mixed-class list.
-#[derive(Debug, Clone, PartialEq)]
-pub struct InstanceContext {
-    /// Base URI of the existing instance — what the LLM emits as `id` to update.
-    pub id: String,
-    /// The class's declared `identity` value (usually `title`), decoded. Raw,
-    /// not normalized: the prompt shows it to the LLM verbatim, and
-    /// [`filter_already_present`] normalizes both sides when comparing.
-    pub title: String,
-    /// Local class name (e.g. "Task"), matching the map key of the returned map.
-    pub class: String,
-    /// Currently-set secondary scalar values, keyed by property name. Excludes
-    /// the identity property (already rendered as `title`), the class's type
-    /// flag, and every relation. Empty when the class declares no other
-    /// scalars, or when this instance has none set. Rendered into the prompt
-    /// so the LLM sees the existing instance's *state* — not just its
-    /// identity label — and can better judge whether a new turn continues an
-    /// existing instance or belongs to a fresh one on a different topic.
-    /// `BTreeMap` for deterministic prompt ordering across calls.
-    pub properties: BTreeMap<String, String>,
 }

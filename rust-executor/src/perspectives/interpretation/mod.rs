@@ -37,36 +37,16 @@
 //! the real-LLM end-to-end suite lives in `interpretation_e2e.rs`, with shared
 //! fixtures/harness in `interpretation_test_support.rs`.
 
-use serde::Deserialize;
-use std::collections::HashMap;
-
 mod dedup;
 mod graph;
 mod parse;
 mod prompt;
 mod run;
+mod types;
 
 pub use dedup::*;
 pub use graph::*;
 pub use parse::*;
 pub use prompt::*;
 pub use run::*;
-
-/// One instance the LLM proposes writing: the target class name plus a flat
-/// map of field-name -> value. Extra/unknown fields are tolerated (kept in
-/// `props`); `create_subject` only writes those that have a declared
-/// `ad4m://setter` on the class, so unknown fields never become links.
-///
-/// `id` is the upsert marker. When present it names an instance already in the
-/// graph (one the model was shown in that class's `existing` list): the
-/// proposal patches that instance's scalar fields, leaving its type flag in
-/// place. When absent, a fresh instance is minted. Relation-typed fields carry
-/// *refs* rather than values — see `plan_interpretation_ops_with_context`.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct ProposedInstance {
-    pub class: String,
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(flatten)]
-    pub props: HashMap<String, serde_json::Value>,
-}
+pub use types::*;
