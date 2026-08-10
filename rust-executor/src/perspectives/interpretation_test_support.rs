@@ -37,7 +37,7 @@ pub(crate) fn ensure_db_init() {
 
 pub(crate) const BELIEF_SDNA: &str = r#"{
   "target_class":"ns://Belief",
-  "interpretation_hint":"A claim a participant holds to be true about the world or the group. Not a task or a question.",
+  "interpretation_hint":"A claim a participant holds to be true — about the world, the work, or the group. Includes opinions, assessments, and judgments asserted as true, such as 'X is the right approach' or 'Y should be enough'. Not a task or a question.",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://belief"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://belief","min_count":1,"max_count":1},

@@ -81,7 +81,7 @@ async fn create_subject_roundtrips_soa_instance() {
 /// Intention + Belief: an intent with an owner and a claim.
 #[tokio::test]
 async fn e2e_intention_and_belief() {
-    let (p, shapes, bases) = run_e2e(
+    let (p, shapes, bases) = run_e2e_until(
         &[("Belief", BELIEF_SDNA), ("Intention", INTENTION_SDNA)],
         &[
             (
@@ -93,6 +93,11 @@ async fn e2e_intention_and_belief() {
                 "Cool. One English hint per class should be enough to steer this.",
             ),
         ],
+        3,
+        |c| {
+            c.get("intention").copied().unwrap_or(0) >= 1
+                && c.get("belief").copied().unwrap_or(0) >= 1
+        },
     )
     .await;
     assert_persisted(&p, &shapes, &bases).await;
