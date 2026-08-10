@@ -171,9 +171,9 @@ How to decide what to extract:
   - Consider EACH class independently against the WHOLE transcript, using its
     `hint`. A turn can match one class, several, or none.
   - Do not skip a clearly-stated item just because another one is also present:
-    a direct question is a Question even amid tasks; a stated claim or opinion is
-    a Belief; a reported fact or measurement is an Observation; a commitment to
-    act is a Task/Intention. Capture each on its own merits.
+    a single turn may satisfy several classes at once. Judge each class only by
+    its own `hint`, and capture every item that clearly matches it on its own
+    merits — independent of whatever other classes are also present.
   - At the same time, do not invent items the transcript does not support, and
     do not manufacture instances from greetings or small talk.
   - Only include a field if its value is present or clearly implied; omit
