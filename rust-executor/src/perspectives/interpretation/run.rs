@@ -6,9 +6,8 @@ use super::{
 };
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::{ModelShape, ParentScope};
-use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
-use crate::types::{LinkQuery, LinkStatus};
+use crate::types::LinkStatus;
 use std::collections::HashMap;
 
 /// Max attempts for [`retry_interpretation_parse`]. Mirrors Flux's `LLMutils`
@@ -66,19 +65,18 @@ where
 /// value), and letting it through would clear-and-rewrite scalar links for
 /// nothing, producing spurious link churn and confusing test placement counts.
 ///
-/// Comparison happens on **decoded** values, not raw link targets: the scalar
-/// write path encodes through each property's `resolveLanguage`, and a signed
-/// literal envelope is not byte-stable across writes. So the current target of
-/// `(base, predicate)` is read back and run through
-/// [`parse_literal_value`] — the canonical decoder `model_query` uses — before
-/// being compared with the value the model proposed.
+/// Comparison happens on **decoded** values read back through `model_query` —
+/// the same read path app code uses — so each property is resolved through its
+/// own shape/getter (`resolveLanguage` and all), not hand-decoded on the
+/// assumption every scalar is a `literal:`. The instance's current field values
+/// are compared with what the model proposed; equal ⇒ the Update is a no-op.
 ///
 /// Only Updates are considered: Creates are already deduped upstream by
-/// [`filter_already_present`], and `AddLinks` is additive by design. A property
-/// whose predicate can't be resolved from the shape is treated as "can't prove
-/// it's a no-op", so the op survives. Purely additive Updates (a property not
-/// yet set on the base) survive naturally — the current value set is empty, so
-/// it can't equal a one-element proposed set.
+/// [`filter_already_present`], and `AddLinks` is additive by design. If the
+/// base isn't resolvable as an instance of `class` (or a proposed field isn't
+/// present on it), we treat the op as "can't prove it's a no-op" and keep it.
+/// Purely additive Updates (a property not yet set on the base) survive
+/// naturally — the current value is absent, so it can't equal the proposal.
 pub async fn strip_noop_updates(
     perspective: &PerspectiveInstance,
     shapes: &[ModelShape],
@@ -95,46 +93,42 @@ pub async fn strip_noop_updates(
             kept.push(op);
             continue;
         };
-        let Some(shape) = shapes
+        if shapes
             .iter()
-            .find(|s| class_local_name(&s.target_class) == class)
-        else {
+            .all(|s| class_local_name(&s.target_class) != class)
+        {
             kept.push(op);
             continue;
-        };
-
-        let mut all_noop = !values.is_empty();
-        for (name, new_value) in values.iter() {
-            let Some(prop) = shape.properties.iter().find(|p| &p.name == name) else {
-                all_noop = false;
-                break;
-            };
-            let existing = perspective
-                .get_links(&LinkQuery {
-                    source: Some(base.clone()),
-                    predicate: Some(prop.predicate.clone()),
-                    ..Default::default()
-                })
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "strip_noop_updates: get_links({base} {}) failed: {e:#}",
-                        prop.predicate
-                    )
-                })?;
-            // Decoded current value set for this predicate, as canonical JSON
-            // strings so `Value`s (which aren't `Hash`/`Ord`) can be compared.
-            let mut current: Vec<String> = existing
-                .iter()
-                .map(|l| parse_literal_value(&l.data.target).to_string())
-                .collect();
-            current.sort();
-            current.dedup();
-            if current.len() != 1 || current[0] != new_value.to_string() {
-                all_noop = false;
-                break;
-            }
         }
+
+        // Read the instance's current state via the generic model-query read
+        // path (decodes each property through its own getter), then locate the
+        // row for this base.
+        let props: Vec<&str> = values.keys().map(String::as_str).collect();
+        let query = serde_json::json!({ "properties": props }).to_string();
+        let result_json = perspective.model_query(class, &query).await.map_err(|e| {
+            anyhow::anyhow!("strip_noop_updates: model_query({class}) failed: {e:#}")
+        })?;
+        let result: serde_json::Value = serde_json::from_str(&result_json).map_err(|e| {
+            anyhow::anyhow!("strip_noop_updates: bad model_query result for {class}: {e:#}")
+        })?;
+        let current_row = result
+            .get("instances")
+            .and_then(|v| v.as_array())
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|r| r.get("id").and_then(|i| i.as_str()) == Some(base.as_str()))
+            });
+
+        // A no-op only if the base exists and every proposed field already holds
+        // the proposed value (decoded equality). Missing row / missing field ⇒
+        // keep the op.
+        let all_noop = !values.is_empty()
+            && current_row.is_some_and(|row| {
+                values
+                    .iter()
+                    .all(|(name, new_value)| row.get(name) == Some(new_value))
+            });
 
         if all_noop {
             log::debug!("interpretation: dropping no-op update on {base}");
