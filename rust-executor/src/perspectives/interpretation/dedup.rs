@@ -1,4 +1,4 @@
-use super::graph::{filter_already_present, identity_values_by_class, ExistingInstances};
+use super::graph::{identity_values_by_class, normalize_identity, ExistingInstances};
 use super::ProposedInstance;
 use std::collections::{HashMap, HashSet};
 
@@ -558,4 +558,87 @@ mod tests {
         "intra-response duplicates must be dropped after the first occurrence; got {kept_titles:?}"
     );
     }
+}
+
+/// Deterministic dedup safety-net (pure): drop proposed instances whose
+/// (class, identity-value) already exists in the graph, compared under
+/// [`normalize_identity`]. This is the hard guarantee behind the soft
+/// `existing` hint in [`build_interpretation_input`] — even if the model
+/// re-proposes a known item, it never becomes a new instance.
+///
+/// This is the **`DedupStrategy::NormalizedString`** implementation, not a
+/// separate/legacy path: `run_interpretation` always dedups through
+/// [`filter_already_present_with_strategy`](super::filter_already_present_with_strategy),
+/// which calls this for the (default) string strategy and the embedding path
+/// for `DedupStrategy::Semantic`. No production caller invokes this directly.
+///
+/// `existing` is the id-keyed [`ExistingInstances`] source of truth; the
+/// per-class identity values are projected from it here. `identity_props` maps
+/// a class's local name to the NAME of its declared identity property. An
+/// instance whose class has no identity property is always kept (no dedup);
+/// likewise one missing that property's value.
+///
+/// Filters **in place**: the surviving instances keep the LLM's emission order,
+/// which is what the `new:<Class>:<n>` relation ordinals in
+/// [`plan_interpretation_ops_with_context`] resolve against.
+pub fn filter_already_present(
+    instances: Vec<ProposedInstance>,
+    existing: &ExistingInstances,
+    identity_props: &HashMap<String, String>,
+) -> Vec<ProposedInstance> {
+    // Seed per-class known sets with pre-existing identities; each accepted
+    // proposal is added to its class's set so a same-response duplicate is
+    // dropped like an already-persisted one. Without this, an LLM that emits
+    // the same (class, identity) twice would slip through and `run_interpretation`
+    // would create two subjects for it.
+    let mut known: HashMap<String, HashSet<String>> = identity_values_by_class(existing)
+        .into_iter()
+        .map(|(class, values)| {
+            (
+                class,
+                values.iter().map(|v| normalize_identity(v)).collect(),
+            )
+        })
+        .collect();
+    let mut out = Vec::with_capacity(instances.len());
+    for inst in instances {
+        // A *trusted* id is an explicit upsert target — it names a specific
+        // existing node, so its identity value *should* match one already
+        // present; never dedup it away. But the planner only routes to Update
+        // for ids the graph actually holds; a hallucinated id absent from
+        // `existing` would be routed to Create, so it must still be
+        // dedup-checked like an ordinary proposal (else a made-up id +
+        // duplicate identity mints a duplicate node).
+        if inst
+            .id
+            .as_deref()
+            .is_some_and(|id| existing.contains_key(id))
+        {
+            out.push(inst);
+            continue;
+        }
+        // No declared identity for this class ⇒ no dedup.
+        let Some(idp_name) = identity_props.get(&inst.class) else {
+            out.push(inst);
+            continue;
+        };
+        let Some(value) = inst.props.get(idp_name).and_then(|v| v.as_str()) else {
+            // no identity value to compare on — keep it
+            out.push(inst);
+            continue;
+        };
+        let normalized = normalize_identity(value);
+        let set = known.entry(inst.class.clone()).or_default();
+        if set.contains(&normalized) {
+            log::debug!(
+                "interpretation: dropping already-present {} '{}'",
+                inst.class,
+                value
+            );
+            continue;
+        }
+        set.insert(normalized);
+        out.push(inst);
+    }
+    out
 }
