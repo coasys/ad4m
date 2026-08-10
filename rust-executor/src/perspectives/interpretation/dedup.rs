@@ -19,21 +19,20 @@ pub enum DedupStrategy {
     /// per-class set of existing identity values. Zero external calls. This is
     /// the default: existing callers observe no behaviour change.
     NormalizedString,
-    /// Embed each identity string via an Ollama-compatible embeddings endpoint
-    /// (both `/v1/embeddings` OpenAI-compat and `/api/embeddings` native are
-    /// verified against the Marvin dev tunnel; we use the OpenAI-compat path).
+    /// Embed each identity string through the executor's own
+    /// [`AIService`](crate::ai_service::AIService) embedding model (a local
+    /// candle Bert, CPU-capable — no external endpoint and no CUDA CI switch).
     /// Proposals whose maximum cosine similarity to any existing identity in
     /// the same class meets or exceeds `threshold` are treated as duplicates
     /// and dropped.
     Semantic {
-        /// Base URL of the embeddings endpoint, without the `/embeddings`
-        /// suffix (e.g. `http://localhost:11434/v1`).
-        base_url: String,
-        /// Model tag, e.g. `nomic-embed-text`.
+        /// Id (registered name) of the `AIService` embedding model to use —
+        /// must be registered as a `ModelType::Embedding` model and loaded in
+        /// the embedding channel. The AutoProcessor supplies the default; tests
+        /// register one in the harness.
         model: String,
         /// Cosine similarity above which two identity strings are considered
-        /// the same instance. Sensible starting point: `0.85` for
-        /// `nomic-embed-text`.
+        /// the same instance.
         threshold: f32,
     },
 }
@@ -45,20 +44,15 @@ impl Default for DedupStrategy {
 }
 
 impl DedupStrategy {
-    /// A `Semantic` strategy pre-populated from env: `INTERPRETATION_EMBED_BASE_URL`
-    /// (default `http://localhost:11434/v1`), `INTERPRETATION_EMBED_MODEL`
-    /// (default `nomic-embed-text`), and a caller-provided threshold. Useful for
-    /// e2e tests and the future AutoProcessor default builder.
+    /// A `Semantic` strategy naming the `AIService` embedding model from
+    /// `INTERPRETATION_EMBED_MODEL` (default `interpretation-embed`), with a
+    /// caller-provided threshold. Useful for e2e tests and the future
+    /// AutoProcessor default builder. The named model must already be
+    /// registered with `AIService` as a `ModelType::Embedding` model.
     pub fn semantic_from_env(threshold: f32) -> Self {
-        let base_url = std::env::var("INTERPRETATION_EMBED_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
         let model = std::env::var("INTERPRETATION_EMBED_MODEL")
-            .unwrap_or_else(|_| "nomic-embed-text".to_string());
-        Self::Semantic {
-            base_url,
-            model,
-            threshold,
-        }
+            .unwrap_or_else(|_| "interpretation-embed".to_string());
+        Self::Semantic { model, threshold }
     }
 }
 
@@ -83,55 +77,30 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
-/// OpenAI-compatible embeddings client (`POST {base_url}/embeddings`). Works
-/// against Ollama's `/v1/embeddings` endpoint and any other OpenAI-shaped
-/// provider. `input` is sent as an array so one HTTP round-trip covers all
-/// candidates for a given class.
-pub async fn embed_openai_compat(
-    base_url: &str,
-    model: &str,
+/// Embed `texts` through the executor's own [`AIService`] embedding model
+/// (`model_id` must be a registered `ModelType::Embedding` model — a local
+/// candle Bert, so this runs on CPU with no external endpoint). One call per
+/// text against the shared embedding channel; order is preserved so callers can
+/// zip results back onto their inputs.
+pub(crate) async fn embed_via_ai_service(
+    model_id: &str,
     texts: &[String],
 ) -> anyhow::Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    #[derive(serde::Serialize)]
-    struct Req<'a> {
-        model: &'a str,
-        input: &'a [String],
-    }
-    #[derive(serde::Deserialize)]
-    struct Row {
-        embedding: Vec<f32>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Resp {
-        data: Vec<Row>,
-    }
-    let url = format!("{}/embeddings", base_url.trim_end_matches('/'));
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(&url)
-        .json(&Req {
-            model,
-            input: texts,
-        })
-        .send()
+    let service = crate::ai_service::AIService::global_instance()
         .await
-        .map_err(|e| anyhow::anyhow!("embed_openai_compat POST {url}: {e:#}"))?
-        .error_for_status()
-        .map_err(|e| anyhow::anyhow!("embed_openai_compat {url}: {e:#}"))?
-        .json::<Resp>()
-        .await
-        .map_err(|e| anyhow::anyhow!("embed_openai_compat {url}: bad JSON: {e:#}"))?;
-    if resp.data.len() != texts.len() {
-        return Err(anyhow::anyhow!(
-            "embed_openai_compat {url}: expected {} embeddings, got {}",
-            texts.len(),
-            resp.data.len()
-        ));
+        .map_err(|e| anyhow::anyhow!("semantic dedup: AIService not ready: {e:#}"))?;
+    let mut out = Vec::with_capacity(texts.len());
+    for text in texts {
+        let embedded = service
+            .embed(model_id.to_string(), text.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("semantic dedup: embed('{model_id}') failed: {e:#}"))?;
+        out.push(embedded.embeddings);
     }
-    Ok(resp.data.into_iter().map(|r| r.embedding).collect())
+    Ok(out)
 }
 
 /// PURE (no I/O) semantic-dedup filter over pre-computed vectors — the
@@ -191,7 +160,6 @@ pub async fn filter_already_present_semantic(
     instances: Vec<ProposedInstance>,
     existing: &HashMap<String, Vec<String>>,
     identity_props: &HashMap<String, String>,
-    base_url: &str,
     model: &str,
     threshold: f32,
 ) -> anyhow::Result<Vec<ProposedInstance>> {
@@ -229,7 +197,7 @@ pub async fn filter_already_present_semantic(
         let proposed_vals: Vec<String> = entries.iter().map(|(_, v)| v.clone()).collect();
         let mut batch = existing_vals.clone();
         batch.extend(proposed_vals.iter().cloned());
-        let vectors = embed_openai_compat(base_url, model, &batch).await?;
+        let vectors = embed_via_ai_service(model, &batch).await?;
         let (ev, pv) = vectors.split_at(existing_vals.len());
         existing_vecs.insert(class.clone(), ev.to_vec());
         let pv_entries: Vec<(usize, Vec<f32>)> = entries
@@ -261,20 +229,9 @@ pub async fn filter_already_present_with_strategy(
         DedupStrategy::NormalizedString => {
             Ok(filter_already_present(instances, existing, identity_props))
         }
-        DedupStrategy::Semantic {
-            base_url,
-            model,
-            threshold,
-        } => {
-            filter_already_present_semantic(
-                instances,
-                existing,
-                identity_props,
-                base_url,
-                model,
-                *threshold,
-            )
-            .await
+        DedupStrategy::Semantic { model, threshold } => {
+            filter_already_present_semantic(instances, existing, identity_props, model, *threshold)
+                .await
         }
     }
 }

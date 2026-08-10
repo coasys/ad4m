@@ -287,6 +287,29 @@ pub(crate) async fn setup_interpretation_e2e(
     (perspective, shapes, ctx)
 }
 
+/// Register (and load) an `AIService` embedding model named `interpretation-embed`
+/// — a local candle Bert (CPU) — so the `DedupStrategy::Semantic` path can embed
+/// identity strings through `AIService::embed` rather than any external endpoint.
+/// The channel is keyed by the model *name*, which is what `semantic_from_env`
+/// (default `interpretation-embed`) passes to `embed`. Idempotent-ish: only the
+/// one semantic-dedup e2e needs it, so it isn't part of the default setup (Bert
+/// load is not free).
+pub(crate) async fn register_interpretation_embedding_model() {
+    use crate::types::{ModelInput, ModelType};
+    let service = crate::ai_service::AIService::global_instance()
+        .await
+        .expect("AIService global instance");
+    service
+        .add_model(ModelInput {
+            name: "interpretation-embed".into(),
+            model_type: ModelType::Embedding,
+            local: None,
+            api: None,
+        })
+        .await
+        .expect("add_model(Embedding)");
+}
+
 /// Read back the links written under each affected `base`. Production
 /// `run_interpretation` is link-free (it returns only base URIs), but a few e2e
 /// tests assert on the *edges* a run wrote (a resolved `topic-of` relation, a

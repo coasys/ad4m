@@ -984,6 +984,9 @@ async fn e2e_semantic_dedup_drops_reworded_duplicate() {
     use crate::perspectives::interpretation::DedupStrategy;
 
     let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
+    // Semantic dedup embeds identity strings through AIService's own (local,
+    // CPU) embedding model — register it before the run.
+    super::interpretation_test_support::register_interpretation_embedding_model().await;
     let task_shape = &shapes[0];
 
     // Seed with one wording; transcript uses a different wording for the SAME
@@ -1046,5 +1049,69 @@ async fn e2e_semantic_dedup_drops_reworded_duplicate() {
     assert!(
         counts.get("task").copied().unwrap_or(0) >= 2,
         "expected the seeded task + the new CI-docs task; got {counts:?}"
+    );
+}
+
+/// Deterministic proof that the `DedupStrategy::Semantic` path — AIService's
+/// local Bert embeddings + cosine threshold — actually drops a paraphrased
+/// duplicate while keeping an unrelated item. The LLM-driven e2e above only
+/// exercises this when the model happens to re-propose the seeded item; this
+/// test removes that non-determinism by feeding hand-crafted proposals straight
+/// into `filter_already_present_with_strategy`.
+#[tokio::test]
+async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
+    use crate::perspectives::interpretation::{
+        filter_already_present_with_strategy, DedupStrategy, ProposedInstance,
+    };
+    use std::collections::HashMap;
+
+    // Reuse the standard harness to initialise the DB + AIService global, then
+    // register the embedding model. (The LLM this also registers is unused here.)
+    let _ = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
+    super::interpretation_test_support::register_interpretation_embedding_model().await;
+
+    let existing: HashMap<String, Vec<String>> = HashMap::from([(
+        "Task".to_string(),
+        vec!["Finish the WebRTC call module".to_string()],
+    )]);
+    let identity_props: HashMap<String, String> =
+        HashMap::from([("Task".to_string(), "title".to_string())]);
+
+    let mk = |title: &str| ProposedInstance {
+        class: "Task".to_string(),
+        id: None,
+        props: HashMap::from([(
+            "title".to_string(),
+            serde_json::Value::String(title.to_string()),
+        )]),
+    };
+    let proposed = vec![
+        mk("Wrap up the WebRTC calling module"), // paraphrase of the seed → drop
+        mk("Update the CI documentation"),       // unrelated → keep
+    ];
+
+    let kept = filter_already_present_with_strategy(
+        proposed,
+        &existing,
+        &identity_props,
+        &DedupStrategy::Semantic {
+            model: "interpretation-embed".to_string(),
+            threshold: 0.6,
+        },
+    )
+    .await
+    .expect("semantic dedup");
+
+    let titles: Vec<&str> = kept
+        .iter()
+        .filter_map(|p| p.props.get("title").and_then(|v| v.as_str()))
+        .collect();
+    assert!(
+        titles.iter().any(|t| t.contains("CI documentation")),
+        "unrelated task must survive semantic dedup; got {titles:?}"
+    );
+    assert!(
+        !titles.iter().any(|t| t.contains("WebRTC")),
+        "paraphrased WebRTC task must be dropped by semantic dedup; got {titles:?}"
     );
 }
