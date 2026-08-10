@@ -34,8 +34,8 @@ fn clean_llm_json(raw: &str) -> String {
     let s = fence.replace_all(&s, "");
 
     // 3. Remove trailing commas before a closing } or ] (invalid JSON, common).
-    let trailing = regex::Regex::new(r",(\s*[}\]])").unwrap();
-    let s = trailing.replace_all(&s, "$1");
+    //    Must skip commas inside string literals so values like "a, }" survive.
+    let s: std::borrow::Cow<'_, str> = std::borrow::Cow::Owned(strip_trailing_commas(&s));
 
     // 4. Extract the first JSON array (or object) if surrounded by prose.
     //    Mirrors Flux `LLMutils.ts` — models sometimes prefix an explanation
@@ -59,4 +59,47 @@ fn extract_bracketed(s: &str, open: char, close: char) -> Option<String> {
         return None;
     }
     Some(s[start..=end].to_string())
+}
+
+/// Remove commas that appear immediately before `}` or `]` (with optional
+/// whitespace in between), but only when the comma is outside a JSON string
+/// literal.  This avoids mangling values like `"hello, }"`.
+fn strip_trailing_commas(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+
+    while i < len {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else if c == '"' {
+            in_string = true;
+            out.push(c);
+        } else if c == ',' {
+            let mut j = i + 1;
+            while j < len && chars[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < len && (chars[j] == '}' || chars[j] == ']') {
+                // trailing comma before closing bracket — drop it
+            } else {
+                out.push(',');
+            }
+        } else {
+            out.push(c);
+        }
+        i += 1;
+    }
+    out
 }
