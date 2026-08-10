@@ -400,7 +400,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     };
     lastResultFingerprint = buildFingerprint(initialResults);
 
-    // Listen for subscription updates via the same GraphQL subscription channel.
+    // Listen for subscription updates via the same WS-RPC subscription channel.
     // When Rust re-runs the model query and finds changed results, it pushes them.
     const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
       subscriptionId,

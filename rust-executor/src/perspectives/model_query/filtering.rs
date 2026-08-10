@@ -1050,7 +1050,6 @@ mod tests {
             properties: vec![],
             include_relations: vec![],
             interpretation_hint: None,
-            input_scope_query: None,
         }
     }
 

@@ -329,33 +329,12 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 .and_then(|r| r["hint"].as_str().map(decode_literal_string_target))
         });
 
-    // Optional input-scope SPARQL query — read from the shape node so the
-    // interpretation pipeline can pull just the messages this class cares
-    // about instead of the full channel.
-    let input_scope_query_sparql = format!(
-        r#"
-        SELECT ?query WHERE {{
-            <{shape_uri}> <ad4m://input_scope_query> ?query .
-        }}
-        LIMIT 1
-        "#
-    );
-    let input_scope_query = store
-        .query(&input_scope_query_sparql)
-        .ok()
-        .and_then(|json| serde_json::from_str::<Vec<Value>>(&json).ok())
-        .and_then(|rows| {
-            rows.first()
-                .and_then(|r| r["query"].as_str().map(decode_literal_string_target))
-        });
-
     Ok(ModelShape {
         target_class,
         shape_uri,
         properties,
         include_relations,
         interpretation_hint: class_hint,
-        input_scope_query,
     })
 }
 
@@ -695,7 +674,6 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
         properties,
         include_relations,
         interpretation_hint: None,
-        input_scope_query: None,
     })
 }
 
