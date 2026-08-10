@@ -16,6 +16,7 @@ import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
+import type { AddAutoProcessorConfig, AutoProcessorEvent } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
@@ -563,6 +564,21 @@ export class PerspectiveProxy {
      */
     async runInterpretation(transcript: TranscriptTurn[], basePrefix: string, classes?: string[], linkStatus?: LinkStatus): Promise<string[]> {
         return await this.#client.runInterpretation(this.#handle.uuid, transcript, basePrefix, classes, linkStatus)
+    }
+
+    /**
+     * Register a neighbourhood auto-processor on this perspective. The executor
+     * then runs interpretation automatically over new source items (like Flux
+     * per channel), coordinating which peer processes each batch. Returns the
+     * processor id. Subscribe to progress via {@link addAutoProcessorEventListener}.
+     */
+    async addAutoProcessor(config: AddAutoProcessorConfig): Promise<string> {
+        return await this.#client.addAutoProcessor(this.#handle.uuid, config)
+    }
+
+    /** Subscribe to this perspective's auto-processor step signals. */
+    async addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): Promise<void> {
+        return await this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb)
     }
 
     /**

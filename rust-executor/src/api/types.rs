@@ -563,9 +563,12 @@ pub struct RunInterpretationRequest {
 /// (mirrors what Flux does per channel), coordinating which peer processes each
 /// batch via the shared-graph `ProcessingClaim`. Emits step signals on the
 /// events WebSocket (`auto-processor-event`).
-#[derive(Deserialize, TS)]
+///
+/// Server-side deserialization only: the TypeScript client hand-mirrors this as
+/// `AddAutoProcessorConfig` (uuid passed separately), so no `ts-rs` export is
+/// needed here.
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct AddAutoProcessorRequest {
     pub uuid: String,
     /// Human-meaningful processor id (unique per perspective).

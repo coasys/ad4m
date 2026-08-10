@@ -11,6 +11,7 @@ import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
+import type { AddAutoProcessorConfig, AutoProcessorEvent } from "./AutoProcessor";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -267,6 +268,37 @@ export class PerspectiveClient {
             'perspective.runInterpretation', { uuid, transcript, basePrefix, classes, linkStatus },
             RUN_INTERPRETATION_TIMEOUT_MS,
         )
+    }
+
+    /**
+     * Register a neighbourhood auto-processor on this perspective. The executor's
+     * watch loop then runs interpretation automatically over new source items
+     * (like Flux per channel), coordinating which peer processes each batch via
+     * the shared-graph ProcessingClaim, and emits step signals on the events
+     * WebSocket (subscribe via {@link addAutoProcessorEventListener}).
+     * Returns the processor id.
+     */
+    async addAutoProcessor(uuid: string, config: AddAutoProcessorConfig): Promise<string> {
+        return this.#apiClient.call<string>(
+            'perspective.addAutoProcessor', { uuid, ...config },
+        )
+    }
+
+    /**
+     * Subscribe to auto-processor step signals. `cb` fires for every
+     * `auto-processor-event` on `uuid` (BatchReady → Claimed/BackedOff/… →
+     * Processed), letting a UI show progress and await the next batch.
+     */
+    async addAutoProcessorEventListener(uuid: String, cb: (event: AutoProcessorEvent) => void): Promise<void> {
+        const unsub = this.#apiClient.subscribe(
+            (data) => {
+                if (data.type === 'auto-processor-event' && data.perspectiveUuid === uuid) {
+                    cb(data as unknown as AutoProcessorEvent)
+                }
+            }
+        )
+        this.#unsubscribers.push(unsub)
+        await this.#apiClient.waitForSubscription()
     }
 
     async addLinkExpression(uuid: string, link: LinkExpression, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
