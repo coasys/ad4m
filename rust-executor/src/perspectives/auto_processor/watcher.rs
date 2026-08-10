@@ -25,6 +25,7 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 
 use super::claim::{try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
+use super::events::{emit, AutoProcessorEvent, AutoProcessorStep};
 
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -82,19 +83,26 @@ impl WatcherState {
     /// this keeps the pending queue small when the source graph emits several
     /// `link-added` events for the same node (e.g. type + predicate + data
     /// links landing back-to-back).
+    ///
+    /// `last_touched_ms` (the debounce clock) advances **only for a genuinely
+    /// new id**. This is what lets the polling watch loop actually settle: the
+    /// loop re-gathers the *whole* transcript every tick and re-`record_item`s
+    /// each turn, so if a duplicate re-emit bumped the clock, the debounce
+    /// window would reset every tick and a batch would never drain. Debounce
+    /// therefore means "quiet for `debounce_ms` since the last *new* item".
     pub fn record_item(&mut self, processor_id: &str, item_id: String, now_ms: i64) {
         let entry = self
             .per_processor
             .entry(processor_id.to_string())
             .or_default();
-        if entry.items.is_empty() {
-            // First item of a fresh window — start the max-wait clock.
-            entry.first_touched_ms = now_ms;
-        }
         if !entry.items.contains(&item_id) {
+            if entry.items.is_empty() {
+                // First item of a fresh window — start the max-wait clock.
+                entry.first_touched_ms = now_ms;
+            }
             entry.items.push(item_id);
+            entry.last_touched_ms = now_ms;
         }
-        entry.last_touched_ms = now_ms;
     }
 
     /// Read-only view of a processor's pending state (tests + observability).
@@ -365,6 +373,31 @@ pub async fn run_one_pass(
         );
     }
 
+    // Step signals (P-B2c): observable pass lifecycle for tests + the WS layer.
+    let uuid = perspective.uuid.clone();
+    macro_rules! signal {
+        ($step:expr) => {
+            emit(AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step).with_items(item_ids))
+                .await
+        };
+        ($step:expr, detail = $d:expr) => {
+            emit(
+                AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
+                    .with_items(item_ids)
+                    .with_detail($d),
+            )
+            .await
+        };
+        ($step:expr, bases = $b:expr) => {
+            emit(
+                AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
+                    .with_items(item_ids)
+                    .with_bases($b),
+            )
+            .await
+        };
+    }
+
     // 0. Authorship-ordered candidacy (fast-path, P-B2b3). Best-effort: a
     //    missing/erroring telepresence adapter or a batch with no resolvable
     //    authors falls through to `try_claim`, which is the real correctness
@@ -402,6 +435,7 @@ pub async fn run_one_pass(
                              precedes us in message order",
                             cfg.processor_id
                         );
+                        signal!(AutoProcessorStep::NotCandidate, detail = winner.clone());
                         return Ok(PassOutcome::NotCandidate { winner });
                     }
                     AuthorElection::NoneOnline => {
@@ -410,6 +444,7 @@ pub async fn run_one_pass(
                              participant to return before processing",
                             cfg.processor_id
                         );
+                        signal!(AutoProcessorStep::AwaitingAuthor);
                         return Ok(PassOutcome::AwaitingAuthor);
                     }
                 }
@@ -441,8 +476,10 @@ pub async fn run_one_pass(
             "auto_processor `{}`: backed off — holder `{holder}` has the claim",
             cfg.processor_id
         );
+        signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
         return Ok(PassOutcome::BackedOff { holder });
     }
+    signal!(AutoProcessorStep::Claimed);
 
     // 2. Resolve shapes.
     let store = &*perspective.sparql_store;
@@ -461,20 +498,27 @@ pub async fn run_one_pass(
         }
     }
     if !missing.is_empty() {
+        signal!(
+            AutoProcessorStep::ShapesMissing,
+            detail = missing.join(", ")
+        );
         return Ok(PassOutcome::ShapesMissing { missing });
     }
 
     // 3. Gather transcript.
+    signal!(AutoProcessorStep::GatheringTranscript);
     let transcript = gather_transcript_sparql(perspective, &cfg.source_scope_query).await?;
     if transcript.is_empty() {
         log::info!(
             "auto_processor `{}`: source_scope_query returned 0 rows; nothing to interpret",
             cfg.processor_id
         );
+        signal!(AutoProcessorStep::EmptyTranscript);
         return Ok(PassOutcome::EmptyTranscript);
     }
 
     // 4. Interpret.
+    signal!(AutoProcessorStep::RunningInterpretation);
     let dedup = parse_dedup_strategy_json(cfg.dedup_strategy_json.as_deref());
     let base_prefix = format!("ad4m://autoprocessor/{}/instance/", cfg.processor_id);
     let bases = run_interpretation_with_strategy_and_model(
@@ -492,6 +536,7 @@ pub async fn run_one_pass(
         None,
     )
     .await?;
+    signal!(AutoProcessorStep::Processed, bases = &bases);
     Ok(PassOutcome::Won { bases })
 }
 
@@ -677,9 +722,11 @@ mod tests {
         w.record_item("p", "i1".into(), 400);
         let pending = w.pending_for("p").expect("pending exists");
         assert_eq!(pending.items, vec!["i1".to_string(), "i2".to_string()]);
-        // last_touched follows the most recent record regardless of duplicate
-        // status — otherwise a noisy re-emit resets the debounce clock.
-        assert_eq!(pending.last_touched_ms, 400);
+        // last_touched advances only on a genuinely NEW id: i1@100 then i2@300.
+        // The duplicate i1 re-emits at 200 and 400 must NOT bump it — otherwise
+        // the polling loop's every-tick re-gather would reset the debounce
+        // window forever and no batch would ever drain. So it's 300, not 400.
+        assert_eq!(pending.last_touched_ms, 300);
     }
 
     /// Debounce elapsed + pending non-empty → drain returns everything (below

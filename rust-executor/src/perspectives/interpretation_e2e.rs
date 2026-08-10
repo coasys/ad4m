@@ -1770,6 +1770,165 @@ async fn auto_processor_two_configs_no_cross_contamination() {
     }
 }
 
+// ---- auto_processor P-B2c: high-level, signal-driven, no manual interpretation
+
+/// The clean high-level auto-processor integration test: write a processor
+/// config + seed a channel's messages, then let the **real watch-loop tick**
+/// (`run_auto_processor_tick`) do everything — gather the transcript, debounce,
+/// claim, run the LLM, write the instances — while the test only *observes* it
+/// through the [`events`](crate::perspectives::auto_processor::events) signals
+/// and asserts the outcome. No manual `run_interpretation`, no manual transcript
+/// wrangling: exactly what a Flux channel does when new messages arrive.
+///
+/// Proves: (a) the loop settles and drains a batch (the debounce fix — a
+/// re-gathered duplicate no longer resets the clock), (b) it emits the pass
+/// lifecycle `BatchReady → Claimed → GatheringTranscript → RunningInterpretation
+/// → Processed`, awaitable by a listener, and (c) it actually creates the
+/// ConversationSubgroup on the perspective.
+///
+/// Real-LLM (gemma3:12b). Retry loop for model non-determinism.
+#[tokio::test]
+async fn auto_processor_high_level_signal_driven_pass() {
+    use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+    use crate::perspectives::auto_processor::events::{
+        next_event_matching, subscribe, AutoProcessorStep,
+    };
+    use crate::perspectives::auto_processor::watcher::WatcherState;
+    use crate::types::{Link, LinkStatus};
+    use std::collections::{HashMap, HashSet};
+    use std::time::Duration;
+
+    let processor_id = "flux-channel-proc";
+    let attempts = 3u8;
+    let mut last_err: Option<String> = None;
+
+    for attempt in 1..=attempts {
+        let (mut perspective, _shapes, ctx) =
+            setup_interpretation_e2e(&[("ConversationSubgroup", CONVERSATION_SUBGROUP_SDNA)]).await;
+
+        // Seed a channel's worth of messages on one topic — link pairs, exactly
+        // as a Flux channel perspective holds them.
+        for (uri, author, body) in [
+            ("msg://c1", "did:key:ana", "Our webhook retries keep dropping during payment outages — we lose the failed events."),
+            ("msg://c2", "did:key:ben", "Right, the payments queue has no way to replay what got dropped last time."),
+        ] {
+            for (pred, target) in [
+                ("ns://body", format!("literal:string:{body}")),
+                ("ns://author", author.to_string()),
+            ] {
+                perspective
+                    .add_link(
+                        Link { source: uri.into(), predicate: Some(pred.into()), target },
+                        LinkStatus::Local,
+                        None,
+                        &ctx,
+                    )
+                    .await
+                    .expect("seed channel message link");
+            }
+        }
+
+        // Write the processor into the shared graph — the loop reads it back.
+        let cfg = AutoProcessorConfig {
+            processor_id: processor_id.into(),
+            source_scope_query: "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
+                                 ?m <ns://author> ?speaker . } ORDER BY ?m"
+                .into(),
+            interpretation_classes: vec!["ns://ConversationSubgroup".into()],
+            debounce_ms: 50,
+            batch_min: 2,
+            batch_max: 32,
+            max_wait_ms: None,
+            claim_ttl_ms: 60_000,
+            llm_base_url: None,
+            llm_model: None,
+            dedup_strategy_json: None,
+        };
+        write_processor(&mut perspective, &cfg, &ctx)
+            .await
+            .expect("write_processor");
+
+        // Observe the pass purely through the event stream.
+        let mut rx = subscribe().await;
+        let mut watcher = WatcherState::new();
+        let mut processed: HashMap<String, HashSet<String>> = HashMap::new();
+
+        // Tick 1 records the two turns (debounce not yet elapsed → no drain).
+        perspective
+            .run_auto_processor_tick(&mut watcher, &mut processed, 1_000)
+            .await;
+        // Tick 2, past the debounce window: the re-gathered duplicates don't
+        // reset the clock (the fix), so the batch drains and the real pass runs.
+        perspective
+            .run_auto_processor_tick(&mut watcher, &mut processed, 1_100)
+            .await;
+
+        // Await the terminal signal — this is what a WS client / test waits on
+        // instead of polling the graph.
+        let processed_ev = next_event_matching(&mut rx, Duration::from_secs(90), |e| {
+            e.processor_id == processor_id && e.step == AutoProcessorStep::Processed
+        })
+        .await;
+        let Some(ev) = processed_ev else {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: no `Processed` signal within timeout"
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        };
+        if ev.bases.is_empty() {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: Processed signal carried no bases"
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        }
+
+        // The subgroup must actually exist on the perspective, with a
+        // payments-flavoured summary — created entirely by the loop.
+        let rows =
+            model_instances(&perspective, "ConversationSubgroup", &["name", "summary"]).await;
+        if rows.is_empty() {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: loop signalled Processed but no ConversationSubgroup persisted"
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        }
+        let any_payments = rows.iter().any(|r| {
+            let name = r
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let summary = r
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            contains_any(&name, &["payment", "webhook", "retry", "queue"])
+                || contains_any(
+                    &summary,
+                    &["payment", "webhook", "retry", "queue", "replay"],
+                )
+        });
+        if !any_payments {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: subgroup created but not about the channel topic: {rows:#?}"
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        }
+
+        // Full high-level pass held on this attempt.
+        return;
+    }
+    panic!(
+        "auto_processor high-level signal-driven e2e failed after {attempts} attempts: {}",
+        last_err.unwrap_or_default()
+    );
+}
+
 /// Deterministic proof that the `DedupStrategy::Semantic` path — AIService's
 /// local Bert embeddings + cosine threshold — actually drops a paraphrased
 /// duplicate while keeping an unrelated item. The LLM-driven e2e above only
