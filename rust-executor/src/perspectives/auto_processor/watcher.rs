@@ -282,10 +282,9 @@ pub fn parse_dedup_strategy_json(blob: Option<&str>) -> DedupStrategy {
     match value.get("kind").and_then(|v| v.as_str()) {
         Some("normalized") => DedupStrategy::NormalizedString,
         Some("semantic") => {
-            let base_url = value
-                .get("base_url")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+            // Post-#883, semantic dedup embeds through AIService's own local
+            // model — no external `base_url`. Only `model` (the registered
+            // embedding-model name) + `threshold` are needed.
             let model = value
                 .get("model")
                 .and_then(|v| v.as_str())
@@ -294,16 +293,12 @@ pub fn parse_dedup_strategy_json(blob: Option<&str>) -> DedupStrategy {
                 .get("threshold")
                 .and_then(|v| v.as_f64())
                 .map(|f| f as f32);
-            match (base_url, model, threshold) {
-                (Some(base_url), Some(model), Some(threshold)) => DedupStrategy::Semantic {
-                    base_url,
-                    model,
-                    threshold,
-                },
+            match (model, threshold) {
+                (Some(model), Some(threshold)) => DedupStrategy::Semantic { model, threshold },
                 _ => {
                     log::warn!(
                         "parse_dedup_strategy_json: semantic strategy missing required fields \
-                         (base_url/model/threshold) in `{json}`; falling back to default"
+                         (model/threshold) in `{json}`; falling back to default"
                     );
                     DedupStrategy::default()
                 }
@@ -490,6 +485,11 @@ pub async fn run_one_pass(
         context,
         &dedup,
         cfg.llm_model.as_deref(),
+        // Existing-instance scope: not yet wired from the processor config —
+        // #883 added the plumbing (`existing_instance_context(scope)`), but the
+        // per-channel scope belongs to a follow-up config field. `None` keeps
+        // today's whole-perspective existing-set behaviour.
+        None,
     )
     .await?;
     Ok(PassOutcome::Won { bases })
@@ -841,15 +841,10 @@ mod tests {
     #[test]
     fn parse_dedup_semantic_full_shape() {
         let strat = parse_dedup_strategy_json(Some(
-            r#"{"kind":"semantic","base_url":"http://x/v1","model":"nomic","threshold":0.8}"#,
+            r#"{"kind":"semantic","model":"nomic","threshold":0.8}"#,
         ));
         match strat {
-            DedupStrategy::Semantic {
-                base_url,
-                model,
-                threshold,
-            } => {
-                assert_eq!(base_url, "http://x/v1");
+            DedupStrategy::Semantic { model, threshold } => {
                 assert_eq!(model, "nomic");
                 assert!((threshold - 0.8).abs() < 1e-4);
             }
