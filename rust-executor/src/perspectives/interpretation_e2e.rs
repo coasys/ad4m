@@ -1115,3 +1115,126 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
         "paraphrased WebRTC task must be dropped by semantic dedup; got {titles:?}"
     );
 }
+
+/// Full `run_interpretation` e2e that actually exercises the parent-scope
+/// plumbing end-to-end (prompt build → LLM → dedup → write), not just the
+/// isolated `existing_instance_context` helper. One existing Task lives under
+/// parent B. A transcript restates it. Semantic dedup (Bert) removes wording
+/// sensitivity so the assertions turn purely on *scope*:
+///   - scoped to parent B (contains the seed): the restatement is deduped — no
+///     fresh `ext/` task is minted (robust: holds whether or not the LLM
+///     re-proposes it).
+///   - scoped to parent A (empty): the seed is out of scope, so the restatement
+///     is created as a new instance. Retried until the model proposes it.
+#[tokio::test]
+async fn e2e_run_interpretation_honours_parent_scope() {
+    use crate::perspectives::interpretation::{run_interpretation_with_strategy, DedupStrategy};
+    use crate::perspectives::model_query::types::ParentScope;
+    use crate::types::{Link, LinkStatus};
+
+    let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
+    super::interpretation_test_support::register_interpretation_embedding_model().await;
+
+    // Existing task under parent B only.
+    seed_instance(
+        &mut perspective,
+        &ctx,
+        &shapes[0],
+        "soa://tree-b/task/staging-db",
+        "Provision the staging database",
+    )
+    .await;
+    perspective
+        .add_link(
+            Link {
+                source: "soa://parent/b".into(),
+                predicate: Some("ns://contains".into()),
+                target: "soa://tree-b/task/staging-db".into(),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("parent link");
+
+    let transcript = vec![(
+        "Nico".to_string(),
+        "Reminder for the team: we still need to provision the staging database — it's blocking QA."
+            .to_string(),
+    )];
+    let semantic = DedupStrategy::Semantic {
+        model: "interpretation-embed".to_string(),
+        threshold: 0.6,
+    };
+    let in_scope = ParentScope::Raw {
+        id: "soa://parent/b".into(),
+        predicate: "ns://contains".into(),
+    };
+    let out_scope = ParentScope::Raw {
+        id: "soa://parent/a".into(),
+        predicate: "ns://contains".into(),
+    };
+
+    let minted_staging = |rows: &[serde_json::Value]| -> usize {
+        rows.iter()
+            .filter(|r| {
+                r.get("id")
+                    .and_then(|i| i.as_str())
+                    .map(|id| id.starts_with("soa://ext/"))
+                    .unwrap_or(false)
+                    && r.get("title")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t.to_lowercase().contains("staging"))
+                        .unwrap_or(false)
+            })
+            .count()
+    };
+
+    // In-scope: the restatement must be deduped against the existing seed — no
+    // fresh ext/ task minted.
+    run_interpretation_with_strategy(
+        &mut perspective,
+        &shapes,
+        &transcript,
+        "soa://ext/",
+        &ctx,
+        &semantic,
+        Some(&in_scope),
+    )
+    .await
+    .expect("in-scope run");
+    let rows = model_instances(&perspective, "Task", &["title"]).await;
+    assert_eq!(
+        minted_staging(&rows),
+        0,
+        "in-scope run must dedup the restatement against the parent-B seed; minted {:#?}",
+        rows
+    );
+
+    // Out-of-scope: the parent-B seed is invisible, so the clearly-restated task
+    // is a genuinely new instance. Retry until the model proposes it.
+    let mut minted = 0;
+    for _ in 0..4 {
+        run_interpretation_with_strategy(
+            &mut perspective,
+            &shapes,
+            &transcript,
+            "soa://ext/",
+            &ctx,
+            &semantic,
+            Some(&out_scope),
+        )
+        .await
+        .expect("out-of-scope run");
+        let rows = model_instances(&perspective, "Task", &["title"]).await;
+        minted = minted_staging(&rows);
+        if minted >= 1 {
+            break;
+        }
+    }
+    assert!(
+        minted >= 1,
+        "out-of-scope run must NOT dedup against the parent-B seed — expected a new staging task under ext/"
+    );
+}
