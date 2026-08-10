@@ -1459,45 +1459,6 @@ async fn dispatcher_normalized_string_matches_direct_call() {
     assert_eq!(d_titles, vec!["Write the docs"]);
 }
 
-// ---- input-scope SPARQL: shape roundtrip + gather_transcript_sparql -------
-
-#[test]
-fn shape_from_sdna_reads_back_input_scope_query() {
-    // The SDNA-declared class-level `input_scope_query` must round-trip through
-    // the SHACL writer + `load_shape` so `run_interpretation` (and the
-    // AutoProcessor to come) can read a per-class SPARQL scope off `ModelShape`.
-    let sdna = r#"{
-        "target_class":"ns://Intention",
-        "interpretation_hint":"A first-person commitment.",
-        "input_scope_query":"SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . }",
-        "properties":[
-          {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1}
-        ]
-    }"#;
-    let shape = shape_from_sdna("Intention", sdna);
-    assert_eq!(
-        shape.interpretation_hint.as_deref(),
-        Some("A first-person commitment."),
-        "class hint still round-trips (regression guard)"
-    );
-    assert_eq!(
-        shape.input_scope_query.as_deref(),
-        Some("SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . }"),
-        "input_scope_query must round-trip via ad4m://input_scope_query link"
-    );
-}
-
-#[test]
-fn shape_from_sdna_without_scope_yields_none() {
-    // Absence is a first-class signal: the caller falls back to the flat
-    // channel view. `None` must survive the SDNA → shape roundtrip.
-    let shape = shape_from_sdna("Intention", INTENTION_SDNA);
-    assert!(
-        shape.input_scope_query.is_none(),
-        "no input_scope_query declared ⇒ ModelShape.input_scope_query = None"
-    );
-}
-
 /// Seed the perspective with `(msg_uri, author, body_text)` triples wired as
 /// two direct links per message: `<msg> <ns://body> <literal:string:...>` and
 /// `<msg> <ns://author> <did:key:...>`. Mirrors the shape a Flux-style channel
@@ -1626,80 +1587,6 @@ async fn gather_transcript_sparql_scopes_to_predicate() {
         scoped,
         vec![("did:key:alice".to_string(), "I'll ship the doc".to_string())],
         "scoped query must exclude messages under other predicates"
-    );
-}
-
-#[tokio::test]
-async fn gather_transcript_for_shapes_unions_and_dedups() {
-    // Multiple classes may each declare their own input scope. The union
-    // helper runs every declared query, dedups identical (speaker, text) turns
-    // (preserving first-seen order), and returns `Some(...)` when at least
-    // one shape contributed a query.
-    use super::graph::gather_transcript_for_shapes;
-    let (mut perspective, _shapes, ctx) =
-        setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
-    seed_message(
-        &mut perspective,
-        &ctx,
-        "msg://1",
-        "did:key:alice",
-        "commit A",
-        "ns://body",
-    )
-    .await;
-    seed_message(
-        &mut perspective,
-        &ctx,
-        "msg://2",
-        "did:key:bob",
-        "commit B",
-        "ns://body",
-    )
-    .await;
-
-    // Two classes: intention-scope (both) and task-scope (only bob). Overlap
-    // on bob must dedup, order stays from the first query that saw each turn.
-    let intention_scope = "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . } ORDER BY ?m";
-    let task_scope = "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . FILTER(STRENDS(STR(?m), \"/2\")) }";
-    let intention_sdna = format!(
-        r#"{{"target_class":"ns://Intention","input_scope_query":{intention_scope:?},"properties":[{{"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1}}]}}"#
-    );
-    let task_sdna = format!(
-        r#"{{"target_class":"ns://Task","input_scope_query":{task_scope:?},"properties":[{{"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1}}]}}"#
-    );
-    let shapes = vec![
-        shape_from_sdna("Intention", &intention_sdna),
-        shape_from_sdna("Task", &task_sdna),
-    ];
-
-    let turns = gather_transcript_for_shapes(&perspective, &shapes)
-        .await
-        .expect("gather_transcript_for_shapes")
-        .expect("Some(_) when at least one shape declares a scope");
-    assert_eq!(
-        turns,
-        vec![
-            ("did:key:alice".to_string(), "commit A".to_string()),
-            ("did:key:bob".to_string(), "commit B".to_string()),
-        ],
-        "union preserves first-seen order and drops the duplicate bob turn"
-    );
-}
-
-#[tokio::test]
-async fn gather_transcript_for_shapes_returns_none_when_no_scope_declared() {
-    // With no shape carrying an input_scope_query, the helper must signal
-    // "nothing declared" via `None` so the caller can fall back to the
-    // channel-flat `gather_transcript`, not silently hand the LLM `[]`.
-    use super::graph::gather_transcript_for_shapes;
-    let (perspective, shapes, _ctx) =
-        setup_perspective_no_llm(&[("Intention", INTENTION_SDNA), ("Task", TASK_SDNA)]).await;
-    let out = gather_transcript_for_shapes(&perspective, &shapes)
-        .await
-        .expect("gather_transcript_for_shapes");
-    assert!(
-        out.is_none(),
-        "no scope declared ⇒ None (fallback trigger), got {out:?}"
     );
 }
 

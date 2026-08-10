@@ -474,14 +474,12 @@ pub(crate) fn decode_literal_string(uri: &str) -> Option<String> {
 /// [`decode_literal_string`]); rows that decode to non-string literals or
 /// bind neither cleanly are skipped rather than failing the whole gather.
 ///
-/// This is the generic counterpart to [`gather_transcript`]: it lets a
-/// class declare its own input-scope query (via the SDNA
-/// `ad4m://input_scope_query` link, read back as
-/// [`ModelShape::input_scope_query`]) so an Intention-only or Task-only
-/// interpretation can pull just the relevant subset of the transcript
-/// perspective instead of the full channel. Callers that just want the
-/// flat "all messages on this source under this predicate" view should
-/// keep using the source+predicate wrapper.
+/// This is the generic counterpart to [`gather_transcript`]: a caller supplies
+/// an arbitrary scope query (the AutoProcessor reads one off its config; tests
+/// pass one directly) so interpretation can run over just the relevant subset
+/// of the perspective instead of the full channel. Callers that just want the
+/// flat "all messages on this source under this predicate" view should keep
+/// using the source+predicate wrapper.
 pub async fn gather_transcript_sparql(
     perspective: &PerspectiveInstance,
     sparql: &str,
@@ -511,39 +509,6 @@ pub async fn gather_transcript_sparql(
         out.push((speaker.to_string(), text));
     }
     Ok(out)
-}
-
-/// Union of every declared input-scope query across `shapes`, deduplicating
-/// identical `(speaker, text)` turns while preserving first-seen order. Shapes
-/// without an `input_scope_query` contribute nothing. Returns `None` when no
-/// shape declared one — the caller should then fall back to the flat
-/// [`gather_transcript`] channel view rather than passing an empty transcript
-/// to the LLM.
-pub async fn gather_transcript_for_shapes(
-    perspective: &PerspectiveInstance,
-    shapes: &[ModelShape],
-) -> anyhow::Result<Option<Vec<(String, String)>>> {
-    let mut any_declared = false;
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-    let mut out: Vec<(String, String)> = Vec::new();
-    for shape in shapes {
-        let Some(query) = &shape.input_scope_query else {
-            continue;
-        };
-        any_declared = true;
-        let turns = gather_transcript_sparql(perspective, query).await?;
-        for (speaker, text) in turns {
-            let key = (speaker.clone(), text.clone());
-            if seen.insert(key) {
-                out.push((speaker, text));
-            }
-        }
-    }
-    if any_declared {
-        Ok(Some(out))
-    } else {
-        Ok(None)
-    }
 }
 
 /// One existing instance the interpreter should know about — the LLM sees these
