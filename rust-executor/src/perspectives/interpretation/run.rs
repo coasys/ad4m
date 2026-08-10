@@ -1,14 +1,13 @@
 use super::{
     build_interpretation_input, class_local_name, ensure_interpretation_task_for_model,
-    existing_instance_context, filter_already_present_with_strategy, identities_from_context,
-    identity_property, ids_from_context, parse_interpretation_response,
-    plan_interpretation_ops_with_context, DedupStrategy, InterpretationOp, ProposedInstance,
+    existing_instance_context, filter_already_present_with_strategy, identity_property,
+    parse_interpretation_response, plan_interpretation_ops_with_context, DedupStrategy,
+    InterpretationOp, ProposedInstance,
 };
 use crate::agent::AgentContext;
-use crate::perspectives::model_query::types::ModelShape;
-use crate::perspectives::model_query::utils::parse_literal_value;
+use crate::perspectives::model_query::types::{ModelShape, ParentScope};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
-use crate::types::{LinkQuery, LinkStatus};
+use crate::types::LinkStatus;
 use std::collections::HashMap;
 
 /// Max attempts for [`retry_interpretation_parse`]. Mirrors Flux's `LLMutils`
@@ -66,19 +65,18 @@ where
 /// value), and letting it through would clear-and-rewrite scalar links for
 /// nothing, producing spurious link churn and confusing test placement counts.
 ///
-/// Comparison happens on **decoded** values, not raw link targets: the scalar
-/// write path encodes through each property's `resolveLanguage`, and a signed
-/// literal envelope is not byte-stable across writes. So the current target of
-/// `(base, predicate)` is read back and run through
-/// [`parse_literal_value`] — the canonical decoder `model_query` uses — before
-/// being compared with the value the model proposed.
+/// Comparison happens on **decoded** values read back through `model_query` —
+/// the same read path app code uses — so each property is resolved through its
+/// own shape/getter (`resolveLanguage` and all), not hand-decoded on the
+/// assumption every scalar is a `literal:`. The instance's current field values
+/// are compared with what the model proposed; equal ⇒ the Update is a no-op.
 ///
 /// Only Updates are considered: Creates are already deduped upstream by
-/// [`filter_already_present`], and `AddLinks` is additive by design. A property
-/// whose predicate can't be resolved from the shape is treated as "can't prove
-/// it's a no-op", so the op survives. Purely additive Updates (a property not
-/// yet set on the base) survive naturally — the current value set is empty, so
-/// it can't equal a one-element proposed set.
+/// [`filter_already_present`], and `AddLinks` is additive by design. If the
+/// base isn't resolvable as an instance of `class` (or a proposed field isn't
+/// present on it), we treat the op as "can't prove it's a no-op" and keep it.
+/// Purely additive Updates (a property not yet set on the base) survive
+/// naturally — the current value is absent, so it can't equal the proposal.
 pub async fn strip_noop_updates(
     perspective: &PerspectiveInstance,
     shapes: &[ModelShape],
@@ -95,46 +93,42 @@ pub async fn strip_noop_updates(
             kept.push(op);
             continue;
         };
-        let Some(shape) = shapes
+        if shapes
             .iter()
-            .find(|s| class_local_name(&s.target_class) == class)
-        else {
+            .all(|s| class_local_name(&s.target_class) != class)
+        {
             kept.push(op);
             continue;
-        };
-
-        let mut all_noop = !values.is_empty();
-        for (name, new_value) in values.iter() {
-            let Some(prop) = shape.properties.iter().find(|p| &p.name == name) else {
-                all_noop = false;
-                break;
-            };
-            let existing = perspective
-                .get_links(&LinkQuery {
-                    source: Some(base.clone()),
-                    predicate: Some(prop.predicate.clone()),
-                    ..Default::default()
-                })
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "strip_noop_updates: get_links({base} {}) failed: {e:#}",
-                        prop.predicate
-                    )
-                })?;
-            // Decoded current value set for this predicate, as canonical JSON
-            // strings so `Value`s (which aren't `Hash`/`Ord`) can be compared.
-            let mut current: Vec<String> = existing
-                .iter()
-                .map(|l| parse_literal_value(&l.data.target).to_string())
-                .collect();
-            current.sort();
-            current.dedup();
-            if current.len() != 1 || current[0] != new_value.to_string() {
-                all_noop = false;
-                break;
-            }
         }
+
+        // Read the instance's current state via the generic model-query read
+        // path (decodes each property through its own getter), then locate the
+        // row for this base.
+        let props: Vec<&str> = values.keys().map(String::as_str).collect();
+        let query = serde_json::json!({ "properties": props }).to_string();
+        let result_json = perspective.model_query(class, &query).await.map_err(|e| {
+            anyhow::anyhow!("strip_noop_updates: model_query({class}) failed: {e:#}")
+        })?;
+        let result: serde_json::Value = serde_json::from_str(&result_json).map_err(|e| {
+            anyhow::anyhow!("strip_noop_updates: bad model_query result for {class}: {e:#}")
+        })?;
+        let current_row = result
+            .get("instances")
+            .and_then(|v| v.as_array())
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|r| r.get("id").and_then(|i| i.as_str()) == Some(base.as_str()))
+            });
+
+        // A no-op only if the base exists and every proposed field already holds
+        // the proposed value (decoded equality). Missing row / missing field ⇒
+        // keep the op.
+        let all_noop = !values.is_empty()
+            && current_row.is_some_and(|row| {
+                values
+                    .iter()
+                    .all(|(name, new_value)| row.get(name) == Some(new_value))
+            });
 
         if all_noop {
             log::debug!("interpretation: dropping no-op update on {base}");
@@ -222,6 +216,10 @@ pub async fn apply_interpretation_ops(
                 if links.is_empty() {
                     continue;
                 }
+                // Relation links are written `Shared`: the interpretation-facing
+                // `ShapeRelation` carries no per-relation `local` flag today, so
+                // there is nothing to honour. If local relations are added to the
+                // shape model, thread that status onto `AddLinks` and use it here.
                 perspective
                     .add_links(
                         links.clone(),
@@ -319,6 +317,7 @@ pub async fn run_interpretation(
     transcript: &[(String, String)],
     base_prefix: &str,
     context: &AgentContext,
+    scope: Option<&ParentScope>,
 ) -> anyhow::Result<Vec<String>> {
     run_interpretation_with_strategy(
         perspective,
@@ -327,6 +326,7 @@ pub async fn run_interpretation(
         base_prefix,
         context,
         &DedupStrategy::default(),
+        scope,
     )
     .await
 }
@@ -347,6 +347,7 @@ pub async fn run_interpretation_with_strategy(
     base_prefix: &str,
     context: &AgentContext,
     dedup_strategy: &DedupStrategy,
+    scope: Option<&ParentScope>,
 ) -> anyhow::Result<Vec<String>> {
     run_interpretation_with_strategy_and_model(
         perspective,
@@ -356,6 +357,7 @@ pub async fn run_interpretation_with_strategy(
         context,
         dedup_strategy,
         None,
+        scope,
     )
     .await
 }
@@ -377,18 +379,16 @@ pub async fn run_interpretation_with_strategy_and_model(
     context: &AgentContext,
     dedup_strategy: &DedupStrategy,
     model_override: Option<&str>,
+    scope: Option<&ParentScope>,
 ) -> anyhow::Result<Vec<String>> {
     let task = ensure_interpretation_task_for_model(model_override)?;
     // Existing-instance snapshot: gives the model both the `id` handle to
     // upsert/reference (so it can refine or link an existing node instead of
-    // duplicating) and the identity value to recognise it by. The
-    // identity-only projection feeds the deterministic dedup safety net below,
-    // so both paths agree on what counts as "existing".
-    let existing_ctx = existing_instance_context(perspective, shapes).await?;
-    let existing_identities = identities_from_context(&existing_ctx);
-    // Valid targets for existing-id relation refs — exactly the ids the model is
-    // shown in each class's `existing` list.
-    let known_existing_ids = ids_from_context(&existing_ctx);
+    // duplicating) and the identity value to recognise it by. This one
+    // id-keyed map is the single source: the prompt, the dedup safety net, and
+    // Create-vs-Update routing all project what they need from it, so every
+    // path agrees on what counts as "existing".
+    let existing_ctx = existing_instance_context(perspective, shapes, scope).await?;
     // class local name → identity property name, for the deterministic
     // safety-net below. Classes with no identity property are omitted.
     let identity_props: HashMap<String, String> = shapes
@@ -441,14 +441,14 @@ pub async fn run_interpretation_with_strategy_and_model(
     // ordering the model counted.
     let instances = filter_already_present_with_strategy(
         instances,
-        &existing_identities,
+        &existing_ctx,
         &identity_props,
         dedup_strategy,
     )
     .await?;
 
     let planned =
-        plan_interpretation_ops_with_context(shapes, &instances, base_prefix, &known_existing_ids);
+        plan_interpretation_ops_with_context(shapes, &instances, base_prefix, &existing_ctx);
     // Filter no-op Updates: the LLM occasionally re-emits an unchanged existing
     // entry, and applying that would clear-and-rewrite scalar links for nothing.
     let ops = strip_noop_updates(perspective, shapes, planned).await?;
@@ -458,4 +458,310 @@ pub async fn run_interpretation_with_strategy_and_model(
     // relations). Links are owned by `create_subject` / `update_subject`.
     let bases = touched_bases(&ops);
     Ok(bases)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Ad4mDb;
+    use crate::perspectives::interpretation::*;
+    use crate::perspectives::interpretation_test_support::*;
+    use crate::types::AITask;
+
+    #[tokio::test]
+    async fn strip_noop_updates_drops_same_value_upsert_keeps_real_change() {
+        // Seed an Intention with title+owner. Then plan three ops on it:
+        //   (1) same title + same owner   -> no-op, must be dropped.
+        //   (2) new title (different value) -> real change, must survive.
+        //   (3) a Create -> passed through unchanged (dedup happens elsewhere).
+        let (mut perspective, shapes, ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        let base = "soa://existing/intention/noop-target";
+        seed_instance(&mut perspective, &ctx, &shapes[0], base, "Ship the parser").await;
+        // Seed an owner too so the no-op check covers a multi-field state.
+        apply_one(
+            &mut perspective,
+            &shapes,
+            &ctx,
+            proposal(
+                "Intention",
+                Some(base),
+                &[("owner", serde_json::json!("Nico"))],
+            ),
+        )
+        .await;
+
+        // Mirror `run_interpretation`: the graph's actual base is what makes an id
+        // trusted, otherwise the planner treats it as hallucinated and creates.
+        let existing_ctx = existing_instance_context(&perspective, &shapes, None)
+            .await
+            .expect("existing_instance_context");
+        let planned = plan_interpretation_ops_with_context(
+            &shapes,
+            &[
+                // No-op update: title + owner identical to the seeded state.
+                proposal(
+                    "Intention",
+                    Some(base),
+                    &[
+                        ("title", serde_json::json!("Ship the parser")),
+                        ("owner", serde_json::json!("Nico")),
+                    ],
+                ),
+                // Real update: same base, but a rewritten title.
+                proposal(
+                    "Intention",
+                    Some(base),
+                    &[("title", serde_json::json!("Ship the parser this week"))],
+                ),
+                // A Create (no id) — strip_noop_updates only looks at Updates.
+                proposal(
+                    "Intention",
+                    None,
+                    &[("title", serde_json::json!("A brand new idea"))],
+                ),
+            ],
+            "soa://ext/",
+            &existing_ctx,
+        );
+        assert_eq!(planned.len(), 3, "sanity: planner emitted all three");
+
+        let kept = strip_noop_updates(&perspective, &shapes, planned)
+            .await
+            .expect("strip_noop_updates");
+
+        let updates: Vec<&InterpretationOp> = kept
+            .iter()
+            .filter(|op| matches!(op, InterpretationOp::Update { .. }))
+            .collect();
+        let creates: Vec<&InterpretationOp> = kept
+            .iter()
+            .filter(|op| matches!(op, InterpretationOp::Create { .. }))
+            .collect();
+        assert_eq!(
+            updates.len(),
+            1,
+            "no-op Update dropped, real Update kept; got {kept:#?}"
+        );
+        assert_eq!(creates.len(), 1, "Create pass-through; got {kept:#?}");
+        let InterpretationOp::Update { values, .. } = updates[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            values.get("title").and_then(|v| v.as_str()),
+            Some("Ship the parser this week"),
+            "kept Update must be the real one"
+        );
+    }
+
+    #[test]
+    fn ensure_interpretation_task_registers_and_is_idempotent() {
+        ensure_db_init();
+
+        // Guard: some other test may have inserted the row already; wipe just
+        // our name so the first call below is a real insert. (Global DB is
+        // shared across the single-threaded test run.)
+        let existing: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.name == INTERPRETATION_TASK_NAME)
+            .collect();
+        for t in existing {
+            Ad4mDb::with_global_instance(|db| db.remove_task(t.task_id.clone())).unwrap();
+        }
+
+        let first = ensure_interpretation_task().unwrap();
+        assert_eq!(first.name, INTERPRETATION_TASK_NAME);
+        assert_eq!(first.model_id, "default");
+        assert!(first.system_prompt.contains("You extract typed instances"));
+        assert!(!first.task_id.is_empty());
+
+        // Second call must find the same row, not insert a duplicate.
+        let second = ensure_interpretation_task().unwrap();
+        assert_eq!(first.task_id, second.task_id);
+
+        let rows: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.name == INTERPRETATION_TASK_NAME)
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "expected exactly one interpretation task row"
+        );
+    }
+
+    #[tokio::test]
+    async fn gather_transcript_sparql_returns_speaker_and_decoded_text() {
+        // The generic SPARQL gather must:
+        //   1. run an arbitrary SELECT against the perspective's Oxigraph store,
+        //   2. bind `?speaker` (the raw NamedNode string, e.g. "did:key:alice"),
+        //   3. bind `?text` and, when it's a `literal:string:...` URI, decode it,
+        //   4. preserve caller-visible ordering by returning rows as SPARQL gave
+        //      them (deterministic when ORDER BY is in the query).
+        use crate::perspectives::interpretation::graph::gather_transcript_sparql;
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        seed_message(
+            &mut perspective,
+            &ctx,
+            "msg://1",
+            "did:key:alice",
+            "hello world",
+            "ns://body",
+        )
+        .await;
+        seed_message(
+            &mut perspective,
+            &ctx,
+            "msg://2",
+            "did:key:bob",
+            "second turn",
+            "ns://body",
+        )
+        .await;
+
+        let query = r#"
+        SELECT ?speaker ?text WHERE {
+            ?m <ns://body> ?text .
+            ?m <ns://author> ?speaker .
+        }
+        ORDER BY ?m
+    "#;
+        let turns = gather_transcript_sparql(&perspective, query)
+            .await
+            .expect("gather_transcript_sparql");
+        assert_eq!(
+            turns,
+            vec![
+                ("did:key:alice".to_string(), "hello world".to_string()),
+                ("did:key:bob".to_string(), "second turn".to_string()),
+            ],
+            "SPARQL rows must materialise as (speaker, decoded text) turns in order"
+        );
+    }
+
+    #[tokio::test]
+    async fn gather_transcript_sparql_scopes_to_predicate() {
+        // Proves this is a real scope, not a rebranded gather-everything. Seed one
+        // "body"-predicated message and one "system-log" message; a query that
+        // filters on `ns://body` must return exactly the first.
+        use crate::perspectives::interpretation::graph::gather_transcript_sparql;
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        seed_message(
+            &mut perspective,
+            &ctx,
+            "msg://human",
+            "did:key:alice",
+            "I'll ship the doc",
+            "ns://body",
+        )
+        .await;
+        seed_message(
+            &mut perspective,
+            &ctx,
+            "msg://bot",
+            "did:key:bot",
+            "system boot",
+            "ns://system_log",
+        )
+        .await;
+
+        let scoped = gather_transcript_sparql(
+            &perspective,
+            "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . }",
+        )
+        .await
+        .expect("gather_transcript_sparql");
+        assert_eq!(
+            scoped,
+            vec![("did:key:alice".to_string(), "I'll ship the doc".to_string())],
+            "scoped query must exclude messages under other predicates"
+        );
+    }
+
+    // ---- interpretation_task_name_for_model + ensure_..._for_model --------
+
+    /// Default (None) is the shared name; Some(model) yields a distinct
+    /// `?model=<id>` variant so the DB row and the AIService routing key are
+    /// keyed per model. Colons inside the model id (`gemma3:12b`) are preserved.
+    #[test]
+    fn task_name_default_vs_per_model_variants() {
+        assert_eq!(
+            interpretation_task_name_for_model(None),
+            INTERPRETATION_TASK_NAME
+        );
+        assert_eq!(
+            interpretation_task_name_for_model(Some("gemma3:12b")),
+            format!("{INTERPRETATION_TASK_NAME}?model=gemma3:12b")
+        );
+        assert_ne!(
+            interpretation_task_name_for_model(Some("gemma3:12b")),
+            interpretation_task_name_for_model(Some("qwen3.5-27b")),
+            "per-model names must be distinct"
+        );
+    }
+
+    /// `ensure_interpretation_task_for_model` creates a separate DB row per model,
+    /// re-uses that row on the next call (idempotent), and never touches the
+    /// shared default row when a model is specified.
+    #[test]
+    fn ensure_for_model_creates_isolated_row_per_model_and_is_idempotent() {
+        ensure_db_init();
+
+        // Wipe any leftover rows for the two model-specific names we're about to
+        // create so this test is a real insert path regardless of order.
+        let target_names = [
+            interpretation_task_name_for_model(Some("gemma3:12b")),
+            interpretation_task_name_for_model(Some("qwen3.5-27b")),
+        ];
+        let leftover: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+            .unwrap()
+            .into_iter()
+            .filter(|t| target_names.contains(&t.name))
+            .collect();
+        for t in leftover {
+            Ad4mDb::with_global_instance(|db| db.remove_task(t.task_id.clone())).unwrap();
+        }
+
+        let gemma_first = ensure_interpretation_task_for_model(Some("gemma3:12b")).unwrap();
+        assert_eq!(gemma_first.name, target_names[0]);
+        assert_eq!(gemma_first.model_id, "gemma3:12b");
+        assert!(gemma_first
+            .system_prompt
+            .contains("You extract typed instances"));
+
+        // Idempotent: second call must return the same row, not insert a duplicate.
+        let gemma_second = ensure_interpretation_task_for_model(Some("gemma3:12b")).unwrap();
+        assert_eq!(gemma_first.task_id, gemma_second.task_id);
+
+        // Distinct model → distinct DB row.
+        let qwen = ensure_interpretation_task_for_model(Some("qwen3.5-27b")).unwrap();
+        assert_ne!(qwen.task_id, gemma_first.task_id);
+        assert_eq!(qwen.model_id, "qwen3.5-27b");
+
+        // The default row is untouched — model overrides never mutate the shared
+        // task every other caller depends on.
+        let default_row = ensure_interpretation_task().unwrap();
+        assert_eq!(default_row.model_id, "default");
+        assert_ne!(default_row.task_id, gemma_first.task_id);
+        assert_ne!(default_row.task_id, qwen.task_id);
+
+        // Exactly one row per (target_name), no accidental duplicates left behind.
+        for name in &target_names {
+            let rows: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+                .unwrap()
+                .into_iter()
+                .filter(|t| &t.name == name)
+                .collect();
+            assert_eq!(
+                rows.len(),
+                1,
+                "expected exactly one row for {name}, got {}",
+                rows.len()
+            );
+        }
+    }
 }

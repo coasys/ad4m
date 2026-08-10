@@ -29,7 +29,9 @@
 //!   -- ad4m://source_scope_query   --> <SPARQL SELECT returning ?speaker ?text>
 //!   -- ad4m://interpretation_class --> <class URI>        (repeatable, >= 1)
 //!   -- ad4m://debounce_ms          --> <i64 as string>
+//!   -- ad4m://batch_min            --> <usize as string>  (optional, default 1)
 //!   -- ad4m://batch_max            --> <usize as string>
+//!   -- ad4m://max_wait_ms          --> <i64 as string>    (optional)
 //!   -- ad4m://claim_ttl_ms         --> <i64 as string>
 //!   -- ad4m://llm_base_url         --> <string>           (optional)
 //!   -- ad4m://llm_model            --> <string>           (optional)
@@ -46,7 +48,9 @@ const P_PROCESSOR_ID: &str = "ad4m://processor_id";
 const P_SOURCE_SCOPE_QUERY: &str = "ad4m://source_scope_query";
 const P_INTERPRETATION_CLASS: &str = "ad4m://interpretation_class";
 const P_DEBOUNCE_MS: &str = "ad4m://debounce_ms";
+const P_BATCH_MIN: &str = "ad4m://batch_min";
 const P_BATCH_MAX: &str = "ad4m://batch_max";
+const P_MAX_WAIT_MS: &str = "ad4m://max_wait_ms";
 const P_CLAIM_TTL_MS: &str = "ad4m://claim_ttl_ms";
 const P_LLM_BASE_URL: &str = "ad4m://llm_base_url";
 const P_LLM_MODEL: &str = "ad4m://llm_model";
@@ -72,9 +76,20 @@ pub struct AutoProcessorConfig {
     /// After a new source item lands, wait this long with no further arrivals
     /// before running a pass (batches bursts of typing / imports).
     pub debounce_ms: i64,
+    /// Minimum number of pending items required before a pass runs — the Flux
+    /// "wait for N inputs" threshold. A batch below this size waits for more
+    /// arrivals (subject to [`Self::max_wait_ms`]) rather than draining. `1`
+    /// (the default when the SDNA omits `ad4m://batch_min`) reproduces the
+    /// original "run as soon as the debounce settles" behaviour.
+    pub batch_min: usize,
     /// Cap on how many items a single pass may include, so a large paste
     /// doesn't blow the LLM context window.
     pub batch_max: usize,
+    /// Safety valve for [`Self::batch_min`]: once the oldest pending item has
+    /// waited this long, a sub-threshold batch drains anyway so it is never
+    /// orphaned. `None` (the default) = pure Flux parity: wait indefinitely
+    /// until `batch_min` items accumulate.
+    pub max_wait_ms: Option<i64>,
     /// TTL passed to [`super::claim::try_claim`] — how long a Won claim is
     /// treated as authoritative before other peers may re-claim.
     pub claim_ttl_ms: i64,
@@ -136,6 +151,11 @@ pub async fn write_processor(
         },
         Link {
             source: node.clone(),
+            predicate: Some(P_BATCH_MIN.into()),
+            target: cfg.batch_min.to_string(),
+        },
+        Link {
+            source: node.clone(),
             predicate: Some(P_BATCH_MAX.into()),
             target: cfg.batch_max.to_string(),
         },
@@ -145,6 +165,13 @@ pub async fn write_processor(
             target: cfg.claim_ttl_ms.to_string(),
         },
     ];
+    if let Some(max_wait_ms) = cfg.max_wait_ms {
+        links.push(Link {
+            source: node.clone(),
+            predicate: Some(P_MAX_WAIT_MS.into()),
+            target: max_wait_ms.to_string(),
+        });
+    }
     for class in &cfg.interpretation_classes {
         links.push(Link {
             source: node.clone(),
@@ -280,6 +307,25 @@ async fn load_one(
         return Ok(None);
     };
 
+    // Optional thresholds. Absent `batch_min` → 1 (original behaviour). An
+    // absent `max_wait_ms` → `None` (wait indefinitely). A *present but
+    // unparseable* value is a config error, so we bail (`Ok(None)`) exactly
+    // like the required fields rather than silently defaulting.
+    let batch_min = match first_target(perspective, node, P_BATCH_MIN).await? {
+        Some(s) => match s.parse::<usize>() {
+            Ok(n) => n.max(1),
+            Err(_) => return Ok(None),
+        },
+        None => 1,
+    };
+    let max_wait_ms = match first_target(perspective, node, P_MAX_WAIT_MS).await? {
+        Some(s) => match s.parse::<i64>() {
+            Ok(n) => Some(n),
+            Err(_) => return Ok(None),
+        },
+        None => None,
+    };
+
     let llm_base_url = first_target(perspective, node, P_LLM_BASE_URL).await?;
     let llm_model = first_target(perspective, node, P_LLM_MODEL).await?;
     let dedup_strategy_json = first_target(perspective, node, P_DEDUP_STRATEGY).await?;
@@ -289,7 +335,9 @@ async fn load_one(
         source_scope_query,
         interpretation_classes,
         debounce_ms,
+        batch_min,
         batch_max,
+        max_wait_ms,
         claim_ttl_ms,
         llm_base_url,
         llm_model,
@@ -315,7 +363,9 @@ mod tests {
             // "input order is arbitrary; output order is sorted" contract.
             interpretation_classes: vec!["ns://Question".into(), "ns://Task".into()],
             debounce_ms: 5_000,
+            batch_min: 3,
             batch_max: 32,
+            max_wait_ms: Some(60_000),
             claim_ttl_ms: 120_000,
             llm_base_url: Some("http://localhost:11434/v1".into()),
             llm_model: Some("gemma3:12b".into()),

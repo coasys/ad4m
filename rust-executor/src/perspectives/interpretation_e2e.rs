@@ -846,7 +846,7 @@ async fn e2e_flux_grouping_updates_seeded_subgroup_on_topic_continuation() {
             .unwrap_or("")
             .to_lowercase();
 
-        let payments_grew = ["ledger", "replay", "persist", "payload", "queue"]
+        let payments_grew = ["ledger", "replay", "persist", "queue"]
             .iter()
             .any(|kw| payments_summary.contains(kw));
         let onboarding_untouched = !onboarding_summary.contains("webhook")
@@ -874,8 +874,7 @@ async fn e2e_flux_grouping_updates_seeded_subgroup_on_topic_continuation() {
 /// extractor makes the attach-vs-grow-vs-create decision the way Flux's grouping
 /// pass does — via `plan_interpretation_ops_with_context` routing on the model's
 /// proposed `id`.
-/// TODO(gemma3-model-gap, 2026-08-07): documents a known limitation, not a
-/// framework capability. With one existing `ConversationSubgroup` seeded,
+///
 /// The topic-shift half of the Flux-grouping e2e checkbox. Seeds one
 /// `ConversationSubgroup` on payments/webhooks, then feeds a transcript that
 /// explicitly switches topic to a Q3 retrospective. A well-behaved extractor
@@ -968,6 +967,269 @@ async fn e2e_flux_grouping_creates_new_subgroup_on_topic_shift() {
     );
 }
 
+// ---- highest-level Flux integration: scoped incremental grouping lifecycle --
+
+/// Lower-cased `summary` of the subgroup whose base URI is `base`, or "" if
+/// absent. The read the lifecycle assertions compare across passes.
+async fn subgroup_summary(perspective: &PerspectiveInstance, base: &str) -> String {
+    model_instances(perspective, "ConversationSubgroup", &["name", "summary"])
+        .await
+        .iter()
+        .find(|r| r.get("id").and_then(|i| i.as_str()) == Some(base))
+        .and_then(|r| r.get("summary").and_then(|s| s.as_str()))
+        .unwrap_or("")
+        .to_lowercase()
+}
+
+fn contains_any(haystack: &str, keywords: &[&str]) -> bool {
+    keywords.iter().any(|k| haystack.contains(k))
+}
+
+/// Wire a freshly-minted subgroup into the channel sub-graph
+/// (`<channel> ns://contains <base>`) — the containment a Flux/AutoProcessor
+/// run writes so the next scoped pass can see (and update) it.
+async fn link_under_channel(
+    perspective: &mut PerspectiveInstance,
+    ctx: &crate::agent::AgentContext,
+    channel: &str,
+    contains: &str,
+    base: &str,
+) {
+    use crate::types::LinkStatus;
+    perspective
+        .add_link(
+            Link {
+                source: channel.into(),
+                predicate: Some(contains.into()),
+                target: base.into(),
+            },
+            LinkStatus::Local,
+            None,
+            ctx,
+        )
+        .await
+        .expect("link subgroup under channel");
+}
+
+/// The highest-level Flux grouping integration test: a scoped, incremental
+/// conversation-grouping lifecycle inside one channel, driven pass-by-pass the
+/// way the AutoProcessor (#885) will drive it once messages accumulate past a
+/// batch threshold. It proves the interpretation layer supports the full Flux
+/// "grouping" loop **under a channel scope**:
+///
+///   0. A decoy subgroup exists OUTSIDE the channel (never linked under it).
+///      The scope must hide it — it is never seen and never modified.
+///   1. Empty channel + topic-A turns  → a NEW subgroup is minted.
+///   2. Topic-A continues              → the SAME subgroup's summary is updated
+///                                        (id reused, no duplicate).
+///   3. Topic switches to B            → a fresh SECOND subgroup is minted;
+///                                        subgroup #1 is left untouched.
+///   4. Topic-B continues              → only subgroup #2's summary is updated;
+///                                        subgroup #1 is still untouched.
+///
+/// Scoping is the load-bearing mechanism: every pass reads existing subgroups
+/// through `existing_instance_context(scope = channel)`, so the model only ever
+/// sees this channel's subgroups (never the decoy), and each create-vs-update
+/// decision is taken against exactly that set. Between passes the test links
+/// each freshly-minted subgroup under the channel, the containment the
+/// AutoProcessor writes in production. (Message batching itself is #885's job;
+/// here each pass stands in for one already-accumulated batch.)
+///
+/// Real-LLM (gemma3:12b on the configured Ollama). Wrapped in a retry loop —
+/// four sequential model calls compound non-determinism — with a fresh graph
+/// per attempt.
+#[tokio::test]
+async fn e2e_flux_grouping_scoped_incremental_lifecycle() {
+    use crate::perspectives::interpretation::existing_instance_context;
+    use crate::perspectives::model_query::types::ParentScope;
+
+    let channel = "soa://channel/general";
+    let contains = "ns://contains";
+    let decoy_base = "soa://other/subgroup/decoy";
+    let attempts = 3u8;
+    let mut last_err: Option<String> = None;
+
+    for attempt in 1..=attempts {
+        let (mut perspective, shapes, ctx) =
+            setup_interpretation_e2e(&[("ConversationSubgroup", CONVERSATION_SUBGROUP_SDNA)]).await;
+        let sg_shape = &shapes[0];
+        let scope = ParentScope::Raw {
+            id: channel.into(),
+            predicate: contains.into(),
+        };
+
+        // Decoy subgroup on an unrelated topic, deliberately NOT under the
+        // channel — the scope must keep it invisible for the whole run.
+        seed_instance_with_props(
+            &mut perspective,
+            &ctx,
+            sg_shape,
+            decoy_base,
+            serde_json::json!({
+                "name": "Onboarding UX",
+                "summary": "Ideas for smoothing the first-run experience for brand-new users."
+            }),
+        )
+        .await;
+        let decoy_summary_0 = subgroup_summary(&perspective, decoy_base).await;
+
+        macro_rules! fail_attempt {
+            ($($arg:tt)*) => {{
+                last_err = Some(format!("attempt {attempt}/{attempts}: {}", format!($($arg)*)));
+                eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+                continue;
+            }};
+        }
+
+        // ---- Pass 1: empty channel, topic A (payments/webhooks) → create ----
+        let bases1 = run_interpretation_e2e_scoped(
+            &mut perspective,
+            &shapes,
+            &[
+                ("Ana", "Our webhook retries keep dropping during payment outages — we lose the failed events entirely."),
+                ("Ben", "Right, the payments queue has no way to replay what got dropped last time."),
+            ],
+            &ctx,
+            Some(&scope),
+        )
+        .await;
+        for b in &bases1 {
+            link_under_channel(&mut perspective, &ctx, channel, contains, b).await;
+        }
+        let scoped1 = existing_instance_context(&perspective, &shapes, Some(&scope))
+            .await
+            .expect("scoped ctx p1");
+        if scoped1.len() != 1 {
+            fail_attempt!(
+                "pass1 expected exactly 1 channel subgroup, got {}",
+                scoped1.len()
+            );
+        }
+        let sg1 = scoped1.keys().next().unwrap().clone();
+        let sum1_p1 = subgroup_summary(&perspective, &sg1).await;
+        if !contains_any(
+            &sum1_p1,
+            &["webhook", "payment", "retry", "queue", "replay", "payload"],
+        ) {
+            fail_attempt!("pass1 subgroup summary not about payments: {sum1_p1:?}");
+        }
+
+        // ---- Pass 2: topic A continues → update the SAME subgroup ----
+        run_interpretation_e2e_scoped(
+            &mut perspective,
+            &shapes,
+            &[
+                ("Ana", "Following up on the webhook drops — let's persist failed payloads to a retry ledger so we can replay them after an outage."),
+                ("Ben", "A ledger tied to the payments queue would let us reconstruct exactly what dropped."),
+            ],
+            &ctx,
+            Some(&scope),
+        )
+        .await;
+        let scoped2 = existing_instance_context(&perspective, &shapes, Some(&scope))
+            .await
+            .expect("scoped ctx p2");
+        if scoped2.len() != 1 {
+            fail_attempt!(
+                "pass2 expected still 1 channel subgroup (id reuse), got {}",
+                scoped2.len()
+            );
+        }
+        let sum1_p2 = subgroup_summary(&perspective, &sg1).await;
+        if sum1_p2 == sum1_p1
+            || !contains_any(&sum1_p2, &["ledger", "persist", "replay", "payload"])
+        {
+            fail_attempt!(
+                "pass2 summary did not grow with new detail: before={sum1_p1:?} after={sum1_p2:?}"
+            );
+        }
+
+        // ---- Pass 3: topic switches to B (Q3 retro / Holograph) → new subgroup ----
+        let bases3 = run_interpretation_e2e_scoped(
+            &mut perspective,
+            &shapes,
+            &[
+                ("Ana", "Totally different subject: Josh wants a Q3 retrospective on how Holograph shipped — nothing to do with payments."),
+                ("Ben", "Good call, let's block a Wednesday for retro prep and invite the mobile team."),
+            ],
+            &ctx,
+            Some(&scope),
+        )
+        .await;
+        for b in &bases3 {
+            if b != &sg1 {
+                link_under_channel(&mut perspective, &ctx, channel, contains, b).await;
+            }
+        }
+        let scoped3 = existing_instance_context(&perspective, &shapes, Some(&scope))
+            .await
+            .expect("scoped ctx p3");
+        if scoped3.len() != 2 {
+            fail_attempt!(
+                "pass3 expected 2 channel subgroups after topic shift, got {}",
+                scoped3.len()
+            );
+        }
+        let sum1_p3 = subgroup_summary(&perspective, &sg1).await;
+        if sum1_p3 != sum1_p2 || contains_any(&sum1_p3, &["retro", "holograph", "q3"]) {
+            fail_attempt!("pass3 polluted subgroup #1 on the topic shift: {sum1_p3:?}");
+        }
+        let sg2 = scoped3.keys().find(|k| **k != sg1).unwrap().clone();
+        let sum2_p3 = subgroup_summary(&perspective, &sg2).await;
+        if !contains_any(&sum2_p3, &["retro", "holograph", "q3", "retrospective"]) {
+            fail_attempt!("pass3 new subgroup not about the retro topic: {sum2_p3:?}");
+        }
+
+        // ---- Pass 4: topic B continues → update ONLY subgroup #2 ----
+        run_interpretation_e2e_scoped(
+            &mut perspective,
+            &shapes,
+            &[
+                ("Ana", "For the retro: let's capture what slowed Holograph down — the sync-module rewrites cost us two weeks."),
+                ("Ben", "Agreed, and we should write up the kitsune substrate lessons while they're fresh."),
+            ],
+            &ctx,
+            Some(&scope),
+        )
+        .await;
+        let scoped4 = existing_instance_context(&perspective, &shapes, Some(&scope))
+            .await
+            .expect("scoped ctx p4");
+        if scoped4.len() != 2 {
+            fail_attempt!(
+                "pass4 expected still 2 channel subgroups, got {}",
+                scoped4.len()
+            );
+        }
+        let sum2_p4 = subgroup_summary(&perspective, &sg2).await;
+        let sum1_p4 = subgroup_summary(&perspective, &sg1).await;
+        if sum2_p4 == sum2_p3
+            || !contains_any(&sum2_p4, &["sync", "kitsune", "substrate", "week", "slow"])
+        {
+            fail_attempt!(
+                "pass4 subgroup #2 summary did not grow: before={sum2_p3:?} after={sum2_p4:?}"
+            );
+        }
+        if sum1_p4 != sum1_p2 || contains_any(&sum1_p4, &["retro", "holograph", "kitsune", "sync"])
+        {
+            fail_attempt!("pass4 disturbed subgroup #1: {sum1_p4:?}");
+        }
+
+        // ---- Scope isolation: the decoy outside the channel was never touched ----
+        let decoy_now = subgroup_summary(&perspective, decoy_base).await;
+        if decoy_now != decoy_summary_0 {
+            fail_attempt!("decoy subgroup outside the scope was modified: {decoy_summary_0:?} -> {decoy_now:?}");
+        }
+
+        // Full scoped lifecycle held on this attempt.
+        return;
+    }
+    panic!(
+        "scoped incremental grouping e2e failed after {attempts} attempts: {}",
+        last_err.unwrap_or_default()
+    );
+}
+
 // ---- semantic dedup: reject SEMANTICALLY-similar duplicate identity ---------
 
 /// The `DedupStrategy::Semantic` path drops proposals whose identity string is
@@ -989,6 +1251,9 @@ async fn e2e_semantic_dedup_drops_reworded_duplicate() {
     use crate::perspectives::interpretation::DedupStrategy;
 
     let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
+    // Semantic dedup embeds identity strings through AIService's own (local,
+    // CPU) embedding model — register it before the run.
+    super::interpretation_test_support::register_interpretation_embedding_model().await;
     let task_shape = &shapes[0];
 
     // Seed with one wording; transcript uses a different wording for the SAME
@@ -1133,7 +1398,9 @@ async fn auto_processor_pass_lands_interpretation_instance() {
             .into(),
         interpretation_classes: vec!["ns://Intention".into()],
         debounce_ms: 50,
+        batch_min: 1,
         batch_max: 32,
+        max_wait_ms: None,
         claim_ttl_ms: 60_000,
         llm_base_url: None,
         llm_model: None,
@@ -1322,7 +1589,9 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         source_scope_query: source_scope.into(),
         interpretation_classes: vec!["ns://Intention".into()],
         debounce_ms: 50,
+        batch_min: 1,
         batch_max: 32,
+        max_wait_ms: None,
         claim_ttl_ms: 60_000,
         llm_base_url: None,
         llm_model: None,
@@ -1333,7 +1602,9 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         source_scope_query: source_scope.into(),
         interpretation_classes: vec!["ns://Task".into()],
         debounce_ms: 50,
+        batch_min: 1,
         batch_max: 32,
+        max_wait_ms: None,
         claim_ttl_ms: 60_000,
         llm_base_url: None,
         llm_model: None,
@@ -1502,4 +1773,356 @@ async fn auto_processor_two_configs_no_cross_contamination() {
             "task-proc base `{b}` must carry the task-proc base_prefix"
         );
     }
+}
+
+// ---- auto_processor P-B2c: high-level, signal-driven, no manual interpretation
+
+/// The clean high-level auto-processor integration test: write a processor
+/// config + seed a channel's messages, then let the **real watch-loop tick**
+/// (`run_auto_processor_tick`) do everything — gather the transcript, debounce,
+/// claim, run the LLM, write the instances — while the test only *observes* it
+/// through the [`events`](crate::perspectives::auto_processor::events) signals
+/// and asserts the outcome. No manual `run_interpretation`, no manual transcript
+/// wrangling: exactly what a Flux channel does when new messages arrive.
+///
+/// Proves: (a) the loop settles and drains a batch (the debounce fix — a
+/// re-gathered duplicate no longer resets the clock), (b) it emits the pass
+/// lifecycle `BatchReady → Claimed → GatheringTranscript → RunningInterpretation
+/// → Processed`, awaitable by a listener, and (c) it actually creates the
+/// ConversationSubgroup on the perspective.
+///
+/// Real-LLM (gemma3:12b). Retry loop for model non-determinism.
+#[tokio::test]
+async fn auto_processor_high_level_signal_driven_pass() {
+    use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+    use crate::perspectives::auto_processor::events::{
+        next_event_matching, subscribe, AutoProcessorStep,
+    };
+    use crate::perspectives::auto_processor::watcher::WatcherState;
+    use crate::types::{Link, LinkStatus};
+    use std::collections::{HashMap, HashSet};
+    use std::time::Duration;
+
+    let processor_id = "flux-channel-proc";
+    let attempts = 3u8;
+    let mut last_err: Option<String> = None;
+
+    for attempt in 1..=attempts {
+        let (mut perspective, _shapes, ctx) =
+            setup_interpretation_e2e(&[("ConversationSubgroup", CONVERSATION_SUBGROUP_SDNA)]).await;
+
+        // Seed a channel's worth of messages on one topic — link pairs, exactly
+        // as a Flux channel perspective holds them.
+        for (uri, author, body) in [
+            ("msg://c1", "did:key:ana", "Our webhook retries keep dropping during payment outages — we lose the failed events."),
+            ("msg://c2", "did:key:ben", "Right, the payments queue has no way to replay what got dropped last time."),
+        ] {
+            for (pred, target) in [
+                ("ns://body", format!("literal:string:{body}")),
+                ("ns://author", author.to_string()),
+            ] {
+                perspective
+                    .add_link(
+                        Link { source: uri.into(), predicate: Some(pred.into()), target },
+                        LinkStatus::Local,
+                        None,
+                        &ctx,
+                    )
+                    .await
+                    .expect("seed channel message link");
+            }
+        }
+
+        // Write the processor into the shared graph — the loop reads it back.
+        let cfg = AutoProcessorConfig {
+            processor_id: processor_id.into(),
+            source_scope_query: "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
+                                 ?m <ns://author> ?speaker . } ORDER BY ?m"
+                .into(),
+            interpretation_classes: vec!["ns://ConversationSubgroup".into()],
+            debounce_ms: 50,
+            batch_min: 2,
+            batch_max: 32,
+            max_wait_ms: None,
+            claim_ttl_ms: 60_000,
+            llm_base_url: None,
+            llm_model: None,
+            dedup_strategy_json: None,
+        };
+        write_processor(&mut perspective, &cfg, &ctx)
+            .await
+            .expect("write_processor");
+
+        // Observe the pass purely through the event stream.
+        let mut rx = subscribe().await;
+        let mut watcher = WatcherState::new();
+        let mut processed: HashMap<String, HashSet<String>> = HashMap::new();
+
+        // Tick 1 records the two turns (debounce not yet elapsed → no drain).
+        perspective
+            .run_auto_processor_tick(&mut watcher, &mut processed, 1_000)
+            .await;
+        // Tick 2, past the debounce window: the re-gathered duplicates don't
+        // reset the clock (the fix), so the batch drains and the real pass runs.
+        perspective
+            .run_auto_processor_tick(&mut watcher, &mut processed, 1_100)
+            .await;
+
+        // Await the terminal signal — this is what a WS client / test waits on
+        // instead of polling the graph.
+        let processed_ev = next_event_matching(&mut rx, Duration::from_secs(90), |e| {
+            e.processor_id == processor_id && e.step == AutoProcessorStep::Processed
+        })
+        .await;
+        let Some(ev) = processed_ev else {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: no `Processed` signal within timeout"
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        };
+        if ev.bases.is_empty() {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: Processed signal carried no bases"
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        }
+
+        // The subgroup must actually exist on the perspective, with a
+        // payments-flavoured summary — created entirely by the loop.
+        let rows =
+            model_instances(&perspective, "ConversationSubgroup", &["name", "summary"]).await;
+        if rows.is_empty() {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: loop signalled Processed but no ConversationSubgroup persisted"
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        }
+        let any_payments = rows.iter().any(|r| {
+            let name = r
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let summary = r
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            contains_any(&name, &["payment", "webhook", "retry", "queue"])
+                || contains_any(
+                    &summary,
+                    &["payment", "webhook", "retry", "queue", "replay"],
+                )
+        });
+        if !any_payments {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: subgroup created but not about the channel topic: {rows:#?}"
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        }
+
+        // Full high-level pass held on this attempt.
+        return;
+    }
+    panic!(
+        "auto_processor high-level signal-driven e2e failed after {attempts} attempts: {}",
+        last_err.unwrap_or_default()
+    );
+}
+
+/// Deterministic proof that the `DedupStrategy::Semantic` path — AIService's
+/// local Bert embeddings + cosine threshold — actually drops a paraphrased
+/// duplicate while keeping an unrelated item. The LLM-driven e2e above only
+/// exercises this when the model happens to re-propose the seeded item; this
+/// test removes that non-determinism by feeding hand-crafted proposals straight
+/// into `filter_already_present_with_strategy`.
+#[tokio::test]
+async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
+    use crate::perspectives::interpretation::{
+        filter_already_present_with_strategy, DedupStrategy, ExistingInstances, InstanceContext,
+        ProposedInstance,
+    };
+    use std::collections::{BTreeMap, HashMap};
+
+    // Reuse the standard harness to initialise the DB + AIService global, then
+    // register the embedding model. (The LLM this also registers is unused here.)
+    let _ = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
+    super::interpretation_test_support::register_interpretation_embedding_model().await;
+
+    let existing: ExistingInstances = [InstanceContext {
+        id: "soa://existing/task/webrtc".to_string(),
+        title: "Finish the WebRTC call module".to_string(),
+        class: "Task".to_string(),
+        properties: BTreeMap::new(),
+    }]
+    .into_iter()
+    .map(|i| (i.id.clone(), i))
+    .collect();
+    let identity_props: HashMap<String, String> =
+        HashMap::from([("Task".to_string(), "title".to_string())]);
+
+    let mk = |title: &str| ProposedInstance {
+        class: "Task".to_string(),
+        id: None,
+        props: HashMap::from([(
+            "title".to_string(),
+            serde_json::Value::String(title.to_string()),
+        )]),
+    };
+    let proposed = vec![
+        mk("Wrap up the WebRTC calling module"), // paraphrase of the seed → drop
+        mk("Update the CI documentation"),       // unrelated → keep
+    ];
+
+    let kept = filter_already_present_with_strategy(
+        proposed,
+        &existing,
+        &identity_props,
+        &DedupStrategy::Semantic {
+            model: "interpretation-embed".to_string(),
+            threshold: 0.6,
+        },
+    )
+    .await
+    .expect("semantic dedup");
+
+    let titles: Vec<&str> = kept
+        .iter()
+        .filter_map(|p| p.props.get("title").and_then(|v| v.as_str()))
+        .collect();
+    assert!(
+        titles.iter().any(|t| t.contains("CI documentation")),
+        "unrelated task must survive semantic dedup; got {titles:?}"
+    );
+    assert!(
+        !titles.iter().any(|t| t.contains("WebRTC")),
+        "paraphrased WebRTC task must be dropped by semantic dedup; got {titles:?}"
+    );
+}
+
+/// Full `run_interpretation` e2e that actually exercises the parent-scope
+/// plumbing end-to-end (prompt build → LLM → dedup → write), not just the
+/// isolated `existing_instance_context` helper. One existing Task lives under
+/// parent B. A transcript restates it. Semantic dedup (Bert) removes wording
+/// sensitivity so the assertions turn purely on *scope*:
+///   - scoped to parent B (contains the seed): the restatement is deduped — no
+///     fresh `ext/` task is minted (robust: holds whether or not the LLM
+///     re-proposes it).
+///   - scoped to parent A (empty): the seed is out of scope, so the restatement
+///     is created as a new instance. Retried until the model proposes it.
+#[tokio::test]
+async fn e2e_run_interpretation_honours_parent_scope() {
+    use crate::perspectives::interpretation::{run_interpretation_with_strategy, DedupStrategy};
+    use crate::perspectives::model_query::types::ParentScope;
+    use crate::types::{Link, LinkStatus};
+
+    let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
+    super::interpretation_test_support::register_interpretation_embedding_model().await;
+
+    // Existing task under parent B only.
+    seed_instance(
+        &mut perspective,
+        &ctx,
+        &shapes[0],
+        "soa://tree-b/task/staging-db",
+        "Provision the staging database",
+    )
+    .await;
+    perspective
+        .add_link(
+            Link {
+                source: "soa://parent/b".into(),
+                predicate: Some("ns://contains".into()),
+                target: "soa://tree-b/task/staging-db".into(),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("parent link");
+
+    let transcript = vec![(
+        "Nico".to_string(),
+        "Reminder for the team: we still need to provision the staging database — it's blocking QA."
+            .to_string(),
+    )];
+    let semantic = DedupStrategy::Semantic {
+        model: "interpretation-embed".to_string(),
+        threshold: 0.6,
+    };
+    let in_scope = ParentScope::Raw {
+        id: "soa://parent/b".into(),
+        predicate: "ns://contains".into(),
+    };
+    let out_scope = ParentScope::Raw {
+        id: "soa://parent/a".into(),
+        predicate: "ns://contains".into(),
+    };
+
+    let minted_staging = |rows: &[serde_json::Value]| -> usize {
+        rows.iter()
+            .filter(|r| {
+                r.get("id")
+                    .and_then(|i| i.as_str())
+                    .map(|id| id.starts_with("soa://ext/"))
+                    .unwrap_or(false)
+                    && r.get("title")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t.to_lowercase().contains("staging"))
+                        .unwrap_or(false)
+            })
+            .count()
+    };
+
+    // In-scope: the restatement must be deduped against the existing seed — no
+    // fresh ext/ task minted.
+    run_interpretation_with_strategy(
+        &mut perspective,
+        &shapes,
+        &transcript,
+        "soa://ext/",
+        &ctx,
+        &semantic,
+        Some(&in_scope),
+    )
+    .await
+    .expect("in-scope run");
+    let rows = model_instances(&perspective, "Task", &["title"]).await;
+    assert_eq!(
+        minted_staging(&rows),
+        0,
+        "in-scope run must dedup the restatement against the parent-B seed; minted {:#?}",
+        rows
+    );
+
+    // Out-of-scope: the parent-B seed is invisible, so the clearly-restated task
+    // is a genuinely new instance. Retry until the model proposes it.
+    let mut minted = 0;
+    for _ in 0..4 {
+        run_interpretation_with_strategy(
+            &mut perspective,
+            &shapes,
+            &transcript,
+            "soa://ext/",
+            &ctx,
+            &semantic,
+            Some(&out_scope),
+        )
+        .await
+        .expect("out-of-scope run");
+        let rows = model_instances(&perspective, "Task", &["title"]).await;
+        minted = minted_staging(&rows);
+        if minted >= 1 {
+            break;
+        }
+    }
+    assert!(
+        minted >= 1,
+        "out-of-scope run must NOT dedup against the parent-B seed — expected a new staging task under ext/"
+    );
 }
