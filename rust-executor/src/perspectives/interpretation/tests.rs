@@ -188,6 +188,24 @@ fn tolerates_trailing_commas() {
 }
 
 #[test]
+fn trailing_comma_cleanup_preserves_commas_inside_strings() {
+    let raw = r#"[
+          {"class":"Belief","title":"Hello, world}"},
+          {"class":"Task","title":"A, B, and C]"},
+        ]"#;
+    let out = parse_interpretation_response(raw).unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(
+        out[0].props.get("title").unwrap().as_str(),
+        Some("Hello, world}")
+    );
+    assert_eq!(
+        out[1].props.get("title").unwrap().as_str(),
+        Some("A, B, and C]")
+    );
+}
+
+#[test]
 fn empty_array_yields_no_instances() {
     assert!(parse_interpretation_response("[]").unwrap().is_empty());
     // and empty inside a fence / with whitespace
