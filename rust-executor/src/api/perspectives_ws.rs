@@ -1068,6 +1068,11 @@ async fn run_interpretation_handler(
         &transcript,
         &body.base_prefix,
         &agent_context,
+        // Existing-instance scope: this direct WS entry point interprets over
+        // the whole perspective (no per-channel sub-scope). #883 added the
+        // `scope` plumbing; the AutoProcessor is where a channel scope is
+        // supplied.
+        None,
     )
     .await
     .map_err(|e| WsRpcError::internal(e.to_string()))?;
