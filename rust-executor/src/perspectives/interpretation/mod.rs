@@ -70,6 +70,3 @@ pub struct ProposedInstance {
     #[serde(flatten)]
     pub props: HashMap<String, serde_json::Value>,
 }
-
-#[cfg(test)]
-mod tests;

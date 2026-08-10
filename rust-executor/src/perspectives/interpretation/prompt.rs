@@ -444,3 +444,269 @@ pub fn ensure_interpretation_task() -> anyhow::Result<AITask> {
         .ok_or_else(|| anyhow::anyhow!("interpretation task vanished immediately after insert"))?;
     Ok(task)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perspectives::interpretation::*;
+    use crate::perspectives::interpretation_test_support::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn interpretation_hint_lands_in_prompt() {
+        let shapes = vec![
+            shape_from_sdna("Belief", BELIEF_SDNA),
+            shape_from_sdna("Intention", INTENTION_SDNA),
+        ];
+        let input = build_interpretation_input(
+            &shapes,
+            &[(
+                "Nico".into(),
+                "I'll extract the LLM processing into ADAM".into(),
+            )],
+            &no_existing(),
+        );
+
+        // class-level hints reach the prompt
+        assert!(input.contains("A claim a participant holds to be true"));
+        assert!(input.contains("A first-person commitment to do something"));
+        // per-field hint + required flag
+        assert!(input.contains("Imperative summary of the work"));
+        assert!(input.contains("\"required\":true"));
+        // transcript included
+        assert!(input.contains("Nico") && input.contains("extract the LLM processing"));
+
+        // valid JSON, two classes, type-flag excluded from fields
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(v["classes"].as_array().unwrap().len(), 2);
+        let intention = v["classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "Intention")
+            .expect("Intention class in prompt");
+        let field_names: Vec<&str> = intention["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["name"].as_str())
+            .collect();
+        assert!(field_names.contains(&"title") && field_names.contains(&"owner"));
+        assert!(
+            !field_names.contains(&"type"),
+            "type flag must not be a field"
+        );
+        assert!(
+            intention["relations"].as_array().unwrap().is_empty(),
+            "relation-free shape must render an empty relations block"
+        );
+    }
+
+    #[test]
+    fn existing_context_renders_id_title_class_in_prompt() {
+        // With the richer `existing_instance_context` snapshot in play,
+        // build_interpretation_input must render each existing entry as an object
+        // carrying `id`, `title`, and `class` — that's the handle the LLM needs to
+        // emit an upsert instead of a duplicate create. Also proves the system
+        // prompt still describes the `id` upsert path.
+        let shapes = vec![shape_from_sdna("Task", TASK_SDNA)];
+        let existing = existing_map(vec![InstanceContext {
+            id: "soa://existing/task/42".to_string(),
+            title: "Draft the design doc".to_string(),
+            class: "Task".to_string(),
+            properties: BTreeMap::new(),
+        }]);
+        let input = build_interpretation_input(
+            &shapes,
+            &[("Nico".into(), "About that design doc…".into())],
+            &existing,
+        );
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        let task_class = v["classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "Task")
+            .expect("Task class in prompt");
+        let existing_arr = task_class["existing"]
+            .as_array()
+            .expect("existing must be an array");
+        assert_eq!(existing_arr.len(), 1);
+        assert_eq!(existing_arr[0]["id"], "soa://existing/task/42");
+        assert_eq!(existing_arr[0]["title"], "Draft the design doc");
+        assert_eq!(existing_arr[0]["class"], "Task");
+        // Empty `properties` map must NOT render — keeps the prompt compact for
+        // identity-only classes (regression guard for the render-when-non-empty
+        // rule in `build_interpretation_input`).
+        assert!(
+            existing_arr[0].get("properties").is_none(),
+            "empty properties map must be omitted from the rendered entry, got {:?}",
+            existing_arr[0]
+        );
+        // System prompt still teaches the id-upsert semantics — regression guard
+        // against silently dropping that instruction while refactoring the schema.
+        assert!(
+            INTERPRETATION_SYSTEM_PROMPT.contains("id"),
+            "system prompt must document the `id` upsert semantics"
+        );
+    }
+
+    #[test]
+    fn existing_context_with_properties_renders_them_into_prompt() {
+        // When an `InstanceContext` carries secondary scalars (e.g. the rolling
+        // `summary` on a ConversationSubgroup), the prompt must include a
+        // `properties` object on the corresponding `existing` entry. This is what
+        // gives the LLM enough state to decide whether new turns continue an
+        // existing instance or belong to a fresh one on a different topic — the
+        // topic-shift discrimination the identity-only view could not support.
+        let shapes = vec![shape_from_sdna(
+            "ConversationSubgroup",
+            CONVERSATION_SUBGROUP_SDNA,
+        )];
+        let mut properties: BTreeMap<String, String> = BTreeMap::new();
+        properties.insert(
+            "summary".to_string(),
+            "The team discussed dropped webhook retries during a recent payments outage."
+                .to_string(),
+        );
+        let existing = existing_map(vec![InstanceContext {
+            id: "soa://existing/subgroup/payments".to_string(),
+            title: "Payments infrastructure".to_string(),
+            class: "ConversationSubgroup".to_string(),
+            properties,
+        }]);
+        let input = build_interpretation_input(
+            &shapes,
+            &[("Ana".into(), "Switching topics — Q3 retro planning.".into())],
+            &existing,
+        );
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        let sg_class = v["classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "ConversationSubgroup")
+            .expect("ConversationSubgroup class in prompt");
+        let entry = &sg_class["existing"].as_array().expect("existing array")[0];
+        let rendered_props = entry["properties"]
+            .as_object()
+            .expect("populated properties must render as an object");
+        assert_eq!(
+            rendered_props.get("summary").and_then(|v| v.as_str()),
+            Some("The team discussed dropped webhook retries during a recent payments outage.")
+        );
+        // System prompt must instruct the model to actually READ `properties`, not
+        // just be handed them silently — otherwise the topic-shift fix is dead on
+        // arrival for smaller local models.
+        assert!(
+            INTERPRETATION_SYSTEM_PROMPT.contains("properties"),
+            "system prompt must document the `properties` field on existing entries"
+        );
+    }
+
+    #[test]
+    fn system_prompt_documents_relation_ref_syntax() {
+        // The system prompt must teach the LLM both the shape of the per-class
+        // `relations` block AND the two allowed reference forms it can put into a
+        // relation value. Without this instruction the LLM only sees an unfamiliar
+        // array in the input schema — the planner can only resolve refs it was told
+        // to emit.
+        let p = INTERPRETATION_SYSTEM_PROMPT;
+        assert!(
+            p.contains("`relations`"),
+            "system prompt must introduce the relations block on each class"
+        );
+        assert!(
+            p.contains("instance-reference") || p.contains("instance reference"),
+            "system prompt must frame a relation value as an instance reference"
+        );
+        // The `new:<TargetClass>:<n>` placeholder is the only way to link two
+        // freshly-minted siblings in the same response; a missing description
+        // would silently downgrade sibling-linking to unresolved refs at plan
+        // time. Assert both the literal token and the 1-based ordinal wording.
+        assert!(
+            p.contains("new:<TargetClass>:<n>"),
+            "system prompt must document the `new:<TargetClass>:<n>` ref form"
+        );
+        assert!(
+            p.contains("1-based"),
+            "system prompt must state the ordinal is 1-based"
+        );
+        // Existing-id path must still be described alongside the new-ref path so
+        // the LLM picks the right form per case (upsert-target vs sibling-mint).
+        assert!(
+            p.contains("existing") && p.contains("`id`") && p.contains("existing entry's `id`"),
+            "system prompt must document linking via an existing entry's id"
+        );
+        // Guardrail wording: unresolved refs and fabricated ids are the two
+        // failure modes; without explicit prohibitions small LLMs invent both.
+        assert!(
+            p.contains("Never invent an `id`"),
+            "system prompt must forbid fabricated ids"
+        );
+        assert!(
+            p.contains("never emit a") || p.contains("Never emit a"),
+            "system prompt must forbid unresolved `new:` refs"
+        );
+    }
+
+    #[test]
+    fn relations_few_shot_example_is_present_and_upsert_is_last() {
+        // The few-shot set must include a dedicated relations example demonstrating
+        // the `new:<Class>:<n>` ref syntax the system prompt teaches. It need NOT be
+        // last: empirically, putting the relations example (all-new-instances) in
+        // the recency slot made gemma3:12b create-happy and regressed the id-upsert
+        // behavior (`e2e_updates_existing_instance_via_id` 0/5). So the *upsert*
+        // example owns the last slot; relations sit earlier and still fire reliably.
+        let examples = interpretation_examples();
+        assert_eq!(examples.len(), 5, "expected exactly five few-shot examples");
+
+        // Find the relations example wherever it sits: the one whose output uses
+        // the `new:<Class>:<n>` ref syntax on both endpoints of a
+        // SemanticRelationship.
+        let relations_ex = examples
+            .iter()
+            .find(|e| {
+                e.output.contains("\"new:Topic:1\"") && e.output.contains("\"new:Message:1\"")
+            })
+            .expect(
+                "a relations few-shot example demonstrating `new:<Class>:<n>` refs must be present",
+            );
+        // Its input must render the `relations` block so the LLM sees the schema
+        // half of the ref-syntax lesson.
+        let v: serde_json::Value = serde_json::from_str(&relations_ex.input).unwrap();
+        let rel_class = v["classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "SemanticRelationship")
+            .expect("relations few-shot must declare a SemanticRelationship class");
+        let rels = rel_class["relations"]
+            .as_array()
+            .expect("SemanticRelationship must render a relations block");
+        let rel_names: Vec<&str> = rels.iter().filter_map(|r| r["name"].as_str()).collect();
+        assert!(
+        rel_names.contains(&"tag") && rel_names.contains(&"expression"),
+        "relations example must declare both `tag` and `expression` relations; got {rel_names:?}"
+    );
+
+        // The LAST example must be the upsert one — it carries an `existing` entry
+        // with an `id` and re-emits that `id` in its output (the fragile behavior
+        // that needs the recency slot). Guard against a future reshuffle silently
+        // regressing upsert recall again.
+        let last = examples.last().unwrap();
+        let lv: serde_json::Value = serde_json::from_str(&last.input).unwrap();
+        let has_existing_with_id = lv["classes"].as_array().unwrap().iter().any(|c| {
+            c["existing"]
+                .as_array()
+                .map(|xs| xs.iter().any(|x| x.get("id").is_some()))
+                .unwrap_or(false)
+        });
+        assert!(
+            has_existing_with_id,
+            "the last few-shot example must be the upsert one (an `existing` entry \
+         carrying an `id`), so id-upsert keeps the recency slot; last input was: {}",
+            last.input
+        );
+    }
+}

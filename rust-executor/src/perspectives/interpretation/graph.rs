@@ -736,3 +736,652 @@ pub async fn existing_instance_context(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perspectives::interpretation::*;
+    use crate::perspectives::interpretation_test_support::*;
+
+    #[test]
+    fn plan_ops_creates_without_id_and_updates_with_id() {
+        // An `id` field marks an upsert: patch the existing node's scalar fields
+        // (no fresh base, no re-run constructor). Absence of `id` = a create.
+        let shapes = vec![shape_from_sdna("Intention", INTENTION_SDNA)];
+        let raw = r#"[
+      {"class":"Intention","title":"Write the design doc"},
+      {"class":"Intention","id":"soa://existing/intention/42","title":"Write the design doc and circulate it","owner":"Nico"}
+    ]"#;
+        let proposed = parse_interpretation_response(raw).unwrap();
+        // `id` is parsed into its own field, kept out of `props`.
+        assert_eq!(
+            proposed[1].id.as_deref(),
+            Some("soa://existing/intention/42")
+        );
+        assert!(!proposed[1].props.contains_key("id"));
+
+        // The upsert only fires when the graph actually holds that id — seed
+        // known_existing_ids to mimic what `existing_instance_context` would
+        // return in production. Without this the planner treats the id as
+        // hallucinated and routes to Create.
+        let known = existing_ids(&["soa://existing/intention/42"]);
+        let ops = plan_interpretation_ops_with_context(&shapes, &proposed, "soa://ext/", &known);
+        assert_eq!(ops.len(), 2);
+
+        match &ops[0] {
+            InterpretationOp::Create {
+                base,
+                class,
+                values,
+            } => {
+                assert!(base.starts_with("soa://ext/intention/"));
+                assert_eq!(class, "Intention");
+                // The scalar payload is handed to `create_subject`; the type flag
+                // comes from the class constructor, never from the planner.
+                assert_eq!(
+                    values.get("title").and_then(|v| v.as_str()),
+                    Some("Write the design doc")
+                );
+                assert!(
+                    !values.contains_key("type"),
+                    "planner must not carry the type flag; got {values:?}"
+                );
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+        match &ops[1] {
+            InterpretationOp::Update {
+                base,
+                class,
+                values,
+            } => {
+                assert_eq!(base, "soa://existing/intention/42");
+                assert_eq!(class, "Intention");
+                // update patches scalar fields on the EXISTING base…
+                assert_eq!(
+                    values.get("title").and_then(|v| v.as_str()),
+                    Some("Write the design doc and circulate it")
+                );
+                assert_eq!(values.get("owner").and_then(|v| v.as_str()), Some("Nico"));
+                // …and never re-writes the type flag.
+                assert!(!values.contains_key("type"));
+            }
+            other => panic!("expected Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_ops_hallucinated_id_routes_to_create() {
+        // The LLM sometimes invents an `id` that names no real base — copying the
+        // format from the prompt but with a made-up path. Trusting it produces an
+        // Update against a base that has no type flag, i.e. a scalar write no
+        // reader will ever find. The planner must fall back to Create so the
+        // instance lands somewhere visible.
+        let shapes = vec![shape_from_sdna("Intention", INTENTION_SDNA)];
+        let raw = r#"[
+      {"class":"Intention","id":"soa://existing/intention/999","title":"Ghost"}
+    ]"#;
+        let proposed = parse_interpretation_response(raw).unwrap();
+        // existing intentionally does NOT contain the proposed id.
+        let ops = plan_interpretation_ops_with_context(
+            &shapes,
+            &proposed,
+            "soa://ext/",
+            &ExistingInstances::new(),
+        );
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            InterpretationOp::Create {
+                base,
+                class,
+                values,
+            } => {
+                assert!(
+                    base.starts_with("soa://ext/intention/"),
+                    "hallucinated id must be replaced by a fresh minted base, got {base}"
+                );
+                assert_ne!(
+                    base, "soa://existing/intention/999",
+                    "planner must not reuse the hallucinated id"
+                );
+                assert_eq!(class, "Intention");
+                assert_eq!(values.get("title").and_then(|v| v.as_str()), Some("Ghost"));
+            }
+            other => panic!("expected Create for hallucinated id, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_ops_drops_unknown_class() {
+        let shapes = vec![shape_from_sdna("Task", TASK_SDNA)];
+        let raw = r#"[
+      {"class":"Task","title":"Real"},
+      {"class":"Hallucinated","title":"Nope"}
+    ]"#;
+        let proposed = parse_interpretation_response(raw).unwrap();
+        let ops = plan_interpretation_ops(&shapes, &proposed, "soa://ext/");
+        assert_eq!(ops.len(), 1, "unknown-class proposal must be dropped");
+        assert!(matches!(ops[0], InterpretationOp::Create { .. }));
+    }
+
+    #[test]
+    fn plan_ops_empty_input_yields_no_ops() {
+        let shapes = vec![shape_from_sdna("Task", TASK_SDNA)];
+        assert!(plan_interpretation_ops(&shapes, &[], "soa://ext/").is_empty());
+    }
+
+    #[test]
+    fn relation_properties_are_excluded_from_interpretation() {
+        // A shape whose interpretation hint also declares a link-typed relation
+        // (`blocks`). load_shape lists that relation in `properties` too, so
+        // without the guard it would be offered to the LLM as a scalar field and —
+        // if the LLM emits it — literal-encoded by a setter into a bogus target.
+        let shape = shape_from_sdna("Task", TASK_WITH_RELATION_SDNA);
+        // Sanity: the relation really is present in both lists.
+        assert!(
+            shape.include_relations.iter().any(|r| r.name == "blocks"),
+            "fixture must declare a `blocks` relation"
+        );
+        assert!(
+            shape.properties.iter().any(|p| p.name == "blocks"),
+            "load_shape is expected to also list the relation in properties"
+        );
+
+        // 1. build_interpretation_input must not offer the relation as a field.
+        let input = build_interpretation_input(
+            &[shape.clone()],
+            &[("Nico".into(), "block it".into())],
+            &no_existing(),
+        );
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        let field_names: Vec<&str> = v["classes"][0]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["name"].as_str())
+            .collect();
+        assert!(field_names.contains(&"title"), "scalar field must remain");
+        assert!(
+            !field_names.contains(&"blocks"),
+            "relation must not be offered to the LLM as a field; got {field_names:?}"
+        );
+
+        // Forward relations surface in a dedicated `relations` block (so the LLM
+        // knows what refs it *can* fill), separate from the scalar `fields`. The
+        // `blocks` relation on `TASK_WITH_RELATION_SDNA` is `hasMany` forward, so
+        // it belongs there with its target class + hint.
+        let relations = v["classes"][0]["relations"].as_array().unwrap();
+        let blocks_rel = relations
+            .iter()
+            .find(|r| r["name"].as_str() == Some("blocks"))
+            .expect("hasMany forward relation must appear in `relations` block");
+        assert_eq!(
+            blocks_rel["targetClass"].as_str(),
+            Some("Task"),
+            "relation targetClass must reflect ShapeRelation.target_class_name"
+        );
+        assert_eq!(
+            blocks_rel["hint"].as_str(),
+            Some("Other tasks this one blocks."),
+            "relation hint must reflect the sibling property's interpretationHint"
+        );
+
+        // 2. The scalar write payload must not carry the relation either, even
+        //    when the LLM emits it (here as an array — exactly the case a setter
+        //    would literal-encode into a bogus `literal:json:` target).
+        let raw = r#"[{"class":"Task","title":"Do X","blocks":["soa://t2","soa://t3"]}]"#;
+        let proposed = parse_interpretation_response(raw).unwrap();
+        let ops = plan_interpretation_ops(&[shape], &proposed, "soa://ext/");
+        let InterpretationOp::Create { values, .. } = &ops[0] else {
+            panic!("expected a Create, got {:?}", ops[0]);
+        };
+        assert!(
+            !values.contains_key("blocks"),
+            "relation must never reach the scalar write path; got {values:?}"
+        );
+        // The scalar title still lands.
+        assert_eq!(values.get("title").and_then(|v| v.as_str()), Some("Do X"));
+    }
+
+    #[test]
+    fn relations_write_link_to_new_sibling() {
+        // Two Tasks minted in one pass; the first `blocks` the second via a
+        // `new:Task:2` ref. The relation must resolve to the second Task's freshly
+        // minted base and land as a real `ns://blocks` link (not a literal).
+        let shape = shape_from_sdna("Task", TASK_WITH_RELATION_SDNA);
+        let raw = r#"[
+      {"class":"Task","title":"Ship the API","blocks":["new:Task:2"]},
+      {"class":"Task","title":"Write the client"}
+    ]"#;
+        let proposed = parse_interpretation_response(raw).unwrap();
+        let ops = plan_interpretation_ops(&[shape], &proposed, "soa://ext/");
+
+        let first_base = nth_create_base(&ops, 0);
+        let second_base = nth_create_base(&ops, 1);
+        let targets = targets_of(addlinks_for(&ops, &first_base), "ns://blocks");
+        assert_eq!(
+            targets,
+            vec![second_base],
+            "blocks ref `new:Task:2` must point at the second Task's base"
+        );
+        // The target is an instance base, never a literal URI.
+        assert!(
+            !targets[0].starts_with("literal:"),
+            "relation target must be an instance URI, not a literal"
+        );
+    }
+
+    #[test]
+    fn relations_write_link_to_existing_id() {
+        // A single new Task blocks an existing one, referenced by its id. Only ids
+        // the model was shown (in `known_existing_ids`) are accepted as targets.
+        let shape = shape_from_sdna("Task", TASK_WITH_RELATION_SDNA);
+        let existing_id = "soa://ext/task/already-here".to_string();
+        let known = existing_ids(&[existing_id.as_str()]);
+        let raw = format!(r#"[{{"class":"Task","title":"New work","blocks":["{existing_id}"]}}]"#,);
+        let proposed = parse_interpretation_response(&raw).unwrap();
+        let ops = plan_interpretation_ops_with_context(&[shape], &proposed, "soa://ext/", &known);
+
+        let base = nth_create_base(&ops, 0);
+        assert_eq!(
+            targets_of(addlinks_for(&ops, &base), "ns://blocks"),
+            vec![existing_id],
+            "existing-id blocks ref must resolve to that id"
+        );
+    }
+
+    #[test]
+    fn relations_drop_unresolved_ref() {
+        // An out-of-range ordinal and an invented id are both unresolvable — the
+        // node still lands, just with no relation link and no panic.
+        let shape = shape_from_sdna("Task", TASK_WITH_RELATION_SDNA);
+        let raw = r#"[
+      {"class":"Task","title":"Lonely","blocks":["new:Task:99","soa://ext/task/never-shown"]}
+    ]"#;
+        let proposed = parse_interpretation_response(raw).unwrap();
+        // Empty known-ids: the bare id ref is "invented" from the model's POV.
+        let ops = plan_interpretation_ops(&[shape], &proposed, "soa://ext/");
+
+        let base = nth_create_base(&ops, 0);
+        assert!(
+            addlinks_for(&ops, &base).is_empty(),
+            "unresolved refs must not become links; got {ops:#?}"
+        );
+        // The node still lands with its scalar — a dropped relation never drops it.
+        let InterpretationOp::Create { values, .. } = &ops[0] else {
+            panic!("expected a Create, got {:?}", ops[0]);
+        };
+        assert_eq!(values.get("title").and_then(|v| v.as_str()), Some("Lonely"));
+    }
+
+    #[test]
+    fn relations_hasone_takes_first_of_array() {
+        // A single-cardinality (`hasOne`) relation given an array keeps only the
+        // first resolved ref. `parent` is hasOne forward -> Task.
+        let sdna = r#"{
+      "target_class":"ns://Task",
+      "interpretation_hint":"A task.",
+      "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://task"}],
+      "properties":[
+        {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
+        {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+        {"path":"ns://parent","name":"parent","relation_kind":"hasOne","target_class_name":"Task","class":"ns://TaskShape","interpretation_hint":"The parent task."}
+      ]
+    }"#;
+        let shape = shape_from_sdna("Task", sdna);
+        // Sanity: the fixture really is single-cardinality forward.
+        let parent_rel = shape
+            .include_relations
+            .iter()
+            .find(|r| r.name == "parent")
+            .expect("parent relation present");
+        assert_eq!(parent_rel.direction, "forward");
+        assert!(
+            parent_rel.kind == "hasOne" || parent_rel.max_count == Some(1),
+            "parent must be single-cardinality"
+        );
+
+        let raw = r#"[
+      {"class":"Task","title":"Child","parent":["new:Task:2","new:Task:3"]},
+      {"class":"Task","title":"First parent"},
+      {"class":"Task","title":"Second parent"}
+    ]"#;
+        let proposed = parse_interpretation_response(raw).unwrap();
+        let ops = plan_interpretation_ops(&[shape], &proposed, "soa://ext/");
+
+        let child_base = nth_create_base(&ops, 0);
+        let first_parent_base = nth_create_base(&ops, 1);
+        assert_eq!(
+            targets_of(addlinks_for(&ops, &child_base), "ns://parent"),
+            vec![first_parent_base],
+            "hasOne must keep only the first resolved ref (new:Task:2)"
+        );
+    }
+
+    #[test]
+    fn relations_from_update_target_emit_addlinks() {
+        // A relation whose source is an *existing* (upsert) instance must not fold
+        // into that instance's scalar Update — it becomes an additive `AddLinks`
+        // op (relations to a fresh sibling grow the graph, never replace scalars).
+        let shape = shape_from_sdna("Task", TASK_WITH_RELATION_SDNA);
+        let existing_id = "soa://ext/task/existing".to_string();
+        let raw = format!(
+            r#"[
+          {{"class":"Task","id":"{existing_id}","title":"Renamed","blocks":["new:Task:2"]}},
+          {{"class":"Task","title":"Fresh sibling"}}
+        ]"#,
+        );
+        let proposed = parse_interpretation_response(&raw).unwrap();
+        let known = existing_ids(&[existing_id.as_str()]);
+        let ops = plan_interpretation_ops_with_context(&[shape], &proposed, "soa://ext/", &known);
+
+        // The Update carries the retitled scalar, no relation value.
+        let update = ops
+            .iter()
+            .find_map(|op| match op {
+                InterpretationOp::Update { base, values, .. } if base == &existing_id => {
+                    Some(values)
+                }
+                _ => None,
+            })
+            .expect("expected an Update on the existing id");
+        assert!(
+            !update.contains_key("blocks"),
+            "scalar Update must not carry the relation; got {update:?}"
+        );
+        assert_eq!(
+            update.get("title").and_then(|v| v.as_str()),
+            Some("Renamed")
+        );
+
+        // The relation lands as an additive AddLinks on the same base, pointing at
+        // the fresh sibling.
+        let sibling_base = nth_create_base(&ops, 0);
+        assert_eq!(
+            targets_of(addlinks_for(&ops, &existing_id), "ns://blocks"),
+            vec![sibling_base],
+            "AddLinks must point the blocks relation at the fresh sibling's base"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_ops_upsert_replaces_scalar_without_touching_type_flag() {
+        // End-to-end (no LLM): seed a real perspective with an Intention whose
+        // title/owner are already set, then apply an Update op that patches the
+        // scalar fields on that same base. The old scalar values must be GONE (the
+        // setters are `setSingleTarget` = replace-per-predicate) and the new ones
+        // present; the type flag stays untouched.
+        let (mut perspective, shapes, ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        let base = "soa://existing/intention/upsert-target";
+
+        // Seed: original title + owner on the target instance.
+        seed_instance(&mut perspective, &ctx, &shapes[0], base, "Draft the design").await;
+        apply_one(
+            &mut perspective,
+            &shapes,
+            &ctx,
+            proposal(
+                "Intention",
+                Some(base),
+                &[("owner", serde_json::json!("Nico"))],
+            ),
+        )
+        .await;
+        assert_eq!(
+            decoded_targets(&perspective, base, "ns://owner").await,
+            vec![serde_json::json!("Nico")],
+            "sanity: the seeding update wrote the owner"
+        );
+
+        // Now upsert: same base, revised title + new owner.
+        let ops = apply_one(
+            &mut perspective,
+            &shapes,
+            &ctx,
+            proposal(
+                "Intention",
+                Some(base),
+                &[
+                    (
+                        "title",
+                        serde_json::json!("Draft the design and circulate it"),
+                    ),
+                    ("owner", serde_json::json!("Josh")),
+                ],
+            ),
+        )
+        .await;
+        assert!(matches!(ops[0], InterpretationOp::Update { .. }));
+
+        // Type flag survives (the constructor wrote it; updates never touch it).
+        let type_links = decoded_targets(&perspective, base, "ns://type").await;
+        assert_eq!(
+            type_links,
+            vec![serde_json::json!("ns://intention")],
+            "type flag must remain exactly once"
+        );
+        // Title: exactly the new value, no residue of the old one.
+        assert_eq!(
+            decoded_targets(&perspective, base, "ns://title").await,
+            vec![serde_json::json!("Draft the design and circulate it")],
+            "title must have been replaced (no old-value residue)"
+        );
+        // Owner: exactly the new value ("Nico" gone).
+        assert_eq!(
+            decoded_targets(&perspective, base, "ns://owner").await,
+            vec![serde_json::json!("Josh")],
+            "owner must have been replaced"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_ops_addlinks_are_additive() {
+        // Two `blocks` edges on the same base must coexist: relations are appended,
+        // never replaced-per-predicate the way scalars are.
+        use crate::types::LinkQuery;
+        let (mut perspective, shapes, ctx) =
+            setup_perspective_no_llm(&[("Task", TASK_WITH_RELATION_SDNA)]).await;
+        let base = "soa://existing/task/hub";
+        seed_instance(&mut perspective, &ctx, &shapes[0], base, "Hub task").await;
+
+        for target in ["soa://ext/task/a", "soa://ext/task/b"] {
+            apply_interpretation_ops(
+                &mut perspective,
+                &[InterpretationOp::AddLinks {
+                    source: base.to_string(),
+                    links: vec![Link {
+                        source: base.to_string(),
+                        predicate: Some("ns://blocks".to_string()),
+                        target: target.to_string(),
+                    }],
+                }],
+                &ctx,
+            )
+            .await
+            .expect("apply AddLinks");
+        }
+
+        let links = perspective
+            .get_links(&LinkQuery {
+                source: Some(base.to_string()),
+                predicate: Some("ns://blocks".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        let mut targets: Vec<String> = links.iter().map(|l| l.data.target.clone()).collect();
+        targets.sort();
+        assert_eq!(
+            targets,
+            vec![
+                "soa://ext/task/a".to_string(),
+                "soa://ext/task/b".to_string()
+            ],
+            "AddLinks must accumulate, not replace"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_instance_context_reads_id_and_identity() {
+        // The context snapshot the prompt + relation resolver rely on: one row per
+        // persisted instance, carrying the base URI as `id` and the class's declared
+        // identity value as `title`.
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            "soa://existing/task/1",
+            "Migrate the SHACL parser",
+        )
+        .await;
+
+        let ctx_map = existing_instance_context(&perspective, &shapes, None)
+            .await
+            .expect("existing_instance_context");
+        assert_eq!(ctx_map.len(), 1, "one seeded instance; got {ctx_map:#?}");
+        // Id-keyed single source: look the instance up by its base URI.
+        let inst = ctx_map
+            .get("soa://existing/task/1")
+            .expect("instance keyed by its id");
+        assert_eq!(inst.id, "soa://existing/task/1");
+        assert_eq!(inst.title, "Migrate the SHACL parser");
+        assert_eq!(inst.class, "Task");
+        // Task's `owner` scalar is unset on this seed → nothing to render;
+        // stays empty so the prompt does not carry an empty `properties` block.
+        assert!(
+            inst.properties.is_empty(),
+            "task with only identity set must carry no secondary scalars; got {:?}",
+            inst.properties
+        );
+
+        // The projections consumers derive from this one map: per-class identity
+        // values (dedup net) and the id key-set (relation resolver).
+        assert_eq!(
+            identity_values_by_class(&ctx_map).get("Task"),
+            Some(&vec!["Migrate the SHACL parser".to_string()])
+        );
+        assert!(ctx_map.contains_key("soa://existing/task/1"));
+    }
+
+    #[tokio::test]
+    async fn existing_instance_context_scope_constrains_to_subtree() {
+        // Plumbing for tree-scoped extraction (#883): the existing-instance snapshot
+        // that feeds dedup must be constrainable to a sub-graph, not every instance
+        // of the class in the perspective. The runner (#885) supplies the scope; here
+        // we prove the parameter actually narrows the set. Two Tasks, each linked
+        // under a different parent node.
+        use crate::perspectives::model_query::types::ParentScope;
+        use crate::types::{Link, LinkStatus};
+
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            "soa://tree-a/task/1",
+            "Task under tree A",
+        )
+        .await;
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            "soa://tree-b/task/1",
+            "Task under tree B",
+        )
+        .await;
+        // Parent edges: <parent> ns://contains <task-base>.
+        for (parent, task) in [
+            ("soa://parent/a", "soa://tree-a/task/1"),
+            ("soa://parent/b", "soa://tree-b/task/1"),
+        ] {
+            perspective
+                .add_link(
+                    Link {
+                        source: parent.into(),
+                        predicate: Some("ns://contains".into()),
+                        target: task.into(),
+                    },
+                    LinkStatus::Local,
+                    None,
+                    &ctx,
+                )
+                .await
+                .expect("parent link");
+        }
+
+        // Unscoped: both instances are visible (pre-scope behaviour).
+        let all = existing_instance_context(&perspective, &shapes, None)
+            .await
+            .expect("unscoped context");
+        assert_eq!(
+            all.len(),
+            2,
+            "unscoped context must see both tasks; got {all:#?}"
+        );
+
+        // Scoped to parent A: only the task under tree A survives.
+        let scope = ParentScope::Raw {
+            id: "soa://parent/a".into(),
+            predicate: "ns://contains".into(),
+        };
+        let scoped = existing_instance_context(&perspective, &shapes, Some(&scope))
+            .await
+            .expect("scoped context");
+        assert_eq!(
+            scoped.len(),
+            1,
+            "parent-scoped context must exclude tree B; got {scoped:#?}"
+        );
+        let inst = scoped
+            .get("soa://tree-a/task/1")
+            .expect("tree-A task present");
+        assert_eq!(inst.id, "soa://tree-a/task/1");
+        assert_eq!(inst.title, "Task under tree A");
+    }
+
+    #[tokio::test]
+    async fn existing_instance_context_populates_secondary_scalars() {
+        // With the design-fork (i) enrichment, `existing_instance_context` must
+        // return each instance's currently-set non-identity scalar values in the
+        // `properties` map, so the prompt can show the LLM the full state of an
+        // existing entry (its rolling summary etc.) — not just the identity
+        // label. This is what unblocks the topic-shift discrimination on smaller
+        // local models.
+        let (mut perspective, shapes, ctx) =
+            setup_perspective_no_llm(&[("ConversationSubgroup", CONVERSATION_SUBGROUP_SDNA)]).await;
+        seed_instance_with_props(
+        &mut perspective,
+        &ctx,
+        &shapes[0],
+        "soa://existing/subgroup/payments",
+        serde_json::json!({
+            "name": "Payments infrastructure",
+            "summary": "The team discussed dropped webhook retries during a recent payments outage."
+        }),
+    )
+    .await;
+
+        let ctx_map = existing_instance_context(&perspective, &shapes, None)
+            .await
+            .expect("existing_instance_context");
+        assert_eq!(ctx_map.len(), 1, "one seeded instance; got {ctx_map:#?}");
+        let inst = ctx_map
+            .get("soa://existing/subgroup/payments")
+            .expect("subgroup keyed by its id");
+        assert_eq!(inst.title, "Payments infrastructure");
+        assert_eq!(
+            inst.properties.get("summary").map(String::as_str),
+            Some("The team discussed dropped webhook retries during a recent payments outage."),
+            "summary scalar must be populated; got {:?}",
+            inst.properties
+        );
+        // Identity value must not be duplicated under `properties` (it is
+        // already carried by `title`); the type flag must never leak in either
+        // (setter-managed, not LLM-visible state).
+        assert!(!inst.properties.contains_key("name"));
+        assert!(!inst.properties.contains_key("type"));
+    }
+}

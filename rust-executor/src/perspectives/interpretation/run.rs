@@ -416,3 +416,226 @@ pub async fn run_interpretation_with_strategy(
     let bases = touched_bases(&ops);
     Ok(bases)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Ad4mDb;
+    use crate::perspectives::interpretation::*;
+    use crate::perspectives::interpretation_test_support::*;
+    use crate::types::AITask;
+
+    #[tokio::test]
+    async fn strip_noop_updates_drops_same_value_upsert_keeps_real_change() {
+        // Seed an Intention with title+owner. Then plan three ops on it:
+        //   (1) same title + same owner   -> no-op, must be dropped.
+        //   (2) new title (different value) -> real change, must survive.
+        //   (3) a Create -> passed through unchanged (dedup happens elsewhere).
+        let (mut perspective, shapes, ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        let base = "soa://existing/intention/noop-target";
+        seed_instance(&mut perspective, &ctx, &shapes[0], base, "Ship the parser").await;
+        // Seed an owner too so the no-op check covers a multi-field state.
+        apply_one(
+            &mut perspective,
+            &shapes,
+            &ctx,
+            proposal(
+                "Intention",
+                Some(base),
+                &[("owner", serde_json::json!("Nico"))],
+            ),
+        )
+        .await;
+
+        // Mirror `run_interpretation`: the graph's actual base is what makes an id
+        // trusted, otherwise the planner treats it as hallucinated and creates.
+        let existing_ctx = existing_instance_context(&perspective, &shapes, None)
+            .await
+            .expect("existing_instance_context");
+        let planned = plan_interpretation_ops_with_context(
+            &shapes,
+            &[
+                // No-op update: title + owner identical to the seeded state.
+                proposal(
+                    "Intention",
+                    Some(base),
+                    &[
+                        ("title", serde_json::json!("Ship the parser")),
+                        ("owner", serde_json::json!("Nico")),
+                    ],
+                ),
+                // Real update: same base, but a rewritten title.
+                proposal(
+                    "Intention",
+                    Some(base),
+                    &[("title", serde_json::json!("Ship the parser this week"))],
+                ),
+                // A Create (no id) — strip_noop_updates only looks at Updates.
+                proposal(
+                    "Intention",
+                    None,
+                    &[("title", serde_json::json!("A brand new idea"))],
+                ),
+            ],
+            "soa://ext/",
+            &existing_ctx,
+        );
+        assert_eq!(planned.len(), 3, "sanity: planner emitted all three");
+
+        let kept = strip_noop_updates(&perspective, &shapes, planned)
+            .await
+            .expect("strip_noop_updates");
+
+        let updates: Vec<&InterpretationOp> = kept
+            .iter()
+            .filter(|op| matches!(op, InterpretationOp::Update { .. }))
+            .collect();
+        let creates: Vec<&InterpretationOp> = kept
+            .iter()
+            .filter(|op| matches!(op, InterpretationOp::Create { .. }))
+            .collect();
+        assert_eq!(
+            updates.len(),
+            1,
+            "no-op Update dropped, real Update kept; got {kept:#?}"
+        );
+        assert_eq!(creates.len(), 1, "Create pass-through; got {kept:#?}");
+        let InterpretationOp::Update { values, .. } = updates[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            values.get("title").and_then(|v| v.as_str()),
+            Some("Ship the parser this week"),
+            "kept Update must be the real one"
+        );
+    }
+
+    #[test]
+    fn ensure_interpretation_task_registers_and_is_idempotent() {
+        ensure_db_init();
+
+        // Guard: some other test may have inserted the row already; wipe just
+        // our name so the first call below is a real insert. (Global DB is
+        // shared across the single-threaded test run.)
+        let existing: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.name == INTERPRETATION_TASK_NAME)
+            .collect();
+        for t in existing {
+            Ad4mDb::with_global_instance(|db| db.remove_task(t.task_id.clone())).unwrap();
+        }
+
+        let first = ensure_interpretation_task().unwrap();
+        assert_eq!(first.name, INTERPRETATION_TASK_NAME);
+        assert_eq!(first.model_id, "default");
+        assert!(first.system_prompt.contains("You extract typed instances"));
+        assert!(!first.task_id.is_empty());
+
+        // Second call must find the same row, not insert a duplicate.
+        let second = ensure_interpretation_task().unwrap();
+        assert_eq!(first.task_id, second.task_id);
+
+        let rows: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.name == INTERPRETATION_TASK_NAME)
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "expected exactly one interpretation task row"
+        );
+    }
+
+    #[tokio::test]
+    async fn gather_transcript_sparql_returns_speaker_and_decoded_text() {
+        // The generic SPARQL gather must:
+        //   1. run an arbitrary SELECT against the perspective's Oxigraph store,
+        //   2. bind `?speaker` (the raw NamedNode string, e.g. "did:key:alice"),
+        //   3. bind `?text` and, when it's a `literal:string:...` URI, decode it,
+        //   4. preserve caller-visible ordering by returning rows as SPARQL gave
+        //      them (deterministic when ORDER BY is in the query).
+        use crate::perspectives::interpretation::graph::gather_transcript_sparql;
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        seed_message(
+            &mut perspective,
+            &ctx,
+            "msg://1",
+            "did:key:alice",
+            "hello world",
+            "ns://body",
+        )
+        .await;
+        seed_message(
+            &mut perspective,
+            &ctx,
+            "msg://2",
+            "did:key:bob",
+            "second turn",
+            "ns://body",
+        )
+        .await;
+
+        let query = r#"
+        SELECT ?speaker ?text WHERE {
+            ?m <ns://body> ?text .
+            ?m <ns://author> ?speaker .
+        }
+        ORDER BY ?m
+    "#;
+        let turns = gather_transcript_sparql(&perspective, query)
+            .await
+            .expect("gather_transcript_sparql");
+        assert_eq!(
+            turns,
+            vec![
+                ("did:key:alice".to_string(), "hello world".to_string()),
+                ("did:key:bob".to_string(), "second turn".to_string()),
+            ],
+            "SPARQL rows must materialise as (speaker, decoded text) turns in order"
+        );
+    }
+
+    #[tokio::test]
+    async fn gather_transcript_sparql_scopes_to_predicate() {
+        // Proves this is a real scope, not a rebranded gather-everything. Seed one
+        // "body"-predicated message and one "system-log" message; a query that
+        // filters on `ns://body` must return exactly the first.
+        use crate::perspectives::interpretation::graph::gather_transcript_sparql;
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        seed_message(
+            &mut perspective,
+            &ctx,
+            "msg://human",
+            "did:key:alice",
+            "I'll ship the doc",
+            "ns://body",
+        )
+        .await;
+        seed_message(
+            &mut perspective,
+            &ctx,
+            "msg://bot",
+            "did:key:bot",
+            "system boot",
+            "ns://system_log",
+        )
+        .await;
+
+        let scoped = gather_transcript_sparql(
+            &perspective,
+            "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . }",
+        )
+        .await
+        .expect("gather_transcript_sparql");
+        assert_eq!(
+            scoped,
+            vec![("did:key:alice".to_string(), "I'll ship the doc".to_string())],
+            "scoped query must exclude messages under other predicates"
+        );
+    }
+}
