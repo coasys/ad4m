@@ -57,6 +57,12 @@ pub(crate) fn relation_predicates(shape: &ModelShape) -> HashSet<&str> {
 /// `existing` hint in [`build_interpretation_input`] — even if the model
 /// re-proposes a known item, it never becomes a new instance.
 ///
+/// This is the **`DedupStrategy::NormalizedString`** implementation, not a
+/// separate/legacy path: `run_interpretation` always dedups through
+/// [`filter_already_present_with_strategy`](super::filter_already_present_with_strategy),
+/// which calls this for the (default) string strategy and the embedding path
+/// for `DedupStrategy::Semantic`. No production caller invokes this directly.
+///
 /// `existing` maps a class's local name to the already-present identity
 /// values. `identity_props` maps a class's local name to the NAME of its
 /// declared identity property. An instance whose class has no identity property
