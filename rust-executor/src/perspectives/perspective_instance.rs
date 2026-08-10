@@ -5196,14 +5196,18 @@ impl PerspectiveInstance {
                         }
                     }
                     PassOutcome::NotCandidate { .. }
+                    | PassOutcome::AwaitingAuthor
                     | PassOutcome::ShapesMissing { .. }
                     | PassOutcome::EmptyTranscript => {
                         // Do NOT mark as processed:
-                        //   * NotCandidate — the earliest online peer may go
+                        //   * NotCandidate — the elected online author may go
                         //     offline before finishing; next tick's fast-path
                         //     could rightly elect us. If we suppressed the ids
                         //     now and no peer follows through, the batch would
                         //     silently drop.
+                        //   * AwaitingAuthor — no batch author is online yet;
+                        //     one may return and must then be able to pick this
+                        //     batch up, so we keep re-evaluating it.
                         //   * ShapesMissing — the SDNA may land later
                         //     (partial-sync).
                         //   * EmptyTranscript — the transcript may fill in.

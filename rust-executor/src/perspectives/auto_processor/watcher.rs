@@ -57,6 +57,10 @@ pub struct ProcessorPending {
     /// Wall-clock (unix millis) of the most recent [`WatcherState::record_item`]
     /// for this processor. Used to compare against `debounce_ms`.
     pub last_touched_ms: i64,
+    /// Wall-clock (unix millis) of the *oldest* still-pending item — i.e. the
+    /// first `record_item` after the queue was last emptied. Used to compare
+    /// against `max_wait_ms` so a sub-`batch_min` batch is not orphaned.
+    pub first_touched_ms: i64,
 }
 
 /// Container that observes source item arrivals across every declared
@@ -83,6 +87,10 @@ impl WatcherState {
             .per_processor
             .entry(processor_id.to_string())
             .or_default();
+        if entry.items.is_empty() {
+            // First item of a fresh window — start the max-wait clock.
+            entry.first_touched_ms = now_ms;
+        }
         if !entry.items.contains(&item_id) {
             entry.items.push(item_id);
         }
@@ -94,12 +102,19 @@ impl WatcherState {
         self.per_processor.get(processor_id)
     }
 
-    /// If `now_ms - last_touched >= cfg.debounce_ms` and pending is non-empty,
-    /// drain up to `cfg.batch_max` ids (FIFO) and return them; anything over
-    /// the cap stays in the queue for the next window.
+    /// Drain a ready batch, or `None` if the processor should keep waiting.
     ///
-    /// Returns `None` when nothing is pending or the debounce hasn't elapsed
-    /// — the watcher-loop caller should just wait.
+    /// A batch is ready when **all** of:
+    /// 1. pending is non-empty;
+    /// 2. the debounce has settled (`now - last_touched >= debounce_ms`) — no
+    ///    fresh arrival in the quiet window;
+    /// 3. the size threshold is met — either `items.len() >= batch_min` (the
+    ///    Flux "wait for N inputs" rule) **or** the oldest pending item has
+    ///    waited past `max_wait_ms` (the safety valve, when configured).
+    ///
+    /// On drain it takes up to `batch_max` ids (FIFO); any overflow stays for
+    /// the next window. Draining the queue empty resets the `max_wait_ms`
+    /// clock (the next `record_item` re-arms `first_touched_ms`).
     pub fn drain_ready_batch(
         &mut self,
         cfg: &AutoProcessorConfig,
@@ -110,6 +125,13 @@ impl WatcherState {
             return None;
         }
         if now_ms.saturating_sub(entry.last_touched_ms) < cfg.debounce_ms {
+            return None;
+        }
+        let threshold_met = entry.items.len() >= cfg.batch_min.max(1);
+        let wait_expired = cfg
+            .max_wait_ms
+            .is_some_and(|w| now_ms.saturating_sub(entry.first_touched_ms) >= w);
+        if !threshold_met && !wait_expired {
             return None;
         }
         let take = entry.items.len().min(cfg.batch_max);
@@ -128,13 +150,20 @@ pub enum PassOutcome {
     /// not touch the LLM and did not write anything. The winner's result will
     /// reach us via link sync.
     BackedOff { holder: String },
-    /// Telepresence fast-path stood us down before writing a claim: another
-    /// online peer's DID sorts lexicographically before ours, so they are the
-    /// earliest-eligible-author for this pass. No claim was written; no
-    /// contention was added to the shared graph. `earliest` is that peer's
-    /// DID. `try_claim` (P-A) is still the real correctness guard — this only
-    /// reduces contention when telepresence data is available.
-    NotCandidate { earliest: String },
+    /// Authorship fast-path stood us down before writing a claim: an *online*
+    /// author of the batch precedes us in message order, so they are the
+    /// elected processor for this pass. No claim was written; no contention was
+    /// added to the shared graph. `winner` is that author's DID. `try_claim`
+    /// (P-A) is still the real correctness guard — this only reduces contention
+    /// when telepresence data is available.
+    NotCandidate { winner: String },
+    /// Authorship policy stood us down with *no* winner: none of the batch's
+    /// authors are currently online (all participants dropped, or the item
+    /// synced in late). Per the "only participants process" rule we neither
+    /// claim nor process — we wait for an author to come back online. No claim
+    /// was written. This is a benign, expected steady-state on a quiet
+    /// neighbourhood; the next pass re-evaluates presence.
+    AwaitingAuthor,
     /// The claim was ours, but at least one of `cfg.interpretation_classes`
     /// did not resolve via `load_shape` (partial-sync SDNA / config typo).
     /// We logged, skipped the LLM call and let the claim TTL-expire so a
@@ -145,26 +174,82 @@ pub enum PassOutcome {
     EmptyTranscript,
 }
 
-/// Pure winner-selection over an online-agent set plus this agent's own DID.
+/// Outcome of authorship-ordered processor election (pure; see
+/// [`elect_author`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorElection {
+    /// This agent is the elected processor — the first reachable author in
+    /// message order is us. Proceed to `try_claim`.
+    Me,
+    /// Another online author precedes us in message order; stand down. They
+    /// hold the local data and are present, so they should process.
+    Other(String),
+    /// No author of the batch is reachable (none online, self not among the
+    /// authors). Under the "only participants process" policy nobody runs the
+    /// pass this round; wait for an author to return.
+    NoneOnline,
+}
+
+/// Pure authorship-ordered processor election.
 ///
-/// The min-DID rule mirrors [`super::claim::try_claim`]'s tiebreak — same
-/// deterministic ordering, same "lexicographically smallest DID wins"
-/// convention — so a losing candidate can stand down BEFORE writing a claim
-/// and still be sure the winner it inferred will be the one that
-/// [`try_claim`] elects if a race happens. Callers pass their own DID
-/// separately so this function works regardless of whether the telepresence
-/// provider echoes the local agent in `online_agents()`.
+/// Replaces the old lexical min-DID rule: the agent that runs the (expensive,
+/// LLM) pass should be a *participant* — an author of the data in scope — not
+/// merely whoever happens to have the smallest DID online. `authors` is the
+/// batch's authors in **message order** (deduplicated, first-occurrence order
+/// preserved by the caller). An author is *reachable* when it is either this
+/// agent (`self_did`, always present since we are the one running) or a member
+/// of `online_dids`.
 ///
-/// Returns the earliest DID over the union `{self_did} ∪ online_dids`;
-/// when the union is just `self_did`, self is trivially the earliest.
-pub fn earliest_eligible_did(online_dids: &[String], self_did: &str) -> String {
-    let mut earliest = self_did.to_string();
-    for did in online_dids {
-        if did.as_str() < earliest.as_str() {
-            earliest = did.clone();
+/// The winner is the **first reachable author in message order** — mirroring
+/// Flux, which walks from the first message's author onward until it finds a
+/// present participant. Message order is a total order every peer computes
+/// identically from the synced graph, so peers converge on the same winner
+/// without a global sync clock; `try_claim` remains the guard for the residual
+/// "who is online differs across peers" race.
+///
+/// Returns [`AuthorElection::NoneOnline`] when no author is reachable — the
+/// strict "wait for a participant" branch (policy (b)).
+pub fn elect_author(authors: &[String], online_dids: &[String], self_did: &str) -> AuthorElection {
+    for author in authors {
+        if author == self_did {
+            return AuthorElection::Me;
+        }
+        if online_dids.iter().any(|d| d == author) {
+            return AuthorElection::Other(author.clone());
         }
     }
-    earliest
+    AuthorElection::NoneOnline
+}
+
+/// Resolve the author DID of each batch item, in `item_ids` order, for
+/// authorship-ordered election ([`elect_author`]). Each item's author is the
+/// lexicographically smallest author DID among its outgoing links — a message
+/// node's links normally share a single author, so the `min` is just "the
+/// author", and picking `min` keeps the result deterministic across peers when
+/// they don't. Items with no links contribute no author. The returned list is
+/// deduplicated with first-occurrence (message) order preserved, so the caller
+/// walks it exactly as Flux walks messages: first author first.
+async fn batch_authors(
+    perspective: &PerspectiveInstance,
+    item_ids: &[String],
+) -> anyhow::Result<Vec<String>> {
+    use crate::types::LinkQuery;
+    let mut authors: Vec<String> = Vec::new();
+    for item in item_ids {
+        let links = perspective
+            .get_links(&LinkQuery {
+                source: Some(item.clone()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("batch_authors: get_links({item}) failed: {e:#}"))?;
+        if let Some(author) = links.into_iter().map(|l| l.author).min() {
+            if !authors.contains(&author) {
+                authors.push(author);
+            }
+        }
+    }
+    Ok(authors)
 }
 
 /// Turn an [`AutoProcessorConfig::dedup_strategy_json`] blob into a live
@@ -241,14 +326,17 @@ pub fn parse_dedup_strategy_json(blob: Option<&str>) -> DedupStrategy {
 /// changing its guarantees.
 ///
 /// Ordering:
-/// 0. Telepresence fast-path (P-B2b3) — read
-///    [`PerspectiveInstance::online_agents`] and short-circuit with
-///    [`PassOutcome::NotCandidate`] when some other online peer's DID sorts
-///    before ours. This never writes anything to the shared graph, so it
-///    keeps contention (and claim links) off perspectives with a busy
-///    online set. A missing / erroring telepresence adapter is treated as
-///    "no candidacy signal" and falls through — correctness still rests on
-///    step 1's claim.
+/// 0. Authorship-ordered candidacy (fast-path, P-B2b3) — resolve the batch's
+///    authors (in message order) and read
+///    [`PerspectiveInstance::online_agents`], then [`elect_author`]: the first
+///    *online* author in message order is the processor. If that is not us we
+///    short-circuit with [`PassOutcome::NotCandidate`]; if no author is online
+///    we short-circuit with [`PassOutcome::AwaitingAuthor`] and wait (the
+///    "only participants process" rule). This never writes to the shared
+///    graph, so it keeps contention (and claim links) off busy perspectives.
+///    A missing/erroring telepresence adapter, or a batch with no resolvable
+///    authors, is treated as "no candidacy signal" and falls through —
+///    correctness still rests on step 1's claim.
 /// 1. `try_claim` — reserve the batch in the shared graph. Loss = back off
 ///    silently; the winner's result reaches us via link sync.
 /// 2. Resolve each `cfg.interpretation_classes` entry via [`load_shape`]. A
@@ -282,24 +370,54 @@ pub async fn run_one_pass(
         );
     }
 
-    // 0. Telepresence-bounded candidacy (fast-path, P-B2b3). Best-effort: a
-    //    missing/erroring telepresence adapter (no link-language, no online
-    //    peers, transport hiccup) falls through to `try_claim`, which is the
-    //    real correctness guard. Only short-circuits when we can positively
-    //    identify some other online peer with a smaller DID.
+    // 0. Authorship-ordered candidacy (fast-path, P-B2b3). Best-effort: a
+    //    missing/erroring telepresence adapter or a batch with no resolvable
+    //    authors falls through to `try_claim`, which is the real correctness
+    //    guard. Otherwise it elects the first *online* author in message order
+    //    and either proceeds (that is us), stands down for the winner, or waits
+    //    when no author is online ("only participants process").
     let me = did_for_context(context)
         .map_err(|e| anyhow::anyhow!("run_one_pass: did_for_context: {e:#}"))?;
     match perspective.online_agents().await {
         Ok(agents) => {
-            let dids: Vec<String> = agents.into_iter().map(|a| a.did).collect();
-            let earliest = earliest_eligible_did(&dids, &me);
-            if earliest != me {
-                log::info!(
-                    "auto_processor `{}`: standing down — `{earliest}` is the earliest online \
-                     eligible author",
+            let online: Vec<String> = agents.into_iter().map(|a| a.did).collect();
+            let authors = match batch_authors(perspective, item_ids).await {
+                Ok(a) => a,
+                Err(e) => {
+                    log::debug!(
+                        "auto_processor `{}`: batch_authors failed ({e:#}); proceeding to try_claim",
+                        cfg.processor_id
+                    );
+                    Vec::new()
+                }
+            };
+            if authors.is_empty() {
+                // No authorship signal — don't stall the pass; let the claim
+                // layer (min-DID) elect a processor instead.
+                log::debug!(
+                    "auto_processor `{}`: no resolvable batch authors; proceeding to try_claim",
                     cfg.processor_id
                 );
-                return Ok(PassOutcome::NotCandidate { earliest });
+            } else {
+                match elect_author(&authors, &online, &me) {
+                    AuthorElection::Me => { /* elected — fall through to claim */ }
+                    AuthorElection::Other(winner) => {
+                        log::info!(
+                            "auto_processor `{}`: standing down — online author `{winner}` \
+                             precedes us in message order",
+                            cfg.processor_id
+                        );
+                        return Ok(PassOutcome::NotCandidate { winner });
+                    }
+                    AuthorElection::NoneOnline => {
+                        log::info!(
+                            "auto_processor `{}`: no batch author online — waiting for a \
+                             participant to return before processing",
+                            cfg.processor_id
+                        );
+                        return Ok(PassOutcome::AwaitingAuthor);
+                    }
+                }
             }
         }
         Err(e) => {
@@ -391,7 +509,9 @@ mod tests {
             ),
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms,
+            batch_min: 1,
             batch_max,
+            max_wait_ms: None,
             claim_ttl_ms: 60_000,
             llm_base_url: None,
             llm_model: None,
@@ -417,66 +537,109 @@ mod tests {
             .all(|c| c.is_ascii_hexdigit()));
     }
 
-    // ---- earliest_eligible_did ---------------------------------------------
+    // ---- elect_author ------------------------------------------------------
 
-    /// Only self is a candidate — self wins trivially. This is the state
-    /// telepresence-less perspectives hit if we ever pass an empty list
-    /// (though `run_one_pass` never actually calls the fast-path in that
-    /// case — the `online_agents()` error path is taken instead).
+    /// The first author in message order is us and we are (definitionally)
+    /// present → we are elected regardless of who else is online. This is the
+    /// common single-participant / I-spoke-first case.
     #[test]
-    fn earliest_eligible_did_returns_self_when_no_online_peers() {
+    fn elect_author_elects_self_when_first_author() {
+        let authors = vec!["did:key:me".into(), "did:key:bob".into()];
+        let online = vec!["did:key:bob".into()];
         assert_eq!(
-            earliest_eligible_did(&[], "did:key:zzz-me"),
-            "did:key:zzz-me"
+            elect_author(&authors, &online, "did:key:me"),
+            AuthorElection::Me
         );
     }
 
-    /// Some other online peer sorts lexicographically before us — that peer
-    /// is the earliest, so self stands down. Mirrors P-A's min-DID tiebreak.
+    /// The first author precedes us in message order AND is online → stand
+    /// down for them; they hold the data and are present. Message order, not
+    /// DID order, decides — `zzz-alice` wins over us even though her DID sorts
+    /// last, because she authored the first message.
     #[test]
-    fn earliest_eligible_did_returns_smaller_online_peer() {
-        let online = vec!["did:key:mmm".into(), "did:key:zzz-peer".into()];
+    fn elect_author_stands_down_for_earlier_online_author() {
+        let authors = vec!["did:key:zzz-alice".into(), "did:key:me".into()];
+        let online = vec!["did:key:zzz-alice".into()];
         assert_eq!(
-            earliest_eligible_did(&online, "did:key:yyy-me"),
-            "did:key:mmm"
+            elect_author(&authors, &online, "did:key:me"),
+            AuthorElection::Other("did:key:zzz-alice".into())
         );
     }
 
-    /// Self sorts before every online peer → self is the earliest. Proves
-    /// self does not need to be echoed in `online_agents()` for the fast-path
-    /// to elect us; it is inserted into the comparison set explicitly.
+    /// The first author is offline; the second author is us → we skip past the
+    /// absent participant and are elected. This is Nico's "everyone else
+    /// offline, eventually I find my own message and process" case.
     #[test]
-    fn earliest_eligible_did_returns_self_when_lexicographically_smallest() {
-        let online = vec!["did:key:mmm".into(), "did:key:zzz".into()];
+    fn elect_author_skips_offline_author_to_reach_self() {
+        let authors = vec!["did:key:alice".into(), "did:key:me".into()];
+        let online: Vec<String> = vec![]; // alice dropped
         assert_eq!(
-            earliest_eligible_did(&online, "did:key:aaa-me"),
-            "did:key:aaa-me"
+            elect_author(&authors, &online, "did:key:me"),
+            AuthorElection::Me
         );
     }
 
-    /// If the telepresence provider *does* echo self in `online_agents()`,
-    /// the answer must still be self (not the empty string, not something
-    /// smaller). Idempotent under self-inclusion.
+    /// No author of the batch is online and we are not among the authors (a
+    /// non-participant watching a synced transcript) → nobody processes. The
+    /// strict "only participants process" branch — policy (b).
     #[test]
-    fn earliest_eligible_did_handles_self_in_online_list_idempotently() {
-        let me = "did:key:mmm-me";
-        let online = vec![me.into(), "did:key:zzz-peer".into()];
-        assert_eq!(earliest_eligible_did(&online, me), me);
+    fn elect_author_waits_when_no_author_online() {
+        let authors = vec!["did:key:alice".into(), "did:key:bob".into()];
+        let online: Vec<String> = vec![];
+        assert_eq!(
+            elect_author(&authors, &online, "did:key:non-participant"),
+            AuthorElection::NoneOnline
+        );
     }
 
-    /// Sort is total on the DIDs — ties don't occur in practice, but the
-    /// function must be deterministic even if the online list has repeated
-    /// entries (a mis-behaving telepresence adapter could send duplicates).
+    /// Earliest-in-order online author wins even when a later author is also
+    /// online — order is the tiebreak, so election is deterministic across
+    /// peers without a global clock.
     #[test]
-    fn earliest_eligible_did_is_deterministic_on_duplicate_online_entries() {
-        let online = vec![
-            "did:key:mmm".into(),
-            "did:key:mmm".into(),
-            "did:key:zzz".into(),
-        ];
+    fn elect_author_picks_earliest_in_order_among_multiple_online() {
+        let authors = vec!["did:key:alice".into(), "did:key:bob".into()];
+        let online = vec!["did:key:bob".into(), "did:key:alice".into()];
         assert_eq!(
-            earliest_eligible_did(&online, "did:key:yyy-me"),
-            "did:key:mmm"
+            elect_author(&authors, &online, "did:key:me"),
+            AuthorElection::Other("did:key:alice".into())
+        );
+    }
+
+    // ---- batch_authors -----------------------------------------------------
+
+    /// `batch_authors` reads each item's link author from the graph, in
+    /// `item_ids` order, deduplicates repeated authors, and skips items with no
+    /// links. Here both authored items share the local test agent, so the
+    /// result is a single-entry list; the linkless id contributes nothing.
+    #[tokio::test]
+    async fn batch_authors_resolves_dedupes_and_skips_linkless() {
+        use crate::types::{Link, LinkStatus};
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let me = did_for_context(&ctx).expect("did");
+        for uri in ["msg://a", "msg://b"] {
+            p.add_link(
+                Link {
+                    source: uri.into(),
+                    predicate: Some("ns://body".into()),
+                    target: "literal:string:hi".into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed body");
+        }
+        let authors = batch_authors(
+            &p,
+            &["msg://a".into(), "msg://b".into(), "msg://no-links".into()],
+        )
+        .await
+        .expect("batch_authors");
+        assert_eq!(
+            authors,
+            vec![me],
+            "same author collapses to one entry; the linkless id is skipped"
         );
     }
 
@@ -554,6 +717,79 @@ mod tests {
             &vec!["i2".to_string(), "i3".to_string(), "i4".to_string()],
             "overflow must be preserved in insertion order for the next window"
         );
+    }
+
+    /// `batch_min` holds a below-threshold batch even after the debounce has
+    /// settled — the Flux "wait for N inputs" rule. Two items pending, min is
+    /// 3, no `max_wait_ms` → keep waiting (None) and leave the queue intact.
+    #[test]
+    fn drain_holds_below_batch_min() {
+        let mut w = WatcherState::new();
+        w.record_item("p", "i1".into(), 1_000);
+        w.record_item("p", "i2".into(), 1_100);
+        let mut c = cfg("p", 100, 32);
+        c.batch_min = 3;
+        assert_eq!(
+            w.drain_ready_batch(&c, 5_000),
+            None,
+            "below batch_min with no max_wait must keep waiting"
+        );
+        assert_eq!(
+            w.pending_for("p").unwrap().items.len(),
+            2,
+            "held batch stays queued"
+        );
+    }
+
+    /// Once `batch_min` items have accumulated (debounce settled), the batch
+    /// drains normally.
+    #[test]
+    fn drain_fires_at_batch_min() {
+        let mut w = WatcherState::new();
+        w.record_item("p", "i1".into(), 1_000);
+        w.record_item("p", "i2".into(), 1_100);
+        w.record_item("p", "i3".into(), 1_200);
+        let mut c = cfg("p", 100, 32);
+        c.batch_min = 3;
+        assert_eq!(
+            w.drain_ready_batch(&c, 5_000),
+            Some(vec!["i1".into(), "i2".into(), "i3".into()])
+        );
+    }
+
+    /// `max_wait_ms` is the safety valve: a sub-`batch_min` batch drains once
+    /// the oldest item has waited long enough, so it is never orphaned. Item
+    /// first seen at t=1_000, max_wait=2_000 → still held at t=2_500 relative
+    /// to... no: elapsed since first_touched (1_000) at now=3_500 is 2_500 ≥
+    /// 2_000 → drains despite being below min.
+    #[test]
+    fn drain_flushes_below_min_after_max_wait() {
+        let mut w = WatcherState::new();
+        w.record_item("p", "i1".into(), 1_000);
+        w.record_item("p", "i2".into(), 1_100);
+        let mut c = cfg("p", 100, 32);
+        c.batch_min = 5;
+        c.max_wait_ms = Some(2_000);
+        // Debounce settled (no arrival since 1_100) and 3_500-1_000=2_500 ≥
+        // 2_000 max_wait → flush the partial batch.
+        assert_eq!(
+            w.drain_ready_batch(&c, 3_500),
+            Some(vec!["i1".into(), "i2".into()]),
+            "max_wait must flush a sub-min batch rather than orphan it"
+        );
+    }
+
+    /// `max_wait_ms` does not fire early: before the oldest item ages past the
+    /// window, a sub-min batch is still held.
+    #[test]
+    fn drain_respects_max_wait_before_expiry() {
+        let mut w = WatcherState::new();
+        w.record_item("p", "i1".into(), 1_000);
+        let mut c = cfg("p", 100, 32);
+        c.batch_min = 5;
+        c.max_wait_ms = Some(2_000);
+        // 1_500-1_000 = 500 < 2_000 → still waiting (debounce already settled).
+        assert_eq!(w.drain_ready_batch(&c, 1_500), None);
     }
 
     /// Per-processor state is isolated: draining one processor's queue does
