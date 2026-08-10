@@ -558,6 +558,43 @@ pub struct RunInterpretationRequest {
     pub link_status: Option<String>,
 }
 
+/// Register a neighbourhood auto-processor on a perspective. The executor's
+/// watch loop then runs LLM interpretation automatically over new source items
+/// (mirrors what Flux does per channel), coordinating which peer processes each
+/// batch via the shared-graph `ProcessingClaim`. Emits step signals on the
+/// events WebSocket (`auto-processor-event`).
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AddAutoProcessorRequest {
+    pub uuid: String,
+    /// Human-meaningful processor id (unique per perspective).
+    pub processor_id: String,
+    /// SPARQL `SELECT ?speaker ?text` over the source items to interpret (e.g.
+    /// a channel's messages).
+    pub source_scope_query: String,
+    /// Class URIs (SHACL `target_class`) to materialize each pass.
+    pub interpretation_classes: Vec<String>,
+    /// Quiet-window (ms) after the last new item before a pass runs.
+    pub debounce_ms: i64,
+    /// Minimum items before a pass runs (Flux "wait for N inputs"). Default 1.
+    #[serde(default)]
+    pub batch_min: Option<usize>,
+    /// Cap on items per pass.
+    pub batch_max: usize,
+    /// Safety flush (ms) for a sub-`batch_min` batch; `None` = wait indefinitely.
+    #[serde(default)]
+    pub max_wait_ms: Option<i64>,
+    /// How long a won claim is authoritative before peers may re-claim (ms).
+    pub claim_ttl_ms: i64,
+    /// Optional LLM model tag override (else the executor's default).
+    #[serde(default)]
+    pub llm_model: Option<String>,
+    /// Optional serialized `DedupStrategy` JSON (else NormalizedString).
+    #[serde(default)]
+    pub dedup_strategy_json: Option<String>,
+}
+
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]

@@ -1089,6 +1089,52 @@ async fn run_interpretation_handler(
     Ok(serde_json::to_value(bases)?)
 }
 
+/// Register a neighbourhood auto-processor on a perspective. Writes the
+/// `AutoProcessorConfig` into the shared graph; the executor watch loop reads it
+/// back and starts running interpretation automatically over new source items,
+/// emitting step signals on the events WebSocket (`auto-processor-event`).
+async fn add_auto_processor_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    use crate::api::types::AddAutoProcessorRequest;
+    use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: AddAutoProcessorRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+
+    let cfg = AutoProcessorConfig {
+        processor_id: body.processor_id.clone(),
+        source_scope_query: body.source_scope_query,
+        interpretation_classes: body.interpretation_classes,
+        debounce_ms: body.debounce_ms,
+        batch_min: body.batch_min.unwrap_or(1),
+        batch_max: body.batch_max,
+        max_wait_ms: body.max_wait_ms,
+        claim_ttl_ms: body.claim_ttl_ms,
+        // `llm_base_url` is not part of the request surface — dynamic provider
+        // registration is a follow-up; the pass uses the executor's default LLM.
+        llm_base_url: None,
+        llm_model: body.llm_model,
+        dedup_strategy_json: body.dedup_strategy_json,
+    };
+    write_processor(&mut perspective, &cfg, &agent_context)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(serde_json::to_value(body.processor_id)?)
+}
+
 // ── Registration ──
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -1125,4 +1171,5 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.modelSubscribe", model_subscribe_handler);
     map.register("perspective.evaluateGetters", evaluate_getters_handler);
     map.register("perspective.runInterpretation", run_interpretation_handler);
+    map.register("perspective.addAutoProcessor", add_auto_processor_handler);
 }

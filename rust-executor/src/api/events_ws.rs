@@ -49,11 +49,11 @@ use crate::agent::capabilities::*;
 use crate::agent::{did_for_context, AgentContext};
 use crate::pubsub::{
     get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, AI_MODEL_LOADING_STATUS,
-    AI_TRANSCRIPTION_TEXT_TOPIC, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC,
-    HOSTING_USER_INFO_CHANGED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
-    PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
-    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_REMOVED_TOPIC,
-    PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
+    AI_TRANSCRIPTION_TEXT_TOPIC, APPS_CHANGED, AUTO_PROCESSOR_EVENT_TOPIC,
+    EXCEPTION_OCCURRED_TOPIC, HOSTING_USER_INFO_CHANGED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC,
+    PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC,
+    PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
+    PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
     RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
 
@@ -345,6 +345,16 @@ pub(crate) async fn build_event_stream(
         matches_query_subscription_owner
     );
 
+    // ── Auto-processor step signals ──
+    // Broadcast (not owner-filtered): the event carries `perspectiveUuid` +
+    // `processorId`, so a client subscribes and filters to the perspective it
+    // cares about. This is how a Flux-style UI shows "collecting → running LLM
+    // → done" and awaits the next batch.
+    let s_auto_processor = broadcast_stream!(
+        pubsub.subscribe(&AUTO_PROCESSOR_EVENT_TOPIC).await,
+        "auto-processor-event"
+    );
+
     // ── Merge all streams ──
     let agent = stream::select(
         stream::select(s_status, s_apps),
@@ -356,7 +366,10 @@ pub(crate) async fn build_event_stream(
     );
     let links = stream::select(s_link_added, stream::select(s_link_removed, s_link_updated));
     let runtime = stream::select(s_msg, stream::select(s_notif, s_exc));
-    let ai = stream::select(s_trans, stream::select(s_loading, s_query_sub));
+    let ai = stream::select(
+        s_trans,
+        stream::select(s_loading, stream::select(s_query_sub, s_auto_processor)),
+    );
 
     let top = stream::select(
         stream::select(agent, persp),
