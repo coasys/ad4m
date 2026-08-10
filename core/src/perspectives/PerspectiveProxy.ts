@@ -639,7 +639,7 @@ export class PerspectiveProxy {
      * internally in Rust, registers a subscription, runs the initial query, and
      * pushes updated results when relevant links change.
      *
-     * The subscription reuses the same GraphQL subscription channel as subscribeQuery().
+     * The subscription reuses the same WS-RPC subscription channel as subscribeQuery().
      * Use keepAliveQuery() / disposeQuerySubscription() with the returned subscriptionId.
      *
      * @param className - The model class name
