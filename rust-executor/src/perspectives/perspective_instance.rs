@@ -397,7 +397,7 @@ impl PerspectiveInstance {
             self.pending_diffs_loop(),
             self.subscribed_queries_loop(),
             self.fallback_sync_loop(),
-            self.auto_processor_watch_loop(),
+            self.auto_processor_watch_loop(AgentContext::main_agent()),
         );
     }
 
@@ -5081,7 +5081,10 @@ impl PerspectiveInstance {
     /// deltas) is a follow-up optimisation — the coordination correctness
     /// envelope is the same because the `ProcessingClaim` (P-A) is the real
     /// double-processing guard, not the trigger latency.
-    async fn auto_processor_watch_loop(&self) {
+    /// `context` is the agent this executor runs passes as — production passes
+    /// the main agent; a multi-user test spawns one loop per managed user so the
+    /// `ProcessingClaim` election runs across distinct DIDs on one executor.
+    pub(crate) async fn auto_processor_watch_loop(&self, context: AgentContext) {
         use crate::perspectives::auto_processor::watcher::WatcherState;
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5108,7 +5111,7 @@ impl PerspectiveInstance {
                 &mut watcher,
                 &mut processed_per_processor,
                 now_ms,
-                &AgentContext::main_agent(),
+                &context,
             )
             .await;
         }
