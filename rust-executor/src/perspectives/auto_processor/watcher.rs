@@ -374,15 +374,25 @@ pub async fn run_one_pass(
     }
 
     // Step signals (P-B2c): observable pass lifecycle for tests + the WS layer.
+    // `me` (the acting agent's DID) is resolved up front so every signal is
+    // tagged with which peer emitted it — the multi-user/executor observer uses
+    // this to see who claimed vs backed off.
     let uuid = perspective.uuid.clone();
+    let me = did_for_context(context)
+        .map_err(|e| anyhow::anyhow!("run_one_pass: did_for_context: {e:#}"))?;
     macro_rules! signal {
         ($step:expr) => {
-            emit(AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step).with_items(item_ids))
-                .await
+            emit(
+                AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
+                    .with_agent_did(&me)
+                    .with_items(item_ids),
+            )
+            .await
         };
         ($step:expr, detail = $d:expr) => {
             emit(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
+                    .with_agent_did(&me)
                     .with_items(item_ids)
                     .with_detail($d),
             )
@@ -391,6 +401,7 @@ pub async fn run_one_pass(
         ($step:expr, bases = $b:expr) => {
             emit(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
+                    .with_agent_did(&me)
                     .with_items(item_ids)
                     .with_bases($b),
             )
@@ -404,8 +415,6 @@ pub async fn run_one_pass(
     //    guard. Otherwise it elects the first *online* author in message order
     //    and either proceeds (that is us), stands down for the winner, or waits
     //    when no author is online ("only participants process").
-    let me = did_for_context(context)
-        .map_err(|e| anyhow::anyhow!("run_one_pass: did_for_context: {e:#}"))?;
     match perspective.online_agents().await {
         Ok(agents) => {
             let online: Vec<String> = agents.into_iter().map(|a| a.did).collect();

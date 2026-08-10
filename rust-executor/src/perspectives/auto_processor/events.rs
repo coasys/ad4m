@@ -60,6 +60,10 @@ pub struct AutoProcessorEvent {
     pub perspective_uuid: String,
     /// The processor's id (`AutoProcessorConfig::processor_id`).
     pub processor_id: String,
+    /// DID of the agent this executor ran the pass as — lets a multi-user /
+    /// multi-executor observer see *which* peer claimed/processed vs backed off.
+    #[serde(default)]
+    pub agent_did: Option<String>,
     /// Which step this event marks.
     pub step: AutoProcessorStep,
     /// The batch's source item ids (present from `BatchReady` onward).
@@ -78,11 +82,16 @@ impl AutoProcessorEvent {
         Self {
             perspective_uuid: perspective_uuid.to_string(),
             processor_id: processor_id.to_string(),
+            agent_did: None,
             step,
             item_ids: Vec::new(),
             bases: Vec::new(),
             detail: None,
         }
+    }
+    pub fn with_agent_did(mut self, did: &str) -> Self {
+        self.agent_did = Some(did.to_string());
+        self
     }
     pub fn with_items(mut self, item_ids: &[String]) -> Self {
         self.item_ids = item_ids.to_vec();

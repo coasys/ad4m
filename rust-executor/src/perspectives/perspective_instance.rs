@@ -5104,8 +5104,13 @@ impl PerspectiveInstance {
                 Ok(d) => d.as_millis() as i64,
                 Err(_) => continue, // clock before epoch — skip tick
             };
-            self.run_auto_processor_tick(&mut watcher, &mut processed_per_processor, now_ms)
-                .await;
+            self.run_auto_processor_tick(
+                &mut watcher,
+                &mut processed_per_processor,
+                now_ms,
+                &AgentContext::main_agent(),
+            )
+            .await;
         }
 
         log::debug!("auto_processor_watch_loop ended for perspective {}", uuid);
@@ -5122,11 +5127,17 @@ impl PerspectiveInstance {
     /// `processed_per_processor` carries the per-processor turn-id set across
     /// ticks (a `Won`/`BackedOff` pass marks its batch processed so the polling
     /// design does not re-race it).
+    ///
+    /// `context` is the agent this executor runs the pass as — the production
+    /// loop passes the main agent; a multi-user test passes each managed user's
+    /// context so the `ProcessingClaim` election runs across distinct DIDs
+    /// (proving two users on one executor don't double-process).
     pub(crate) async fn run_auto_processor_tick(
         &self,
         watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState,
         processed_per_processor: &mut HashMap<String, HashSet<String>>,
         now_ms: i64,
+        context: &AgentContext,
     ) {
         use crate::perspectives::auto_processor::{
             config::load_processors,
@@ -5194,9 +5205,8 @@ impl PerspectiveInstance {
             )
             .await;
             let mut perspective_clone = self.clone();
-            let ctx = AgentContext::main_agent();
             let outcome =
-                match run_one_pass(&mut perspective_clone, cfg, &batch, now_ms, &ctx).await {
+                match run_one_pass(&mut perspective_clone, cfg, &batch, now_ms, context).await {
                     Ok(o) => o,
                     Err(e) => {
                         log::warn!(
