@@ -1855,12 +1855,12 @@ async fn auto_processor_high_level_signal_driven_pass() {
 
         // Tick 1 records the two turns (debounce not yet elapsed → no drain).
         perspective
-            .run_auto_processor_tick(&mut watcher, &mut processed, 1_000)
+            .run_auto_processor_tick(&mut watcher, &mut processed, 1_000, &ctx)
             .await;
         // Tick 2, past the debounce window: the re-gathered duplicates don't
         // reset the clock (the fix), so the batch drains and the real pass runs.
         perspective
-            .run_auto_processor_tick(&mut watcher, &mut processed, 1_100)
+            .run_auto_processor_tick(&mut watcher, &mut processed, 1_100, &ctx)
             .await;
 
         // Await the terminal signal — this is what a WS client / test waits on
@@ -1925,6 +1925,167 @@ async fn auto_processor_high_level_signal_driven_pass() {
     }
     panic!(
         "auto_processor high-level signal-driven e2e failed after {attempts} attempts: {}",
+        last_err.unwrap_or_default()
+    );
+}
+
+/// Two users, one executor (ad4m multi-tenancy): the `ProcessingClaim` must
+/// stop the SAME batch from being processed twice. This is the step toward the
+/// full two-executor neighbourhood test (#881) — here both "peers" live in one
+/// process and share the perspective graph, so a claim written by one is
+/// immediately visible to the other.
+///
+/// Setup: register two managed users (distinct DIDs), seed a channel + one
+/// processor, then drive each user's own watch-loop tick. The claim election is
+/// min-DID over active claimants, so we tick the smaller-DID user first: it is
+/// the sole claimant and wins → processes; the other then claims, sees the
+/// winner, and backs off. The load-bearing assertion is on the graph — exactly
+/// ONE ConversationSubgroup — plus the corroborating signals (winner `Processed`,
+/// loser `BackedOff`), each tagged with its `agentDid`.
+///
+/// Real-LLM (gemma3:12b). Retry loop for model non-determinism.
+#[tokio::test]
+async fn auto_processor_two_users_one_executor_no_double_processing() {
+    use crate::agent::{did_for_context, AgentContext, AgentService};
+    use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+    use crate::perspectives::auto_processor::events::{
+        next_event_matching, subscribe, AutoProcessorStep,
+    };
+    use crate::perspectives::auto_processor::watcher::WatcherState;
+    use crate::types::{Link, LinkStatus};
+    use std::collections::{HashMap, HashSet};
+    use std::time::Duration;
+
+    let processor_id = "shared-channel-proc";
+    let attempts = 3u8;
+    let mut last_err: Option<String> = None;
+
+    for attempt in 1..=attempts {
+        let (mut perspective, _shapes, ctx_main) =
+            setup_interpretation_e2e(&[("ConversationSubgroup", CONVERSATION_SUBGROUP_SDNA)]).await;
+
+        // Two managed users on the one executor — distinct DIDs so the claim
+        // election has two real candidates.
+        AgentService::ensure_user_key_exists("alice@e2e").expect("user A key");
+        AgentService::ensure_user_key_exists("bob@e2e").expect("user B key");
+        let ctx_a = AgentContext::for_user_email("alice@e2e".to_string());
+        let ctx_b = AgentContext::for_user_email("bob@e2e".to_string());
+        let did_a = did_for_context(&ctx_a).expect("did A");
+        let did_b = did_for_context(&ctx_b).expect("did B");
+        assert_ne!(did_a, did_b, "two managed users must have distinct DIDs");
+
+        // Order by DID: the smaller-DID user is the claim winner, so tick it
+        // first (sole claimant) and the other second (sees the claim).
+        let (ctx_win, did_win, ctx_lose, did_lose) = if did_a <= did_b {
+            (&ctx_a, &did_a, &ctx_b, &did_b)
+        } else {
+            (&ctx_b, &did_b, &ctx_a, &did_a)
+        };
+
+        // Seed a channel's messages (as the main agent) + register the processor.
+        for (uri, author, body) in [
+            ("msg://s1", "did:key:ana", "Our webhook retries keep dropping during payment outages — we lose the failed events."),
+            ("msg://s2", "did:key:ben", "Right, the payments queue has no way to replay what got dropped last time."),
+        ] {
+            for (pred, target) in [
+                ("ns://body", format!("literal:string:{body}")),
+                ("ns://author", author.to_string()),
+            ] {
+                perspective
+                    .add_link(
+                        Link { source: uri.into(), predicate: Some(pred.into()), target },
+                        LinkStatus::Local,
+                        None,
+                        &ctx_main,
+                    )
+                    .await
+                    .expect("seed channel message link");
+            }
+        }
+        let cfg = AutoProcessorConfig {
+            processor_id: processor_id.into(),
+            source_scope_query: "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
+                                 ?m <ns://author> ?speaker . } ORDER BY ?m"
+                .into(),
+            interpretation_classes: vec!["ns://ConversationSubgroup".into()],
+            debounce_ms: 50,
+            batch_min: 2,
+            batch_max: 32,
+            max_wait_ms: None,
+            claim_ttl_ms: 60_000,
+            llm_base_url: None,
+            llm_model: None,
+            dedup_strategy_json: None,
+        };
+        write_processor(&mut perspective, &cfg, &ctx_main)
+            .await
+            .expect("write_processor");
+
+        let mut rx = subscribe().await;
+
+        // Each user's "executor" keeps its own in-memory watcher state.
+        let mut w_win = WatcherState::new();
+        let mut p_win: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut w_lose = WatcherState::new();
+        let mut p_lose: HashMap<String, HashSet<String>> = HashMap::new();
+
+        // Tick 1: both record the batch (debounce not elapsed → no drain).
+        perspective
+            .run_auto_processor_tick(&mut w_win, &mut p_win, 1_000, ctx_win)
+            .await;
+        perspective
+            .run_auto_processor_tick(&mut w_lose, &mut p_lose, 1_000, ctx_lose)
+            .await;
+        // Tick 2 past debounce: winner drains first (sole claimant → wins →
+        // processes); loser drains and, seeing the winner's claim, backs off.
+        perspective
+            .run_auto_processor_tick(&mut w_win, &mut p_win, 1_100, ctx_win)
+            .await;
+        perspective
+            .run_auto_processor_tick(&mut w_lose, &mut p_lose, 1_100, ctx_lose)
+            .await;
+
+        // Load-bearing assertion: exactly ONE subgroup. Two would mean the claim
+        // failed to coordinate and both users processed the same batch.
+        let subgroups = model_instances(&perspective, "ConversationSubgroup", &["name"]).await;
+        if subgroups.len() != 1 {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: expected exactly 1 subgroup (claim must dedup), got {}: {subgroups:#?}",
+                subgroups.len()
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        }
+
+        // Corroborate via the (buffered) signal stream: winner Processed, loser
+        // backed off — each tagged with its agentDid.
+        let mut win_processed = false;
+        let mut lose_stood_down = false;
+        while let Some(ev) = next_event_matching(&mut rx, Duration::from_millis(100), |e| {
+            e.processor_id == processor_id
+        })
+        .await
+        {
+            match (ev.agent_did.as_deref(), &ev.step) {
+                (Some(d), AutoProcessorStep::Processed) if d == did_win => win_processed = true,
+                (Some(d), AutoProcessorStep::BackedOff) if d == did_lose => lose_stood_down = true,
+                _ => {}
+            }
+        }
+        if !win_processed || !lose_stood_down {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: signals not as expected (win_processed={win_processed}, lose_stood_down={lose_stood_down}); \
+                 winner={did_win}, loser={did_lose}"
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        }
+
+        // No double-processing held on this attempt.
+        return;
+    }
+    panic!(
+        "two-user no-double-processing e2e failed after {attempts} attempts: {}",
         last_err.unwrap_or_default()
     );
 }
