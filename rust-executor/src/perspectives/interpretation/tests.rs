@@ -1369,7 +1369,12 @@ fn filter_already_present_drops_known_titles() {
     let mut identity_props = HashMap::new();
     identity_props.insert("Task".to_string(), "title".to_string());
 
-    let kept = filter_already_present(proposed, &existing, &identity_props);
+    let kept = filter_already_present(
+        proposed,
+        &existing,
+        &identity_props,
+        &std::collections::HashSet::new(),
+    );
     let kept_titles: Vec<&str> = kept
         .iter()
         .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
@@ -1518,10 +1523,16 @@ async fn dispatcher_normalized_string_matches_direct_call() {
         &existing,
         &identity_props,
         &DedupStrategy::default(),
+        &std::collections::HashSet::new(),
     )
     .await
     .unwrap();
-    let via_direct = filter_already_present(proposed, &existing, &identity_props);
+    let via_direct = filter_already_present(
+        proposed,
+        &existing,
+        &identity_props,
+        &std::collections::HashSet::new(),
+    );
     let d_titles: Vec<&str> = via_dispatcher
         .iter()
         .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
@@ -1687,7 +1698,14 @@ fn filter_already_present_keeps_upserts_and_preserves_order() {
     let mut identity_props = HashMap::new();
     identity_props.insert("Task".to_string(), "title".to_string());
 
-    let kept = filter_already_present(proposed, &existing, &identity_props);
+    let kept = filter_already_present(
+        proposed,
+        &existing,
+        &identity_props,
+        &["soa://existing/task/1".to_string()]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+    );
     let kept_titles: Vec<&str> = kept
         .iter()
         .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
@@ -1702,6 +1720,43 @@ fn filter_already_present_keeps_upserts_and_preserves_order() {
         Some("soa://existing/task/1"),
         "the surviving 'Ship the MVP' must be the id-carrying upsert"
     );
+}
+
+#[test]
+fn filter_already_present_dedups_hallucinated_id_but_keeps_trusted() {
+    // A proposal may carry an `id` the model invented. The planner only routes
+    // to Update for ids the graph actually holds (`known_existing_ids`); an
+    // untrusted id goes to Create — so it must still be dedup-checked, or a
+    // made-up id + duplicate identity mints a duplicate node. A *trusted* id is
+    // a real upsert target and bypasses dedup.
+    let proposed = parse_interpretation_response(
+        r#"[
+              {"class":"Task","id":"soa://hallucinated/999","title":"Ship the MVP"}
+            ]"#,
+    )
+    .unwrap();
+    let mut existing = HashMap::new();
+    existing.insert("Task".to_string(), vec!["Ship the MVP".to_string()]);
+    let mut identity_props = HashMap::new();
+    identity_props.insert("Task".to_string(), "title".to_string());
+
+    // Untrusted id → must be deduped away (identity matches an existing one).
+    let dropped = filter_already_present(
+        proposed.clone(),
+        &existing,
+        &identity_props,
+        &HashSet::new(),
+    );
+    assert!(
+        dropped.is_empty(),
+        "hallucinated id + duplicate identity must be deduped, not minted; got {dropped:#?}"
+    );
+
+    // Same proposal, but now the id is trusted (the graph holds it) → kept as an
+    // explicit upsert target.
+    let trusted: HashSet<String> = ["soa://hallucinated/999".to_string()].into_iter().collect();
+    let kept = filter_already_present(proposed, &existing, &identity_props, &trusted);
+    assert_eq!(kept.len(), 1, "a trusted id bypasses dedup; got {kept:#?}");
 }
 
 #[test]
@@ -1726,7 +1781,12 @@ fn filter_already_present_dedupes_within_same_response() {
     let mut identity_props = HashMap::new();
     identity_props.insert("Task".to_string(), "title".to_string());
 
-    let kept = filter_already_present(proposed, &existing, &identity_props);
+    let kept = filter_already_present(
+        proposed,
+        &existing,
+        &identity_props,
+        &std::collections::HashSet::new(),
+    );
     let kept_titles: Vec<&str> = kept
         .iter()
         .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))

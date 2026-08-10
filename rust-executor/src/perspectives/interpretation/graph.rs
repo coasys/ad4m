@@ -75,6 +75,7 @@ pub fn filter_already_present(
     instances: Vec<ProposedInstance>,
     existing: &HashMap<String, Vec<String>>,
     identity_props: &HashMap<String, String>,
+    known_existing_ids: &HashSet<String>,
 ) -> Vec<ProposedInstance> {
     // Seed per-class known sets with pre-existing identities; each accepted
     // proposal is added to its class's set so a same-response duplicate is
@@ -92,10 +93,18 @@ pub fn filter_already_present(
         .collect();
     let mut out = Vec::with_capacity(instances.len());
     for inst in instances {
-        // An instance carrying an `id` is an explicit upsert target — it
-        // names a specific existing node, so its identity value *should*
-        // match one already present. Never dedup it away.
-        if inst.id.is_some() {
+        // A *trusted* id is an explicit upsert target — it names a specific
+        // existing node, so its identity value *should* match one already
+        // present; never dedup it away. But the planner only routes to Update
+        // for ids in `known_existing_ids`; a hallucinated id absent from that
+        // set would be routed to Create, so it must still be dedup-checked
+        // like an ordinary proposal (else a made-up id + duplicate identity
+        // mints a duplicate node).
+        if inst
+            .id
+            .as_deref()
+            .is_some_and(|id| known_existing_ids.contains(id))
+        {
             out.push(inst);
             continue;
         }

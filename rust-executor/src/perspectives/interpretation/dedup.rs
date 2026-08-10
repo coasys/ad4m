@@ -150,23 +150,33 @@ pub(crate) fn semantic_dedup_pure(
         .collect()
 }
 
-/// Semantic-dedup filter with live HTTP calls: for each class that has both
-/// proposals and existing identities, batch-embed both sides in one
-/// round-trip, then delegate to [`semantic_dedup_pure`]. Proposals carrying an
-/// `id` (explicit upsert) bypass dedup, same as the string path. Classes with
-/// no identity property, or proposals missing that property's value, always
-/// survive.
+/// Semantic-dedup filter backed by AIService embeddings: for each class that
+/// has both proposals and existing identities, embed both sides (one
+/// `AIService::embed` call per string — the embedding channel is single-prompt;
+/// a batch API would be a worthwhile future optimisation) and delegate to
+/// [`semantic_dedup_pure`]. Proposals carrying a *trusted* `id` (one the graph
+/// holds — an explicit upsert) bypass dedup, same as the string path; a
+/// hallucinated id is still checked. Classes with no identity property, or
+/// proposals missing that property's value, always survive.
 pub async fn filter_already_present_semantic(
     instances: Vec<ProposedInstance>,
     existing: &HashMap<String, Vec<String>>,
     identity_props: &HashMap<String, String>,
     model: &str,
     threshold: f32,
+    known_existing_ids: &HashSet<String>,
 ) -> anyhow::Result<Vec<ProposedInstance>> {
     // Bucket proposal indices by class, but only those subject to dedup.
     let mut per_class: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     for (i, inst) in instances.iter().enumerate() {
-        if inst.id.is_some() {
+        // Only a *trusted* id (one the graph actually holds) is a real upsert
+        // target that bypasses dedup; a hallucinated id must still be checked
+        // (see `filter_already_present`).
+        if inst
+            .id
+            .as_deref()
+            .is_some_and(|id| known_existing_ids.contains(id))
+        {
             continue;
         }
         let Some(idp_name) = identity_props.get(&inst.class) else {
@@ -224,14 +234,25 @@ pub async fn filter_already_present_with_strategy(
     existing: &HashMap<String, Vec<String>>,
     identity_props: &HashMap<String, String>,
     strategy: &DedupStrategy,
+    known_existing_ids: &HashSet<String>,
 ) -> anyhow::Result<Vec<ProposedInstance>> {
     match strategy {
-        DedupStrategy::NormalizedString => {
-            Ok(filter_already_present(instances, existing, identity_props))
-        }
+        DedupStrategy::NormalizedString => Ok(filter_already_present(
+            instances,
+            existing,
+            identity_props,
+            known_existing_ids,
+        )),
         DedupStrategy::Semantic { model, threshold } => {
-            filter_already_present_semantic(instances, existing, identity_props, model, *threshold)
-                .await
+            filter_already_present_semantic(
+                instances,
+                existing,
+                identity_props,
+                model,
+                *threshold,
+                known_existing_ids,
+            )
+            .await
         }
     }
 }

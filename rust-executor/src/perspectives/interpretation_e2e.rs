@@ -841,7 +841,7 @@ async fn e2e_flux_grouping_updates_seeded_subgroup_on_topic_continuation() {
             .unwrap_or("")
             .to_lowercase();
 
-        let payments_grew = ["ledger", "replay", "persist", "payload", "queue"]
+        let payments_grew = ["ledger", "replay", "persist", "queue"]
             .iter()
             .any(|kw| payments_summary.contains(kw));
         let onboarding_untouched = !onboarding_summary.contains("webhook")
@@ -869,8 +869,7 @@ async fn e2e_flux_grouping_updates_seeded_subgroup_on_topic_continuation() {
 /// extractor makes the attach-vs-grow-vs-create decision the way Flux's grouping
 /// pass does — via `plan_interpretation_ops_with_context` routing on the model's
 /// proposed `id`.
-/// TODO(gemma3-model-gap, 2026-08-07): documents a known limitation, not a
-/// framework capability. With one existing `ConversationSubgroup` seeded,
+///
 /// The topic-shift half of the Flux-grouping e2e checkbox. Seeds one
 /// `ConversationSubgroup` on payments/webhooks, then feeds a transcript that
 /// explicitly switches topic to a Q3 retrospective. A well-behaved extractor
@@ -1098,6 +1097,7 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
             model: "interpretation-embed".to_string(),
             threshold: 0.6,
         },
+        &std::collections::HashSet::new(),
     )
     .await
     .expect("semantic dedup");

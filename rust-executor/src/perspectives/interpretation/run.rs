@@ -216,6 +216,10 @@ pub async fn apply_interpretation_ops(
                 if links.is_empty() {
                     continue;
                 }
+                // Relation links are written `Shared`: the interpretation-facing
+                // `ShapeRelation` carries no per-relation `local` flag today, so
+                // there is nothing to honour. If local relations are added to the
+                // shape model, thread that status onto `AddLinks` and use it here.
                 perspective
                     .add_links(
                         links.clone(),
@@ -400,6 +404,7 @@ pub async fn run_interpretation_with_strategy(
         &existing_identities,
         &identity_props,
         dedup_strategy,
+        &known_existing_ids,
     )
     .await?;
 
