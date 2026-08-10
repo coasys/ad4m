@@ -853,7 +853,7 @@ async fn apply_one(
     ctx: &crate::agent::AgentContext,
     inst: ProposedInstance,
 ) -> Vec<InterpretationOp> {
-    let existing_ctx = existing_instance_context(perspective, shapes)
+    let existing_ctx = existing_instance_context(perspective, shapes, None)
         .await
         .expect("existing_instance_context");
     let known_existing_ids = ids_from_context(&existing_ctx);
@@ -1027,7 +1027,7 @@ async fn strip_noop_updates_drops_same_value_upsert_keeps_real_change() {
 
     // Mirror `run_interpretation`: the graph's actual base is what makes an id
     // trusted, otherwise the planner treats it as hallucinated and creates.
-    let existing_ctx = existing_instance_context(&perspective, &shapes)
+    let existing_ctx = existing_instance_context(&perspective, &shapes, None)
         .await
         .expect("existing_instance_context");
     let known = ids_from_context(&existing_ctx);
@@ -1104,7 +1104,7 @@ async fn existing_instance_context_reads_id_and_identity() {
     )
     .await;
 
-    let ctx_map = existing_instance_context(&perspective, &shapes)
+    let ctx_map = existing_instance_context(&perspective, &shapes, None)
         .await
         .expect("existing_instance_context");
     let rows = ctx_map.get("Task").expect("Task rows present");
@@ -1129,6 +1129,81 @@ async fn existing_instance_context_reads_id_and_identity() {
 }
 
 #[tokio::test]
+async fn existing_instance_context_scope_constrains_to_subtree() {
+    // Plumbing for tree-scoped extraction (#883): the existing-instance snapshot
+    // that feeds dedup must be constrainable to a sub-graph, not every instance
+    // of the class in the perspective. The runner (#885) supplies the scope; here
+    // we prove the parameter actually narrows the set. Two Tasks, each linked
+    // under a different parent node.
+    use crate::perspectives::model_query::types::ParentScope;
+    use crate::types::{Link, LinkStatus};
+
+    let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+    seed_instance(
+        &mut perspective,
+        &ctx,
+        &shapes[0],
+        "soa://tree-a/task/1",
+        "Task under tree A",
+    )
+    .await;
+    seed_instance(
+        &mut perspective,
+        &ctx,
+        &shapes[0],
+        "soa://tree-b/task/1",
+        "Task under tree B",
+    )
+    .await;
+    // Parent edges: <parent> ns://contains <task-base>.
+    for (parent, task) in [
+        ("soa://parent/a", "soa://tree-a/task/1"),
+        ("soa://parent/b", "soa://tree-b/task/1"),
+    ] {
+        perspective
+            .add_link(
+                Link {
+                    source: parent.into(),
+                    predicate: Some("ns://contains".into()),
+                    target: task.into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("parent link");
+    }
+
+    // Unscoped: both instances are visible (pre-scope behaviour).
+    let all = existing_instance_context(&perspective, &shapes, None)
+        .await
+        .expect("unscoped context");
+    assert_eq!(
+        all.get("Task").map(|r| r.len()).unwrap_or(0),
+        2,
+        "unscoped context must see both tasks; got {all:#?}"
+    );
+
+    // Scoped to parent A: only the task under tree A survives.
+    let scope = ParentScope::Raw {
+        id: "soa://parent/a".into(),
+        predicate: "ns://contains".into(),
+    };
+    let scoped = existing_instance_context(&perspective, &shapes, Some(&scope))
+        .await
+        .expect("scoped context");
+    let rows = scoped.get("Task").expect("Task rows present");
+    assert_eq!(
+        rows.len(),
+        1,
+        "parent-scoped context must exclude tree B; got {rows:#?}"
+    );
+    assert_eq!(rows[0].id, "soa://tree-a/task/1");
+    assert_eq!(rows[0].title, "Task under tree A");
+}
+
+#[tokio::test]
 async fn existing_instance_context_populates_secondary_scalars() {
     // With the design-fork (i) enrichment, `existing_instance_context` must
     // return each instance's currently-set non-identity scalar values in the
@@ -1150,7 +1225,7 @@ async fn existing_instance_context_populates_secondary_scalars() {
     )
     .await;
 
-    let ctx_map = existing_instance_context(&perspective, &shapes)
+    let ctx_map = existing_instance_context(&perspective, &shapes, None)
         .await
         .expect("existing_instance_context");
     let rows = ctx_map

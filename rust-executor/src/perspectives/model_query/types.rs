@@ -181,7 +181,7 @@ where
 /// When a query targets instances that are children of a specific parent
 /// (e.g. "all Messages belonging to Channel X"), the parent scope constrains
 /// the SPARQL query with an additional triple pattern.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ParentScope {
     Model {

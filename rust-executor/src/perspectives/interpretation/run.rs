@@ -5,7 +5,7 @@ use super::{
     plan_interpretation_ops_with_context, DedupStrategy, InterpretationOp, ProposedInstance,
 };
 use crate::agent::AgentContext;
-use crate::perspectives::model_query::types::ModelShape;
+use crate::perspectives::model_query::types::{ModelShape, ParentScope};
 use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::{LinkQuery, LinkStatus};
@@ -319,6 +319,7 @@ pub async fn run_interpretation(
     transcript: &[(String, String)],
     base_prefix: &str,
     context: &AgentContext,
+    scope: Option<&ParentScope>,
 ) -> anyhow::Result<Vec<String>> {
     run_interpretation_with_strategy(
         perspective,
@@ -327,6 +328,7 @@ pub async fn run_interpretation(
         base_prefix,
         context,
         &DedupStrategy::default(),
+        scope,
     )
     .await
 }
@@ -347,6 +349,7 @@ pub async fn run_interpretation_with_strategy(
     base_prefix: &str,
     context: &AgentContext,
     dedup_strategy: &DedupStrategy,
+    scope: Option<&ParentScope>,
 ) -> anyhow::Result<Vec<String>> {
     let task = ensure_interpretation_task()?;
     // Existing-instance snapshot: gives the model both the `id` handle to
@@ -354,7 +357,7 @@ pub async fn run_interpretation_with_strategy(
     // duplicating) and the identity value to recognise it by. The
     // identity-only projection feeds the deterministic dedup safety net below,
     // so both paths agree on what counts as "existing".
-    let existing_ctx = existing_instance_context(perspective, shapes).await?;
+    let existing_ctx = existing_instance_context(perspective, shapes, scope).await?;
     let existing_identities = identities_from_context(&existing_ctx);
     // Valid targets for existing-id relation refs — exactly the ids the model is
     // shown in each class's `existing` list.

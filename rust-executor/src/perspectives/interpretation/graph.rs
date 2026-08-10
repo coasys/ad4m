@@ -1,5 +1,5 @@
 use super::ProposedInstance;
-use crate::perspectives::model_query::types::{ModelShape, ShapeProperty};
+use crate::perspectives::model_query::types::{ModelShape, ParentScope, ShapeProperty};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::Link;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -572,6 +572,7 @@ pub struct InstanceContext {
 pub async fn existing_instance_context(
     perspective: &PerspectiveInstance,
     shapes: &[ModelShape],
+    scope: Option<&ParentScope>,
 ) -> anyhow::Result<HashMap<String, Vec<InstanceContext>>> {
     let mut out: HashMap<String, Vec<InstanceContext>> = HashMap::new();
     for shape in shapes {
@@ -601,12 +602,20 @@ pub async fn existing_instance_context(
         let mut requested = Vec::with_capacity(1 + scalar_names.len());
         requested.push(idp_name.clone());
         requested.extend(scalar_names.iter().cloned());
-        let props_json = requested
-            .iter()
-            .map(|n| format!("\"{n}\""))
-            .collect::<Vec<_>>()
-            .join(",");
-        let query = format!(r#"{{"properties":[{props_json}]}}"#);
+        // Build the model-query as structured JSON so an optional `scope`
+        // (a `ParentScope`) can be spliced in as the query's `parent` filter —
+        // constraining the existing-instance set to a sub-graph/tree rather
+        // than every instance of the class in the perspective. `None` keeps the
+        // pre-scope behaviour (all instances). The actual scope is supplied at
+        // runtime by the caller (the AutoProcessor wires it in #885); here we
+        // only thread the plumbing and exercise it in tests.
+        let mut query_obj = serde_json::json!({ "properties": requested });
+        if let Some(scope) = scope {
+            query_obj["parent"] = serde_json::to_value(scope).map_err(|e| {
+                anyhow::anyhow!("existing_instance_context: serialize parent scope: {e:#}")
+            })?;
+        }
+        let query = query_obj.to_string();
         let result_json = perspective.model_query(class, &query).await.map_err(|e| {
             anyhow::anyhow!(
                 "existing_instance_context: model_query({class}) failed — refusing to \

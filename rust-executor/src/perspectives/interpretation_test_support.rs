@@ -348,7 +348,7 @@ pub(crate) async fn run_interpretation_e2e(
         .iter()
         .map(|(s, t)| (s.to_string(), t.to_string()))
         .collect();
-    let bases = run_interpretation(perspective, shapes, &transcript, "soa://ext/", ctx)
+    let bases = run_interpretation(perspective, shapes, &transcript, "soa://ext/", ctx, None)
         .await
         .expect("run_interpretation against real LLM to succeed");
     let placements = read_back_placements(perspective, &bases).await;
@@ -377,6 +377,7 @@ pub(crate) async fn run_interpretation_e2e_with_strategy(
         "soa://ext/",
         ctx,
         strategy,
+        None,
     )
     .await
     .expect("run_interpretation_with_strategy against real LLM to succeed");
