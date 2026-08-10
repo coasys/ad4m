@@ -17,7 +17,7 @@ use super::interpretation::{
     DedupStrategy, ExistingInstances, InstanceContext, InterpretationOp, ProposedInstance,
 };
 use super::model_query::shape::load_shape;
-use super::model_query::types::ModelShape;
+use super::model_query::types::{ModelShape, ParentScope};
 use super::perspective_instance::{PerspectiveInstance, SdnaType, SubjectClassOption};
 use super::shacl_parser::parse_shacl_to_links;
 use super::sparql_store::SparqlStore;
@@ -281,6 +281,14 @@ pub(crate) async fn setup_interpretation_e2e(
         })
         .await
         .expect("add_model");
+    // Insert the interpretation task row BEFORE setting the default model:
+    // `ensure_interpretation_task` only writes the DB row, and it's
+    // `set_default_model`'s respawn loop (over `model_id == "default"` tasks)
+    // that actually registers the task with the LLM worker. Priming it here
+    // makes every e2e test self-contained — otherwise running one in isolation
+    // (with no earlier test having inserted the row) leaves the task unspawned
+    // and the first `prompt()` fails with "Task ... not spawned".
+    let _ = crate::perspectives::interpretation::ensure_interpretation_task();
     service
         .set_default_model(ModelType::Llm, model_id)
         .await
@@ -386,6 +394,30 @@ pub(crate) async fn run_interpretation_e2e_with_strategy(
     let placements = read_back_placements(perspective, &bases).await;
     print_placements(&placements);
     placements
+}
+
+/// Like [`run_interpretation_e2e`] but with an explicit existing-instance
+/// `scope` (a [`ParentScope`]) — the channel-scoping a Flux-style processor
+/// applies so the model only sees the subgroups belonging to *this* channel.
+/// Returns the affected instance bases so the caller can wire fresh instances
+/// into the scoped sub-graph between passes.
+pub(crate) async fn run_interpretation_e2e_scoped(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[(&str, &str)],
+    ctx: &AgentContext,
+    scope: Option<&ParentScope>,
+) -> Vec<String> {
+    let transcript: Vec<(String, String)> = transcript
+        .iter()
+        .map(|(s, t)| (s.to_string(), t.to_string()))
+        .collect();
+    let bases = run_interpretation(perspective, shapes, &transcript, "soa://ext/", ctx, scope)
+        .await
+        .expect("run_interpretation (scoped) against real LLM to succeed");
+    let placements = read_back_placements(perspective, &bases).await;
+    print_placements(&placements);
+    bases
 }
 
 /// Convenience for the simple single-shot tests: set up + run in one call.
