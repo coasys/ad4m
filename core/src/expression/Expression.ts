@@ -1,5 +1,7 @@
 import { Icon } from "../language/Icon";
 import { LanguageRef } from "../language/LanguageRef";
+import { GraphDiff } from "../generated/api/GraphDiff";
+import { SnapshotProof } from "../generated/api/SnapshotProof";
 
 type ClassType<T = any> = new (...args: any[]) => T;
 
@@ -52,6 +54,11 @@ export class Expression extends ExpressionGeneric(Object) {};
 export class ExpressionRendered extends ExpressionGeneric(String) {
     language: LanguageRef
     icon: Icon
+    address?: string
+    snapshotProofs?: SnapshotProof[]
+    graphDiff?: GraphDiff
+    parents?: string[]
+    snapshotHash?: string
 };
 
 export function isExpression(e: any): boolean {

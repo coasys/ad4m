@@ -2,6 +2,7 @@ use crate::types::LinkStatus;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
 use chrono::DateTime as ChronoDateTime;
 use deno_core::anyhow::{anyhow, Error};
+use oxigraph::io::{RdfFormat, RdfParser};
 use oxigraph::model::*;
 use oxigraph::sparql::{QueryResults, SparqlEvaluator};
 use oxigraph::store::Store;
@@ -35,6 +36,89 @@ const RFC3986_COMPONENT_ENCODE: percent_encoding::AsciiSet = percent_encoding::N
     .remove(b'_')
     .remove(b'.')
     .remove(b'~');
+
+/// Serialisation formats for graph snapshots.
+///
+/// All three round-trip losslessly, preserving RDF-1.2 reifier triples.
+/// `NquadsCanonical` is the canonical form — sorted canonical
+/// N-Triples with the graph label excluded — whose bytes hash directly to the
+/// content-hash address without re-canonicalisation.
+///
+/// `jsonld` is deferred: Oxigraph's JSON-LD serialiser rejects RDF-1.2
+/// (`"JSON-LD does not support RDF 1.2 yet"`), and every graph-backed subject
+/// carries `rdf:reifies` reifier triples for link metadata, so a JSON-LD dump
+/// would fail on every real graph. It returns once the serialiser supports
+/// RDF 1.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphDumpFormat {
+    NquadsCanonical,
+    Nquads,
+    Turtle,
+}
+
+impl GraphDumpFormat {
+    /// Parse the wire-format format string. Defaults are chosen by the caller;
+    /// an unrecognised value is an error rather than a silent fallback.
+    pub fn parse(s: &str) -> Result<Self, Error> {
+        match s {
+            "nquads-canonical" => Ok(Self::NquadsCanonical),
+            "nquads" => Ok(Self::Nquads),
+            "turtle" => Ok(Self::Turtle),
+            other => Err(anyhow!(
+                "unsupported graph format '{other}' (expected one of: nquads-canonical, nquads, turtle)"
+            )),
+        }
+    }
+
+    /// The wire-format format string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NquadsCanonical => "nquads-canonical",
+            Self::Nquads => "nquads",
+            Self::Turtle => "turtle",
+        }
+    }
+
+    /// The Oxigraph RDF format used to serialise/parse this snapshot's triples.
+    /// The canonical form serialises as N-Triples (label excluded).
+    fn rdf_format(&self) -> RdfFormat {
+        match self {
+            Self::NquadsCanonical => RdfFormat::NTriples,
+            Self::Nquads => RdfFormat::NQuads,
+            Self::Turtle => RdfFormat::Turtle,
+        }
+    }
+}
+
+/// True if `s` (a triple subject) is a blank node.
+fn subject_is_blank(s: &NamedOrBlankNode) -> bool {
+    matches!(s, NamedOrBlankNode::BlankNode(_))
+}
+
+/// True if `t` (a triple object) is — or transitively contains, through an
+/// RDF-1.2 quoted triple — a blank node.
+fn term_has_blank(t: &Term) -> bool {
+    match t {
+        Term::BlankNode(_) => true,
+        Term::Triple(inner) => subject_is_blank(&inner.subject) || term_has_blank(&inner.object),
+        _ => false,
+    }
+}
+
+/// Enforce the no-blank-node invariant that makes sorted canonical N-Triples
+/// equal to RDFC-1.0. Native AD4M subjects can never
+/// contain a blank node (`target_to_storage_term` yields only `Literal`/
+/// `NamedNode`, reifier IRIs are `NamedNode`); this only ever fires on a
+/// foreign snapshot, where failing closed is correct until a later phase installs a
+/// full canonicaliser.
+fn guard_no_blank_nodes(quad: &Quad) -> Result<(), Error> {
+    if subject_is_blank(&quad.subject) || term_has_blank(&quad.object) {
+        return Err(anyhow!(
+            "blank-node graphs require RDFC-1.0 canonicalisation (deferred)"
+        ));
+    }
+    Ok(())
+}
 
 /// Convert a wire-format link target string to the oxigraph [`Term`] that
 /// represents it in storage.
@@ -1414,6 +1498,87 @@ impl SparqlStore {
             let node = NamedNode::new_unchecked(iri);
             let _ = self.store.insert_named_graph(node.as_ref());
         }
+        Ok(())
+    }
+
+    /// Canonical serialisation of a named graph's triples with the graph label
+    /// excluded: each triple rendered as a canonical
+    /// N-Triples line (RDF-1.2 reifiers included as `<<( s p o )>>`), the lines
+    /// sorted byte-wise, joined with `\n`. For a blank-node-free graph this is
+    /// byte-identical to RDFC-1.0 canonical output; the blank-node guard keeps
+    /// the invariant honest. The returned string is exactly the preimage of the
+    /// content hash and of the `nquads-canonical` dump.
+    pub(crate) fn canonical_ntriples(&self, graph_iri: &str) -> Result<String, Error> {
+        let graph_node = NamedNode::new_unchecked(graph_iri);
+        let graph_ref = GraphNameRef::NamedNode(graph_node.as_ref());
+        let mut lines = Vec::new();
+        for quad in self
+            .store
+            .quads_for_pattern(None, None, None, Some(graph_ref))
+        {
+            let quad = quad?;
+            guard_no_blank_nodes(&quad)?;
+            let triple: TripleRef = quad.as_ref().into();
+            lines.push(format!("{triple} ."));
+        }
+        lines.sort();
+        Ok(lines.join("\n"))
+    }
+
+    /// Deterministic content hash of a named graph: hex SHA-256 of the canonical
+    /// serialisation (label excluded). Two
+    /// graphs with identical contents under different partition labels hash
+    /// equally, so a mounted copy hashes equal to its source.
+    pub fn content_hash(&self, graph_iri: &str) -> Result<String, Error> {
+        let canonical = self.canonical_ntriples(graph_iri)?;
+        let mut hasher = Sha256::new();
+        hasher.update(canonical.as_bytes());
+        Ok(hex::encode(hasher.finalize()))
+    }
+
+    /// Serialise a named graph's triples (label excluded) in one of the three
+    /// snapshot formats. Reifier triples are
+    /// preserved in every format. For `NquadsCanonical` the bytes are the
+    /// content-hash preimage — `content_hash == hex(SHA-256(dump))` holds
+    /// without re-canonicalisation.
+    pub fn dump_graph(&self, graph_iri: &str, format: GraphDumpFormat) -> Result<String, Error> {
+        if format == GraphDumpFormat::NquadsCanonical {
+            return self.canonical_ntriples(graph_iri);
+        }
+        let graph_node = NamedNode::new_unchecked(graph_iri);
+        let graph_ref = GraphNameRef::NamedNode(graph_node.as_ref());
+        let buffer = self
+            .store
+            .dump_graph_to_writer(graph_ref, format.rdf_format(), Vec::new())
+            .map_err(|e| {
+                anyhow!(
+                    "failed to serialise graph {graph_iri} as {}: {e}",
+                    format.as_str()
+                )
+            })?;
+        String::from_utf8(buffer)
+            .map_err(|e| anyhow!("graph serialisation produced invalid UTF-8: {e}"))
+    }
+
+    /// Parse a serialised snapshot and materialise its triples into the named
+    /// graph partition keyed by `graph_iri`. The input
+    /// carries triples in its default graph (label excluded on export); they are
+    /// redirected into the content-hash partition. The graph is registered so it
+    /// participates in scoped queries immediately.
+    pub fn load_serialized_into_graph(
+        &self,
+        graph_iri: &str,
+        data: &str,
+        format: GraphDumpFormat,
+    ) -> Result<(), Error> {
+        let graph_node = NamedNode::new_unchecked(graph_iri);
+        self.create_named_graph(graph_iri)?;
+        let parser = RdfParser::from_format(format.rdf_format())
+            .without_named_graphs()
+            .with_default_graph(graph_node);
+        self.store
+            .load_from_reader(parser, data.as_bytes())
+            .map_err(|e| anyhow!("failed to parse snapshot as {}: {e}", format.as_str()))?;
         Ok(())
     }
 
@@ -5049,5 +5214,135 @@ mod tests {
             !result.contains("ad4m://src"),
             "Querying a non-existent named graph should not return default graph data"
         );
+    }
+
+    // ── Graph-Expression-Duality: content hash + snapshot dump ──
+
+    fn add_link_to_graph(svc: &SparqlStore, iri: &str, s: &str, p: &str, o: &str) {
+        let mut link = make_link(s, p, o);
+        link.graph = Some(iri.to_string());
+        svc.add_link(&link).unwrap();
+    }
+
+    #[test]
+    fn test_content_hash_is_deterministic_across_stores() {
+        // Identical data → identical hash, on two independent stores.
+        let iri = make_graph_iri("expr://subject-a");
+        let build = || {
+            let svc = new_service();
+            add_link_to_graph(&svc, &iri, "ad4m://s1", "ad4m://p", "ad4m://o1");
+            add_link_to_graph(&svc, &iri, "ad4m://s2", "ad4m://p", "ad4m://o2");
+            svc.content_hash(&iri).unwrap()
+        };
+        assert_eq!(
+            build(),
+            build(),
+            "identical data must hash equally across independent stores"
+        );
+    }
+
+    #[test]
+    fn test_content_hash_is_label_independent() {
+        // The same triples under two different internal partition labels
+        // hash equally — the label is excluded from the canonical form, so a mounted
+        // copy hashes equal to its source.
+        let svc = new_service();
+        let iri_a = make_graph_iri("expr://alpha");
+        let iri_b = make_graph_iri("expr://beta");
+        assert_ne!(iri_a, iri_b);
+        add_link_to_graph(&svc, &iri_a, "ad4m://s", "ad4m://p", "ad4m://o");
+        add_link_to_graph(&svc, &iri_b, "ad4m://s", "ad4m://p", "ad4m://o");
+        assert_eq!(
+            svc.content_hash(&iri_a).unwrap(),
+            svc.content_hash(&iri_b).unwrap(),
+            "identical triples under different partition labels must hash equally"
+        );
+    }
+
+    #[test]
+    fn test_content_hash_changes_when_data_changes() {
+        // A subject exported before/after a change differs in address;
+        // unchanged data hashes identically twice.
+        let svc = new_service();
+        let iri = make_graph_iri("expr://mutating");
+        add_link_to_graph(&svc, &iri, "ad4m://s1", "ad4m://p", "ad4m://o1");
+        let before = svc.content_hash(&iri).unwrap();
+        assert_eq!(
+            before,
+            svc.content_hash(&iri).unwrap(),
+            "unchanged data must hash identically"
+        );
+        add_link_to_graph(&svc, &iri, "ad4m://s2", "ad4m://p", "ad4m://o2");
+        assert_ne!(
+            before,
+            svc.content_hash(&iri).unwrap(),
+            "a link change must change the content hash"
+        );
+    }
+
+    #[test]
+    fn test_content_hash_rejects_blank_nodes() {
+        // The no-blank-node guard fails closed rather than
+        // producing a non-canonical hash (full RDFC-1.0 canonicalisation deferred).
+        let svc = new_service();
+        let iri = make_graph_iri("expr://blank");
+        svc.load_serialized_into_graph(
+            &iri,
+            "_:b0 <ad4m://p> <ad4m://o> .",
+            GraphDumpFormat::NquadsCanonical,
+        )
+        .unwrap();
+        let err = svc
+            .content_hash(&iri)
+            .expect_err("a blank node must be rejected")
+            .to_string();
+        assert!(err.contains("blank-node"), "got: {err}");
+    }
+
+    #[test]
+    fn test_canonical_dump_is_the_content_hash_preimage() {
+        // The nquads-canonical bytes are exactly the hash
+        // preimage, so address == graph://hex(SHA-256(dump)) without re-canonicalisation.
+        let svc = new_service();
+        let iri = make_graph_iri("expr://preimage");
+        add_link_to_graph(&svc, &iri, "ad4m://s", "ad4m://p", "ad4m://o");
+        let dump = svc
+            .dump_graph(&iri, GraphDumpFormat::NquadsCanonical)
+            .unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(dump.as_bytes());
+        assert_eq!(
+            svc.content_hash(&iri).unwrap(),
+            hex::encode(hasher.finalize()),
+            "content_hash must equal hex(SHA-256(canonical dump))"
+        );
+    }
+
+    #[test]
+    fn test_all_three_formats_round_trip_with_reifiers_preserved() {
+        // Every format round-trips to an equal content hash
+        // with reifier (RDF-1.2) triples preserved. jsonld is deferred — oxigraph
+        // 0.5.x's JSON-LD serialiser rejects RDF-1.2 reifiers, which every real
+        // graph-backed subject carries; see the enum doc comment.
+        let svc = new_service();
+        let src = make_graph_iri("expr://roundtrip-src");
+        add_link_to_graph(&svc, &src, "ad4m://s", "ad4m://p", "ad4m://o");
+        let source_hash = svc.content_hash(&src).unwrap();
+
+        for format in [
+            GraphDumpFormat::NquadsCanonical,
+            GraphDumpFormat::Nquads,
+            GraphDumpFormat::Turtle,
+        ] {
+            let dump = svc.dump_graph(&src, format).unwrap();
+            let dst = make_graph_iri(&format!("expr://roundtrip-dst-{}", format.as_str()));
+            svc.load_serialized_into_graph(&dst, &dump, format).unwrap();
+            assert_eq!(
+                svc.content_hash(&dst).unwrap(),
+                source_hash,
+                "format {} must round-trip to an equal content hash",
+                format.as_str()
+            );
+        }
     }
 }

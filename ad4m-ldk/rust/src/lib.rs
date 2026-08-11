@@ -53,9 +53,9 @@ pub mod prelude {
     pub use crate::errors::{ErrorCode, LanguageError, LanguageResult};
     pub use crate::imports as runtime;
     pub use crate::traits::{
-        ExpressionCapability, HolochainSignalHandler, Language, PeersCapability,
-        PerspectiveCommitCapability, PerspectiveQueryCapability, PerspectiveSyncCapability,
-        TelepresenceCapability,
+        ExpressionCapability, HolochainSignalHandler, Language, LanguageSourceCapability,
+        PeersCapability, PerspectiveCommitCapability, PerspectiveQueryCapability,
+        PerspectiveSyncCapability, TelepresenceCapability,
     };
     pub use crate::types::*;
 }

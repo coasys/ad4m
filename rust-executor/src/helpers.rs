@@ -109,5 +109,10 @@ pub fn build_expression_rendered(
             name: String::new(),
         },
         icon: Icon { code: None },
+        address: String::new(),
+        snapshot_proofs: Vec::new(),
+        graph_diff: None,
+        parents: None,
+        snapshot_hash: None,
     }
 }

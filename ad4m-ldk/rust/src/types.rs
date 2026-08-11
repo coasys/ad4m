@@ -65,6 +65,14 @@ pub struct Perspective {
     pub links: Vec<LinkExpression>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GraphDiff {
+    #[serde(default)]
+    pub additions: Vec<String>,
+    #[serde(default)]
+    pub removals: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryRequest {

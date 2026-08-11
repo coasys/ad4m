@@ -15,8 +15,18 @@ import { AllInstancesResult } from "../model/types";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
+import { MountedGraphEntry } from "../generated/api/MountedGraphEntry";
 
 type QueryCallback = (result: AllInstancesResult) => void;
+
+/**
+ * Options controlling how a subject's named graph is exported as a snapshot
+ * {@link ExpressionRendered} via {@link PerspectiveProxy.getGraphAsExpression}.
+ */
+export interface GraphExportOptions {
+    /** Serialization format for the snapshot payload. Defaults to `'nquads-canonical'`. jsonld is deferred (oxigraph 0.5.x rejects RDF-1.2 reifiers). */
+    format?: 'nquads-canonical' | 'nquads' | 'turtle';
+}
 
 /** Extract namespace prefix from a URI (everything up to and including the last / or #) */
 function extractNamespaceFromUri(uri: string): string {
@@ -535,6 +545,70 @@ export class PerspectiveProxy {
         const result = await this.#client.removeNamedGraph(this.#handle.uuid, graphIri);
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
+    }
+
+    /**
+     * Export a subject's named graph as an immutable, content-addressed snapshot
+     * {@link ExpressionRendered}. The returned `address` is `graph://<sha256>` of the
+     * canonical serialization, and `snapshotProofs` carries the agent's signature over it.
+     *
+     * @param subject - The subject base IRI whose graph to snapshot.
+     * @param options - Optional {@link GraphExportOptions} (format).
+     */
+    async getGraphAsExpression(subject: string, options?: GraphExportOptions): Promise<ExpressionRendered> {
+        return this.#client.getGraphAsExpression(this.#handle.uuid, subject, options?.format);
+    }
+
+    /**
+     * Compute the content-hash of a subject's named graph without exporting it.
+     * Returns the bare hex SHA-256 (no `graph://` prefix).
+     *
+     * @param subject - The subject base IRI whose graph to hash.
+     */
+    async graphContentHash(subject: string): Promise<string> {
+        return this.#client.graphContentHash(this.#handle.uuid, subject);
+    }
+
+    /**
+     * Retrieve a locally-held snapshot {@link ExpressionRendered} by its
+     * `graph://<hash>` address. Only snapshots produced or mounted in this
+     * session are available (cross-node fetch is deferred to a later phase).
+     *
+     * @param address - The `graph://<hash>` content-hash address.
+     */
+    async getGraphExpression(address: string): Promise<ExpressionRendered> {
+        return this.#client.getGraphExpression(this.#handle.uuid, address);
+    }
+
+    /**
+     * Mount a locally-held snapshot into this perspective as a read-only named
+     * graph, verifying its proof bundle and content-hash before materialising.
+     * Returns the mounted graph's `graph://<hash>` IRI.
+     *
+     * @param uri - The `graph://<hash>` address of the snapshot to mount.
+     */
+    async mountExpression(uri: string): Promise<string> {
+        const iri = await this.#client.mountExpression(this.#handle.uuid, uri);
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return iri;
+    }
+
+    /**
+     * Unmount a previously-mounted snapshot graph, removing it and all its quads.
+     *
+     * @param graphIri - The `graph://<hash>` IRI of the mounted graph to remove.
+     */
+    async unmountGraph(graphIri: string): Promise<void> {
+        await this.#client.unmountGraph(this.#handle.uuid, graphIri);
+        invalidatePerspectiveCache(this.#handle.uuid);
+    }
+
+    /**
+     * List all snapshot graphs currently mounted in this perspective, with their
+     * source, trust level, and proof bundle.
+     */
+    async mountedGraphs(): Promise<MountedGraphEntry[]> {
+        return this.#client.mountedGraphs(this.#handle.uuid);
     }
 
     /**
