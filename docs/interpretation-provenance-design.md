@@ -24,7 +24,8 @@ This keeps it all subject-class read/write + `model_query`, and makes acceptance
 ## 3. Two subject classes
 
 ### 3a. `InterpretationRun` — one per pass
-`run_id` (identity) · `model` (e.g. gemma3:12b) · `prompt_version` (hash of system-prompt + few-shots) · `ran_at` · `agent` (DID).
+`run_id` (identity) · `model` (e.g. gemma3:12b) · `prompt_version` (hash of system-prompt + few-shots) · `ran_at`.
+*No `agent` field* — the run node and every link it writes are already authored by the user's agent DID, so "who ran it" = the link author; storing it would just duplicate that.
 
 ### 3b. `InterpretationOverlay` — instantiated over the instance's base URI
 | prop | meaning |
@@ -49,6 +50,8 @@ Every LLM write instantiates/updates the overlay over the base. Behaviour depend
 - If a human has diverged (real ≠ overlay `inferred/<p>`), **or** mode is `Stage`: **leave the real prop untouched** and set overlay `inferred/<p> = <proposed new value>`. UI shows real (kept) vs overlay (suggested).
 
 **The one rule that protects humans:** the engine only overwrites a real value in place when it's still identical to what the overlay last recorded. The instant a human changes it, further LLM changes go into the overlay as suggestions, never overwrite.
+
+**Multiple passes / re-change of an unaccepted node:** there is exactly **one overlay per base**, updated in place. A later pass that changes a not-yet-accepted instance (AutoMaterialize, still LLM-owned) moves **both the instance and the overlay's `inferred/<p>` together** to the new value — no overlays accumulate, it's just the rolling refinement of one inference. (Under `Stage`, or once a human has diverged, only the overlay's proposed value updates; the real instance is untouched.)
 
 ## 5. Accept / reject
 
