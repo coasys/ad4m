@@ -3533,10 +3533,16 @@ impl PerspectiveInstance {
             }
         }
 
-        // Only error when there is genuinely no telepresence source at all — no
-        // link language AND not a neighbourhood. (Previously this always errored
-        // without a link language, which hid co-located multi-tenancy presence.)
-        if !has_link_language && handle.shared_url.is_none() {
+        // Stay strictly additive: preserve the historical "no telepresence
+        // source" error whenever there's no link language AND we found no
+        // locally-online managed users. Callers (notably the auto-processor
+        // watcher) rely on that error to fall through to their claim-based path
+        // rather than reading an empty set as "everyone is offline". We only
+        // diverge from the old link-language passthrough when we actually have
+        // co-located managed users to report. (A link language that returns an
+        // empty set is a genuine "nobody online" and stays `Ok(vec![])`, as
+        // before.)
+        if agents.is_empty() && !has_link_language {
             return Err(self.no_link_language_error().await);
         }
 
