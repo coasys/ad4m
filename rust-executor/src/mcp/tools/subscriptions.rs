@@ -234,7 +234,12 @@ impl Ad4mMcpHandler {
         // form, so `STR(?target)` yields the text we want to substring-match.
         let mention_conditions: Vec<String> = all_terms
             .iter()
-            .map(|t| format!("CONTAINS(LCASE(STR(?target)), \"{}\")", escape_sparql_literal(t)))
+            .map(|t| {
+                format!(
+                    "CONTAINS(LCASE(STR(?target)), \"{}\")",
+                    escape_sparql_literal(t)
+                )
+            })
             .collect();
 
         let mention_predicate = format!("({})", mention_conditions.join(" || "));

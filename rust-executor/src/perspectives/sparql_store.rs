@@ -1015,7 +1015,11 @@ impl SparqlStore {
         self.query_internal(query_string, false)
     }
 
-    fn query_internal(&self, query_string: &str, hydrate_target_vars: bool) -> Result<String, Error> {
+    fn query_internal(
+        &self,
+        query_string: &str,
+        hydrate_target_vars: bool,
+    ) -> Result<String, Error> {
         validate_readonly_query(query_string)?;
 
         let results = self
@@ -4122,7 +4126,10 @@ mod tests {
 
         let before = svc.get_all_links().unwrap();
         assert_eq!(
-            before.iter().filter(|l| l.data.source == "ad4m://json_source").count(),
+            before
+                .iter()
+                .filter(|l| l.data.source == "ad4m://json_source")
+                .count(),
             1,
             "link should be present after insert"
         );
@@ -4141,7 +4148,10 @@ mod tests {
 
         let after = svc.get_all_links().unwrap();
         assert_eq!(
-            after.iter().filter(|l| l.data.source == "ad4m://json_source").count(),
+            after
+                .iter()
+                .filter(|l| l.data.source == "ad4m://json_source")
+                .count(),
             0,
             "link should be gone after removing with the hydrated (re-serialized) JSON target"
         );
