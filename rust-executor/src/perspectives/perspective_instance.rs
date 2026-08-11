@@ -3479,10 +3479,18 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Seconds a locally-managed multi-tenancy user's `last_seen` may lag before
+    /// we treat them as offline for telepresence. Mirrors the 5-minute window
+    /// `agent::capabilities` already uses to throttle last-seen updates.
+    const LOCAL_ONLINE_THRESHOLD_SECS: i64 = 300;
+
     pub async fn online_agents(&self) -> Result<Vec<OnlineAgent>, AnyError> {
+        // Remote peers via the link language's telepresence adapter (when one is
+        // present — i.e. a real multi-executor neighbourhood).
         let link_language_clone = self.link_language.read().await.clone();
-        if let Some(mut link_language) = link_language_clone {
-            Ok(link_language
+        let has_link_language = link_language_clone.is_some();
+        let mut agents: Vec<OnlineAgent> = if let Some(mut link_language) = link_language_clone {
+            link_language
                 .get_online_agents()
                 .await?
                 .into_iter()
@@ -3490,10 +3498,49 @@ impl PerspectiveInstance {
                     a.status.verify_signatures();
                     a
                 })
-                .collect())
+                .collect()
         } else {
-            Err(self.no_link_language_error().await)
+            Vec::new()
+        };
+
+        // Co-located multi-tenancy users: a neighbourhood's locally-managed
+        // participants are "online" when they've hit any authed API within the
+        // last-seen window — no Holochain round-trip needed. Mirrors
+        // `send_signal`'s local re-routing so telepresence is transparent across
+        // the multi-tenancy (one executor) vs. multi-executor boundary. This is
+        // the presence source the auto-processor's `elect_author` reads.
+        let handle = self.persisted.lock().await.clone();
+        if handle.shared_url.is_some() {
+            let owners: Vec<String> = handle.owners.clone().unwrap_or_default();
+            if !owners.is_empty() {
+                let now = chrono::Utc::now().timestamp();
+                let managed =
+                    Ad4mDb::with_global_instance(|db| db.list_users()).unwrap_or_default();
+                for user in managed {
+                    let recently_active = user
+                        .last_seen
+                        .map_or(false, |ls| now - ls < Self::LOCAL_ONLINE_THRESHOLD_SECS);
+                    if recently_active
+                        && owners.contains(&user.did)
+                        && !agents.iter().any(|a| a.did == user.did)
+                    {
+                        agents.push(OnlineAgent {
+                            did: user.did,
+                            status: PerspectiveExpression::default(),
+                        });
+                    }
+                }
+            }
         }
+
+        // Only error when there is genuinely no telepresence source at all — no
+        // link language AND not a neighbourhood. (Previously this always errored
+        // without a link language, which hid co-located multi-tenancy presence.)
+        if !has_link_language && handle.shared_url.is_none() {
+            return Err(self.no_link_language_error().await);
+        }
+
+        Ok(agents)
     }
 
     pub async fn set_online_status(&self, status: PerspectiveExpression) -> Result<(), AnyError> {
