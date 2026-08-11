@@ -83,7 +83,9 @@ pub async fn run_interpretation(
     base_prefix: &str,
     context: &AgentContext,
 ) -> anyhow::Result<Vec<String>> {
-    let (task, created) = ensure_interpretation_task()?;
+    // Returns a task already spawned into its LLM worker, so `prompt` can use it
+    // immediately (see `ensure_interpretation_task`).
+    let task = ensure_interpretation_task().await?;
     // Dedup context: what the graph already holds, so the model is steered away
     // from re-proposing known items and we can enforce it deterministically.
     // Keyed by each class's declared `identity` property; classes without one
@@ -107,22 +109,6 @@ pub async fn run_interpretation(
     let service = crate::ai_service::AIService::global_instance()
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
-
-    // Spawn the task with its LLM worker the first time we mint it. `add_task`
-    // (the usual registration path) spawns; `ensure_interpretation_task` inserts
-    // the row directly to stay idempotent-by-name, so it doesn't — leaving the
-    // task unspawned until an executor restart's `load()` sweep. Without this,
-    // the first `prompt` below fails with "Task not spawned". A pre-existing row
-    // (`created == false`) is already spawned, so we skip it to avoid a
-    // redundant local-model warmup on every run.
-    if created {
-        service
-            .spawn_registered_task(task.clone())
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("run_interpretation: failed to spawn interpretation task: {e:#}")
-            })?;
-    }
 
     let instances = retry_interpretation_parse(|_attempt| {
         let service = service.clone();

@@ -345,7 +345,10 @@ fn ensure_interpretation_task_registers_and_is_idempotent() {
         Ad4mDb::with_global_instance(|db| db.remove_task(t.task_id.clone())).unwrap();
     }
 
-    let (first, created) = ensure_interpretation_task().unwrap();
+    // Target the DB-only primitive: it registers the row without touching the
+    // AIService, so this stays a no-model/no-GPU unit test. (The async
+    // `ensure_interpretation_task` wrapper additionally spawns the task.)
+    let (first, created) = register_interpretation_task().unwrap();
     assert!(created, "first call after wipe must insert the row");
     assert_eq!(first.name, INTERPRETATION_TASK_NAME);
     assert_eq!(first.model_id, "default");
@@ -353,7 +356,7 @@ fn ensure_interpretation_task_registers_and_is_idempotent() {
     assert!(!first.task_id.is_empty());
 
     // Second call must find the same row, not insert a duplicate.
-    let (second, created_again) = ensure_interpretation_task().unwrap();
+    let (second, created_again) = register_interpretation_task().unwrap();
     assert!(!created_again, "second call must find the existing row");
     assert_eq!(first.task_id, second.task_id);
 
