@@ -1,106 +1,82 @@
-# Interpretation Provenance & "Suggested Data" — Design (for sign-off)
+# Interpretation Provenance & "Suggested Data" — Design v2 (for sign-off)
 
-**Status:** DRAFT for Nico + James. Nothing implemented yet. Lands in **#883** (the write path) because it's the one property that can't be backfilled once #885 goes continuous.
+**Status:** DRAFT for Nico + James. Nothing implemented yet. Lands in **#883** (the write path) — it's the one property that can't be backfilled once #885 goes continuous.
 
-**Constraint:** we do NOT assign per-write DIDs (needs agent-language changes, out of scope). We differentiate LLM-inferred vs human data with **link tags + a couple of subject classes**.
+**Constraint:** no per-write DIDs (needs agent-language changes, out of scope). We differentiate LLM vs human data with **subject classes** — kept as close as possible to "just writing/updating subject classes", no bespoke link magic.
 
 ---
 
 ## 1. The problem
+Interpreted instances/updates are written under the human's DID, indistinguishable from deliberate human assertions. Under continuous auto-processing that means human corrections get silently overwritten, you can't tell LLM data from human data (no re-derive / upgrade / audit / "suggested" UI), and it can't be backfilled later.
 
-Interpreted instances/updates are written under the human's DID, indistinguishable from deliberate human assertions. Under continuous auto-processing that means:
-- human corrections get silently overwritten by the next pass,
-- you can't tell LLM data from human data → can't re-derive, upgrade, audit, or show "suggested" in the UI,
-- it can't be backfilled later.
+## 2. Core idea — an **overlay subject class** on the same base
 
-## 2. Mental model — Git-style staging (Nico's framing)
+The whole mechanism is **one extra subject class instantiated over the *same base URI* as the instance the LLM writes** — an `InterpretationOverlay`. It carries the provenance + the LLM's value snapshot + (for updates) the proposed new values. A node can conform to several subject classes at once, so a node is e.g. *both* a `Task` **and** an `InterpretationOverlay`.
 
-- **Accepted baseline** = the last state a *human* blessed — like the committed tree.
-- **Proposed change** = what the LLM has inferred since — always diffable against the accepted baseline, like the working tree / an open PR.
-- **Accept** = advance the accepted baseline to include the proposal (materialise).
-- **Reject** = discard the proposal, keep the baseline.
+Git-staging analogy holds, but realised as the overlay:
+- The **real instance** = the working data readers/UI see and edit normally.
+- The **overlay** = the "this came from the LLM / here's what it proposed" layer, diffable against the real instance.
+- **Accept** = drop the overlay (create) / carry its value over then drop it (update) → plain accepted data.
+- **Reject** = drop the overlay (+ the base, for a not-yet-accepted create).
 
-Every LLM write is tagged so the diff *"LLM-proposed vs last human-accepted"* is always computable.
+This keeps it all subject-class read/write + `model_query`, and makes acceptance a *link deletion*, not a rewrite — minimal churn.
 
-## 3. Scope: applies to CREATES **and** UPDATES
+## 3. Two subject classes
 
-- **New instance** = a proposed *create* (the whole node is "unaccepted" until a human blesses or edits it).
-- **Property change on an existing instance** = a proposed *update* on that property.
+### 3a. `InterpretationRun` — one per pass
+`run_id` (identity) · `model` (e.g. gemma3:12b) · `prompt_version` (hash of system-prompt + few-shots) · `ran_at` · `agent` (DID).
 
-Both carry provenance. Neither is hidden — they're live and readable — but both are flagged *proposed* until accepted. (This directly answers "is the stamp only for new instances?" → no, updates too.)
-
-## 4. Data shape
-
-Mix of **plain link tags** (cheap, per-instance, queryable by predicate) and **two subject classes** (so the UI can `model_query` the review queue, per Nico's ask).
-
-### 4a. `InterpretationRun` — subject class, one per pass
+### 3b. `InterpretationOverlay` — instantiated over the instance's base URI
 | prop | meaning |
 |---|---|
-| `run_id` (identity) | UUID of the pass |
-| `model` | e.g. `gemma3:12b` |
-| `prompt_version` | hash/id of system-prompt + few-shots (James's ask) |
-| `ran_at` | timestamp |
-| `agent` | DID it ran as |
+| `run` | → the `InterpretationRun` that wrote it |
+| `kind` | `create` \| `update` — how the engine knows it minted the node vs patched an existing one |
+| `inferred/<predicate>` → value | the LLM's value for each affected property. For a **create**: a snapshot of every value written. For an **update**: the proposed new value(s). Parallel predicates (`ad4m://interp/inferred/<realPredicate>`) so they never collide with the real property links and stay `model_query`-able. |
 
-### 4b. Per-instance provenance — link tags on the instance node
-- `ad4m://inferred_by  → <run_id>`   (which run last produced/touched it)
-- `ad4m://inferred_from → <source item ids>`  (the transcript turns it derived from)
-- `ad4m://inferred_at  → <ts>`
+That's it — the overlay is provenance **and** last-inferred baseline **and** suggestion, in one instance. No separate `Suggestion` node, no `accepted/<prop>` shadow.
 
-Model + prompt_version are reachable via the run, so they're not repeated per node.
+## 4. How it behaves (per write)
 
-### 4c. `Suggestion` — subject class, one per pending proposed change
-| prop | meaning |
-|---|---|
-| `target` | the instance node it modifies (or parent it would create under) |
-| `kind` | `create` \| `update` |
-| `prop` | for `update`: which property |
-| `proposed_value` | the value the LLM wants |
-| `run` | → `InterpretationRun` |
-| `status` | `pending` \| `accepted` \| `rejected` |
+Every LLM write instantiates/updates the overlay over the base. Behaviour depends on `write_mode` (§6) and whether the value is still the LLM's own:
 
-UI: `model_query(Suggestion where status = pending)` → the whole review queue, searchable.
+**Create (new instance):**
+- Write the real instance (its real class + values) **and** an overlay `{kind: create, run, inferred/<p> = <same values>}`.
+- The overlay-with-identical-values is how we know it's LLM-created *and* untouched. Humans read/edit the instance normally; they never touch the overlay.
+- **Human-change detection:** real `<p>` == overlay `inferred/<p>` → still the LLM's; real `<p>` ≠ overlay `inferred/<p>` → a human edited it. (Answers the old "baseline for a brand-new LLM instance" question — the overlay *is* the baseline.)
 
-### 4d. Accepted baseline — per interpreted property
-- `ad4m://accepted/<prop>  → { value, by <human DID>, at }`
+**Update (existing instance):**
+- If the target value is still the LLM's own (real == overlay `inferred/<p>`) **and** mode is `AutoMaterialize`: overwrite the real prop in place *and* bump overlay `inferred/<p>` to match (the LLM refining its own inference — rolling-summary keeps working autonomously, zero clicks).
+- If a human has diverged (real ≠ overlay `inferred/<p>`), **or** mode is `Stage`: **leave the real prop untouched** and set overlay `inferred/<p> = <proposed new value>`. UI shows real (kept) vs overlay (suggested).
 
-The diff shown in the UI = *current value* vs *accepted value*.
+**The one rule that protects humans:** the engine only overwrites a real value in place when it's still identical to what the overlay last recorded. The instant a human changes it, further LLM changes go into the overlay as suggestions, never overwrite.
 
-## 5. Per-property lifecycle (the 3 states)
+## 5. Accept / reject
 
-1. **Human-authored** (never LLM-touched): current = human value; no `inferred` stamp; `accepted` = current. → LLM may only **Suggest**, never overwrite.
-2. **LLM-inferred, unaccepted**: current = inferred; `inferred` stamp present; `accepted` absent or ≠ current. → UI shows "suggested". The LLM may **refine its own inference in place** (overwrite) each pass — this is what keeps the rolling-summary working autonomously. Human can **Accept** (`accepted` := current) or **Reject** (revert to `accepted`, or delete a never-accepted create).
-3. **Accepted, then LLM proposes a new change**: `accepted` = human-blessed value; a `Suggestion` holds the LLM's new value beside it. UI shows the diff. **Accept** → advance `accepted` + materialise; **Reject** → drop the `Suggestion`.
+- **Accept a create** → delete the overlay. The instance remains as plain, human-owned data (editable again; a later LLM change re-adds an overlay suggestion).
+- **Accept an update** → copy overlay `inferred/<p>` → real `<p>`, then remove that overlay suggestion (remove the whole overlay if nothing else pending).
+- **Reject a create** → delete the base node + overlay (if never accepted).
+- **Reject an update** → remove the overlay suggestion, leaving the real (human) value.
 
-**The one rule that protects humans:** the LLM overwrites in place **only when the current value is still its own prior inference** (current == last-inferred, not human-diverged). The moment a human edits or accepts-then-the-LLM-differs, further LLM changes become **Suggestions**, never overwrites.
+All four are pure link add/removes over subject classes — the executor exposes `acceptInterpretation(base [,prop])` / `rejectInterpretation(base [,prop])` ops (surface likely spans into #881's API for the UI).
 
-## 6. Accept semantics (Nico's question)
+## 6. `write_mode` parameter (DECIDED — both modes)
+- **`AutoMaterialize`** *(default)*: LLM writes live, refines its own inferences with zero clicks; only human-diverged values get staged into the overlay (§4).
+- **`Stage`**: nothing materialises directly — every create/update stays in the overlay as a suggestion until a human accepts.
 
-- **Accept** a suggestion → the proposed value is written to the real property and `accepted/<prop>` advances to it, authored/timestamped by the accepting human. It becomes ordinary human-owned data — **and can be edited again** (a later human edit just moves the baseline; a later LLM change becomes a new suggestion).
-- So yes: "written as if the human did it, still changeable." Exactly the Git model — accepting is a commit; you can commit again later.
+Plumbing: Rust `write_mode: WriteMode` param on `run_interpretation[_with_strategy]` (default `AutoMaterialize` → existing callers unchanged); `ad4m://write_mode` on `AutoProcessorConfig` (#885); same option on the TS `AutoProcessor` / `runInterpretation` (#881). "Live summary" → AutoMaterialize; "suggest for review" → Stage — same engine, one flag.
 
-## 7. Autonomous vs. fully-staged — DECIDED: a `write_mode` parameter (both)
+## 7. Why this is nice
+- **All subject classes** → the UI queries `model_query(InterpretationOverlay)` for "all proposed/AI data", filters `kind`, joins `run` for model/prompt version. No special link scanning.
+- **Minimal churn** → acceptance deletes the overlay; the instance links are untouched.
+- **Baseline is free** → the overlay's `inferred/<p>` doubles as "what the LLM last wrote", so human-vs-LLM diffs need no separate shadow.
+- **Re-derivable / auditable** → `run` → model + prompt_version + sources.
 
-Both modes are wanted in different contexts, so it's a **parameter**, not a fixed policy (Nico, 2026-08-11):
+## 8. Remaining small choices (I'll default unless you say otherwise)
+1. **Inferred-value encoding:** parallel `ad4m://interp/inferred/<predicate>` links (RDF-clean, queryable) — *recommended* — vs a single JSON snapshot prop (fewer links, opaque). Lean parallel links.
+2. **Stage-mode create materialisation:** write the real instance immediately but flagged by the overlay (visible/queryable, "pending"), vs hold the values only in the overlay until accept (base not a real `Task` until accepted). Lean *write-then-flag* so the UI can render it in place. 
+3. **Overlay identity** across passes: one overlay per base (updated in place each pass) — recommended — vs one per run (history). Lean one-per-base; the `run` link records the latest producer.
 
-- **`AutoMaterialize`** *(default)*: the LLM writes live and refines its own inferences with zero human clicks (auto-summary just works); only *human-touched* values get the Suggestion (staged) treatment — the §5 rule. Provenance still tags everything so the UI can render "inferred, not yet human-accepted."
-- **`Stage`**: nothing the LLM writes materialises directly — every create/update lands as a `Suggestion` for a human to accept/reject. For "review before it lands" flows.
-
-Plumbing:
-- **Rust:** `write_mode: WriteMode` param on `run_interpretation[_with_strategy]` (defaults to `AutoMaterialize`, so existing callers/tests are byte-for-byte unchanged).
-- **#885:** `ad4m://write_mode` field on `AutoProcessorConfig`, threaded into the pass — Flux sets it per channel/processor.
-- **#881:** the same option on the TS `AutoProcessor` config and `runInterpretation`.
-
-So a "live summary" processor runs `AutoMaterialize`; a "suggest tasks for review" processor runs `Stage` — same engine, one flag.
-
-## 8. Open questions for James + Nico
-1. **Link-tags vs subject-classes granularity.** Proposed hybrid: `InterpretationRun` + `Suggestion` as subject classes (queryable), per-instance `inferred_by`/`inferred_from`/`accepted` as plain predicates (cheap, still predicate-queryable). OK?
-2. **Baseline granularity:** per-property `accepted` (precise — human edits one field, LLM keeps refining others) vs per-instance (simpler, coarser). Lean per-property.
-3. **Default mode (A) vs (B)** and whether it's per-processor config.
-4. **Reject of a never-accepted create:** hard-delete the node, or keep it with `status = rejected` for audit?
-5. **Where does the accepted baseline live** for a brand-new inferred instance that's never been human-touched — implicitly "accepted = nothing" (whole node is a pending create) until first human action?
-
-## 9. Incremental landing plan (once signed off)
-1. `InterpretationRun` + the three `inferred_*` tags on every write (additive, non-breaking) — the un-backfillable core.
-2. The "overwrite-only-your-own-inference" gate on Update routing (protects human edits) + `accepted/<prop>` on accept.
-3. `Suggestion` subject class + accept/reject executor ops + the UI query surface (this part likely spans into #881's API).
+## 9. Landing plan (once signed off)
+1. `InterpretationRun` + `InterpretationOverlay` subject classes (hard-wired SDNA) + instantiate the overlay on every create/update with `inferred/<p>` snapshot — additive, non-breaking (readers ignore the overlay).
+2. The human-diverged gate on Update routing (real vs overlay `inferred/<p>`) + `write_mode`.
+3. `acceptInterpretation` / `rejectInterpretation` executor ops + the UI/API query surface (into #881).
