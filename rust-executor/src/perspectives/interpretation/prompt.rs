@@ -222,22 +222,6 @@ Output rules:
     existing entry untouched in the same response.
 ";
 
-/// idempotently register the generic interpretation task in the AI-task DB.
-///
-/// If a task with `INTERPRETATION_TASK_NAME` already exists, returns it unchanged
-/// (so callers can safely invoke this on every executor startup or before every
-/// interpretation run). Otherwise inserts a new row bound to the `\"default\"` LLM
-/// model — `AIService::replace_model_variables` resolves this to whatever LLM
-/// the user has configured as default at prompt time, so interpretation works with
-/// any model without hard-coding one here.
-///
-/// DB-only: does not touch the running `AIService`. The returned bool is
-/// `true` when this call inserted the row (vs. found an existing one), so the
-/// runtime path can spawn the task exactly once — right after creation — via
-/// `AIService::spawn_registered_task`. This split keeps registration testable
-/// in CI without a GPU. A pre-existing row is already spawned (either by the
-/// executor's boot-time `load()` sweep or by the call that first created it),
-/// so callers only spawn when `created` is `true`.
 /// Few-shot examples sent as prior User/Assistant turns (via `prompt_examples`)
 /// ahead of the real input. Four generic, non-test scenarios that teach the
 /// failure modes small models hit: (1) a belief and a task in the same snippet
@@ -427,7 +411,15 @@ pub(crate) fn interpretation_examples() -> Vec<AIPromptExamples> {
     ]
 }
 
-pub fn ensure_interpretation_task() -> anyhow::Result<(AITask, bool)> {
+/// idempotently register the generic interpretation task row in the AI-task DB.
+///
+/// DB-only, synchronous, and does not touch the running `AIService` — so task
+/// registration stays unit-testable without a model/GPU. Returns `(task,
+/// created)`; `created` is `true` only when this call inserted the row. The
+/// runtime entry point [`ensure_interpretation_task`] wraps this and spawns the
+/// task into its LLM worker; callers that just need a ready-to-prompt task use
+/// that async wrapper rather than this primitive.
+pub(crate) fn register_interpretation_task() -> anyhow::Result<(AITask, bool)> {
     if let Some(existing) = Ad4mDb::with_global_instance(|db| db.get_tasks())?
         .into_iter()
         .find(|t| t.name == INTERPRETATION_TASK_NAME)
@@ -446,6 +438,34 @@ pub fn ensure_interpretation_task() -> anyhow::Result<(AITask, bool)> {
     let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
         .ok_or_else(|| anyhow::anyhow!("interpretation task vanished immediately after insert"))?;
     Ok((task, true))
+}
+
+/// Return a ready-to-prompt interpretation task: register the DB row if absent
+/// (via [`register_interpretation_task`]) AND ensure it is spawned into its LLM
+/// worker, so the caller can immediately `AIService::prompt` it.
+///
+/// The spawn is what makes this async and AIService-dependent. `register_...`
+/// only writes the DB row; a freshly-registered task is invisible to the worker
+/// until the next `set_default_model`/restart `load()` sweep, so its first
+/// `prompt` would fail with "Task not spawned". We spawn it here, but only when
+/// this call actually minted the row — a pre-existing row is already spawned
+/// (boot-time `load()` sweep, or the call that first created it), so re-spawning
+/// would force a redundant local-model warmup on every interpretation run.
+pub async fn ensure_interpretation_task() -> anyhow::Result<AITask> {
+    let (task, created) = register_interpretation_task()?;
+    if created {
+        crate::ai_service::AIService::global_instance()
+            .await
+            .map_err(|e| anyhow::anyhow!("ensure_interpretation_task: AIService not ready: {e:#}"))?
+            .spawn_registered_task(task.clone())
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "ensure_interpretation_task: failed to spawn interpretation task: {e:#}"
+                )
+            })?;
+    }
+    Ok(task)
 }
 
 #[cfg(test)]
