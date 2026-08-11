@@ -745,7 +745,10 @@ mod tests {
         // Idempotent: second call must return the same row, not insert a duplicate.
         let (gemma_second, gemma_created_again) =
             ensure_interpretation_task_for_model(Some("gemma3:12b")).unwrap();
-        assert!(!gemma_created_again, "second call must find the existing row");
+        assert!(
+            !gemma_created_again,
+            "second call must find the existing row"
+        );
         assert_eq!(gemma_first.task_id, gemma_second.task_id);
 
         // Distinct model → distinct DB row.
