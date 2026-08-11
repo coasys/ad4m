@@ -365,9 +365,7 @@ pub async fn run_interpretation_with_strategy(
 /// [`run_interpretation_with_strategy`] with an optional per-call LLM model
 /// override — routes the interpretation prompt through the AI-task DB row
 /// bound to `model_override` (falling back to the shared default row when
-/// `None`). This is the plumbing the neighbourhood auto-processor uses to
-/// honor `AutoProcessorConfig::llm_model` without touching the global default
-/// or any other caller.
+/// `None`).
 ///
 /// `model_override = None` reuses the exact task row every existing caller
 /// already uses, so behaviour is unchanged for all non-processor callers.

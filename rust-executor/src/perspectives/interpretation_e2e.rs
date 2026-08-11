@@ -1397,8 +1397,6 @@ async fn auto_processor_pass_lands_interpretation_instance() {
         batch_max: 32,
         max_wait_ms: None,
         claim_ttl_ms: 60_000,
-        llm_base_url: None,
-        llm_model: None,
         dedup_strategy_json: None,
     };
     write_processor(&mut perspective, &cfg, &ctx)
@@ -1588,8 +1586,6 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         batch_max: 32,
         max_wait_ms: None,
         claim_ttl_ms: 60_000,
-        llm_base_url: None,
-        llm_model: None,
         dedup_strategy_json: None,
     };
     let task_cfg = AutoProcessorConfig {
@@ -1601,8 +1597,6 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         batch_max: 32,
         max_wait_ms: None,
         claim_ttl_ms: 60_000,
-        llm_base_url: None,
-        llm_model: None,
         dedup_strategy_json: None,
     };
 
@@ -1840,8 +1834,6 @@ async fn auto_processor_high_level_signal_driven_pass() {
             batch_max: 32,
             max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            llm_base_url: None,
-            llm_model: None,
             dedup_strategy_json: None,
         };
         write_processor(&mut perspective, &cfg, &ctx)
@@ -2013,8 +2005,6 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
             batch_max: 32,
             max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            llm_base_url: None,
-            llm_model: None,
             dedup_strategy_json: None,
         };
         write_processor(&mut perspective, &cfg, &ctx_main)

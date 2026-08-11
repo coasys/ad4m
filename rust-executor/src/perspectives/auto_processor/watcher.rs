@@ -18,7 +18,7 @@
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
-    gather_transcript_sparql, run_interpretation_with_strategy_and_model, DedupStrategy,
+    gather_transcript_sparql, run_interpretation_with_strategy, DedupStrategy,
 };
 use crate::perspectives::model_query::load_shape_from_store;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -349,13 +349,10 @@ pub fn parse_dedup_strategy_json(blob: Option<&str>) -> DedupStrategy {
 ///    `cfg.source_scope_query`. Zero rows = [`PassOutcome::EmptyTranscript`].
 /// 4. [`run_interpretation_with_strategy`] with the deserialized dedup.
 ///
-/// `cfg.llm_model` (if set) is honored: the pass routes through an AI-task
-/// row bound to that model id. `cfg.llm_base_url` is NOT yet applied — it
-/// implies a distinct model *provider* registration (different LLM channel),
-/// which is a runtime concern handled at `AIService::spawn_model` time; a
-/// dedicated dynamic-registration follow-up will wire it in. When it is
-/// `Some` we emit a `warn` log so a misconfigured processor is visible in
-/// the executor log instead of silently falling back to the default provider.
+/// The pass always uses the executor's default LLM (via `AIService`).
+/// `AutoProcessorConfig` is a neighbourhood-shared record and must not carry
+/// per-peer LLM overrides — each peer picks a model that matches its local
+/// hardware in `AIService` config.
 pub async fn run_one_pass(
     perspective: &mut PerspectiveInstance,
     cfg: &AutoProcessorConfig,
@@ -363,16 +360,6 @@ pub async fn run_one_pass(
     now_ms: i64,
     context: &AgentContext,
 ) -> anyhow::Result<PassOutcome> {
-    if cfg.llm_base_url.is_some() {
-        log::warn!(
-            "auto_processor `{}`: llm_base_url is set but not yet honored — dynamic model \
-             provider registration is a follow-up. Falling back to the AIService default \
-             provider for `{}`.",
-            cfg.processor_id,
-            cfg.llm_model.as_deref().unwrap_or("<default model>"),
-        );
-    }
-
     // Step signals (P-B2c): observable pass lifecycle for tests + the WS layer.
     // `me` (the acting agent's DID) is resolved up front so every signal is
     // tagged with which peer emitted it — the multi-user/executor observer uses
@@ -530,14 +517,13 @@ pub async fn run_one_pass(
     signal!(AutoProcessorStep::RunningInterpretation);
     let dedup = parse_dedup_strategy_json(cfg.dedup_strategy_json.as_deref());
     let base_prefix = format!("ad4m://autoprocessor/{}/instance/", cfg.processor_id);
-    let bases = run_interpretation_with_strategy_and_model(
+    let bases = run_interpretation_with_strategy(
         perspective,
         &shapes,
         &transcript,
         &base_prefix,
         context,
         &dedup,
-        cfg.llm_model.as_deref(),
         // Existing-instance scope: not yet wired from the processor config —
         // #883 added the plumbing (`existing_instance_context(scope)`), but the
         // per-channel scope belongs to a follow-up config field. `None` keeps
@@ -567,8 +553,6 @@ mod tests {
             batch_max,
             max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            llm_base_url: None,
-            llm_model: None,
             dedup_strategy_json: None,
         }
     }
@@ -975,117 +959,5 @@ mod tests {
             }
             other => panic!("expected ShapesMissing, got {other:?}"),
         }
-    }
-
-    /// `cfg.llm_model` must reach the interpretation engine — the pass has to
-    /// register (or reuse) an AI-task row bound to that model id, not the
-    /// shared default row. Verified end-to-end: seed a real shape + transcript,
-    /// run the pass, then confirm `Ad4mDb` now holds a per-model task named
-    /// `adam://interpretation?model=<id>` with `model_id = <id>`. The LLM
-    /// invocation itself is expected to fail in this unit-test environment
-    /// (no `AIService` provider registered for the fabricated model) — but the
-    /// DB insert happens *before* the LLM step, so the failure does not gate
-    /// this proof. This is the plumbing check the P-B2b watcher-loop relies on.
-    #[tokio::test]
-    async fn run_one_pass_uses_cfg_llm_model_for_interpretation_task() {
-        use crate::db::Ad4mDb;
-        use crate::perspectives::interpretation::interpretation_task_name_for_model;
-        use crate::perspectives::interpretation_test_support::INTENTION_SDNA;
-        use crate::types::{AITask, Link, LinkStatus};
-
-        let (mut p, _shapes, ctx) =
-            setup_perspective_no_llm(&[("ns://Intention", INTENTION_SDNA)]).await;
-
-        // Fabricated model id: guaranteed no matching AIService LLM channel,
-        // so the LLM call fails — but only after `ensure_interpretation_task`
-        // has inserted the per-model row we're asserting on.
-        let model = "wiring-probe-model-v1";
-        let expected_name = interpretation_task_name_for_model(Some(model));
-
-        // Pre-clean: this test asserts on a fresh insert. `ensure_db_init` is
-        // shared across the single-threaded test run, so scrub the target name.
-        let leftover: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
-            .unwrap()
-            .into_iter()
-            .filter(|t| t.name == expected_name)
-            .collect();
-        for t in leftover {
-            Ad4mDb::with_global_instance(|db| db.remove_task(t.task_id.clone())).unwrap();
-        }
-
-        // Two turns so `gather_transcript_sparql` returns non-empty and the
-        // pass does not short-circuit on `EmptyTranscript`.
-        for (uri, author, body) in [
-            (
-                "msg://a",
-                "did:key:alice",
-                "I'll ship the interpretation refactor.",
-            ),
-            (
-                "msg://b",
-                "did:key:bob",
-                "Roger, I'll review this afternoon.",
-            ),
-        ] {
-            p.add_link(
-                Link {
-                    source: uri.into(),
-                    predicate: Some("ns://body".into()),
-                    target: format!("literal:string:{body}"),
-                },
-                LinkStatus::Local,
-                None,
-                &ctx,
-            )
-            .await
-            .expect("seed body");
-            p.add_link(
-                Link {
-                    source: uri.into(),
-                    predicate: Some("ns://author".into()),
-                    target: author.into(),
-                },
-                LinkStatus::Local,
-                None,
-                &ctx,
-            )
-            .await
-            .expect("seed author");
-        }
-
-        let mut c = cfg("wiring-probe-proc", 100, 32);
-        c.interpretation_classes = vec!["ns://Intention".into()];
-        c.source_scope_query = "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
-                                ?m <ns://author> ?speaker . } ORDER BY ?m"
-            .to_string();
-        c.llm_model = Some(model.to_string());
-
-        // The pass is *expected* to fail once it reaches the LLM step (no
-        // provider registered for `wiring-probe-model-v1`) — we swallow the
-        // Result. The plumbing proof lives in the DB check below.
-        let _ = run_one_pass(
-            &mut p,
-            &c,
-            &["msg://a".into(), "msg://b".into()],
-            1_000,
-            &ctx,
-        )
-        .await;
-
-        let rows: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
-            .unwrap()
-            .into_iter()
-            .filter(|t| t.name == expected_name)
-            .collect();
-        assert_eq!(
-            rows.len(),
-            1,
-            "expected exactly one per-model interpretation task row for `{model}`; \
-             the watcher must plumb cfg.llm_model into ensure_interpretation_task_for_model"
-        );
-        assert_eq!(
-            rows[0].model_id, model,
-            "per-model task row must carry cfg.llm_model as its model_id"
-        );
     }
 }
