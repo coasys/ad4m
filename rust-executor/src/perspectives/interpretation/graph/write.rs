@@ -251,10 +251,21 @@ fn resolve_relation_links(
 fn normalize_refs(value: &serde_json::Value) -> Option<Vec<String>> {
     match value {
         serde_json::Value::String(s) => Some(vec![s.clone()]),
-        serde_json::Value::Array(arr) => arr
-            .iter()
-            .map(|v| v.as_str().map(|s| s.to_string()))
-            .collect(),
+        // Keep every string ref and skip (log) any non-string element, rather
+        // than collecting into `Option<Vec>` — a single bad element there
+        // dropped the WHOLE relation array (James #883). A malformed ref should
+        // cost only itself, not the sibling refs the model got right.
+        serde_json::Value::Array(arr) => Some(
+            arr.iter()
+                .filter_map(|v| match v.as_str() {
+                    Some(s) => Some(s.to_string()),
+                    None => {
+                        log::debug!("interpretation: dropping non-string relation ref {v:?}");
+                        None
+                    }
+                })
+                .collect(),
+        ),
         _ => None,
     }
 }
@@ -363,6 +374,23 @@ mod tests {
             }
             other => panic!("expected Update, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn normalize_refs_keeps_valid_refs_and_skips_non_strings() {
+        use serde_json::json;
+        assert_eq!(normalize_refs(&json!("t1")), Some(vec!["t1".to_string()]));
+        assert_eq!(
+            normalize_refs(&json!(["a", "b"])),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        // Regression (James #883): one non-string element must NOT drop the whole
+        // array — the good refs survive.
+        assert_eq!(
+            normalize_refs(&json!(["a", 5, "b", null])),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(normalize_refs(&json!(5)), None);
     }
 
     #[test]
