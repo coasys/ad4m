@@ -330,10 +330,13 @@ pub struct PerspectiveInstance {
     link_language: Arc<RwLock<Option<Language>>>,
     trigger_notification_check: Arc<AtomicBool>,
     trigger_prolog_subscription_check: Arc<AtomicBool>,
-    /// Predicates of links changed since last subscription check.
-    changed_predicates: Arc<Mutex<ChangedPredicates>>,
-    /// Named graphs changed since last subscription check.
-    changed_graphs: Arc<Mutex<ChangedGraphs>>,
+    /// Predicates and named graphs changed since last subscription check.
+    /// Combined under one mutex: recording and draining both fields as a
+    /// single atomic snapshot prevents one diff's predicate and graph state
+    /// from being observed torn across two subscription-check cycles (a
+    /// diff whose predicate lands in one drain and whose graph lands in the
+    /// next would let a subscription requiring both silently miss a check).
+    changed_predicates_and_graphs: Arc<Mutex<(ChangedPredicates, ChangedGraphs)>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
@@ -394,8 +397,10 @@ impl PerspectiveInstance {
             link_language: Arc::new(RwLock::new(None)),
             trigger_notification_check: Arc::new(AtomicBool::new(false)),
             trigger_prolog_subscription_check: Arc::new(AtomicBool::new(false)),
-            changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
-            changed_graphs: Arc::new(Mutex::new(ChangedGraphs::NoneRecorded)),
+            changed_predicates_and_graphs: Arc::new(Mutex::new((
+                ChangedPredicates::NoneRecorded,
+                ChangedGraphs::NoneRecorded,
+            ))),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
@@ -3021,7 +3026,11 @@ impl PerspectiveInstance {
                 Some(&[graph_iri.to_string()]),
             )
             .unwrap_or_else(|e| {
-                log::warn!("remove_graph: subject enumeration query failed: {}", e);
+                log::warn!(
+                    "remove_graph: failed to enumerate subjects in graph {}: {}",
+                    graph_iri,
+                    e
+                );
                 "[]".to_string()
             });
 
@@ -3134,13 +3143,17 @@ impl PerspectiveInstance {
     }
 
     /// Record the predicates and graphs from a diff into tracking state.
+    ///
+    /// Both fields are recorded under a single lock acquisition (see
+    /// `changed_predicates_and_graphs`) so a concurrent subscription-check
+    /// drain can never observe this diff's predicate update without its
+    /// graph update, or vice versa.
     async fn record_changed_predicates(&self, diff: &DecoratedPerspectiveDiff) {
-        let mut changed = self.changed_predicates.lock().await;
+        let mut state = self.changed_predicates_and_graphs.lock().await;
+        let (changed, changed_graphs) = &mut *state;
 
         // If already CheckAll, it's sticky — nothing to do
-        if matches!(*changed, ChangedPredicates::CheckAll) {
-            // Still need to record graphs
-        } else {
+        if !matches!(changed, ChangedPredicates::CheckAll) {
             // Collect predicates from the diff
             let mut new_preds = HashSet::new();
             let mut has_predicate_less = false;
@@ -3156,7 +3169,7 @@ impl PerspectiveInstance {
             if has_predicate_less {
                 *changed = ChangedPredicates::CheckAll;
             } else {
-                match &mut *changed {
+                match changed {
                     ChangedPredicates::NoneRecorded => {
                         *changed = ChangedPredicates::Specific(new_preds);
                     }
@@ -3167,27 +3180,23 @@ impl PerspectiveInstance {
                 }
             }
         }
-        drop(changed);
 
         // Record changed graphs
-        let mut changed_graphs = self.changed_graphs.lock().await;
         for link in diff.additions.iter().chain(diff.removals.iter()) {
             match &link.graph {
-                Some(g) => {
-                    match &mut *changed_graphs {
-                        ChangedGraphs::NoneRecorded => {
-                            let mut set = HashSet::new();
-                            set.insert(g.clone());
-                            *changed_graphs = ChangedGraphs::Specific(set);
-                        }
-                        ChangedGraphs::Specific(existing) => {
-                            existing.insert(g.clone());
-                        }
-                        ChangedGraphs::DefaultGraphChanged => {
-                            // Already watching everything
-                        }
+                Some(g) => match changed_graphs {
+                    ChangedGraphs::NoneRecorded => {
+                        let mut set = HashSet::new();
+                        set.insert(g.clone());
+                        *changed_graphs = ChangedGraphs::Specific(set);
                     }
-                }
+                    ChangedGraphs::Specific(existing) => {
+                        existing.insert(g.clone());
+                    }
+                    ChangedGraphs::DefaultGraphChanged => {
+                        // Already watching everything
+                    }
+                },
                 None => {
                     *changed_graphs = ChangedGraphs::DefaultGraphChanged;
                 }
@@ -5105,13 +5114,12 @@ impl PerspectiveInstance {
                 // triggers that arrived during the debounce window.
                 self.trigger_prolog_subscription_check
                     .swap(false, Ordering::AcqRel);
-                let changed_preds = std::mem::replace(
-                    &mut *self.changed_predicates.lock().await,
-                    ChangedPredicates::NoneRecorded,
-                );
-                let changed_graphs = std::mem::replace(
-                    &mut *self.changed_graphs.lock().await,
-                    ChangedGraphs::NoneRecorded,
+                // Drain both fields as a single atomic snapshot (one lock) —
+                // see `changed_predicates_and_graphs` for why this must not
+                // be two separate lock/replace operations.
+                let (changed_preds, changed_graphs) = std::mem::replace(
+                    &mut *self.changed_predicates_and_graphs.lock().await,
+                    (ChangedPredicates::NoneRecorded, ChangedGraphs::NoneRecorded),
                 );
 
                 log::debug!(

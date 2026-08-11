@@ -601,8 +601,12 @@ async fn named_graphs(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     .map_err(|e| WsRpcError::forbidden(e))?;
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let graphs = perspective
-        .named_graphs()
+    // Run the synchronous store lookup on a blocking thread — matches the
+    // sparql_query_with_graphs pattern below so this handler doesn't hold up
+    // the async runtime on the (unbounded, store-size-proportional) scan.
+    let graphs = tokio::task::spawn_blocking(move || perspective.named_graphs())
+        .await
+        .map_err(|e| WsRpcError::internal(format!("Task join error: {}", e)))?
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(graphs)?)
@@ -618,8 +622,12 @@ async fn remove_named_graph(params: Value, ctx: Arc<RequestContext>) -> Result<V
 
     let graph_iri = params.require_str("graphIri")?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    perspective
-        .remove_graph(&graph_iri)
+    // remove_graph does a subject-enumeration query, a graph delete, and a
+    // batched cross-graph link cleanup query — run it on a blocking thread
+    // so it can't stall the Tokio runtime, matching the pattern above.
+    tokio::task::spawn_blocking(move || perspective.remove_graph(&graph_iri))
+        .await
+        .map_err(|e| WsRpcError::internal(format!("Task join error: {}", e)))?
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(Value::Bool(true))
