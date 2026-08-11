@@ -1,4 +1,5 @@
 use super::*;
+use crate::perspectives::interpretation::dedup::Resolution;
 use crate::perspectives::interpretation::types::{
     ExistingInstances, InterpretationOp, ProposedInstance,
 };
@@ -67,9 +68,38 @@ pub fn plan_interpretation_ops(
 /// `proposed` **must be in the LLM's emission order** for the ordinals to line
 /// up; `run_interpretation` guarantees this by dedup-filtering in place rather
 /// than re-partitioning.
+///
+/// Treats every proposal as [`Resolution::Keep`] — i.e. no dedup context. The
+/// production path calls [`plan_interpretation_ops_resolved`] with real
+/// [`Resolution`] tags so `new:<Class>:<n>` ordinals survive dedup (James #883).
 pub fn plan_interpretation_ops_with_context(
     shapes: &[ModelShape],
     proposed: &[ProposedInstance],
+    base_prefix: &str,
+    existing: &ExistingInstances,
+) -> Vec<InterpretationOp> {
+    let resolved: Vec<(ProposedInstance, Resolution)> = proposed
+        .iter()
+        .map(|p| (p.clone(), Resolution::Keep))
+        .collect();
+    plan_interpretation_ops_resolved(shapes, &resolved, base_prefix, existing)
+}
+
+/// Ordinal-preserving planner: like [`plan_interpretation_ops_with_context`] but
+/// each proposal carries the [`Resolution`] identity-dedup assigned it. Every
+/// item — kept OR duplicate — takes a slot in the per-class ordinal index so a
+/// relation `new:<Class>:<n>` resolves against the model's *full* emission
+/// order (James #883: dedup that dropped items before planning shifted later
+/// ordinals). Ops are emitted only for kept items:
+///   - [`Resolution::Keep`]: as before — id naming a same-class existing
+///     instance → `Update`, else a fresh `Create` under `base_prefix`.
+///   - [`Resolution::DupOfExisting`]: indexed at the real existing base (so refs
+///     to it link the real node) but written nothing.
+///   - [`Resolution::DupOfEarlier`]: indexed at the earlier slot's base, written
+///     nothing.
+pub fn plan_interpretation_ops_resolved(
+    shapes: &[ModelShape],
+    resolved: &[(ProposedInstance, Resolution)],
     base_prefix: &str,
     existing: &ExistingInstances,
 ) -> Vec<InterpretationOp> {
@@ -78,6 +108,9 @@ pub fn plan_interpretation_ops_with_context(
         inst: &'a ProposedInstance,
         base: String,
         is_update: bool,
+        /// Whether Pass 2 emits an op for this slot. Duplicates are indexed for
+        /// ordinal resolution but never written.
+        emit: bool,
     }
 
     // Pass 1: place proposals + build the per-class ordinal index.
@@ -85,8 +118,12 @@ pub fn plan_interpretation_ops_with_context(
     // Ids the graph holds, extended with proposals we route to Update, so
     // relation refs can resolve against real *and* just-planned bases.
     let mut existing_ids: HashSet<String> = existing.keys().cloned().collect();
-    let mut placed: Vec<Placed> = Vec::with_capacity(proposed.len());
-    for inst in proposed {
+    let mut placed: Vec<Placed> = Vec::with_capacity(resolved.len());
+    // Base URI resolved for each `resolved` slot (None = skipped: unknown class
+    // or an unresolvable earlier ref). Keeps `DupOfEarlier(idx)` aligned to the
+    // emission order even though `placed` is compacted.
+    let mut slot_base: Vec<Option<String>> = Vec::with_capacity(resolved.len());
+    for (inst, resolution) in resolved {
         let Some(shape) = shapes
             .iter()
             .find(|s| class_local_name(&s.target_class) == inst.class)
@@ -95,60 +132,90 @@ pub fn plan_interpretation_ops_with_context(
                 "interpretation: dropping proposed instance for unknown class '{}'",
                 inst.class
             );
+            slot_base.push(None);
             continue;
         };
-        let (base, is_update) = match &inst.id {
-            // Only route to Update when the proposed id names an existing
-            // instance OF THE SAME CLASS. An id that belongs to a different
-            // class must Create, never Update — running this class's setters
-            // against a foreign-class node clobbers links on shared predicates.
-            Some(id) if existing.get(id).is_some_and(|ctx| ctx.class == inst.class) => {
-                (id.clone(), true)
-            }
-            _ => {
-                if let Some(hallucinated) = &inst.id {
-                    match existing.get(hallucinated) {
-                        Some(ctx) => log::debug!(
-                            "interpretation: proposed id {hallucinated:?} is class '{}', not '{}'; routing to Create",
-                            ctx.class,
-                            inst.class
-                        ),
-                        None => log::debug!(
-                            "interpretation: proposed id {hallucinated:?} not among existing instances for class {}; routing to Create",
-                            inst.class
-                        ),
-                    }
+        let placed_slot: Option<(String, bool, bool)> = match resolution {
+            Resolution::DupOfExisting(existing_base) => Some((existing_base.clone(), false, false)),
+            Resolution::DupOfEarlier(idx) => match slot_base.get(*idx).cloned().flatten() {
+                Some(base) => Some((base, false, false)),
+                None => {
+                    log::debug!(
+                        "interpretation: DupOfEarlier({idx}) for '{}' had no resolved base; dropping",
+                        inst.class
+                    );
+                    None
                 }
-                (
-                    format!(
-                        "{base_prefix}{}/{}",
-                        inst.class.to_lowercase(),
-                        Uuid::new_v4()
-                    ),
-                    false,
-                )
+            },
+            Resolution::Keep => {
+                let (base, is_update) = match &inst.id {
+                    // Only route to Update when the proposed id names an existing
+                    // instance OF THE SAME CLASS. An id that belongs to a
+                    // different class must Create, never Update — running this
+                    // class's setters against a foreign-class node clobbers links
+                    // on shared predicates.
+                    Some(id) if existing.get(id).is_some_and(|ctx| ctx.class == inst.class) => {
+                        (id.clone(), true)
+                    }
+                    _ => {
+                        if let Some(hallucinated) = &inst.id {
+                            match existing.get(hallucinated) {
+                                Some(ctx) => log::debug!(
+                                    "interpretation: proposed id {hallucinated:?} is class '{}', not '{}'; routing to Create",
+                                    ctx.class,
+                                    inst.class
+                                ),
+                                None => log::debug!(
+                                    "interpretation: proposed id {hallucinated:?} not among existing instances for class {}; routing to Create",
+                                    inst.class
+                                ),
+                            }
+                        }
+                        (
+                            format!(
+                                "{base_prefix}{}/{}",
+                                inst.class.to_lowercase(),
+                                Uuid::new_v4()
+                            ),
+                            false,
+                        )
+                    }
+                };
+                Some((base, is_update, true))
             }
         };
-        // Index under the class name the LLM uses (matches the relation's
-        // `targetClass`, i.e. the bare local name), in output order.
-        per_class
-            .entry(inst.class.clone())
-            .or_default()
-            .push(base.clone());
-        if is_update {
-            existing_ids.insert(base.clone());
+        match placed_slot {
+            Some((base, is_update, emit)) => {
+                // Index under the class name the LLM uses (matches the
+                // relation's `targetClass`, i.e. the bare local name), in
+                // output order.
+                per_class
+                    .entry(inst.class.clone())
+                    .or_default()
+                    .push(base.clone());
+                if is_update {
+                    existing_ids.insert(base.clone());
+                }
+                slot_base.push(Some(base.clone()));
+                placed.push(Placed {
+                    shape,
+                    inst,
+                    base,
+                    is_update,
+                    emit,
+                });
+            }
+            None => slot_base.push(None),
         }
-        placed.push(Placed {
-            shape,
-            inst,
-            base,
-            is_update,
-        });
     }
 
-    // Pass 2: build ops, resolving relations against the full index.
+    // Pass 2: build ops for the written slots, resolving relations against the
+    // full index.
     let mut out = Vec::with_capacity(placed.len());
     for p in &placed {
+        if !p.emit {
+            continue;
+        }
         let values = scalar_values(p.shape, p.inst);
         if p.is_update {
             if !values.is_empty() {
@@ -727,6 +794,57 @@ mod tests {
             targets_of(addlinks_for(&ops, &existing_id), "ns://blocks"),
             vec![sibling_base],
             "AddLinks must point the blocks relation at the fresh sibling's base"
+        );
+    }
+
+    #[test]
+    fn plan_resolved_indexes_dup_slot_so_ordinal_resolves_to_existing_base() {
+        // James #883: a proposal deduped as already-existing must still occupy
+        // its slot in the emission-order ordinal index, mapped to the REAL
+        // existing base — so a sibling's `new:<Class>:<n>` links the existing
+        // node, not the wrong sibling or a fresh mint. Emission order:
+        // [Alpha(new), Existing(dup-of-existing), Gamma(new)]; Gamma.blocks =
+        // `new:Task:2` must target Existing's base, and no Create is emitted for
+        // the dup.
+        let shape = shape_from_sdna("Task", TASK_WITH_RELATION_SDNA);
+        let existing_base = "soa://ext/task/existing".to_string();
+        let raw = r#"[
+          {"class":"Task","title":"Alpha"},
+          {"class":"Task","title":"Existing Title"},
+          {"class":"Task","title":"Gamma","blocks":["new:Task:2"]}
+        ]"#;
+        let proposed = parse_interpretation_response(raw).unwrap();
+        let resolved = vec![
+            (proposed[0].clone(), Resolution::Keep),
+            (
+                proposed[1].clone(),
+                Resolution::DupOfExisting(existing_base.clone()),
+            ),
+            (proposed[2].clone(), Resolution::Keep),
+        ];
+        let known = existing_map(vec![InstanceContext {
+            id: existing_base.clone(),
+            title: "Existing Title".to_string(),
+            class: "Task".to_string(),
+            properties: std::collections::BTreeMap::new(),
+        }]);
+        let ops = plan_interpretation_ops_resolved(&[shape], &resolved, "soa://ext/", &known);
+
+        // The dup slot is never re-created.
+        assert!(
+            !ops.iter().any(|op| matches!(
+                op,
+                InterpretationOp::Create { base, .. } if base == &existing_base
+            )),
+            "the dup-of-existing slot must not be re-created; got {ops:#?}"
+        );
+        // Creates, in order: Alpha (#0), Gamma (#1) — the dup took no create slot.
+        let gamma_base = nth_create_base(&ops, 1);
+        assert_eq!(
+            targets_of(addlinks_for(&ops, &gamma_base), "ns://blocks"),
+            vec![existing_base],
+            "new:Task:2 (the 2nd Task in emission order = the dup) must resolve \
+             to the existing Task's base, not a sibling or fresh mint"
         );
     }
 

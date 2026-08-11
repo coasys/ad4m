@@ -1,7 +1,7 @@
 use super::{
     build_interpretation_input, class_local_name, ensure_interpretation_task,
-    existing_instance_context, filter_already_present_with_strategy, identity_property,
-    parse_interpretation_response, plan_interpretation_ops_with_context, DedupStrategy,
+    existing_instance_context, identity_property, parse_interpretation_response,
+    plan_interpretation_ops_resolved, resolve_already_present_with_strategy, DedupStrategy,
     InterpretationOp, ProposedInstance,
 };
 use crate::agent::AgentContext;
@@ -395,10 +395,11 @@ pub async fn run_interpretation_with_strategy(
     // Hard dedup guarantee: even if the model ignored the `existing` hint, an
     // already-present (class, identity value) never becomes a *new* instance.
     // Updates (proposals carrying an `id`) bypass this — they name a specific
-    // target. Crucially this filters **in place**, preserving the LLM's output
-    // order so `new:<Class>:<n>` relation ordinals resolve against the same
-    // ordering the model counted.
-    let instances = filter_already_present_with_strategy(
+    // target. Rather than *drop* duplicates (which would shift later
+    // `new:<Class>:<n>` ordinals — James #883), we TAG every proposal in
+    // emission order with its `Resolution`; the planner indexes all of them for
+    // ordinal resolution but writes ops only for the kept ones.
+    let resolved = resolve_already_present_with_strategy(
         instances,
         &existing_ctx,
         &identity_props,
@@ -406,8 +407,7 @@ pub async fn run_interpretation_with_strategy(
     )
     .await?;
 
-    let planned =
-        plan_interpretation_ops_with_context(shapes, &instances, base_prefix, &existing_ctx);
+    let planned = plan_interpretation_ops_resolved(shapes, &resolved, base_prefix, &existing_ctx);
     // Filter no-op Updates: the LLM occasionally re-emits an unchanged existing
     // entry, and applying that would clear-and-rewrite scalar links for nothing.
     let ops = strip_noop_updates(perspective, shapes, planned).await?;

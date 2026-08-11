@@ -1,6 +1,27 @@
-use super::graph::{identity_values_by_class, normalize_identity};
+use super::graph::{instances_by_class, normalize_identity};
 use super::types::{ExistingInstances, ProposedInstance};
 use std::collections::{HashMap, HashSet};
+
+/// How identity-dedup resolved one proposed instance, while **keeping its slot**
+/// in the LLM's emission order so relation ordinals (`new:<Class>:<n>`) still
+/// line up. Dedup used to *drop* duplicates before the write path planned
+/// ordinals, so a removed earlier sibling shifted every later `new:<Class>:<n>`
+/// (James #883). Instead we tag every item and let
+/// [`plan_interpretation_ops_resolved`](super::graph::plan_interpretation_ops_resolved)
+/// index all of them — writing ops only for the kept ones.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Resolution {
+    /// A genuinely new proposal, or an explicit upsert carrying a *trusted* id:
+    /// the planner emits its Create/Update op.
+    Keep,
+    /// Its (class, identity) already exists in the graph. Not re-created; a
+    /// relation ref pointing at this slot resolves to `existing_base` (the real
+    /// node) rather than a fresh mint.
+    DupOfExisting(String),
+    /// It duplicates an *earlier* proposal in THIS same response (index into the
+    /// emission order). Not written; refs resolve to that earlier slot's base.
+    DupOfEarlier(usize),
+}
 
 /// How to decide whether a proposed instance is "already present" in the graph
 /// — the identity-dedup policy `run_interpretation` runs after the LLM emits
@@ -150,14 +171,46 @@ pub(crate) fn semantic_dedup_pure(
         .collect()
 }
 
-/// Semantic-dedup filter backed by AIService embeddings: for each class that
-/// has both proposals and existing identities, embed both sides (one
-/// `AIService::embed` call per string — the embedding channel is single-prompt;
-/// a batch API would be a worthwhile future optimisation) and delegate to
-/// [`semantic_dedup_pure`]. Proposals carrying a *trusted* `id` (one the graph
-/// holds — an explicit upsert) bypass dedup, same as the string path; a
-/// hallucinated id is still checked. Classes with no identity property, or
-/// proposals missing that property's value, always survive.
+/// PURE argmax companion to [`semantic_dedup_pure`]: for each proposed index
+/// whose max cosine similarity to an existing vector of the same class is
+/// `≥ threshold`, return that best-matching existing vector's *local index*
+/// (position within the class's `existing_vecs` list). Lets the caller map a
+/// semantic duplicate back to the real existing base for
+/// [`Resolution::DupOfExisting`].
+pub(crate) fn semantic_dup_targets(
+    existing_vecs: &HashMap<String, Vec<Vec<f32>>>,
+    proposed_vecs: &HashMap<String, Vec<(usize, Vec<f32>)>>,
+    threshold: f32,
+) -> HashMap<usize, usize> {
+    let mut targets: HashMap<usize, usize> = HashMap::new();
+    for (class, entries) in proposed_vecs.iter() {
+        let Some(existing) = existing_vecs.get(class) else {
+            continue;
+        };
+        if existing.is_empty() {
+            continue;
+        }
+        for (idx, pv) in entries {
+            let mut best_sim = f32::MIN;
+            let mut best_j = 0usize;
+            for (j, ev) in existing.iter().enumerate() {
+                let sim = cosine_similarity(pv, ev);
+                if sim > best_sim {
+                    best_sim = sim;
+                    best_j = j;
+                }
+            }
+            if best_sim >= threshold {
+                targets.insert(*idx, best_j);
+            }
+        }
+    }
+    targets
+}
+
+/// Semantic-dedup filter backed by AIService embeddings — thin wrapper over
+/// [`resolve_already_present_semantic`] keeping only [`Resolution::Keep`]
+/// instances (the historical contract).
 pub async fn filter_already_present_semantic(
     instances: Vec<ProposedInstance>,
     existing: &ExistingInstances,
@@ -165,9 +218,43 @@ pub async fn filter_already_present_semantic(
     model: &str,
     threshold: f32,
 ) -> anyhow::Result<Vec<ProposedInstance>> {
-    // Per-class identity values projected from the id-keyed source (raw, since
-    // embeddings run on the same text the prompt showed the model).
-    let existing_by_class = identity_values_by_class(existing);
+    Ok(
+        resolve_already_present_semantic(instances, existing, identity_props, model, threshold)
+            .await?
+            .into_iter()
+            .filter_map(|(inst, r)| matches!(r, Resolution::Keep).then_some(inst))
+            .collect(),
+    )
+}
+
+/// Tagging version of the semantic path (see [`resolve_already_present`] for the
+/// string equivalent): for each class with both proposals and existing
+/// identities, embed both sides (one `AIService::embed` call per string — the
+/// embedding channel is single-prompt; a batch API would be a worthwhile future
+/// optimisation) and tag each proposal `Keep` / `DupOfExisting(real base)`.
+/// Proposals carrying a *trusted* `id` (an explicit upsert) bypass dedup, same
+/// as the string path; a hallucinated id is still checked. Classes with no
+/// identity property, or proposals missing that property's value, always
+/// survive. The semantic path has no intra-response pass, so it never emits
+/// `DupOfEarlier`.
+pub async fn resolve_already_present_semantic(
+    instances: Vec<ProposedInstance>,
+    existing: &ExistingInstances,
+    identity_props: &HashMap<String, String>,
+    model: &str,
+    threshold: f32,
+) -> anyhow::Result<Vec<(ProposedInstance, Resolution)>> {
+    // Per-class (base id, identity value) rows so a semantic match resolves back
+    // to the real base, kept parallel to the embedded existing vectors.
+    let mut existing_rows_by_class: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for (class, rows) in instances_by_class(existing) {
+        existing_rows_by_class.insert(
+            class,
+            rows.into_iter()
+                .map(|r| (r.id.clone(), r.title.clone()))
+                .collect(),
+        );
+    }
     // Bucket proposal indices by class, but only those subject to dedup.
     let mut per_class: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     for (i, inst) in instances.iter().enumerate() {
@@ -194,24 +281,30 @@ pub async fn filter_already_present_semantic(
     }
 
     let mut existing_vecs: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
+    let mut existing_ids: HashMap<String, Vec<String>> = HashMap::new();
     let mut proposed_vecs: HashMap<String, Vec<(usize, Vec<f32>)>> = HashMap::new();
     for (class, entries) in per_class.iter() {
-        let existing_vals: Vec<String> = existing_by_class
+        // Filter empties from (id, value) rows together so ids stay parallel to
+        // the vectors we embed.
+        let filtered: Vec<(String, String)> = existing_rows_by_class
             .get(class)
             .cloned()
             .unwrap_or_default()
             .into_iter()
-            .filter(|s| !s.trim().is_empty())
+            .filter(|(_, title)| !title.trim().is_empty())
             .collect();
-        if existing_vals.is_empty() {
+        if filtered.is_empty() {
             continue;
         }
+        let existing_vals: Vec<String> = filtered.iter().map(|(_, v)| v.clone()).collect();
+        let ids: Vec<String> = filtered.iter().map(|(id, _)| id.clone()).collect();
         let proposed_vals: Vec<String> = entries.iter().map(|(_, v)| v.clone()).collect();
         let mut batch = existing_vals.clone();
         batch.extend(proposed_vals.iter().cloned());
         let vectors = embed_via_ai_service(model, &batch).await?;
         let (ev, pv) = vectors.split_at(existing_vals.len());
         existing_vecs.insert(class.clone(), ev.to_vec());
+        existing_ids.insert(class.clone(), ids);
         let pv_entries: Vec<(usize, Vec<f32>)> = entries
             .iter()
             .zip(pv.iter())
@@ -220,12 +313,27 @@ pub async fn filter_already_present_semantic(
         proposed_vecs.insert(class.clone(), pv_entries);
     }
 
-    Ok(semantic_dedup_pure(
-        instances,
-        &existing_vecs,
-        &proposed_vecs,
-        threshold,
-    ))
+    let targets = semantic_dup_targets(&existing_vecs, &proposed_vecs, threshold);
+    let out = instances
+        .into_iter()
+        .enumerate()
+        .map(|(i, inst)| match targets.get(&i) {
+            Some(&existing_local_idx) => {
+                match existing_ids
+                    .get(&inst.class)
+                    .and_then(|v| v.get(existing_local_idx))
+                    .cloned()
+                {
+                    Some(base) => (inst, Resolution::DupOfExisting(base)),
+                    // Defensive: index parity is maintained above, so this
+                    // shouldn't fire — keep the item rather than lose it.
+                    None => (inst, Resolution::Keep),
+                }
+            }
+            None => (inst, Resolution::Keep),
+        })
+        .collect();
+    Ok(out)
 }
 
 /// Strategy dispatcher: pick the string or semantic dedup path based on
@@ -243,6 +351,29 @@ pub async fn filter_already_present_with_strategy(
         }
         DedupStrategy::Semantic { model, threshold } => {
             filter_already_present_semantic(instances, existing, identity_props, model, *threshold)
+                .await
+        }
+    }
+}
+
+/// Tagging dispatcher — the ordinal-preserving counterpart to
+/// [`filter_already_present_with_strategy`]. Returns every proposal in emission
+/// order tagged with its [`Resolution`], which the planner needs so
+/// `new:<Class>:<n>` ordinals resolve against the model's *full* output even
+/// after duplicates are excluded from the write set. This is what
+/// `run_interpretation` uses.
+pub async fn resolve_already_present_with_strategy(
+    instances: Vec<ProposedInstance>,
+    existing: &ExistingInstances,
+    identity_props: &HashMap<String, String>,
+    strategy: &DedupStrategy,
+) -> anyhow::Result<Vec<(ProposedInstance, Resolution)>> {
+    match strategy {
+        DedupStrategy::NormalizedString => {
+            Ok(resolve_already_present(instances, existing, identity_props))
+        }
+        DedupStrategy::Semantic { model, threshold } => {
+            resolve_already_present_semantic(instances, existing, identity_props, model, *threshold)
                 .await
         }
     }
@@ -297,6 +428,74 @@ mod tests {
         kept_titles.contains(&"ship the mvp"),
         "same title on a class with no declared identity must NOT be dropped; got {kept_titles:?}"
     );
+    }
+
+    #[test]
+    fn resolve_already_present_tags_existing_dups_at_their_base() {
+        // James #883: dedup must TAG (not drop) so ordinals survive. Emission
+        // order [Alpha(new), Ship(existing), ship(existing again), Beta(new)]:
+        // both Ship copies resolve to the existing base (a pre-existing graph
+        // match beats an in-response one), length is preserved.
+        let proposed = parse_interpretation_response(
+            r#"[
+              {"class":"Task","title":"Alpha"},
+              {"class":"Task","title":"Ship the MVP"},
+              {"class":"Task","title":"  ship   the   mvp  "},
+              {"class":"Task","title":"Beta"}
+            ]"#,
+        )
+        .unwrap();
+        let existing = existing_map(vec![InstanceContext {
+            id: "soa://existing/task/1".to_string(),
+            title: "Ship the MVP".to_string(),
+            class: "Task".to_string(),
+            properties: BTreeMap::new(),
+        }]);
+        let mut identity_props = HashMap::new();
+        identity_props.insert("Task".to_string(), "title".to_string());
+
+        let tagged = resolve_already_present(proposed, &existing, &identity_props);
+        let res: Vec<Resolution> = tagged.into_iter().map(|(_, r)| r).collect();
+        assert_eq!(res.len(), 4, "length preserved — nothing dropped");
+        assert_eq!(res[0], Resolution::Keep);
+        assert_eq!(
+            res[1],
+            Resolution::DupOfExisting("soa://existing/task/1".to_string())
+        );
+        assert_eq!(
+            res[2],
+            Resolution::DupOfExisting("soa://existing/task/1".to_string()),
+            "a second copy of an already-present identity still points at the real node"
+        );
+        assert_eq!(res[3], Resolution::Keep);
+    }
+
+    #[test]
+    fn resolve_already_present_flags_intra_response_dup_as_dup_of_earlier() {
+        // Two copies of a NOT-yet-existing identity in one response: the first is
+        // Keep, the later normalized-equal copy is DupOfEarlier(first index) — so
+        // it keeps its ordinal slot pointing at the first occurrence's base.
+        let proposed = parse_interpretation_response(
+            r#"[
+              {"class":"Task","title":"Write the docs"},
+              {"class":"Task","title":"  WRITE  the  docs "},
+              {"class":"Task","title":"Ship"}
+            ]"#,
+        )
+        .unwrap();
+        let existing = ExistingInstances::new();
+        let mut identity_props = HashMap::new();
+        identity_props.insert("Task".to_string(), "title".to_string());
+
+        let tagged = resolve_already_present(proposed, &existing, &identity_props);
+        let res: Vec<Resolution> = tagged.into_iter().map(|(_, r)| r).collect();
+        assert_eq!(res[0], Resolution::Keep);
+        assert_eq!(
+            res[1],
+            Resolution::DupOfEarlier(0),
+            "normalized-equal later copy dups the earlier proposal"
+        );
+        assert_eq!(res[2], Resolution::Keep);
     }
 
     #[test]
@@ -581,64 +780,109 @@ mod tests {
 /// Filters **in place**: the surviving instances keep the LLM's emission order,
 /// which is what the `new:<Class>:<n>` relation ordinals in
 /// [`plan_interpretation_ops_with_context`] resolve against.
+///
+/// Thin wrapper over [`resolve_already_present`] that keeps only the
+/// [`Resolution::Keep`] instances — the historical contract. New callers that
+/// need ordinals to survive dedup use `resolve_already_present` directly.
 pub fn filter_already_present(
     instances: Vec<ProposedInstance>,
     existing: &ExistingInstances,
     identity_props: &HashMap<String, String>,
 ) -> Vec<ProposedInstance> {
-    // Seed per-class known sets with pre-existing identities; each accepted
-    // proposal is added to its class's set so a same-response duplicate is
-    // dropped like an already-persisted one. Without this, an LLM that emits
-    // the same (class, identity) twice would slip through and `run_interpretation`
-    // would create two subjects for it.
-    let mut known: HashMap<String, HashSet<String>> = identity_values_by_class(existing)
+    resolve_already_present(instances, existing, identity_props)
         .into_iter()
-        .map(|(class, values)| {
-            (
-                class,
-                values.iter().map(|v| normalize_identity(v)).collect(),
-            )
-        })
-        .collect();
+        .filter_map(|(inst, r)| matches!(r, Resolution::Keep).then_some(inst))
+        .collect()
+}
+
+/// Tagging core behind [`filter_already_present`]: classify every proposed
+/// instance as [`Resolution::Keep`] / `DupOfExisting` / `DupOfEarlier` while
+/// preserving the input order **and length** — nothing is dropped. This is what
+/// lets the planner index EVERY emitted item for `new:<Class>:<n>` ordinals
+/// even though duplicates never get written (James #883: dedup that *removes*
+/// items shifts later ordinals).
+///
+/// - A *trusted* id (one the graph holds) is an explicit upsert → `Keep`.
+/// - A class with no declared identity, or a proposal missing that identity's
+///   value, can't be deduped → `Keep`.
+/// - Otherwise, under [`normalize_identity`]: a match against a pre-existing
+///   graph instance → `DupOfExisting(that base)`; a match against an *earlier*
+///   kept proposal in this response → `DupOfEarlier(its index)`; else `Keep`
+///   (and remembered so a later copy dedups against it).
+pub fn resolve_already_present(
+    instances: Vec<ProposedInstance>,
+    existing: &ExistingInstances,
+    identity_props: &HashMap<String, String>,
+) -> Vec<(ProposedInstance, Resolution)> {
+    // Pre-existing graph identities → the base id that owns them, per class,
+    // under identity normalization. First writer of a normalized value wins.
+    let mut existing_norm_to_id: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for (class, rows) in instances_by_class(existing) {
+        let entry = existing_norm_to_id.entry(class).or_default();
+        for row in rows {
+            entry
+                .entry(normalize_identity(&row.title))
+                .or_insert_with(|| row.id.clone());
+        }
+    }
+    // (class, normalized identity) → index of the first KEPT proposal in this
+    // response, so a later same-key proposal becomes `DupOfEarlier`.
+    let mut seen_in_response: HashMap<String, HashMap<String, usize>> = HashMap::new();
     let mut out = Vec::with_capacity(instances.len());
-    for inst in instances {
-        // A *trusted* id is an explicit upsert target — it names a specific
-        // existing node, so its identity value *should* match one already
-        // present; never dedup it away. But the planner only routes to Update
-        // for ids the graph actually holds; a hallucinated id absent from
-        // `existing` would be routed to Create, so it must still be
-        // dedup-checked like an ordinary proposal (else a made-up id +
-        // duplicate identity mints a duplicate node).
+    for (idx, inst) in instances.into_iter().enumerate() {
+        // Trusted id (graph holds it) = explicit upsert → keep it verbatim.
         if inst
             .id
             .as_deref()
             .is_some_and(|id| existing.contains_key(id))
         {
-            out.push(inst);
+            out.push((inst, Resolution::Keep));
             continue;
         }
-        // No declared identity for this class ⇒ no dedup.
         let Some(idp_name) = identity_props.get(&inst.class) else {
-            out.push(inst);
+            out.push((inst, Resolution::Keep));
             continue;
         };
         let Some(value) = inst.props.get(idp_name).and_then(|v| v.as_str()) else {
-            // no identity value to compare on — keep it
-            out.push(inst);
+            out.push((inst, Resolution::Keep));
             continue;
         };
         let normalized = normalize_identity(value);
-        let set = known.entry(inst.class.clone()).or_default();
-        if set.contains(&normalized) {
+        // Prefer a pre-existing graph match (a stable base) over an earlier
+        // in-response one — a second copy of an already-present identity should
+        // still point at the real node.
+        if let Some(existing_id) = existing_norm_to_id
+            .get(&inst.class)
+            .and_then(|m| m.get(&normalized))
+            .cloned()
+        {
             log::debug!(
-                "interpretation: dropping already-present {} '{}'",
+                "interpretation: already-present {} '{}' → dup of {}",
                 inst.class,
-                value
+                value,
+                existing_id
             );
+            out.push((inst, Resolution::DupOfExisting(existing_id)));
             continue;
         }
-        set.insert(normalized);
-        out.push(inst);
+        if let Some(first_idx) = seen_in_response
+            .get(&inst.class)
+            .and_then(|m| m.get(&normalized))
+            .copied()
+        {
+            log::debug!(
+                "interpretation: {} '{}' duplicates earlier proposal #{first_idx}",
+                inst.class,
+                value,
+            );
+            out.push((inst, Resolution::DupOfEarlier(first_idx)));
+            continue;
+        }
+        seen_in_response
+            .entry(inst.class.clone())
+            .or_default()
+            .insert(normalized, idx);
+        out.push((inst, Resolution::Keep));
     }
     out
 }
