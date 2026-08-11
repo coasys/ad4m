@@ -90,3 +90,68 @@ pub(crate) fn class_local_name(target_class: &str) -> &str {
         .find(|seg| !seg.is_empty())
         .unwrap_or(target_class)
 }
+
+/// Class identifier shown to the LLM and used as the cross-map key throughout
+/// interpretation (prompt `name`, the `existing`-by-class grouping, `identity_props`,
+/// and the Create/Update routing `find`).
+///
+/// Bare local name when it is unique among `shapes` — the common single-namespace
+/// case, which keeps the identifier short so small models echo it reliably. When
+/// two shapes share a local name (e.g. `flux://Task` vs `soa://Task`), the full
+/// `target_class` URI is used for BOTH, so they never collapse into one bucket
+/// (which would let the `existing`/`identity_props` maps overwrite each other and
+/// make the routing `find` resolve to whichever shape came first). `load_shape` /
+/// `create_subject` resolve a full-URI class name via exact match
+/// (`STR(?targetClass) = "<uri>"`), so a disambiguated label still round-trips to
+/// the real subject class. Every call site derives this from the same `shapes`
+/// slice, so they agree on each class's label.
+pub(crate) fn class_label(target_class: &str, shapes: &[ModelShape]) -> String {
+    let local = class_local_name(target_class);
+    let collides = shapes
+        .iter()
+        .filter(|s| s.target_class != target_class)
+        .any(|s| class_local_name(&s.target_class) == local);
+    if collides {
+        target_class.to_string()
+    } else {
+        local.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shape(target_class: &str) -> ModelShape {
+        ModelShape {
+            target_class: target_class.to_string(),
+            shape_uri: format!("{target_class}Shape"),
+            properties: Vec::new(),
+            include_relations: Vec::new(),
+            interpretation_hint: None,
+        }
+    }
+
+    #[test]
+    fn class_label_uses_bare_local_name_when_unique() {
+        let shapes = vec![shape("soa://Task"), shape("soa://Belief")];
+        assert_eq!(class_label("soa://Task", &shapes), "Task");
+        assert_eq!(class_label("soa://Belief", &shapes), "Belief");
+    }
+
+    #[test]
+    fn class_label_disambiguates_cross_namespace_collision_with_full_uri() {
+        // `flux://Task` and `soa://Task` share the local name "Task": both must
+        // fall back to their full URIs so the `existing`/`identity_props` maps and
+        // the Create/Update routing `find` never collapse them into one bucket.
+        let shapes = vec![
+            shape("flux://Task"),
+            shape("soa://Task"),
+            shape("soa://Belief"),
+        ];
+        assert_eq!(class_label("flux://Task", &shapes), "flux://Task");
+        assert_eq!(class_label("soa://Task", &shapes), "soa://Task");
+        // A non-colliding class in the same set still gets its short name.
+        assert_eq!(class_label("soa://Belief", &shapes), "Belief");
+    }
+}

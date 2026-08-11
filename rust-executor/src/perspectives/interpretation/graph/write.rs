@@ -89,7 +89,7 @@ pub fn plan_interpretation_ops_with_context(
     for inst in proposed {
         let Some(shape) = shapes
             .iter()
-            .find(|s| class_local_name(&s.target_class) == inst.class)
+            .find(|s| class_label(&s.target_class, shapes) == inst.class)
         else {
             log::debug!(
                 "interpretation: dropping proposed instance for unknown class '{}'",
@@ -109,7 +109,10 @@ pub fn plan_interpretation_ops_with_context(
                 (
                     format!(
                         "{base_prefix}{}/{}",
-                        inst.class.to_lowercase(),
+                        // Use the shape's bare local name for the minted base URI
+                        // even when `inst.class` is a full URI (collision case), so
+                        // the id stays clean (`…/task/<uuid>`, not `…/flux://task/…`).
+                        class_local_name(&shape.target_class).to_lowercase(),
                         Uuid::new_v4()
                     ),
                     false,

@@ -1,4 +1,4 @@
-use super::{class_local_name, instances_by_class, relation_predicates, ExistingInstances};
+use super::{class_label, instances_by_class, relation_predicates, ExistingInstances};
 use crate::db::Ad4mDb;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::types::{AIPromptExamples, AITask};
@@ -91,7 +91,8 @@ pub fn build_interpretation_input(
                     })
                 })
                 .collect();
-            let name = class_local_name(&s.target_class);
+            let name = class_label(&s.target_class, shapes);
+            let name = name.as_str();
             let existing_json: Vec<serde_json::Value> = existing_by_class
                 .get(name)
                 .map(|rows| {
