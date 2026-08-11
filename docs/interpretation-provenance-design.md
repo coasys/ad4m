@@ -79,12 +79,19 @@ The diff shown in the UI = *current value* vs *accepted value*.
 - **Accept** a suggestion → the proposed value is written to the real property and `accepted/<prop>` advances to it, authored/timestamped by the accepting human. It becomes ordinary human-owned data — **and can be edited again** (a later human edit just moves the baseline; a later LLM change becomes a new suggestion).
 - So yes: "written as if the human did it, still changeable." Exactly the Git model — accepting is a commit; you can commit again later.
 
-## 7. Autonomous vs. fully-staged — the one real decision
+## 7. Autonomous vs. fully-staged — DECIDED: a `write_mode` parameter (both)
 
-- **(A) Auto-materialise own inferences, stage only on conflict** *(recommended default)*: the LLM writes live and refines its own inferences with zero human clicks (auto-summary just works); only human-touched values get the Suggestion (staged) treatment. Provenance still tags everything so the UI can render "inferred, not yet human-accepted."
-- **(B) Stage everything**: nothing the LLM writes is "real" until a human accepts. Safest, but needs a human in the loop for *anything* to materialise — kills fully-autonomous operation (e.g. a summarizer bot).
+Both modes are wanted in different contexts, so it's a **parameter**, not a fixed policy (Nico, 2026-08-11):
 
-Recommendation: **(A) as default, (B) selectable per-processor** via config, since Flux's live-summary wants (A) but a "review before it lands" flow wants (B).
+- **`AutoMaterialize`** *(default)*: the LLM writes live and refines its own inferences with zero human clicks (auto-summary just works); only *human-touched* values get the Suggestion (staged) treatment — the §5 rule. Provenance still tags everything so the UI can render "inferred, not yet human-accepted."
+- **`Stage`**: nothing the LLM writes materialises directly — every create/update lands as a `Suggestion` for a human to accept/reject. For "review before it lands" flows.
+
+Plumbing:
+- **Rust:** `write_mode: WriteMode` param on `run_interpretation[_with_strategy]` (defaults to `AutoMaterialize`, so existing callers/tests are byte-for-byte unchanged).
+- **#885:** `ad4m://write_mode` field on `AutoProcessorConfig`, threaded into the pass — Flux sets it per channel/processor.
+- **#881:** the same option on the TS `AutoProcessor` config and `runInterpretation`.
+
+So a "live summary" processor runs `AutoMaterialize`; a "suggest tasks for review" processor runs `Stage` — same engine, one flag.
 
 ## 8. Open questions for James + Nico
 1. **Link-tags vs subject-classes granularity.** Proposed hybrid: `InterpretationRun` + `Suggestion` as subject classes (queryable), per-instance `inferred_by`/`inferred_from`/`accepted` as plain predicates (cheap, still predicate-queryable). OK?
