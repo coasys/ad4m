@@ -381,7 +381,7 @@ pub async fn run_interpretation_with_strategy_and_model(
     model_override: Option<&str>,
     scope: Option<&ParentScope>,
 ) -> anyhow::Result<Vec<String>> {
-    let task = ensure_interpretation_task_for_model(model_override)?;
+    let (task, created) = ensure_interpretation_task_for_model(model_override)?;
     // Existing-instance snapshot: gives the model both the `id` handle to
     // upsert/reference (so it can refine or link an existing node instead of
     // duplicating) and the identity value to recognise it by. This one
@@ -407,6 +407,22 @@ pub async fn run_interpretation_with_strategy_and_model(
     let service = crate::ai_service::AIService::global_instance()
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
+
+    // Spawn the task with its LLM worker the first time we mint it. `add_task`
+    // (the usual registration path) spawns; `ensure_interpretation_task` inserts
+    // the row directly to stay idempotent-by-name, so it doesn't — leaving the
+    // task unspawned until an executor restart's `load()` sweep. Without this,
+    // the first `prompt` below fails with "Task not spawned". A pre-existing row
+    // (`created == false`) is already spawned, so we skip it to avoid a
+    // redundant local-model warmup on every run.
+    if created {
+        service
+            .spawn_registered_task(task.clone())
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("run_interpretation: failed to spawn interpretation task: {e:#}")
+            })?;
+    }
 
     let instances = retry_interpretation_parse(|_attempt| {
         let service = service.clone();
@@ -559,14 +575,16 @@ mod tests {
             Ad4mDb::with_global_instance(|db| db.remove_task(t.task_id.clone())).unwrap();
         }
 
-        let first = ensure_interpretation_task().unwrap();
+        let (first, created) = ensure_interpretation_task().unwrap();
+        assert!(created, "first call after wipe must insert the row");
         assert_eq!(first.name, INTERPRETATION_TASK_NAME);
         assert_eq!(first.model_id, "default");
         assert!(first.system_prompt.contains("You extract typed instances"));
         assert!(!first.task_id.is_empty());
 
         // Second call must find the same row, not insert a duplicate.
-        let second = ensure_interpretation_task().unwrap();
+        let (second, created_again) = ensure_interpretation_task().unwrap();
+        assert!(!created_again, "second call must find the existing row");
         assert_eq!(first.task_id, second.task_id);
 
         let rows: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
@@ -715,7 +733,9 @@ mod tests {
             Ad4mDb::with_global_instance(|db| db.remove_task(t.task_id.clone())).unwrap();
         }
 
-        let gemma_first = ensure_interpretation_task_for_model(Some("gemma3:12b")).unwrap();
+        let (gemma_first, gemma_created) =
+            ensure_interpretation_task_for_model(Some("gemma3:12b")).unwrap();
+        assert!(gemma_created, "first call after wipe must insert the row");
         assert_eq!(gemma_first.name, target_names[0]);
         assert_eq!(gemma_first.model_id, "gemma3:12b");
         assert!(gemma_first
@@ -723,17 +743,19 @@ mod tests {
             .contains("You extract typed instances"));
 
         // Idempotent: second call must return the same row, not insert a duplicate.
-        let gemma_second = ensure_interpretation_task_for_model(Some("gemma3:12b")).unwrap();
+        let (gemma_second, gemma_created_again) =
+            ensure_interpretation_task_for_model(Some("gemma3:12b")).unwrap();
+        assert!(!gemma_created_again, "second call must find the existing row");
         assert_eq!(gemma_first.task_id, gemma_second.task_id);
 
         // Distinct model → distinct DB row.
-        let qwen = ensure_interpretation_task_for_model(Some("qwen3.5-27b")).unwrap();
+        let (qwen, _) = ensure_interpretation_task_for_model(Some("qwen3.5-27b")).unwrap();
         assert_ne!(qwen.task_id, gemma_first.task_id);
         assert_eq!(qwen.model_id, "qwen3.5-27b");
 
         // The default row is untouched — model overrides never mutate the shared
         // task every other caller depends on.
-        let default_row = ensure_interpretation_task().unwrap();
+        let (default_row, _) = ensure_interpretation_task().unwrap();
         assert_eq!(default_row.model_id, "default");
         assert_ne!(default_row.task_id, gemma_first.task_id);
         assert_ne!(default_row.task_id, qwen.task_id);

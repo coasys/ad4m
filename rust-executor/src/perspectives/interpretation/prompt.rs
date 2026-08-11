@@ -231,10 +231,13 @@ Output rules:
 /// the user has configured as default at prompt time, so interpretation works with
 /// any model without hard-coding one here.
 ///
-/// DB-only: does not touch the running `AIService`. The runtime path is
-/// expected to call `service.spawn_task(task)` separately when it needs the
-/// model loaded for a `prompt` call; this split keeps registration testable in
-/// CI without a GPU.
+/// DB-only: does not touch the running `AIService`. The returned bool is
+/// `true` when this call inserted the row (vs. found an existing one), so the
+/// runtime path can spawn the task exactly once — right after creation — via
+/// `AIService::spawn_registered_task`. This split keeps registration testable
+/// in CI without a GPU. A pre-existing row is already spawned (either by the
+/// executor's boot-time `load()` sweep or by the call that first created it),
+/// so callers only spawn when `created` is `true`.
 /// Few-shot examples sent as prior User/Assistant turns (via `prompt_examples`)
 /// ahead of the real input. Four generic, non-test scenarios that teach the
 /// failure modes small models hit: (1) a belief and a task in the same snippet
@@ -436,7 +439,7 @@ pub fn interpretation_task_name_for_model(model_id: Option<&str>) -> String {
     }
 }
 
-pub fn ensure_interpretation_task() -> anyhow::Result<AITask> {
+pub fn ensure_interpretation_task() -> anyhow::Result<(AITask, bool)> {
     ensure_interpretation_task_for_model(None)
 }
 
@@ -444,14 +447,18 @@ pub fn ensure_interpretation_task() -> anyhow::Result<AITask> {
 /// interpretation prompt through a specific AI-task DB row bound to
 /// `model_id` (e.g. per-processor `AutoProcessorConfig::llm_model`). `None`
 /// preserves the shared-default row so every existing caller behaves
-/// byte-for-byte the same as before.
-pub fn ensure_interpretation_task_for_model(model_id: Option<&str>) -> anyhow::Result<AITask> {
+/// byte-for-byte the same as before. Returns `(task, created)`; `created` is
+/// `true` only when this call inserted the row, so the runtime path spawns it
+/// exactly once.
+pub fn ensure_interpretation_task_for_model(
+    model_id: Option<&str>,
+) -> anyhow::Result<(AITask, bool)> {
     let name = interpretation_task_name_for_model(model_id);
     if let Some(existing) = Ad4mDb::with_global_instance(|db| db.get_tasks())?
         .into_iter()
         .find(|t| t.name == name)
     {
-        return Ok(existing);
+        return Ok((existing, false));
     }
     let db_model_id = model_id.unwrap_or("default").to_string();
     let task_id = Ad4mDb::with_global_instance(|db| {
@@ -465,7 +472,7 @@ pub fn ensure_interpretation_task_for_model(model_id: Option<&str>) -> anyhow::R
     })?;
     let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
         .ok_or_else(|| anyhow::anyhow!("interpretation task vanished immediately after insert"))?;
-    Ok(task)
+    Ok((task, true))
 }
 
 #[cfg(test)]
