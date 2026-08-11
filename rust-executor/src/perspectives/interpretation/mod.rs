@@ -39,6 +39,7 @@
 
 mod dedup;
 mod graph;
+mod overlay;
 mod parse;
 mod prompt;
 mod run;
@@ -46,6 +47,7 @@ mod types;
 
 pub use dedup::*;
 pub use graph::*;
+pub(crate) use overlay::*;
 pub use parse::*;
 pub use prompt::*;
 pub use run::*;

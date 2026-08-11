@@ -1,5 +1,5 @@
 use super::{
-    build_interpretation_input, class_local_name, ensure_interpretation_task,
+    apply_with_overlay, build_interpretation_input, class_local_name, ensure_interpretation_task,
     existing_instance_context, existing_relation_links, identity_property,
     parse_interpretation_response, plan_interpretation_ops_resolved,
     resolve_already_present_with_strategy, DedupStrategy, InterpretationOp, ProposedInstance,
@@ -264,23 +264,6 @@ pub async fn apply_interpretation_ops(
     }
 }
 
-/// The instance bases an op set touches, in op order and de-duplicated — what
-/// [`run_interpretation`] reads back so callers see exactly what landed.
-fn touched_bases(ops: &[InterpretationOp]) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for op in ops {
-        let base = match op {
-            InterpretationOp::Create { base, .. } | InterpretationOp::Update { base, .. } => base,
-            InterpretationOp::AddLinks { source, .. } => source,
-        };
-        if seen.insert(base.clone()) {
-            out.push(base.clone());
-        }
-    }
-    out
-}
-
 /// end-to-end interpretation driver. Wires everything: build the input from
 /// shapes' hints + transcript, call `AIService::prompt` on the registered
 /// interpretation task, retry parsing up to 5×, plan the writes, then apply them
@@ -422,11 +405,28 @@ pub async fn run_interpretation_with_strategy(
     // Filter no-op Updates: the LLM occasionally re-emits an unchanged existing
     // entry, and applying that would clear-and-rewrite scalar links for nothing.
     let ops = strip_noop_updates(perspective, shapes, planned).await?;
-    apply_interpretation_ops(perspective, &ops, context).await?;
+
+    // Apply the writes AND the provenance overlay (#883): every create/update
+    // also instantiates/updates an `InterpretationOverlay` over the same base
+    // (kind + run + `inferred/<p>` snapshot), and the human-divergence gate keeps
+    // real writes only where the value is still the LLM's own. One
+    // `InterpretationRun` is minted per pass and threaded onto every overlay.
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let ran_at = chrono::Utc::now().timestamp_millis().to_string();
+    let bases = apply_with_overlay(
+        perspective,
+        shapes,
+        ops,
+        base_prefix,
+        &task,
+        run_id,
+        ran_at,
+        context,
+    )
+    .await?;
 
     // The affected instance base URIs (created, updated, or given new
     // relations). Links are owned by `create_subject` / `update_subject`.
-    let bases = touched_bases(&ops);
     Ok(bases)
 }
 
