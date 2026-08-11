@@ -1,5 +1,7 @@
 use super::*;
-use crate::perspectives::interpretation::types::{ExistingInstances, ExistingLinks, InstanceContext};
+use crate::perspectives::interpretation::types::{
+    ExistingInstances, ExistingLinks, InstanceContext,
+};
 use crate::perspectives::model_query::types::{ModelShape, ParentScope};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use std::collections::{BTreeMap, HashMap, HashSet};

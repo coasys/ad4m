@@ -86,7 +86,13 @@ pub fn plan_interpretation_ops_with_context(
     // caller has no graph to read edges from (unit tests, first-pass planning),
     // so every resolved relation is emitted. The idempotency guard is exercised
     // through [`plan_interpretation_ops_resolved`] with a populated set.
-    plan_interpretation_ops_resolved(shapes, &resolved, base_prefix, existing, &ExistingLinks::new())
+    plan_interpretation_ops_resolved(
+        shapes,
+        &resolved,
+        base_prefix,
+        existing,
+        &ExistingLinks::new(),
+    )
 }
 
 /// Ordinal-preserving planner: like [`plan_interpretation_ops_with_context`] but
@@ -1053,7 +1059,10 @@ mod tests {
         let grown_proposed = vec![proposal(
             "Task",
             Some(&hub),
-            &[("blocks", serde_json::json!([a.clone(), b.clone(), c.clone()]))],
+            &[(
+                "blocks",
+                serde_json::json!([a.clone(), b.clone(), c.clone()]),
+            )],
         )];
         let resolved_grown: Vec<_> = grown_proposed
             .iter()
