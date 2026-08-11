@@ -33,20 +33,23 @@ fn clean_llm_json(raw: &str) -> String {
     let fence = regex::Regex::new(r"```[a-zA-Z0-9]*").unwrap();
     let s = fence.replace_all(&s, "");
 
-    // 3. Remove trailing commas before a closing } or ] (invalid JSON, common).
-    //    Must skip commas inside string literals so values like "a, }" survive.
-    let s: std::borrow::Cow<'_, str> = std::borrow::Cow::Owned(strip_trailing_commas(&s));
-
-    // 4. Extract the first JSON array (or object) if surrounded by prose.
+    // 3. Extract the first JSON array (or object) if surrounded by prose.
     //    Mirrors Flux `LLMutils.ts` — models sometimes prefix an explanation
     //    even after `<think>`-stripping (e.g. gemma3 emitting plain prose).
+    //    This MUST run before trailing-comma stripping: `strip_trailing_commas`
+    //    tracks an `in_string` flag, and an odd number of `"` in the
+    //    surrounding prose would invert it before the real JSON begins, so a
+    //    comma inside a genuine string value could be dropped. Extracting the
+    //    bracketed block first confines the string-scanner to actual JSON.
     let candidate = s.trim();
-    if let Some(extracted) =
-        extract_bracketed(candidate, '[', ']').or_else(|| extract_bracketed(candidate, '{', '}'))
-    {
-        return extracted;
-    }
-    candidate.to_string()
+    let extracted = extract_bracketed(candidate, '[', ']')
+        .or_else(|| extract_bracketed(candidate, '{', '}'))
+        .unwrap_or_else(|| candidate.to_string());
+
+    // 4. Remove trailing commas before a closing } or ] (invalid JSON, common),
+    //    now scoped to the extracted JSON. Skips commas inside string literals
+    //    so values like "a, }" survive.
+    strip_trailing_commas(&extracted)
 }
 
 /// Return the substring from the first `open` to the matching last `close`,

@@ -206,6 +206,20 @@ fn trailing_comma_cleanup_preserves_commas_inside_strings() {
 }
 
 #[test]
+fn trailing_commas_stripped_despite_odd_quotes_in_prose() {
+    // Regression: `clean_llm_json` must extract the JSON block BEFORE stripping
+    // trailing commas. The prose prefix here carries an odd number of `"`
+    // (one, before "here's"), which — if the comma-stripper scanned the whole
+    // text — inverts its `in_string` flag before the real JSON begins, so the
+    // genuine trailing commas below would not be stripped and the payload would
+    // fail to parse. Extracting first confines the scanner to actual JSON.
+    let raw = "The model replied: \"here's your data\n[\n  {\"class\":\"Task\",\"title\":\"A\",},\n  {\"class\":\"Task\",\"title\":\"B\"},\n]";
+    let out = parse_interpretation_response(raw).unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(prop_values(&out, "title"), vec!["A", "B"]);
+}
+
+#[test]
 fn empty_array_yields_no_instances() {
     assert!(parse_interpretation_response("[]").unwrap().is_empty());
     // and empty inside a fence / with whitespace
@@ -331,14 +345,16 @@ fn ensure_interpretation_task_registers_and_is_idempotent() {
         Ad4mDb::with_global_instance(|db| db.remove_task(t.task_id.clone())).unwrap();
     }
 
-    let first = ensure_interpretation_task().unwrap();
+    let (first, created) = ensure_interpretation_task().unwrap();
+    assert!(created, "first call after wipe must insert the row");
     assert_eq!(first.name, INTERPRETATION_TASK_NAME);
     assert_eq!(first.model_id, "default");
     assert!(first.system_prompt.contains("You extract typed instances"));
     assert!(!first.task_id.is_empty());
 
     // Second call must find the same row, not insert a duplicate.
-    let second = ensure_interpretation_task().unwrap();
+    let (second, created_again) = ensure_interpretation_task().unwrap();
+    assert!(!created_again, "second call must find the existing row");
     assert_eq!(first.task_id, second.task_id);
 
     let rows: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
