@@ -50,8 +50,6 @@ export interface AddAutoProcessorConfig {
   maxWaitMs?: number;
   /** How long a won claim is authoritative before peers may re-claim (ms). */
   claimTtlMs: number;
-  /** Optional LLM model tag override (else the executor's default). */
-  llmModel?: string;
   /** Optional serialized `DedupStrategy` JSON (else NormalizedString). */
   dedupStrategyJson?: string;
 }
