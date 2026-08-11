@@ -912,6 +912,18 @@ impl AIService {
         })
     }
 
+    /// Register an already-persisted task row with its LLM worker.
+    ///
+    /// Public entry point for tasks minted outside [`AIService::add_task`] —
+    /// notably the generic interpretation task, which `ensure_interpretation_task`
+    /// inserts via `Ad4mDb::add_task` directly (to stay idempotent-by-name).
+    /// Without this, such a task sits in the DB unspawned until the next
+    /// executor restart's `load()` sweep, so its first `prompt` fails with
+    /// "Task not spawned". Callers spawn it right after creation instead.
+    pub async fn spawn_registered_task(&self, task: AITask) -> Result<()> {
+        self.spawn_task(task).await
+    }
+
     async fn spawn_task(&self, task: AITask) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let llm_channel = self.llm_channel.lock().await;
