@@ -208,6 +208,58 @@ pub(crate) fn semantic_dup_targets(
     targets
 }
 
+/// PURE intra-response companion to [`semantic_dup_targets`] — the semantic
+/// analogue of the earlier-proposal pass in [`resolve_already_present`]. Walks
+/// each class's proposals in emission order and, for every proposal that is
+/// *not* already a duplicate of a pre-existing graph instance (`existing_dup`,
+/// the output of [`semantic_dup_targets`]), checks whether it semantically
+/// duplicates an EARLIER **kept** proposal of the same class (max cosine
+/// `≥ threshold`). Returns a map proposal-index → that earlier kept proposal's
+/// index, for [`Resolution::DupOfEarlier`].
+///
+/// Mirrors [`resolve_already_present`]'s precedence exactly: a pre-existing
+/// match wins over an in-response one (so `existing_dup` indices are skipped and
+/// never become dup targets), and only proposals that resolve to `Keep` become
+/// dedup targets for later ones — a chain of near-duplicates all point back at
+/// the first kept occurrence. `proposed_vecs` entries are per-class and already
+/// in ascending (emission) index order, so a plain walk is the emission order.
+pub(crate) fn semantic_dup_earlier(
+    proposed_vecs: &HashMap<String, Vec<(usize, Vec<f32>)>>,
+    existing_dup: &HashMap<usize, usize>,
+    threshold: f32,
+) -> HashMap<usize, usize> {
+    let mut earlier: HashMap<usize, usize> = HashMap::new();
+    for entries in proposed_vecs.values() {
+        // (index, vec) of proposals that resolved to Keep so far in this class,
+        // in emission order — the candidates a later proposal can duplicate.
+        let mut kept: Vec<(usize, &Vec<f32>)> = Vec::new();
+        for (idx, pv) in entries {
+            // A pre-existing graph match takes precedence and is not a Keep, so
+            // it is neither an earlier-dup itself nor a target for later ones.
+            if existing_dup.contains_key(idx) {
+                continue;
+            }
+            let mut best_sim = f32::MIN;
+            let mut best_idx = 0usize;
+            for (kidx, kv) in kept.iter() {
+                let sim = cosine_similarity(pv, kv);
+                // `>` keeps the earliest kept occurrence on a tie (kept is in
+                // emission order), matching the string path's first-writer-wins.
+                if sim > best_sim {
+                    best_sim = sim;
+                    best_idx = *kidx;
+                }
+            }
+            if best_sim >= threshold {
+                earlier.insert(*idx, best_idx);
+            } else {
+                kept.push((*idx, pv));
+            }
+        }
+    }
+    earlier
+}
+
 /// Semantic-dedup filter backed by AIService embeddings — thin wrapper over
 /// [`resolve_already_present_semantic`] keeping only [`Resolution::Keep`]
 /// instances (the historical contract).
@@ -235,8 +287,10 @@ pub async fn filter_already_present_semantic(
 /// Proposals carrying a *trusted* `id` (an explicit upsert) bypass dedup, same
 /// as the string path; a hallucinated id is still checked. Classes with no
 /// identity property, or proposals missing that property's value, always
-/// survive. The semantic path has no intra-response pass, so it never emits
-/// `DupOfEarlier`.
+/// survive. Like the string path it also runs an intra-response pass: a later
+/// proposal semantically duplicating an EARLIER kept proposal of the same class
+/// (cosine `≥ threshold`) is tagged `DupOfEarlier(earlier index)`, with a
+/// pre-existing graph match taking precedence over an in-response one.
 pub async fn resolve_already_present_semantic(
     instances: Vec<ProposedInstance>,
     existing: &ExistingInstances,
@@ -313,12 +367,15 @@ pub async fn resolve_already_present_semantic(
         proposed_vecs.insert(class.clone(), pv_entries);
     }
 
+    // Precedence mirrors `resolve_already_present`: a pre-existing graph match
+    // (`targets`) beats an earlier-in-response one (`earlier`), which beats Keep.
     let targets = semantic_dup_targets(&existing_vecs, &proposed_vecs, threshold);
+    let earlier = semantic_dup_earlier(&proposed_vecs, &targets, threshold);
     let out = instances
         .into_iter()
         .enumerate()
-        .map(|(i, inst)| match targets.get(&i) {
-            Some(&existing_local_idx) => {
+        .map(|(i, inst)| {
+            if let Some(&existing_local_idx) = targets.get(&i) {
                 match existing_ids
                     .get(&inst.class)
                     .and_then(|v| v.get(existing_local_idx))
@@ -329,8 +386,11 @@ pub async fn resolve_already_present_semantic(
                     // shouldn't fire — keep the item rather than lose it.
                     None => (inst, Resolution::Keep),
                 }
+            } else if let Some(&earlier_idx) = earlier.get(&i) {
+                (inst, Resolution::DupOfEarlier(earlier_idx))
+            } else {
+                (inst, Resolution::Keep)
             }
-            None => (inst, Resolution::Keep),
         })
         .collect();
     Ok(out)
@@ -598,6 +658,117 @@ mod tests {
             kept[1].id.as_deref(),
             Some("soa://existing/task/1"),
             "surviving Ship the MVP is the id-carrying upsert"
+        );
+    }
+
+    #[test]
+    fn semantic_dup_earlier_flags_intra_response_dup_as_dup_of_earlier() {
+        // Semantic analogue of `resolve_already_present_flags_intra_response_dup_as_dup_of_earlier`:
+        // [A(new), B(sem-dup-of-A), C(new)] with no existing graph vectors → B
+        // duplicates the earlier kept A (cosine ≥ threshold) so it maps to
+        // DupOfEarlier(0); A and C are kept. Hand-built vectors exercise the pure
+        // pass without an embedding round-trip.
+        let mut proposed_vecs: HashMap<String, Vec<(usize, Vec<f32>)>> = HashMap::new();
+        proposed_vecs.insert(
+            "Task".to_string(),
+            vec![
+                (0, vec![1.0f32, 0.0, 0.0]),  // A
+                (1, vec![0.98f32, 0.2, 0.0]), // B ≈ A → sim ≈ 0.98
+                (2, vec![0.0f32, 1.0, 0.0]),  // C orthogonal to A
+            ],
+        );
+        let no_existing: HashMap<usize, usize> = HashMap::new();
+        let earlier = semantic_dup_earlier(&proposed_vecs, &no_existing, 0.85);
+        assert_eq!(
+            earlier.get(&1),
+            Some(&0),
+            "B semantically dups the earlier kept A"
+        );
+        assert_eq!(earlier.get(&0), None, "A is the first occurrence — kept");
+        assert_eq!(
+            earlier.get(&2),
+            None,
+            "C is orthogonal to the only kept proposal — kept"
+        );
+    }
+
+    #[test]
+    fn semantic_dup_earlier_matches_string_path_precedence() {
+        // Mixed DupOfExisting + DupOfEarlier, proving the semantic tagging's
+        // precedence is byte-for-byte the string path's. Same emission shape on
+        // both sides: [Ship(existing), Ship(existing), Write(new), Write(dup)].
+        // The string side resolves against a real graph + normalized titles; the
+        // semantic side against hand-built vectors within threshold. Both must
+        // yield [DupOfExisting(base), DupOfExisting(base), Keep, DupOfEarlier(2)].
+        let base = "soa://existing/task/1".to_string();
+        let mut identity_props = HashMap::new();
+        identity_props.insert("Task".to_string(), "title".to_string());
+
+        // --- string path (ground truth) ---
+        let proposed_str = parse_interpretation_response(
+            r#"[
+              {"class":"Task","title":"Ship the MVP"},
+              {"class":"Task","title":"Ship the MVP"},
+              {"class":"Task","title":"Write the docs"},
+              {"class":"Task","title":"Write the docs"}
+            ]"#,
+        )
+        .unwrap();
+        let existing = existing_map(vec![InstanceContext {
+            id: base.clone(),
+            title: "Ship the MVP".to_string(),
+            class: "Task".to_string(),
+            properties: BTreeMap::new(),
+        }]);
+        let string_res: Vec<Resolution> =
+            resolve_already_present(proposed_str, &existing, &identity_props)
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect();
+
+        // --- semantic path via the pure fns, mirroring `resolve_already_present_semantic` ---
+        let mut existing_vecs: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
+        existing_vecs.insert("Task".to_string(), vec![vec![1.0, 0.0, 0.0]]); // Ship the MVP
+        let mut existing_ids: HashMap<String, Vec<String>> = HashMap::new();
+        existing_ids.insert("Task".to_string(), vec![base.clone()]);
+        let mut proposed_vecs: HashMap<String, Vec<(usize, Vec<f32>)>> = HashMap::new();
+        proposed_vecs.insert(
+            "Task".to_string(),
+            vec![
+                (0, vec![1.0, 0.0, 0.0]),  // Ship — dup of existing
+                (1, vec![0.99, 0.1, 0.0]), // Ship — dup of existing
+                (2, vec![0.0, 1.0, 0.0]),  // Write — new
+                (3, vec![0.0, 0.99, 0.1]), // Write — dup of earlier #2
+            ],
+        );
+        let threshold = 0.85;
+        let targets = semantic_dup_targets(&existing_vecs, &proposed_vecs, threshold);
+        let earlier = semantic_dup_earlier(&proposed_vecs, &targets, threshold);
+        let semantic_res: Vec<Resolution> = (0..4)
+            .map(|i| {
+                if let Some(&j) = targets.get(&i) {
+                    Resolution::DupOfExisting(existing_ids["Task"][j].clone())
+                } else if let Some(&e) = earlier.get(&i) {
+                    Resolution::DupOfEarlier(e)
+                } else {
+                    Resolution::Keep
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            semantic_res,
+            vec![
+                Resolution::DupOfExisting(base.clone()),
+                Resolution::DupOfExisting(base.clone()),
+                Resolution::Keep,
+                Resolution::DupOfEarlier(2),
+            ],
+            "existing match beats in-response; later Write dups the earlier kept one"
+        );
+        assert_eq!(
+            semantic_res, string_res,
+            "semantic tagging precedence must match the string path exactly"
         );
     }
 
