@@ -98,13 +98,26 @@ pub fn plan_interpretation_ops_with_context(
             continue;
         };
         let (base, is_update) = match &inst.id {
-            Some(id) if existing.contains_key(id) => (id.clone(), true),
+            // Only route to Update when the proposed id names an existing
+            // instance OF THE SAME CLASS. An id that belongs to a different
+            // class must Create, never Update — running this class's setters
+            // against a foreign-class node clobbers links on shared predicates.
+            Some(id) if existing.get(id).is_some_and(|ctx| ctx.class == inst.class) => {
+                (id.clone(), true)
+            }
             _ => {
                 if let Some(hallucinated) = &inst.id {
-                    log::debug!(
-                        "interpretation: proposed id {hallucinated:?} not among existing instances for class {}; routing to Create",
-                        inst.class
-                    );
+                    match existing.get(hallucinated) {
+                        Some(ctx) => log::debug!(
+                            "interpretation: proposed id {hallucinated:?} is class '{}', not '{}'; routing to Create",
+                            ctx.class,
+                            inst.class
+                        ),
+                        None => log::debug!(
+                            "interpretation: proposed id {hallucinated:?} not among existing instances for class {}; routing to Create",
+                            inst.class
+                        ),
+                    }
                 }
                 (
                     format!(
@@ -299,7 +312,14 @@ mod tests {
         // known_existing_ids to mimic what `existing_instance_context` would
         // return in production. Without this the planner treats the id as
         // hallucinated and routes to Create.
-        let known = existing_ids(&["soa://existing/intention/42"]);
+        // Seed the existing node with its real class — Update routing now
+        // requires the id to name a *same-class* instance (James #883).
+        let known = existing_map(vec![InstanceContext {
+            id: "soa://existing/intention/42".to_string(),
+            title: "Write the design doc".to_string(),
+            class: "Intention".to_string(),
+            properties: std::collections::BTreeMap::new(),
+        }]);
         let ops = plan_interpretation_ops_with_context(&shapes, &proposed, "soa://ext/", &known);
         assert_eq!(ops.len(), 2);
 
@@ -342,6 +362,43 @@ mod tests {
                 assert!(!values.contains_key("type"));
             }
             other => panic!("expected Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_ops_cross_class_id_routes_to_create_not_foreign_node() {
+        // Regression (James #883): an `id` that names an existing instance of a
+        // DIFFERENT class must Create, never Update. Updating a foreign-class
+        // node runs this class's setters against it and clobbers links on shared
+        // predicates. Only a same-class id may upsert.
+        let shapes = vec![shape_from_sdna("Intention", INTENTION_SDNA)];
+        // The graph holds a Task at this id…
+        let known = existing_map(vec![InstanceContext {
+            id: "soa://existing/task/42".to_string(),
+            title: "Ship the MVP".to_string(),
+            class: "Task".to_string(),
+            properties: std::collections::BTreeMap::new(),
+        }]);
+        // …but the LLM emits an Intention pointing at the Task's id.
+        let raw = r#"[
+      {"class":"Intention","id":"soa://existing/task/42","title":"Ship the MVP"}
+    ]"#;
+        let proposed = parse_interpretation_response(raw).unwrap();
+        let ops = plan_interpretation_ops_with_context(&shapes, &proposed, "soa://ext/", &known);
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            InterpretationOp::Create { base, class, .. } => {
+                assert!(
+                    base.starts_with("soa://ext/intention/"),
+                    "cross-class id must mint a fresh base, got {base}"
+                );
+                assert_ne!(
+                    base, "soa://existing/task/42",
+                    "planner must not Update the foreign-class (Task) node"
+                );
+                assert_eq!(class, "Intention");
+            }
+            other => panic!("expected Create for a cross-class id, got {other:?}"),
         }
     }
 
@@ -607,7 +664,13 @@ mod tests {
         ]"#,
         );
         let proposed = parse_interpretation_response(&raw).unwrap();
-        let known = existing_ids(&[existing_id.as_str()]);
+        // Same-class seed so the id upserts (routing now checks class — James #883).
+        let known = existing_map(vec![InstanceContext {
+            id: existing_id.clone(),
+            title: "Existing".to_string(),
+            class: "Task".to_string(),
+            properties: std::collections::BTreeMap::new(),
+        }]);
         let ops = plan_interpretation_ops_with_context(&[shape], &proposed, "soa://ext/", &known);
 
         // The Update carries the retitled scalar, no relation value.
