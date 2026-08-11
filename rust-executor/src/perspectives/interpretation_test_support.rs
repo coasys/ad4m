@@ -14,7 +14,8 @@
 use super::interpretation::{
     apply_interpretation_ops, class_local_name, existing_instance_context,
     plan_interpretation_ops_with_context, run_interpretation, run_interpretation_with_strategy,
-    DedupStrategy, ExistingInstances, InstanceContext, InterpretationOp, ProposedInstance,
+    DedupStrategy, ExistingInstances, ExistingLinks, InstanceContext, InterpretationOp,
+    ProposedInstance,
 };
 use super::model_query::shape::load_shape;
 use super::model_query::types::{ModelShape, ParentScope};
@@ -762,6 +763,26 @@ pub(crate) fn targets_of(links: &[Link], predicate: &str) -> Vec<String> {
         .filter(|l| l.predicate.as_deref() == Some(predicate))
         .map(|l| l.target.clone())
         .collect()
+}
+
+/// Collect the `(source, predicate, target)` triples an op set's `AddLinks` would
+/// write — the existing-link state a *subsequent* planner pass reads back to stay
+/// idempotent (James #883 #4). Mirrors what `existing_relation_links` returns
+/// after those ops are applied, without needing a live perspective.
+pub(crate) fn links_from_ops(ops: &[InterpretationOp]) -> ExistingLinks {
+    let mut out = ExistingLinks::new();
+    for op in ops {
+        if let InterpretationOp::AddLinks { links, .. } = op {
+            for l in links {
+                out.insert((
+                    l.source.clone(),
+                    l.predicate.clone().unwrap_or_default(),
+                    l.target.clone(),
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// Decoded targets of `(base, predicate)` in the store, sorted — the shape

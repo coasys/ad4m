@@ -1,8 +1,8 @@
 use super::{
     build_interpretation_input, class_local_name, ensure_interpretation_task,
-    existing_instance_context, identity_property, parse_interpretation_response,
-    plan_interpretation_ops_resolved, resolve_already_present_with_strategy, DedupStrategy,
-    InterpretationOp, ProposedInstance,
+    existing_instance_context, existing_relation_links, identity_property,
+    parse_interpretation_response, plan_interpretation_ops_resolved,
+    resolve_already_present_with_strategy, DedupStrategy, InterpretationOp, ProposedInstance,
 };
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::{ModelShape, ParentScope};
@@ -359,6 +359,11 @@ pub async fn run_interpretation_with_strategy(
     // Create-vs-Update routing all project what they need from it, so every
     // path agrees on what counts as "existing".
     let existing_ctx = existing_instance_context(perspective, shapes, scope).await?;
+    // The relation edges already in the graph, so a repeated continuous pass
+    // does not re-emit a link that already exists (James #883 #4). Additive
+    // AddLinks would otherwise duplicate the edge — and its reifier node, whose
+    // IRI hashes in the link timestamp — on every pass.
+    let existing_links = existing_relation_links(perspective, shapes).await?;
     // class local name → identity property name, for the deterministic
     // safety-net below. Classes with no identity property are omitted.
     let identity_props: HashMap<String, String> = shapes
@@ -407,7 +412,13 @@ pub async fn run_interpretation_with_strategy(
     )
     .await?;
 
-    let planned = plan_interpretation_ops_resolved(shapes, &resolved, base_prefix, &existing_ctx);
+    let planned = plan_interpretation_ops_resolved(
+        shapes,
+        &resolved,
+        base_prefix,
+        &existing_ctx,
+        &existing_links,
+    );
     // Filter no-op Updates: the LLM occasionally re-emits an unchanged existing
     // entry, and applying that would clear-and-rewrite scalar links for nothing.
     let ops = strip_noop_updates(perspective, shapes, planned).await?;

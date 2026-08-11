@@ -1,8 +1,8 @@
 use super::*;
-use crate::perspectives::interpretation::types::{ExistingInstances, InstanceContext};
+use crate::perspectives::interpretation::types::{ExistingInstances, ExistingLinks, InstanceContext};
 use crate::perspectives::model_query::types::{ModelShape, ParentScope};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// minimal transcript gatherer. Reads links `source ⇒ predicate ⇒ literal`
 /// from a perspective where `predicate` matches `message_predicate` and the
@@ -226,6 +226,57 @@ pub async fn existing_instance_context(
         // map). Ids are globally unique across classes, so no collision.
         for row in rows {
             out.insert(row.id.clone(), row);
+        }
+    }
+    Ok(out)
+}
+
+/// Read the relation edges already present in the graph for the given shapes'
+/// **forward** relations, as canonical `(source, predicate, target)` triples.
+///
+/// Feeds the planner's idempotency guard ([`ExistingLinks`] threaded into
+/// [`plan_interpretation_ops_resolved`]): a repeated continuous interpretation
+/// pass must not re-emit a relation link that already exists, which would grow a
+/// duplicate edge and — because a stored link's reifier IRI hashes in its
+/// timestamp — a duplicate reifier node too (James #883 #4).
+///
+/// Only forward relations are read: reverse relations (`belongsTo*`) store their
+/// edge on the other class and the planner does not emit them yet (Phase 3).
+/// Each distinct predicate is queried once even when several shapes share it. A
+/// query failure propagates — an empty set would silently defeat the guard and
+/// let duplicates back in.
+pub async fn existing_relation_links(
+    perspective: &PerspectiveInstance,
+    shapes: &[ModelShape],
+) -> anyhow::Result<ExistingLinks> {
+    use crate::types::LinkQuery;
+    let mut out: ExistingLinks = HashSet::new();
+    let mut queried: HashSet<String> = HashSet::new();
+    for shape in shapes {
+        for rel in &shape.include_relations {
+            if rel.direction != "forward" {
+                continue;
+            }
+            if !queried.insert(rel.predicate.clone()) {
+                continue;
+            }
+            let links = perspective
+                .get_links(&LinkQuery {
+                    predicate: Some(rel.predicate.clone()),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "existing_relation_links: get_links({}) failed: {e:#}",
+                        rel.predicate
+                    )
+                })?;
+            for l in links {
+                if let Some(pred) = &l.data.predicate {
+                    out.insert((l.data.source.clone(), pred.clone(), l.data.target.clone()));
+                }
+            }
         }
     }
     Ok(out)

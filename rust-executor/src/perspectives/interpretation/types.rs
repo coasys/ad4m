@@ -10,7 +10,7 @@
 
 use crate::types::Link;
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// One instance the LLM proposes writing: the target class name plus a flat
 /// map of field-name -> value. Extra/unknown fields are tolerated (kept in
@@ -41,6 +41,19 @@ pub struct ProposedInstance {
 /// still carries its own `id`, so the value is self-describing; the key is
 /// that same id, promoted for O(1) "does the graph hold this id?" checks.
 pub type ExistingInstances = HashMap<String, InstanceContext>;
+
+/// The relation edges already present in the graph for an interpretation pass,
+/// as canonical `(source, predicate, target)` triples. Threaded into the planner
+/// ([`plan_interpretation_ops_resolved`]) so a repeated continuous pass does not
+/// re-emit a relation link that already exists — keeping the additive
+/// [`InterpretationOp::AddLinks`] idempotent across passes (James #883 #4).
+///
+/// Without this guard, additive-only AddLinks re-minted a duplicate edge for an
+/// unchanged single-cardinality (`hasOne`) relation on every pass and — because
+/// each stored link's reifier IRI hashes in its *timestamp* (see
+/// `sparql_store::make_reifier_iri`) — a fresh reifier node too. Skipping the
+/// re-emission upstream prevents both.
+pub type ExistingLinks = HashSet<(String, String, String)>;
 
 /// One existing instance the interpreter should know about — the LLM sees these
 /// so it can decide whether an interpreted item is a genuinely new node (no `id`
