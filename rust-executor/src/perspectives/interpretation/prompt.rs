@@ -425,8 +425,10 @@ pub fn interpretation_task_name_for_model(model_id: Option<&str>) -> String {
 }
 
 /// DB-only registration for the shared-default interpretation task. Delegates to
-/// [`register_interpretation_task_for_model`] with `None`; used by the
-/// idempotency unit test and any caller wanting the shared row.
+/// [`register_interpretation_task_for_model`] with `None`. Test-only: production
+/// paths always carry an explicit (possibly `None`) model through the per-model
+/// variant, so this shared-row convenience wrapper only backs the unit tests.
+#[cfg(test)]
 pub(crate) fn register_interpretation_task() -> anyhow::Result<(AITask, bool)> {
     register_interpretation_task_for_model(None)
 }
