@@ -1449,7 +1449,7 @@ async fn auto_processor_pass_lands_interpretation_instance() {
         "both seeded turns should drain in one batch"
     );
 
-    let outcome = run_one_pass(&mut perspective, cfg_loaded, &batch, drain_at, &ctx)
+    let outcome = run_one_pass(&mut perspective, cfg_loaded, &batch, drain_at, &ctx, false)
         .await
         .expect("run_one_pass");
     let bases = match outcome {
@@ -1656,7 +1656,7 @@ async fn auto_processor_two_configs_no_cross_contamination() {
             "each processor's batch must contain both turns; got {batch:?} for `{}`",
             cfg_ref.processor_id
         );
-        let outcome = run_one_pass(&mut perspective, cfg_ref, &batch, drain_at, &ctx)
+        let outcome = run_one_pass(&mut perspective, cfg_ref, &batch, drain_at, &ctx, false)
             .await
             .expect("run_one_pass");
         let bases = match outcome {

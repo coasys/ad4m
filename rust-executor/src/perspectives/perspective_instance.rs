@@ -5261,23 +5261,38 @@ impl PerspectiveInstance {
             )
             .await;
             let mut perspective_clone = self.clone();
-            let outcome =
-                match run_one_pass(&mut perspective_clone, cfg, &batch, now_ms, context).await {
-                    Ok(o) => o,
-                    Err(e) => {
-                        log::warn!(
-                            "auto_processor `{}` [{}]: run_one_pass errored (batch len={}): {e:#}",
-                            cfg.processor_id,
-                            uuid,
-                            batch.len()
-                        );
-                        continue;
-                    }
-                };
+            // Stall-fallback: if this batch has been standing down for its online
+            // elected author past `claim_ttl_ms`, escalate past election straight
+            // to the claim (the min-DID claim still prevents doubles among peers
+            // that escalate together).
+            let batch_id = crate::perspectives::auto_processor::claim::batch_key(&batch);
+            let escalate = watcher.should_escalate(&batch_id, now_ms, cfg.claim_ttl_ms);
+            let outcome = match run_one_pass(
+                &mut perspective_clone,
+                cfg,
+                &batch,
+                now_ms,
+                context,
+                escalate,
+            )
+            .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    log::warn!(
+                        "auto_processor `{}` [{}]: run_one_pass errored (batch len={}): {e:#}",
+                        cfg.processor_id,
+                        uuid,
+                        batch.len()
+                    );
+                    continue;
+                }
+            };
             match outcome {
                 PassOutcome::Won { .. } | PassOutcome::BackedOff { .. } => {
                     // Either we processed the batch or a peer holds the claim
                     // and will — both mean "do not re-race these ids next tick".
+                    watcher.clear_standdown(&batch_id);
                     let processed = processed_per_processor
                         .entry(cfg.processor_id.clone())
                         .or_default();
@@ -5285,13 +5300,20 @@ impl PerspectiveInstance {
                         processed.insert(id.clone());
                     }
                 }
-                PassOutcome::NotCandidate { .. }
-                | PassOutcome::AwaitingAuthor
+                PassOutcome::NotCandidate { .. } => {
+                    // Stood down for an *online* elected author. Start/continue
+                    // the stall clock so a persistently-inactive elected author
+                    // eventually trips the escalation above. Not marked processed
+                    // — retried next tick (the author acts, or we escalate).
+                    watcher.note_standdown(batch_id, now_ms);
+                }
+                PassOutcome::AwaitingAuthor
                 | PassOutcome::ShapesMissing { .. }
                 | PassOutcome::EmptyTranscript => {
-                    // Do NOT mark processed — the condition may change and the
-                    // batch should be re-evaluated next tick (author returns,
-                    // SDNA syncs, transcript fills, or the elected peer drops).
+                    // Do NOT mark processed, and do NOT accrue stall time:
+                    // AwaitingAuthor is "no participant online at all" (the
+                    // wait-for-a-participant policy, not a stalled author); the
+                    // others are transient config/transcript states.
                 }
             }
         }

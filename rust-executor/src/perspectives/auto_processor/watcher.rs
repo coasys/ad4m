@@ -71,6 +71,14 @@ pub struct ProcessorPending {
 #[derive(Debug, Default, Clone)]
 pub struct WatcherState {
     per_processor: BTreeMap<String, ProcessorPending>,
+    /// Per-batch (keyed by [`crate::perspectives::auto_processor::claim::batch_key`])
+    /// wall-clock (unix millis) of the first tick we stood down for an *online*
+    /// elected author. Drives the stall-fallback: once a deferred batch has
+    /// waited past `claim_ttl_ms` without being processed, we escalate straight
+    /// to `try_claim`. This covers an elected author that is online but never
+    /// actually claims — the claim TTL only recovers a *crashed claimant*, not
+    /// an *inactive elected author*.
+    standdown_since: BTreeMap<String, i64>,
 }
 
 impl WatcherState {
@@ -144,6 +152,28 @@ impl WatcherState {
         }
         let take = entry.items.len().min(cfg.batch_max);
         Some(entry.items.drain(..take).collect())
+    }
+
+    /// Record that this tick stood down for a batch's online elected author.
+    /// Idempotent: only the *first* stand-down time is kept, so the stall clock
+    /// measures continuous deferral, not the most recent tick.
+    pub fn note_standdown(&mut self, batch_key: String, now_ms: i64) {
+        self.standdown_since.entry(batch_key).or_insert(now_ms);
+    }
+
+    /// Whether a stood-down batch has now been deferred past `claim_ttl_ms` and
+    /// should escalate past election straight to `try_claim`. `false` for a
+    /// batch we have never stood down for.
+    pub fn should_escalate(&self, batch_key: &str, now_ms: i64, claim_ttl_ms: i64) -> bool {
+        self.standdown_since
+            .get(batch_key)
+            .is_some_and(|since| now_ms.saturating_sub(*since) >= claim_ttl_ms)
+    }
+
+    /// Clear a batch's stand-down record once it is processed (or a peer took
+    /// it), so a later batch that happens to reuse the key starts a fresh clock.
+    pub fn clear_standdown(&mut self, batch_key: &str) {
+        self.standdown_since.remove(batch_key);
     }
 }
 
@@ -359,6 +389,7 @@ pub async fn run_one_pass(
     item_ids: &[String],
     now_ms: i64,
     context: &AgentContext,
+    escalate_past_election: bool,
 ) -> anyhow::Result<PassOutcome> {
     // Step signals (P-B2c): observable pass lifecycle for tests + the WS layer.
     // `me` (the acting agent's DID) is resolved up front so every signal is
@@ -402,58 +433,71 @@ pub async fn run_one_pass(
     //    guard. Otherwise it elects the first *online* author in message order
     //    and either proceeds (that is us), stands down for the winner, or waits
     //    when no author is online ("only participants process").
-    match perspective.online_agents().await {
-        Ok(agents) => {
-            let online: Vec<String> = agents.into_iter().map(|a| a.did).collect();
-            let authors = match batch_authors(perspective, item_ids).await {
-                Ok(a) => a,
-                Err(e) => {
-                    log::debug!(
+    //
+    //    Stall-fallback: when `escalate_past_election` is set (the caller has
+    //    seen this batch stand down past `claim_ttl_ms`), skip candidacy and go
+    //    straight to the claim — the min-DID claim still prevents doubles among
+    //    peers that escalate together. This is the liveness guard for an elected
+    //    author that is online but never actually claims.
+    if escalate_past_election {
+        log::info!(
+            "auto_processor `{}`: escalating past election (elected author stalled > claim_ttl_ms); claiming anyway",
+            cfg.processor_id
+        );
+    } else {
+        match perspective.online_agents().await {
+            Ok(agents) => {
+                let online: Vec<String> = agents.into_iter().map(|a| a.did).collect();
+                let authors = match batch_authors(perspective, item_ids).await {
+                    Ok(a) => a,
+                    Err(e) => {
+                        log::debug!(
                         "auto_processor `{}`: batch_authors failed ({e:#}); proceeding to try_claim",
                         cfg.processor_id
                     );
-                    Vec::new()
-                }
-            };
-            if authors.is_empty() {
-                // No authorship signal — don't stall the pass; let the claim
-                // layer (min-DID) elect a processor instead.
-                log::debug!(
-                    "auto_processor `{}`: no resolvable batch authors; proceeding to try_claim",
-                    cfg.processor_id
-                );
-            } else {
-                match elect_author(&authors, &online, &me) {
-                    AuthorElection::Me => { /* elected — fall through to claim */ }
-                    AuthorElection::Other(winner) => {
-                        log::info!(
-                            "auto_processor `{}`: standing down — online author `{winner}` \
-                             precedes us in message order",
-                            cfg.processor_id
-                        );
-                        signal!(AutoProcessorStep::NotCandidate, detail = winner.clone());
-                        return Ok(PassOutcome::NotCandidate { winner });
+                        Vec::new()
                     }
-                    AuthorElection::NoneOnline => {
-                        log::info!(
-                            "auto_processor `{}`: no batch author online — waiting for a \
+                };
+                if authors.is_empty() {
+                    // No authorship signal — don't stall the pass; let the claim
+                    // layer (min-DID) elect a processor instead.
+                    log::debug!(
+                        "auto_processor `{}`: no resolvable batch authors; proceeding to try_claim",
+                        cfg.processor_id
+                    );
+                } else {
+                    match elect_author(&authors, &online, &me) {
+                        AuthorElection::Me => { /* elected — fall through to claim */ }
+                        AuthorElection::Other(winner) => {
+                            log::info!(
+                                "auto_processor `{}`: standing down — online author `{winner}` \
+                             precedes us in message order",
+                                cfg.processor_id
+                            );
+                            signal!(AutoProcessorStep::NotCandidate, detail = winner.clone());
+                            return Ok(PassOutcome::NotCandidate { winner });
+                        }
+                        AuthorElection::NoneOnline => {
+                            log::info!(
+                                "auto_processor `{}`: no batch author online — waiting for a \
                              participant to return before processing",
-                            cfg.processor_id
-                        );
-                        signal!(AutoProcessorStep::AwaitingAuthor);
-                        return Ok(PassOutcome::AwaitingAuthor);
+                                cfg.processor_id
+                            );
+                            signal!(AutoProcessorStep::AwaitingAuthor);
+                            return Ok(PassOutcome::AwaitingAuthor);
+                        }
                     }
                 }
             }
-        }
-        Err(e) => {
-            // Expected on perspectives without a telepresence-capable
-            // link-language. Correctness is unaffected — `try_claim` below is
-            // the real guard.
-            log::debug!(
+            Err(e) => {
+                // Expected on perspectives without a telepresence-capable
+                // link-language. Correctness is unaffected — `try_claim` below is
+                // the real guard.
+                log::debug!(
                 "auto_processor `{}`: online_agents unavailable ({e:#}); proceeding to try_claim",
                 cfg.processor_id
             );
+            }
         }
     }
 
@@ -690,6 +734,31 @@ mod tests {
         let mut w = WatcherState::new();
         let c = cfg("p", 1_000, 32);
         assert_eq!(w.drain_ready_batch(&c, 10_000), None);
+    }
+
+    /// Stall-fallback clock: a batch we never stood down for never escalates;
+    /// once stood down, it escalates only after `claim_ttl_ms` has elapsed; and
+    /// clearing it resets the clock.
+    #[test]
+    fn standdown_escalates_only_after_claim_ttl() {
+        let mut w = WatcherState::new();
+        let ttl = 60_000;
+        // Never stood down → never escalate.
+        assert!(!w.should_escalate("k", 1_000_000, ttl));
+
+        // First stand-down at t=1_000_000. `note_standdown` is first-write-wins.
+        w.note_standdown("k".into(), 1_000_000);
+        w.note_standdown("k".into(), 1_030_000); // ignored — keeps the earliest
+        assert!(!w.should_escalate("k", 1_030_000, ttl)); // 30s < 60s
+        assert!(w.should_escalate("k", 1_060_000, ttl)); // exactly ttl → escalate
+        assert!(w.should_escalate("k", 1_120_000, ttl)); // well past
+
+        // A different batch is independent.
+        assert!(!w.should_escalate("other", 2_000_000, ttl));
+
+        // Clearing resets: a later reuse of the key starts a fresh clock.
+        w.clear_standdown("k");
+        assert!(!w.should_escalate("k", 1_120_000, ttl));
     }
 
     /// Items recorded but the debounce window has not elapsed yet → None.
@@ -931,7 +1000,7 @@ mod tests {
             .await
             .expect("seed incumbent");
 
-        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx)
+        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false)
             .await
             .expect("run_one_pass");
         assert!(
@@ -950,7 +1019,7 @@ mod tests {
         let mut cfg = cfg("proc", 100, 32);
         cfg.interpretation_classes = vec!["ns://Unregistered".into()];
         let items = vec!["i1".to_string()];
-        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx)
+        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false)
             .await
             .expect("run_one_pass");
         match outcome {
