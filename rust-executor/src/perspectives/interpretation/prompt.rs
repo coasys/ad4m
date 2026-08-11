@@ -129,22 +129,6 @@ Output rules:
     extract genuinely new items.
 ";
 
-/// idempotently register the generic interpretation task in the AI-task DB.
-///
-/// If a task with `INTERPRETATION_TASK_NAME` already exists, returns it unchanged
-/// (so callers can safely invoke this on every executor startup or before every
-/// interpretation run). Otherwise inserts a new row bound to the `\"default\"` LLM
-/// model — `AIService::replace_model_variables` resolves this to whatever LLM
-/// the user has configured as default at prompt time, so interpretation works with
-/// any model without hard-coding one here.
-///
-/// DB-only: does not touch the running `AIService`. The returned bool is
-/// `true` when this call inserted the row (vs. found an existing one), so the
-/// runtime path can spawn the task exactly once — right after creation — via
-/// `AIService::spawn_registered_task`. This split keeps registration testable
-/// in CI without a GPU. A pre-existing row is already spawned (either by the
-/// executor's boot-time `load()` sweep or by the call that first created it),
-/// so callers only spawn when `created` is `true`.
 /// Few-shot examples sent as prior User/Assistant turns (via `prompt_examples`)
 /// ahead of the real input. Two generic, non-test scenarios that teach the
 /// failure modes small models hit: (1) a belief and a task in the same snippet
