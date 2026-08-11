@@ -912,13 +912,15 @@ impl AIService {
         })
     }
 
-    /// Ensure a DB-registered task is loaded into the running model worker so
-    /// `prompt` can find it. Idempotent (re-spawning overwrites the worker's
-    /// copy). For callers that register a task via the DB directly — e.g.
-    /// generic interpretation's `ensure_interpretation_task` — rather than through
-    /// `add_task`, which are otherwise invisible to the worker until the next
-    /// `set_default_model`.
-    pub async fn ensure_task_spawned(&self, task: AITask) -> Result<()> {
+    /// Register an already-persisted task row with its LLM worker.
+    ///
+    /// Public entry point for tasks minted outside [`AIService::add_task`] —
+    /// notably the generic interpretation task, which `ensure_interpretation_task`
+    /// inserts via `Ad4mDb::add_task` directly (to stay idempotent-by-name).
+    /// Without this, such a task sits in the DB unspawned until the next
+    /// executor restart's `load()` sweep, so its first `prompt` fails with
+    /// "Task not spawned". Callers spawn it right after creation instead.
+    pub async fn spawn_registered_task(&self, task: AITask) -> Result<()> {
         self.spawn_task(task).await
     }
 
