@@ -282,13 +282,13 @@ pub(crate) async fn setup_interpretation_e2e(
         .await
         .expect("add_model");
     // Insert the interpretation task row BEFORE setting the default model:
-    // `ensure_interpretation_task` only writes the DB row, and it's
+    // `register_interpretation_task` only writes the DB row (no spawn), and it's
     // `set_default_model`'s respawn loop (over `model_id == "default"` tasks)
     // that actually registers the task with the LLM worker. Priming it here
     // makes every e2e test self-contained — otherwise running one in isolation
     // (with no earlier test having inserted the row) leaves the task unspawned
     // and the first `prompt()` fails with "Task ... not spawned".
-    let _ = crate::perspectives::interpretation::ensure_interpretation_task();
+    let _ = crate::perspectives::interpretation::register_interpretation_task();
     service
         .set_default_model(ModelType::Llm, model_id)
         .await

@@ -222,22 +222,6 @@ Output rules:
     existing entry untouched in the same response.
 ";
 
-/// idempotently register the generic interpretation task in the AI-task DB.
-///
-/// If a task with `INTERPRETATION_TASK_NAME` already exists, returns it unchanged
-/// (so callers can safely invoke this on every executor startup or before every
-/// interpretation run). Otherwise inserts a new row bound to the `\"default\"` LLM
-/// model — `AIService::replace_model_variables` resolves this to whatever LLM
-/// the user has configured as default at prompt time, so interpretation works with
-/// any model without hard-coding one here.
-///
-/// DB-only: does not touch the running `AIService`. The returned bool is
-/// `true` when this call inserted the row (vs. found an existing one), so the
-/// runtime path can spawn the task exactly once — right after creation — via
-/// `AIService::spawn_registered_task`. This split keeps registration testable
-/// in CI without a GPU. A pre-existing row is already spawned (either by the
-/// executor's boot-time `load()` sweep or by the call that first created it),
-/// so callers only spawn when `created` is `true`.
 /// Few-shot examples sent as prior User/Assistant turns (via `prompt_examples`)
 /// ahead of the real input. Four generic, non-test scenarios that teach the
 /// failure modes small models hit: (1) a belief and a task in the same snippet
@@ -439,18 +423,23 @@ pub fn interpretation_task_name_for_model(model_id: Option<&str>) -> String {
     }
 }
 
-pub fn ensure_interpretation_task() -> anyhow::Result<(AITask, bool)> {
-    ensure_interpretation_task_for_model(None)
+/// DB-only registration for the shared-default interpretation task. Delegates to
+/// [`register_interpretation_task_for_model`] with `None`; used by the
+/// idempotency unit test and any caller wanting the shared row.
+pub(crate) fn register_interpretation_task() -> anyhow::Result<(AITask, bool)> {
+    register_interpretation_task_for_model(None)
 }
 
-/// [`ensure_interpretation_task`] with an optional model override — routes the
-/// interpretation prompt through a specific AI-task DB row bound to
-/// `model_id` (e.g. per-processor `AutoProcessorConfig::llm_model`). `None`
-/// preserves the shared-default row so every existing caller behaves
-/// byte-for-byte the same as before. Returns `(task, created)`; `created` is
-/// `true` only when this call inserted the row, so the runtime path spawns it
-/// exactly once.
-pub fn ensure_interpretation_task_for_model(
+/// idempotently register the generic interpretation task row in the AI-task DB,
+/// optionally bound to a specific model (`Some(model_id)` → a distinct
+/// `?model=<id>` row; `None` → the shared-default row).
+///
+/// DB-only, synchronous, and does not touch the running `AIService` — so task
+/// registration stays unit-testable without a model/GPU. Returns `(task,
+/// created)`; `created` is `true` only when this call inserted the row. The
+/// async entry points [`ensure_interpretation_task`] /
+/// [`ensure_interpretation_task_for_model`] wrap this and spawn the task.
+pub(crate) fn register_interpretation_task_for_model(
     model_id: Option<&str>,
 ) -> anyhow::Result<(AITask, bool)> {
     let name = interpretation_task_name_for_model(model_id);
@@ -473,6 +462,46 @@ pub fn ensure_interpretation_task_for_model(
     let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
         .ok_or_else(|| anyhow::anyhow!("interpretation task vanished immediately after insert"))?;
     Ok((task, true))
+}
+
+/// Return a ready-to-prompt interpretation task: register the DB row if absent
+/// (via [`register_interpretation_task`]) AND ensure it is spawned into its LLM
+/// worker, so the caller can immediately `AIService::prompt` it.
+///
+/// The spawn is what makes this async and AIService-dependent. `register_...`
+/// only writes the DB row; a freshly-registered task is invisible to the worker
+/// until the next `set_default_model`/restart `load()` sweep, so its first
+/// `prompt` would fail with "Task not spawned". We spawn it here, but only when
+/// this call actually minted the row — a pre-existing row is already spawned
+/// (boot-time `load()` sweep, or the call that first created it), so re-spawning
+/// would force a redundant local-model warmup on every interpretation run.
+pub async fn ensure_interpretation_task() -> anyhow::Result<AITask> {
+    ensure_interpretation_task_for_model(None).await
+}
+
+/// Per-model variant of [`ensure_interpretation_task`]: register the row for
+/// `model_id` if absent (via [`register_interpretation_task_for_model`]) AND
+/// ensure it is spawned into its LLM worker, so the caller can immediately
+/// `AIService::prompt` it. `None` targets the shared-default row. Spawns only on
+/// the call that minted the row (a pre-existing row is already spawned), avoiding
+/// a redundant local-model warmup on every interpretation run.
+pub async fn ensure_interpretation_task_for_model(
+    model_id: Option<&str>,
+) -> anyhow::Result<AITask> {
+    let (task, created) = register_interpretation_task_for_model(model_id)?;
+    if created {
+        crate::ai_service::AIService::global_instance()
+            .await
+            .map_err(|e| anyhow::anyhow!("ensure_interpretation_task: AIService not ready: {e:#}"))?
+            .spawn_registered_task(task.clone())
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "ensure_interpretation_task: failed to spawn interpretation task: {e:#}"
+                )
+            })?;
+    }
+    Ok(task)
 }
 
 #[cfg(test)]
