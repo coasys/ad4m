@@ -3020,7 +3020,10 @@ impl PerspectiveInstance {
                 "SELECT DISTINCT ?s WHERE { ?s ?p ?o . FILTER(isIRI(?s)) }",
                 Some(&[graph_iri.to_string()]),
             )
-            .unwrap_or_else(|_| "[]".to_string());
+            .unwrap_or_else(|e| {
+                log::warn!("remove_graph: subject enumeration query failed: {}", e);
+                "[]".to_string()
+            });
 
         // Collect subject IRIs
         let subject_iris: Vec<String> =

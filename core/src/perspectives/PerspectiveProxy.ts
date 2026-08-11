@@ -606,10 +606,11 @@ export class PerspectiveProxy {
      * @returns Query results as parsed JSON
      */
     async querySparql<T = any>(query: string, graphs?: string[]): Promise<T> {
-        const cached = getCachedResult(this.#handle.uuid, query);
+        const cacheKey = graphs && graphs.length > 0 ? `${query}|${graphs.join(',')}` : query;
+        const cached = getCachedResult(this.#handle.uuid, cacheKey);
         if (cached !== undefined) return cached as T;
         const result = await this.#client.querySparql(this.#handle.uuid, query, graphs);
-        setCachedResult(this.#handle.uuid, query, result);
+        setCachedResult(this.#handle.uuid, cacheKey, result);
         return result as T;
     }
 

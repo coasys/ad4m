@@ -1468,6 +1468,7 @@ impl SparqlStore {
     /// Clear the store and bulk-insert all provided links.
     pub fn reload(&self, links: Vec<DecoratedLinkExpression>) -> Result<(), Error> {
         self.clear()?;
+        self.registered_graphs.lock().unwrap().clear();
         for link in &links {
             self.insert_link_triples(link)?;
         }

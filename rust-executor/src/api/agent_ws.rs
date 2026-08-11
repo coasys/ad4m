@@ -36,7 +36,7 @@ fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLin
             invalid: lei.proof.invalid,
         },
         status: lei.status.clone(),
-        graph: None,
+        graph: lei.graph.clone(),
     }
 }
 

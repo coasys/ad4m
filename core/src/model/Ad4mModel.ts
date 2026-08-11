@@ -41,6 +41,7 @@ function jsonToModelInstance<T extends Ad4mModel>(
   json: any,
   include?: IncludeMap,
   properties?: string[],
+  graphIris?: string[],
 ): T {
   const instance = new ModelClass(perspective, json.id || json.baseExpression) as any;
 
@@ -112,6 +113,17 @@ function jsonToModelInstance<T extends Ad4mModel>(
         );
       }
     }
+  }
+
+  // Recover the named graph this instance's own properties were queried
+  // from. Graph-rooted models don't need this — the `graphIri` getter
+  // already derives it from the instance's own base expression. Non-graph-
+  // rooted models only get a graph back here when the query was
+  // unambiguously scoped to a single graph: SPARQL result rows aren't
+  // graph-tagged, so a union (multi-graph) or unscoped query can't attribute
+  // a graph to any individual instance after the fact.
+  if (!(ModelClass as any)._graphRooted && graphIris && graphIris.length === 1) {
+    instance._resolvedGraphIri = graphIris[0];
   }
 
   return instance;
@@ -918,11 +930,12 @@ export class Ad4mModel {
     raw: any,
     include?: IncludeMap,
     properties?: string[],
+    graphIris?: string[],
   ): T[] {
     const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
     const arr = data.instances || data;
     if (!Array.isArray(arr)) return [];
-    return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
+    return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties, graphIris));
   }
 
 
@@ -950,19 +963,19 @@ export class Ad4mModel {
 
     // Resolve graph scoping from the parent's model metadata.
     // If the parent model is graph-rooted, scope queries to the parent's graph.
-    // If the queried model itself is graph-rooted and has a parent, the parent
-    // provides the graph scope. Without a parent, queries are unscoped (union all).
+    // Graph-rooted children store their own data in their OWN graph
+    // (`ad4m://graph/${child.id}`), never the parent's — so only scope to the
+    // parent's graph when the queried model itself is NOT graph-rooted.
+    // Without a parent (or when the queried model is graph-rooted), queries
+    // stay unscoped (union across all graphs).
     const metadata = this.getModelMetadata();
     let graphIris: string[] | undefined;
-    if (query.parent?.id) {
+    if (query.parent?.id && !metadata.graph) {
       if ('model' in query.parent && query.parent.model) {
         const parentMeta = (query.parent.model as typeof Ad4mModel).getModelMetadata?.();
         if (parentMeta?.graph) {
           graphIris = [`ad4m://graph/${query.parent.id}`];
         }
-      } else if (metadata.graph) {
-        // No parent model info, but queried model is graph-rooted — scope to parent's graph
-        graphIris = [`ad4m://graph/${query.parent.id}`];
       }
     }
 
@@ -971,7 +984,7 @@ export class Ad4mModel {
     // Convert JSON instances to model class instances, recursively constructing
     // class instances for any included relations resolved by Rust.
     const instances: T[] = result.instances.map((json: any) => {
-      return jsonToModelInstance(this, perspective, json, query.include, query.properties);
+      return jsonToModelInstance(this, perspective, json, query.include, query.properties, graphIris);
     });
 
     // Take snapshots for dirty tracking (exclude $-prefixed projection keys)
@@ -1734,6 +1747,18 @@ export class Ad4mModel {
       if (parentMeta?.graph) {
         parentGraphIri = Ad4mModel.graphIriFor(options.parent.id);
       }
+    } else if (options?.parent) {
+      // Raw parent scope (`{ id }` without `model`) — the parent's graph-rootedness
+      // can't be determined from an id alone, so `parentGraphIri` (and, unless this
+      // model is itself graph-rooted, `_resolvedGraphIri`) silently stay undefined
+      // and the parent→child link falls back to the default graph. Warn so a
+      // graph-rooted parent doesn't silently lose scoping.
+      console.warn(
+        `${this.name}.create(): 'options.parent' was provided without 'model' — graph ` +
+        `scoping can't be resolved from a raw id. If the parent model is graph-rooted, ` +
+        `pass { model, id } instead of { id } so the parent→child link resolves into ` +
+        `the parent's graph.`
+      );
     }
 
     // When a parent scope is provided without a caller-supplied batch, open a
