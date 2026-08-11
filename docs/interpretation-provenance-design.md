@@ -46,12 +46,12 @@ Every LLM write instantiates/updates the overlay over the base. Behaviour depend
 - **Human-change detection:** real `<p>` == overlay `inferred/<p>` → still the LLM's; real `<p>` ≠ overlay `inferred/<p>` → a human edited it. (Answers the old "baseline for a brand-new LLM instance" question — the overlay *is* the baseline.)
 
 **Update (existing instance):**
-- If the target value is still the LLM's own (real == overlay `inferred/<p>`) **and** mode is `AutoMaterialize`: overwrite the real prop in place *and* bump overlay `inferred/<p>` to match (the LLM refining its own inference — rolling-summary keeps working autonomously, zero clicks).
-- If a human has diverged (real ≠ overlay `inferred/<p>`), **or** mode is `Stage`: **leave the real prop untouched** and set overlay `inferred/<p> = <proposed new value>`. UI shows real (kept) vs overlay (suggested).
+- Target value still the LLM's own (real == overlay `inferred/<p>`): overwrite the real prop in place *and* bump overlay `inferred/<p>` to match — the LLM refining its own inference (rolling-summary keeps working, zero clicks).
+- Human has diverged (real ≠ overlay `inferred/<p>`): **leave the real prop untouched** and set overlay `inferred/<p> = <proposed new value>`. UI shows real (kept human value) vs overlay (suggestion).
 
 **The one rule that protects humans:** the engine only overwrites a real value in place when it's still identical to what the overlay last recorded. The instant a human changes it, further LLM changes go into the overlay as suggestions, never overwrite.
 
-**Multiple passes / re-change of an unaccepted node:** there is exactly **one overlay per base**, updated in place. A later pass that changes a not-yet-accepted instance (AutoMaterialize, still LLM-owned) moves **both the instance and the overlay's `inferred/<p>` together** to the new value — no overlays accumulate, it's just the rolling refinement of one inference. (Under `Stage`, or once a human has diverged, only the overlay's proposed value updates; the real instance is untouched.)
+**Multiple passes / re-change of an unaccepted node:** there is exactly **one overlay per base**, updated in place. A later pass that changes a not-yet-accepted instance (still LLM-owned) moves **both the instance and the overlay's `inferred/<p>` together** to the new value — no overlays accumulate, it's just the rolling refinement of one inference. (Once a human has diverged, only the overlay's proposed value updates; the real instance is untouched.)
 
 ## 5. Accept / reject
 
@@ -62,11 +62,13 @@ Every LLM write instantiates/updates the overlay over the base. Behaviour depend
 
 All four are pure link add/removes over subject classes — the executor exposes `acceptInterpretation(base [,prop])` / `rejectInterpretation(base [,prop])` ops (surface likely spans into #881's API for the UI).
 
-## 6. `write_mode` parameter (DECIDED — both modes)
-- **`AutoMaterialize`** *(default)*: LLM writes live, refines its own inferences with zero clicks; only human-diverged values get staged into the overlay (§4).
-- **`Stage`**: nothing materialises directly — every create/update stays in the overlay as a suggestion until a human accepts.
+## 6. No `write_mode` — the overlay *is* the staging state (DECIDED)
 
-Plumbing: Rust `write_mode: WriteMode` param on `run_interpretation[_with_strategy]` (default `AutoMaterialize` → existing callers unchanged); `ad4m://write_mode` on `AutoProcessorConfig` (#885); same option on the TS `AutoProcessor` / `runInterpretation` (#881). "Live summary" → AutoMaterialize; "suggest for review" → Stage — same engine, one flag.
+Earlier drafts had a `write_mode` (AutoMaterialize | Stage) param. **Dropped** — the overlay already gives us the distinction, so there's just **one write path** (always materialise + overlay-flag):
+- "Live summary" apps read the instance normally and can ignore the overlay.
+- "Review before it counts" apps `model_query(InterpretationOverlay where kind = create)` (or updates) to render the pending queue, and only treat instances *without* an overlay as accepted.
+
+So "staged vs live" is simply *overlay present or not* — a query/UX concern, not a write mode. Fewer moving parts, and human edits are still protected by the §4 diff rule.
 
 ## 7. Why this is nice
 - **All subject classes** → the UI queries `model_query(InterpretationOverlay)` for "all proposed/AI data", filters `kind`, joins `run` for model/prompt version. No special link scanning.
@@ -74,12 +76,12 @@ Plumbing: Rust `write_mode: WriteMode` param on `run_interpretation[_with_strate
 - **Baseline is free** → the overlay's `inferred/<p>` doubles as "what the LLM last wrote", so human-vs-LLM diffs need no separate shadow.
 - **Re-derivable / auditable** → `run` → model + prompt_version + sources.
 
-## 8. Remaining small choices (I'll default unless you say otherwise)
-1. **Inferred-value encoding:** parallel `ad4m://interp/inferred/<predicate>` links (RDF-clean, queryable) — *recommended* — vs a single JSON snapshot prop (fewer links, opaque). Lean parallel links.
-2. **Stage-mode create materialisation:** write the real instance immediately but flagged by the overlay (visible/queryable, "pending"), vs hold the values only in the overlay until accept (base not a real `Task` until accepted). Lean *write-then-flag* so the UI can render it in place. 
-3. **Overlay identity** across passes: one overlay per base (updated in place each pass) — recommended — vs one per run (history). Lean one-per-base; the `run` link records the latest producer.
+## 8. Settled choices
+1. **Inferred-value encoding:** parallel `ad4m://interp/inferred/<predicate>` links (RDF-clean, `model_query`-able) — **decided**, not a JSON blob.
+2. **Create materialisation:** always **write-then-flag** — the real instance is written and visible in place, with the overlay marking it pending. **Decided.**
+3. **Overlay identity across passes:** exactly **one overlay per base**, updated in place — no per-run accumulation. **Decided.**
 
 ## 9. Landing plan (once signed off)
 1. `InterpretationRun` + `InterpretationOverlay` subject classes (hard-wired SDNA) + instantiate the overlay on every create/update with `inferred/<p>` snapshot — additive, non-breaking (readers ignore the overlay).
-2. The human-diverged gate on Update routing (real vs overlay `inferred/<p>`) + `write_mode`.
+2. The human-diverged gate on Update routing (real vs overlay `inferred/<p>`).
 3. `acceptInterpretation` / `rejectInterpretation` executor ops + the UI/API query surface (into #881).
