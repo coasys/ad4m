@@ -14,7 +14,8 @@
 use super::interpretation::{
     apply_interpretation_ops, class_local_name, existing_instance_context,
     plan_interpretation_ops_with_context, run_interpretation, run_interpretation_with_strategy,
-    DedupStrategy, ExistingInstances, InstanceContext, InterpretationOp, ProposedInstance,
+    DedupStrategy, ExistingInstances, ExistingLinks, InstanceContext, InterpretationOp,
+    ProposedInstance,
 };
 use super::model_query::shape::load_shape;
 use super::model_query::types::{ModelShape, ParentScope};
@@ -546,6 +547,45 @@ pub(crate) async fn seed_instance_with_props(
         .expect("seed_instance_with_props create_subject");
 }
 
+/// Seed an `InterpretationOverlay` over an already-seeded instance so the §4
+/// human-divergence gate treats it as **LLM-authored** (as it would be in
+/// production, where every instance is minted by an interpretation pass that
+/// also writes the overlay). Without this, a directly-`seed_instance`'d base
+/// carries no overlay and the gate — correctly — refuses to let a later pass
+/// overwrite its scalars (protecting human/seed data). Use it whenever a test
+/// seeds an instance that a subsequent interpretation pass is expected to
+/// *update in place* (e.g. a persistent `ConversationSubgroup` whose rolling
+/// `summary` grows). `props` are the same property names/values seeded onto the
+/// instance; they are mapped to their real predicates via the class shape so the
+/// overlay's `inferred/<p>` equals the seeded real value.
+pub(crate) async fn seed_llm_overlay(
+    perspective: &mut PerspectiveInstance,
+    ctx: &AgentContext,
+    shape: &ModelShape,
+    base: &str,
+    props: serde_json::Value,
+) {
+    let obj = props
+        .as_object()
+        .expect("seed_llm_overlay: props must be a JSON object");
+    let mut inferred: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    for (name, value) in obj {
+        let pred = shape
+            .properties
+            .iter()
+            .find(|p| &p.name == name)
+            .unwrap_or_else(|| {
+                panic!("seed_llm_overlay: class {} has no property {name}", shape.target_class)
+            })
+            .predicate
+            .clone();
+        inferred.insert(pred, value.clone());
+    }
+    super::interpretation::seed_overlay(perspective, base, inferred, ctx)
+        .await
+        .expect("seed_llm_overlay: seed_overlay");
+}
+
 // ---- graph-state accessors / assertions (read back via `model_query`) -------
 //
 // These read the *final graph state* through `PerspectiveInstance::model_query`
@@ -762,6 +802,26 @@ pub(crate) fn targets_of(links: &[Link], predicate: &str) -> Vec<String> {
         .filter(|l| l.predicate.as_deref() == Some(predicate))
         .map(|l| l.target.clone())
         .collect()
+}
+
+/// Collect the `(source, predicate, target)` triples an op set's `AddLinks` would
+/// write — the existing-link state a *subsequent* planner pass reads back to stay
+/// idempotent (James #883 #4). Mirrors what `existing_relation_links` returns
+/// after those ops are applied, without needing a live perspective.
+pub(crate) fn links_from_ops(ops: &[InterpretationOp]) -> ExistingLinks {
+    let mut out = ExistingLinks::new();
+    for op in ops {
+        if let InterpretationOp::AddLinks { links, .. } = op {
+            for l in links {
+                out.insert((
+                    l.source.clone(),
+                    l.predicate.clone().unwrap_or_default(),
+                    l.target.clone(),
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// Decoded targets of `(base, predicate)` in the store, sorted — the shape

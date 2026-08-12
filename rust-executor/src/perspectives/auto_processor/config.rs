@@ -33,8 +33,6 @@
 //!   -- ad4m://batch_max            --> <usize as string>
 //!   -- ad4m://max_wait_ms          --> <i64 as string>    (optional)
 //!   -- ad4m://claim_ttl_ms         --> <i64 as string>
-//!   -- ad4m://llm_base_url         --> <string>           (optional)
-//!   -- ad4m://llm_model            --> <string>           (optional)
 //!   -- ad4m://dedup_strategy       --> <JSON string>      (optional)
 //! ```
 
@@ -52,8 +50,6 @@ const P_BATCH_MIN: &str = "ad4m://batch_min";
 const P_BATCH_MAX: &str = "ad4m://batch_max";
 const P_MAX_WAIT_MS: &str = "ad4m://max_wait_ms";
 const P_CLAIM_TTL_MS: &str = "ad4m://claim_ttl_ms";
-const P_LLM_BASE_URL: &str = "ad4m://llm_base_url";
-const P_LLM_MODEL: &str = "ad4m://llm_model";
 const P_DEDUP_STRATEGY: &str = "ad4m://dedup_strategy";
 
 /// Everything the executor watcher (P-B2) needs to schedule and run a single
@@ -93,12 +89,6 @@ pub struct AutoProcessorConfig {
     /// TTL passed to [`super::claim::try_claim`] — how long a Won claim is
     /// treated as authoritative before other peers may re-claim.
     pub claim_ttl_ms: i64,
-    /// LLM endpoint (`base_url`) override — falls back to the executor's
-    /// configured default when `None`.
-    pub llm_base_url: Option<String>,
-    /// LLM model tag override — falls back to the executor's configured
-    /// default when `None`.
-    pub llm_model: Option<String>,
     /// Serialized `DedupStrategy` (JSON blob, opaque to this module).
     /// Deserialized by P-B2 into
     /// [`crate::perspectives::interpretation::DedupStrategy`]. `None` = the
@@ -177,20 +167,6 @@ pub async fn write_processor(
             source: node.clone(),
             predicate: Some(P_INTERPRETATION_CLASS.into()),
             target: class.clone(),
-        });
-    }
-    if let Some(base_url) = &cfg.llm_base_url {
-        links.push(Link {
-            source: node.clone(),
-            predicate: Some(P_LLM_BASE_URL.into()),
-            target: base_url.clone(),
-        });
-    }
-    if let Some(model) = &cfg.llm_model {
-        links.push(Link {
-            source: node.clone(),
-            predicate: Some(P_LLM_MODEL.into()),
-            target: model.clone(),
         });
     }
     if let Some(dedup) = &cfg.dedup_strategy_json {
@@ -326,8 +302,6 @@ async fn load_one(
         None => None,
     };
 
-    let llm_base_url = first_target(perspective, node, P_LLM_BASE_URL).await?;
-    let llm_model = first_target(perspective, node, P_LLM_MODEL).await?;
     let dedup_strategy_json = first_target(perspective, node, P_DEDUP_STRATEGY).await?;
 
     Ok(Some(AutoProcessorConfig {
@@ -339,8 +313,6 @@ async fn load_one(
         batch_max,
         max_wait_ms,
         claim_ttl_ms,
-        llm_base_url,
-        llm_model,
         dedup_strategy_json,
     }))
 }
@@ -367,8 +339,6 @@ mod tests {
             batch_max: 32,
             max_wait_ms: Some(60_000),
             claim_ttl_ms: 120_000,
-            llm_base_url: Some("http://localhost:11434/v1".into()),
-            llm_model: Some("gemma3:12b".into()),
             dedup_strategy_json: Some(r#"{"kind":"normalized"}"#.into()),
         }
     }
@@ -412,15 +382,11 @@ mod tests {
     async fn load_handles_missing_optionals() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let mut cfg = sample_config("minimal");
-        cfg.llm_base_url = None;
-        cfg.llm_model = None;
         cfg.dedup_strategy_json = None;
         write_processor(&mut p, &cfg, &ctx).await.expect("write");
         let loaded = load_processors(&p).await.expect("load");
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0], cfg);
-        assert!(loaded[0].llm_base_url.is_none());
-        assert!(loaded[0].llm_model.is_none());
         assert!(loaded[0].dedup_strategy_json.is_none());
     }
 

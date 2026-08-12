@@ -1122,10 +1122,6 @@ async fn add_auto_processor_handler(
         batch_max: body.batch_max,
         max_wait_ms: body.max_wait_ms,
         claim_ttl_ms: body.claim_ttl_ms,
-        // `llm_base_url` is not part of the request surface — dynamic provider
-        // registration is a follow-up; the pass uses the executor's default LLM.
-        llm_base_url: None,
-        llm_model: body.llm_model,
         dedup_strategy_json: body.dedup_strategy_json,
     };
     write_processor(&mut perspective, &cfg, &agent_context)

@@ -1,9 +1,13 @@
 use super::{
-    build_interpretation_input, class_label, ensure_interpretation_task_for_model,
-    existing_instance_context, filter_already_present_with_strategy, identity_property,
-    parse_interpretation_response, plan_interpretation_ops_with_context, DedupStrategy,
-    InterpretationOp, ProposedInstance,
+    apply_with_overlay, build_interpretation_input, class_label,
+    ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
+    identity_property, parse_interpretation_response, plan_interpretation_ops_resolved,
+    resolve_already_present_with_strategy, DedupStrategy, InterpretationOp, ProposedInstance,
 };
+// Only exercised by the in-module `#[cfg(test)]` planner tests (via their
+// `use super::*`); the production paths use `plan_interpretation_ops_resolved`.
+#[cfg(test)]
+use super::plan_interpretation_ops_with_context;
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::{ModelShape, ParentScope};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
@@ -264,23 +268,6 @@ pub async fn apply_interpretation_ops(
     }
 }
 
-/// The instance bases an op set touches, in op order and de-duplicated — what
-/// [`run_interpretation`] reads back so callers see exactly what landed.
-fn touched_bases(ops: &[InterpretationOp]) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for op in ops {
-        let base = match op {
-            InterpretationOp::Create { base, .. } | InterpretationOp::Update { base, .. } => base,
-            InterpretationOp::AddLinks { source, .. } => source,
-        };
-        if seen.insert(base.clone()) {
-            out.push(base.clone());
-        }
-    }
-    out
-}
-
 /// end-to-end interpretation driver. Wires everything: build the input from
 /// shapes' hints + transcript, call `AIService::prompt` on the registered
 /// interpretation task, retry parsing up to 5×, plan the writes, then apply them
@@ -365,9 +352,7 @@ pub async fn run_interpretation_with_strategy(
 /// [`run_interpretation_with_strategy`] with an optional per-call LLM model
 /// override — routes the interpretation prompt through the AI-task DB row
 /// bound to `model_override` (falling back to the shared default row when
-/// `None`). This is the plumbing the neighbourhood auto-processor uses to
-/// honor `AutoProcessorConfig::llm_model` without touching the global default
-/// or any other caller.
+/// `None`).
 ///
 /// `model_override = None` reuses the exact task row every existing caller
 /// already uses, so behaviour is unchanged for all non-processor callers.
@@ -391,6 +376,11 @@ pub async fn run_interpretation_with_strategy_and_model(
     // Create-vs-Update routing all project what they need from it, so every
     // path agrees on what counts as "existing".
     let existing_ctx = existing_instance_context(perspective, shapes, scope).await?;
+    // The relation edges already in the graph, so a repeated continuous pass
+    // does not re-emit a link that already exists (James #883 #4). Additive
+    // AddLinks would otherwise duplicate the edge — and its reifier node, whose
+    // IRI hashes in the link timestamp — on every pass.
+    let existing_links = existing_relation_links(perspective, shapes).await?;
     // class local name → identity property name, for the deterministic
     // safety-net below. Classes with no identity property are omitted.
     let identity_props: HashMap<String, String> = shapes
@@ -422,10 +412,11 @@ pub async fn run_interpretation_with_strategy_and_model(
     // Hard dedup guarantee: even if the model ignored the `existing` hint, an
     // already-present (class, identity value) never becomes a *new* instance.
     // Updates (proposals carrying an `id`) bypass this — they name a specific
-    // target. Crucially this filters **in place**, preserving the LLM's output
-    // order so `new:<Class>:<n>` relation ordinals resolve against the same
-    // ordering the model counted.
-    let instances = filter_already_present_with_strategy(
+    // target. Rather than *drop* duplicates (which would shift later
+    // `new:<Class>:<n>` ordinals — James #883), we TAG every proposal in
+    // emission order with its `Resolution`; the planner indexes all of them for
+    // ordinal resolution but writes ops only for the kept ones.
+    let resolved = resolve_already_present_with_strategy(
         instances,
         &existing_ctx,
         &identity_props,
@@ -433,16 +424,29 @@ pub async fn run_interpretation_with_strategy_and_model(
     )
     .await?;
 
-    let planned =
-        plan_interpretation_ops_with_context(shapes, &instances, base_prefix, &existing_ctx);
+    let planned = plan_interpretation_ops_resolved(
+        shapes,
+        &resolved,
+        base_prefix,
+        &existing_ctx,
+        &existing_links,
+    );
     // Filter no-op Updates: the LLM occasionally re-emits an unchanged existing
     // entry, and applying that would clear-and-rewrite scalar links for nothing.
     let ops = strip_noop_updates(perspective, shapes, planned).await?;
-    apply_interpretation_ops(perspective, &ops, context).await?;
+
+    // Apply the writes AND the provenance overlay (#883): every create/update
+    // also instantiates/updates an `InterpretationOverlay` over the same base
+    // (kind + run + `inferred/<p>` snapshot), and the human-divergence gate keeps
+    // real writes only where the value is still the LLM's own. One
+    // `InterpretationRun` is minted per pass and threaded onto every overlay.
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let ran_at = chrono::Utc::now().timestamp_millis().to_string();
+    let bases =
+        apply_with_overlay(perspective, shapes, ops, &task, run_id, ran_at, context).await?;
 
     // The affected instance base URIs (created, updated, or given new
     // relations). Links are owned by `create_subject` / `update_subject`.
-    let bases = touched_bases(&ops);
     Ok(bases)
 }
 

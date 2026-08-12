@@ -18,7 +18,7 @@
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
-    gather_transcript_sparql, run_interpretation_with_strategy_and_model, DedupStrategy,
+    gather_transcript_sparql, run_interpretation_with_strategy, DedupStrategy,
 };
 use crate::perspectives::model_query::load_shape_from_store;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -71,6 +71,14 @@ pub struct ProcessorPending {
 #[derive(Debug, Default, Clone)]
 pub struct WatcherState {
     per_processor: BTreeMap<String, ProcessorPending>,
+    /// Per-batch (keyed by [`crate::perspectives::auto_processor::claim::batch_key`])
+    /// wall-clock (unix millis) of the first tick we stood down for an *online*
+    /// elected author. Drives the stall-fallback: once a deferred batch has
+    /// waited past `claim_ttl_ms` without being processed, we escalate straight
+    /// to `try_claim`. This covers an elected author that is online but never
+    /// actually claims — the claim TTL only recovers a *crashed claimant*, not
+    /// an *inactive elected author*.
+    standdown_since: BTreeMap<String, i64>,
 }
 
 impl WatcherState {
@@ -144,6 +152,28 @@ impl WatcherState {
         }
         let take = entry.items.len().min(cfg.batch_max);
         Some(entry.items.drain(..take).collect())
+    }
+
+    /// Record that this tick stood down for a batch's online elected author.
+    /// Idempotent: only the *first* stand-down time is kept, so the stall clock
+    /// measures continuous deferral, not the most recent tick.
+    pub fn note_standdown(&mut self, batch_key: String, now_ms: i64) {
+        self.standdown_since.entry(batch_key).or_insert(now_ms);
+    }
+
+    /// Whether a stood-down batch has now been deferred past `claim_ttl_ms` and
+    /// should escalate past election straight to `try_claim`. `false` for a
+    /// batch we have never stood down for.
+    pub fn should_escalate(&self, batch_key: &str, now_ms: i64, claim_ttl_ms: i64) -> bool {
+        self.standdown_since
+            .get(batch_key)
+            .is_some_and(|since| now_ms.saturating_sub(*since) >= claim_ttl_ms)
+    }
+
+    /// Clear a batch's stand-down record once it is processed (or a peer took
+    /// it), so a later batch that happens to reuse the key starts a fresh clock.
+    pub fn clear_standdown(&mut self, batch_key: &str) {
+        self.standdown_since.remove(batch_key);
     }
 }
 
@@ -349,30 +379,18 @@ pub fn parse_dedup_strategy_json(blob: Option<&str>) -> DedupStrategy {
 ///    `cfg.source_scope_query`. Zero rows = [`PassOutcome::EmptyTranscript`].
 /// 4. [`run_interpretation_with_strategy`] with the deserialized dedup.
 ///
-/// `cfg.llm_model` (if set) is honored: the pass routes through an AI-task
-/// row bound to that model id. `cfg.llm_base_url` is NOT yet applied — it
-/// implies a distinct model *provider* registration (different LLM channel),
-/// which is a runtime concern handled at `AIService::spawn_model` time; a
-/// dedicated dynamic-registration follow-up will wire it in. When it is
-/// `Some` we emit a `warn` log so a misconfigured processor is visible in
-/// the executor log instead of silently falling back to the default provider.
+/// The pass always uses the executor's default LLM (via `AIService`).
+/// `AutoProcessorConfig` is a neighbourhood-shared record and must not carry
+/// per-peer LLM overrides — each peer picks a model that matches its local
+/// hardware in `AIService` config.
 pub async fn run_one_pass(
     perspective: &mut PerspectiveInstance,
     cfg: &AutoProcessorConfig,
     item_ids: &[String],
     now_ms: i64,
     context: &AgentContext,
+    escalate_past_election: bool,
 ) -> anyhow::Result<PassOutcome> {
-    if cfg.llm_base_url.is_some() {
-        log::warn!(
-            "auto_processor `{}`: llm_base_url is set but not yet honored — dynamic model \
-             provider registration is a follow-up. Falling back to the AIService default \
-             provider for `{}`.",
-            cfg.processor_id,
-            cfg.llm_model.as_deref().unwrap_or("<default model>"),
-        );
-    }
-
     // Step signals (P-B2c): observable pass lifecycle for tests + the WS layer.
     // `me` (the acting agent's DID) is resolved up front so every signal is
     // tagged with which peer emitted it — the multi-user/executor observer uses
@@ -415,58 +433,71 @@ pub async fn run_one_pass(
     //    guard. Otherwise it elects the first *online* author in message order
     //    and either proceeds (that is us), stands down for the winner, or waits
     //    when no author is online ("only participants process").
-    match perspective.online_agents().await {
-        Ok(agents) => {
-            let online: Vec<String> = agents.into_iter().map(|a| a.did).collect();
-            let authors = match batch_authors(perspective, item_ids).await {
-                Ok(a) => a,
-                Err(e) => {
-                    log::debug!(
+    //
+    //    Stall-fallback: when `escalate_past_election` is set (the caller has
+    //    seen this batch stand down past `claim_ttl_ms`), skip candidacy and go
+    //    straight to the claim — the min-DID claim still prevents doubles among
+    //    peers that escalate together. This is the liveness guard for an elected
+    //    author that is online but never actually claims.
+    if escalate_past_election {
+        log::info!(
+            "auto_processor `{}`: escalating past election (elected author stalled > claim_ttl_ms); claiming anyway",
+            cfg.processor_id
+        );
+    } else {
+        match perspective.online_agents().await {
+            Ok(agents) => {
+                let online: Vec<String> = agents.into_iter().map(|a| a.did).collect();
+                let authors = match batch_authors(perspective, item_ids).await {
+                    Ok(a) => a,
+                    Err(e) => {
+                        log::debug!(
                         "auto_processor `{}`: batch_authors failed ({e:#}); proceeding to try_claim",
                         cfg.processor_id
                     );
-                    Vec::new()
-                }
-            };
-            if authors.is_empty() {
-                // No authorship signal — don't stall the pass; let the claim
-                // layer (min-DID) elect a processor instead.
-                log::debug!(
-                    "auto_processor `{}`: no resolvable batch authors; proceeding to try_claim",
-                    cfg.processor_id
-                );
-            } else {
-                match elect_author(&authors, &online, &me) {
-                    AuthorElection::Me => { /* elected — fall through to claim */ }
-                    AuthorElection::Other(winner) => {
-                        log::info!(
-                            "auto_processor `{}`: standing down — online author `{winner}` \
-                             precedes us in message order",
-                            cfg.processor_id
-                        );
-                        signal!(AutoProcessorStep::NotCandidate, detail = winner.clone());
-                        return Ok(PassOutcome::NotCandidate { winner });
+                        Vec::new()
                     }
-                    AuthorElection::NoneOnline => {
-                        log::info!(
-                            "auto_processor `{}`: no batch author online — waiting for a \
+                };
+                if authors.is_empty() {
+                    // No authorship signal — don't stall the pass; let the claim
+                    // layer (min-DID) elect a processor instead.
+                    log::debug!(
+                        "auto_processor `{}`: no resolvable batch authors; proceeding to try_claim",
+                        cfg.processor_id
+                    );
+                } else {
+                    match elect_author(&authors, &online, &me) {
+                        AuthorElection::Me => { /* elected — fall through to claim */ }
+                        AuthorElection::Other(winner) => {
+                            log::info!(
+                                "auto_processor `{}`: standing down — online author `{winner}` \
+                             precedes us in message order",
+                                cfg.processor_id
+                            );
+                            signal!(AutoProcessorStep::NotCandidate, detail = winner.clone());
+                            return Ok(PassOutcome::NotCandidate { winner });
+                        }
+                        AuthorElection::NoneOnline => {
+                            log::info!(
+                                "auto_processor `{}`: no batch author online — waiting for a \
                              participant to return before processing",
-                            cfg.processor_id
-                        );
-                        signal!(AutoProcessorStep::AwaitingAuthor);
-                        return Ok(PassOutcome::AwaitingAuthor);
+                                cfg.processor_id
+                            );
+                            signal!(AutoProcessorStep::AwaitingAuthor);
+                            return Ok(PassOutcome::AwaitingAuthor);
+                        }
                     }
                 }
             }
-        }
-        Err(e) => {
-            // Expected on perspectives without a telepresence-capable
-            // link-language. Correctness is unaffected — `try_claim` below is
-            // the real guard.
-            log::debug!(
+            Err(e) => {
+                // Expected on perspectives without a telepresence-capable
+                // link-language. Correctness is unaffected — `try_claim` below is
+                // the real guard.
+                log::debug!(
                 "auto_processor `{}`: online_agents unavailable ({e:#}); proceeding to try_claim",
                 cfg.processor_id
             );
+            }
         }
     }
 
@@ -530,14 +561,13 @@ pub async fn run_one_pass(
     signal!(AutoProcessorStep::RunningInterpretation);
     let dedup = parse_dedup_strategy_json(cfg.dedup_strategy_json.as_deref());
     let base_prefix = format!("ad4m://autoprocessor/{}/instance/", cfg.processor_id);
-    let bases = run_interpretation_with_strategy_and_model(
+    let bases = run_interpretation_with_strategy(
         perspective,
         &shapes,
         &transcript,
         &base_prefix,
         context,
         &dedup,
-        cfg.llm_model.as_deref(),
         // Existing-instance scope: not yet wired from the processor config —
         // #883 added the plumbing (`existing_instance_context(scope)`), but the
         // per-channel scope belongs to a follow-up config field. `None` keeps
@@ -567,8 +597,6 @@ mod tests {
             batch_max,
             max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            llm_base_url: None,
-            llm_model: None,
             dedup_strategy_json: None,
         }
     }
@@ -706,6 +734,31 @@ mod tests {
         let mut w = WatcherState::new();
         let c = cfg("p", 1_000, 32);
         assert_eq!(w.drain_ready_batch(&c, 10_000), None);
+    }
+
+    /// Stall-fallback clock: a batch we never stood down for never escalates;
+    /// once stood down, it escalates only after `claim_ttl_ms` has elapsed; and
+    /// clearing it resets the clock.
+    #[test]
+    fn standdown_escalates_only_after_claim_ttl() {
+        let mut w = WatcherState::new();
+        let ttl = 60_000;
+        // Never stood down → never escalate.
+        assert!(!w.should_escalate("k", 1_000_000, ttl));
+
+        // First stand-down at t=1_000_000. `note_standdown` is first-write-wins.
+        w.note_standdown("k".into(), 1_000_000);
+        w.note_standdown("k".into(), 1_030_000); // ignored — keeps the earliest
+        assert!(!w.should_escalate("k", 1_030_000, ttl)); // 30s < 60s
+        assert!(w.should_escalate("k", 1_060_000, ttl)); // exactly ttl → escalate
+        assert!(w.should_escalate("k", 1_120_000, ttl)); // well past
+
+        // A different batch is independent.
+        assert!(!w.should_escalate("other", 2_000_000, ttl));
+
+        // Clearing resets: a later reuse of the key starts a fresh clock.
+        w.clear_standdown("k");
+        assert!(!w.should_escalate("k", 1_120_000, ttl));
     }
 
     /// Items recorded but the debounce window has not elapsed yet → None.
@@ -947,7 +1000,7 @@ mod tests {
             .await
             .expect("seed incumbent");
 
-        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx)
+        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false)
             .await
             .expect("run_one_pass");
         assert!(
@@ -966,7 +1019,7 @@ mod tests {
         let mut cfg = cfg("proc", 100, 32);
         cfg.interpretation_classes = vec!["ns://Unregistered".into()];
         let items = vec!["i1".to_string()];
-        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx)
+        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false)
             .await
             .expect("run_one_pass");
         match outcome {
@@ -975,117 +1028,5 @@ mod tests {
             }
             other => panic!("expected ShapesMissing, got {other:?}"),
         }
-    }
-
-    /// `cfg.llm_model` must reach the interpretation engine — the pass has to
-    /// register (or reuse) an AI-task row bound to that model id, not the
-    /// shared default row. Verified end-to-end: seed a real shape + transcript,
-    /// run the pass, then confirm `Ad4mDb` now holds a per-model task named
-    /// `adam://interpretation?model=<id>` with `model_id = <id>`. The LLM
-    /// invocation itself is expected to fail in this unit-test environment
-    /// (no `AIService` provider registered for the fabricated model) — but the
-    /// DB insert happens *before* the LLM step, so the failure does not gate
-    /// this proof. This is the plumbing check the P-B2b watcher-loop relies on.
-    #[tokio::test]
-    async fn run_one_pass_uses_cfg_llm_model_for_interpretation_task() {
-        use crate::db::Ad4mDb;
-        use crate::perspectives::interpretation::interpretation_task_name_for_model;
-        use crate::perspectives::interpretation_test_support::INTENTION_SDNA;
-        use crate::types::{AITask, Link, LinkStatus};
-
-        let (mut p, _shapes, ctx) =
-            setup_perspective_no_llm(&[("ns://Intention", INTENTION_SDNA)]).await;
-
-        // Fabricated model id: guaranteed no matching AIService LLM channel,
-        // so the LLM call fails — but only after `ensure_interpretation_task`
-        // has inserted the per-model row we're asserting on.
-        let model = "wiring-probe-model-v1";
-        let expected_name = interpretation_task_name_for_model(Some(model));
-
-        // Pre-clean: this test asserts on a fresh insert. `ensure_db_init` is
-        // shared across the single-threaded test run, so scrub the target name.
-        let leftover: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
-            .unwrap()
-            .into_iter()
-            .filter(|t| t.name == expected_name)
-            .collect();
-        for t in leftover {
-            Ad4mDb::with_global_instance(|db| db.remove_task(t.task_id.clone())).unwrap();
-        }
-
-        // Two turns so `gather_transcript_sparql` returns non-empty and the
-        // pass does not short-circuit on `EmptyTranscript`.
-        for (uri, author, body) in [
-            (
-                "msg://a",
-                "did:key:alice",
-                "I'll ship the interpretation refactor.",
-            ),
-            (
-                "msg://b",
-                "did:key:bob",
-                "Roger, I'll review this afternoon.",
-            ),
-        ] {
-            p.add_link(
-                Link {
-                    source: uri.into(),
-                    predicate: Some("ns://body".into()),
-                    target: format!("literal:string:{body}"),
-                },
-                LinkStatus::Local,
-                None,
-                &ctx,
-            )
-            .await
-            .expect("seed body");
-            p.add_link(
-                Link {
-                    source: uri.into(),
-                    predicate: Some("ns://author".into()),
-                    target: author.into(),
-                },
-                LinkStatus::Local,
-                None,
-                &ctx,
-            )
-            .await
-            .expect("seed author");
-        }
-
-        let mut c = cfg("wiring-probe-proc", 100, 32);
-        c.interpretation_classes = vec!["ns://Intention".into()];
-        c.source_scope_query = "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
-                                ?m <ns://author> ?speaker . } ORDER BY ?m"
-            .to_string();
-        c.llm_model = Some(model.to_string());
-
-        // The pass is *expected* to fail once it reaches the LLM step (no
-        // provider registered for `wiring-probe-model-v1`) — we swallow the
-        // Result. The plumbing proof lives in the DB check below.
-        let _ = run_one_pass(
-            &mut p,
-            &c,
-            &["msg://a".into(), "msg://b".into()],
-            1_000,
-            &ctx,
-        )
-        .await;
-
-        let rows: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
-            .unwrap()
-            .into_iter()
-            .filter(|t| t.name == expected_name)
-            .collect();
-        assert_eq!(
-            rows.len(),
-            1,
-            "expected exactly one per-model interpretation task row for `{model}`; \
-             the watcher must plumb cfg.llm_model into ensure_interpretation_task_for_model"
-        );
-        assert_eq!(
-            rows[0].model_id, model,
-            "per-model task row must carry cfg.llm_model as its model_id"
-        );
     }
 }
