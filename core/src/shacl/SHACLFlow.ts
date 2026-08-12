@@ -332,19 +332,6 @@ export class SHACLFlow {
    * @returns Reconstructed SHACLFlow
    */
   static fromLinks(links: Link[], flowUri: string): SHACLFlow {
-    // The perspective's typed-literal migration rewrites the `literal:string:*`
-    // IRI targets that older flows wrote into plain typed literals (e.g.
-    // `"ready"` instead of `literal:string:ready`). Accept both shapes on read
-    // so `SHACLFlow` round-trips through the migration transparently.
-    const readLiteralString = (target: string): string =>
-      target.startsWith("literal:")
-        ? (Literal.fromUrl(target).get() as string)
-        : target;
-    const readLiteralNumber = (target: string): number =>
-      target.startsWith("literal:")
-        ? (Literal.fromUrl(target).get() as number)
-        : Number(target);
-
     // Extract namespace and name from flowUri
     // Format: {namespace}{Name}Flow
     const flowSuffix = "Flow";
@@ -408,16 +395,16 @@ export class SHACLFlow {
       const nameLink = links.find(l =>
         l.source === stateUri && l.predicate === "ad4m://stateName"
       );
-      const stateName = nameLink ? readLiteralString(nameLink.target) : "";
-
+      const stateName = nameLink ? Literal.fromUrl(nameLink.target).get() as string : "";
+      
       // Store mapping for transition lookup
       stateUriToName.set(stateUri, stateName);
-
+      
       // Get state value
       const valueLink = links.find(l =>
         l.source === stateUri && l.predicate === "ad4m://stateValue"
       );
-      const stateValue = valueLink ? readLiteralNumber(valueLink.target) : 0;
+      const stateValue = valueLink ? Literal.fromUrl(valueLink.target).get() as number : 0;
       
       // Get state check
       const checkLink = links.find(l =>
@@ -448,7 +435,7 @@ export class SHACLFlow {
       const actionNameLink = links.find(l =>
         l.source === transitionUri && l.predicate === "ad4m://actionName"
       );
-      const actionName = actionNameLink ? readLiteralString(actionNameLink.target) : "";
+      const actionName = actionNameLink ? Literal.fromUrl(actionNameLink.target).get() as string : "";
       
       // Get from state
       const fromStateLink = links.find(l =>
