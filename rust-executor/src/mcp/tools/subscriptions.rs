@@ -62,6 +62,23 @@ fn escape_sparql_literal(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
+/// Validate that a value intended to be an IRI is safe for interpolation
+/// inside a SPARQL string literal (`STR(?x) = "..."`).  A well-formed IRI
+/// has a scheme (e.g. `ad4m:`, `did:`, `literal:`) and must not contain
+/// `"` or `\` which would break out of the enclosing double-quoted literal.
+fn validate_sparql_iri(s: &str) -> Result<&str, String> {
+    if !s.contains(':') {
+        return Err(format!("expected IRI (scheme:...), got: {}", s));
+    }
+    if s.contains('"') || s.contains('\\') {
+        return Err(format!(
+            "IRI contains characters unsafe for SPARQL interpolation: {}",
+            s
+        ));
+    }
+    Ok(s)
+}
+
 // ============================================================================
 // Tool Implementations
 // ============================================================================
@@ -91,15 +108,21 @@ impl Ad4mMcpHandler {
             } else {
                 Self::encode_literal(parent)
             };
+            if let Err(e) = validate_sparql_iri(&parent_encoded) {
+                return json!({"error": format!("Invalid parent_address: {}", e)}).to_string();
+            }
             format!(
                 "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?source) = \"{}\" && STR(?predicate) = \"ad4m://has_child\") }}",
                 parent_encoded
             )
         } else if let Some(ref predicate) = p.predicate {
+            if let Err(e) = validate_sparql_iri(predicate) {
+                return json!({"error": format!("Invalid predicate: {}", e)}).to_string();
+            }
             if let Some(ref target) = p.target_value {
                 format!(
                     "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) = \"{}\" && STR(?target) = \"{}\") }}",
-                    predicate, target
+                    predicate, escape_sparql_literal(target)
                 )
             } else {
                 format!(
@@ -115,6 +138,7 @@ impl Ad4mMcpHandler {
                     .properties
                     .iter()
                     .filter_map(|prop| prop.predicate.clone())
+                    .filter(|p| validate_sparql_iri(p).is_ok())
                     .collect();
 
                 if predicates.is_empty() {
@@ -259,6 +283,7 @@ impl Ad4mMcpHandler {
                 .iter()
                 .find(|prop| prop.name.to_lowercase() == "body")
                 .and_then(|prop| prop.predicate.clone())
+                .filter(|p| validate_sparql_iri(p).is_ok())
         } else {
             None
         };
@@ -339,5 +364,24 @@ mod tests {
         assert_eq!(escape_sparql_literal("a\"b"), "a\\\"b");
         assert_eq!(escape_sparql_literal("a\nb"), "a\\nb");
         assert_eq!(escape_sparql_literal("plain"), "plain");
+    }
+
+    #[test]
+    fn test_validate_sparql_iri_accepts_valid_iris() {
+        assert!(validate_sparql_iri("ad4m://has_child").is_ok());
+        assert!(validate_sparql_iri("did:key:z6Mk123").is_ok());
+        assert!(validate_sparql_iri("literal:string:hello").is_ok());
+        assert!(validate_sparql_iri("urn:isbn:0451450523").is_ok());
+    }
+
+    #[test]
+    fn test_validate_sparql_iri_rejects_no_scheme() {
+        assert!(validate_sparql_iri("no-scheme-here").is_err());
+    }
+
+    #[test]
+    fn test_validate_sparql_iri_rejects_injection_chars() {
+        assert!(validate_sparql_iri(r#"ad4m://x" || true || ""#).is_err());
+        assert!(validate_sparql_iri(r"ad4m://x\n").is_err());
     }
 }

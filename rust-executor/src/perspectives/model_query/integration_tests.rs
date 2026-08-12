@@ -5131,6 +5131,11 @@ fn bench_indexed_literal_vs_str_filter() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(10_000);
 
+    assert!(
+        n_links > 0,
+        "WT_BENCH_LINKS must be > 0 (got 0); omit the variable to use the default (10 000)"
+    );
+
     let store = SparqlStore::new(None).unwrap();
     let pred = "ns://body";
     let target_value = "needle";
