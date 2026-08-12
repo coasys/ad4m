@@ -56,6 +56,7 @@ const AUTO_PROCESSOR_SDNA: &str = r#"{
     {"path":"rdf://type","name":"type","has_value":"ad4m://AutoProcessor","min_count":1,"max_count":1},
     {"path":"ad4m://processor_id","name":"processor_id","identity":true,"min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://processor_id","target":"value"}]},
     {"path":"ad4m://source_scope_query","name":"source_scope_query","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://source_scope_query","target":"value"}]},
+    {"path":"ad4m://base_prefix","name":"base_prefix","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://base_prefix","target":"value"}]},
     {"path":"ad4m://interpretation_class","name":"interpretation_class","collection":true,"min_count":1,"setter":[{"action":"addLink","source":"this","predicate":"ad4m://interpretation_class","target":"value"}]},
     {"path":"ad4m://debounce_ms","name":"debounce_ms","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://debounce_ms","target":"value"}]},
     {"path":"ad4m://batch_min","name":"batch_min","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://batch_min","target":"value"}]},
@@ -79,6 +80,14 @@ pub struct AutoProcessorConfig {
     /// [`crate::perspectives::interpretation::graph::gather_transcript_sparql`]
     /// accepts. Defines "the content this processor watches".
     pub source_scope_query: String,
+    /// URI namespace new interpreted instances are minted under (the "spawn
+    /// scope"), e.g. `soa://project/42/`. `None` falls back to a per-processor
+    /// default (`ad4m://autoprocessor/<id>/instance/`), preserving the original
+    /// behaviour when a config omits `ad4m://base_prefix`. Existing instances to
+    /// upsert into are gathered from the perspective's registered classes; a
+    /// caller that wants create+update confined to one subtree points both this
+    /// and `source_scope_query` at that subtree.
+    pub base_prefix: Option<String>,
     /// Class URIs (SHACL `target_class`) the interpretation engine is asked
     /// to materialize on each pass. Must contain at least one entry;
     /// [`load_processors`] skips otherwise.
@@ -158,6 +167,9 @@ pub async fn write_processor(
         "batch_max": cfg.batch_max.to_string(),
         "claim_ttl_ms": cfg.claim_ttl_ms.to_string(),
     });
+    if let Some(base_prefix) = &cfg.base_prefix {
+        values["base_prefix"] = base_prefix.clone().into();
+    }
     if let Some(max_wait_ms) = cfg.max_wait_ms {
         values["max_wait_ms"] = max_wait_ms.to_string().into();
     }
@@ -210,9 +222,9 @@ pub async fn load_processors(
     }
     let query = serde_json::json!({
         "properties": [
-            "processor_id", "source_scope_query", "interpretation_class",
-            "debounce_ms", "batch_min", "batch_max", "max_wait_ms",
-            "claim_ttl_ms", "dedup_strategy",
+            "processor_id", "source_scope_query", "base_prefix",
+            "interpretation_class", "debounce_ms", "batch_min", "batch_max",
+            "max_wait_ms", "claim_ttl_ms", "dedup_strategy",
         ]
     })
     .to_string();
@@ -274,15 +286,29 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         None => None,
     };
 
+    // Timings must be in range or the batch/claim primitives misbehave: a
+    // `batch_max` of 0 drains nothing (empty passes forever), and a
+    // non-positive `claim_ttl_ms` makes each peer's own claim expire the moment
+    // it is written, so every peer reads an empty holder set and processes the
+    // same batch. Treat an out-of-range value like an unparseable one — the
+    // processor is simply not loaded (and a warn is logged by the caller).
+    let debounce_ms = number("debounce_ms")?;
+    let batch_max = count("batch_max")?;
+    let claim_ttl_ms = number("claim_ttl_ms")?;
+    if debounce_ms < 0 || batch_max < 1 || claim_ttl_ms <= 0 {
+        return None;
+    }
+
     Some(AutoProcessorConfig {
         processor_id: scalar("processor_id")?,
         source_scope_query: scalar("source_scope_query")?,
+        base_prefix: scalar("base_prefix"),
         interpretation_classes,
-        debounce_ms: number("debounce_ms")?,
+        debounce_ms,
         batch_min,
-        batch_max: count("batch_max")?,
+        batch_max,
         max_wait_ms,
-        claim_ttl_ms: number("claim_ttl_ms")?,
+        claim_ttl_ms,
         dedup_strategy_json: scalar("dedup_strategy"),
     })
 }
@@ -299,6 +325,7 @@ mod tests {
             source_scope_query: format!(
                 "SELECT ?speaker ?text WHERE {{ ?s <ns://{id}/turn> ?t . }}"
             ),
+            base_prefix: Some(format!("soa://{id}/instance/")),
             // Kept in sorted order to match [`load_processors`]'s canonical
             // ordering — see the assertion in
             // [`interpretation_classes_multiple_roundtrip_sorted`] below for

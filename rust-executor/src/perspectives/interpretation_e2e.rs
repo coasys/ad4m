@@ -1430,6 +1430,7 @@ async fn auto_processor_pass_lands_interpretation_instance() {
         source_scope_query: "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
                              ?m <ns://author> ?speaker . } ORDER BY ?m"
             .into(),
+        base_prefix: None,
         interpretation_classes: vec!["ns://Intention".into()],
         debounce_ms: 50,
         batch_min: 1,
@@ -1619,6 +1620,7 @@ async fn auto_processor_two_configs_no_cross_contamination() {
     let intent_cfg = AutoProcessorConfig {
         processor_id: "pc-intent-proc".into(),
         source_scope_query: source_scope.into(),
+        base_prefix: None,
         interpretation_classes: vec!["ns://Intention".into()],
         debounce_ms: 50,
         batch_min: 1,
@@ -1630,6 +1632,7 @@ async fn auto_processor_two_configs_no_cross_contamination() {
     let task_cfg = AutoProcessorConfig {
         processor_id: "pc-task-proc".into(),
         source_scope_query: source_scope.into(),
+        base_prefix: None,
         interpretation_classes: vec!["ns://Task".into()],
         debounce_ms: 50,
         batch_min: 1,
@@ -1867,6 +1870,7 @@ async fn auto_processor_high_level_signal_driven_pass() {
             source_scope_query: "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
                                  ?m <ns://author> ?speaker . } ORDER BY ?m"
                 .into(),
+            base_prefix: None,
             interpretation_classes: vec!["ns://ConversationSubgroup".into()],
             debounce_ms: 50,
             batch_min: 2,
@@ -1895,9 +1899,14 @@ async fn auto_processor_high_level_signal_driven_pass() {
             .await;
 
         // Await the terminal signal — this is what a WS client / test waits on
-        // instead of polling the graph.
+        // instead of polling the graph. Scope the predicate to THIS perspective:
+        // `emit` publishes to a process-global channel, so another perspective
+        // reusing the same `processor_id` could otherwise match.
+        let persp_uuid = perspective.uuid.clone();
         let processed_ev = next_event_matching(&mut rx, Duration::from_secs(90), |e| {
-            e.processor_id == processor_id && e.step == AutoProcessorStep::Processed
+            e.processor_id == processor_id
+                && e.perspective_uuid == persp_uuid
+                && e.step == AutoProcessorStep::Processed
         })
         .await;
         let Some(ev) = processed_ev else {
@@ -2038,6 +2047,7 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
             source_scope_query: "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
                                  ?m <ns://author> ?speaker . } ORDER BY ?m"
                 .into(),
+            base_prefix: None,
             interpretation_classes: vec!["ns://ConversationSubgroup".into()],
             debounce_ms: 100,
             batch_min: 2,
@@ -2050,6 +2060,9 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
             .await
             .expect("write_processor");
 
+        // Scope event predicates to THIS perspective — `emit` is process-global,
+        // so a concurrent test/perspective on the same `processor_id` must not match.
+        let persp_uuid = perspective.uuid.clone();
         let mut rx = subscribe().await;
 
         // Spawn the winner's REAL background loop — it polls, debounces, claims
@@ -2058,6 +2071,7 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
         let win_loop = tokio::spawn(async move { p_win.auto_processor_watch_loop(ctx_win).await });
         let processed = next_event_matching(&mut rx, Duration::from_secs(90), |e| {
             e.processor_id == processor_id
+                && e.perspective_uuid == persp_uuid
                 && e.step == AutoProcessorStep::Processed
                 && e.agent_did.as_deref() == Some(did_win.as_str())
         })
@@ -2071,6 +2085,7 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
         let backed_off = if processed.is_some() {
             next_event_matching(&mut rx, Duration::from_secs(30), |e| {
                 e.processor_id == processor_id
+                    && e.perspective_uuid == persp_uuid
                     && e.step == AutoProcessorStep::BackedOff
                     && e.agent_did.as_deref() == Some(did_lose.as_str())
             })

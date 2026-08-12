@@ -150,7 +150,10 @@ impl WatcherState {
         if !threshold_met && !wait_expired {
             return None;
         }
-        let take = entry.items.len().min(cfg.batch_max);
+        // `batch_max.max(1)`: defence-in-depth against a 0 cap (config loading
+        // already rejects it) — a 0 would take nothing, drain nothing, and the
+        // caller would run an empty pass every tick without the queue emptying.
+        let take = entry.items.len().min(cfg.batch_max.max(1));
         Some(entry.items.drain(..take).collect())
     }
 
@@ -560,7 +563,12 @@ pub async fn run_one_pass(
     // 4. Interpret.
     signal!(AutoProcessorStep::RunningInterpretation);
     let dedup = parse_dedup_strategy_json(cfg.dedup_strategy_json.as_deref());
-    let base_prefix = format!("ad4m://autoprocessor/{}/instance/", cfg.processor_id);
+    // Spawn scope: the processor's configured `base_prefix`, or a per-processor
+    // default when the config omits it (original behaviour).
+    let base_prefix = cfg
+        .base_prefix
+        .clone()
+        .unwrap_or_else(|| format!("ad4m://autoprocessor/{}/instance/", cfg.processor_id));
     let bases = run_interpretation_with_strategy(
         perspective,
         &shapes,
@@ -591,6 +599,7 @@ mod tests {
             source_scope_query: format!(
                 "SELECT ?speaker ?text WHERE {{ ?s <ns://{id}/turn> ?t . }}"
             ),
+            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms,
             batch_min: 1,

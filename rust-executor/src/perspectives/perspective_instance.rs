@@ -5239,12 +5239,20 @@ impl PerspectiveInstance {
             let processed = processed_per_processor
                 .entry(cfg.processor_id.clone())
                 .or_default();
+            let mut live_ids: HashSet<String> = HashSet::with_capacity(transcript.len());
             for (speaker, text) in &transcript {
                 let id = turn_id(speaker, text);
                 if !processed.contains(&id) {
-                    watcher.record_item(&cfg.processor_id, id, now_ms);
+                    watcher.record_item(&cfg.processor_id, id.clone(), now_ms);
                 }
+                live_ids.insert(id);
             }
+            // Bound the processed set: a turn id is a content hash, so one that
+            // is no longer in the source scope can never be re-recorded. Drop
+            // those, capping the set at the live transcript size instead of
+            // leaking every id ever processed for the loop's (perspective's)
+            // lifetime.
+            processed.retain(|id| live_ids.contains(id));
         }
 
         // 2. Drain + run a pass per config.
