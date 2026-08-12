@@ -119,56 +119,11 @@ pub fn initialize_from_db() {
                 Err(e) => log::warn!("Reifier migration for {}: {}", handle_clone.uuid, e),
             }
 
-            // Signed-envelope → plain-literal migration. The new indexed WHERE
-            // path probes `literal:*` targets directly, so if this migration
-            // fails midway through the perspective is left with a mix of legacy
-            // signed-envelope targets and new plain-literal targets — equality
-            // filters would then silently miss the unmigrated rows. Skip
-            // initialising the perspective on error so the next executor restart
-            // can retry the migration cleanly rather than serving stale results.
-            match p.sparql_store.migrate_signed_envelopes_to_plain_literals() {
-                Ok(count) if count > 0 => {
-                    log::info!(
-                        "🔄 Signed-envelope migration for {}: {} envelopes converted",
-                        handle_clone.uuid,
-                        count
-                    );
-                }
-                Ok(_) => {} // Already migrated or nothing to migrate
-                Err(e) => {
-                    log::error!(
-                        "Signed-envelope migration failed for {}: {} — \
-                         skipping perspective init to avoid mixing legacy and \
-                         migrated link targets under the new indexed WHERE path. \
-                         Will retry on next executor restart.",
-                        handle_clone.uuid,
-                        e
-                    );
-                    return;
-                }
-            }
-
-            match p.sparql_store.migrate_iri_literals_to_typed_literals() {
-                Ok(count) if count > 0 => {
-                    log::info!(
-                        "🔄 Typed-literal migration for {}: {} IRI-shaped targets converted",
-                        handle_clone.uuid,
-                        count
-                    );
-                }
-                Ok(_) => {} // Already migrated or nothing to migrate
-                Err(e) => {
-                    log::error!(
-                        "Typed-literal migration failed for {}: {} — \
-                         skipping perspective init to avoid mixing IRI-shaped and \
-                         typed-literal targets under the new indexed WHERE path. \
-                         Will retry on next executor restart.",
-                        handle_clone.uuid,
-                        e
-                    );
-                    return;
-                }
-            }
+            // Note: the signed-envelope → plain-literal and IRI-literal →
+            // typed-literal store migrations were removed on this branch.
+            // Fresh writes flow through the typed-literal encoder; historical
+            // `literal:*:` IRI targets stay as-is. Readers and WHERE builders
+            // need to keep tolerating both shapes on the way in and out.
 
             // Rebuild SPARQL index from existing links
             // Skip SPARQL rebuild if persistent store already has data
