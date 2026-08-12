@@ -575,7 +575,10 @@ pub(crate) async fn seed_llm_overlay(
             .iter()
             .find(|p| &p.name == name)
             .unwrap_or_else(|| {
-                panic!("seed_llm_overlay: class {} has no property {name}", shape.target_class)
+                panic!(
+                    "seed_llm_overlay: class {} has no property {name}",
+                    shape.target_class
+                )
             })
             .predicate
             .clone();

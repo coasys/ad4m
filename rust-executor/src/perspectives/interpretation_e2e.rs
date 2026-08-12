@@ -789,18 +789,46 @@ async fn e2e_flux_grouping_updates_seeded_subgroup_on_topic_continuation() {
             "name": "Payments infrastructure",
             "summary": "The team discussed dropped webhook retries during a recent payments outage and the need for better observability on failure payloads."
         });
-        seed_instance_with_props(&mut perspective, &ctx, sg_shape, payments_base, payments_props.clone()).await;
+        seed_instance_with_props(
+            &mut perspective,
+            &ctx,
+            sg_shape,
+            payments_base,
+            payments_props.clone(),
+        )
+        .await;
         // Seed the overlay too: in production this subgroup would have been minted
         // by a prior interpretation pass (which writes an overlay), so the §4 gate
         // must see it as LLM-authored to let this continuation grow its summary.
-        seed_llm_overlay(&mut perspective, &ctx, sg_shape, payments_base, payments_props).await;
+        seed_llm_overlay(
+            &mut perspective,
+            &ctx,
+            sg_shape,
+            payments_base,
+            payments_props,
+        )
+        .await;
 
         let onboarding_props = serde_json::json!({
             "name": "Onboarding UX",
             "summary": "Ideas about smoothing the first-run flow for brand-new users, including copy tweaks and default profile fields."
         });
-        seed_instance_with_props(&mut perspective, &ctx, sg_shape, onboarding_base, onboarding_props.clone()).await;
-        seed_llm_overlay(&mut perspective, &ctx, sg_shape, onboarding_base, onboarding_props).await;
+        seed_instance_with_props(
+            &mut perspective,
+            &ctx,
+            sg_shape,
+            onboarding_base,
+            onboarding_props.clone(),
+        )
+        .await;
+        seed_llm_overlay(
+            &mut perspective,
+            &ctx,
+            sg_shape,
+            onboarding_base,
+            onboarding_props,
+        )
+        .await;
 
         // Continuing turns on payments/webhooks — the model must resolve to the
         // seeded payments subgroup's id and update its summary in place.

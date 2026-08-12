@@ -531,7 +531,10 @@ mod tests {
         run_ops(
             &mut p,
             &shapes,
-            vec![update_op(base, &[("title", json!("Second LLM suggestion"))])],
+            vec![update_op(
+                base,
+                &[("title", json!("Second LLM suggestion"))],
+            )],
             "run-2",
             &ctx,
         )
