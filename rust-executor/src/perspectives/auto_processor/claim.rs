@@ -1,13 +1,12 @@
 //! Atomic processing-claim reservation for neighbourhood auto-processing.
 //!
-//! Phase **P-A** of the AutoProcessor arc (see
-//! `planning/neighbourhood-auto-processing-spec.md`). This is the reservation
+//! Phase **P-A** of the AutoProcessor arc. This is the reservation
 //! primitive that fixes Flux's double-processing race: before a peer runs an
 //! (expensive, LLM) processing pass over a batch of items, it writes a
 //! **`ProcessingClaim`** into the *shared* perspective. Because shared links sync
 //! across the neighbourhood, a claim already present (and unexpired) for the same
 //! batch means every other peer backs off. Correctness rests on the **synced
-//! claim link**, not on ephemeral signals (spec §4.4).
+//! claim link**, not on ephemeral signals.
 //!
 //! Pure coordination — no LLM, no telepresence. Telepresence-based presence /
 //! election (P-B) and the `AutoProcessor` subject + executor watcher build on
@@ -15,7 +14,7 @@
 //!
 //! ## Claim shape (links, all `Shared`)
 //! A batch is keyed by [`batch_key`] (order-independent hash of the source item
-//! id-set — provisional per spec §8). Each claimant hangs its own claim node off
+//! id-set — provisional). Each claimant hangs its own claim node off
 //! the shared batch node, so concurrent claimants don't clobber each other's
 //! expiry/status:
 //! ```text
@@ -36,6 +35,27 @@
 //! DID wins. Every peer converges on the same winner once claims sync, so exactly
 //! one proceeds. A losing/crashed claimant's claim simply expires (`ttl_ms`),
 //! after which the batch can be re-claimed.
+//!
+//! ## The TTL vs. sync-latency window (why exactly-once is *eventual*)
+//! The guarantee is only as strong as the relationship between `ttl_ms` and the
+//! neighbourhood's claim-sync latency, and there are two failure edges to size
+//! against:
+//! * **TTL too short.** If a claim expires before the winner finishes its pass
+//!   *and* before peers have converged, another peer sees no active claimant and
+//!   re-claims — double processing. So `ttl_ms` must comfortably exceed
+//!   `expected sync latency + a pass's worst-case runtime`.
+//! * **Claims not yet synced.** Two peers that both claim inside one sync round
+//!   each read only their own claim and each believe they won — until the other's
+//!   claim arrives. The min-DID rule makes them *converge* on the same winner
+//!   once synced, but a peer that starts its (expensive) pass before the round
+//!   completes runs it too — so a genuine same-round tie can produce **duplicate
+//!   writes** for that one batch (identity dedup can't catch them: neither peer
+//!   has seen the other's output yet). This is the residual, accepted race: the
+//!   debounce/quiet-window before a batch is eligible, plus `claim_ttl_ms` sized
+//!   above sync latency, make a same-instant tie rare rather than impossible. A
+//!   hard exactly-once across an unbounded-latency link would need a consensus
+//!   round we deliberately avoid; the min-DID convergence covers every case
+//!   *except* the sub-sync-round simultaneous claim.
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
