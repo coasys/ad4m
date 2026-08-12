@@ -413,17 +413,8 @@ pub async fn run_interpretation_with_strategy(
     // `InterpretationRun` is minted per pass and threaded onto every overlay.
     let run_id = uuid::Uuid::new_v4().to_string();
     let ran_at = chrono::Utc::now().timestamp_millis().to_string();
-    let bases = apply_with_overlay(
-        perspective,
-        shapes,
-        ops,
-        base_prefix,
-        &task,
-        run_id,
-        ran_at,
-        context,
-    )
-    .await?;
+    let bases =
+        apply_with_overlay(perspective, shapes, ops, &task, run_id, ran_at, context).await?;
 
     // The affected instance base URIs (created, updated, or given new
     // relations). Links are owned by `create_subject` / `update_subject`.

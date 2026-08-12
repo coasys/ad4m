@@ -18,12 +18,17 @@
 //! overlay per base**, updated in place across passes — no per-run accumulation.
 //!
 //! ## The one rule that protects humans (Update routing, §4)
-//! The engine overwrites a real value **in place only when it is still identical
-//! to the overlay's last-recorded `inferred/<p>`**:
-//!   * real == overlay inferred (or the real field is unset) → still the LLM's
-//!     own inference → overwrite the real prop *and* bump `inferred/<p>` to match.
-//!   * real ≠ overlay inferred → a human has diverged → **leave the real prop
-//!     untouched**, only set `inferred/<p> = proposed` as a suggestion.
+//! The engine overwrites a real value **only when it can prove the LLM owns it**;
+//! otherwise it stages the proposal in the overlay and leaves the real value
+//! untouched:
+//!   * real field unset → the LLM is filling in a fresh value → write it.
+//!   * base has an overlay and real == last-recorded `inferred/<p>` → the LLM
+//!     wrote it and it's untouched → overwrite *and* bump `inferred/<p>` to match.
+//!   * base has an overlay and real ≠ `inferred/<p>` → a human diverged → **leave
+//!     the real prop untouched**, only set `inferred/<p> = proposed` (suggestion).
+//!   * base has **no overlay** → the LLM never wrote this instance (human/seed
+//!     data) → **never overwrite**; mint an overlay recording `inferred/<p> =
+//!     proposed` as a suggestion only.
 
 use super::{class_local_name, InterpretationOp};
 use crate::agent::AgentContext;
@@ -47,11 +52,11 @@ pub(crate) const INTERP_OVERLAY_CLASS: &str = "InterpretationOverlay";
 /// Target-class URI of [`INTERP_OVERLAY_CLASS`] — used to detect prior
 /// registration and to test whether a base already carries an overlay.
 const INTERP_OVERLAY_TARGET_CLASS: &str = "ad4m://InterpretationOverlay";
-/// Type-flag predicate for the overlay (distinct from the real class's own
-/// `type` predicate so the overlay never clobbers the instance's real flag).
-const OVERLAY_TYPE_PRED: &str = "ad4m://type";
-/// Type-flag value the overlay constructor mints on the base.
-const OVERLAY_TYPE_FLAG: &str = "ad4m://interpretation-overlay";
+/// The overlay's mandatory `kind` predicate. It doubles as the class's
+/// discriminator: an overlay carries no separate type flag — its presence of a
+/// `kind` link (a required property) is what identifies a base as overlay-marked
+/// (both for [`overlay_exists`] and for `model_query` conformance matching).
+const OVERLAY_KIND_PRED: &str = "ad4m://interp/kind";
 /// Parallel-predicate prefix for the LLM's per-property value snapshot: the full
 /// predicate is `ad4m://interp/inferred/<realPredicate>`.
 const INFERRED_PREFIX: &str = "ad4m://interp/inferred/";
@@ -74,18 +79,22 @@ const INTERP_RUN_SDNA: &str = r#"{
   ]
 }"#;
 
-/// Hard-wired SDNA for the [`INTERP_OVERLAY_CLASS`] subject class. `kind` is a
-/// deterministic literal; `run` carries no `resolveLanguage` so its value (the
-/// run node's URI) is stored as a plain link target rather than literal-encoded.
-/// The dynamic `inferred/<p>` links are NOT declared here — their predicates
-/// vary per instance, so they are written directly as parallel links (see
-/// [`write_overlay`]).
+/// Hard-wired SDNA for the [`INTERP_OVERLAY_CLASS`] subject class.
+///
+/// The overlay carries **no dedicated type flag**: the mandatory `kind`
+/// (`create` | `update`) is the class discriminator, so the constructor mints a
+/// `kind` link (a placeholder value that the per-instance `kind` setter always
+/// overwrites in the same `create_subject` call). This keeps exactly one
+/// identifying link on the base instead of a redundant `type` + `kind` pair.
+/// `run` carries no `resolveLanguage` so its value (the run node's URI) is stored
+/// as a plain link target rather than literal-encoded. The dynamic `inferred/<p>`
+/// links are NOT declared here — their predicates vary per instance, so they are
+/// written directly as parallel links (see [`write_overlay`]).
 const INTERP_OVERLAY_SDNA: &str = r#"{
   "target_class":"ad4m://InterpretationOverlay",
   "interpretation_hint":"Provenance overlay marking an instance as LLM-inferred, with the last-inferred value snapshot.",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ad4m://type","target":"ad4m://interpretation-overlay"}],
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ad4m://interp/kind","target":"create"}],
   "properties":[
-    {"path":"ad4m://type","name":"type","has_value":"ad4m://interpretation-overlay","min_count":1,"max_count":1},
     {"path":"ad4m://interp/kind","name":"kind","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/kind","target":"value"}]},
     {"path":"ad4m://interp/run","name":"run","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/run","target":"value"}]}
   ]
@@ -182,15 +191,17 @@ async fn overlay_classes_present(perspective: &PerspectiveInstance) -> anyhow::R
         .any(|l| l.data.source == INTERP_OVERLAY_TARGET_CLASS))
 }
 
-/// Mint the per-pass [`INTERP_RUN_CLASS`] node under `base_prefix` and return its
-/// base URI (to thread onto the pass's overlays as `run`).
+/// Mint the per-pass [`INTERP_RUN_CLASS`] node in the `ad4m://interp/run/`
+/// coordination namespace and return its URI (to thread onto the pass's overlays
+/// as `run`). It lives *outside* the interpreted data tree — like the
+/// auto-processor's `ad4m://claim/…` nodes — so it never clutters the SoA graph;
+/// it is reached only by traversal from each affected base's overlay `run` link.
 pub(crate) async fn mint_interpretation_run(
     perspective: &mut PerspectiveInstance,
-    base_prefix: &str,
     meta: &InterpretationRunMeta,
     context: &AgentContext,
 ) -> anyhow::Result<String> {
-    let run_uri = format!("{base_prefix}interpretation-run/{}", meta.run_id);
+    let run_uri = format!("ad4m://interp/run/{}", meta.run_id);
     let values = serde_json::json!({
         "run_id": meta.run_id,
         "model": meta.model,
@@ -255,7 +266,6 @@ pub(crate) async fn apply_with_overlay(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
     ops: Vec<InterpretationOp>,
-    base_prefix: &str,
     task: &AITask,
     run_id: String,
     ran_at: String,
@@ -333,7 +343,7 @@ pub(crate) async fn apply_with_overlay(
     // Phase 3: mint the run + write the overlays (only if any were planned).
     if !overlays.is_empty() {
         let meta = InterpretationRunMeta::from_task(task, run_id, ran_at);
-        let run_uri = mint_interpretation_run(perspective, base_prefix, &meta, context).await?;
+        let run_uri = mint_interpretation_run(perspective, &meta, context).await?;
         for ow in &overlays {
             write_overlay(perspective, ow, &run_uri, context).await?;
         }
@@ -371,22 +381,29 @@ fn predicate_for(shapes: &[ModelShape], class: &str, name: &str) -> Option<Strin
         .map(|p| p.predicate.clone())
 }
 
-/// The human-divergence gate for an Update (§4). Reads the base's current real
+/// The human-divergence gate for an Update (§4). The engine only ever overwrites
+/// a real value it can prove the LLM owns — otherwise it stages the proposal in
+/// the overlay and leaves the real value alone. Reads the base's current real
 /// values (through the same `model_query` read path app code uses) and the
 /// overlay's last-inferred snapshot, then per property decides:
-///   * real unset → nothing to protect → **keep** the real write.
-///   * the base has **no overlay** yet (never LLM-touched — e.g. a
-///     human/seed-created node the LLM now refines for the first time) → the
-///     engine has no baseline to claim a human diverged, so it **keeps** the real
-///     write *and* establishes the overlay baseline (`inferred = proposed`). The
-///     protection engages on the *next* pass, once a baseline exists.
-///   * overlay exists and real == overlay `inferred/<p>` → still the LLM's own →
-///     **keep** the real write and bump `inferred/<p>`.
-///   * overlay exists and real ≠ overlay `inferred/<p>` → a human diverged →
-///     **drop** the real write; only record the proposed value as a suggestion.
+///   * real unset → nothing to overwrite → **keep** the real write (a fresh
+///     field the LLM is filling in).
+///   * the base has **no overlay** yet → the LLM did *not* write this instance
+///     (it's human/seed-created), so its real values are **not** the LLM's to
+///     overwrite → **drop** the real write; only stage `inferred = proposed` as
+///     an overlay suggestion. (This is the §4 protection: an existing value the
+///     LLM never authored is never silently clobbered.)
+///   * overlay exists and real == overlay `inferred/<p>` → the LLM wrote it and
+///     it hasn't been touched since → **keep** the real write and bump
+///     `inferred/<p>` (the LLM refining its own inference).
+///   * overlay exists and real ≠ overlay `inferred/<p>` → a human diverged from
+///     the last inference → **drop** the real write; only record the proposed
+///     value as a suggestion.
 ///
 /// Returns `(kept_real_values, inferred_snapshot)`. The inferred snapshot always
-/// carries every proposed property (kept or suggested), keyed by predicate.
+/// carries every proposed property (kept or suggested), keyed by predicate — so
+/// even a fully-gated (suggestion-only) update still establishes/updates the
+/// overlay baseline.
 async fn gate_update(
     perspective: &PerspectiveInstance,
     shapes: &[ModelShape],
@@ -415,9 +432,14 @@ async fn gate_update(
         let real_val = real.get(name);
         let inferred_val = inferred_now.get(&pred);
         let llm_owns = match real_val {
-            None => true,                         // nothing to protect
-            Some(_) if !has_overlay => true,      // first LLM touch → establish baseline
-            Some(rv) => inferred_val == Some(rv), // still the LLM's own value
+            // Fresh/unset field → the LLM filling it in is always allowed.
+            None => true,
+            // No overlay → the LLM never wrote this instance, so an existing real
+            // value is not its to overwrite → suggestion-only (protect the human).
+            Some(_) if !has_overlay => false,
+            // Overlay present → overwrite only while the value is still identical
+            // to the last inference (untouched); a human edit diverges it → drop.
+            Some(rv) => inferred_val == Some(rv),
         };
         if llm_owns {
             kept.insert(name.clone(), proposed.clone());
@@ -486,13 +508,13 @@ async fn read_inferred_values(
     Ok(out)
 }
 
-/// True once `base` carries the overlay type flag.
+/// True once `base` carries an overlay — detected by its mandatory `kind` link
+/// (the overlay's sole discriminator; there is no separate type flag).
 async fn overlay_exists(perspective: &PerspectiveInstance, base: &str) -> anyhow::Result<bool> {
     let links = perspective
         .get_links(&LinkQuery {
             source: Some(base.to_string()),
-            predicate: Some(OVERLAY_TYPE_PRED.to_string()),
-            target: Some(OVERLAY_TYPE_FLAG.to_string()),
+            predicate: Some(OVERLAY_KIND_PRED.to_string()),
             ..Default::default()
         })
         .await?;
@@ -659,7 +681,6 @@ mod tests {
             perspective,
             shapes,
             ops,
-            "soa://ext/",
             &dummy_task(),
             run_id.to_string(),
             "1700000000000".to_string(),
@@ -757,13 +778,16 @@ mod tests {
         let flags = p
             .get_links(&LinkQuery {
                 source: Some(base.to_string()),
-                predicate: Some(OVERLAY_TYPE_PRED.to_string()),
-                target: Some(OVERLAY_TYPE_FLAG.to_string()),
+                predicate: Some(OVERLAY_KIND_PRED.to_string()),
                 ..Default::default()
             })
             .await
             .unwrap();
-        assert_eq!(flags.len(), 1, "exactly one overlay type flag on the base");
+        assert_eq!(
+            flags.len(),
+            1,
+            "exactly one overlay kind link identifies the base (no separate type flag)"
+        );
 
         // The run link points at a minted InterpretationRun carrying our run_id.
         let run_links = p
@@ -826,12 +850,11 @@ mod tests {
             "an unchanged (LLM-owned) node is overwritten in place on pass 2"
         );
 
-        // Exactly ONE overlay flag — updated in place, not accumulated per run.
+        // Exactly ONE overlay kind link — updated in place, not accumulated per run.
         let flags = p
             .get_links(&LinkQuery {
                 source: Some(base.to_string()),
-                predicate: Some(OVERLAY_TYPE_PRED.to_string()),
-                target: Some(OVERLAY_TYPE_FLAG.to_string()),
+                predicate: Some(OVERLAY_KIND_PRED.to_string()),
                 ..Default::default()
             })
             .await
@@ -925,6 +948,66 @@ mod tests {
             decoded_targets(&p, base, &inferred_pred("ns://title")).await,
             vec![json!("Second LLM suggestion")],
             "the overlay's inferred/<p> is updated to the new suggestion"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_llm_instance_is_never_overwritten_only_gets_overlay_suggestion() {
+        // §4 core protection (review fix): a base the LLM did NOT write (no
+        // overlay — e.g. human/seed-created) must never have its real values
+        // overwritten by an interpretation pass. The pass may only stage the
+        // proposal in a freshly-minted overlay as a suggestion.
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        let base = "soa://ext/intention/seed-1";
+
+        // A non-LLM actor creates the instance directly (no overlay is minted).
+        p.create_subject(
+            SubjectClassOption {
+                class_name: Some("Intention".to_string()),
+                query: None,
+            },
+            base.to_string(),
+            Some(json!({ "title": "Human authored title" })),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed create");
+        assert!(
+            !overlay_exists(&p, base).await.unwrap(),
+            "sanity: a plain create leaves no overlay on the base"
+        );
+
+        // The LLM proposes a different value for the same field on its first pass.
+        run_ops(
+            &mut p,
+            &shapes,
+            vec![update_op(base, &[("title", json!("LLM proposed title"))])],
+            "run-1",
+            &ctx,
+        )
+        .await;
+
+        // Real value is LEFT UNTOUCHED — the LLM never owned this instance.
+        assert_eq!(
+            real_title(&p, base).await.as_deref(),
+            Some("Human authored title"),
+            "an instance the LLM never wrote must not be overwritten on first touch"
+        );
+        // An overlay is now established, recording the proposal as a suggestion.
+        assert!(
+            overlay_exists(&p, base).await.unwrap(),
+            "the pass still establishes an overlay baseline"
+        );
+        assert_eq!(
+            decoded_targets(&p, base, &inferred_pred("ns://title")).await,
+            vec![json!("LLM proposed title")],
+            "the overlay records the LLM's value as an inferred suggestion only"
+        );
+        assert_eq!(
+            decoded_targets(&p, base, "ad4m://interp/kind").await,
+            vec![json!("update")],
+            "a suggestion-only overlay on an existing node records kind=update"
         );
     }
 
