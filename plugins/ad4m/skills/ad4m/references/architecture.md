@@ -14,8 +14,8 @@ A perspective is a subjective graph of links — a personal knowledge graph. Eve
 
 ```
 Perspective "My Notes"
-├── Link: (ad4m://self) --has_name--> (literal://string:Data)
-├── Link: (ad4m://self) --has_role--> (literal://string:AI Agent)
+├── Link: (ad4m://self) --has_name--> (literal:string:Data)
+├── Link: (ad4m://self) --has_role--> (literal:string:AI Agent)
 └── Link: (did:key:z6Mk...) --authored--> (Qm...expression-hash)
 ```
 
@@ -54,9 +54,9 @@ interface LinkExpression {
 ### URI Conventions
 
 - `ad4m://self` — the perspective itself
-- `literal://string:value` — inline string literal
-- `literal://number:42` — inline number
-- `literal://json:{"key":"value"}` — inline JSON
+- `literal:string:value` — inline string literal
+- `literal:number:42` — inline number
+- `literal:json:{"key":"value"}` — inline JSON
 - `did:key:z6Mk...` — agent identity
 - `Qm...` — content-addressed expression (language-specific)
 
@@ -229,7 +229,7 @@ Once registered, dynamic tools are auto-generated:
 When you set `message.body = "Hello"` via a subject class:
 
 ```
-Link: (<message-instance-uri>) --message://body--> (literal://string:Hello)
+Link: (<message-instance-uri>) --message://body--> (literal:string:Hello)
 ```
 
 When you add to a collection `message.reactions.add(uri)`:
@@ -243,8 +243,8 @@ Link: (<message-instance-uri>) --message://reactions--> (<reaction-uri>)
 SHACL definitions are decomposed into RDF links in the perspective. Key link patterns:
 
 ```
-(ad4m://self) --ad4m://has_shacl--> (literal://string:shacl://Message)
-(literal://string:shacl://Message) --ad4m://shacl_shape_uri--> (message://MessageShape)
+(ad4m://self) --ad4m://has_shacl--> (literal:string:shacl://Message)
+(literal:string:shacl://Message) --ad4m://shacl_shape_uri--> (message://MessageShape)
 (message://Message) --rdf://type--> (ad4m://SubjectClass)
 (message://MessageShape) --sh://property--> (message://Message.body)
 ```
