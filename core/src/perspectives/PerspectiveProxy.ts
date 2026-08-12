@@ -560,10 +560,9 @@ export class PerspectiveProxy {
      * @param transcript ordered `{ speaker, text }` turns
      * @param basePrefix URI namespace for new instance identities, e.g. `soa://ext/`
      * @param classes local names of the subject classes to extract into; omit for all
-     * @param linkStatus `'local'` (default) or `'shared'`
      */
-    async runInterpretation(transcript: TranscriptTurn[], basePrefix: string, classes?: string[], linkStatus?: LinkStatus): Promise<string[]> {
-        return await this.#client.runInterpretation(this.#handle.uuid, transcript, basePrefix, classes, linkStatus)
+    async runInterpretation(transcript: TranscriptTurn[], basePrefix: string, classes?: string[]): Promise<string[]> {
+        return await this.#client.runInterpretation(this.#handle.uuid, transcript, basePrefix, classes)
     }
 
     /**

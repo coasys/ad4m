@@ -1029,10 +1029,9 @@ async fn run_interpretation_handler(
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
-    // `body.link_status` is accepted for backward-compat but is now ignored:
-    // interpretation writes via `create_subject`, so link status derives from each
-    // class's SDNA `local` flags (same rule as app code).
-    let _ = body.link_status.as_ref();
+    // Interpretation writes via `create_subject`, so link status derives from each
+    // class's SDNA `local` flags (same rule as app code) — there is no caller-facing
+    // link-status knob on this path.
 
     // Target classes: the caller's explicit selection, or (default) all subject
     // classes registered in the perspective.

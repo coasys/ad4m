@@ -15,9 +15,4 @@ basePrefix: string,
  * Local names of the subject classes to extract into (e.g. `["Task","Belief"]`).
  * `None`/empty selects all subject classes registered in the perspective.
  */
-classes: Array<string> | null,
-/**
- * "local" (default) or "shared". Defaults to local so LLM-generated links
- * on shared/neighbourhood perspectives are not auto-published.
- */
-linkStatus: string | null, };
+classes: Array<string> | null, };

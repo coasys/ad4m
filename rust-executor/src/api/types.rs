@@ -553,9 +553,6 @@ pub struct RunInterpretationRequest {
     /// Local names of the subject classes to extract into (e.g. `["Task","Belief"]`).
     /// `None`/empty selects all subject classes registered in the perspective.
     pub classes: Option<Vec<String>>,
-    /// "local" (default) or "shared". Defaults to local so LLM-generated links
-    /// on shared/neighbourhood perspectives are not auto-published.
-    pub link_status: Option<String>,
 }
 
 /// Register a neighbourhood auto-processor on a perspective. The executor's

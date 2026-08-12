@@ -262,10 +262,10 @@ export class PerspectiveClient {
      * or CPU-only models. We raise the default 30s RPC timeout here to 20 min
      * (matches the CI `--timeout 1200000` for the interpretation tests).
      */
-    async runInterpretation(uuid: string, transcript: TranscriptTurn[], basePrefix: string, classes?: string[], linkStatus?: LinkStatus): Promise<string[]> {
+    async runInterpretation(uuid: string, transcript: TranscriptTurn[], basePrefix: string, classes?: string[]): Promise<string[]> {
         const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
         return this.#apiClient.call<string[]>(
-            'perspective.runInterpretation', { uuid, transcript, basePrefix, classes, linkStatus },
+            'perspective.runInterpretation', { uuid, transcript, basePrefix, classes },
             RUN_INTERPRETATION_TIMEOUT_MS,
         )
     }
