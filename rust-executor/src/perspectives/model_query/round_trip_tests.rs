@@ -567,3 +567,179 @@ fn round_trip_no_resolve_options_is_deterministic() {
         "no resolve options → deterministic literal storage (perf default)",
     );
 }
+
+/// End-to-end test mimicking the JS integration test pipeline:
+/// SHACL shape → store → load shape → add data → model query with operators.
+#[tokio::test]
+async fn e2e_shacl_shape_with_where_ops() {
+    use super::query::execute_model_query;
+    use super::test_helpers::StaticShapeResolver;
+    use super::types::{ModelQueryInput, WhereCondition, WhereOps};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    let store = SparqlStore::new(None).unwrap();
+
+    let shacl_json = r#"{
+        "target_class": "ns://TestPost",
+        "properties": [
+            {
+                "path": "test://post_type",
+                "name": "type",
+                "min_count": 1,
+                "max_count": 1,
+                "has_value": "test://post",
+                "resolve_language": null
+            },
+            {
+                "path": "test://title",
+                "name": "title",
+                "datatype": "xsd://string",
+                "resolve_language": "literal"
+            },
+            {
+                "path": "test://view_count",
+                "name": "viewCount",
+                "datatype": "xsd://integer",
+                "resolve_language": "literal"
+            }
+        ]
+    }"#;
+
+    let class_name = "TestPost";
+    let target_class_uri = "ns://TestPost";
+    let shape_uri = "ns://TestPostShape";
+
+    let shacl_links = parse_shacl_to_links(shacl_json, class_name).expect("parse SHACL");
+    let mut all_links = vec![
+        Link {
+            source: target_class_uri.to_string(),
+            predicate: Some("rdf://type".to_string()),
+            target: "ad4m://SubjectClass".to_string(),
+        },
+        Link {
+            source: target_class_uri.to_string(),
+            predicate: Some("ad4m://shape".to_string()),
+            target: shape_uri.to_string(),
+        },
+    ];
+    all_links.extend(shacl_links);
+    for link in all_links {
+        store.add_link(&make_link_for_round_trip(link)).unwrap();
+    }
+
+    let shape = load_shape(&store, class_name).expect("load shape");
+    eprintln!("[e2e] Loaded shape properties:");
+    for p in &shape.properties {
+        eprintln!(
+            "  {} predicate={} resolve_language={:?} is_flag={} is_required={} initial={:?}",
+            p.name, p.predicate, p.resolve_language, p.is_flag, p.is_required, p.initial_value
+        );
+    }
+
+    let ts = "1700000000000";
+    let items = [
+        "test://post-1",
+        "test://post-2",
+        "test://post-3",
+        "test://post-4",
+        "test://post-5",
+    ];
+    let titles = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+    let counts: [f64; 5] = [10.0, 20.0, 30.0, 40.0, 50.0];
+
+    for (i, item) in items.iter().enumerate() {
+        store
+            .add_link(&make_link_for_round_trip(Link {
+                source: item.to_string(),
+                predicate: Some("test://post_type".to_string()),
+                target: "test://post".to_string(),
+            }))
+            .unwrap();
+        store
+            .add_link(&make_link_for_round_trip(Link {
+                source: item.to_string(),
+                predicate: Some("test://title".to_string()),
+                target: format!(
+                    "literal:string:{}",
+                    percent_encoding::utf8_percent_encode(
+                        titles[i],
+                        percent_encoding::NON_ALPHANUMERIC
+                    )
+                ),
+            }))
+            .unwrap();
+        let count_target = if counts[i].fract() == 0.0 {
+            format!("literal:number:{}", counts[i] as i64)
+        } else {
+            format!("literal:number:{}", counts[i])
+        };
+        store
+            .add_link(&make_link_for_round_trip(Link {
+                source: item.to_string(),
+                predicate: Some("test://view_count".to_string()),
+                target: count_target,
+            }))
+            .unwrap();
+    }
+
+    let shape_arc = Arc::new(shape);
+    let resolver = StaticShapeResolver::new();
+    resolver.register_arc(class_name, shape_arc.clone());
+
+    // Test: gt numeric
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "viewCount".to_string(),
+        WhereCondition::Ops(WhereOps {
+            gt: Some(30.0),
+            ..Default::default()
+        }),
+    );
+    let result = execute_model_query(
+        &store,
+        shape_arc.as_ref(),
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "e2e: gt:30 should match 40 and 50, got {} instances: {:?}",
+        result.instances.len(),
+        result.instances
+    );
+
+    // Test: not string
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "title".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(serde_json::Value::String("Alpha".to_string())),
+            ..Default::default()
+        }),
+    );
+    let result = execute_model_query(
+        &store,
+        shape_arc.as_ref(),
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        4,
+        "e2e: not:Alpha should match 4, got {} instances: {:?}",
+        result.instances.len(),
+        result.instances
+    );
+}

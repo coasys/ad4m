@@ -717,176 +717,111 @@ pub(super) fn build_query_patterns(
                     }
                     WhereCondition::Ops(ops) => {
                         let var = format!("?_pw_{safe_name}");
+                        let val_var = format!("?_pw_{safe_name}_v");
                         where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
+                        // Compare on the lexical string rather than on a typed
+                        // literal term: Oxigraph treats a simple literal and an
+                        // `xsd:string` literal as distinct terms, so `?v != "x"^^xsd:string`
+                        // silently fails to match values stored either way.
+                        //
+                        // Deterministic literals expose their value via `STR()`
+                        // directly; envelope / custom-language values need
+                        // `parse_literal` first to reach the inner `data`.
+                        let val_src = if is_literal_prop {
+                            var.clone()
+                        } else {
+                            format!("<ad4m://fn/parse_literal>({var})")
+                        };
+                        where_patterns.push(format!("    BIND(STR({val_src}) AS {val_var})"));
 
                         let mut filters = Vec::new();
 
-                        if is_literal_prop {
-                            // Deterministic typed-literal storage: compare directly
-                            // against `?val` using SPARQL's native xsd datatype
-                            // semantics so Oxigraph's index serves the comparison.
-                            if let Some(ref not_val) = ops.not {
-                                match not_val {
-                                    Value::String(s) => {
-                                        let escaped = escape_sparql_string(s);
+                        if let Some(ref not_val) = ops.not {
+                            match not_val {
+                                Value::String(s) => {
+                                    filters.push(format!(
+                                        "{val_var} != \"{}\"",
+                                        escape_sparql_string(s)
+                                    ));
+                                }
+                                Value::Number(n) => {
+                                    let n_f64 = n.as_f64().unwrap_or(0.0);
+                                    let n_str = if n_f64.fract() == 0.0 {
+                                        format!("{}", n_f64 as i64)
+                                    } else {
+                                        format!("{n_f64}")
+                                    };
+                                    filters.push(format!("{val_var} != \"{n_str}\""));
+                                }
+                                Value::Bool(b) => {
+                                    filters.push(format!("{val_var} != \"{b}\""));
+                                }
+                                Value::Array(arr) => {
+                                    let items: Vec<String> = arr
+                                        .iter()
+                                        .filter_map(|item| match item {
+                                            Value::String(s) => {
+                                                Some(format!("\"{}\"", escape_sparql_string(s)))
+                                            }
+                                            Value::Number(n) => {
+                                                let f = n.as_f64().unwrap_or(0.0);
+                                                let s = if f.fract() == 0.0 {
+                                                    format!("{}", f as i64)
+                                                } else {
+                                                    format!("{f}")
+                                                };
+                                                Some(format!("\"{s}\""))
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    if !items.is_empty() {
                                         filters.push(format!(
-                                            "{var} != \"{escaped}\"^^<{XSD_STRING}>"
+                                            "{val_var} NOT IN ({})",
+                                            items.join(", ")
                                         ));
                                     }
-                                    Value::Number(n) => {
-                                        let n_f64 = n.as_f64().unwrap_or(0.0);
-                                        if let Some(typed) = typed_number_literal(n_f64) {
-                                            filters.push(format!("{var} != {typed}"));
-                                        }
-                                    }
-                                    Value::Bool(b) => {
-                                        filters.push(format!("{var} != \"{b}\"^^<{XSD_BOOLEAN}>"));
-                                    }
-                                    Value::Array(arr) => {
-                                        let items: Vec<String> = arr
-                                            .iter()
-                                            .filter_map(|item| match item {
-                                                Value::String(s) => Some(format!(
-                                                    "\"{}\"^^<{XSD_STRING}>",
-                                                    escape_sparql_string(s)
-                                                )),
-                                                Value::Number(n) => {
-                                                    let f = n.as_f64().unwrap_or(0.0);
-                                                    typed_number_literal(f)
-                                                }
-                                                Value::Bool(b) => {
-                                                    Some(format!("\"{b}\"^^<{XSD_BOOLEAN}>"))
-                                                }
-                                                _ => None,
-                                            })
-                                            .collect();
-                                        if !items.is_empty() {
-                                            filters.push(format!(
-                                                "{var} NOT IN ({})",
-                                                items.join(", ")
-                                            ));
-                                        }
-                                    }
-                                    _ => {}
                                 }
+                                _ => {}
                             }
+                        }
+
+                        let has_numeric = ops.gt.is_some()
+                            || ops.gte.is_some()
+                            || ops.lt.is_some()
+                            || ops.lte.is_some()
+                            || ops.between.is_some();
+
+                        if has_numeric {
+                            let num_var = format!("?_pw_{safe_name}_num");
+                            where_patterns
+                                .push(format!("    BIND(<{XSD_DOUBLE}>({val_var}) AS {num_var})"));
                             if let Some(gt) = ops.gt {
-                                match typed_number_literal(gt) {
-                                    Some(typed) => filters.push(format!("{var} > {typed}")),
-                                    None => filters.push("false".to_string()),
-                                }
+                                filters.push(format!("{num_var} > {gt}"));
                             }
                             if let Some(gte) = ops.gte {
-                                match typed_number_literal(gte) {
-                                    Some(typed) => filters.push(format!("{var} >= {typed}")),
-                                    None => filters.push("false".to_string()),
-                                }
+                                filters.push(format!("{num_var} >= {gte}"));
                             }
                             if let Some(lt) = ops.lt {
-                                match typed_number_literal(lt) {
-                                    Some(typed) => filters.push(format!("{var} < {typed}")),
-                                    None => filters.push("false".to_string()),
-                                }
+                                filters.push(format!("{num_var} < {lt}"));
                             }
                             if let Some(lte) = ops.lte {
-                                match typed_number_literal(lte) {
-                                    Some(typed) => filters.push(format!("{var} <= {typed}")),
-                                    None => filters.push("false".to_string()),
-                                }
+                                filters.push(format!("{num_var} <= {lte}"));
                             }
                             if let Some((lo, hi)) = ops.between {
-                                match (typed_number_literal(lo), typed_number_literal(hi)) {
-                                    (Some(lo_t), Some(hi_t)) => {
-                                        filters.push(format!("{var} >= {lo_t} && {var} <= {hi_t}"))
-                                    }
-                                    _ => filters.push("false".to_string()),
-                                }
+                                filters.push(format!("{num_var} >= {lo} && {num_var} <= {hi}"));
                             }
-                            if let Some(ref contains_val) = ops.contains {
-                                let needle = match contains_val {
-                                    Value::String(s) => s.clone(),
-                                    other => other.to_string(),
-                                };
-                                filters.push(format!(
-                                    "CONTAINS(LCASE(STR({var})), LCASE(\"{}\"))",
-                                    escape_sparql_string(&needle)
-                                ));
-                            }
-                        } else {
-                            // Expression-resolved storage (signed literal envelope
-                            // or a custom resolveLanguage). The stored term is the
-                            // envelope, so unwrap the inner value with
-                            // `fn/parse_literal` and compare on the decoded text /
-                            // numeric cast. Not index-served, but correct.
-                            let pv = format!("<ad4m://fn/parse_literal>({var})");
-                            let num = format!("<{XSD_DOUBLE}>({pv})");
-                            if let Some(ref not_val) = ops.not {
-                                match not_val {
-                                    Value::String(s) => {
-                                        filters.push(format!(
-                                            "{pv} != \"{}\"",
-                                            escape_sparql_string(s)
-                                        ));
-                                    }
-                                    Value::Number(n) => {
-                                        filters.push(format!(
-                                            "{num} != {}",
-                                            n.as_f64().unwrap_or(0.0)
-                                        ));
-                                    }
-                                    Value::Bool(b) => {
-                                        filters.push(format!("{pv} != \"{b}\""));
-                                    }
-                                    Value::Array(arr) => {
-                                        let items: Vec<String> = arr
-                                            .iter()
-                                            .filter_map(|item| match item {
-                                                Value::String(s) => {
-                                                    Some(format!("\"{}\"", escape_sparql_string(s)))
-                                                }
-                                                Value::Number(n) => Some(format!(
-                                                    "\"{}\"",
-                                                    n.as_f64().unwrap_or(0.0)
-                                                )),
-                                                Value::Bool(b) => Some(format!("\"{b}\"")),
-                                                _ => None,
-                                            })
-                                            .collect();
-                                        if !items.is_empty() {
-                                            filters.push(format!(
-                                                "{pv} NOT IN ({})",
-                                                items.join(", ")
-                                            ));
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            if let Some(gt) = ops.gt {
-                                filters.push(format!("{num} > {gt}"));
-                            }
-                            if let Some(gte) = ops.gte {
-                                filters.push(format!("{num} >= {gte}"));
-                            }
-                            if let Some(lt) = ops.lt {
-                                filters.push(format!("{num} < {lt}"));
-                            }
-                            if let Some(lte) = ops.lte {
-                                filters.push(format!("{num} <= {lte}"));
-                            }
-                            if let Some((lo, hi)) = ops.between {
-                                filters.push(format!("{num} >= {lo} && {num} <= {hi}"));
-                            }
-                            if let Some(ref contains_val) = ops.contains {
-                                let needle = match contains_val {
-                                    Value::String(s) => s.clone(),
-                                    other => other.to_string(),
-                                };
-                                filters.push(format!(
-                                    "CONTAINS(LCASE({pv}), LCASE(\"{}\"))",
-                                    escape_sparql_string(&needle)
-                                ));
-                            }
+                        }
+
+                        if let Some(ref contains_val) = ops.contains {
+                            let needle = match contains_val {
+                                Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            filters.push(format!(
+                                "CONTAINS(LCASE({val_var}), LCASE(\"{}\"))",
+                                escape_sparql_string(&needle)
+                            ));
                         }
 
                         if !filters.is_empty() {

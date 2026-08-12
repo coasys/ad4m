@@ -2275,7 +2275,7 @@ describe("Prolog + Literals", () => {
 
                         // Poll until callback called. 60s upper bound matches
                         // the surrounding waitForCondition timeouts in this
-                        // suite. Even with the previous 30s ceiling the test
+                        // suite. Even with the previous 5s ceiling the test
                         // still flaked on integration-tests-js #17171 after
                         // the dev merge pulled in the lazy-load resolveLanguage
                         // change (#848), which adds first-fetch latency on a
