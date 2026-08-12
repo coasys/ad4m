@@ -18,7 +18,7 @@ export class ExtTask extends Ad4mModel {
   @Flag({ through: "soa://type", value: "soa://task" })
   type = "soa://task";
 
-  @Property({ through: "soa://title", required: true, interpretationHint: "Imperative summary of the task." })
+  @Property({ through: "soa://title", required: true, identity: true, interpretationHint: "Imperative summary of the task." })
   title: string = "";
 
   @Property({ through: "soa://owner", interpretationHint: "Person responsible for the task, if stated." })
@@ -33,7 +33,7 @@ export class ExtBelief extends Ad4mModel {
   @Flag({ through: "soa://type", value: "soa://belief" })
   type = "soa://belief";
 
-  @Property({ through: "soa://title", required: true, interpretationHint: "One-sentence statement of the claim." })
+  @Property({ through: "soa://title", required: true, identity: true, interpretationHint: "One-sentence statement of the claim." })
   title: string = "";
 }
 
@@ -45,6 +45,6 @@ export class ExtQuestion extends Ad4mModel {
   @Flag({ through: "soa://type", value: "soa://question" })
   type = "soa://question";
 
-  @Property({ through: "soa://title", required: true, interpretationHint: "The question, phrased as a question." })
+  @Property({ through: "soa://title", required: true, identity: true, interpretationHint: "The question, phrased as a question." })
   title: string = "";
 }

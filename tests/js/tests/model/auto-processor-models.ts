@@ -20,6 +20,7 @@ export class ConversationSubgroup extends Ad4mModel {
     through: "ns://name",
     required: true,
     resolveLanguage: "literal",
+    identity: true,
     interpretationHint: "Short label for the topic (2-5 words).",
   })
   name: string = "";

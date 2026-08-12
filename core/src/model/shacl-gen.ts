@@ -192,6 +192,12 @@ export function buildSHACL(
             propShape.interpretationHint = propMeta.interpretationHint;
         }
 
+        // Declared-identity dedup key for the generic LLM interpreter
+        // (emitted as `ad4m://identity` by SHACLShape.toLinks()).
+        if (propMeta.identity) {
+            propShape.identity = true;
+        }
+
         // ── Setter actions ──────────────────────────────────────────────
         if (propMeta.prologSetter) {
             console.warn(

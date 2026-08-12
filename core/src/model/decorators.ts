@@ -344,6 +344,17 @@ export interface PropertyOptions {
      * extractor prompt can quote it verbatim.
      */
     interpretationHint?: string;
+
+    /**
+     * Marks this property as the class's **identity** (dedup key) for the
+     * generic LLM interpreter: on re-runs, two proposed instances of the same
+     * class with an equal (normalized/semantic) value on the identity property
+     * are treated as the same instance rather than duplicated. Emitted as an
+     * `ad4m://identity` link on the property shape and read back by the Rust
+     * model query (`ShapeProperty.identity`). At most one property per class
+     * should set this.
+     */
+    identity?: boolean;
 }
 
 

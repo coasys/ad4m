@@ -215,6 +215,11 @@ export interface SHACLPropertyShape {
    *  as an `ad4m://interpretation_hint` link on the property shape node and
    *  surfaced on `ShapeProperty.interpretation_hint` by the Rust model query. */
   interpretationHint?: string;
+
+  /** AD4M-specific: marks this property as the class's identity (dedup key)
+   *  for the generic LLM interpreter. Emitted as an `ad4m://identity` link
+   *  (`literal:string:true`) and read back on `ShapeProperty.identity`. */
+  identity?: boolean;
 }
 
 /**
@@ -666,6 +671,14 @@ export class SHACLShape {
           target: `literal:string:${prop.interpretationHint}`
         });
       }
+
+      if (prop.identity) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://identity",
+          target: `literal:string:true`
+        });
+      }
     }
 
     return links;
@@ -977,6 +990,14 @@ export class SHACLShape {
         prop.interpretationHint = interpretationHintLink.target.replace(
           /^literal:\/\/string:|^literal:string:/, ''
         );
+      }
+
+      const identityLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://identity"
+      );
+      if (identityLink) {
+        prop.identity =
+          identityLink.target.replace(/^literal:\/\/string:|^literal:string:/, '') === 'true';
       }
 
       const transformLink = links.find(l =>
