@@ -3184,3 +3184,36 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod parse_literal_tests {
+    use super::parse_literal_fn;
+    use oxigraph::model::{Literal, Term};
+
+    fn parsed(value: &str) -> String {
+        let term: Term = Literal::new_simple_literal(value).into();
+        match parse_literal_fn(&[term]) {
+            Some(Term::Literal(l)) => l.value().to_string(),
+            other => panic!("expected a literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_literal_returns_only_the_data_field_not_author() {
+        // A signed message expression: parse_literal must return only `.data`, so
+        // a mention query matching on the parsed target never wakes on the author
+        // DID sitting beside the content. Regression guard for the self-wake path.
+        let v = "literal:json:{\"author\":\"did:key:zAgentDID\",\"timestamp\":\"t\",\"data\":\"weekly harvest report\"}";
+        let out = parsed(v);
+        assert_eq!(out, "weekly harvest report");
+        assert!(
+            !out.contains("zAgentDID"),
+            "author DID must not appear in the matched text: {out}"
+        );
+    }
+
+    #[test]
+    fn string_literal_is_url_decoded() {
+        assert_eq!(parsed("literal:string:hello%20world"), "hello world");
+    }
+}

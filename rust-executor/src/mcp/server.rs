@@ -30,11 +30,11 @@ pub struct McpContext {
 pub struct McpServerConfig {
     /// Port to listen on (default: 3001)
     pub port: u16,
-    /// Host to bind to (default: 0.0.0.0). Binds all interfaces so the MCP
+    /// Host to bind to. Read from `MCP_HOST`, defaulting to `0.0.0.0` so the MCP
     /// server stays reachable from sibling containers (an agent harness on the
     /// same Docker network); access stays gated by `--admin-credential`.
-    /// SECURITY: on a bare-metal node this also exposes MCP to the LAN — the
-    /// local-security review must confirm a credential is always required.
+    /// SECURITY: `0.0.0.0` also exposes MCP to the LAN on a bare-metal node — a
+    /// deployment that wants to restrict it sets `MCP_HOST=127.0.0.1`.
     pub host: String,
 }
 
@@ -42,7 +42,7 @@ impl Default for McpServerConfig {
     fn default() -> Self {
         Self {
             port: 3001,
-            host: "0.0.0.0".to_string(),
+            host: std::env::var("MCP_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
         }
     }
 }

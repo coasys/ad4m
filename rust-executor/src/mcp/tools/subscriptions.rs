@@ -300,10 +300,16 @@ pub fn build_mention_query(names: &[String], did: &str, body_predicate: Option<&
     }
 }
 
-/// Escape a string for embedding inside a SPARQL double-quoted literal:
-/// backslash first, then double-quote.
+/// Escape a string for embedding inside a SPARQL double-quoted literal.
+/// Backslash first, then the double-quote and the control characters that a
+/// STRING_LITERAL2 forbids raw (CR/LF/TAB) — a term carrying a newline would
+/// otherwise produce an unparseable query.
 fn escape_sparql_literal(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 /// Build a mention-subscription id keyed on the perspective.
@@ -374,6 +380,16 @@ mod tests {
             !q.contains("\"a\"b"),
             "raw unescaped quote must not appear: {q}"
         );
+    }
+
+    #[test]
+    fn query_escapes_control_characters_in_terms() {
+        // SPARQL STRING_LITERAL2 forbids raw CR/LF/TAB; a term carrying them must
+        // be escaped, not embedded raw, or the query fails to parse.
+        let q = build_mention_query(&["a\nb\tc\rd".to_string()], "did:key:zX", None);
+        assert!(q.contains("a\\nb\\tc\\rd"), "control chars escaped: {q:?}");
+        assert!(!q.contains('\n'), "no raw newline in the query: {q:?}");
+        assert!(!q.contains('\t'), "no raw tab in the query: {q:?}");
     }
 
     #[test]
