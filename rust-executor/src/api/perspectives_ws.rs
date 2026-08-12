@@ -1115,6 +1115,7 @@ async fn add_auto_processor_handler(
     let cfg = AutoProcessorConfig {
         processor_id: body.processor_id.clone(),
         source_scope_query: body.source_scope_query,
+        base_prefix: body.base_prefix,
         interpretation_classes: body.interpretation_classes,
         debounce_ms: body.debounce_ms,
         batch_min: body.batch_min.unwrap_or(1),

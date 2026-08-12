@@ -573,6 +573,10 @@ pub struct AddAutoProcessorRequest {
     /// SPARQL `SELECT ?speaker ?text` over the source items to interpret (e.g.
     /// a channel's messages).
     pub source_scope_query: String,
+    /// URI namespace new interpreted instances are minted under (the spawn
+    /// scope), e.g. `soa://project/42/`. Omit for a per-processor default.
+    #[serde(default)]
+    pub base_prefix: Option<String>,
     /// Class URIs (SHACL `target_class`) to materialize each pass.
     pub interpretation_classes: Vec<String>,
     /// Quiet-window (ms) after the last new item before a pass runs.
@@ -587,9 +591,6 @@ pub struct AddAutoProcessorRequest {
     pub max_wait_ms: Option<i64>,
     /// How long a won claim is authoritative before peers may re-claim (ms).
     pub claim_ttl_ms: i64,
-    /// Optional LLM model tag override (else the executor's default).
-    #[serde(default)]
-    pub llm_model: Option<String>,
     /// Optional serialized `DedupStrategy` JSON (else NormalizedString).
     #[serde(default)]
     pub dedup_strategy_json: Option<String>,

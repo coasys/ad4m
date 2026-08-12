@@ -38,6 +38,13 @@ export interface AddAutoProcessorConfig {
   processorId: string;
   /** SPARQL `SELECT ?speaker ?text` over the source items to interpret. */
   sourceScopeQuery: string;
+  /**
+   * URI namespace new interpreted instances are minted under (the "spawn
+   * scope"), e.g. `soa://project/42/`. Omit for a per-processor default
+   * (`ad4m://autoprocessor/<processorId>/instance/`). Point this and
+   * `sourceScopeQuery` at the same subtree to confine a processor to it.
+   */
+  basePrefix?: string;
   /** Class URIs (SHACL `target_class`) to materialize each pass. */
   interpretationClasses: string[];
   /** Quiet-window (ms) after the last new item before a pass runs. */
