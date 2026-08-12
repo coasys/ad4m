@@ -47,6 +47,22 @@ async function registerLlm(ad4m: any): Promise<void> {
 export default function autoProcessorNeighbourhoodTests(testContext: TestContext) {
   return () => {
     describe("Auto-processor across two executors", () => {
+      // This is a real-LLM + two-executor neighbourhood e2e: it needs a
+      // reachable Ollama endpoint (INTERPRETATION_E2E_BASE_URL). The default
+      // `integration-tests-js` CI job runs on a runner without an LLM, so this
+      // test only runs when explicitly opted in (set on the Marvin/self-hosted
+      // runner or a dev box with the LLM tunnelled). Skipped — never silently
+      // dropped — everywhere else.
+      before(function () {
+        if (!process.env.INTERPRETATION_E2E_NEIGHBOURHOOD) {
+          console.log(
+            "[auto-processor-neighbourhood] SKIP: set INTERPRETATION_E2E_NEIGHBOURHOOD=1 " +
+              "with a reachable LLM (INTERPRETATION_E2E_BASE_URL) to run this two-executor e2e.",
+          );
+          this.skip();
+        }
+      });
+
       it("processes a shared channel exactly once (claim coordinates)", async () => {
         const alice = testContext.alice;
         const bob = testContext.bob;
