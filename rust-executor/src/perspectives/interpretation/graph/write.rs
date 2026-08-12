@@ -1,12 +1,51 @@
 use super::*;
+use crate::agent::AgentContext;
 use crate::perspectives::interpretation::dedup::Resolution;
 use crate::perspectives::interpretation::types::{
     ExistingInstances, ExistingLinks, InterpretationOp, ProposedInstance,
 };
 use crate::perspectives::model_query::types::ModelShape;
-use crate::types::Link;
+use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
+
+/// Replace `(base, predicate)` with a single link to `target`: remove every
+/// existing link under that predicate, then add the new one. A generic
+/// single-valued link upsert — used by the provenance overlay to keep
+/// `inferred/<p>` (and `run`) single-valued and current across passes.
+pub(crate) async fn replace_link(
+    perspective: &mut PerspectiveInstance,
+    base: &str,
+    predicate: &str,
+    target: &str,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
+    let existing = perspective
+        .get_links(&LinkQuery {
+            source: Some(base.to_string()),
+            predicate: Some(predicate.to_string()),
+            ..Default::default()
+        })
+        .await?;
+    if !existing.is_empty() {
+        let exprs: Vec<LinkExpression> = existing.into_iter().map(Into::into).collect();
+        perspective.remove_links(exprs, None).await?;
+    }
+    perspective
+        .add_link(
+            Link {
+                source: base.to_string(),
+                predicate: Some(predicate.to_string()),
+                target: target.to_string(),
+            },
+            LinkStatus::Shared,
+            None,
+            context,
+        )
+        .await?;
+    Ok(())
+}
 
 /// The scalar (non-relation) field values a proposed instance wants written —
 /// the payload handed to `create_subject` / `update_subject` as `initial_values`.
