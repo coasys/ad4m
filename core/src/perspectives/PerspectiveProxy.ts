@@ -16,7 +16,7 @@ import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
-import type { AddAutoProcessorConfig, AutoProcessorEvent } from "./AutoProcessor";
+import type { AddAutoProcessorConfig, AutoProcessorEvent, InterpretationOverlay } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
@@ -573,6 +573,32 @@ export class PerspectiveProxy {
      */
     async addAutoProcessor(config: AddAutoProcessorConfig): Promise<string> {
         return await this.#client.addAutoProcessor(this.#handle.uuid, config)
+    }
+
+    /**
+     * Pending interpretation overlays on this perspective — LLM suggestions the
+     * §4 divergence gate staged rather than applied, awaiting human accept/reject.
+     */
+    async interpretationOverlays(): Promise<InterpretationOverlay[]> {
+        return await this.#client.interpretationOverlays(this.#handle.uuid)
+    }
+
+    /**
+     * Accept an interpretation overlay's suggestion(s): the LLM's staged value
+     * becomes the real, human-owned value and the overlay is deleted. Pass
+     * `property` to accept a single predicate; omit it for the whole base.
+     */
+    async acceptInterpretation(base: string, property?: string): Promise<boolean> {
+        return await this.#client.acceptInterpretation(this.#handle.uuid, base, property)
+    }
+
+    /**
+     * Reject an interpretation overlay's suggestion(s). Omit `property` to reject
+     * the whole base — a rejected `create` deletes the suggested instance, a
+     * rejected `update` drops the overlay and keeps the real value.
+     */
+    async rejectInterpretation(base: string, property?: string): Promise<boolean> {
+        return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
     }
 
     /** Subscribe to this perspective's auto-processor step signals. */

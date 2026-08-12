@@ -596,6 +596,28 @@ pub struct AddAutoProcessorRequest {
     pub dedup_strategy_json: Option<String>,
 }
 
+/// `perspective.acceptInterpretation` / `perspective.rejectInterpretation` —
+/// resolve an LLM interpretation overlay's suggestion(s) on a base. `property`
+/// scopes to one predicate; omit it to accept/reject the whole base.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveInterpretationRequest {
+    pub uuid: String,
+    /// Base instance the overlay sits on.
+    pub base: String,
+    /// Real predicate to scope to; omit for the whole base.
+    #[serde(default)]
+    pub property: Option<String>,
+}
+
+/// `perspective.interpretationOverlays` — list pending overlay suggestions in a
+/// perspective so a UI can surface them for human accept/reject.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InterpretationOverlaysRequest {
+    pub uuid: String,
+}
+
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]

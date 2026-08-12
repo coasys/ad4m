@@ -60,3 +60,19 @@ export interface AddAutoProcessorConfig {
   /** Optional serialized `DedupStrategy` JSON (else NormalizedString). */
   dedupStrategyJson?: string;
 }
+
+/**
+ * A pending interpretation overlay: an LLM suggestion on a base instance
+ * awaiting human accept/reject (see `PerspectiveProxy.interpretationOverlays`).
+ */
+export interface InterpretationOverlay {
+  /** The base instance the overlay sits on. */
+  base: string;
+  /** Whether the LLM authored the whole instance (`"create"`) or proposed
+   *  changes to an existing one (`"update"`). */
+  kind: "create" | "update";
+  /** The `InterpretationRun` that last wrote it, if present. */
+  run: string | null;
+  /** `[realPredicate, stagedValue]` pairs — the model's proposed values. */
+  inferred: [string, any][];
+}

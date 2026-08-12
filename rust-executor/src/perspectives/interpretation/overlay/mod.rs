@@ -39,9 +39,14 @@
 //!     together, plus the shared predicate vocabulary. The generic
 //!     single-valued link upsert (`replace_link`) lives in the `graph` submodule.
 
+mod accept;
 mod classes;
 mod gate;
 mod write;
+
+pub(crate) use accept::{
+    accept_interpretation, list_overlays, overlay_of, reject_interpretation, OverlayView,
+};
 
 use classes::{
     ensure_interpretation_overlay_classes, mint_interpretation_run, InterpretationRunMeta,

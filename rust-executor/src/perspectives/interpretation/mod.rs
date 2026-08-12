@@ -39,7 +39,7 @@
 
 mod dedup;
 mod graph;
-mod overlay;
+pub(crate) mod overlay;
 mod parse;
 mod prompt;
 mod run;

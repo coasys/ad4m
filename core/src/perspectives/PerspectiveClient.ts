@@ -11,7 +11,7 @@ import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
-import type { AddAutoProcessorConfig, AutoProcessorEvent } from "./AutoProcessor";
+import type { AddAutoProcessorConfig, AutoProcessorEvent, InterpretationOverlay } from "./AutoProcessor";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -281,6 +281,29 @@ export class PerspectiveClient {
     async addAutoProcessor(uuid: string, config: AddAutoProcessorConfig): Promise<string> {
         return this.#apiClient.call<string>(
             'perspective.addAutoProcessor', { uuid, ...config },
+        )
+    }
+
+    /** Pending interpretation overlays (LLM suggestions awaiting human accept/reject). */
+    async interpretationOverlays(uuid: string): Promise<InterpretationOverlay[]> {
+        return this.#apiClient.call<InterpretationOverlay[]>(
+            'perspective.interpretationOverlays', { uuid },
+        )
+    }
+
+    /** Accept an overlay's suggestion(s): the LLM value becomes the real value and
+     *  the overlay is deleted. Omit `property` to accept the whole base. */
+    async acceptInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>(
+            'perspective.acceptInterpretation', { uuid, base, property },
+        )
+    }
+
+    /** Reject an overlay's suggestion(s). Omit `property` to reject the whole base
+     *  (a rejected `create` deletes the suggested instance). */
+    async rejectInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>(
+            'perspective.rejectInterpretation', { uuid, base, property },
         )
     }
 

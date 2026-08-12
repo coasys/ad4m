@@ -1131,6 +1131,84 @@ async fn add_auto_processor_handler(
     Ok(serde_json::to_value(body.processor_id)?)
 }
 
+/// `perspective.acceptInterpretation` — materialize the overlay's staged
+/// suggestion(s) as human-owned real value(s) and delete the (targeted) overlay.
+async fn accept_interpretation_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    use crate::api::types::ResolveInterpretationRequest;
+    use crate::perspectives::interpretation::overlay::accept_interpretation;
+
+    let body: ResolveInterpretationRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![body.uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let mut perspective = get_perspective_with_access(&body.uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    accept_interpretation(
+        &mut perspective,
+        &body.base,
+        body.property.as_deref(),
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::Bool(true))
+}
+
+/// `perspective.rejectInterpretation` — drop the overlay's suggestion(s); a
+/// whole-base reject of a `create` deletes the suggested instance.
+async fn reject_interpretation_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    use crate::api::types::ResolveInterpretationRequest;
+    use crate::perspectives::interpretation::overlay::reject_interpretation;
+
+    let body: ResolveInterpretationRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![body.uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let mut perspective = get_perspective_with_access(&body.uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    reject_interpretation(
+        &mut perspective,
+        &body.base,
+        body.property.as_deref(),
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::Bool(true))
+}
+
+/// `perspective.interpretationOverlays` — pending overlay suggestions in the
+/// perspective (read-only), for a UI to surface human accept/reject.
+async fn interpretation_overlays_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    use crate::api::types::InterpretationOverlaysRequest;
+    use crate::perspectives::interpretation::overlay::list_overlays;
+
+    let body: InterpretationOverlaysRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let perspective = get_perspective_with_access(&body.uuid, &ctx).await?;
+    let overlays = list_overlays(&perspective)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(overlays)?)
+}
+
 // ── Registration ──
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -1168,4 +1246,16 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.evaluateGetters", evaluate_getters_handler);
     map.register("perspective.runInterpretation", run_interpretation_handler);
     map.register("perspective.addAutoProcessor", add_auto_processor_handler);
+    map.register(
+        "perspective.acceptInterpretation",
+        accept_interpretation_handler,
+    );
+    map.register(
+        "perspective.rejectInterpretation",
+        reject_interpretation_handler,
+    );
+    map.register(
+        "perspective.interpretationOverlays",
+        interpretation_overlays_handler,
+    );
 }
