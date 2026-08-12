@@ -5128,8 +5128,7 @@ impl PerspectiveInstance {
     ///      sync, no reason to re-race); `ShapesMissing` and `EmptyTranscript`
     ///      do not, so the ids are retried once the shape or transcript lands.
     ///
-    /// This is the "polling MVP" per the design decision in
-    /// `planning/p-b2b2-watcher-wireup.md`. The event-driven variant
+    /// This is the "polling MVP". The event-driven variant
     /// (subscribe to `PERSPECTIVE_LINK_ADDED_TOPIC`, record `link.data.source`
     /// deltas) is a follow-up optimisation — the coordination correctness
     /// envelope is the same because the `ProcessingClaim` (P-A) is the real

@@ -1,6 +1,6 @@
 //! Neighbourhood auto-processing — run the interpretation engine automatically
 //! and coordinate *which* peer runs each pass, inside AD4M rather than in app UI
-//! code (spec: `planning/neighbourhood-auto-processing-spec.md`).
+//! code.
 //!
 //! Built in phases, stacked on the tree-aware interpretation engine (#883):
 //!   * **P-A — [`claim`]**: the atomic reservation primitive (`ProcessingClaim`
