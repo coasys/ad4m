@@ -850,8 +850,10 @@ Notes:
   api.registerService({
     id: "ad4m-mcp",
     async start(ctx: any) {
-      // Capture _stateDir from service context
-      if (ctx?._stateDir) {
+      // Capture the state dir from the service context. The field is `stateDir`
+      // (the guard used to check `_stateDir`, which the context never sets, so
+      // the dir was never captured and waker state never persisted).
+      if (ctx?.stateDir) {
         _stateDir = ctx.stateDir;
       }
 
@@ -1021,8 +1023,9 @@ Notes:
       logger.info("[ad4m-waker] ── Waker service start() ──");
       logger.info(`[ad4m-waker] stateDir from ctx: ${ctx?.stateDir ?? "N/A"}, existing stateDir: ${_stateDir || "N/A"}`);
 
-      // Capture _stateDir from service context (in case mcp service didn't set it)
-      if (ctx?._stateDir && !_stateDir) {
+      // Capture the state dir from the service context (in case the mcp service
+      // didn't set it). The field is `stateDir`, not `_stateDir`.
+      if (ctx?.stateDir && !_stateDir) {
         _stateDir = ctx.stateDir;
       }
 
