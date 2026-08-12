@@ -7,50 +7,64 @@
 //! calls `run_interpretation_with_strategy` for the configured
 //! `interpretation_classes`.
 //!
-//! Kept as a hand-crafted link shape (parallel to [`super::claim`]) rather
-//! than a full SHACL subject class. This is executor-owned coordination
-//! config, not user-domain data; turning it into a proper SubjectClass so app
-//! UIs can configure processors from outside is a follow-up. Living in the
-//! shared perspective (as `Shared` links) means every peer in the
-//! neighbourhood sees the same processor set once state syncs, so the
-//! election in [`super::claim::try_claim`] is over the same batches on every
-//! peer.
+//! A processor is a **hard-wired SHACL subject class** ([`AUTO_PROCESSOR_SDNA`],
+//! registered on first write by [`ensure_auto_processor_class`]), written with
+//! `create_subject` and read back with `model_query`. So app UIs can list,
+//! inspect and edit processors through the ordinary model API instead of
+//! reverse-engineering a private link shape. Instances live in the shared
+//! perspective (the setters below carry no `local` flag, so their links are
+//! `Shared`), which means every peer in the neighbourhood sees the same
+//! processor set once state syncs, and the election in
+//! [`super::claim::try_claim`] is over the same batches on every peer.
 //!
 //! `dedup_strategy_json` is intentionally stored as an opaque JSON blob rather
 //! than a typed enum: the watcher (P-B2) will deserialize it into
 //! [`crate::perspectives::interpretation::DedupStrategy`]. This keeps P-B1 free
 //! of the dedup module's shape (which does not implement `Serialize`).
 //!
-//! ## Link shape (all `Shared`)
-//! ```text
-//! processor node = ad4m://autoprocessor/<processor_id>
-//!   -- rdf://type                  --> ad4m://AutoProcessor
-//!   -- ad4m://processor_id         --> <string>          (identity)
-//!   -- ad4m://source_scope_query   --> <SPARQL SELECT returning ?speaker ?text>
-//!   -- ad4m://interpretation_class --> <class URI>        (repeatable, >= 1)
-//!   -- ad4m://debounce_ms          --> <i64 as string>
-//!   -- ad4m://batch_min            --> <usize as string>  (optional, default 1)
-//!   -- ad4m://batch_max            --> <usize as string>
-//!   -- ad4m://max_wait_ms          --> <i64 as string>    (optional)
-//!   -- ad4m://claim_ttl_ms         --> <i64 as string>
-//!   -- ad4m://dedup_strategy       --> <JSON string>      (optional)
-//! ```
+//! Numeric scalars are stored as strings (`literal:string:5000`) and parsed on
+//! read: SHACL properties carry no int type-check, so a hand-edited or
+//! partially-synced value has to be validated here anyway — see
+//! [`config_from_instance`].
 
 use crate::agent::AgentContext;
-use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{Link, LinkQuery, LinkStatus};
+use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 
-const P_TYPE: &str = "rdf://type";
-const T_AUTO_PROCESSOR: &str = "ad4m://AutoProcessor";
-const P_PROCESSOR_ID: &str = "ad4m://processor_id";
-const P_SOURCE_SCOPE_QUERY: &str = "ad4m://source_scope_query";
-const P_INTERPRETATION_CLASS: &str = "ad4m://interpretation_class";
-const P_DEBOUNCE_MS: &str = "ad4m://debounce_ms";
-const P_BATCH_MIN: &str = "ad4m://batch_min";
-const P_BATCH_MAX: &str = "ad4m://batch_max";
-const P_MAX_WAIT_MS: &str = "ad4m://max_wait_ms";
-const P_CLAIM_TTL_MS: &str = "ad4m://claim_ttl_ms";
-const P_DEDUP_STRATEGY: &str = "ad4m://dedup_strategy";
+use super::{ensure_subject_class, scalar_string, subject_class_registered};
+
+/// Local subject-class name of a processor config.
+pub(crate) const AUTO_PROCESSOR_CLASS: &str = "AutoProcessor";
+/// Target-class URI of [`AUTO_PROCESSOR_CLASS`] — used to detect prior
+/// registration.
+const AUTO_PROCESSOR_TARGET_CLASS: &str = "ad4m://AutoProcessor";
+
+/// Hard-wired SDNA for the [`AUTO_PROCESSOR_CLASS`] subject class.
+///
+/// The `type` flag is the class discriminator (and, with the other
+/// `min_count: 1` properties, the `model_query` conformance pattern: a
+/// half-synced node missing a required scalar simply is not an instance yet).
+/// `interpretation_class` is declared `collection` — the marker the shape
+/// reader keys on for a multi-valued *literal* property — so its `addLink`
+/// setter accumulates class URIs instead of replacing them, and hydration
+/// returns them as an array. No `maxCount` is declared on it: the number of
+/// classes one processor materializes is open-ended.
+const AUTO_PROCESSOR_SDNA: &str = r#"{
+  "target_class":"ad4m://AutoProcessor",
+  "interpretation_hint":"An automatic interpretation processor: the content it watches, the classes it materializes, and its batching/claim timings.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"rdf://type","target":"ad4m://AutoProcessor"}],
+  "properties":[
+    {"path":"rdf://type","name":"type","has_value":"ad4m://AutoProcessor","min_count":1,"max_count":1},
+    {"path":"ad4m://processor_id","name":"processor_id","identity":true,"min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://processor_id","target":"value"}]},
+    {"path":"ad4m://source_scope_query","name":"source_scope_query","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://source_scope_query","target":"value"}]},
+    {"path":"ad4m://interpretation_class","name":"interpretation_class","collection":true,"min_count":1,"setter":[{"action":"addLink","source":"this","predicate":"ad4m://interpretation_class","target":"value"}]},
+    {"path":"ad4m://debounce_ms","name":"debounce_ms","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://debounce_ms","target":"value"}]},
+    {"path":"ad4m://batch_min","name":"batch_min","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://batch_min","target":"value"}]},
+    {"path":"ad4m://batch_max","name":"batch_max","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://batch_max","target":"value"}]},
+    {"path":"ad4m://max_wait_ms","name":"max_wait_ms","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://max_wait_ms","target":"value"}]},
+    {"path":"ad4m://claim_ttl_ms","name":"claim_ttl_ms","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://claim_ttl_ms","target":"value"}]},
+    {"path":"ad4m://dedup_strategy","name":"dedup_strategy","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://dedup_strategy","target":"value"}]}
+  ]
+}"#;
 
 /// Everything the executor watcher (P-B2) needs to schedule and run a single
 /// auto-processor pass over a source perspective.
@@ -102,143 +116,121 @@ pub fn processor_node(processor_id: &str) -> String {
     format!("ad4m://autoprocessor/{processor_id}")
 }
 
-/// Write an AutoProcessor config as `Shared` links so it syncs across the
-/// neighbourhood. Idempotent-per-call in the sense that it always writes the
-/// full set; but writing the same config twice will create duplicate links
-/// (dedup up on read via [`load_processors`]).
+/// Idempotently register the hard-wired [`AUTO_PROCESSOR_CLASS`] subject class.
+pub async fn ensure_auto_processor_class(
+    perspective: &mut PerspectiveInstance,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
+    ensure_subject_class(
+        perspective,
+        AUTO_PROCESSOR_CLASS,
+        AUTO_PROCESSOR_TARGET_CLASS,
+        AUTO_PROCESSOR_SDNA,
+        context,
+    )
+    .await
+}
+
+/// Register the class if needed, then mint the processor as a subject instance.
+/// Writing the same `processor_id` twice overwrites its scalars (the setters
+/// are `setSingleTarget`) and appends its interpretation classes (deduplicated
+/// on read by [`load_processors`]).
 pub async fn write_processor(
     perspective: &mut PerspectiveInstance,
     cfg: &AutoProcessorConfig,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    if cfg.interpretation_classes.is_empty() {
+    let Some((first_class, more_classes)) = cfg.interpretation_classes.split_first() else {
         anyhow::bail!(
             "write_processor: `{}` has no interpretation_classes",
             cfg.processor_id
         );
-    }
+    };
+    ensure_auto_processor_class(perspective, context).await?;
+
     let node = processor_node(&cfg.processor_id);
-    let mut links = vec![
-        Link {
-            source: node.clone(),
-            predicate: Some(P_TYPE.into()),
-            target: T_AUTO_PROCESSOR.into(),
-        },
-        Link {
-            source: node.clone(),
-            predicate: Some(P_PROCESSOR_ID.into()),
-            target: cfg.processor_id.clone(),
-        },
-        Link {
-            source: node.clone(),
-            predicate: Some(P_SOURCE_SCOPE_QUERY.into()),
-            target: cfg.source_scope_query.clone(),
-        },
-        Link {
-            source: node.clone(),
-            predicate: Some(P_DEBOUNCE_MS.into()),
-            target: cfg.debounce_ms.to_string(),
-        },
-        Link {
-            source: node.clone(),
-            predicate: Some(P_BATCH_MIN.into()),
-            target: cfg.batch_min.to_string(),
-        },
-        Link {
-            source: node.clone(),
-            predicate: Some(P_BATCH_MAX.into()),
-            target: cfg.batch_max.to_string(),
-        },
-        Link {
-            source: node.clone(),
-            predicate: Some(P_CLAIM_TTL_MS.into()),
-            target: cfg.claim_ttl_ms.to_string(),
-        },
-    ];
+    let mut values = serde_json::json!({
+        "processor_id": cfg.processor_id,
+        "source_scope_query": cfg.source_scope_query,
+        "interpretation_class": first_class,
+        "debounce_ms": cfg.debounce_ms.to_string(),
+        "batch_min": cfg.batch_min.to_string(),
+        "batch_max": cfg.batch_max.to_string(),
+        "claim_ttl_ms": cfg.claim_ttl_ms.to_string(),
+    });
     if let Some(max_wait_ms) = cfg.max_wait_ms {
-        links.push(Link {
-            source: node.clone(),
-            predicate: Some(P_MAX_WAIT_MS.into()),
-            target: max_wait_ms.to_string(),
-        });
-    }
-    for class in &cfg.interpretation_classes {
-        links.push(Link {
-            source: node.clone(),
-            predicate: Some(P_INTERPRETATION_CLASS.into()),
-            target: class.clone(),
-        });
+        values["max_wait_ms"] = max_wait_ms.to_string().into();
     }
     if let Some(dedup) = &cfg.dedup_strategy_json {
-        links.push(Link {
-            source: node,
-            predicate: Some(P_DEDUP_STRATEGY.into()),
-            target: dedup.clone(),
-        });
+        values["dedup_strategy"] = dedup.clone().into();
     }
     perspective
-        .add_links(links, LinkStatus::Shared, None, context)
+        .create_subject(class_option(), node.clone(), Some(values), None, context)
         .await
-        .map_err(|e| anyhow::anyhow!("write_processor: add_links failed: {e:#}"))?;
+        .map_err(|e| anyhow::anyhow!("write_processor: create_subject failed: {e:#}"))?;
+
+    // `create_subject` applies one value per property, so the remaining
+    // members of the `interpretation_class` collection go through the same
+    // `addLink` setter one at a time.
+    for class in more_classes {
+        perspective
+            .update_subject(
+                class_option(),
+                node.clone(),
+                serde_json::json!({ "interpretation_class": class }),
+                None,
+                context,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("write_processor: update_subject(class) failed: {e:#}"))?;
+    }
     Ok(())
 }
 
-async fn get_targets(
-    perspective: &PerspectiveInstance,
-    source: &str,
-    predicate: &str,
-) -> anyhow::Result<Vec<String>> {
-    let links = perspective
-        .get_links(&LinkQuery {
-            source: Some(source.to_string()),
-            predicate: Some(predicate.to_string()),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("get_links({source} {predicate}): {e:#}"))?;
-    Ok(links.into_iter().map(|l| l.data.target).collect())
+fn class_option() -> SubjectClassOption {
+    SubjectClassOption {
+        class_name: Some(AUTO_PROCESSOR_CLASS.to_string()),
+        query: None,
+    }
 }
 
-async fn first_target(
-    perspective: &PerspectiveInstance,
-    source: &str,
-    predicate: &str,
-) -> anyhow::Result<Option<String>> {
-    Ok(get_targets(perspective, source, predicate)
-        .await?
-        .into_iter()
-        .next())
-}
-
-/// Load every AutoProcessor config from the perspective. Nodes typed
-/// `ad4m://AutoProcessor` but missing any required scalar (or a parseable
-/// numeric) are logged and skipped — so an in-flight write from another peer
-/// (partial sync) does not crash the watcher, and neither does human hand-
-/// editing of the graph. Returns configs sorted by `processor_id` for
+/// Load every AutoProcessor config from the perspective. Instances missing a
+/// required scalar are not `AutoProcessor` instances yet as far as the class's
+/// conformance goes (so a partially-synced write from another peer is invisible
+/// rather than fatal); one that conforms but carries an unparseable numeric is
+/// logged and skipped. Returns configs sorted by `processor_id` for
 /// deterministic iteration order.
 pub async fn load_processors(
     perspective: &PerspectiveInstance,
 ) -> anyhow::Result<Vec<AutoProcessorConfig>> {
-    let typed_links = perspective
-        .get_links(&LinkQuery {
-            predicate: Some(P_TYPE.into()),
-            target: Some(T_AUTO_PROCESSOR.into()),
-            ..Default::default()
-        })
+    // The watcher polls this on every perspective, most of which never declare
+    // a processor: no registered class ⇒ no shape to query ⇒ nothing to load.
+    if !subject_class_registered(perspective, AUTO_PROCESSOR_TARGET_CLASS).await? {
+        return Ok(Vec::new());
+    }
+    let query = serde_json::json!({
+        "properties": [
+            "processor_id", "source_scope_query", "interpretation_class",
+            "debounce_ms", "batch_min", "batch_max", "max_wait_ms",
+            "claim_ttl_ms", "dedup_strategy",
+        ]
+    })
+    .to_string();
+    let result_json = perspective
+        .model_query(AUTO_PROCESSOR_CLASS, &query)
         .await
-        .map_err(|e| anyhow::anyhow!("load_processors: get_links(type) failed: {e:#}"))?;
-
-    let mut nodes: Vec<String> = typed_links.into_iter().map(|l| l.data.source).collect();
-    nodes.sort();
-    nodes.dedup();
+        .map_err(|e| anyhow::anyhow!("load_processors: model_query failed: {e:#}"))?;
+    let result: serde_json::Value = serde_json::from_str(&result_json)
+        .map_err(|e| anyhow::anyhow!("load_processors: bad model_query result: {e:#}"))?;
 
     let mut out = Vec::new();
-    for node in nodes {
-        match load_one(perspective, &node).await? {
+    for instance in result["instances"].as_array().into_iter().flatten() {
+        match config_from_instance(instance) {
             Some(cfg) => out.push(cfg),
             None => log::warn!(
-                "load_processors: node `{node}` typed AutoProcessor but missing / \
-                    unparseable required fields; skipping"
+                "load_processors: AutoProcessor instance `{}` has missing / unparseable \
+                 fields; skipping",
+                instance["id"].as_str().unwrap_or("<no id>")
             ),
         }
     }
@@ -246,82 +238,60 @@ pub async fn load_processors(
     Ok(out)
 }
 
-async fn load_one(
-    perspective: &PerspectiveInstance,
-    node: &str,
-) -> anyhow::Result<Option<AutoProcessorConfig>> {
-    let Some(processor_id) = first_target(perspective, node, P_PROCESSOR_ID).await? else {
-        return Ok(None);
-    };
-    let Some(source_scope_query) = first_target(perspective, node, P_SOURCE_SCOPE_QUERY).await?
-    else {
-        return Ok(None);
-    };
-    let mut interpretation_classes = get_targets(perspective, node, P_INTERPRETATION_CLASS).await?;
-    if interpretation_classes.is_empty() {
-        return Ok(None);
-    }
-    // `get_links` order is not guaranteed across storage backends / sync
-    // states, so sort for deterministic iteration in the watcher (and in
-    // downstream tests that assert on the config shape).
+/// Map one hydrated `model_query` instance onto an [`AutoProcessorConfig`], or
+/// `None` when a field is missing or does not parse.
+fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorConfig> {
+    let scalar = |name: &str| scalar_string(instance.get(name));
+    let number = |name: &str| scalar(name)?.parse::<i64>().ok();
+    let count = |name: &str| scalar(name)?.parse::<usize>().ok();
+
+    // Hydration returns a collection as an array; sort + dedup for a stable
+    // iteration order in the watcher (and in downstream tests that assert on
+    // the config shape), since neither store order nor sync order is
+    // guaranteed.
+    let mut interpretation_classes: Vec<String> = instance
+        .get("interpretation_class")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
     interpretation_classes.sort();
     interpretation_classes.dedup();
-    let Some(debounce_ms_s) = first_target(perspective, node, P_DEBOUNCE_MS).await? else {
-        return Ok(None);
-    };
-    let Some(batch_max_s) = first_target(perspective, node, P_BATCH_MAX).await? else {
-        return Ok(None);
-    };
-    let Some(claim_ttl_ms_s) = first_target(perspective, node, P_CLAIM_TTL_MS).await? else {
-        return Ok(None);
-    };
-    let (Ok(debounce_ms), Ok(batch_max), Ok(claim_ttl_ms)) = (
-        debounce_ms_s.parse::<i64>(),
-        batch_max_s.parse::<usize>(),
-        claim_ttl_ms_s.parse::<i64>(),
-    ) else {
-        return Ok(None);
-    };
+    if interpretation_classes.is_empty() {
+        return None;
+    }
 
     // Optional thresholds. Absent `batch_min` → 1 (original behaviour). An
     // absent `max_wait_ms` → `None` (wait indefinitely). A *present but
-    // unparseable* value is a config error, so we bail (`Ok(None)`) exactly
-    // like the required fields rather than silently defaulting.
-    let batch_min = match first_target(perspective, node, P_BATCH_MIN).await? {
-        Some(s) => match s.parse::<usize>() {
-            Ok(n) => n.max(1),
-            Err(_) => return Ok(None),
-        },
+    // unparseable* value is a config error, so we bail (`None`) exactly like
+    // the required fields rather than silently defaulting.
+    let batch_min = match scalar("batch_min") {
+        Some(_) => count("batch_min")?.max(1),
         None => 1,
     };
-    let max_wait_ms = match first_target(perspective, node, P_MAX_WAIT_MS).await? {
-        Some(s) => match s.parse::<i64>() {
-            Ok(n) => Some(n),
-            Err(_) => return Ok(None),
-        },
+    let max_wait_ms = match scalar("max_wait_ms") {
+        Some(_) => Some(number("max_wait_ms")?),
         None => None,
     };
 
-    let dedup_strategy_json = first_target(perspective, node, P_DEDUP_STRATEGY).await?;
-
-    Ok(Some(AutoProcessorConfig {
-        processor_id,
-        source_scope_query,
+    Some(AutoProcessorConfig {
+        processor_id: scalar("processor_id")?,
+        source_scope_query: scalar("source_scope_query")?,
         interpretation_classes,
-        debounce_ms,
+        debounce_ms: number("debounce_ms")?,
         batch_min,
-        batch_max,
+        batch_max: count("batch_max")?,
         max_wait_ms,
-        claim_ttl_ms,
-        dedup_strategy_json,
-    }))
+        claim_ttl_ms: number("claim_ttl_ms")?,
+        dedup_strategy_json: scalar("dedup_strategy"),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
-    use crate::types::LinkStatus;
+    use crate::types::{Link, LinkQuery, LinkStatus};
 
     fn sample_config(id: &str) -> AutoProcessorConfig {
         AutoProcessorConfig {
@@ -331,8 +301,8 @@ mod tests {
             ),
             // Kept in sorted order to match [`load_processors`]'s canonical
             // ordering — see the assertion in
-            // [`load_returns_classes_in_deterministic_order`] below for the
-            // "input order is arbitrary; output order is sorted" contract.
+            // [`interpretation_classes_multiple_roundtrip_sorted`] below for
+            // the "input order is arbitrary; output order is sorted" contract.
             interpretation_classes: vec!["ns://Question".into(), "ns://Task".into()],
             debounce_ms: 5_000,
             batch_min: 3,
@@ -353,6 +323,43 @@ mod tests {
             .expect("write_processor");
         let loaded = load_processors(&p).await.expect("load_processors");
         assert_eq!(loaded, vec![cfg]);
+    }
+
+    /// The config lives in the *shared* graph: every link the subject class
+    /// writes must be `Shared`, or peers would never see the processor set and
+    /// the claim election would run over different batches per peer.
+    #[tokio::test]
+    async fn write_creates_shared_links() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        write_processor(&mut p, &sample_config("shared"), &ctx)
+            .await
+            .expect("write_processor");
+        let links = p
+            .get_links(&LinkQuery {
+                source: Some(processor_node("shared")),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert!(!links.is_empty(), "processor node must carry links");
+        for l in &links {
+            assert_eq!(
+                l.status,
+                Some(LinkStatus::Shared),
+                "link {:?} must be Shared",
+                l.data
+            );
+        }
+    }
+
+    /// A perspective that never declared a processor has no registered class —
+    /// the watcher polls `load_processors` on every perspective, so that must
+    /// be an empty read, not an error.
+    #[tokio::test]
+    async fn load_without_registered_class_is_empty() {
+        let (p, _shapes, _ctx) = setup_perspective_no_llm(&[]).await;
+        let loaded = load_processors(&p).await.expect("load_processors");
+        assert!(loaded.is_empty());
     }
 
     /// Multiple processors on one perspective load together, sorted by
@@ -390,17 +397,23 @@ mod tests {
         assert!(loaded[0].dedup_strategy_json.is_none());
     }
 
-    /// A node typed AutoProcessor but missing a required scalar (here: a
-    /// partially-synced write with only the type link) is skipped, not
-    /// crashed on — the watcher must be robust to in-flight sync state.
+    /// A node typed AutoProcessor but missing every required scalar (here: a
+    /// partially-synced write with only the type link) does not conform to the
+    /// class, so it is invisible rather than crashed on — the watcher must be
+    /// robust to in-flight sync state.
     #[tokio::test]
     async fn load_skips_incomplete_node() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        // A complete one first, so the class is registered and we prove the
+        // partial is skipped while the valid one still comes through.
+        write_processor(&mut p, &sample_config("complete"), &ctx)
+            .await
+            .expect("write complete");
         p.add_links(
             vec![Link {
                 source: processor_node("partial"),
-                predicate: Some(P_TYPE.into()),
-                target: T_AUTO_PROCESSOR.into(),
+                predicate: Some("rdf://type".into()),
+                target: AUTO_PROCESSOR_TARGET_CLASS.into(),
             }],
             LinkStatus::Shared,
             None,
@@ -408,75 +421,37 @@ mod tests {
         )
         .await
         .expect("seed partial");
-        // A complete one alongside, to prove the partial is skipped but the
-        // valid one still comes through.
-        write_processor(&mut p, &sample_config("complete"), &ctx)
-            .await
-            .expect("write complete");
         let loaded = load_processors(&p).await.expect("load");
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].processor_id, "complete");
     }
 
-    /// A node whose `debounce_ms` link is not parseable as `i64` is treated
-    /// the same as a missing field: skipped with a warn, not returned.
+    /// A conforming node whose `debounce_ms` is not parseable as `i64` is
+    /// treated the same as a missing field: skipped with a warn, not returned.
+    /// The garbled value is written through the class's own setter (rather than
+    /// hand-rolled links) so it lands exactly where the loader reads it.
     #[tokio::test]
     async fn load_skips_node_with_unparseable_numeric() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        let cfg = sample_config("garbled");
-        write_processor(&mut p, &cfg, &ctx).await.expect("write");
-        // Overwrite debounce_ms with a non-numeric target by adding another
-        // link with the same source+predicate: the first-target reader picks
-        // the first, which we can't guarantee is our garbled one — instead
-        // seed a whole SEPARATE node manually with a garbled numeric.
-        p.add_links(
-            vec![
-                Link {
-                    source: processor_node("garbled-2"),
-                    predicate: Some(P_TYPE.into()),
-                    target: T_AUTO_PROCESSOR.into(),
-                },
-                Link {
-                    source: processor_node("garbled-2"),
-                    predicate: Some(P_PROCESSOR_ID.into()),
-                    target: "garbled-2".into(),
-                },
-                Link {
-                    source: processor_node("garbled-2"),
-                    predicate: Some(P_SOURCE_SCOPE_QUERY.into()),
-                    target: "SELECT ?speaker ?text WHERE {}".into(),
-                },
-                Link {
-                    source: processor_node("garbled-2"),
-                    predicate: Some(P_INTERPRETATION_CLASS.into()),
-                    target: "ns://Task".into(),
-                },
-                Link {
-                    source: processor_node("garbled-2"),
-                    predicate: Some(P_DEBOUNCE_MS.into()),
-                    target: "not-a-number".into(),
-                },
-                Link {
-                    source: processor_node("garbled-2"),
-                    predicate: Some(P_BATCH_MAX.into()),
-                    target: "32".into(),
-                },
-                Link {
-                    source: processor_node("garbled-2"),
-                    predicate: Some(P_CLAIM_TTL_MS.into()),
-                    target: "60000".into(),
-                },
-            ],
-            LinkStatus::Shared,
+        write_processor(&mut p, &sample_config("garbled"), &ctx)
+            .await
+            .expect("write");
+        write_processor(&mut p, &sample_config("garbled-2"), &ctx)
+            .await
+            .expect("write");
+        p.update_subject(
+            class_option(),
+            processor_node("garbled-2"),
+            serde_json::json!({ "debounce_ms": "not-a-number" }),
             None,
             &ctx,
         )
         .await
-        .expect("seed garbled-2");
+        .expect("garble debounce_ms");
 
         let loaded = load_processors(&p).await.expect("load");
-        // The original well-formed "garbled" config comes through; the
-        // second, unparseable node is dropped.
+        // The well-formed "garbled" config comes through; the node with the
+        // unparseable numeric is dropped.
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].processor_id, "garbled");
     }

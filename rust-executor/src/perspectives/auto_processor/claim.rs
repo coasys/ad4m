@@ -12,7 +12,7 @@
 //! election (P-B) and the `AutoProcessor` subject + executor watcher build on
 //! top of this.
 //!
-//! ## Claim shape (links, all `Shared`)
+//! ## Claim shape
 //! A batch is keyed by [`batch_key`] (order-independent hash of the source item
 //! id-set — provisional). Each claimant hangs its own claim node off
 //! the shared batch node, so concurrent claimants don't clobber each other's
@@ -20,12 +20,13 @@
 //! ```text
 //! batch node  ad4m://claim/<processor>/<key>
 //!   -- ad4m://has_claim -->  claim node  ad4m://claim/<processor>/<key>/<did>
-//! claim node
-//!   -- rdf://type          --> ad4m://ProcessingClaim
-//!   -- ad4m://claimant     --> <claimant did>
-//!   -- ad4m://expires_at   --> <unix millis, as string>
-//!   -- ad4m://claim_status --> "active" | "done"
 //! ```
+//! The claim node is a hard-wired **SHACL subject class**
+//! ([`PROCESSING_CLAIM_SDNA`], registered on first claim by
+//! [`ensure_processing_claim_class`]): written with `create_subject`, read back
+//! with `model_query` scoped to the batch node, so UIs can see who holds what.
+//! The batch node itself is not an instance — it is just the shared anchor the
+//! `ad4m://has_claim` links (`Shared`, like every link a claim writes) hang off.
 //!
 //! ## Winner determination
 //! Under a race, two peers may both write a claim before either sees the other.
@@ -58,17 +59,36 @@
 //!   *except* the sub-sync-round simultaneous claim.
 
 use crate::agent::{did_for_context, AgentContext};
-use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{Link, LinkQuery, LinkStatus};
+use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
+use crate::types::{Link, LinkStatus};
 use sha2::{Digest, Sha256};
 
-const P_TYPE: &str = "rdf://type";
-const T_CLAIM: &str = "ad4m://ProcessingClaim";
+use super::{ensure_subject_class, scalar_string, subject_class_registered};
+
+/// Local subject-class name of a claim.
+pub(crate) const PROCESSING_CLAIM_CLASS: &str = "ProcessingClaim";
+/// Target-class URI of [`PROCESSING_CLAIM_CLASS`] — used to detect prior
+/// registration.
+const PROCESSING_CLAIM_TARGET_CLASS: &str = "ad4m://ProcessingClaim";
 const P_HAS_CLAIM: &str = "ad4m://has_claim";
-const P_CLAIMANT: &str = "ad4m://claimant";
-const P_EXPIRES_AT: &str = "ad4m://expires_at";
-const P_STATUS: &str = "ad4m://claim_status";
 const STATUS_ACTIVE: &str = "active";
+
+/// Hard-wired SDNA for the [`PROCESSING_CLAIM_CLASS`] subject class. `claimant`
+/// is the identity property: one claim node per DID per batch, so concurrent
+/// claimants keep independent expiry/status. `expires_at` is a unix-millis
+/// scalar stored as a string (SHACL carries no int type-check; the parse on
+/// read in [`active_claimants`] is what validates it).
+const PROCESSING_CLAIM_SDNA: &str = r#"{
+  "target_class":"ad4m://ProcessingClaim",
+  "interpretation_hint":"One peer's time-boxed reservation of a batch of items for processing, so other peers back off.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"rdf://type","target":"ad4m://ProcessingClaim"}],
+  "properties":[
+    {"path":"rdf://type","name":"type","has_value":"ad4m://ProcessingClaim","min_count":1,"max_count":1},
+    {"path":"ad4m://claimant","name":"claimant","identity":true,"min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://claimant","target":"value"}]},
+    {"path":"ad4m://expires_at","name":"expires_at","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://expires_at","target":"value"}]},
+    {"path":"ad4m://claim_status","name":"claim_status","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://claim_status","target":"value"}]}
+  ]
+}"#;
 
 /// Order-independent key for a batch of source items: a hash of the sorted,
 /// de-duplicated item id-set. Independent of query/iteration order, so every
@@ -110,10 +130,25 @@ pub enum ClaimOutcome {
     BackedOff { holder: String },
 }
 
-/// Write a claim for `claimant` on `(processor, batch)` expiring at `expires_ms`,
-/// as shared links. `claimant` is link *data*, so a test can simulate another
-/// peer's claim by passing an arbitrary DID (the link author stays `context`'s
-/// agent).
+/// Idempotently register the hard-wired [`PROCESSING_CLAIM_CLASS`] subject class.
+pub async fn ensure_processing_claim_class(
+    perspective: &mut PerspectiveInstance,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
+    ensure_subject_class(
+        perspective,
+        PROCESSING_CLAIM_CLASS,
+        PROCESSING_CLAIM_TARGET_CLASS,
+        PROCESSING_CLAIM_SDNA,
+        context,
+    )
+    .await
+}
+
+/// Write a claim for `claimant` on `(processor, batch)` expiring at `expires_ms`
+/// and hang it off the shared batch node. `claimant` is instance *data*, so a
+/// test can simulate another peer's claim by passing an arbitrary DID (the link
+/// author stays `context`'s agent).
 pub async fn write_claim(
     perspective: &mut PerspectiveInstance,
     processor: &str,
@@ -122,92 +157,77 @@ pub async fn write_claim(
     expires_ms: i64,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    let batch = batch_node(processor, key);
+    ensure_processing_claim_class(perspective, context).await?;
     let node = claim_node(processor, key, claimant);
-    let links = vec![
-        Link {
-            source: node.clone(),
-            predicate: Some(P_TYPE.into()),
-            target: T_CLAIM.into(),
-        },
-        Link {
-            source: node.clone(),
-            predicate: Some(P_CLAIMANT.into()),
-            target: claimant.into(),
-        },
-        Link {
-            source: node.clone(),
-            predicate: Some(P_EXPIRES_AT.into()),
-            target: expires_ms.to_string(),
-        },
-        Link {
-            source: node.clone(),
-            predicate: Some(P_STATUS.into()),
-            target: STATUS_ACTIVE.into(),
-        },
-        Link {
-            source: batch,
-            predicate: Some(P_HAS_CLAIM.into()),
-            target: node,
-        },
-    ];
     perspective
-        .add_links(links, LinkStatus::Shared, None, context)
+        .create_subject(
+            SubjectClassOption {
+                class_name: Some(PROCESSING_CLAIM_CLASS.to_string()),
+                query: None,
+            },
+            node.clone(),
+            Some(serde_json::json!({
+                "claimant": claimant,
+                "expires_at": expires_ms.to_string(),
+                "claim_status": STATUS_ACTIVE,
+            })),
+            None,
+            context,
+        )
         .await
-        .map_err(|e| anyhow::anyhow!("write_claim: add_links failed: {e:#}"))?;
+        .map_err(|e| anyhow::anyhow!("write_claim: create_subject failed: {e:#}"))?;
+    perspective
+        .add_link(
+            Link {
+                source: batch_node(processor, key),
+                predicate: Some(P_HAS_CLAIM.into()),
+                target: node,
+            },
+            LinkStatus::Shared,
+            None,
+            context,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("write_claim: add_link(has_claim) failed: {e:#}"))?;
     Ok(())
 }
 
-/// One value of `(source, predicate)` in the perspective, or `None`.
-async fn first_target(
-    perspective: &PerspectiveInstance,
-    source: &str,
-    predicate: &str,
-) -> anyhow::Result<Option<String>> {
-    let links = perspective
-        .get_links(&LinkQuery {
-            source: Some(source.to_string()),
-            predicate: Some(predicate.to_string()),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("get_links({source} {predicate}): {e:#}"))?;
-    Ok(links.into_iter().next().map(|l| l.data.target))
-}
-
 /// DIDs of every claimant whose claim on the batch is `active` and not yet
-/// expired at `now_ms`.
+/// expired at `now_ms`. Reads the claims as subject instances scoped to the
+/// batch node, so only claims actually hung off *this* batch are considered.
 pub async fn active_claimants(
     perspective: &PerspectiveInstance,
     processor: &str,
     key: &str,
     now_ms: i64,
 ) -> anyhow::Result<Vec<String>> {
-    let batch = batch_node(processor, key);
-    let claim_nodes = perspective
-        .get_links(&LinkQuery {
-            source: Some(batch),
-            predicate: Some(P_HAS_CLAIM.into()),
-            ..Default::default()
-        })
+    // Nothing has ever claimed on this perspective ⇒ no class, no claims.
+    if !subject_class_registered(perspective, PROCESSING_CLAIM_TARGET_CLASS).await? {
+        return Ok(Vec::new());
+    }
+    let query = serde_json::json!({
+        "parent": { "id": batch_node(processor, key), "predicate": P_HAS_CLAIM },
+        "properties": ["claimant", "expires_at", "claim_status"],
+    })
+    .to_string();
+    let result_json = perspective
+        .model_query(PROCESSING_CLAIM_CLASS, &query)
         .await
-        .map_err(|e| anyhow::anyhow!("get_links(has_claim): {e:#}"))?;
+        .map_err(|e| anyhow::anyhow!("active_claimants: model_query failed: {e:#}"))?;
+    let result: serde_json::Value = serde_json::from_str(&result_json)
+        .map_err(|e| anyhow::anyhow!("active_claimants: bad model_query result: {e:#}"))?;
 
     let mut out = Vec::new();
-    for link in claim_nodes {
-        let node = link.data.target;
-        let status = first_target(perspective, &node, P_STATUS).await?;
-        if status.as_deref() != Some(STATUS_ACTIVE) {
+    for claim in result["instances"].as_array().into_iter().flatten() {
+        if scalar_string(claim.get("claim_status")).as_deref() != Some(STATUS_ACTIVE) {
             continue;
         }
-        let expires = first_target(perspective, &node, P_EXPIRES_AT)
-            .await?
-            .and_then(|s| s.parse::<i64>().ok());
+        let expires = scalar_string(claim.get("expires_at")).and_then(|s| s.parse::<i64>().ok());
         let Some(expires) = expires else { continue };
         if expires <= now_ms {
             continue;
         }
-        if let Some(did) = first_target(perspective, &node, P_CLAIMANT).await? {
+        if let Some(did) = scalar_string(claim.get("claimant")) {
             out.push(did);
         }
     }
@@ -249,6 +269,7 @@ pub async fn try_claim(
 mod tests {
     use super::*;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+    use crate::types::LinkQuery;
 
     #[test]
     fn batch_key_is_order_and_dup_independent() {
@@ -277,6 +298,55 @@ mod tests {
             .await
             .expect("try_claim");
         assert_eq!(outcome, ClaimOutcome::Won);
+    }
+
+    /// Claims sync across the neighbourhood or they coordinate nothing: every
+    /// link a claim writes — the instance's own and the batch anchor — is
+    /// `Shared`.
+    #[tokio::test]
+    async fn claim_links_are_shared() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let key = batch_key(&["i1".to_string()]);
+        write_claim(&mut p, "proc", &key, "aaa:peer", 60_000, &ctx)
+            .await
+            .expect("write_claim");
+        for source in [
+            batch_node("proc", &key),
+            claim_node("proc", &key, "aaa:peer"),
+        ] {
+            let links = p
+                .get_links(&LinkQuery {
+                    source: Some(source.clone()),
+                    ..Default::default()
+                })
+                .await
+                .expect("get_links");
+            assert!(!links.is_empty(), "{source} must carry links");
+            for l in &links {
+                assert_eq!(
+                    l.status,
+                    Some(LinkStatus::Shared),
+                    "link {:?} must be Shared",
+                    l.data
+                );
+            }
+        }
+    }
+
+    /// A claim is scoped to its own batch: a claimant on a *different* batch
+    /// must not show up as a holder here (the batch anchor is the query scope).
+    #[tokio::test]
+    async fn claims_on_other_batches_are_not_visible() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let mine = batch_key(&["i1".to_string()]);
+        let other = batch_key(&["i2".to_string()]);
+        write_claim(&mut p, "proc", &other, "aaa:elsewhere", 60_000, &ctx)
+            .await
+            .expect("seed other-batch claim");
+        let holders = active_claimants(&p, "proc", &mine, 1_000)
+            .await
+            .expect("active_claimants");
+        assert!(holders.is_empty(), "unexpected holders: {holders:?}");
     }
 
     /// A peer with a smaller DID already holding an unexpired claim wins the
