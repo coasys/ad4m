@@ -1,11 +1,51 @@
 use super::*;
+use crate::agent::AgentContext;
+use crate::perspectives::interpretation::dedup::Resolution;
 use crate::perspectives::interpretation::types::{
-    ExistingInstances, InterpretationOp, ProposedInstance,
+    ExistingInstances, ExistingLinks, InterpretationOp, ProposedInstance,
 };
 use crate::perspectives::model_query::types::ModelShape;
-use crate::types::Link;
+use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
+
+/// Replace `(base, predicate)` with a single link to `target`: remove every
+/// existing link under that predicate, then add the new one. A generic
+/// single-valued link upsert — used by the provenance overlay to keep
+/// `inferred/<p>` (and `run`) single-valued and current across passes.
+pub(crate) async fn replace_link(
+    perspective: &mut PerspectiveInstance,
+    base: &str,
+    predicate: &str,
+    target: &str,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
+    let existing = perspective
+        .get_links(&LinkQuery {
+            source: Some(base.to_string()),
+            predicate: Some(predicate.to_string()),
+            ..Default::default()
+        })
+        .await?;
+    if !existing.is_empty() {
+        let exprs: Vec<LinkExpression> = existing.into_iter().map(Into::into).collect();
+        perspective.remove_links(exprs, None).await?;
+    }
+    perspective
+        .add_link(
+            Link {
+                source: base.to_string(),
+                predicate: Some(predicate.to_string()),
+                target: target.to_string(),
+            },
+            LinkStatus::Shared,
+            None,
+            context,
+        )
+        .await?;
+    Ok(())
+}
 
 /// The scalar (non-relation) field values a proposed instance wants written —
 /// the payload handed to `create_subject` / `update_subject` as `initial_values`.
@@ -67,17 +107,66 @@ pub fn plan_interpretation_ops(
 /// `proposed` **must be in the LLM's emission order** for the ordinals to line
 /// up; `run_interpretation` guarantees this by dedup-filtering in place rather
 /// than re-partitioning.
+///
+/// Treats every proposal as [`Resolution::Keep`] — i.e. no dedup context. The
+/// production path calls [`plan_interpretation_ops_resolved`] with real
+/// [`Resolution`] tags so `new:<Class>:<n>` ordinals survive dedup (James #883).
 pub fn plan_interpretation_ops_with_context(
     shapes: &[ModelShape],
     proposed: &[ProposedInstance],
     base_prefix: &str,
     existing: &ExistingInstances,
 ) -> Vec<InterpretationOp> {
+    let resolved: Vec<(ProposedInstance, Resolution)> = proposed
+        .iter()
+        .map(|p| (p.clone(), Resolution::Keep))
+        .collect();
+    // No existing-link context here: this convenience wrapper is used where the
+    // caller has no graph to read edges from (unit tests, first-pass planning),
+    // so every resolved relation is emitted. The idempotency guard is exercised
+    // through [`plan_interpretation_ops_resolved`] with a populated set.
+    plan_interpretation_ops_resolved(
+        shapes,
+        &resolved,
+        base_prefix,
+        existing,
+        &ExistingLinks::new(),
+    )
+}
+
+/// Ordinal-preserving planner: like [`plan_interpretation_ops_with_context`] but
+/// each proposal carries the [`Resolution`] identity-dedup assigned it. Every
+/// item — kept OR duplicate — takes a slot in the per-class ordinal index so a
+/// relation `new:<Class>:<n>` resolves against the model's *full* emission
+/// order (James #883: dedup that dropped items before planning shifted later
+/// ordinals). Ops are emitted only for kept items:
+///   - [`Resolution::Keep`]: as before — id naming a same-class existing
+///     instance → `Update`, else a fresh `Create` under `base_prefix`.
+///   - [`Resolution::DupOfExisting`]: indexed at the real existing base (so refs
+///     to it link the real node) but written nothing.
+///   - [`Resolution::DupOfEarlier`]: indexed at the earlier slot's base, written
+///     nothing.
+///
+/// `existing_links` carries the `(source, predicate, target)` relation edges the
+/// graph already holds (see [`ExistingLinks`]); a resolved relation link whose
+/// triple is already present is NOT re-emitted, so repeated continuous passes
+/// stay idempotent (James #883 #4). Pass an empty set for a first pass / when no
+/// graph state is available.
+pub fn plan_interpretation_ops_resolved(
+    shapes: &[ModelShape],
+    resolved: &[(ProposedInstance, Resolution)],
+    base_prefix: &str,
+    existing: &ExistingInstances,
+    existing_links: &ExistingLinks,
+) -> Vec<InterpretationOp> {
     struct Placed<'a> {
         shape: &'a ModelShape,
         inst: &'a ProposedInstance,
         base: String,
         is_update: bool,
+        /// Whether Pass 2 emits an op for this slot. Duplicates are indexed for
+        /// ordinal resolution but never written.
+        emit: bool,
     }
 
     // Pass 1: place proposals + build the per-class ordinal index.
@@ -85,8 +174,12 @@ pub fn plan_interpretation_ops_with_context(
     // Ids the graph holds, extended with proposals we route to Update, so
     // relation refs can resolve against real *and* just-planned bases.
     let mut existing_ids: HashSet<String> = existing.keys().cloned().collect();
-    let mut placed: Vec<Placed> = Vec::with_capacity(proposed.len());
-    for inst in proposed {
+    let mut placed: Vec<Placed> = Vec::with_capacity(resolved.len());
+    // Base URI resolved for each `resolved` slot (None = skipped: unknown class
+    // or an unresolvable earlier ref). Keeps `DupOfEarlier(idx)` aligned to the
+    // emission order even though `placed` is compacted.
+    let mut slot_base: Vec<Option<String>> = Vec::with_capacity(resolved.len());
+    for (inst, resolution) in resolved {
         let Some(shape) = shapes
             .iter()
             .find(|s| class_local_name(&s.target_class) == inst.class)
@@ -95,47 +188,90 @@ pub fn plan_interpretation_ops_with_context(
                 "interpretation: dropping proposed instance for unknown class '{}'",
                 inst.class
             );
+            slot_base.push(None);
             continue;
         };
-        let (base, is_update) = match &inst.id {
-            Some(id) if existing.contains_key(id) => (id.clone(), true),
-            _ => {
-                if let Some(hallucinated) = &inst.id {
+        let placed_slot: Option<(String, bool, bool)> = match resolution {
+            Resolution::DupOfExisting(existing_base) => Some((existing_base.clone(), false, false)),
+            Resolution::DupOfEarlier(idx) => match slot_base.get(*idx).cloned().flatten() {
+                Some(base) => Some((base, false, false)),
+                None => {
                     log::debug!(
-                        "interpretation: proposed id {hallucinated:?} not among existing instances for class {}; routing to Create",
+                        "interpretation: DupOfEarlier({idx}) for '{}' had no resolved base; dropping",
                         inst.class
                     );
+                    None
                 }
-                (
-                    format!(
-                        "{base_prefix}{}/{}",
-                        inst.class.to_lowercase(),
-                        Uuid::new_v4()
-                    ),
-                    false,
-                )
+            },
+            Resolution::Keep => {
+                let (base, is_update) = match &inst.id {
+                    // Only route to Update when the proposed id names an existing
+                    // instance OF THE SAME CLASS. An id that belongs to a
+                    // different class must Create, never Update — running this
+                    // class's setters against a foreign-class node clobbers links
+                    // on shared predicates.
+                    Some(id) if existing.get(id).is_some_and(|ctx| ctx.class == inst.class) => {
+                        (id.clone(), true)
+                    }
+                    _ => {
+                        if let Some(hallucinated) = &inst.id {
+                            match existing.get(hallucinated) {
+                                Some(ctx) => log::debug!(
+                                    "interpretation: proposed id {hallucinated:?} is class '{}', not '{}'; routing to Create",
+                                    ctx.class,
+                                    inst.class
+                                ),
+                                None => log::debug!(
+                                    "interpretation: proposed id {hallucinated:?} not among existing instances for class {}; routing to Create",
+                                    inst.class
+                                ),
+                            }
+                        }
+                        (
+                            format!(
+                                "{base_prefix}{}/{}",
+                                inst.class.to_lowercase(),
+                                Uuid::new_v4()
+                            ),
+                            false,
+                        )
+                    }
+                };
+                Some((base, is_update, true))
             }
         };
-        // Index under the class name the LLM uses (matches the relation's
-        // `targetClass`, i.e. the bare local name), in output order.
-        per_class
-            .entry(inst.class.clone())
-            .or_default()
-            .push(base.clone());
-        if is_update {
-            existing_ids.insert(base.clone());
+        match placed_slot {
+            Some((base, is_update, emit)) => {
+                // Index under the class name the LLM uses (matches the
+                // relation's `targetClass`, i.e. the bare local name), in
+                // output order.
+                per_class
+                    .entry(inst.class.clone())
+                    .or_default()
+                    .push(base.clone());
+                if is_update {
+                    existing_ids.insert(base.clone());
+                }
+                slot_base.push(Some(base.clone()));
+                placed.push(Placed {
+                    shape,
+                    inst,
+                    base,
+                    is_update,
+                    emit,
+                });
+            }
+            None => slot_base.push(None),
         }
-        placed.push(Placed {
-            shape,
-            inst,
-            base,
-            is_update,
-        });
     }
 
-    // Pass 2: build ops, resolving relations against the full index.
+    // Pass 2: build ops for the written slots, resolving relations against the
+    // full index.
     let mut out = Vec::with_capacity(placed.len());
     for p in &placed {
+        if !p.emit {
+            continue;
+        }
         let values = scalar_values(p.shape, p.inst);
         if p.is_update {
             if !values.is_empty() {
@@ -152,7 +288,14 @@ pub fn plan_interpretation_ops_with_context(
                 values,
             });
         }
-        let rel_links = resolve_relation_links(p.shape, p.inst, &p.base, &per_class, &existing_ids);
+        let rel_links = resolve_relation_links(
+            p.shape,
+            p.inst,
+            &p.base,
+            &per_class,
+            &existing_ids,
+            existing_links,
+        );
         if !rel_links.is_empty() {
             out.push(InterpretationOp::AddLinks {
                 source: p.base.clone(),
@@ -170,12 +313,22 @@ pub fn plan_interpretation_ops_with_context(
 /// Reverse-direction relations are skipped (they need the inverse predicate on
 /// the target class — Phase 3). Single-cardinality relations keep only the
 /// first resolved ref. Unresolved/malformed refs are dropped with `log::warn!`.
+///
+/// `existing_links` makes this idempotent across repeated passes (James #883 #4):
+/// a resolved `(source, predicate, target)` edge already present in the graph is
+/// not re-emitted, so a second continuous pass over the same proposals grows no
+/// duplicate link (and mints no duplicate reifier node downstream). For a
+/// single-cardinality relation this means an unchanged target is a no-op; a
+/// *changed* target still emits additively (removing the stale edge needs a
+/// removal op — out of scope, Phase 3 semantic diff), so at minimum no duplicate
+/// edge is ever produced for an unchanged relation.
 fn resolve_relation_links(
     shape: &ModelShape,
     inst: &ProposedInstance,
     source_base: &str,
     per_class: &HashMap<String, Vec<String>>,
     existing_ids: &HashSet<String>,
+    existing_links: &ExistingLinks,
 ) -> Vec<Link> {
     let mut links = Vec::new();
     for rel in &shape.include_relations {
@@ -210,6 +363,26 @@ fn resolve_relation_links(
                         );
                         continue;
                     }
+                    // Idempotency guard (James #883 #4): the edge already exists,
+                    // so re-emitting it would grow a duplicate link (and a fresh
+                    // reifier node). Count it as satisfied — for a single-
+                    // cardinality relation this also stops a later ref replacing
+                    // an unchanged target — but write nothing.
+                    if existing_links.contains(&(
+                        source_base.to_string(),
+                        rel.predicate.clone(),
+                        target.clone(),
+                    )) {
+                        log::debug!(
+                            "interpretation: relation '{}' on '{}' already links {} -> {}; skipping (idempotent)",
+                            rel.name,
+                            inst.class,
+                            source_base,
+                            target
+                        );
+                        emitted += 1;
+                        continue;
+                    }
                     links.push(Link {
                         source: source_base.to_string(),
                         predicate: Some(rel.predicate.clone()),
@@ -238,10 +411,21 @@ fn resolve_relation_links(
 fn normalize_refs(value: &serde_json::Value) -> Option<Vec<String>> {
     match value {
         serde_json::Value::String(s) => Some(vec![s.clone()]),
-        serde_json::Value::Array(arr) => arr
-            .iter()
-            .map(|v| v.as_str().map(|s| s.to_string()))
-            .collect(),
+        // Keep every string ref and skip (log) any non-string element, rather
+        // than collecting into `Option<Vec>` — a single bad element there
+        // dropped the WHOLE relation array (James #883). A malformed ref should
+        // cost only itself, not the sibling refs the model got right.
+        serde_json::Value::Array(arr) => Some(
+            arr.iter()
+                .filter_map(|v| match v.as_str() {
+                    Some(s) => Some(s.to_string()),
+                    None => {
+                        log::debug!("interpretation: dropping non-string relation ref {v:?}");
+                        None
+                    }
+                })
+                .collect(),
+        ),
         _ => None,
     }
 }
@@ -299,7 +483,14 @@ mod tests {
         // known_existing_ids to mimic what `existing_instance_context` would
         // return in production. Without this the planner treats the id as
         // hallucinated and routes to Create.
-        let known = existing_ids(&["soa://existing/intention/42"]);
+        // Seed the existing node with its real class — Update routing now
+        // requires the id to name a *same-class* instance (James #883).
+        let known = existing_map(vec![InstanceContext {
+            id: "soa://existing/intention/42".to_string(),
+            title: "Write the design doc".to_string(),
+            class: "Intention".to_string(),
+            properties: std::collections::BTreeMap::new(),
+        }]);
         let ops = plan_interpretation_ops_with_context(&shapes, &proposed, "soa://ext/", &known);
         assert_eq!(ops.len(), 2);
 
@@ -342,6 +533,60 @@ mod tests {
                 assert!(!values.contains_key("type"));
             }
             other => panic!("expected Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_refs_keeps_valid_refs_and_skips_non_strings() {
+        use serde_json::json;
+        assert_eq!(normalize_refs(&json!("t1")), Some(vec!["t1".to_string()]));
+        assert_eq!(
+            normalize_refs(&json!(["a", "b"])),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        // Regression (James #883): one non-string element must NOT drop the whole
+        // array — the good refs survive.
+        assert_eq!(
+            normalize_refs(&json!(["a", 5, "b", null])),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(normalize_refs(&json!(5)), None);
+    }
+
+    #[test]
+    fn plan_ops_cross_class_id_routes_to_create_not_foreign_node() {
+        // Regression (James #883): an `id` that names an existing instance of a
+        // DIFFERENT class must Create, never Update. Updating a foreign-class
+        // node runs this class's setters against it and clobbers links on shared
+        // predicates. Only a same-class id may upsert.
+        let shapes = vec![shape_from_sdna("Intention", INTENTION_SDNA)];
+        // The graph holds a Task at this id…
+        let known = existing_map(vec![InstanceContext {
+            id: "soa://existing/task/42".to_string(),
+            title: "Ship the MVP".to_string(),
+            class: "Task".to_string(),
+            properties: std::collections::BTreeMap::new(),
+        }]);
+        // …but the LLM emits an Intention pointing at the Task's id.
+        let raw = r#"[
+      {"class":"Intention","id":"soa://existing/task/42","title":"Ship the MVP"}
+    ]"#;
+        let proposed = parse_interpretation_response(raw).unwrap();
+        let ops = plan_interpretation_ops_with_context(&shapes, &proposed, "soa://ext/", &known);
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            InterpretationOp::Create { base, class, .. } => {
+                assert!(
+                    base.starts_with("soa://ext/intention/"),
+                    "cross-class id must mint a fresh base, got {base}"
+                );
+                assert_ne!(
+                    base, "soa://existing/task/42",
+                    "planner must not Update the foreign-class (Task) node"
+                );
+                assert_eq!(class, "Intention");
+            }
+            other => panic!("expected Create for a cross-class id, got {other:?}"),
         }
     }
 
@@ -607,7 +852,13 @@ mod tests {
         ]"#,
         );
         let proposed = parse_interpretation_response(&raw).unwrap();
-        let known = existing_ids(&[existing_id.as_str()]);
+        // Same-class seed so the id upserts (routing now checks class — James #883).
+        let known = existing_map(vec![InstanceContext {
+            id: existing_id.clone(),
+            title: "Existing".to_string(),
+            class: "Task".to_string(),
+            properties: std::collections::BTreeMap::new(),
+        }]);
         let ops = plan_interpretation_ops_with_context(&[shape], &proposed, "soa://ext/", &known);
 
         // The Update carries the retitled scalar, no relation value.
@@ -636,6 +887,237 @@ mod tests {
             targets_of(addlinks_for(&ops, &existing_id), "ns://blocks"),
             vec![sibling_base],
             "AddLinks must point the blocks relation at the fresh sibling's base"
+        );
+    }
+
+    #[test]
+    fn plan_resolved_indexes_dup_slot_so_ordinal_resolves_to_existing_base() {
+        // James #883: a proposal deduped as already-existing must still occupy
+        // its slot in the emission-order ordinal index, mapped to the REAL
+        // existing base — so a sibling's `new:<Class>:<n>` links the existing
+        // node, not the wrong sibling or a fresh mint. Emission order:
+        // [Alpha(new), Existing(dup-of-existing), Gamma(new)]; Gamma.blocks =
+        // `new:Task:2` must target Existing's base, and no Create is emitted for
+        // the dup.
+        let shape = shape_from_sdna("Task", TASK_WITH_RELATION_SDNA);
+        let existing_base = "soa://ext/task/existing".to_string();
+        let raw = r#"[
+          {"class":"Task","title":"Alpha"},
+          {"class":"Task","title":"Existing Title"},
+          {"class":"Task","title":"Gamma","blocks":["new:Task:2"]}
+        ]"#;
+        let proposed = parse_interpretation_response(raw).unwrap();
+        let resolved = vec![
+            (proposed[0].clone(), Resolution::Keep),
+            (
+                proposed[1].clone(),
+                Resolution::DupOfExisting(existing_base.clone()),
+            ),
+            (proposed[2].clone(), Resolution::Keep),
+        ];
+        let known = existing_map(vec![InstanceContext {
+            id: existing_base.clone(),
+            title: "Existing Title".to_string(),
+            class: "Task".to_string(),
+            properties: std::collections::BTreeMap::new(),
+        }]);
+        let ops = plan_interpretation_ops_resolved(
+            &[shape],
+            &resolved,
+            "soa://ext/",
+            &known,
+            &ExistingLinks::new(),
+        );
+
+        // The dup slot is never re-created.
+        assert!(
+            !ops.iter().any(|op| matches!(
+                op,
+                InterpretationOp::Create { base, .. } if base == &existing_base
+            )),
+            "the dup-of-existing slot must not be re-created; got {ops:#?}"
+        );
+        // Creates, in order: Alpha (#0), Gamma (#1) — the dup took no create slot.
+        let gamma_base = nth_create_base(&ops, 1);
+        assert_eq!(
+            targets_of(addlinks_for(&ops, &gamma_base), "ns://blocks"),
+            vec![existing_base],
+            "new:Task:2 (the 2nd Task in emission order = the dup) must resolve \
+             to the existing Task's base, not a sibling or fresh mint"
+        );
+    }
+
+    #[test]
+    fn plan_ops_hasone_relation_idempotent_across_passes() {
+        // James #883 #4: rerun the planner over the SAME proposal with pass-1's
+        // edge already present as existing state — a single-cardinality (hasOne)
+        // relation whose target is unchanged must NOT re-emit. No duplicate
+        // AddLinks on pass 2 ⇒ no duplicate link, and no duplicate reifier node
+        // downstream (the reifier IRI hashes in the link timestamp, so a re-add
+        // would mint a fresh one — see sparql_store::make_reifier_iri).
+        let sdna = r#"{
+      "target_class":"ns://Task",
+      "interpretation_hint":"A task.",
+      "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://task"}],
+      "properties":[
+        {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
+        {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+        {"path":"ns://parent","name":"parent","relation_kind":"hasOne","target_class_name":"Task","class":"ns://TaskShape","interpretation_hint":"The parent task."}
+      ]
+    }"#;
+        let shape = shape_from_sdna("Task", sdna);
+        let child = "soa://ext/task/child".to_string();
+        let parent = "soa://ext/task/parent".to_string();
+        // Both instances already exist (same class) so the child upserts and
+        // references the parent by a stable id — the source base is identical
+        // across passes, which is what makes the existence check meaningful.
+        let known = existing_map(vec![
+            InstanceContext {
+                id: child.clone(),
+                title: "Child".to_string(),
+                class: "Task".to_string(),
+                properties: std::collections::BTreeMap::new(),
+            },
+            InstanceContext {
+                id: parent.clone(),
+                title: "Parent".to_string(),
+                class: "Task".to_string(),
+                properties: std::collections::BTreeMap::new(),
+            },
+        ]);
+        let proposed = vec![proposal(
+            "Task",
+            Some(&child),
+            &[("parent", serde_json::json!([parent.clone()]))],
+        )];
+        let resolved: Vec<_> = proposed
+            .iter()
+            .map(|p| (p.clone(), Resolution::Keep))
+            .collect();
+
+        // Pass 1: no existing links -> the edge is emitted once.
+        let ops1 = plan_interpretation_ops_resolved(
+            std::slice::from_ref(&shape),
+            &resolved,
+            "soa://ext/",
+            &known,
+            &ExistingLinks::new(),
+        );
+        assert_eq!(
+            targets_of(addlinks_for(&ops1, &child), "ns://parent"),
+            vec![parent.clone()],
+            "pass 1 must emit the hasOne edge"
+        );
+
+        // Pass 2: feed pass-1's edge back as existing state -> no re-emission.
+        let existing_links = links_from_ops(&ops1);
+        let ops2 = plan_interpretation_ops_resolved(
+            std::slice::from_ref(&shape),
+            &resolved,
+            "soa://ext/",
+            &known,
+            &existing_links,
+        );
+        assert!(
+            addlinks_for(&ops2, &child).is_empty(),
+            "pass 2 must not re-emit the unchanged hasOne edge; got {ops2:#?}"
+        );
+        assert!(
+            !ops2.iter().any(|op| matches!(
+                op,
+                InterpretationOp::AddLinks { source, .. } if source == &child
+            )),
+            "pass 2 must emit no AddLinks op at all for an unchanged relation; got {ops2:#?}"
+        );
+    }
+
+    #[test]
+    fn plan_ops_hasmany_relation_idempotent_across_passes() {
+        // James #883 #4 (multi-cardinality): a `hasMany` (`blocks`) relation from
+        // an existing hub to two existing targets must not re-emit either edge on
+        // a second pass — while a genuinely NEW target is still added (additive
+        // growth is preserved, only the duplicates are suppressed).
+        let shape = shape_from_sdna("Task", TASK_WITH_RELATION_SDNA);
+        let hub = "soa://ext/task/hub".to_string();
+        let a = "soa://ext/task/a".to_string();
+        let b = "soa://ext/task/b".to_string();
+        let c = "soa://ext/task/c".to_string();
+        let known = existing_map(
+            [&hub, &a, &b, &c]
+                .iter()
+                .map(|id| InstanceContext {
+                    id: (**id).clone(),
+                    title: (**id).clone(),
+                    class: "Task".to_string(),
+                    properties: std::collections::BTreeMap::new(),
+                })
+                .collect(),
+        );
+        let base_proposed = vec![proposal(
+            "Task",
+            Some(&hub),
+            &[("blocks", serde_json::json!([a.clone(), b.clone()]))],
+        )];
+        let resolved: Vec<_> = base_proposed
+            .iter()
+            .map(|p| (p.clone(), Resolution::Keep))
+            .collect();
+
+        // Pass 1: both edges emitted.
+        let ops1 = plan_interpretation_ops_resolved(
+            std::slice::from_ref(&shape),
+            &resolved,
+            "soa://ext/",
+            &known,
+            &ExistingLinks::new(),
+        );
+        let mut t1 = targets_of(addlinks_for(&ops1, &hub), "ns://blocks");
+        t1.sort();
+        assert_eq!(
+            t1,
+            vec![a.clone(), b.clone()],
+            "pass 1 must emit both blocks edges"
+        );
+
+        let existing_links = links_from_ops(&ops1);
+
+        // Pass 2: identical proposal -> both edges already exist -> nothing added.
+        let ops2 = plan_interpretation_ops_resolved(
+            std::slice::from_ref(&shape),
+            &resolved,
+            "soa://ext/",
+            &known,
+            &existing_links,
+        );
+        assert!(
+            addlinks_for(&ops2, &hub).is_empty(),
+            "pass 2 must not re-emit existing hasMany edges; got {ops2:#?}"
+        );
+
+        // Pass 3: same two targets PLUS a new one -> only the new edge is added.
+        let grown_proposed = vec![proposal(
+            "Task",
+            Some(&hub),
+            &[(
+                "blocks",
+                serde_json::json!([a.clone(), b.clone(), c.clone()]),
+            )],
+        )];
+        let resolved_grown: Vec<_> = grown_proposed
+            .iter()
+            .map(|p| (p.clone(), Resolution::Keep))
+            .collect();
+        let ops3 = plan_interpretation_ops_resolved(
+            std::slice::from_ref(&shape),
+            &resolved_grown,
+            "soa://ext/",
+            &known,
+            &existing_links,
+        );
+        assert_eq!(
+            targets_of(addlinks_for(&ops3, &hub), "ns://blocks"),
+            vec![c.clone()],
+            "only the genuinely new target must be added; the two existing edges stay suppressed"
         );
     }
 
