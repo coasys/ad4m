@@ -547,6 +547,45 @@ pub(crate) async fn seed_instance_with_props(
         .expect("seed_instance_with_props create_subject");
 }
 
+/// Seed an `InterpretationOverlay` over an already-seeded instance so the §4
+/// human-divergence gate treats it as **LLM-authored** (as it would be in
+/// production, where every instance is minted by an interpretation pass that
+/// also writes the overlay). Without this, a directly-`seed_instance`'d base
+/// carries no overlay and the gate — correctly — refuses to let a later pass
+/// overwrite its scalars (protecting human/seed data). Use it whenever a test
+/// seeds an instance that a subsequent interpretation pass is expected to
+/// *update in place* (e.g. a persistent `ConversationSubgroup` whose rolling
+/// `summary` grows). `props` are the same property names/values seeded onto the
+/// instance; they are mapped to their real predicates via the class shape so the
+/// overlay's `inferred/<p>` equals the seeded real value.
+pub(crate) async fn seed_llm_overlay(
+    perspective: &mut PerspectiveInstance,
+    ctx: &AgentContext,
+    shape: &ModelShape,
+    base: &str,
+    props: serde_json::Value,
+) {
+    let obj = props
+        .as_object()
+        .expect("seed_llm_overlay: props must be a JSON object");
+    let mut inferred: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    for (name, value) in obj {
+        let pred = shape
+            .properties
+            .iter()
+            .find(|p| &p.name == name)
+            .unwrap_or_else(|| {
+                panic!("seed_llm_overlay: class {} has no property {name}", shape.target_class)
+            })
+            .predicate
+            .clone();
+        inferred.insert(pred, value.clone());
+    }
+    super::interpretation::seed_overlay(perspective, base, inferred, ctx)
+        .await
+        .expect("seed_llm_overlay: seed_overlay");
+}
+
 // ---- graph-state accessors / assertions (read back via `model_query`) -------
 //
 // These read the *final graph state* through `PerspectiveInstance::model_query`
