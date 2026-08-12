@@ -498,8 +498,9 @@ Notes:
   async function subscribeToMentionsForPerspective(
     perspectiveId: string,
   ): Promise<string> {
-    // Skip if already subscribed
-    const existingId = `mention-${perspectiveId.substring(0, 8)}`;
+    // Skip if already subscribed. Must match the executor's build_mention_sub_id
+    // (`mention-${perspective_id}`) so the dedup guard is effective.
+    const existingId = `mention-${perspectiveId}`;
     if (_subscriptionManager?.has(existingId)) {
       return `Already subscribed to mentions in perspective ${perspectiveId}.`;
     }

@@ -265,6 +265,10 @@ impl Ad4mMcpHandler {
 /// authored (its own author-DID proof metadata), so the agent would wake on its
 /// own writes rather than on real mentions.
 ///
+/// Search terms (profile names, DID) are interpolated into the query, so each is
+/// escaped as a SPARQL string literal — a name containing `"` or `\` would
+/// otherwise break out of the CONTAINS literal and could inject query syntax.
+///
 /// Pure over its inputs, so it unit-tests without an agent or perspective.
 pub fn build_mention_query(names: &[String], did: &str, body_predicate: Option<&str>) -> String {
     let all_terms: Vec<String> = names
@@ -277,7 +281,7 @@ pub fn build_mention_query(names: &[String], did: &str, body_predicate: Option<&
         .map(|t| {
             format!(
                 "CONTAINS(LCASE(STR(<ad4m://fn/parse_literal>(?target))), \"{}\")",
-                t
+                escape_sparql_literal(t)
             )
         })
         .collect();
@@ -296,18 +300,23 @@ pub fn build_mention_query(names: &[String], did: &str, body_predicate: Option<&
     }
 }
 
+/// Escape a string for embedding inside a SPARQL double-quoted literal:
+/// backslash first, then double-quote.
+fn escape_sparql_literal(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Build a mention-subscription id keyed on the perspective.
 ///
 /// Deriving the id from the agent DID alone made it identical across every
 /// neighbourhood the agent joined; the waker's dispose-by-id then evicted a
 /// prior perspective's subscription when the agent subscribed in a second one,
 /// so an agent in N neighbourhoods only woke in the most-recent. Keying on the
-/// perspective gives distinct ids for distinct perspectives, and matches the
-/// plugin's `mention-${perspectiveId.slice(0,8)}` dedup guard so a repeat
-/// subscribe on the same perspective is correctly skipped.
+/// full perspective id gives distinct ids for distinct perspectives with no
+/// truncation collision, and matches the plugin's `mention-${perspectiveId}`
+/// dedup guard so a repeat subscribe on the same perspective is skipped.
 pub fn build_mention_sub_id(perspective_id: &str) -> String {
-    let head: String = perspective_id.chars().take(8).collect();
-    format!("mention-{}", head)
+    format!("mention-{}", perspective_id)
 }
 
 #[cfg(test)]
@@ -317,7 +326,7 @@ mod tests {
     #[test]
     fn scoped_query_excludes_ontology_proof_metadata() {
         let q = build_mention_query(
-            &["hex".to_string()],
+            &["alice".to_string()],
             "did:key:zAgent",
             Some("ad4m://message_body"),
         );
@@ -335,7 +344,7 @@ mod tests {
     fn unscoped_fallback_still_excludes_ontology_proof_metadata() {
         // Regression: the fallback (no body predicate) used to be fully unscoped,
         // so the DID term matched the agent's own ad4m://ontology/author links.
-        let q = build_mention_query(&["hex".to_string()], "did:key:zAgent", None);
+        let q = build_mention_query(&["alice".to_string()], "did:key:zAgent", None);
         assert!(
             q.contains("FILTER(!STRSTARTS(STR(?predicate), \"ad4m://ontology/\"))"),
             "fallback must still exclude proof metadata"
@@ -345,24 +354,37 @@ mod tests {
     #[test]
     fn query_matches_names_and_did_case_insensitively() {
         let q = build_mention_query(
-            &["Hex".to_string(), "Josh".to_string()],
+            &["Alice".to_string(), "Bob".to_string()],
             "did:key:zABC",
             None,
         );
-        assert!(q.contains("\"hex\""), "name lowercased");
-        assert!(q.contains("\"josh\""), "second name lowercased");
+        assert!(q.contains("\"alice\""), "name lowercased");
+        assert!(q.contains("\"bob\""), "second name lowercased");
         assert!(q.contains("\"did:key:zabc\""), "DID lowercased + included");
         assert!(q.contains("parse_literal"), "decodes literal targets");
     }
 
     #[test]
+    fn query_escapes_quotes_and_backslashes_in_terms() {
+        // A term containing a double-quote or backslash must not break out of the
+        // CONTAINS string literal (SPARQL injection guard).
+        let q = build_mention_query(&["a\"b\\c".to_string()], "did:key:zX", None);
+        assert!(q.contains("a\\\"b\\\\c"), "quote + backslash escaped: {q}");
+        assert!(
+            !q.contains("\"a\"b"),
+            "raw unescaped quote must not appear: {q}"
+        );
+    }
+
+    #[test]
     fn sub_id_is_perspective_scoped_not_did_scoped() {
         // Two perspectives, same agent → distinct ids (no cross-neighbourhood
-        // eviction). Matches the plugin's mention-${perspectiveId.slice(0,8)} guard.
+        // eviction). Uses the full perspective id (no truncation collision) and
+        // matches the plugin's mention-${perspectiveId} dedup guard.
         let a = build_mention_sub_id("c41dfd35-769e-474f-a2e6-4e5d580615c8");
         let b = build_mention_sub_id("8432bdcb-410e-48e2-b1e1-2bb3f831d067");
         assert_ne!(a, b, "distinct perspectives must yield distinct sub ids");
-        assert_eq!(a, "mention-c41dfd35");
+        assert_eq!(a, "mention-c41dfd35-769e-474f-a2e6-4e5d580615c8");
         // Repeat subscribe on the same perspective → same id (dedup fires).
         assert_eq!(
             a,
