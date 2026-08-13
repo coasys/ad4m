@@ -570,8 +570,14 @@ pub struct AddAutoProcessorRequest {
     pub uuid: String,
     /// Human-meaningful processor id (unique per perspective).
     pub processor_id: String,
-    /// SPARQL `SELECT ?speaker ?text` over the source items to interpret (e.g.
-    /// a channel's messages).
+    /// SPARQL `SELECT ?speaker ?text ?timestamp` over the source items to
+    /// interpret (e.g. a channel's messages). All three bindings are required:
+    /// `?timestamp` is what makes a turn identifiable, so the processed-turn
+    /// cursor can tell a re-gathered turn from the same wording said again
+    /// later. Copy `BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY` (it reads the body
+    /// link's reifier — `ad4m://ontology/author` + `ad4m://ontology/timestamp`
+    /// — rather than an app-level `ns://author` predicate) and swap in your own
+    /// body predicate; a query binding only speaker+text fails the gather.
     pub source_scope_query: String,
     /// URI namespace new interpreted instances are minted under (the spawn
     /// scope), e.g. `soa://project/42/`. Omit for a per-processor default.
@@ -594,6 +600,13 @@ pub struct AddAutoProcessorRequest {
     /// Optional serialized `DedupStrategy` JSON (else NormalizedString).
     #[serde(default)]
     pub dedup_strategy_json: Option<String>,
+    /// How far back (ms) each pass looks: turns older than `now - window` are
+    /// dropped, and the processed-turn cursor only counts runs that finished
+    /// inside the same window. Omit for **no window** — every gathered turn is
+    /// a candidate and the cursor is the unbounded union of this processor's
+    /// past runs.
+    #[serde(default)]
+    pub source_window_ms: Option<i64>,
 }
 
 /// `perspective.acceptInterpretation` / `perspective.rejectInterpretation` —

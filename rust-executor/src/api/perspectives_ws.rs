@@ -1055,10 +1055,18 @@ async fn run_interpretation_handler(
         ));
     }
 
-    let transcript: Vec<(String, String)> = body
+    // The public WS turn carries `speaker`/`text` only. `timestamp` stays an
+    // AutoProcessor concern: it is bound by the scope query's SPARQL gather so
+    // repeated wording at different times hashes to distinct turns, which a
+    // one-shot caller passing an explicit transcript has no cursor for.
+    let transcript: Vec<crate::perspectives::interpretation::TranscriptTurn> = body
         .transcript
         .into_iter()
-        .map(|t| (t.speaker, t.text))
+        .map(|t| {
+            crate::perspectives::interpretation::TranscriptTurn::from_speaker_text(
+                t.speaker, t.text,
+            )
+        })
         .collect();
 
     let bases = crate::perspectives::interpretation::run_interpretation(
@@ -1123,6 +1131,7 @@ async fn add_auto_processor_handler(
         max_wait_ms: body.max_wait_ms,
         claim_ttl_ms: body.claim_ttl_ms,
         dedup_strategy_json: body.dedup_strategy_json,
+        source_window_ms: body.source_window_ms,
     };
     write_processor(&mut perspective, &cfg, &agent_context)
         .await

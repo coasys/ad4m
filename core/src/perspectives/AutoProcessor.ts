@@ -36,7 +36,26 @@ export interface AutoProcessorEvent {
 export interface AddAutoProcessorConfig {
   /** Human-meaningful processor id (unique per perspective). */
   processorId: string;
-  /** SPARQL `SELECT ?speaker ?text` over the source items to interpret. */
+  /**
+   * SPARQL `SELECT ?speaker ?text ?timestamp` over the source items to
+   * interpret. All three bindings are required: `?timestamp` is what makes a
+   * turn identifiable, so the processed-turn cursor can tell a re-gathered
+   * turn from the same wording said again later. Read the body link's reifier
+   * for author and timestamp rather than an app-level `ns://author`:
+   *
+   * ```sparql
+   * SELECT ?speaker ?text ?timestamp WHERE {
+   *   ?m <ns://body> ?text .
+   *   ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
+   *   ?r <ad4m://ontology/author> ?speaker .
+   *   ?r <ad4m://ontology/timestamp> ?timestamp .
+   * }
+   * ORDER BY ?timestamp
+   * ```
+   *
+   * Swap `ns://body` for your own body predicate. A query binding only
+   * speaker+text fails the gather.
+   */
   sourceScopeQuery: string;
   /**
    * URI namespace new interpreted instances are minted under (the "spawn
@@ -59,6 +78,14 @@ export interface AddAutoProcessorConfig {
   claimTtlMs: number;
   /** Optional serialized `DedupStrategy` JSON (else NormalizedString). */
   dedupStrategyJson?: string;
+  /**
+   * How far back (ms) each pass looks: turns older than `now - window` are
+   * dropped, and the processed-turn cursor only counts runs that finished
+   * inside the same window. Omit for no window — every gathered turn is a
+   * candidate and the cursor is the unbounded union of this processor's past
+   * runs.
+   */
+  sourceWindowMs?: number;
 }
 
 /**

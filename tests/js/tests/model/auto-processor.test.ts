@@ -26,8 +26,17 @@ import { ConversationSubgroup } from "./auto-processor-models.js";
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
 const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.5-27b-opus:latest";
 
-const SCOPE_QUERY =
-  "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . } ORDER BY ?m";
+// Speaker and timestamp come off the body link's reifier, not an app-level
+// `ns://author` predicate: `?timestamp` is required (it is what makes a turn
+// identifiable to the processed-turn cursor) and only the reifier carries it.
+// So `?speaker` is the DID that *signed* the link, not the `ns://author` target.
+const SCOPE_QUERY = `SELECT ?speaker ?text ?timestamp WHERE {
+  ?m <ns://body> ?text .
+  ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
+  ?r <ad4m://ontology/author> ?speaker .
+  ?r <ad4m://ontology/timestamp> ?timestamp .
+}
+ORDER BY ?timestamp`;
 
 function withTimeout<T>(pr: Promise<T>, ms: number, msg: string): Promise<T> {
   return Promise.race([
