@@ -7,10 +7,10 @@
 //!   ready batch when the debounce window has elapsed. No I/O; unit-tested
 //!   deterministically.
 //! * [`run_one_pass`] — the async pass itself: `try_claim`, load shapes,
-//!   gather the SPARQL transcript, run `run_interpretation_with_strategy`
-//!   with the deserialized dedup strategy. Standalone and re-triggerable so
-//!   it can be driven from a test, a REPL, or the future event-driven
-//!   watcher loop (P-B2b) without changing its guarantees.
+//!   interpret the drained [`PendingTurn`] payload (no second SPARQL), run
+//!   `run_interpretation_with_strategy` with the deserialized dedup strategy.
+//!   Standalone and re-triggerable so it can be driven from a test, a REPL, or
+//!   the future event-driven watcher loop without changing its guarantees.
 //!
 //! The eventual watcher loop (P-B2b) wires this to real perspective link
 //! events + telepresence presence — it will still delegate the actual pass
@@ -18,7 +18,8 @@
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
-    gather_transcript_sparql, run_interpretation_with_strategy, DedupStrategy,
+    run_interpretation_with_strategy_and_model, DedupStrategy, InterpretationRunCursor,
+    TranscriptTurn,
 };
 use crate::perspectives::model_query::load_shape_from_store;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -30,21 +31,56 @@ use super::events::{emit, AutoProcessorEvent, AutoProcessorStep};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-/// Stable id for a `(speaker, text)` transcript turn — the atom the polling
-/// watch loop feeds to [`WatcherState::record_item`] and (indirectly) to
-/// [`crate::perspectives::auto_processor::claim::batch_key`]. SHA-256 over
-/// `speaker || \0 || text` keeps it injective across the field boundary; a
-/// hex prefix keeps claim-link URIs short.
+/// Stable id for a `(speaker, text, timestamp)` transcript turn — the atom the
+/// polling watch loop feeds to [`WatcherState::record_item`] and (indirectly)
+/// to [`crate::perspectives::auto_processor::claim::batch_key`]. SHA-256 over
+/// `speaker || \0 || text || \0 || timestamp` keeps it injective across field
+/// boundaries; a hex prefix keeps claim-link URIs short.
 ///
-/// The value is only meaningful within a single processor's pending window;
-/// consumers should not persist it or compare across processors.
-pub fn turn_id(speaker: &str, text: &str) -> String {
+/// Identical content at different times is a **new** turn. The same link
+/// (same speaker, body, and link timestamp) collapses. The value is only
+/// meaningful within a single processor's pending window; consumers should
+/// not persist it or compare across processors (until the shared
+/// `InterpretationRun.sources` cursor lands).
+pub fn turn_id(speaker: &str, text: &str, timestamp: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(speaker.as_bytes());
     hasher.update([0u8]);
     hasher.update(text.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(timestamp.as_bytes());
     let digest = hasher.finalize();
     format!("{:x}", digest)[..16].to_string()
+}
+
+/// One pending source turn: the content-hash id plus the payload
+/// `run_one_pass` interprets. Kept together so a drained batch is exactly
+/// what the LLM sees — no second SPARQL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingTurn {
+    pub id: String,
+    pub speaker: String,
+    pub text: String,
+    pub timestamp: String,
+}
+
+impl PendingTurn {
+    pub fn from_transcript(turn: &TranscriptTurn) -> Self {
+        Self {
+            id: turn_id(&turn.speaker, &turn.text, &turn.timestamp),
+            speaker: turn.speaker.clone(),
+            text: turn.text.clone(),
+            timestamp: turn.timestamp.clone(),
+        }
+    }
+
+    pub fn as_transcript(&self) -> TranscriptTurn {
+        TranscriptTurn {
+            speaker: self.speaker.clone(),
+            text: self.text.clone(),
+            timestamp: self.timestamp.clone(),
+        }
+    }
 }
 
 /// Per-processor observation state. Kept in a `BTreeMap` inside
@@ -52,9 +88,9 @@ pub fn turn_id(speaker: &str, text: &str) -> String {
 /// correctness).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ProcessorPending {
-    /// Source item ids seen since the last drained batch, insertion order,
-    /// deduplicated.
-    pub items: Vec<String>,
+    /// Source turns seen since the last drained batch, insertion order,
+    /// deduplicated by [`PendingTurn::id`].
+    pub items: Vec<PendingTurn>,
     /// Wall-clock (unix millis) of the most recent [`WatcherState::record_item`]
     /// for this processor. Used to compare against `debounce_ms`.
     pub last_touched_ms: i64,
@@ -79,6 +115,18 @@ pub struct WatcherState {
     /// actually claims — the claim TTL only recovers a *crashed claimant*, not
     /// an *inactive elected author*.
     standdown_since: BTreeMap<String, i64>,
+    /// Per-processor turn id → wall-clock (unix millis) before which the id
+    /// must not be re-enqueued, set when a pass backed off to a peer's claim.
+    ///
+    /// The durable cursor is the winner's `InterpretationRun.sources`, which
+    /// only reaches us once their links sync. Without this, the losing peer
+    /// re-gathers the same turns every debounce window and calls `try_claim`
+    /// again — and `try_claim` *writes* its claim before reading the holders,
+    /// so a slow-syncing neighbourhood would see steady claim-link churn. The
+    /// deadline is the claim TTL: past it the winner's claim has expired
+    /// anyway, so retrying is the intended crashed-claimant recovery rather
+    /// than a redundant race.
+    deferred: BTreeMap<String, BTreeMap<String, i64>>,
 }
 
 impl WatcherState {
@@ -86,7 +134,7 @@ impl WatcherState {
         Self::default()
     }
 
-    /// Note that `item_id` was just observed under `processor_id`'s scope at
+    /// Note that `turn` was just observed under `processor_id`'s scope at
     /// `now_ms`. Duplicate ids inside the same pending window are ignored;
     /// this keeps the pending queue small when the source graph emits several
     /// `link-added` events for the same node (e.g. type + predicate + data
@@ -98,17 +146,17 @@ impl WatcherState {
     /// each turn, so if a duplicate re-emit bumped the clock, the debounce
     /// window would reset every tick and a batch would never drain. Debounce
     /// therefore means "quiet for `debounce_ms` since the last *new* item".
-    pub fn record_item(&mut self, processor_id: &str, item_id: String, now_ms: i64) {
+    pub fn record_item(&mut self, processor_id: &str, turn: PendingTurn, now_ms: i64) {
         let entry = self
             .per_processor
             .entry(processor_id.to_string())
             .or_default();
-        if !entry.items.contains(&item_id) {
+        if !entry.items.iter().any(|t| t.id == turn.id) {
             if entry.items.is_empty() {
                 // First item of a fresh window — start the max-wait clock.
                 entry.first_touched_ms = now_ms;
             }
-            entry.items.push(item_id);
+            entry.items.push(turn);
             entry.last_touched_ms = now_ms;
         }
     }
@@ -135,7 +183,7 @@ impl WatcherState {
         &mut self,
         cfg: &AutoProcessorConfig,
         now_ms: i64,
-    ) -> Option<Vec<String>> {
+    ) -> Option<Vec<PendingTurn>> {
         let entry = self.per_processor.get_mut(&cfg.processor_id)?;
         if entry.items.is_empty() {
             return None;
@@ -178,6 +226,27 @@ impl WatcherState {
     pub fn clear_standdown(&mut self, batch_key: &str) {
         self.standdown_since.remove(batch_key);
     }
+
+    /// Hold `ids` back from re-enqueue for `ttl_ms`, because a peer holds the
+    /// claim on them. Expired entries for this processor are pruned on the way
+    /// in, so the map stays bounded by what is currently deferred rather than
+    /// growing with every id ever backed off.
+    pub fn defer_turns(&mut self, processor_id: &str, ids: &[String], now_ms: i64, ttl_ms: i64) {
+        let entry = self.deferred.entry(processor_id.to_string()).or_default();
+        entry.retain(|_, until| *until > now_ms);
+        let until = now_ms.saturating_add(ttl_ms);
+        for id in ids {
+            entry.insert(id.clone(), until);
+        }
+    }
+
+    /// Whether `id` is still inside a [`Self::defer_turns`] window.
+    pub fn is_deferred(&self, processor_id: &str, id: &str, now_ms: i64) -> bool {
+        self.deferred
+            .get(processor_id)
+            .and_then(|m| m.get(id))
+            .is_some_and(|until| *until > now_ms)
+    }
 }
 
 /// Result of a single [`run_one_pass`] call.
@@ -210,8 +279,8 @@ pub enum PassOutcome {
     /// We logged, skipped the LLM call and let the claim TTL-expire so a
     /// later pass — once the shape lands — can re-take it.
     ShapesMissing { missing: Vec<String> },
-    /// Won the claim but `source_scope_query` returned zero `(speaker, text)`
-    /// rows. Nothing to interpret; no LLM round-trip.
+    /// Won the claim but the drained batch was empty. Nothing to interpret;
+    /// no LLM round-trip.
     EmptyTranscript,
 }
 
@@ -347,8 +416,8 @@ pub fn parse_dedup_strategy_json(blob: Option<&str>) -> DedupStrategy {
 /// 2. Resolve each `cfg.interpretation_classes` entry via [`load_shape`]. A
 ///    single miss returns [`PassOutcome::ShapesMissing`] and lets the claim
 ///    TTL-expire so a later pass — once the SDNA lands — can re-take it.
-/// 3. Gather the transcript via [`gather_transcript_sparql`] using
-///    `cfg.source_scope_query`. Zero rows = [`PassOutcome::EmptyTranscript`].
+/// 3. Interpret the drained [`PendingTurn`] payload (no second SPARQL).
+///    Empty `turns` = [`PassOutcome::EmptyTranscript`].
 /// 4. [`run_interpretation_with_strategy`] with the deserialized dedup.
 ///
 /// The pass always uses the executor's default LLM (via `AIService`).
@@ -358,12 +427,7 @@ pub fn parse_dedup_strategy_json(blob: Option<&str>) -> DedupStrategy {
 pub async fn run_one_pass(
     perspective: &mut PerspectiveInstance,
     cfg: &AutoProcessorConfig,
-    item_ids: &[String],
-    // The author DID of each batch item, in message order (may repeat). The
-    // `speaker` binding of the source scope IS the author, so the caller (the
-    // watch loop) resolves these from the transcript rather than the executor
-    // re-deriving them from a node — `item_ids` are content hashes, not URIs.
-    batch_authors: &[String],
+    turns: &[PendingTurn],
     now_ms: i64,
     context: &AgentContext,
     escalate_past_election: bool,
@@ -375,12 +439,14 @@ pub async fn run_one_pass(
     let uuid = perspective.uuid.clone();
     let me = did_for_context(context)
         .map_err(|e| anyhow::anyhow!("run_one_pass: did_for_context: {e:#}"))?;
+    let item_ids: Vec<String> = turns.iter().map(|t| t.id.clone()).collect();
+    let batch_authors: Vec<String> = turns.iter().map(|t| t.speaker.clone()).collect();
     macro_rules! signal {
         ($step:expr) => {
             emit(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
                     .with_agent_did(&me)
-                    .with_items(item_ids),
+                    .with_items(&item_ids),
             )
             .await
         };
@@ -388,7 +454,7 @@ pub async fn run_one_pass(
             emit(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
                     .with_agent_did(&me)
-                    .with_items(item_ids)
+                    .with_items(&item_ids)
                     .with_detail($d),
             )
             .await
@@ -397,7 +463,7 @@ pub async fn run_one_pass(
             emit(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
                     .with_agent_did(&me)
-                    .with_items(item_ids)
+                    .with_items(&item_ids)
                     .with_bases($b),
             )
             .await
@@ -428,7 +494,7 @@ pub async fn run_one_pass(
                 // Batch authors in message order, deduplicated (first occurrence
                 // kept) — the participants `elect_author` walks.
                 let mut authors: Vec<String> = Vec::new();
-                for a in batch_authors {
+                for a in &batch_authors {
                     if !authors.contains(a) {
                         authors.push(a.clone());
                     }
@@ -480,7 +546,7 @@ pub async fn run_one_pass(
     let claim = try_claim(
         perspective,
         &cfg.processor_id,
-        item_ids,
+        &item_ids,
         cfg.claim_ttl_ms,
         now_ms,
         context,
@@ -520,17 +586,17 @@ pub async fn run_one_pass(
         return Ok(PassOutcome::ShapesMissing { missing });
     }
 
-    // 3. Gather transcript.
+    // 3. Interpret the drained batch — no second SPARQL.
     signal!(AutoProcessorStep::GatheringTranscript);
-    let transcript = gather_transcript_sparql(perspective, &cfg.source_scope_query).await?;
-    if transcript.is_empty() {
+    if turns.is_empty() {
         log::info!(
-            "auto_processor `{}`: source_scope_query returned 0 rows; nothing to interpret",
+            "auto_processor `{}`: drained batch is empty; nothing to interpret",
             cfg.processor_id
         );
         signal!(AutoProcessorStep::EmptyTranscript);
         return Ok(PassOutcome::EmptyTranscript);
     }
+    let transcript: Vec<TranscriptTurn> = turns.iter().map(|t| t.as_transcript()).collect();
 
     // 4. Interpret.
     signal!(AutoProcessorStep::RunningInterpretation);
@@ -541,18 +607,23 @@ pub async fn run_one_pass(
         .base_prefix
         .clone()
         .unwrap_or_else(|| format!("ad4m://autoprocessor/{}/instance/", cfg.processor_id));
-    let bases = run_interpretation_with_strategy(
+    let bases = run_interpretation_with_strategy_and_model(
         perspective,
         &shapes,
         &transcript,
         &base_prefix,
         context,
         &dedup,
+        None,
         // Existing-instance scope: not yet wired from the processor config —
         // #883 added the plumbing (`existing_instance_context(scope)`), but the
         // per-channel scope belongs to a follow-up config field. `None` keeps
         // today's whole-perspective existing-set behaviour.
         None,
+        Some(&InterpretationRunCursor {
+            processor: super::config::processor_node(&cfg.processor_id),
+            sources: item_ids.clone(),
+        }),
     )
     .await?;
     signal!(AutoProcessorStep::Processed, bases = &bases);
@@ -579,23 +650,44 @@ mod tests {
             max_wait_ms: None,
             claim_ttl_ms: 60_000,
             dedup_strategy_json: None,
+            source_window_ms: None,
         }
+    }
+
+    fn pt(id: &str) -> PendingTurn {
+        PendingTurn {
+            id: id.to_string(),
+            speaker: "s".into(),
+            text: id.to_string(),
+            timestamp: "ts".into(),
+        }
+    }
+
+    fn rec(w: &mut WatcherState, proc: &str, id: &str, now: i64) {
+        w.record_item(proc, pt(id), now);
+    }
+
+    fn ids(turns: &[PendingTurn]) -> Vec<String> {
+        turns.iter().map(|t| t.id.clone()).collect()
     }
 
     // ---- turn_id -----------------------------------------------------------
 
-    /// `turn_id` is deterministic (same inputs → same output every call) and
-    /// injective across the (speaker, text) field boundary — swapping bytes
-    /// between the fields must yield a different id. Also short (16 hex
-    /// chars) so a batch of turn ids doesn't blow up the claim-link URI.
+    /// `turn_id` is deterministic, injective across field boundaries (including
+    /// timestamp), and short (16 hex chars). Identical bodies at different
+    /// timestamps are distinct; the same (speaker, text, timestamp) collapses.
     #[test]
     fn turn_id_is_deterministic_and_field_injective() {
-        assert_eq!(turn_id("alice", "hi"), turn_id("alice", "hi"));
-        assert_ne!(turn_id("alice", "hi"), turn_id("alic", "ehi"));
-        assert_ne!(turn_id("alice", "hi"), turn_id("bob", "hi"));
-        assert_eq!(turn_id("alice", "hi").len(), 16);
-        // Field content is hex.
-        assert!(turn_id("alice", "hi")
+        assert_eq!(turn_id("alice", "hi", "t1"), turn_id("alice", "hi", "t1"));
+        assert_ne!(turn_id("alice", "hi", "t1"), turn_id("alic", "ehi", "t1"));
+        assert_ne!(turn_id("alice", "hi", "t1"), turn_id("bob", "hi", "t1"));
+        assert_ne!(
+            turn_id("alice", "yes", "t1"),
+            turn_id("alice", "yes", "t2"),
+            "identical content at different times is a new turn"
+        );
+        assert_eq!(turn_id("alice", "hi", "t1").len(), 16);
+        assert!(turn_id("alice", "hi", "t1")
             .chars()
             .all(|c| c.is_ascii_hexdigit()));
     }
@@ -679,6 +771,43 @@ mod tests {
         assert_eq!(w.drain_ready_batch(&c, 10_000), None);
     }
 
+    /// A backed-off batch is held back until the claim TTL elapses, then
+    /// becomes eligible again (the crashed-claimant recovery path). Deferrals
+    /// are per-processor and expired entries are pruned rather than retained.
+    #[test]
+    fn deferred_turns_expire_and_are_processor_scoped() {
+        let mut w = WatcherState::new();
+        let ids = vec!["i1".to_string(), "i2".to_string()];
+        w.defer_turns("p", &ids, 1_000, 60_000);
+
+        assert!(w.is_deferred("p", "i1", 1_000));
+        assert!(w.is_deferred("p", "i2", 60_000));
+        assert!(!w.is_deferred("p", "i3", 1_000), "only the given ids");
+        assert!(!w.is_deferred("other", "i1", 1_000), "per-processor");
+        assert!(
+            !w.is_deferred("p", "i1", 61_000),
+            "past now+ttl the batch is eligible again"
+        );
+
+        // A later deferral prunes the expired entries instead of accumulating.
+        w.defer_turns("p", &["i9".to_string()], 61_000, 60_000);
+        assert!(!w.is_deferred("p", "i1", 61_000));
+        assert!(w.is_deferred("p", "i9", 61_000));
+    }
+
+    /// A deferred id is not re-enqueued while its window is open, but the
+    /// debounce clock is untouched, so unrelated turns still batch normally.
+    #[test]
+    fn deferred_ids_are_skipped_by_the_caller_not_the_queue() {
+        let mut w = WatcherState::new();
+        w.defer_turns("p", &["i1".to_string()], 1_000, 60_000);
+        // `record_item` itself is unconditional — the tick consults
+        // `is_deferred` before recording, so a caller that ignores it still
+        // works exactly as before.
+        rec(&mut w, "p", "i2", 1_000);
+        assert_eq!(w.pending_for("p").expect("pending").items.len(), 1);
+    }
+
     /// Stall-fallback clock: a batch we never stood down for never escalates;
     /// once stood down, it escalates only after `claim_ttl_ms` has elapsed; and
     /// clearing it resets the clock.
@@ -709,8 +838,8 @@ mod tests {
     #[test]
     fn drain_returns_none_while_debounce_not_elapsed() {
         let mut w = WatcherState::new();
-        w.record_item("p", "i1".into(), 10_000);
-        w.record_item("p", "i2".into(), 10_400);
+        rec(&mut w, "p", "i1", 10_000);
+        rec(&mut w, "p", "i2", 10_400);
         let c = cfg("p", 1_000, 32);
         assert_eq!(w.drain_ready_batch(&c, 10_900), None);
     }
@@ -721,12 +850,15 @@ mod tests {
     #[test]
     fn record_dedupes_repeated_ids() {
         let mut w = WatcherState::new();
-        w.record_item("p", "i1".into(), 100);
-        w.record_item("p", "i1".into(), 200);
-        w.record_item("p", "i2".into(), 300);
-        w.record_item("p", "i1".into(), 400);
+        rec(&mut w, "p", "i1", 100);
+        rec(&mut w, "p", "i1", 200);
+        rec(&mut w, "p", "i2", 300);
+        rec(&mut w, "p", "i1", 400);
         let pending = w.pending_for("p").expect("pending exists");
-        assert_eq!(pending.items, vec!["i1".to_string(), "i2".to_string()]);
+        assert_eq!(
+            ids(&pending.items),
+            vec!["i1".to_string(), "i2".to_string()]
+        );
         // last_touched advances only on a genuinely NEW id: i1@100 then i2@300.
         // The duplicate i1 re-emits at 200 and 400 must NOT bump it — otherwise
         // the polling loop's every-tick re-gather would reset the debounce
@@ -739,13 +871,13 @@ mod tests {
     #[test]
     fn drain_returns_all_pending_after_debounce() {
         let mut w = WatcherState::new();
-        w.record_item("p", "i1".into(), 1_000);
-        w.record_item("p", "i2".into(), 1_500);
+        rec(&mut w, "p", "i1", 1_000);
+        rec(&mut w, "p", "i2", 1_500);
         let c = cfg("p", 1_000, 32);
         let batch = w
             .drain_ready_batch(&c, 3_000)
             .expect("debounce elapsed → batch");
-        assert_eq!(batch, vec!["i1".to_string(), "i2".to_string()]);
+        assert_eq!(ids(&batch), vec!["i1".to_string(), "i2".to_string()]);
         assert!(
             w.pending_for("p").unwrap().items.is_empty(),
             "drain must empty the queue when everything fits"
@@ -758,15 +890,14 @@ mod tests {
     fn drain_caps_at_batch_max_leaving_overflow() {
         let mut w = WatcherState::new();
         for i in 0..5 {
-            w.record_item("p", format!("i{i}"), 1_000 + i as i64);
+            rec(&mut w, "p", &format!("i{i}"), 1_000 + i as i64);
         }
         let c = cfg("p", 100, 2);
         let batch = w.drain_ready_batch(&c, 5_000).expect("batch");
-        assert_eq!(batch, vec!["i0".to_string(), "i1".to_string()]);
-        let remaining = &w.pending_for("p").unwrap().items;
+        assert_eq!(ids(&batch), vec!["i0".to_string(), "i1".to_string()]);
         assert_eq!(
-            remaining,
-            &vec!["i2".to_string(), "i3".to_string(), "i4".to_string()],
+            ids(&w.pending_for("p").unwrap().items),
+            vec!["i2".to_string(), "i3".to_string(), "i4".to_string()],
             "overflow must be preserved in insertion order for the next window"
         );
     }
@@ -777,8 +908,8 @@ mod tests {
     #[test]
     fn drain_holds_below_batch_min() {
         let mut w = WatcherState::new();
-        w.record_item("p", "i1".into(), 1_000);
-        w.record_item("p", "i2".into(), 1_100);
+        rec(&mut w, "p", "i1", 1_000);
+        rec(&mut w, "p", "i2", 1_100);
         let mut c = cfg("p", 100, 32);
         c.batch_min = 3;
         assert_eq!(
@@ -798,14 +929,15 @@ mod tests {
     #[test]
     fn drain_fires_at_batch_min() {
         let mut w = WatcherState::new();
-        w.record_item("p", "i1".into(), 1_000);
-        w.record_item("p", "i2".into(), 1_100);
-        w.record_item("p", "i3".into(), 1_200);
+        rec(&mut w, "p", "i1", 1_000);
+        rec(&mut w, "p", "i2", 1_100);
+        rec(&mut w, "p", "i3", 1_200);
         let mut c = cfg("p", 100, 32);
         c.batch_min = 3;
+        let batch = w.drain_ready_batch(&c, 5_000).expect("batch");
         assert_eq!(
-            w.drain_ready_batch(&c, 5_000),
-            Some(vec!["i1".into(), "i2".into(), "i3".into()])
+            ids(&batch),
+            vec!["i1".to_string(), "i2".to_string(), "i3".to_string()]
         );
     }
 
@@ -817,16 +949,17 @@ mod tests {
     #[test]
     fn drain_flushes_below_min_after_max_wait() {
         let mut w = WatcherState::new();
-        w.record_item("p", "i1".into(), 1_000);
-        w.record_item("p", "i2".into(), 1_100);
+        rec(&mut w, "p", "i1", 1_000);
+        rec(&mut w, "p", "i2", 1_100);
         let mut c = cfg("p", 100, 32);
         c.batch_min = 5;
         c.max_wait_ms = Some(2_000);
         // Debounce settled (no arrival since 1_100) and 3_500-1_000=2_500 ≥
         // 2_000 max_wait → flush the partial batch.
+        let batch = w.drain_ready_batch(&c, 3_500).expect("flush");
         assert_eq!(
-            w.drain_ready_batch(&c, 3_500),
-            Some(vec!["i1".into(), "i2".into()]),
+            ids(&batch),
+            vec!["i1".to_string(), "i2".to_string()],
             "max_wait must flush a sub-min batch rather than orphan it"
         );
     }
@@ -836,7 +969,7 @@ mod tests {
     #[test]
     fn drain_respects_max_wait_before_expiry() {
         let mut w = WatcherState::new();
-        w.record_item("p", "i1".into(), 1_000);
+        rec(&mut w, "p", "i1", 1_000);
         let mut c = cfg("p", 100, 32);
         c.batch_min = 5;
         c.max_wait_ms = Some(2_000);
@@ -849,27 +982,23 @@ mod tests {
     #[test]
     fn per_processor_state_is_isolated() {
         let mut w = WatcherState::new();
-        w.record_item("a", "a-1".into(), 1_000);
-        w.record_item("b", "b-1".into(), 2_000);
+        rec(&mut w, "a", "a-1", 1_000);
+        rec(&mut w, "b", "b-1", 2_000);
         let ca = cfg("a", 100, 32);
         let cb = cfg("b", 100, 32);
-        assert_eq!(
-            w.drain_ready_batch(&ca, 1_500),
-            Some(vec!["a-1".to_string()])
-        );
+        let batch_a = w.drain_ready_batch(&ca, 1_500).expect("a");
+        assert_eq!(ids(&batch_a), vec!["a-1".to_string()]);
         assert!(
             w.pending_for("a").unwrap().items.is_empty(),
             "'a' drained, 'b' untouched"
         );
         assert_eq!(
-            w.pending_for("b").unwrap().items,
+            ids(&w.pending_for("b").unwrap().items),
             vec!["b-1".to_string()],
             "'b' state untouched by 'a' drain"
         );
-        assert_eq!(
-            w.drain_ready_batch(&cb, 2_500),
-            Some(vec!["b-1".to_string()])
-        );
+        let batch_b = w.drain_ready_batch(&cb, 2_500).expect("b");
+        assert_eq!(ids(&batch_b), vec!["b-1".to_string()]);
     }
 
     // ---- parse_dedup_strategy_json -----------------------------------------
@@ -937,13 +1066,13 @@ mod tests {
     async fn run_one_pass_backs_off_when_batch_already_claimed() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let cfg = cfg("proc", 100, 32);
-        let items = vec!["i1".to_string(), "i2".to_string()];
-        let key = batch_key(&items);
+        let items = vec![pt("i1"), pt("i2")];
+        let key = batch_key(&ids(&items));
         write_claim(&mut p, "proc", &key, "aaa:incumbent", 60_000, &ctx)
             .await
             .expect("seed incumbent");
 
-        let outcome = run_one_pass(&mut p, &cfg, &items, &[], 1_000, &ctx, false)
+        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false)
             .await
             .expect("run_one_pass");
         assert!(
@@ -961,8 +1090,8 @@ mod tests {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let mut cfg = cfg("proc", 100, 32);
         cfg.interpretation_classes = vec!["ns://Unregistered".into()];
-        let items = vec!["i1".to_string()];
-        let outcome = run_one_pass(&mut p, &cfg, &items, &[], 1_000, &ctx, false)
+        let items = vec![pt("i1")];
+        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false)
             .await
             .expect("run_one_pass");
         match outcome {

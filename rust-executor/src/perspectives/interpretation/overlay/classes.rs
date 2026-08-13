@@ -2,10 +2,9 @@
 //! their idempotent registration, and run-node minting.
 
 use crate::agent::AgentContext;
-use crate::perspectives::perspective_instance::{
-    PerspectiveInstance, SdnaType, SubjectClassOption,
-};
-use crate::types::{AITask, LinkQuery};
+use crate::perspectives::hardwired_class::ensure_subject_class;
+use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
+use crate::types::AITask;
 use sha2::{Digest, Sha256};
 
 /// Local subject-class name of the per-pass run node.
@@ -16,6 +15,8 @@ pub(crate) const INTERP_OVERLAY_CLASS: &str = "InterpretationOverlay";
 /// Target-class URI of [`INTERP_OVERLAY_CLASS`] — used to detect prior
 /// registration.
 const INTERP_OVERLAY_TARGET_CLASS: &str = "ad4m://InterpretationOverlay";
+/// Target-class URI of [`INTERP_RUN_CLASS`] — used to detect prior registration.
+const INTERP_RUN_TARGET_CLASS: &str = "ad4m://InterpretationRun";
 
 /// Hard-wired SDNA for the [`INTERP_RUN_CLASS`] subject class. Mirrors the
 /// interpretation SoA fixtures' SHACL shape: a `type` flag plus literal scalars.
@@ -31,9 +32,21 @@ const INTERP_RUN_SDNA: &str = r#"{
     {"path":"ad4m://interp/run_id","name":"run_id","identity":true,"min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/run_id","target":"value"}]},
     {"path":"ad4m://interp/model","name":"model","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/model","target":"value"}]},
     {"path":"ad4m://interp/prompt_version","name":"prompt_version","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/prompt_version","target":"value"}]},
-    {"path":"ad4m://interp/ran_at","name":"ran_at","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/ran_at","target":"value"}]}
+    {"path":"ad4m://interp/ran_at","name":"ran_at","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/ran_at","target":"value"}]},
+    {"path":"ad4m://interp/processor","name":"processor","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/processor","target":"value"}]},
+    {"path":"ad4m://interp/sources","name":"sources","collection":true,"min_count":0,"setter":[{"action":"addLink","source":"this","predicate":"ad4m://interp/sources","target":"value"}]}
   ]
 }"#;
+
+/// AutoProcessor cursor extras on an [`InterpretationRun`]: the processor
+/// instance URI (`ad4m://autoprocessor/<id>`) and the turn IDs this pass
+/// consumed. One-shot / manual interpretation omits this — those runs do not
+/// participate in the processed-turn cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterpretationRunCursor {
+    pub processor: String,
+    pub sources: Vec<String>,
+}
 
 /// Hard-wired SDNA for the [`INTERP_OVERLAY_CLASS`] subject class.
 ///
@@ -96,51 +109,34 @@ impl InterpretationRunMeta {
 /// Idempotently register the hard-wired [`INTERP_RUN_CLASS`] +
 /// [`INTERP_OVERLAY_CLASS`] subject classes into the perspective, mirroring the
 /// `add_sdna` path the SoA classes use. A no-op once the overlay class is
-/// present, so a continuous processor calling it every pass costs one cheap
-/// link scan rather than a SHACL rewrite.
+/// present *and* the run class has the cursor properties (`processor` /
+/// `sources`); otherwise the run class is refreshed so a perspective that
+/// registered an older SDNA picks up the new setters.
 pub(crate) async fn ensure_interpretation_overlay_classes(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    if overlay_classes_present(perspective).await? {
-        return Ok(());
-    }
-    perspective
-        .add_sdna(
-            INTERP_RUN_CLASS.to_string(),
-            String::new(),
-            SdnaType::SubjectClass,
-            Some(INTERP_RUN_SDNA.to_string()),
-            context,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("ensure overlay classes: add_sdna(run) failed: {e:#}"))?;
-    perspective
-        .add_sdna(
-            INTERP_OVERLAY_CLASS.to_string(),
-            String::new(),
-            SdnaType::SubjectClass,
-            Some(INTERP_OVERLAY_SDNA.to_string()),
-            context,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("ensure overlay classes: add_sdna(overlay) failed: {e:#}"))?;
-    Ok(())
-}
-
-/// True once the overlay target class has been registered as a SubjectClass in
-/// this perspective.
-async fn overlay_classes_present(perspective: &PerspectiveInstance) -> anyhow::Result<bool> {
-    let links = perspective
-        .get_links(&LinkQuery {
-            predicate: Some("rdf://type".to_string()),
-            target: Some("ad4m://SubjectClass".to_string()),
-            ..Default::default()
-        })
-        .await?;
-    Ok(links
-        .iter()
-        .any(|l| l.data.source == INTERP_OVERLAY_TARGET_CLASS))
+    ensure_subject_class(
+        perspective,
+        INTERP_OVERLAY_CLASS,
+        INTERP_OVERLAY_TARGET_CLASS,
+        INTERP_OVERLAY_SDNA,
+        None,
+        context,
+    )
+    .await?;
+    // `sources` is the newest property on the run class, so a perspective that
+    // registered the pre-cursor SDNA is refreshed rather than left with a shape
+    // whose `processor`/`sources` setters do not exist.
+    ensure_subject_class(
+        perspective,
+        INTERP_RUN_CLASS,
+        INTERP_RUN_TARGET_CLASS,
+        INTERP_RUN_SDNA,
+        Some("ad4m://interp/sources"),
+        context,
+    )
+    .await
 }
 
 /// Mint the per-pass [`INTERP_RUN_CLASS`] node in the `ad4m://interp/run/`
@@ -151,15 +147,24 @@ async fn overlay_classes_present(perspective: &PerspectiveInstance) -> anyhow::R
 pub(crate) async fn mint_interpretation_run(
     perspective: &mut PerspectiveInstance,
     meta: &InterpretationRunMeta,
+    cursor: Option<&InterpretationRunCursor>,
     context: &AgentContext,
 ) -> anyhow::Result<String> {
     let run_uri = format!("ad4m://interp/run/{}", meta.run_id);
-    let values = serde_json::json!({
+    let mut values = serde_json::json!({
         "run_id": meta.run_id,
         "model": meta.model,
         "prompt_version": meta.prompt_version,
         "ran_at": meta.ran_at,
     });
+    let mut rest_sources: Vec<String> = Vec::new();
+    if let Some(c) = cursor {
+        values["processor"] = c.processor.clone().into();
+        if let Some((first, rest)) = c.sources.split_first() {
+            values["sources"] = first.clone().into();
+            rest_sources.extend(rest.iter().cloned());
+        }
+    }
     perspective
         .create_subject(
             SubjectClassOption {
@@ -173,5 +178,24 @@ pub(crate) async fn mint_interpretation_run(
         )
         .await
         .map_err(|e| anyhow::anyhow!("mint_interpretation_run: create_subject failed: {e:#}"))?;
+    // `create_subject` applies one value per property; remaining collection
+    // members go through the same `addLink` setter one at a time.
+    for id in rest_sources {
+        perspective
+            .update_subject(
+                SubjectClassOption {
+                    class_name: Some(INTERP_RUN_CLASS.to_string()),
+                    query: None,
+                },
+                run_uri.clone(),
+                serde_json::json!({ "sources": id }),
+                None,
+                context,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("mint_interpretation_run: update_subject(sources) failed: {e:#}")
+            })?;
+    }
     Ok(run_uri)
 }

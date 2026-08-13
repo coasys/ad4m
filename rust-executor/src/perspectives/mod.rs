@@ -1,4 +1,5 @@
 pub mod auto_processor;
+pub(crate) mod hardwired_class;
 pub mod interpretation;
 #[cfg(test)]
 mod interpretation_e2e;
