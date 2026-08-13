@@ -149,18 +149,20 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         expect(subgroups.length, `expected exactly 1 subgroup, got ${subgroups.length}`).to.equal(1);
 
         // Corroborate the coordination via signals: exactly one executor
-        // `processed`; the other `backedOff` (or was never a candidate).
+        // `processed`. The exactly-one-subgroup outcome above is the
+        // load-bearing guarantee; the coordination path is any of:
+        //   (a) Bob's fast-path candidacy stood down → `notCandidate`.
+        //   (b) Bob's claim raced Alice's and lost → `backedOff`.
+        //   (c) Alice's `InterpretationRun.sources` cursor synced to Bob
+        //       before Bob's watch loop drained a batch → Bob emits no
+        //       candidacy event because there is nothing to batch.
+        // (c) is a real, correct coordination path (via the cursor rather
+        // than the claim) — asserting one of (a)/(b) fires would over-specify
+        // the mechanism and turn a legitimate flow into a flake.
         const processedDids = new Set(
           events.filter((e) => e.step === "processed" && e.agentDid).map((e) => e.agentDid),
         );
-        const backedOffDids = new Set(
-          events.filter((e) => e.step === "backedOff" && e.agentDid).map((e) => e.agentDid),
-        );
         expect(processedDids.size, "exactly one executor should have processed").to.equal(1);
-        expect(
-          backedOffDids.size >= 1 || events.some((e) => e.step === "notCandidate"),
-          "the other executor must have backed off / stood down",
-        ).to.be.true;
       });
 
       it("divides successive waves between the executors without re-processing a turn", async () => {
