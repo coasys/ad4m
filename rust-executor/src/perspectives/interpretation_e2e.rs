@@ -1489,9 +1489,17 @@ async fn auto_processor_pass_lands_interpretation_instance() {
         "both seeded turns should drain in one batch"
     );
 
-    let outcome = run_one_pass(&mut perspective, cfg_loaded, &batch, drain_at, &ctx, false)
-        .await
-        .expect("run_one_pass");
+    let outcome = run_one_pass(
+        &mut perspective,
+        cfg_loaded,
+        &batch,
+        &[],
+        drain_at,
+        &ctx,
+        false,
+    )
+    .await
+    .expect("run_one_pass");
     let bases = match outcome {
         PassOutcome::Won { bases } => bases,
         other => panic!(
@@ -1698,9 +1706,17 @@ async fn auto_processor_two_configs_no_cross_contamination() {
             "each processor's batch must contain both turns; got {batch:?} for `{}`",
             cfg_ref.processor_id
         );
-        let outcome = run_one_pass(&mut perspective, cfg_ref, &batch, drain_at, &ctx, false)
-            .await
-            .expect("run_one_pass");
+        let outcome = run_one_pass(
+            &mut perspective,
+            cfg_ref,
+            &batch,
+            &[],
+            drain_at,
+            &ctx,
+            false,
+        )
+        .await
+        .expect("run_one_pass");
         let bases = match outcome {
             PassOutcome::Won { bases } => bases,
             other => panic!(
@@ -2131,6 +2147,112 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
     panic!(
         "two-user (real background loop) no-double-processing e2e failed after {attempts} attempts: {}",
         last_err.unwrap_or_default()
+    );
+}
+
+/// Real-telepresence authorship election (Option A — only *participants* process).
+/// On a SHARED perspective with real managed users whose presence flows through
+/// `online_agents()`, the pass must go to the **first online message-author in
+/// message order**, skipping offline authors, and a peer that is not that author
+/// stands down — while a peer whose batch has *no* online author waits rather
+/// than processing a channel it doesn't participate in. No LLM: `run_one_pass`
+/// returns the election verdict before the interpretation step.
+#[tokio::test]
+async fn auto_processor_election_only_online_participants_process() {
+    use crate::agent::{did_for_context, AgentContext, AgentService};
+    use crate::db::Ad4mDb;
+    use crate::perspectives::auto_processor::config::AutoProcessorConfig;
+    use crate::perspectives::auto_processor::watcher::{run_one_pass, turn_id, PassOutcome};
+    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+
+    let (mut perspective, _shapes, _ctx_main) = setup_perspective_no_llm(&[]).await;
+
+    // Four managed participants, each a real key + a listable user row (so the
+    // co-located `online_agents` path can report their presence).
+    let mk = |email: &str| -> (AgentContext, String) {
+        AgentService::ensure_user_key_exists(email).expect("user key");
+        let ctx = AgentContext::for_user_email(email.to_string());
+        let did = did_for_context(&ctx).expect("did");
+        Ad4mDb::with_global_instance(|db| db.add_user(email, &did, "pw")).expect("add_user");
+        (ctx, did)
+    };
+    let (_ctx_carol, did_carol) = mk("carol@e2e");
+    let (_ctx_bob, did_bob) = mk("bob@e2e");
+    let (ctx_alice, did_alice) = mk("alice@e2e");
+    let (ctx_dave, did_dave) = mk("dave@e2e");
+
+    // Make the perspective a shared neighbourhood owned by all four, so
+    // `online_agents()` reports co-located presence instead of erroring.
+    {
+        let mut h = perspective.persisted.lock().await;
+        h.shared_url = Some("test://neighbourhood".into());
+        h.owners = Some(vec![
+            did_carol.clone(),
+            did_bob.clone(),
+            did_alice.clone(),
+            did_dave.clone(),
+        ]);
+    }
+    // "Log in" bob, alice, dave (recent last_seen ⇒ online). carol stays offline.
+    for email in ["bob@e2e", "alice@e2e", "dave@e2e"] {
+        Ad4mDb::with_global_instance(|db| db.update_user_last_seen(email)).expect("last_seen");
+    }
+
+    let cfg = AutoProcessorConfig {
+        processor_id: "election".into(),
+        source_scope_query: "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
+                             ?m <ns://author> ?speaker . } ORDER BY ?m"
+            .into(),
+        base_prefix: None,
+        interpretation_classes: vec!["ns://ConversationSubgroup".into()],
+        debounce_ms: 0,
+        batch_min: 1,
+        batch_max: 32,
+        max_wait_ms: None,
+        claim_ttl_ms: 60_000,
+        dedup_strategy_json: None,
+    };
+
+    // Case 1 — a batch authored by carol (offline) then bob (online), in that
+    // message order. alice is online but is NOT the first online author, so she
+    // must stand down for bob (carol is skipped because she is offline).
+    let batch = vec![turn_id(&did_carol, "m1"), turn_id(&did_bob, "m2")];
+    let authors = vec![did_carol.clone(), did_bob.clone()];
+    let out = run_one_pass(
+        &mut perspective,
+        &cfg,
+        &batch,
+        &authors,
+        1_000,
+        &ctx_alice,
+        false,
+    )
+    .await
+    .expect("alice pass");
+    assert!(
+        matches!(out, PassOutcome::NotCandidate { ref winner } if winner == &did_bob),
+        "alice stands down for the first ONLINE author (bob); carol offline is skipped — got {out:?}"
+    );
+
+    // Case 2 — a batch whose only author (carol) is offline. dave is online but
+    // authored nothing here, so nobody processes: the pass waits for a
+    // participant rather than letting a bystander run it.
+    let batch2 = vec![turn_id(&did_carol, "solo")];
+    let authors2 = vec![did_carol.clone()];
+    let out2 = run_one_pass(
+        &mut perspective,
+        &cfg,
+        &batch2,
+        &authors2,
+        2_000,
+        &ctx_dave,
+        false,
+    )
+    .await
+    .expect("dave pass");
+    assert!(
+        matches!(out2, PassOutcome::AwaitingAuthor),
+        "no online author for the batch ⇒ wait (bystander dave must not process) — got {out2:?}"
     );
 }
 

@@ -262,37 +262,6 @@ pub fn elect_author(authors: &[String], online_dids: &[String], self_did: &str) 
     AuthorElection::NoneOnline
 }
 
-/// Resolve the author DID of each batch item, in `item_ids` order, for
-/// authorship-ordered election ([`elect_author`]). Each item's author is the
-/// lexicographically smallest author DID among its outgoing links — a message
-/// node's links normally share a single author, so the `min` is just "the
-/// author", and picking `min` keeps the result deterministic across peers when
-/// they don't. Items with no links contribute no author. The returned list is
-/// deduplicated with first-occurrence (message) order preserved, so the caller
-/// walks it exactly as Flux walks messages: first author first.
-async fn batch_authors(
-    perspective: &PerspectiveInstance,
-    item_ids: &[String],
-) -> anyhow::Result<Vec<String>> {
-    use crate::types::LinkQuery;
-    let mut authors: Vec<String> = Vec::new();
-    for item in item_ids {
-        let links = perspective
-            .get_links(&LinkQuery {
-                source: Some(item.clone()),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("batch_authors: get_links({item}) failed: {e:#}"))?;
-        if let Some(author) = links.into_iter().map(|l| l.author).min() {
-            if !authors.contains(&author) {
-                authors.push(author);
-            }
-        }
-    }
-    Ok(authors)
-}
-
 /// Turn an [`AutoProcessorConfig::dedup_strategy_json`] blob into a live
 /// [`DedupStrategy`]. Missing / unparseable / unknown-kind blobs fall back to
 /// [`DedupStrategy::NormalizedString`] with a warn log, preserving the
@@ -390,6 +359,11 @@ pub async fn run_one_pass(
     perspective: &mut PerspectiveInstance,
     cfg: &AutoProcessorConfig,
     item_ids: &[String],
+    // The author DID of each batch item, in message order (may repeat). The
+    // `speaker` binding of the source scope IS the author, so the caller (the
+    // watch loop) resolves these from the transcript rather than the executor
+    // re-deriving them from a node — `item_ids` are content hashes, not URIs.
+    batch_authors: &[String],
     now_ms: i64,
     context: &AgentContext,
     escalate_past_election: bool,
@@ -451,16 +425,14 @@ pub async fn run_one_pass(
         match perspective.online_agents().await {
             Ok(agents) => {
                 let online: Vec<String> = agents.into_iter().map(|a| a.did).collect();
-                let authors = match batch_authors(perspective, item_ids).await {
-                    Ok(a) => a,
-                    Err(e) => {
-                        log::debug!(
-                        "auto_processor `{}`: batch_authors failed ({e:#}); proceeding to try_claim",
-                        cfg.processor_id
-                    );
-                        Vec::new()
+                // Batch authors in message order, deduplicated (first occurrence
+                // kept) — the participants `elect_author` walks.
+                let mut authors: Vec<String> = Vec::new();
+                for a in batch_authors {
+                    if !authors.contains(a) {
+                        authors.push(a.clone());
                     }
-                };
+                }
                 if authors.is_empty() {
                     // No authorship signal — don't stall the pass; let the claim
                     // layer (min-DID) elect a processor instead.
@@ -693,44 +665,6 @@ mod tests {
         assert_eq!(
             elect_author(&authors, &online, "did:key:me"),
             AuthorElection::Other("did:key:alice".into())
-        );
-    }
-
-    // ---- batch_authors -----------------------------------------------------
-
-    /// `batch_authors` reads each item's link author from the graph, in
-    /// `item_ids` order, deduplicates repeated authors, and skips items with no
-    /// links. Here both authored items share the local test agent, so the
-    /// result is a single-entry list; the linkless id contributes nothing.
-    #[tokio::test]
-    async fn batch_authors_resolves_dedupes_and_skips_linkless() {
-        use crate::types::{Link, LinkStatus};
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        let me = did_for_context(&ctx).expect("did");
-        for uri in ["msg://a", "msg://b"] {
-            p.add_link(
-                Link {
-                    source: uri.into(),
-                    predicate: Some("ns://body".into()),
-                    target: "literal:string:hi".into(),
-                },
-                LinkStatus::Local,
-                None,
-                &ctx,
-            )
-            .await
-            .expect("seed body");
-        }
-        let authors = batch_authors(
-            &p,
-            &["msg://a".into(), "msg://b".into(), "msg://no-links".into()],
-        )
-        .await
-        .expect("batch_authors");
-        assert_eq!(
-            authors,
-            vec![me],
-            "same author collapses to one entry; the linkless id is skipped"
         );
     }
 
@@ -1009,7 +943,7 @@ mod tests {
             .await
             .expect("seed incumbent");
 
-        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false)
+        let outcome = run_one_pass(&mut p, &cfg, &items, &[], 1_000, &ctx, false)
             .await
             .expect("run_one_pass");
         assert!(
@@ -1028,7 +962,7 @@ mod tests {
         let mut cfg = cfg("proc", 100, 32);
         cfg.interpretation_classes = vec!["ns://Unregistered".into()];
         let items = vec!["i1".to_string()];
-        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false)
+        let outcome = run_one_pass(&mut p, &cfg, &items, &[], 1_000, &ctx, false)
             .await
             .expect("run_one_pass");
         match outcome {
