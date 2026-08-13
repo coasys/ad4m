@@ -1,28 +1,31 @@
 /**
- * Two-executor auto-processor integration: the `ProcessingClaim` must stop the
- * SAME channel batch from being processed twice across two real ad4m executors
- * sharing a neighbourhood (link language). This is the full-integration mirror
- * of the Rust `auto_processor_two_users_one_executor_no_double_processing` test.
+ * Two-executor auto-processor integration: two real ad4m executors sharing a
+ * neighbourhood must divide the work rather than duplicate it. This is the
+ * full-integration mirror of the Rust
+ * `auto_processor_two_users_one_executor_no_double_processing`, which runs both
+ * peers in one process; here they are separate executors syncing over a link
+ * language, so the claim and the processed-turn cursor have to coordinate
+ * through the shared graph with real sync latency in between.
  *
  * Flow (mirrors ./neighbourhood.ts's publish/join pattern):
  *   1. Alice creates a perspective and publishes it as a neighbourhood.
  *   2. Bob joins → both share the graph, so claim + subgroup links sync.
  *   3. Both register the ConversationSubgroup class + the LLM; Alice registers
  *      one auto-processor (its config syncs to Bob).
- *   4. Alice posts a channel's messages (they sync to Bob).
- *   5. Both executors' watch loops run. The claim coordinates: exactly one
- *      executor processes the batch; the other backs off.
- *   6. Assert exactly ONE ConversationSubgroup exists (no duplicate), and the
- *      `auto-processor-event` stream shows one `processed` and one `backedOff`,
- *      each tagged with its agentDid.
+ *   4. Messages are posted into the shared channel.
+ *   5. Both executors' watch loops run and coordinate over the shared graph.
  *
- * NOTE: requires two executors + Holochain + a reachable LLM (Marvin/Ollama).
- * Model/endpoint via INTERPRETATION_E2E_MODEL / INTERPRETATION_E2E_BASE_URL.
+ * The neighbourhood is published and joined here, the same way ./neighbourhood.ts
+ * does it, so this needs nothing from the environment beyond what the rest of
+ * the integration suite already needs — plus a reachable LLM, which the runner
+ * provides for the Rust e2e suite too. Model/endpoint are overridable via
+ * INTERPRETATION_E2E_MODEL / INTERPRETATION_E2E_BASE_URL.
  */
 import { PerspectiveProxy, Perspective, Link } from "@coasys/ad4m";
 import type { AutoProcessorEvent } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
 import { sleep } from "../utils/utils";
+import { waitUntil } from "../helpers/index";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
 import { expect } from "chai";
@@ -31,12 +34,14 @@ import { ConversationSubgroup } from "./model/auto-processor-models";
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.5-27b-opus:latest";
+const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
+
 // Speaker and timestamp come off the body link's reifier, not an app-level
 // `ns://author` predicate: `?timestamp` is required (it is what makes a turn
 // identifiable to the processed-turn cursor) and only the reifier carries it.
-// Note the consequence for this test: `?speaker` is the DID that *signed* the
-// link (Alice, who posts every message below), not the `ns://author` target.
+// Note the consequence here: `?speaker` is the DID that *signed* the link, so
+// each peer's own messages carry that peer as the speaker — which is what the
+// authorship election runs on.
 const SCOPE_QUERY = `SELECT ?speaker ?text ?timestamp WHERE {
   ?m <ns://body> ?text .
   ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
@@ -57,31 +62,19 @@ async function registerLlm(ad4m: any): Promise<void> {
 export default function autoProcessorNeighbourhoodTests(testContext: TestContext) {
   return () => {
     describe("Auto-processor across two executors", () => {
-      // This is a real-LLM + two-executor neighbourhood e2e: it needs a
-      // reachable Ollama endpoint (INTERPRETATION_E2E_BASE_URL). The default
-      // `integration-tests-js` CI job runs on a runner without an LLM, so this
-      // test only runs when explicitly opted in (set on the Marvin/self-hosted
-      // runner or a dev box with the LLM tunnelled). Skipped — never silently
-      // dropped — everywhere else.
-      before(function () {
-        if (!process.env.INTERPRETATION_E2E_NEIGHBOURHOOD) {
-          console.log(
-            "[auto-processor-neighbourhood] SKIP: set INTERPRETATION_E2E_NEIGHBOURHOOD=1 " +
-              "with a reachable LLM (INTERPRETATION_E2E_BASE_URL) to run this two-executor e2e.",
-          );
-          this.skip();
-        }
-      });
-
-      it("processes a shared channel exactly once (claim coordinates)", async () => {
+      /**
+       * Alice publishes a neighbourhood, Bob joins, both register the class and
+       * the LLM, and Alice registers one processor whose config syncs to Bob.
+       * Returns both proxies plus the merged event stream from both executors.
+       */
+      async function sharedChannel(processorId: string, config: Record<string, unknown> = {}) {
         const alice = testContext.alice;
         const bob = testContext.bob;
 
         await registerLlm(alice);
         await registerLlm(bob);
 
-        // 1. Alice creates + publishes a neighbourhood.
-        const aliceHandle = await alice.perspective.add("ap-channel");
+        const aliceHandle = await alice.perspective.add(`ap-channel-${processorId}`);
         const socialContext = await alice.languages.applyTemplateAndPublish(
           DIFF_SYNC_OFFICIAL,
           JSON.stringify({ uid: uuidv4(), name: "auto-processor neighbourhood" }),
@@ -92,7 +85,6 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
           new Perspective(),
         );
 
-        // 2. Bob joins; make nodes known + let the link language connect.
         const bobHandle = await bob.neighbourhood.joinFromUrl(url);
         await testContext.makeAllNodesKnown();
         await sleep(2000);
@@ -100,37 +92,48 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         const aliceP = (await alice.perspective.byUUID(aliceHandle.uuid)) as PerspectiveProxy;
         const bobP = (await bob.perspective.byUUID(bobHandle.uuid)) as PerspectiveProxy;
 
-        // 3. Both register the class; collect signals from both executors.
         await ConversationSubgroup.register(aliceP);
         await ConversationSubgroup.register(bobP);
 
+        // One merged stream: each executor reports its own passes, tagged with
+        // the DID that ran them, so "who did what" is readable from one list.
         const events: AutoProcessorEvent[] = [];
         await aliceP.addAutoProcessorEventListener((e) => events.push(e));
         await bobP.addAutoProcessorEventListener((e) => events.push(e));
 
-        // Alice registers one processor; the config syncs to Bob.
         await aliceP.addAutoProcessor({
-          processorId: "flux-channel",
+          processorId,
           sourceScopeQuery: SCOPE_QUERY,
           interpretationClasses: ["ns://ConversationSubgroup"],
           debounceMs: 200,
           batchMin: 2,
           batchMax: 32,
           claimTtlMs: 60_000,
-        });
+          ...config,
+        } as any);
         await sleep(2000);
 
-        // 4. Alice posts the channel's messages (shared → sync to Bob).
-        const msgs: [string, string, string][] = [
-          ["msg://c1", "did:key:ana", "Our webhook retries keep dropping during payment outages — we lose the failed events."],
-          ["msg://c2", "did:key:ben", "Right, the payments queue has no way to replay what got dropped last time."],
-        ];
-        for (const [uri, author, body] of msgs) {
-          await aliceP.add(new Link({ source: uri, predicate: "ns://body", target: `literal:string:${body}` }));
-          await aliceP.add(new Link({ source: uri, predicate: "ns://author", target: author }));
-        }
+        return { aliceP, bobP, events };
+      }
 
-        // 5. Let both watch loops run + the writes sync.
+      async function say(p: PerspectiveProxy, uri: string, body: string) {
+        await p.add(new Link({ source: uri, predicate: "ns://body", target: `literal:string:${body}` }));
+      }
+
+      it("processes a shared channel exactly once (claim coordinates)", async () => {
+        const { aliceP, events } = await sharedChannel("flux-channel");
+
+        await say(
+          aliceP,
+          "msg://c1",
+          "Our webhook retries keep dropping during payment outages — we lose the failed events.",
+        );
+        await say(
+          aliceP,
+          "msg://c2",
+          "Right, the payments queue has no way to replay what got dropped last time.",
+        );
+
         // Poll until exactly one subgroup is visible (both executors' views must agree).
         let subgroups: ConversationSubgroup[] = [];
         for (let i = 0; i < 60; i++) {
@@ -140,7 +143,7 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
           if (processedCount >= 1 && subgroups.length >= 1) break;
         }
 
-        // 6. The load-bearing assertion: exactly ONE subgroup — the claim stopped
+        // The load-bearing assertion: exactly ONE subgroup — the claim stopped
         // the two executors from both minting one for the same batch.
         expect(subgroups.length, `expected exactly 1 subgroup, got ${subgroups.length}`).to.equal(1);
 
@@ -154,10 +157,54 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         );
         expect(processedDids.size, "exactly one executor should have processed").to.equal(1);
         expect(
-          backedOffDids.size >= 1 ||
-            events.some((e) => e.step === "notCandidate"),
+          backedOffDids.size >= 1 || events.some((e) => e.step === "notCandidate"),
           "the other executor must have backed off / stood down",
         ).to.be.true;
+      });
+
+      it("divides successive waves between the executors without re-processing a turn", async () => {
+        const { aliceP, bobP, events } = await sharedChannel("flux-waves", { batchMin: 2 });
+
+        const retired = () =>
+          events.filter((e) => e.step === "processed").flatMap((e) => e.itemIds);
+
+        // Wave 1 is authored by Alice, wave 2 by Bob. Both land in the same
+        // shared channel, so each peer re-gathers the other's turns on every
+        // tick — only the claim and the cursor keep a turn from being
+        // interpreted twice, once per executor.
+        await say(aliceP, "msg://w1a", "Our webhook retries keep dropping during payment outages.");
+        await say(aliceP, "msg://w1b", "Right, the payments queue cannot replay what got dropped.");
+        await waitUntil(() => retired().length >= 2, 240_000, "the first wave to be processed");
+
+        const firstWave = retired();
+        await say(bobP, "msg://w2a", "Separately, the retro is moved to Thursday morning.");
+        await say(bobP, "msg://w2b", "I'll book the room and send the invite.");
+        await waitUntil(() => retired().length >= 4, 240_000, "the second wave to be processed");
+
+        // The whole point: four turns, four retirements, no turn twice — across
+        // two executors that both saw all four.
+        const ids = retired();
+        expect(
+          new Set(ids).size,
+          `every turn must be retired exactly once across both executors, got ${JSON.stringify(ids)}`,
+        ).to.equal(ids.length);
+        expect(
+          ids.filter((id) => firstWave.includes(id)).length,
+          "the second wave must not re-process the first",
+        ).to.equal(firstWave.length);
+
+        // Both executors converge on the same graph.
+        await waitUntil(
+          async () =>
+            (await ConversationSubgroup.findAll(aliceP)).length ===
+            (await ConversationSubgroup.findAll(bobP)).length,
+          120_000,
+          "both executors to converge on the same subgroups",
+        );
+        const seen = await ConversationSubgroup.findAll(aliceP);
+        expect(seen.length, "the waves must have produced at least one subgroup").to.be.greaterThan(
+          0,
+        );
       });
     });
   };

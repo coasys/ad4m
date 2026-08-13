@@ -9,7 +9,7 @@
  * self-hosted CI runner (Marvin) the endpoint is local; from a dev box, tunnel
  * it. Endpoint + model are env-overridable to match the Rust e2e suite:
  *   INTERPRETATION_E2E_BASE_URL (default http://localhost:11434/v1)
- *   INTERPRETATION_E2E_MODEL    (default qwen3.5-27b-opus:latest)
+ *   INTERPRETATION_E2E_MODEL    (default gemma3:12b)
  *
  * Run with (from tests/js, executor built + `pnpm run prepare-test` once):
  *   pnpm ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/model/run-interpretation.test.ts
@@ -21,7 +21,7 @@ import { startAgent } from "../../helpers/index.js";
 import { ExtBelief, ExtQuestion, ExtTask } from "./interpretation-models.js";
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.5-27b-opus:latest";
+const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
 const BASE_PREFIX = "soa://ext/";
 
 async function typeOf(p: PerspectiveProxy, base: string): Promise<string | undefined> {
