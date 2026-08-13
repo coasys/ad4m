@@ -5215,6 +5215,12 @@ impl PerspectiveInstance {
             return;
         }
 
+        // Per-processor `turn_id → author DID` for this tick. The `speaker`
+        // binding of the source scope IS the message author, so the election in
+        // `run_one_pass` gets real participant DIDs instead of re-deriving them
+        // from a turn-id hash (which is not a graph node).
+        let mut authors_by_proc: HashMap<String, HashMap<String, String>> = HashMap::new();
+
         // 1. Record new-since-last-processed turn ids per config.
         for cfg in &configs {
             let transcript = match crate::perspectives::interpretation::gather_transcript_sparql(
@@ -5240,11 +5246,13 @@ impl PerspectiveInstance {
                 .entry(cfg.processor_id.clone())
                 .or_default();
             let mut live_ids: HashSet<String> = HashSet::with_capacity(transcript.len());
+            let proc_authors = authors_by_proc.entry(cfg.processor_id.clone()).or_default();
             for (speaker, text) in &transcript {
                 let id = turn_id(speaker, text);
                 if !processed.contains(&id) {
                     watcher.record_item(&cfg.processor_id, id.clone(), now_ms);
                 }
+                proc_authors.insert(id.clone(), speaker.clone());
                 live_ids.insert(id);
             }
             // Bound the processed set: a turn id is a content hash, so one that
@@ -5274,10 +5282,19 @@ impl PerspectiveInstance {
             // that escalate together).
             let batch_id = crate::perspectives::auto_processor::claim::batch_key(&batch);
             let escalate = watcher.should_escalate(&batch_id, now_ms, cfg.claim_ttl_ms);
+            // The batch's author DIDs in message order — the participants
+            // `elect_author` walks (skip an id whose author we somehow lost).
+            let empty = HashMap::new();
+            let proc_authors = authors_by_proc.get(&cfg.processor_id).unwrap_or(&empty);
+            let batch_authors: Vec<String> = batch
+                .iter()
+                .filter_map(|id| proc_authors.get(id).cloned())
+                .collect();
             let outcome = match run_one_pass(
                 &mut perspective_clone,
                 cfg,
                 &batch,
+                &batch_authors,
                 now_ms,
                 context,
                 escalate,
