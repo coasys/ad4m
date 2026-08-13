@@ -135,14 +135,18 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
           "Right, the payments queue has no way to replay what got dropped last time.",
         );
 
-        // Poll until exactly one subgroup is visible (both executors' views must agree).
+        // Wait until at least one subgroup is visible — same 4-minute budget as
+        // the wave-division test uses.
         let subgroups: ConversationSubgroup[] = [];
-        for (let i = 0; i < 60; i++) {
-          await sleep(2000);
-          subgroups = await ConversationSubgroup.findAll(aliceP);
-          const processedCount = events.filter((e) => e.step === "processed").length;
-          if (processedCount >= 1 && subgroups.length >= 1) break;
-        }
+        await waitUntil(
+          async () => {
+            subgroups = await ConversationSubgroup.findAll(aliceP);
+            const processedCount = events.filter((e) => e.step === "processed").length;
+            return processedCount >= 1 && subgroups.length >= 1;
+          },
+          240_000,
+          "a processed event and at least one subgroup",
+        );
 
         // The load-bearing assertion: exactly ONE subgroup — the claim stopped
         // the two executors from both minting one for the same batch.
