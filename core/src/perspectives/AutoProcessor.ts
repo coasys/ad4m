@@ -89,10 +89,12 @@ export interface AddAutoProcessorConfig {
 }
 
 /**
- * A pending interpretation overlay: an LLM suggestion on a base instance
- * awaiting human accept/reject (see `PerspectiveProxy.interpretationOverlays`).
+ * Raw REST-API response shape for a pending interpretation overlay.
+ * This is the plain-data DTO returned by `PerspectiveProxy.interpretationOverlays()`.
+ * For perspective-graph querying, use the `@Model` class `InterpretationOverlay`
+ * from `@coasys/ad4m` (which supports `findAll`, `findOne`, etc.).
  */
-export interface InterpretationOverlay {
+export interface InterpretationOverlayInfo {
   /** The base instance the overlay sits on. */
   base: string;
   /** Whether the LLM authored the whole instance (`"create"`) or proposed

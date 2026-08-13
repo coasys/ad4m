@@ -11,7 +11,7 @@ import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
-import type { AddAutoProcessorConfig, AutoProcessorEvent, InterpretationOverlay } from "./AutoProcessor";
+import type { AddAutoProcessorConfig, AutoProcessorEvent, InterpretationOverlayInfo } from "./AutoProcessor";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -285,8 +285,8 @@ export class PerspectiveClient {
     }
 
     /** Pending interpretation overlays (LLM suggestions awaiting human accept/reject). */
-    async interpretationOverlays(uuid: string): Promise<InterpretationOverlay[]> {
-        return this.#apiClient.call<InterpretationOverlay[]>(
+    async interpretationOverlays(uuid: string): Promise<InterpretationOverlayInfo[]> {
+        return this.#apiClient.call<InterpretationOverlayInfo[]>(
             'perspective.interpretationOverlays', { uuid },
         )
     }

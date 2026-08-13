@@ -16,7 +16,7 @@ import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
-import type { AddAutoProcessorConfig, AutoProcessorEvent, InterpretationOverlay } from "./AutoProcessor";
+import type { AddAutoProcessorConfig, AutoProcessorEvent, InterpretationOverlayInfo } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
@@ -579,7 +579,7 @@ export class PerspectiveProxy {
      * Pending interpretation overlays on this perspective — LLM suggestions the
      * §4 divergence gate staged rather than applied, awaiting human accept/reject.
      */
-    async interpretationOverlays(): Promise<InterpretationOverlay[]> {
+    async interpretationOverlays(): Promise<InterpretationOverlayInfo[]> {
         return await this.#client.interpretationOverlays(this.#handle.uuid)
     }
 

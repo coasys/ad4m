@@ -17,6 +17,7 @@ export * from "./perspectives/Perspective";
 export * from "./perspectives/PerspectiveHandle";
 export * from "./perspectives/PerspectiveProxy";
 export * from "./perspectives/AutoProcessor";
+export * from "./perspectives/InterpretationModels";
 export * from "./perspectives/SparqlBindings";
 export * from "./perspectives/WakerSubscriptionManager";
 export * from "./perspectives/PerspectiveDiff";
