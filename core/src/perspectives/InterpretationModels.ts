@@ -50,7 +50,7 @@ export class AutoProcessorConfig extends Ad4mModel {
   sourceScopeQuery: string = "";
 
   /** URI prefix for minted instances; omit for the per-processor default. */
-  @Optional({ through: "ad4m://base_prefix" })
+  @Optional({ through: "ad4m://base_prefix", resolveLanguage: "literal" })
   basePrefix?: string;
 
   /** Class URIs (SHACL targetClass) to materialise each pass. */
@@ -62,7 +62,7 @@ export class AutoProcessorConfig extends Ad4mModel {
   debounceMs: string = "200";
 
   /** Minimum batch size before a pass runs (default 1). */
-  @Optional({ through: "ad4m://batch_min" })
+  @Optional({ through: "ad4m://batch_min", resolveLanguage: "literal" })
   batchMin?: string;
 
   /** Maximum items per pass. */
@@ -70,7 +70,7 @@ export class AutoProcessorConfig extends Ad4mModel {
   batchMax: string = "32";
 
   /** Safety flush (ms) for a sub-`batchMin` batch; absent = wait indefinitely. */
-  @Optional({ through: "ad4m://max_wait_ms" })
+  @Optional({ through: "ad4m://max_wait_ms", resolveLanguage: "literal" })
   maxWaitMs?: string;
 
   /** How long a won claim is authoritative before peers may re-claim (ms). */
@@ -78,11 +78,11 @@ export class AutoProcessorConfig extends Ad4mModel {
   claimTtlMs: string = "60000";
 
   /** How far back (ms) each pass looks; absent = unbounded. */
-  @Optional({ through: "ad4m://source_window_ms" })
+  @Optional({ through: "ad4m://source_window_ms", resolveLanguage: "literal" })
   sourceWindowMs?: string;
 
   /** Serialised `DedupStrategy` JSON (absent = NormalizedString). */
-  @Optional({ through: "ad4m://dedup_strategy" })
+  @Optional({ through: "ad4m://dedup_strategy", resolveLanguage: "literal" })
   dedupStrategy?: string;
 }
 
@@ -108,19 +108,19 @@ export class InterpretationRun extends Ad4mModel {
   runId: string = "";
 
   /** LLM model id used for this run. */
-  @Optional({ through: "ad4m://interp/model" })
+  @Optional({ through: "ad4m://interp/model", resolveLanguage: "literal" })
   model?: string;
 
   /** SHA-256 hex of the system prompt + few-shots at the time of the run. */
-  @Optional({ through: "ad4m://interp/prompt_version" })
+  @Optional({ through: "ad4m://interp/prompt_version", resolveLanguage: "literal" })
   promptVersion?: string;
 
   /** RFC3339 timestamp when the run completed. */
-  @Optional({ through: "ad4m://interp/ran_at" })
+  @Optional({ through: "ad4m://interp/ran_at", resolveLanguage: "literal" })
   ranAt?: string;
 
   /** URI of the AutoProcessorConfig node that triggered this run. */
-  @Optional({ through: "ad4m://interp/processor" })
+  @Optional({ through: "ad4m://interp/processor", resolveLanguage: "literal" })
   processor?: string;
 
   /**
