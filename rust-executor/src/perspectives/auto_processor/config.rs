@@ -287,15 +287,17 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
     };
 
     // Timings must be in range or the batch/claim primitives misbehave: a
-    // `batch_max` of 0 drains nothing (empty passes forever), and a
-    // non-positive `claim_ttl_ms` makes each peer's own claim expire the moment
-    // it is written, so every peer reads an empty holder set and processes the
-    // same batch. Treat an out-of-range value like an unparseable one — the
-    // processor is simply not loaded (and a warn is logged by the caller).
+    // `batch_max` of 0 drains nothing (empty passes forever), a non-positive
+    // `claim_ttl_ms` makes each peer's own claim expire the moment it is
+    // written (so every peer reads an empty holder set and processes the same
+    // batch), and a *negative* `max_wait_ms` makes the oldest-item deadline
+    // "expire" immediately, silently bypassing `batch_min` on every pass. Treat
+    // an out-of-range value like an unparseable one — the processor is simply
+    // not loaded (and a warn is logged by the caller).
     let debounce_ms = number("debounce_ms")?;
     let batch_max = count("batch_max")?;
     let claim_ttl_ms = number("claim_ttl_ms")?;
-    if debounce_ms < 0 || batch_max < 1 || claim_ttl_ms <= 0 {
+    if debounce_ms < 0 || batch_max < 1 || claim_ttl_ms <= 0 || max_wait_ms.is_some_and(|w| w < 0) {
         return None;
     }
 
@@ -481,6 +483,61 @@ mod tests {
         // unparseable numeric is dropped.
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].processor_id, "garbled");
+    }
+
+    /// `claim_ttl_ms` parses fine as `i64`, but a value of `0` is out of
+    /// range: a claim that expires the instant it is written lets every peer
+    /// re-process the same batch. The in-range-but-invalid case is dropped
+    /// exactly like an unparseable one.
+    #[tokio::test]
+    async fn load_skips_node_with_zero_claim_ttl() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        write_processor(&mut p, &sample_config("good"), &ctx)
+            .await
+            .expect("write good");
+        write_processor(&mut p, &sample_config("zero-ttl"), &ctx)
+            .await
+            .expect("write zero-ttl");
+        p.update_subject(
+            class_option(),
+            processor_node("zero-ttl"),
+            serde_json::json!({ "claim_ttl_ms": "0" }),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("zero claim_ttl_ms");
+
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].processor_id, "good");
+    }
+
+    /// A *negative* `max_wait_ms` parses but is invalid: it would make the
+    /// oldest-item deadline expire immediately and silently bypass `batch_min`
+    /// on every pass. Treat it as out of range and drop the node.
+    #[tokio::test]
+    async fn load_skips_node_with_negative_max_wait() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        write_processor(&mut p, &sample_config("good"), &ctx)
+            .await
+            .expect("write good");
+        write_processor(&mut p, &sample_config("neg-wait"), &ctx)
+            .await
+            .expect("write neg-wait");
+        p.update_subject(
+            class_option(),
+            processor_node("neg-wait"),
+            serde_json::json!({ "max_wait_ms": "-1" }),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("negative max_wait_ms");
+
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].processor_id, "good");
     }
 
     /// Multiple `interpretation_class` targets on the same node round-trip
