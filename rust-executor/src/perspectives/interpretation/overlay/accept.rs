@@ -47,7 +47,7 @@ pub(crate) async fn overlay_of(
     base: &str,
 ) -> anyhow::Result<Option<OverlayView>> {
     let all = links_from(perspective, base).await?;
-    let kind = match first_target(&all, OVERLAY_KIND_PRED) {
+    let kind = match overlay_kind(&all) {
         Some(k) => k,
         None => return Ok(None),
     };
@@ -139,7 +139,7 @@ pub(crate) async fn reject_interpretation(
 ) -> anyhow::Result<()> {
     let _ = context;
     let all = links_from(perspective, base).await?;
-    let kind = match first_target(&all, OVERLAY_KIND_PRED) {
+    let kind = match overlay_kind(&all) {
         Some(k) => k,
         None => anyhow::bail!("reject_interpretation: no overlay on `{base}`"),
     };
@@ -184,6 +184,24 @@ fn first_target(links: &[DecoratedLinkExpression], predicate: &str) -> Option<St
         .iter()
         .find(|l| l.data.predicate.as_deref() == Some(predicate))
         .map(|l| l.data.target.clone())
+}
+
+/// The overlay's `kind` value (`create` | `update`), decoded from its link
+/// target.
+///
+/// `write_overlay` mints the overlay through `create_subject`, whose `kind`
+/// SHACL setter (`setSingleTarget`, no `resolveLanguage`) stores the value
+/// literal-encoded (`literal:string:create`). Every consumer — the §8 accept /
+/// reject branches below, the `interpretationOverlays` query surface, and the
+/// module's own tests (`decoded_targets`) — treats `kind` as the bare
+/// discriminator string, so decode it on read exactly as `inferred/<p>` targets
+/// are decoded. `parse_literal_value` passes an already-plain target through
+/// unchanged, so this stays correct regardless of how the link was written.
+fn overlay_kind(links: &[DecoratedLinkExpression]) -> Option<String> {
+    first_target(links, OVERLAY_KIND_PRED).map(|k| match parse_literal_value(&k) {
+        serde_json::Value::String(s) => s,
+        other => other.to_string(),
+    })
 }
 
 /// The `inferred/<p>` links on the base, optionally narrowed to one real
@@ -383,6 +401,64 @@ mod tests {
         assert!(
             overlay_of(&p, base).await.unwrap().is_none(),
             "overlay gone"
+        );
+    }
+
+    /// The production write path (`write_overlay` → `create_subject`) stores
+    /// `kind` through its SHACL `setSingleTarget` setter, which — because the
+    /// property carries no `resolveLanguage` — literal-encodes the value as
+    /// `literal:string:create`. Every reader treats `kind` as the bare
+    /// discriminator, so `overlay_of` must decode it and the §8 create/update
+    /// branches must fire on the decoded value.
+    ///
+    /// Regression for the wind-tunnel I3 failure: a literal-encoded `kind` read
+    /// back as `"literal:string:create"`, so `== "create"` never matched and
+    /// `reject`(create) wrongly took the update branch. The pre-existing tests
+    /// missed it only because their `add(..., "create")` seed wrote `kind`
+    /// *plain*, unlike the real setter.
+    #[tokio::test]
+    async fn overlay_kind_decodes_literal_encoded_target() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[]).await;
+        let base = "soa://ext/Task/kind-enc";
+        // Mint the overlay exactly as create_subject's `kind` setter does: a
+        // literal-encoded target, not the bare discriminator string.
+        add(
+            &mut p,
+            base,
+            OVERLAY_KIND_PRED,
+            "literal:string:create",
+            &ctx,
+        )
+        .await;
+        add(&mut p, base, OVERLAY_RUN_PRED, "ad4m://interp/run/r1", &ctx).await;
+        add(&mut p, base, "soa://title", "literal:string:Fix", &ctx).await;
+        add(
+            &mut p,
+            base,
+            &format!("{INFERRED_PREFIX}soa://title"),
+            "literal:string:Fix",
+            &ctx,
+        )
+        .await;
+
+        let view = overlay_of(&p, base)
+            .await
+            .unwrap()
+            .expect("overlay present");
+        assert_eq!(
+            view.kind, "create",
+            "kind must decode to the bare discriminator, not stay literal-encoded"
+        );
+
+        // The create branch must fire on the decoded kind: rejecting a create
+        // wipes the whole instance. If `kind` stayed `literal:string:create` this
+        // would wrongly hit the update branch and leave `soa://title` behind.
+        reject_interpretation(&mut p, base, None, &ctx)
+            .await
+            .unwrap();
+        assert!(
+            preds_on(&p, base).await.is_empty(),
+            "reject(create) removed the whole instance"
         );
     }
 }
