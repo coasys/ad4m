@@ -30,7 +30,8 @@
 use crate::agent::AgentContext;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 
-use super::{ensure_subject_class, scalar_string, subject_class_registered};
+use super::scalar_string;
+use crate::perspectives::hardwired_class::{ensure_subject_class, subject_class_registered};
 
 /// Local subject-class name of a processor config.
 pub(crate) const AUTO_PROCESSOR_CLASS: &str = "AutoProcessor";
@@ -63,6 +64,7 @@ const AUTO_PROCESSOR_SDNA: &str = r#"{
     {"path":"ad4m://batch_max","name":"batch_max","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://batch_max","target":"value"}]},
     {"path":"ad4m://max_wait_ms","name":"max_wait_ms","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://max_wait_ms","target":"value"}]},
     {"path":"ad4m://claim_ttl_ms","name":"claim_ttl_ms","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://claim_ttl_ms","target":"value"}]},
+    {"path":"ad4m://source_window_ms","name":"source_window_ms","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://source_window_ms","target":"value"}]},
     {"path":"ad4m://dedup_strategy","name":"dedup_strategy","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://dedup_strategy","target":"value"}]}
   ]
 }"#;
@@ -120,6 +122,14 @@ pub struct AutoProcessorConfig {
     /// [`crate::perspectives::interpretation::DedupStrategy`]. `None` = the
     /// default (`NormalizedString`) — preserving existing runner behaviour.
     pub dedup_strategy_json: Option<String>,
+    /// How far back the watch tick looks: gathered turns older than
+    /// `now - window` are dropped, and the processed-turn cursor only loads
+    /// `InterpretationRun.sources` from runs whose `ran_at` is inside the same
+    /// window. `None` (omit `ad4m://source_window_ms`) means **no window** —
+    /// every gathered turn is a candidate and the cursor is the unbounded
+    /// union of this processor's run sources. `<= 0` is invalid and the
+    /// processor is not loaded.
+    pub source_window_ms: Option<i64>,
 }
 
 /// Deterministic node URI for an AutoProcessor. Deterministic in
@@ -129,6 +139,7 @@ pub fn processor_node(processor_id: &str) -> String {
 }
 
 /// Idempotently register the hard-wired [`AUTO_PROCESSOR_CLASS`] subject class.
+/// Refreshes the SHACL if an older registration predates `source_window_ms`.
 pub async fn ensure_auto_processor_class(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
@@ -138,6 +149,7 @@ pub async fn ensure_auto_processor_class(
         AUTO_PROCESSOR_CLASS,
         AUTO_PROCESSOR_TARGET_CLASS,
         AUTO_PROCESSOR_SDNA,
+        Some("ad4m://source_window_ms"),
         context,
     )
     .await
@@ -178,6 +190,9 @@ pub async fn write_processor(
     }
     if let Some(dedup) = &cfg.dedup_strategy_json {
         values["dedup_strategy"] = dedup.clone().into();
+    }
+    if let Some(source_window_ms) = cfg.source_window_ms {
+        values["source_window_ms"] = source_window_ms.to_string().into();
     }
     perspective
         .create_subject(class_option(), node.clone(), Some(values), None, context)
@@ -227,7 +242,7 @@ pub async fn load_processors(
         "properties": [
             "processor_id", "source_scope_query", "base_prefix",
             "interpretation_class", "debounce_ms", "batch_min", "batch_max",
-            "max_wait_ms", "claim_ttl_ms", "dedup_strategy",
+            "max_wait_ms", "claim_ttl_ms", "dedup_strategy", "source_window_ms",
         ]
     })
     .to_string();
@@ -303,6 +318,13 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
     if debounce_ms < 0 || batch_max < 1 || claim_ttl_ms <= 0 || max_wait_ms.is_some_and(|w| w < 0) {
         return None;
     }
+    let source_window_ms = match scalar("source_window_ms") {
+        Some(_) => Some(number("source_window_ms")?),
+        None => None,
+    };
+    if source_window_ms.is_some_and(|w| w <= 0) {
+        return None;
+    }
 
     Some(AutoProcessorConfig {
         processor_id: scalar("processor_id")?,
@@ -315,6 +337,7 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         max_wait_ms,
         claim_ttl_ms,
         dedup_strategy_json: scalar("dedup_strategy"),
+        source_window_ms,
     })
 }
 
@@ -342,6 +365,7 @@ mod tests {
             max_wait_ms: Some(60_000),
             claim_ttl_ms: 120_000,
             dedup_strategy_json: Some(r#"{"kind":"normalized"}"#.into()),
+            source_window_ms: None,
         }
     }
 
@@ -427,6 +451,19 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0], cfg);
         assert!(loaded[0].dedup_strategy_json.is_none());
+        assert!(loaded[0].source_window_ms.is_none());
+    }
+
+    /// An explicit `source_window_ms` round-trips; omitted stays `None`
+    /// (unbounded gather + cursor).
+    #[tokio::test]
+    async fn source_window_ms_optional_roundtrip() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let mut cfg = sample_config("windowed");
+        cfg.source_window_ms = Some(42);
+        write_processor(&mut p, &cfg, &ctx).await.expect("write");
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded[0].source_window_ms, Some(42));
     }
 
     /// A node typed AutoProcessor but missing every required scalar (here: a

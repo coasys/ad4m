@@ -18,7 +18,8 @@
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
-    run_interpretation_with_strategy, DedupStrategy, TranscriptTurn,
+    run_interpretation_with_strategy_and_model, DedupStrategy, InterpretationRunCursor,
+    TranscriptTurn,
 };
 use crate::perspectives::model_query::load_shape_from_store;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -114,6 +115,18 @@ pub struct WatcherState {
     /// actually claims — the claim TTL only recovers a *crashed claimant*, not
     /// an *inactive elected author*.
     standdown_since: BTreeMap<String, i64>,
+    /// Per-processor turn id → wall-clock (unix millis) before which the id
+    /// must not be re-enqueued, set when a pass backed off to a peer's claim.
+    ///
+    /// The durable cursor is the winner's `InterpretationRun.sources`, which
+    /// only reaches us once their links sync. Without this, the losing peer
+    /// re-gathers the same turns every debounce window and calls `try_claim`
+    /// again — and `try_claim` *writes* its claim before reading the holders,
+    /// so a slow-syncing neighbourhood would see steady claim-link churn. The
+    /// deadline is the claim TTL: past it the winner's claim has expired
+    /// anyway, so retrying is the intended crashed-claimant recovery rather
+    /// than a redundant race.
+    deferred: BTreeMap<String, BTreeMap<String, i64>>,
 }
 
 impl WatcherState {
@@ -212,6 +225,27 @@ impl WatcherState {
     /// it), so a later batch that happens to reuse the key starts a fresh clock.
     pub fn clear_standdown(&mut self, batch_key: &str) {
         self.standdown_since.remove(batch_key);
+    }
+
+    /// Hold `ids` back from re-enqueue for `ttl_ms`, because a peer holds the
+    /// claim on them. Expired entries for this processor are pruned on the way
+    /// in, so the map stays bounded by what is currently deferred rather than
+    /// growing with every id ever backed off.
+    pub fn defer_turns(&mut self, processor_id: &str, ids: &[String], now_ms: i64, ttl_ms: i64) {
+        let entry = self.deferred.entry(processor_id.to_string()).or_default();
+        entry.retain(|_, until| *until > now_ms);
+        let until = now_ms.saturating_add(ttl_ms);
+        for id in ids {
+            entry.insert(id.clone(), until);
+        }
+    }
+
+    /// Whether `id` is still inside a [`Self::defer_turns`] window.
+    pub fn is_deferred(&self, processor_id: &str, id: &str, now_ms: i64) -> bool {
+        self.deferred
+            .get(processor_id)
+            .and_then(|m| m.get(id))
+            .is_some_and(|until| *until > now_ms)
     }
 }
 
@@ -573,18 +607,23 @@ pub async fn run_one_pass(
         .base_prefix
         .clone()
         .unwrap_or_else(|| format!("ad4m://autoprocessor/{}/instance/", cfg.processor_id));
-    let bases = run_interpretation_with_strategy(
+    let bases = run_interpretation_with_strategy_and_model(
         perspective,
         &shapes,
         &transcript,
         &base_prefix,
         context,
         &dedup,
+        None,
         // Existing-instance scope: not yet wired from the processor config —
         // #883 added the plumbing (`existing_instance_context(scope)`), but the
         // per-channel scope belongs to a follow-up config field. `None` keeps
         // today's whole-perspective existing-set behaviour.
         None,
+        Some(&InterpretationRunCursor {
+            processor: super::config::processor_node(&cfg.processor_id),
+            sources: item_ids.clone(),
+        }),
     )
     .await?;
     signal!(AutoProcessorStep::Processed, bases = &bases);
@@ -611,6 +650,7 @@ mod tests {
             max_wait_ms: None,
             claim_ttl_ms: 60_000,
             dedup_strategy_json: None,
+            source_window_ms: None,
         }
     }
 
@@ -729,6 +769,43 @@ mod tests {
         let mut w = WatcherState::new();
         let c = cfg("p", 1_000, 32);
         assert_eq!(w.drain_ready_batch(&c, 10_000), None);
+    }
+
+    /// A backed-off batch is held back until the claim TTL elapses, then
+    /// becomes eligible again (the crashed-claimant recovery path). Deferrals
+    /// are per-processor and expired entries are pruned rather than retained.
+    #[test]
+    fn deferred_turns_expire_and_are_processor_scoped() {
+        let mut w = WatcherState::new();
+        let ids = vec!["i1".to_string(), "i2".to_string()];
+        w.defer_turns("p", &ids, 1_000, 60_000);
+
+        assert!(w.is_deferred("p", "i1", 1_000));
+        assert!(w.is_deferred("p", "i2", 60_000));
+        assert!(!w.is_deferred("p", "i3", 1_000), "only the given ids");
+        assert!(!w.is_deferred("other", "i1", 1_000), "per-processor");
+        assert!(
+            !w.is_deferred("p", "i1", 61_000),
+            "past now+ttl the batch is eligible again"
+        );
+
+        // A later deferral prunes the expired entries instead of accumulating.
+        w.defer_turns("p", &["i9".to_string()], 61_000, 60_000);
+        assert!(!w.is_deferred("p", "i1", 61_000));
+        assert!(w.is_deferred("p", "i9", 61_000));
+    }
+
+    /// A deferred id is not re-enqueued while its window is open, but the
+    /// debounce clock is untouched, so unrelated turns still batch normally.
+    #[test]
+    fn deferred_ids_are_skipped_by_the_caller_not_the_queue() {
+        let mut w = WatcherState::new();
+        w.defer_turns("p", &["i1".to_string()], 1_000, 60_000);
+        // `record_item` itself is unconditional — the tick consults
+        // `is_deferred` before recording, so a caller that ignores it still
+        // works exactly as before.
+        rec(&mut w, "p", "i2", 1_000);
+        assert_eq!(w.pending_for("p").expect("pending").items.len(), 1);
     }
 
     /// Stall-fallback clock: a batch we never stood down for never escalates;

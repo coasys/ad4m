@@ -189,8 +189,13 @@ The same pressure already applies to `source_scope_query`: it cannot
 return the whole channel history to the LLM. **Both** the scope and the
 subtract must be recent-window operations.
 
-`AutoProcessorConfig.source_window_ms` (new, default **7 days**) is the
-engine-owned bound:
+`AutoProcessorConfig.source_window_ms` is **optional**. Omit the SDNA
+property (`None`) for **no window**: every gathered turn is a candidate
+and the cursor is the unbounded union of this processor's run sources.
+Set a positive millis value to bound both sides. `<= 0` is invalid and
+the processor is not loaded.
+
+When set, the window is the engine-owned bound:
 
 - **Scope (in Rust, after gather):** drop rows whose `timestamp` is
   older than `now - source_window_ms`. Apps should *also* `FILTER` in
@@ -246,29 +251,36 @@ SELECT ?speaker ?text ?timestamp WHERE {
   FILTER (?timestamp >= "…rfc3339 of now - source_window_ms…")
 }
 
-# 2. Cursor — engine-owned, bounded by ran_at
-SELECT ?id WHERE {
+# 2. Cursor — engine-owned. `ran_at` is OPTIONAL because it only matters
+#    when a window is set, and is filtered in Rust: the stored value is a
+#    `literal:string:` IRI, so `xsd:integer(?ran_at)` does not apply to it.
+SELECT ?id ?ran_at WHERE {
   ?run <ad4m://type> <ad4m://interpretation-run> .
   ?run <ad4m://interp/processor> <ad4m://autoprocessor/{processor_id}> .
-  ?run <ad4m://interp/ran_at> ?ran_at .
   ?run <ad4m://interp/sources> ?id .
-  FILTER (xsd:integer(?ran_at) >= {now_ms - source_window_ms})
+  OPTIONAL { ?run <ad4m://interp/ran_at> ?ran_at }
 }
 ```
+
+With a window set, a row whose `ran_at` is missing or unparseable is
+**dropped** rather than kept. The cursor is a suppression list, so the
+safe direction is to re-process (output identity-dedup catches the
+duplicate) rather than to retire a turn that was never interpreted.
 
 (`<<( … )>>` is the RDF 1.2 quoted-triple shape this store’s own queries
 use. Annotating the quoted triple directly with
 `ad4m://ontology/timestamp` binds nothing.)
 
-The watch loop may keep a RAM `HashSet` of in-window IDs and refresh
+The watch loop may keep a RAM `HashSet` of processed IDs and refresh
 when new run/source links land; that is a cache of (2), not a second
-store, and not a substitute for the `ran_at` bound.
+store, and not a substitute for the `ran_at` bound when a window is set.
 
 Tick:
 
 1. Gather transcript (query 1) → `(speaker, text, timestamp)` rows.
-   Drop rows older than `source_window_ms`.
-2. Load in-window processed IDs (query 2, or cache).
+   Drop rows older than `source_window_ms` **when that field is set**.
+2. Load processed IDs (query 2, or cache). Apply the `ran_at` window
+   only when `source_window_ms` is set.
 3. For each row, `id = turn_id(speaker, text, timestamp)`. If `id` is
    processed, skip. Else `record_item` with the full `PendingTurn`.
 4. Drain a ready batch of `PendingTurn`s → `run_one_pass` (no re-gather).
@@ -308,16 +320,23 @@ are the durable watermark after the lock expires.
 4. **Write sources only on Won.** BackedOff waits for synced sources or
    claim TTL + retry. Size `claim_ttl_ms` ≳ sync latency + pass runtime
    (default 10 minutes). Residual race → output dedup. **Decided.**
+   BackedOff additionally holds its ids back *locally* for `claim_ttl_ms`.
+   The winner's `sources` are the durable record, but they only arrive
+   once links sync; without the local hold the loser re-gathers and
+   re-claims the same batch every debounce window, and `try_claim` writes
+   its claim before reading the holders, so that is pure link churn. The
+   TTL is the claim TTL: past it the winner's claim has expired anyway
+   and retrying *is* the crashed-claimant recovery path.
 5. **Subtract in Rust** (scope query + windowed cursor query). Do not
    fold the hash/filter into the user’s SPARQL. **Decided.**
 6. **Turn ID is `hash(speaker, text, timestamp)`.** Identical content at
    different times is a new turn; the same link (same timestamp) is
    idempotent. `source_scope_query` must bind `?timestamp`. **Decided.**
-7. **Both scope and cursor are time-windowed** via
-   `source_window_ms` (default 7 days), using turn `timestamp` and run
-   `ran_at`. The cursor is not the unbounded union of all history.
-   Window sufficiency holds modulo cross-peer clock skew; output-dedup
-   is the boundary fallback. **Decided.**
+7. **Optional `source_window_ms`.** Omit (`None`) = unbounded gather and
+   cursor. When set, both scope and cursor are bounded by that window
+   using turn `timestamp` and run `ran_at`. Window sufficiency holds
+   modulo cross-peer clock skew; output-dedup is the boundary fallback.
+   **Decided.**
 
 ---
 
@@ -331,8 +350,9 @@ are the durable watermark after the lock expires.
    authors do not have to reverse-engineer `rdf:reifies`.
 2. `turn_id(speaker, text, timestamp)`. Tests: two identical bodies at
    different timestamps are distinct; the same triple is not.
-3. `source_window_ms` on `AutoProcessorConfig` (default 7 days). Rust
-   drops out-of-window gathered rows; cursor SPARQL filters `ran_at`.
+3. Optional `source_window_ms` on `AutoProcessorConfig` (`None` → no
+   window). When set, Rust drops out-of-window gathered rows and the
+   cursor filters `ran_at`.
 4. Extend `InterpretationRun` SDNA with `processor` (optional, single)
    and `sources` (collection). Wire both on AutoProcessor Won. Cursor
    query uses `ad4m://type` / `ad4m://interpretation-run`.
@@ -363,3 +383,5 @@ branch does not exist here yet; rebase/merge this cut onto it and apply:
 3. **JS tests** `SCOPE_QUERY` in `auto-processor.test.ts` and
    `auto-processor-neighbourhood.ts` — same reifier query as §3f,
    otherwise gather will fail the tick once this cut is merged.
+4. **`sourceWindowMs?`** on `AddAutoProcessorConfig` / the WS request —
+   optional; omit for no window (unbounded gather + cursor).

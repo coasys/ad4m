@@ -5117,16 +5117,19 @@ impl PerspectiveInstance {
     ///   1. Load every `AutoProcessorConfig` declared on this perspective's
     ///      shared graph (`load_processors`). Zero configs = no-op tick.
     ///   2. Per config, run its `source_scope_query` to gather the current
-    ///      transcript (`?speaker` `?text` `?timestamp`), hash each turn into a
-    ///      stable id, and feed only new-since-last-processed **payloads** into
-    ///      `WatcherState`. The per-processor `processed_ids` set defends against
-    ///      re-processing after `drain_ready_batch` empties the pending queue.
+    ///      transcript (`?speaker` `?text` `?timestamp`), drop turns older
+    ///      than `source_window_ms` when set, hash each remaining turn, and
+    ///      skip IDs already in this processor's `InterpretationRun.sources`
+    ///      (windowed by `ran_at` only when `source_window_ms` is set).
     ///   3. Per config, `drain_ready_batch(cfg, now_ms)` — if a batch is ready
     ///      (i.e. `debounce_ms` elapsed since the last `record_item`), run
-    ///      `run_one_pass` in-line. `Won` and `BackedOff` both add the batch
-    ///      to `processed_ids` (a peer won → their write reaches us via link
-    ///      sync, no reason to re-race); `ShapesMissing` and `EmptyTranscript`
-    ///      do not, so the ids are retried once the shape or transcript lands.
+    ///      `run_one_pass` in-line. `Won` writes `processor` + `sources` on the
+    ///      new run node (the durable cursor). `BackedOff` holds the ids back
+    ///      locally for `claim_ttl_ms` — the winner's sources are what really
+    ///      retire them, but they only arrive once links sync, and re-racing
+    ///      the claim every debounce window until then is pure churn.
+    ///      `ShapesMissing` and `EmptyTranscript` do not write sources, so the
+    ///      ids are retried once the shape or transcript lands.
     ///
     /// This is the "polling MVP". The event-driven variant
     /// (subscribe to `PERSPECTIVE_LINK_ADDED_TOPIC`, record `link.data.source`
@@ -5144,11 +5147,6 @@ impl PerspectiveInstance {
 
         let uuid = self.uuid.clone();
         let mut watcher = WatcherState::new();
-        // Per-processor `HashSet<turn-id>` — turn ids already handed to a
-        // successful (Won or BackedOff) pass. Prevents the polling design from
-        // re-processing the same transcript row every tick after WatcherState's
-        // pending queue drains. Carried across ticks by `run_auto_processor_tick`.
-        let mut processed_per_processor: HashMap<String, HashSet<String>> = HashMap::new();
 
         while !self.is_teardown.load(Ordering::Acquire) {
             sleep(Duration::from_millis(TICK_MS)).await;
@@ -5159,13 +5157,8 @@ impl PerspectiveInstance {
                 Ok(d) => d.as_millis() as i64,
                 Err(_) => continue, // clock before epoch — skip tick
             };
-            self.run_auto_processor_tick(
-                &mut watcher,
-                &mut processed_per_processor,
-                now_ms,
-                &context,
-            )
-            .await;
+            self.run_auto_processor_tick(&mut watcher, now_ms, &context)
+                .await;
         }
 
         log::debug!("auto_processor_watch_loop ended for perspective {}", uuid);
@@ -5178,10 +5171,9 @@ impl PerspectiveInstance {
     /// with no manual interpretation or transcript wrangling.
     ///
     /// Loads every declared `AutoProcessorConfig`, records new-since-processed
-    /// transcript turn ids into `watcher`, then drains and runs any ready batch.
-    /// `processed_per_processor` carries the per-processor turn-id set across
-    /// ticks (a `Won`/`BackedOff` pass marks its batch processed so the polling
-    /// design does not re-race it).
+    /// transcript turns into `watcher` (gather minus this processor's
+    /// `InterpretationRun.sources`, optionally windowed), then drains and runs
+    /// any ready batch.
     ///
     /// `context` is the agent this executor runs the pass as — the production
     /// loop passes the main agent; a multi-user test passes each managed user's
@@ -5190,12 +5182,12 @@ impl PerspectiveInstance {
     pub(crate) async fn run_auto_processor_tick(
         &self,
         watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState,
-        processed_per_processor: &mut HashMap<String, HashSet<String>>,
         now_ms: i64,
         context: &AgentContext,
     ) {
         use crate::perspectives::auto_processor::{
             config::load_processors,
+            cursor::{load_processed_source_ids, turn_in_source_window},
             events::{emit, AutoProcessorEvent, AutoProcessorStep},
             watcher::{run_one_pass, PassOutcome, PendingTurn},
         };
@@ -5233,26 +5225,38 @@ impl PerspectiveInstance {
                     continue;
                 }
             };
-            if transcript.is_empty() {
-                continue;
-            }
-            let processed = processed_per_processor
-                .entry(cfg.processor_id.clone())
-                .or_default();
-            let mut live_ids: HashSet<String> = HashSet::with_capacity(transcript.len());
-            for turn in &transcript {
-                let pending = PendingTurn::from_transcript(turn);
-                if !processed.contains(&pending.id) {
-                    watcher.record_item(&cfg.processor_id, pending.clone(), now_ms);
+            let processed = match load_processed_source_ids(
+                self,
+                &cfg.processor_id,
+                now_ms,
+                cfg.source_window_ms,
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!(
+                        "auto_processor `{}` [{}]: load_processed_source_ids failed: {e:#}",
+                        cfg.processor_id,
+                        uuid
+                    );
+                    continue;
                 }
-                live_ids.insert(pending.id);
+            };
+            for turn in &transcript {
+                if let Some(window_ms) = cfg.source_window_ms {
+                    if !turn_in_source_window(&turn.timestamp, now_ms, window_ms) {
+                        continue;
+                    }
+                }
+                let pending = PendingTurn::from_transcript(turn);
+                if processed.contains(&pending.id)
+                    || watcher.is_deferred(&cfg.processor_id, &pending.id, now_ms)
+                {
+                    continue;
+                }
+                watcher.record_item(&cfg.processor_id, pending, now_ms);
             }
-            // Bound the processed set: a turn id is a content hash, so one that
-            // is no longer in the source scope can never be re-recorded. Drop
-            // those, capping the set at the live transcript size instead of
-            // leaking every id ever processed for the loop's (perspective's)
-            // lifetime.
-            processed.retain(|id| live_ids.contains(id));
         }
 
         // 2. Drain + run a pass per config.
@@ -5297,16 +5301,19 @@ impl PerspectiveInstance {
                 }
             };
             match outcome {
-                PassOutcome::Won { .. } | PassOutcome::BackedOff { .. } => {
-                    // Either we processed the batch or a peer holds the claim
-                    // and will — both mean "do not re-race these ids next tick".
+                PassOutcome::Won { .. } => {
+                    // Sources are on the new InterpretationRun; next tick's
+                    // cursor SPARQL skips these ids. Clear any stall clock.
                     watcher.clear_standdown(&batch_id);
-                    let processed = processed_per_processor
-                        .entry(cfg.processor_id.clone())
-                        .or_default();
-                    for t in &batch {
-                        processed.insert(t.id.clone());
-                    }
+                }
+                PassOutcome::BackedOff { .. } => {
+                    // The winner's `sources` are the durable record, but they
+                    // only reach us once their links sync. Hold the ids back
+                    // until the claim would have expired so we neither re-race
+                    // the batch every debounce window nor lose it if the
+                    // winner crashes before writing.
+                    watcher.defer_turns(&cfg.processor_id, &item_ids, now_ms, cfg.claim_ttl_ms);
+                    watcher.clear_standdown(&batch_id);
                 }
                 PassOutcome::NotCandidate { .. } => {
                     // Stood down for an *online* elected author. Start/continue

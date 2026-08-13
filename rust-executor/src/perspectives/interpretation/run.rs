@@ -2,13 +2,9 @@ use super::{
     apply_with_overlay, build_interpretation_input, class_local_name,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
     identity_property, parse_interpretation_response, plan_interpretation_ops_resolved,
-    resolve_already_present_with_strategy, DedupStrategy, InterpretationOp, ProposedInstance,
-    TranscriptTurn,
+    resolve_already_present_with_strategy, DedupStrategy, InterpretationOp,
+    InterpretationRunCursor, ProposedInstance, TranscriptTurn,
 };
-// Only exercised by the in-module `#[cfg(test)]` planner tests (via their
-// `use super::*`); the production paths use `plan_interpretation_ops_resolved`.
-#[cfg(test)]
-use super::plan_interpretation_ops_with_context;
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::{ModelShape, ParentScope};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
@@ -346,6 +342,7 @@ pub async fn run_interpretation_with_strategy(
         dedup_strategy,
         None,
         scope,
+        None,
     )
     .await
 }
@@ -366,6 +363,7 @@ pub async fn run_interpretation_with_strategy_and_model(
     dedup_strategy: &DedupStrategy,
     model_override: Option<&str>,
     scope: Option<&ParentScope>,
+    cursor: Option<&InterpretationRunCursor>,
 ) -> anyhow::Result<Vec<String>> {
     // Returns a task already spawned into its LLM worker, so `prompt` can use it
     // immediately (see `ensure_interpretation_task_for_model`).
@@ -448,8 +446,17 @@ pub async fn run_interpretation_with_strategy_and_model(
     // `InterpretationRun` is minted per pass and threaded onto every overlay.
     let run_id = uuid::Uuid::new_v4().to_string();
     let ran_at = chrono::Utc::now().timestamp_millis().to_string();
-    let bases =
-        apply_with_overlay(perspective, shapes, ops, &task, run_id, ran_at, context).await?;
+    let bases = apply_with_overlay(
+        perspective,
+        shapes,
+        ops,
+        &task,
+        run_id,
+        ran_at,
+        context,
+        cursor,
+    )
+    .await?;
 
     // The affected instance base URIs (created, updated, or given new
     // relations). Links are owned by `create_subject` / `update_subject`.

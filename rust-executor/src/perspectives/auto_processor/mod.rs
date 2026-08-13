@@ -19,59 +19,9 @@
 
 pub mod claim;
 pub mod config;
+pub mod cursor;
 pub mod events;
 pub mod watcher;
-
-use crate::agent::AgentContext;
-use crate::perspectives::perspective_instance::{PerspectiveInstance, SdnaType};
-use crate::types::LinkQuery;
-
-/// True once `target_class` has been registered as a SubjectClass in this
-/// perspective — the presence guard both hard-wired classes below use, and the
-/// "is there anything to read?" check on the load paths (a perspective that
-/// never wrote a processor/claim has no shape to `model_query` against).
-pub(crate) async fn subject_class_registered(
-    perspective: &PerspectiveInstance,
-    target_class: &str,
-) -> anyhow::Result<bool> {
-    let links = perspective
-        .get_links(&LinkQuery {
-            predicate: Some("rdf://type".to_string()),
-            target: Some("ad4m://SubjectClass".to_string()),
-            ..Default::default()
-        })
-        .await?;
-    Ok(links.iter().any(|l| l.data.source == target_class))
-}
-
-/// Idempotently register a hard-wired subject class into the perspective,
-/// mirroring the `add_sdna` path the interpretation overlay classes use. A
-/// no-op once the class is present, so a continuous processor calling it on
-/// every write costs one cheap link scan rather than a SHACL rewrite.
-pub(crate) async fn ensure_subject_class(
-    perspective: &mut PerspectiveInstance,
-    class_name: &str,
-    target_class: &str,
-    sdna: &str,
-    context: &AgentContext,
-) -> anyhow::Result<()> {
-    if subject_class_registered(perspective, target_class).await? {
-        return Ok(());
-    }
-    perspective
-        .add_sdna(
-            class_name.to_string(),
-            String::new(),
-            SdnaType::SubjectClass,
-            Some(sdna.to_string()),
-            context,
-        )
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!("ensure_subject_class({class_name}): add_sdna failed: {e:#}")
-        })?;
-    Ok(())
-}
 
 /// Render a hydrated `model_query` scalar as a `String`. Both classes write
 /// their scalars as `literal:string:` targets, but a value that hydrates to a

@@ -1433,6 +1433,7 @@ async fn auto_processor_pass_lands_interpretation_instance() {
         max_wait_ms: None,
         claim_ttl_ms: 60_000,
         dedup_strategy_json: None,
+        source_window_ms: None,
     };
     write_processor(&mut perspective, &cfg, &ctx)
         .await
@@ -1628,6 +1629,7 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         max_wait_ms: None,
         claim_ttl_ms: 60_000,
         dedup_strategy_json: None,
+        source_window_ms: None,
     };
     let task_cfg = AutoProcessorConfig {
         processor_id: "pc-task-proc".into(),
@@ -1640,6 +1642,7 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         max_wait_ms: None,
         claim_ttl_ms: 60_000,
         dedup_strategy_json: None,
+        source_window_ms: None,
     };
 
     write_processor(&mut perspective, &intent_cfg, &ctx)
@@ -1835,7 +1838,6 @@ async fn auto_processor_high_level_signal_driven_pass() {
     };
     use crate::perspectives::auto_processor::watcher::WatcherState;
     use crate::types::{Link, LinkStatus};
-    use std::collections::{HashMap, HashSet};
     use std::time::Duration;
 
     let processor_id = "flux-channel-proc";
@@ -1881,6 +1883,7 @@ async fn auto_processor_high_level_signal_driven_pass() {
             max_wait_ms: None,
             claim_ttl_ms: 60_000,
             dedup_strategy_json: None,
+            source_window_ms: None,
         };
         write_processor(&mut perspective, &cfg, &ctx)
             .await
@@ -1889,16 +1892,15 @@ async fn auto_processor_high_level_signal_driven_pass() {
         // Observe the pass purely through the event stream.
         let mut rx = subscribe().await;
         let mut watcher = WatcherState::new();
-        let mut processed: HashMap<String, HashSet<String>> = HashMap::new();
 
         // Tick 1 records the two turns (debounce not yet elapsed → no drain).
         perspective
-            .run_auto_processor_tick(&mut watcher, &mut processed, 1_000, &ctx)
+            .run_auto_processor_tick(&mut watcher, 1_000, &ctx)
             .await;
         // Tick 2, past the debounce window: the re-gathered duplicates don't
         // reset the clock (the fix), so the batch drains and the real pass runs.
         perspective
-            .run_auto_processor_tick(&mut watcher, &mut processed, 1_100, &ctx)
+            .run_auto_processor_tick(&mut watcher, 1_100, &ctx)
             .await;
 
         // Await the terminal signal — this is what a WS client / test waits on
@@ -1984,10 +1986,10 @@ async fn auto_processor_high_level_signal_driven_pass() {
 /// perspective's real autonomous loop (poll → debounce → claim → LLM → write).
 /// The claim election is min-DID over active claimants, so the smaller-DID
 /// user's loop is started first: it is the sole claimant, wins, and processes;
-/// then the other user's loop is started and, seeing the winner's active claim,
-/// backs off. Load-bearing assertions: exactly ONE ConversationSubgroup, and the
-/// signals show the winner `Processed` and the loser `BackedOff` (each tagged
-/// with its agentDid).
+/// then the other user's loop is started. Same-process, the winner's `sources`
+/// are already in the graph, so the loser typically skips rather than
+/// `BackedOff`. Load-bearing assertions: winner `Processed`, loser never
+/// `Processed`, and exactly ONE ConversationSubgroup.
 ///
 /// Real-LLM (gemma3:12b). Retry loop for model non-determinism.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2057,6 +2059,7 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
             max_wait_ms: None,
             claim_ttl_ms: 60_000,
             dedup_strategy_json: None,
+            source_window_ms: None,
         };
         write_processor(&mut perspective, &cfg, &ctx_main)
             .await
@@ -2079,38 +2082,39 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
         })
         .await;
 
-        // Now start the loser's loop — it must see the winner's active claim and
-        // back off (min-DID = winner).
+        // Now start the loser's loop. Same-process, the winner's `sources` are
+        // already in the graph, so the loser usually skips the batch outright
+        // rather than reaching the claim — `BackedOff` is one valid outcome,
+        // not a required one. What must hold either way is that the loser
+        // never runs the pass, so wait for `Processed` from *them* and require
+        // the wait to time out.
         let p_lose = perspective.clone();
         let lose_loop =
             tokio::spawn(async move { p_lose.auto_processor_watch_loop(ctx_lose).await });
-        let backed_off = if processed.is_some() {
-            next_event_matching(&mut rx, Duration::from_secs(30), |e| {
-                e.processor_id == processor_id
-                    && e.perspective_uuid == persp_uuid
-                    && e.step == AutoProcessorStep::BackedOff
-                    && e.agent_did.as_deref() == Some(did_lose.as_str())
-            })
-            .await
-        } else {
-            None
-        };
+        let loser_processed = next_event_matching(&mut rx, Duration::from_secs(4), |e| {
+            e.processor_id == processor_id
+                && e.perspective_uuid == persp_uuid
+                && e.step == AutoProcessorStep::Processed
+                && e.agent_did.as_deref() == Some(did_lose.as_str())
+        })
+        .await;
 
         // Stop both background loops (shared is_teardown flag).
         perspective.teardown_background_tasks().await;
         let _ = win_loop.await;
         let _ = lose_loop.await;
 
+        // Not a retryable model wobble: if the loser ran the pass at all, the
+        // claim + cursor failed to coordinate and no amount of retrying is
+        // going to make that correct.
+        assert!(
+            loser_processed.is_none(),
+            "loser ({did_lose}) processed the batch — claim + cursor did not coordinate"
+        );
+
         if processed.is_none() {
             last_err = Some(format!(
                 "attempt {attempt}/{attempts}: winner ({did_win}) never signalled Processed"
-            ));
-            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
-            continue;
-        }
-        if backed_off.is_none() {
-            last_err = Some(format!(
-                "attempt {attempt}/{attempts}: loser ({did_lose}) never backed off — claim did not coordinate"
             ));
             eprintln!("[e2e] {}", last_err.as_ref().unwrap());
             continue;
@@ -2196,6 +2200,7 @@ async fn auto_processor_election_only_online_participants_process() {
         max_wait_ms: None,
         claim_ttl_ms: 60_000,
         dedup_strategy_json: None,
+        source_window_ms: None,
     };
 
     // Case 1 — a batch authored by carol (offline) then bob (online), in that

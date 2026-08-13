@@ -63,7 +63,8 @@ use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClas
 use crate::types::{Link, LinkStatus};
 use sha2::{Digest, Sha256};
 
-use super::{ensure_subject_class, scalar_string, subject_class_registered};
+use super::scalar_string;
+use crate::perspectives::hardwired_class::{ensure_subject_class, subject_class_registered};
 
 /// Local subject-class name of a claim.
 pub(crate) const PROCESSING_CLAIM_CLASS: &str = "ProcessingClaim";
@@ -140,6 +141,7 @@ pub async fn ensure_processing_claim_class(
         PROCESSING_CLAIM_CLASS,
         PROCESSING_CLAIM_TARGET_CLASS,
         PROCESSING_CLAIM_SDNA,
+        None,
         context,
     )
     .await
