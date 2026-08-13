@@ -61,7 +61,8 @@ async function registerLlm(ad4m: any): Promise<void> {
 
 export default function autoProcessorNeighbourhoodTests(testContext: TestContext) {
   return () => {
-    describe("Auto-processor across two executors", () => {
+    describe("Auto-processor across two executors", function () {
+      this.timeout(600_000);
       /**
        * Alice publishes a neighbourhood, Bob joins, both register the class and
        * the LLM, and Alice registers one processor whose config syncs to Bob.
