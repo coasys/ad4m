@@ -356,14 +356,37 @@ are the durable watermark after the lock expires.
 4. Extend `InterpretationRun` SDNA with `processor` (optional, single)
    and `sources` (collection). Wire both on AutoProcessor Won. Cursor
    query uses `ad4m://type` / `ad4m://interpretation-run`.
-5. Replace `processed_per_processor` with the windowed cursor SPARQL
-   (plus optional RAM cache of in-window IDs).
+5. Replace `processed_per_processor` with the cursor SPARQL.
 6. Tests: restart-equivalent empty RAM set still skips in-window sourced
    IDs; two processors do not share a cursor; `[m1,m2]` then `[m1,m2,m3]`
    only interprets `m3`; `batch_max` is the LLM transcript length;
    a turn older than `source_window_ms` is neither enqueued nor required
    in the cursor result; a one-shot run does not suppress auto; two
    “yes”s at different times both enqueue.
+
+Steps 1–6 have landed. A back-off additionally holds its ids back locally
+for `claim_ttl_ms` (§5.4).
+
+### Follow-up on this branch: RAM cache of the cursor
+
+The tick runs the cursor query once per processor per 500ms tick. With no
+`source_window_ms` that is a scan of every run × every source, growing
+without bound — the §3e cost, now on the default path. The fix is a RAM
+`HashSet` per processor, refreshed when new run/source links land.
+
+Deliberately **not** landed with the cursor itself:
+
+- Its invalidation hook is the `PERSPECTIVE_LINK_ADDED_TOPIC`
+  subscription the event-driven watcher (the successor to today's polling
+  MVP) introduces anyway. Building it now means either duplicating that
+  subscription or inventing a throwaway TTL/count probe.
+- A stale cache fails in one direction: it misses a source id that was
+  just written, so the tick re-enqueues and re-claims — exactly the churn
+  the §5.4 local hold removes. A half-invalidated cache regresses that.
+- The cost only bites at tens of thousands of processed turns, i.e.
+  before the Flux integration rather than before this merge.
+
+Pair it with the event-driven watcher.
 
 ### Later PR (`feature/generic-extraction-ws-ts`)
 

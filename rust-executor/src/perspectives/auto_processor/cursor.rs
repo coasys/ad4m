@@ -354,6 +354,213 @@ mod tests {
         );
     }
 
+    /// The cursor's headline promise, end to end: a pass over a *grown*
+    /// transcript enqueues only what is new. `m1`/`m2` are already on a prior
+    /// run's `sources`, so a tick that re-gathers all three turns queues `m3`
+    /// alone rather than re-interpreting the conversation so far.
+    #[tokio::test]
+    async fn tick_enqueues_only_turns_added_since_the_last_run() {
+        use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+        use crate::perspectives::auto_processor::watcher::{PendingTurn, WatcherState};
+        use crate::perspectives::interpretation::{
+            gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
+        };
+        use crate::perspectives::interpretation_test_support::seed_message;
+
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        for (uri, body) in [("msg://1", "first"), ("msg://2", "second")] {
+            seed_message(&mut p, &ctx, uri, "did:key:alice", body, "ns://body").await;
+        }
+        let cfg = AutoProcessorConfig {
+            processor_id: "incremental".into(),
+            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            base_prefix: None,
+            interpretation_classes: vec!["ns://Task".into()],
+            debounce_ms: 50,
+            batch_min: 1,
+            batch_max: 32,
+            max_wait_ms: None,
+            claim_ttl_ms: 60_000,
+            dedup_strategy_json: None,
+            source_window_ms: None,
+        };
+        write_processor(&mut p, &cfg, &ctx)
+            .await
+            .expect("write_processor");
+
+        // The first pass consumed exactly the two turns present at the time.
+        let first_two = gather_transcript_sparql(&p, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
+            .await
+            .expect("gather");
+        assert_eq!(first_two.len(), 2);
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        ensure_interpretation_overlay_classes(&mut p, &ctx)
+            .await
+            .expect("overlay classes");
+        mint_interpretation_run(
+            &mut p,
+            &InterpretationRunMeta {
+                run_id: "run-first".into(),
+                model: "m".into(),
+                prompt_version: "p".into(),
+                ran_at: now_ms.to_string(),
+            },
+            Some(&InterpretationRunCursor {
+                processor: processor_node("incremental"),
+                sources: first_two
+                    .iter()
+                    .map(|t| PendingTurn::from_transcript(t).id)
+                    .collect(),
+            }),
+            &ctx,
+        )
+        .await
+        .expect("mint first run");
+
+        seed_message(
+            &mut p,
+            &ctx,
+            "msg://3",
+            "did:key:alice",
+            "third",
+            "ns://body",
+        )
+        .await;
+
+        let mut watcher = WatcherState::new();
+        p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+        let pending = watcher.pending_for("incremental").expect("pending exists");
+        assert_eq!(
+            pending.items.len(),
+            1,
+            "only the turn added since the last run may enqueue; got {:?}",
+            pending.items
+        );
+        assert_eq!(pending.items[0].text, "third");
+    }
+
+    /// `turn_id` hashes the timestamp, so the same words said twice are two
+    /// turns and both get interpreted. The seeds are deliberately spaced:
+    /// link timestamps are millisecond-precision, so two identical bodies
+    /// authored inside one millisecond genuinely do hash to a single turn.
+    #[tokio::test]
+    async fn tick_enqueues_repeated_text_said_at_different_times() {
+        use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+        use crate::perspectives::auto_processor::watcher::WatcherState;
+        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+        use crate::perspectives::interpretation_test_support::seed_message;
+
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        seed_message(&mut p, &ctx, "msg://1", "did:key:alice", "yes", "ns://body").await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        seed_message(&mut p, &ctx, "msg://2", "did:key:alice", "yes", "ns://body").await;
+
+        let cfg = AutoProcessorConfig {
+            processor_id: "repeated-text".into(),
+            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            base_prefix: None,
+            interpretation_classes: vec!["ns://Task".into()],
+            debounce_ms: 50,
+            batch_min: 1,
+            batch_max: 32,
+            max_wait_ms: None,
+            claim_ttl_ms: 60_000,
+            dedup_strategy_json: None,
+            source_window_ms: None,
+        };
+        write_processor(&mut p, &cfg, &ctx)
+            .await
+            .expect("write_processor");
+
+        let mut watcher = WatcherState::new();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+        let pending = watcher
+            .pending_for("repeated-text")
+            .expect("pending exists");
+        assert_eq!(
+            pending.items.len(),
+            2,
+            "the same text at two times is two turns; got {:?}",
+            pending.items
+        );
+    }
+
+    /// `batch_max` bounds what a *pass* sees, not merely what the queue
+    /// releases: the ids on `BatchReady` are the transcript `run_one_pass`
+    /// interprets (the batch payload is carried, never re-gathered), and the
+    /// overflow stays queued for the following pass.
+    #[tokio::test]
+    async fn tick_caps_the_batch_handed_to_a_pass_at_batch_max() {
+        use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+        use crate::perspectives::auto_processor::events::{
+            next_event_matching, subscribe, AutoProcessorStep,
+        };
+        use crate::perspectives::auto_processor::watcher::WatcherState;
+        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+        use crate::perspectives::interpretation_test_support::seed_message;
+
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        for (uri, body) in [
+            ("msg://1", "one"),
+            ("msg://2", "two"),
+            ("msg://3", "three"),
+            ("msg://4", "four"),
+            ("msg://5", "five"),
+        ] {
+            seed_message(&mut p, &ctx, uri, "did:key:alice", body, "ns://body").await;
+        }
+        let cfg = AutoProcessorConfig {
+            processor_id: "capped".into(),
+            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            base_prefix: None,
+            interpretation_classes: vec!["ns://Task".into()],
+            debounce_ms: 50,
+            batch_min: 1,
+            batch_max: 2,
+            max_wait_ms: None,
+            claim_ttl_ms: 60_000,
+            dedup_strategy_json: None,
+            source_window_ms: None,
+        };
+        write_processor(&mut p, &cfg, &ctx)
+            .await
+            .expect("write_processor");
+
+        let uuid = p.uuid.clone();
+        let mut rx = subscribe().await;
+        let mut watcher = WatcherState::new();
+        // Tick 1 records all five; tick 2 is past the debounce so a batch
+        // drains. No class shape is registered, so the pass stops at
+        // `ShapesMissing` without reaching an LLM.
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+        p.run_auto_processor_tick(&mut watcher, now_ms + 51, &ctx)
+            .await;
+
+        let ready = next_event_matching(&mut rx, std::time::Duration::from_secs(5), |e| {
+            e.perspective_uuid == uuid
+                && e.processor_id == "capped"
+                && e.step == AutoProcessorStep::BatchReady
+        })
+        .await
+        .expect("BatchReady signal");
+        assert_eq!(
+            ready.item_ids.len(),
+            2,
+            "the pass transcript must be capped at batch_max; got {:?}",
+            ready.item_ids
+        );
+        assert_eq!(
+            watcher
+                .pending_for("capped")
+                .map(|e| e.items.len())
+                .unwrap_or(0),
+            3,
+            "the overflow stays queued for the next pass"
+        );
+    }
+
     #[tokio::test]
     async fn tick_drops_turns_older_than_source_window() {
         use crate::perspectives::auto_processor::config::{
