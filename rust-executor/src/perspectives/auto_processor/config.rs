@@ -75,10 +75,13 @@ pub struct AutoProcessorConfig {
     /// [`super::claim::batch_node`], so claims by different processors never
     /// collide even on the same id-set.
     pub processor_id: String,
-    /// SPARQL `SELECT` returning `?speaker` + `?text` bindings — the same
-    /// shape the interpretation engine's
+    /// SPARQL `SELECT` returning `?speaker` + `?text` + `?timestamp` bindings —
+    /// the same shape
     /// [`crate::perspectives::interpretation::graph::gather_transcript_sparql`]
-    /// accepts. Defines "the content this processor watches".
+    /// accepts. Defines "the content this processor watches". Copy
+    /// [`crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY`]
+    /// (reifier `ad4m://ontology/author` + `ad4m://ontology/timestamp` on the
+    /// body link) rather than selecting speaker+text alone.
     pub source_scope_query: String,
     /// URI namespace new interpreted instances are minted under (the "spawn
     /// scope"), e.g. `soa://project/42/`. `None` falls back to a per-processor

@@ -3,6 +3,7 @@ use super::{
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
     identity_property, parse_interpretation_response, plan_interpretation_ops_resolved,
     resolve_already_present_with_strategy, DedupStrategy, InterpretationOp, ProposedInstance,
+    TranscriptTurn,
 };
 // Only exercised by the in-module `#[cfg(test)]` planner tests (via their
 // `use super::*`); the production paths use `plan_interpretation_ops_resolved`.
@@ -301,7 +302,7 @@ pub async fn apply_interpretation_ops(
 pub async fn run_interpretation(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
-    transcript: &[(String, String)],
+    transcript: &[TranscriptTurn],
     base_prefix: &str,
     context: &AgentContext,
     scope: Option<&ParentScope>,
@@ -330,7 +331,7 @@ pub async fn run_interpretation(
 pub async fn run_interpretation_with_strategy(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
-    transcript: &[(String, String)],
+    transcript: &[TranscriptTurn],
     base_prefix: &str,
     context: &AgentContext,
     dedup_strategy: &DedupStrategy,
@@ -359,7 +360,7 @@ pub async fn run_interpretation_with_strategy(
 pub async fn run_interpretation_with_strategy_and_model(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
-    transcript: &[(String, String)],
+    transcript: &[TranscriptTurn],
     base_prefix: &str,
     context: &AgentContext,
     dedup_strategy: &DedupStrategy,
@@ -593,16 +594,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gather_transcript_sparql_returns_speaker_and_decoded_text() {
+    async fn gather_transcript_sparql_returns_speaker_text_and_timestamp() {
         // The generic SPARQL gather must:
         //   1. run an arbitrary SELECT against the perspective's Oxigraph store,
-        //   2. bind `?speaker` (the raw NamedNode string, e.g. "did:key:alice"),
+        //   2. bind `?speaker` from the body-link reifier (`ad4m://ontology/author`
+        //      = the signing agent, NOT a separate ns://author property),
         //   3. bind `?text` and, when it's a `literal:string:...` URI, decode it,
-        //   4. preserve caller-visible ordering by returning rows as SPARQL gave
+        //   4. bind `?timestamp` from the same reifier,
+        //   5. preserve caller-visible ordering by returning rows as SPARQL gave
         //      them (deterministic when ORDER BY is in the query).
-        use crate::perspectives::interpretation::graph::gather_transcript_sparql;
+        use crate::agent::did_for_context;
+        use crate::perspectives::interpretation::graph::{
+            gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
+        };
         let (mut perspective, _shapes, ctx) =
             setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        let me = did_for_context(&ctx).expect("test agent DID");
         seed_message(
             &mut perspective,
             &ctx,
@@ -612,6 +619,9 @@ mod tests {
             "ns://body",
         )
         .await;
+        // Link timestamps are RFC3339 millis; sleep so ORDER BY ?timestamp is
+        // deterministic rather than a same-millisecond tie (undefined order).
+        std::thread::sleep(std::time::Duration::from_millis(2));
         seed_message(
             &mut perspective,
             &ctx,
@@ -622,23 +632,26 @@ mod tests {
         )
         .await;
 
-        let query = r#"
-        SELECT ?speaker ?text WHERE {
-            ?m <ns://body> ?text .
-            ?m <ns://author> ?speaker .
-        }
-        ORDER BY ?m
-    "#;
-        let turns = gather_transcript_sparql(&perspective, query)
+        let turns = gather_transcript_sparql(&perspective, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
             .await
             .expect("gather_transcript_sparql");
-        assert_eq!(
-            turns,
-            vec![
-                ("did:key:alice".to_string(), "hello world".to_string()),
-                ("did:key:bob".to_string(), "second turn".to_string()),
-            ],
-            "SPARQL rows must materialise as (speaker, decoded text) turns in order"
+        assert_eq!(turns.len(), 2, "got {turns:#?}");
+        assert_eq!(turns[0].text, "hello world");
+        assert_eq!(turns[1].text, "second turn");
+        // Speaker is the link signer (test agent), not the ns://author target.
+        assert_eq!(turns[0].speaker, me);
+        assert_eq!(turns[1].speaker, me);
+        assert!(
+            !turns[0].timestamp.is_empty() && !turns[1].timestamp.is_empty(),
+            "reifier timestamp must be bound; got {turns:#?}"
+        );
+        assert_ne!(
+            turns[0].timestamp, turns[1].timestamp,
+            "sequentially seeded links must have distinct timestamps"
+        );
+        assert!(
+            turns[0].timestamp < turns[1].timestamp,
+            "ORDER BY ?timestamp must be chronological; got {turns:#?}"
         );
     }
 
@@ -647,7 +660,9 @@ mod tests {
         // Proves this is a real scope, not a rebranded gather-everything. Seed one
         // "body"-predicated message and one "system-log" message; a query that
         // filters on `ns://body` must return exactly the first.
-        use crate::perspectives::interpretation::graph::gather_transcript_sparql;
+        use crate::perspectives::interpretation::graph::{
+            gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
+        };
         let (mut perspective, _shapes, ctx) =
             setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
         seed_message(
@@ -669,16 +684,41 @@ mod tests {
         )
         .await;
 
-        let scoped = gather_transcript_sparql(
+        let scoped = gather_transcript_sparql(&perspective, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
+            .await
+            .expect("gather_transcript_sparql");
+        assert_eq!(
+            scoped.len(),
+            1,
+            "scoped query must exclude messages under other predicates; got {scoped:#?}"
+        );
+        assert_eq!(scoped[0].text, "I'll ship the doc");
+    }
+
+    #[tokio::test]
+    async fn gather_transcript_sparql_rejects_missing_timestamp() {
+        use crate::perspectives::interpretation::graph::gather_transcript_sparql;
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        seed_message(
+            &mut perspective,
+            &ctx,
+            "msg://1",
+            "did:key:alice",
+            "hello",
+            "ns://body",
+        )
+        .await;
+        let err = gather_transcript_sparql(
             &perspective,
             "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . }",
         )
         .await
-        .expect("gather_transcript_sparql");
-        assert_eq!(
-            scoped,
-            vec![("did:key:alice".to_string(), "I'll ship the doc".to_string())],
-            "scoped query must exclude messages under other predicates"
+        .expect_err("query without ?timestamp must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("?timestamp"),
+            "error must mention the missing binding; got {msg}"
         );
     }
 

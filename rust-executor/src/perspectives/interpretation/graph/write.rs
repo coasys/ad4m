@@ -670,7 +670,7 @@ mod tests {
         // 1. build_interpretation_input must not offer the relation as a field.
         let input = build_interpretation_input(
             &[shape.clone()],
-            &[("Nico".into(), "block it".into())],
+            &[TranscriptTurn::from_speaker_text("Nico", "block it")],
             &no_existing(),
         );
         let v: serde_json::Value = serde_json::from_str(&input).unwrap();

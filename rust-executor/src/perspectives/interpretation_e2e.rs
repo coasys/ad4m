@@ -1367,9 +1367,11 @@ async fn auto_processor_pass_lands_interpretation_instance() {
         load_processors, write_processor, AutoProcessorConfig,
     };
     use crate::perspectives::auto_processor::watcher::{
-        run_one_pass, turn_id, PassOutcome, WatcherState,
+        run_one_pass, PassOutcome, PendingTurn, WatcherState,
     };
-    use crate::perspectives::interpretation::gather_transcript_sparql;
+    use crate::perspectives::interpretation::{
+        gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
+    };
     use crate::types::{LinkQuery, LinkStatus};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1422,9 +1424,7 @@ async fn auto_processor_pass_lands_interpretation_instance() {
     // Write the processor config into the shared graph.
     let cfg = AutoProcessorConfig {
         processor_id: "smoke-auto-processor".into(),
-        source_scope_query: "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
-                             ?m <ns://author> ?speaker . } ORDER BY ?m"
-            .into(),
+        source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
         base_prefix: None,
         interpretation_classes: vec!["ns://Intention".into()],
         debounce_ms: 50,
@@ -1470,8 +1470,12 @@ async fn auto_processor_pass_lands_interpretation_instance() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    for (speaker, text) in &transcript {
-        watcher.record_item(&cfg_loaded.processor_id, turn_id(speaker, text), now_ms);
+    for turn in &transcript {
+        watcher.record_item(
+            &cfg_loaded.processor_id,
+            PendingTurn::from_transcript(turn),
+            now_ms,
+        );
     }
     // Advance `now` past the debounce window so `drain_ready_batch` releases.
     let drain_at = now_ms + cfg_loaded.debounce_ms + 10;
@@ -1484,17 +1488,9 @@ async fn auto_processor_pass_lands_interpretation_instance() {
         "both seeded turns should drain in one batch"
     );
 
-    let outcome = run_one_pass(
-        &mut perspective,
-        cfg_loaded,
-        &batch,
-        &[],
-        drain_at,
-        &ctx,
-        false,
-    )
-    .await
-    .expect("run_one_pass");
+    let outcome = run_one_pass(&mut perspective, cfg_loaded, &batch, drain_at, &ctx, false)
+        .await
+        .expect("run_one_pass");
     let bases = match outcome {
         PassOutcome::Won { bases } => bases,
         other => panic!(
@@ -1560,9 +1556,11 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         load_processors, write_processor, AutoProcessorConfig,
     };
     use crate::perspectives::auto_processor::watcher::{
-        run_one_pass, turn_id, PassOutcome, WatcherState,
+        run_one_pass, PassOutcome, PendingTurn, WatcherState,
     };
-    use crate::perspectives::interpretation::gather_transcript_sparql;
+    use crate::perspectives::interpretation::{
+        gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
+    };
     use crate::types::{LinkQuery, LinkStatus};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1617,8 +1615,7 @@ async fn auto_processor_two_configs_no_cross_contamination() {
             .expect("seed author");
     }
 
-    let source_scope = "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
-                        ?m <ns://author> ?speaker . } ORDER BY ?m";
+    let source_scope = BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
 
     let intent_cfg = AutoProcessorConfig {
         processor_id: "pc-intent-proc".into(),
@@ -1676,8 +1673,12 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         .as_millis() as i64;
     let mut watcher = WatcherState::new();
     for cfg_ref in &loaded {
-        for (speaker, text) in &transcript {
-            watcher.record_item(&cfg_ref.processor_id, turn_id(speaker, text), now_ms);
+        for turn in &transcript {
+            watcher.record_item(
+                &cfg_ref.processor_id,
+                PendingTurn::from_transcript(turn),
+                now_ms,
+            );
         }
     }
 
@@ -1701,17 +1702,9 @@ async fn auto_processor_two_configs_no_cross_contamination() {
             "each processor's batch must contain both turns; got {batch:?} for `{}`",
             cfg_ref.processor_id
         );
-        let outcome = run_one_pass(
-            &mut perspective,
-            cfg_ref,
-            &batch,
-            &[],
-            drain_at,
-            &ctx,
-            false,
-        )
-        .await
-        .expect("run_one_pass");
+        let outcome = run_one_pass(&mut perspective, cfg_ref, &batch, drain_at, &ctx, false)
+            .await
+            .expect("run_one_pass");
         let bases = match outcome {
             PassOutcome::Won { bases } => bases,
             other => panic!(
@@ -1878,9 +1871,8 @@ async fn auto_processor_high_level_signal_driven_pass() {
         // Write the processor into the shared graph — the loop reads it back.
         let cfg = AutoProcessorConfig {
             processor_id: processor_id.into(),
-            source_scope_query: "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
-                                 ?m <ns://author> ?speaker . } ORDER BY ?m"
-                .into(),
+            source_scope_query:
+                crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
             base_prefix: None,
             interpretation_classes: vec!["ns://ConversationSubgroup".into()],
             debounce_ms: 50,
@@ -2055,9 +2047,8 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
         }
         let cfg = AutoProcessorConfig {
             processor_id: processor_id.into(),
-            source_scope_query: "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
-                                 ?m <ns://author> ?speaker . } ORDER BY ?m"
-                .into(),
+            source_scope_query:
+                crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
             base_prefix: None,
             interpretation_classes: vec!["ns://ConversationSubgroup".into()],
             debounce_ms: 100,
@@ -2157,7 +2148,8 @@ async fn auto_processor_election_only_online_participants_process() {
     use crate::agent::{did_for_context, AgentContext, AgentService};
     use crate::db::Ad4mDb;
     use crate::perspectives::auto_processor::config::AutoProcessorConfig;
-    use crate::perspectives::auto_processor::watcher::{run_one_pass, turn_id, PassOutcome};
+    use crate::perspectives::auto_processor::watcher::{run_one_pass, PassOutcome, PendingTurn};
+    use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
 
     let (mut perspective, _shapes, _ctx_main) = setup_perspective_no_llm(&[]).await;
@@ -2195,9 +2187,7 @@ async fn auto_processor_election_only_online_participants_process() {
 
     let cfg = AutoProcessorConfig {
         processor_id: "election".into(),
-        source_scope_query: "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . \
-                             ?m <ns://author> ?speaker . } ORDER BY ?m"
-            .into(),
+        source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
         base_prefix: None,
         interpretation_classes: vec!["ns://ConversationSubgroup".into()],
         debounce_ms: 0,
@@ -2211,19 +2201,23 @@ async fn auto_processor_election_only_online_participants_process() {
     // Case 1 — a batch authored by carol (offline) then bob (online), in that
     // message order. alice is online but is NOT the first online author, so she
     // must stand down for bob (carol is skipped because she is offline).
-    let batch = vec![turn_id(&did_carol, "m1"), turn_id(&did_bob, "m2")];
-    let authors = vec![did_carol.clone(), did_bob.clone()];
-    let out = run_one_pass(
-        &mut perspective,
-        &cfg,
-        &batch,
-        &authors,
-        1_000,
-        &ctx_alice,
-        false,
-    )
-    .await
-    .expect("alice pass");
+    let batch = vec![
+        PendingTurn {
+            id: "m1".into(),
+            speaker: did_carol.clone(),
+            text: "m1".into(),
+            timestamp: "t1".into(),
+        },
+        PendingTurn {
+            id: "m2".into(),
+            speaker: did_bob.clone(),
+            text: "m2".into(),
+            timestamp: "t2".into(),
+        },
+    ];
+    let out = run_one_pass(&mut perspective, &cfg, &batch, 1_000, &ctx_alice, false)
+        .await
+        .expect("alice pass");
     assert!(
         matches!(out, PassOutcome::NotCandidate { ref winner } if winner == &did_bob),
         "alice stands down for the first ONLINE author (bob); carol offline is skipped — got {out:?}"
@@ -2232,19 +2226,15 @@ async fn auto_processor_election_only_online_participants_process() {
     // Case 2 — a batch whose only author (carol) is offline. dave is online but
     // authored nothing here, so nobody processes: the pass waits for a
     // participant rather than letting a bystander run it.
-    let batch2 = vec![turn_id(&did_carol, "solo")];
-    let authors2 = vec![did_carol.clone()];
-    let out2 = run_one_pass(
-        &mut perspective,
-        &cfg,
-        &batch2,
-        &authors2,
-        2_000,
-        &ctx_dave,
-        false,
-    )
-    .await
-    .expect("dave pass");
+    let batch2 = vec![PendingTurn {
+        id: "solo".into(),
+        speaker: did_carol.clone(),
+        text: "solo".into(),
+        timestamp: "t".into(),
+    }];
+    let out2 = run_one_pass(&mut perspective, &cfg, &batch2, 2_000, &ctx_dave, false)
+        .await
+        .expect("dave pass");
     assert!(
         matches!(out2, PassOutcome::AwaitingAuthor),
         "no online author for the batch ⇒ wait (bystander dave must not process) — got {out2:?}"
@@ -2333,7 +2323,9 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
 ///     is created as a new instance. Retried until the model proposes it.
 #[tokio::test]
 async fn e2e_run_interpretation_honours_parent_scope() {
-    use crate::perspectives::interpretation::{run_interpretation_with_strategy, DedupStrategy};
+    use crate::perspectives::interpretation::{
+        run_interpretation_with_strategy, DedupStrategy, TranscriptTurn,
+    };
     use crate::perspectives::model_query::types::ParentScope;
     use crate::types::{Link, LinkStatus};
 
@@ -2363,7 +2355,7 @@ async fn e2e_run_interpretation_honours_parent_scope() {
         .await
         .expect("parent link");
 
-    let transcript = vec![(
+    let transcript = vec![TranscriptTurn::from_speaker_text(
         "Nico".to_string(),
         "Reminder for the team: we still need to provision the staging database — it's blocking QA."
             .to_string(),

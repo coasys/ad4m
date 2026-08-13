@@ -1,4 +1,6 @@
-use super::{class_local_name, instances_by_class, relation_predicates, ExistingInstances};
+use super::{
+    class_local_name, instances_by_class, relation_predicates, ExistingInstances, TranscriptTurn,
+};
 use crate::db::Ad4mDb;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::types::{AIPromptExamples, AITask};
@@ -11,7 +13,7 @@ use std::collections::HashMap;
 ///                  "existing": [{ "id", "title", "class" }, …],
 ///                  "fields": [{ "name", "required", "hint" }],
 ///                  "relations": [{ "name", "targetClass", "hint" }] }],
-///    "transcript": [{ "speaker", "text" }] }`.
+///    "transcript": [{ "speaker", "text", "timestamp"? }] }`.
 ///
 /// `existing` maps a class's local name to the instances already in the graph
 /// (`id` = base URI, `title` = the class's declared identity value, `class` =
@@ -38,7 +40,7 @@ use std::collections::HashMap;
 /// overlap that `load_shape` guarantees); `None` when no hint was declared.
 pub fn build_interpretation_input(
     shapes: &[ModelShape],
-    transcript: &[(String, String)],
+    transcript: &[TranscriptTurn],
     existing: &ExistingInstances,
 ) -> String {
     // Group the id-keyed source by class once for the per-class `existing`
@@ -135,7 +137,13 @@ pub fn build_interpretation_input(
         .collect();
     let turns: Vec<serde_json::Value> = transcript
         .iter()
-        .map(|(speaker, text)| serde_json::json!({ "speaker": speaker, "text": text }))
+        .map(|t| {
+            let mut obj = serde_json::json!({ "speaker": t.speaker, "text": t.text });
+            if !t.timestamp.is_empty() {
+                obj["timestamp"] = serde_json::json!(t.timestamp);
+            }
+            obj
+        })
         .collect();
     serde_json::json!({ "classes": classes, "transcript": turns }).to_string()
 }
@@ -164,7 +172,8 @@ You receive a JSON object with these fields:
     handle you emit to update that entry; `title` is its identity label; the
     optional `properties` object shows its *current state* so you can judge
     whether new turns continue that instance or belong to a fresh one.
-  - `transcript`: an array of turns `{speaker, text}`.
+  - `transcript`: an array of turns `{speaker, text}` and, when known,
+    `timestamp` (the source link's RFC3339 time).
 
 Emit a JSON array. Each element is `{\"class\": <class name>, ...fields, ...relations}`,
 where fields carry strings drawn from what participants actually said or
@@ -521,9 +530,9 @@ mod tests {
         ];
         let input = build_interpretation_input(
             &shapes,
-            &[(
-                "Nico".into(),
-                "I'll extract the LLM processing into ADAM".into(),
+            &[TranscriptTurn::from_speaker_text(
+                "Nico",
+                "I'll extract the LLM processing into ADAM",
             )],
             &no_existing(),
         );
@@ -564,6 +573,26 @@ mod tests {
     }
 
     #[test]
+    fn transcript_timestamp_lands_in_prompt_when_set() {
+        let shapes = vec![shape_from_sdna("Intention", INTENTION_SDNA)];
+        let mut turn = TranscriptTurn::from_speaker_text("Nico", "I'll ship it");
+        turn.timestamp = "2026-08-13T12:00:00.000Z".into();
+        let input = build_interpretation_input(&shapes, &[turn], &no_existing());
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(v["transcript"][0]["timestamp"], "2026-08-13T12:00:00.000Z");
+        let without = build_interpretation_input(
+            &shapes,
+            &[TranscriptTurn::from_speaker_text("Nico", "I'll ship it")],
+            &no_existing(),
+        );
+        let v2: serde_json::Value = serde_json::from_str(&without).unwrap();
+        assert!(
+            v2["transcript"][0].get("timestamp").is_none(),
+            "empty timestamp must be omitted from the prompt"
+        );
+    }
+
+    #[test]
     fn existing_context_renders_id_title_class_in_prompt() {
         // With the richer `existing_instance_context` snapshot in play,
         // build_interpretation_input must render each existing entry as an object
@@ -579,7 +608,10 @@ mod tests {
         }]);
         let input = build_interpretation_input(
             &shapes,
-            &[("Nico".into(), "About that design doc…".into())],
+            &[TranscriptTurn::from_speaker_text(
+                "Nico",
+                "About that design doc…",
+            )],
             &existing,
         );
         let v: serde_json::Value = serde_json::from_str(&input).unwrap();
@@ -638,7 +670,10 @@ mod tests {
         }]);
         let input = build_interpretation_input(
             &shapes,
-            &[("Ana".into(), "Switching topics — Q3 retro planning.".into())],
+            &[TranscriptTurn::from_speaker_text(
+                "Ana",
+                "Switching topics — Q3 retro planning.",
+            )],
             &existing,
         );
         let v: serde_json::Value = serde_json::from_str(&input).unwrap();

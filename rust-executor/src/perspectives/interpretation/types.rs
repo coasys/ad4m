@@ -85,6 +85,28 @@ pub struct InstanceContext {
     pub properties: BTreeMap<String, String>,
 }
 
+/// One transcript turn the interpretation engine (and AutoProcessor gather)
+/// pass around: the speaker DID, the message body, and the body-link's
+/// `ad4m://ontology/timestamp` (RFC3339). `timestamp` may be empty for
+/// one-shot callers that never gathered via SPARQL; AutoProcessor scope
+/// queries must bind it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptTurn {
+    pub speaker: String,
+    pub text: String,
+    pub timestamp: String,
+}
+
+impl TranscriptTurn {
+    pub fn from_speaker_text(speaker: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            speaker: speaker.into(),
+            text: text.into(),
+            timestamp: String::new(),
+        }
+    }
+}
+
 /// A single write the interpreter wants to make.
 ///
 /// Post-#884 the scalar write path is `create_subject` / `update_subject`, which

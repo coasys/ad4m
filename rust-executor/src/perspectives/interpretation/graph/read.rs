@@ -1,6 +1,6 @@
 use super::*;
 use crate::perspectives::interpretation::types::{
-    ExistingInstances, ExistingLinks, InstanceContext,
+    ExistingInstances, ExistingLinks, InstanceContext, TranscriptTurn,
 };
 use crate::perspectives::model_query::types::{ModelShape, ParentScope};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -12,13 +12,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// the order the store returned them. Speaker is the link author.
 ///
 /// Kept intentionally small — flows/channel-aware traversal is deferred to a
-/// later PR. Callers that already have a curated `Vec<(speaker, text)>` should
+/// later PR. Callers that already have a curated [`TranscriptTurn`] list should
 /// pass it straight to [`run_interpretation`] and skip this helper.
 pub async fn gather_transcript(
     perspective: &PerspectiveInstance,
     source: &str,
     message_predicate: &str,
-) -> anyhow::Result<Vec<(String, String)>> {
+) -> anyhow::Result<Vec<TranscriptTurn>> {
     use crate::types::LinkQuery;
     let query = LinkQuery {
         source: Some(source.to_string()),
@@ -32,7 +32,11 @@ pub async fn gather_transcript(
     let mut out = Vec::with_capacity(links.len());
     for l in links {
         if let Some(body) = decode_literal_string(&l.data.target) {
-            out.push((l.author, body));
+            out.push(TranscriptTurn {
+                speaker: l.author,
+                text: body,
+                timestamp: l.timestamp,
+            });
         }
     }
     Ok(out)
@@ -50,13 +54,33 @@ pub(crate) fn decode_literal_string(uri: &str) -> Option<String> {
     }
 }
 
+/// Known-good AutoProcessor `source_scope_query` over `ns://body` messages.
+/// Binds `?speaker`, `?text`, and `?timestamp` from the **body link's reifier**
+/// (`ad4m://ontology/author` + `ad4m://ontology/timestamp`) — the shape
+/// [`gather_transcript_sparql`] requires, and the same fields
+/// [`gather_transcript`] already reads off the link expression. Copy this (or
+/// the same reifier pattern on a different body predicate). Timestamp and
+/// author are metadata on the reifier node, not on the quoted triple and not
+/// a separate `ns://author` property (apps may still bind `?speaker` from
+/// such a property if their model needs a logical author ≠ link signer).
+pub const BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY: &str = r#"SELECT ?speaker ?text ?timestamp WHERE {
+  ?m <ns://body> ?text .
+  ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
+  ?r <ad4m://ontology/author> ?speaker .
+  ?r <ad4m://ontology/timestamp> ?timestamp .
+}
+ORDER BY ?timestamp"#;
+
 /// Assemble an interpretation transcript from an arbitrary SPARQL SELECT
-/// against the perspective. The query MUST bind `?speaker` and `?text` in
-/// its solutions — each row becomes a `(speaker, text)` turn in the order
-/// the store returned them. `?text` may be either a plain string literal
-/// (returned as-is) or a `literal:string:...` URI (decoded via
+/// against the perspective. The query MUST bind `?speaker`, `?text`, and
+/// `?timestamp` in its solutions — each row becomes a [`TranscriptTurn`] in
+/// the order the store returned them. `?text` may be either a plain string
+/// literal (returned as-is) or a `literal:string:...` URI (decoded via
 /// [`decode_literal_string`]); rows that decode to non-string literals or
-/// bind neither cleanly are skipped rather than failing the whole gather.
+/// bind speaker/text uncleanly are skipped. A row that binds speaker+text
+/// but not `?timestamp` fails the whole gather (do not silently collapse
+/// identical bodies) — use [`BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY`] as the
+/// known-good reifier pattern.
 ///
 /// This is the generic counterpart to [`gather_transcript`]: a caller supplies
 /// an arbitrary scope query (the AutoProcessor reads one off its config; tests
@@ -67,7 +91,7 @@ pub(crate) fn decode_literal_string(uri: &str) -> Option<String> {
 pub async fn gather_transcript_sparql(
     perspective: &PerspectiveInstance,
     sparql: &str,
-) -> anyhow::Result<Vec<(String, String)>> {
+) -> anyhow::Result<Vec<TranscriptTurn>> {
     let rows_json = perspective
         .sparql_query(sparql.to_string())
         .map_err(|e| anyhow::anyhow!("gather_transcript_sparql: SPARQL query failed: {e:#}"))?;
@@ -82,6 +106,20 @@ pub async fn gather_transcript_sparql(
         let Some(raw_text) = row.get("text").and_then(|v| v.as_str()) else {
             continue;
         };
+        let Some(timestamp) = row
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        else {
+            anyhow::bail!(
+                "gather_transcript_sparql: row binds ?speaker/?text but not ?timestamp. \
+                 source_scope_query must SELECT ?timestamp via the link reifier \
+                 (`?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <pred> ?text )>>` \
+                 then `?r <ad4m://ontology/timestamp> ?timestamp` and typically \
+                 `?r <ad4m://ontology/author> ?speaker`). See \
+                 BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY."
+            );
+        };
         let text = if raw_text.starts_with("literal:") {
             match decode_literal_string(raw_text) {
                 Some(s) => s,
@@ -90,7 +128,11 @@ pub async fn gather_transcript_sparql(
         } else {
             raw_text.to_string()
         };
-        out.push((speaker.to_string(), text));
+        out.push(TranscriptTurn {
+            speaker: speaker.to_string(),
+            text,
+            timestamp: timestamp.to_string(),
+        });
     }
     Ok(out)
 }
