@@ -29,6 +29,17 @@ export interface FlowState {
   value: number;
   /** Link pattern that indicates this state */
   stateCheck: LinkPattern;
+  /**
+   * Natural-language description of what puts a flow instance IN this state.
+   * Used by AI-driven state suggestion (`suggestFlowState`) — the same
+   * pattern subject classes use for `interpretationHint`. When set, the LLM
+   * reads it alongside conversation content to suggest transitions.
+   *
+   * Example (Deliberation Flow, "Tension" state):
+   *   "Participants have voiced opposing views or objections — there is a
+   *   clear disagreement or unresolved conflict on the table."
+   */
+  interpretationHint?: string;
 }
 
 /**
@@ -111,15 +122,26 @@ export type FlowableCondition = "any" | LinkPattern;
 export class SHACLFlow {
   /** Flow name (e.g., "TODO") */
   public name: string;
-  
+
   /** Namespace for generated URIs */
   public namespace: string;
-  
+
   /** Condition for which expressions can start this flow */
   public flowable: FlowableCondition = "any";
-  
+
   /** Actions to execute when starting the flow */
   public startAction: AD4MAction[] = [];
+
+  /**
+   * Top-level natural-language description of what the flow is about — used
+   * by AI-driven state suggestion (`suggestFlowState`) to frame the state
+   * hints. Optional; states' own `interpretationHint`s are what actually
+   * discriminate. Example (Deliberation Flow):
+   *   "Tracks a group deliberation from an initial proposal to a shared
+   *   understanding — through voicing perspectives, surfacing tension, and
+   *   finding overlap."
+   */
+  public interpretationHint?: string;
   
   /** States in this flow */
   private _states: FlowState[] = [];
@@ -208,6 +230,15 @@ export class SHACLFlow {
       target: Literal.from(this.name).toUrl()
     });
 
+    // Top-level interpretation hint (optional, drives AI state suggestion)
+    if (this.interpretationHint !== undefined) {
+      links.push({
+        source: flowUri,
+        predicate: "ad4m://interpretationHint",
+        target: Literal.from(this.interpretationHint).toUrl()
+      });
+    }
+
     // Flowable condition
     if (this.flowable === "any") {
       links.push({
@@ -270,6 +301,15 @@ export class SHACLFlow {
         predicate: "ad4m://stateCheck",
         target: `literal:string:${encodeURIComponent(JSON.stringify(state.stateCheck))}`
       });
+
+      // Per-state interpretation hint (optional, drives AI state suggestion)
+      if (state.interpretationHint !== undefined) {
+        links.push({
+          source: stateUri,
+          predicate: "ad4m://interpretationHint",
+          target: Literal.from(state.interpretationHint).toUrl()
+        });
+      }
     }
 
     // Transitions
@@ -350,6 +390,18 @@ export class SHACLFlow {
     
     const flow = new SHACLFlow(name, namespace);
 
+    // Find top-level interpretation hint
+    const flowHintLink = links.find(l =>
+      l.source === flowUri && l.predicate === "ad4m://interpretationHint"
+    );
+    if (flowHintLink) {
+      try {
+        flow.interpretationHint = Literal.fromUrl(flowHintLink.target).get() as string;
+      } catch {
+        // Ignore parse errors
+      }
+    }
+
     // Find flowable condition
     const flowableLink = links.find(l => 
       l.source === flowUri && l.predicate === "ad4m://flowable"
@@ -420,7 +472,20 @@ export class SHACLFlow {
         }
       }
       
-      flow.addState({ name: stateName, value: stateValue, stateCheck });
+      // Get per-state interpretation hint (optional)
+      const hintLink = links.find(l =>
+        l.source === stateUri && l.predicate === "ad4m://interpretationHint"
+      );
+      let interpretationHint: string | undefined;
+      if (hintLink) {
+        try {
+          interpretationHint = Literal.fromUrl(hintLink.target).get() as string;
+        } catch {
+          // Ignore parse errors
+        }
+      }
+
+      flow.addState({ name: stateName, value: stateValue, stateCheck, ...(interpretationHint !== undefined ? { interpretationHint } : {}) });
     }
 
     // Find transitions
@@ -481,7 +546,8 @@ export class SHACLFlow {
       flowable: this.flowable,
       startAction: this.startAction,
       states: this._states,
-      transitions: this._transitions
+      transitions: this._transitions,
+      ...(this.interpretationHint !== undefined ? { interpretationHint: this.interpretationHint } : {})
     };
   }
 
@@ -492,6 +558,9 @@ export class SHACLFlow {
     const flow = new SHACLFlow(json.name, json.namespace);
     flow.flowable = json.flowable || "any";
     flow.startAction = json.startAction || [];
+    if (typeof json.interpretationHint === "string") {
+      flow.interpretationHint = json.interpretationHint;
+    }
     for (const state of json.states || []) {
       flow.addState(state);
     }

@@ -234,4 +234,78 @@ describe('SHACLFlow', () => {
       expect(reconstructed.transitions.length).toBe(2);
     });
   });
+
+  describe('interpretationHint (AI-driven state suggestion)', () => {
+    it('round-trips top-level and per-state interpretation hints via toLinks/fromLinks', () => {
+      const flow = new SHACLFlow('Deliberation', 'ns://deliberation/');
+      flow.flowable = 'any';
+      flow.interpretationHint =
+        'Tracks a group deliberation from initial proposal to shared understanding.';
+
+      flow.addState({
+        name: 'Proposal',
+        value: 0,
+        stateCheck: { predicate: 'ns://deliberation/state', target: 'ns://deliberation/proposal' },
+        interpretationHint:
+          'The initial proposal or question has been raised. No distinct perspective or objection has been voiced yet.'
+      });
+      flow.addState({
+        name: 'Tension',
+        value: 1,
+        stateCheck: { predicate: 'ns://deliberation/state', target: 'ns://deliberation/tension' },
+        interpretationHint:
+          'Participants have expressed opposing views or objections — a clear disagreement is on the table.'
+      });
+      // A state deliberately without an interpretationHint stays hint-free after round-trip.
+      flow.addState({
+        name: 'Resolution',
+        value: 2,
+        stateCheck: { predicate: 'ns://deliberation/state', target: 'ns://deliberation/resolution' }
+      });
+
+      const links = flow.toLinks();
+      const roundTripped = SHACLFlow.fromLinks(links, flow.flowUri);
+
+      expect(roundTripped.interpretationHint).toBe(flow.interpretationHint);
+      expect(roundTripped.states.find(s => s.name === 'Proposal')?.interpretationHint)
+        .toBe(flow.states.find(s => s.name === 'Proposal')?.interpretationHint);
+      expect(roundTripped.states.find(s => s.name === 'Tension')?.interpretationHint)
+        .toBe(flow.states.find(s => s.name === 'Tension')?.interpretationHint);
+      expect(roundTripped.states.find(s => s.name === 'Resolution')?.interpretationHint)
+        .toBeUndefined();
+    });
+
+    it('round-trips interpretation hints via toJSON/fromJSON', () => {
+      const flow = new SHACLFlow('Deliberation', 'ns://deliberation/');
+      flow.interpretationHint = 'Top-level hint.';
+      flow.addState({
+        name: 'Proposal',
+        value: 0,
+        stateCheck: { predicate: 'ns://deliberation/state', target: 'ns://deliberation/proposal' },
+        interpretationHint: 'Per-state hint.'
+      });
+
+      const json = flow.toJSON() as any;
+      expect(json.interpretationHint).toBe('Top-level hint.');
+      expect(json.states[0].interpretationHint).toBe('Per-state hint.');
+
+      const roundTripped = SHACLFlow.fromJSON(json);
+      expect(roundTripped.interpretationHint).toBe('Top-level hint.');
+      expect(roundTripped.states[0].interpretationHint).toBe('Per-state hint.');
+    });
+
+    it('omits interpretationHint from toJSON when unset (backwards-compatible)', () => {
+      const flow = new SHACLFlow('TODO', 'todo://');
+      flow.addState({
+        name: 'ready',
+        value: 0,
+        stateCheck: { predicate: 'todo://state', target: 'todo://ready' }
+      });
+
+      const json = flow.toJSON() as any;
+      expect('interpretationHint' in json).toBe(false);
+      // States without a hint don't gain one — existing schema is untouched.
+      expect('interpretationHint' in json.states[0]).toBe(false);
+    });
+  });
 });
