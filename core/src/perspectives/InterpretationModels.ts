@@ -24,29 +24,17 @@ import { Model } from "../model/decorators";
 // One node per registered processor; the node URI is
 // `ad4m://autoprocessor/<processorId>`.
 
-@Model({
-  name: "AutoProcessorConfig",
-  interpretationHint: "Configuration for a neighbourhood auto-processor watch loop.",
-})
+@Model({ name: "AutoProcessorConfig" })
 export class AutoProcessorConfig extends Ad4mModel {
   @Flag({ through: "rdf://type", value: "ad4m://AutoProcessor" })
   type: string = "ad4m://AutoProcessor";
 
   /** Unique processor id — the dedup key for auto-processor instances. */
-  @Property({
-    through: "ad4m://processor_id",
-    required: true,
-    identity: true,
-    interpretationHint: "Unique processor identifier.",
-  })
+  @Property({ through: "ad4m://processor_id", required: true, identity: true })
   processorId: string = "";
 
   /** SPARQL SELECT that gathers source items each pass. */
-  @Property({
-    through: "ad4m://source_scope_query",
-    required: true,
-    interpretationHint: "SPARQL SELECT gathering source items for each pass.",
-  })
+  @Property({ through: "ad4m://source_scope_query", required: true })
   sourceScopeQuery: string = "";
 
   /** URI prefix for minted instances; omit for the per-processor default. */
@@ -90,21 +78,13 @@ export class AutoProcessorConfig extends Ad4mModel {
 // Mirrors the Rust `interpretation::overlay::InterpretationRun` SDNA.
 // One node per completed pass; the node URI is `ad4m://interp/run/<runId>`.
 
-@Model({
-  name: "InterpretationRun",
-  interpretationHint: "A completed interpretation pass over a batch of source items.",
-})
+@Model({ name: "InterpretationRun" })
 export class InterpretationRun extends Ad4mModel {
   @Flag({ through: "ad4m://type", value: "ad4m://interpretation-run" })
   type: string = "ad4m://interpretation-run";
 
   /** UUID for this run — the dedup key across run nodes. */
-  @Property({
-    through: "ad4m://interp/run_id",
-    required: true,
-    identity: true,
-    interpretationHint: "Unique run identifier.",
-  })
+  @Property({ through: "ad4m://interp/run_id", required: true, identity: true })
   runId: string = "";
 
   /** LLM model id used for this run. */
@@ -149,22 +129,14 @@ export class InterpretationRun extends Ad4mModel {
 // all pending proposals.  Accepted/rejected overlays are removed from the
 // graph and will not appear.
 
-@Model({
-  name: "InterpretationOverlay",
-  interpretationHint: "A pending LLM suggestion on a base instance awaiting human accept or reject.",
-})
+@Model({ name: "InterpretationOverlay" })
 export class InterpretationOverlay extends Ad4mModel {
   /**
    * Whether the LLM authored the whole instance (`"create"`) or proposed
    * changes to an existing one (`"update"`).  This is the discriminator link
    * that makes a node identifiable as an overlay.
    */
-  @Property({
-    through: "ad4m://interp/kind",
-    required: true,
-    resolveLanguage: "literal",
-    interpretationHint: 'Either "create" (new instance proposed) or "update" (existing instance amended).',
-  })
+  @Property({ through: "ad4m://interp/kind", required: true, resolveLanguage: "literal" })
   kind: string = "";
 
   /** URI of the InterpretationRun that last wrote this overlay, if present. */
