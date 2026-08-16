@@ -33,7 +33,7 @@ export class Perspective {
         }
         
         if(query.source) {
-            let result = JSON.parse(JSON.stringify(this.links))
+            let result = this.links
             // @ts-ignore
             if(query.target) result = result.filter(l => l.data.target === query.target)
             // @ts-ignore
@@ -51,7 +51,7 @@ export class Perspective {
 
         if(query.target) {
             //@ts-ignore
-            let result = JSON.parse(JSON.stringify(this.links))
+            let result = this.links
             // @ts-ignore
             if(query.predicate) result = result.filter(l => l.data.predicate === query.predicate)
             //@ts-ignore
@@ -65,8 +65,7 @@ export class Perspective {
         // console.debug("getLinks 4")
 
         //@ts-ignore
-        let result = JSON.parse(JSON.stringify(this.links))
-        result = result.filter(link => link.data.predicate === query.predicate)
+        let result = this.links.filter(link => link.data.predicate === query.predicate)
         if (query.limit) result = result.slice(0, query.limit)
         return result
     }
