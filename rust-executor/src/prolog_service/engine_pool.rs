@@ -1006,6 +1006,37 @@ impl PrologEnginePool {
     }
 }
 
+impl Drop for PrologEnginePool {
+    fn drop(&mut self) {
+        // `PrologEnginePool` is cheaply `Clone`d throughout the codebase —
+        // e.g. `PrologService::get_pool()` hands out a fresh clone on every
+        // query, and `initialize()`/`ensure_filtered_pool()` wrap additional
+        // clones for the SDNA and filtered sub-pools. All of those clones
+        // share this same `Arc<Mutex<...>>` task handle. Only abort the
+        // spawned interval tasks when THIS is the last live clone —
+        // otherwise the shared cleanup/state-log loops would die the first
+        // time any transient clone (e.g. one borrowed for a single query)
+        // went out of scope, orphaning the *rest* of the pool instead.
+        //
+        // try_lock is safe here — if another thread holds the lock,
+        // the handle will be cleaned up when that Arc drops.
+        if Arc::strong_count(&self.cleanup_task_handle) == 1 {
+            if let Ok(guard) = self.cleanup_task_handle.try_lock() {
+                if let Some(handle) = guard.as_ref() {
+                    handle.abort();
+                }
+            }
+        }
+        if Arc::strong_count(&self.state_log_task_handle) == 1 {
+            if let Ok(guard) = self.state_log_task_handle.try_lock() {
+                if let Some(handle) = guard.as_ref() {
+                    handle.abort();
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Tests for Complete Prolog Engine Pool

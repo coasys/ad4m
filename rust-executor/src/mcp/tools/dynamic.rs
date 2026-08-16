@@ -14,6 +14,11 @@ use rmcp::model::{CallToolResult, Content, Tool};
 use rmcp::ErrorData;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Server-side timeout for getter SPARQL queries executed while resolving
+/// dynamic SHACL properties (mirrors api/perspectives_ws.rs::query_sparql).
+const MCP_GETTER_SPARQL_TIMEOUT_SECS: u64 = 30;
 
 impl Ad4mMcpHandler {
     /// Generate dynamic MCP tools from SHACL subject classes across all perspectives
@@ -880,8 +885,17 @@ impl Ad4mMcpHandler {
                 if let Some(getter_query) = getter {
                     let sparql =
                         getter_query.replace("<Base>", &format!("<{}>", expression_address));
-                    match perspective.sparql_query(sparql) {
-                        Ok(result_json) => {
+                    // Run the blocking SPARQL query on a blocking thread with a
+                    // timeout so it can't block the async runtime or hang forever
+                    // (same pattern as api/perspectives_ws.rs::query_sparql).
+                    let sparql_perspective = perspective.clone();
+                    let sparql_result = tokio::time::timeout(
+                        Duration::from_secs(MCP_GETTER_SPARQL_TIMEOUT_SECS),
+                        tokio::task::spawn_blocking(move || sparql_perspective.sparql_query(sparql)),
+                    )
+                    .await;
+                    match sparql_result {
+                        Ok(Ok(Ok(result_json))) => {
                             if let Ok(rows) = serde_json::from_str::<
                                 Vec<serde_json::Map<String, serde_json::Value>>,
                             >(&result_json)
@@ -912,8 +926,20 @@ impl Ad4mMcpHandler {
                                 }
                             }
                         }
-                        Err(e) => {
+                        Ok(Ok(Err(e))) => {
                             log::warn!("Failed to execute getter SPARQL for {}: {}", prop_name, e);
+                        }
+                        Ok(Err(join_err)) => {
+                            log::warn!(
+                                "Getter SPARQL task for {} failed to join: {}",
+                                prop_name, join_err
+                            );
+                        }
+                        Err(_) => {
+                            log::warn!(
+                                "Getter SPARQL query for {} timed out after {}s",
+                                prop_name, MCP_GETTER_SPARQL_TIMEOUT_SECS
+                            );
                         }
                     }
                 } else if is_collection {

@@ -1169,7 +1169,7 @@ impl PerspectiveInstance {
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_diff.clone()).await;
-        self.pubsub_publish_diff(decorated_diff).await;
+        self.pubsub_publish_diff(&decorated_diff).await;
 
         Ok(())
     }
@@ -1276,7 +1276,7 @@ impl PerspectiveInstance {
                 // Update both Prolog engines: subscription (immediate) + query (lazy)
                 self.update_prolog_engines(decorated_diff.clone()).await;
 
-                self.pubsub_publish_diff(decorated_diff.clone()).await;
+                self.pubsub_publish_diff(&decorated_diff).await;
 
                 if status == LinkStatus::Shared {
                     self.spawn_commit_and_handle_error(&diff);
@@ -1289,7 +1289,7 @@ impl PerspectiveInstance {
         }
     }
 
-    async fn pubsub_publish_diff(&self, decorated_diff: DecoratedPerspectiveDiff) {
+    async fn pubsub_publish_diff(&self, decorated_diff: &DecoratedPerspectiveDiff) {
         // Get handle without holding lock during pubsub operations
         let handle = {
             let persisted_guard = self.persisted.lock().await;
@@ -1381,27 +1381,29 @@ impl PerspectiveInstance {
                 .ok_or(anyhow!("Batch not found"))?;
             let diff = &mut batch.diff;
 
-            let mut link_expr = link_expression.clone();
+            // `link_expression` isn't needed again in this branch — move instead of clone.
+            let mut link_expr = link_expression;
             link_expr.status = Some(status.clone());
             diff.additions.push(link_expr.clone());
 
-            return Ok(DecoratedLinkExpression::from((
-                link_expr.clone(),
-                status.clone(),
-            )));
+            // Last use of `link_expr` — move instead of clone.
+            return Ok(DecoratedLinkExpression::from((link_expr, status.clone())));
         }
 
         // Store link in SPARQL store
         let diff = PerspectiveDiff::from_additions(vec![link_expression.clone()]);
+        // Last use of `link_expression` — move instead of clone.
         let decorated_link_expression =
-            DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
+            DecoratedLinkExpression::from((link_expression, status.clone()));
         let decorated_perspective_diff =
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
         // Write to SPARQL store (primary storage for links)
         self.persist_link_diff(&decorated_perspective_diff).await?;
 
-        // Update both Prolog engines: subscription (immediate) + query (lazy)
+        // Update both Prolog engines: subscription (immediate) + query (lazy).
+        // Clone required here — spawn_prolog_facts_update needs an owned,
+        // 'static value for its spawned task.
         self.update_prolog_engines(decorated_perspective_diff.clone())
             .await;
 
@@ -1409,7 +1411,7 @@ impl PerspectiveInstance {
             self.spawn_commit_and_handle_error(&diff);
         }
 
-        self.pubsub_publish_diff(decorated_perspective_diff).await;
+        self.pubsub_publish_diff(&decorated_perspective_diff).await;
         Ok(decorated_link_expression)
     }
 
@@ -1463,7 +1465,7 @@ impl PerspectiveInstance {
             self.persist_link_diff(&decorated_perspective_diff).await?;
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
-            self.pubsub_publish_diff(decorated_perspective_diff).await;
+            self.pubsub_publish_diff(&decorated_perspective_diff).await;
 
             if status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&perspective_diff);
@@ -1534,7 +1536,7 @@ impl PerspectiveInstance {
         self.persist_link_diff(&decorated_diff).await?;
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
-        self.pubsub_publish_diff(decorated_diff.clone()).await;
+        self.pubsub_publish_diff(&decorated_diff).await;
 
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
@@ -1761,7 +1763,7 @@ impl PerspectiveInstance {
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
-            self.pubsub_publish_diff(decorated_diff).await;
+            self.pubsub_publish_diff(&decorated_diff).await;
 
             // Only commit shared links by filtering decorated_links
             let shared_links: Vec<LinkExpression> = decorated_links
@@ -5183,7 +5185,7 @@ impl PerspectiveInstance {
             // paths. commit_batch never went through that publish step, so
             // batched diffs were never reaching WS subscribers — that's what
             // this call restores.
-            self.pubsub_publish_diff(combined_diff.clone()).await;
+            self.pubsub_publish_diff(&combined_diff).await;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }

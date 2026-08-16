@@ -1330,8 +1330,12 @@ impl Ad4mDb {
         links: Vec<LinkExpression>,
         status: &LinkStatus,
     ) -> Ad4mDbResult<()> {
+        // Same status for every link in the batch — serialize once instead
+        // of once per row.
+        let status_json = serde_json::to_string(&status)?;
+        let tx = self.conn.unchecked_transaction()?;
         for link in links.iter() {
-            self.conn.execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
@@ -1343,10 +1347,11 @@ impl Ad4mDb {
                     link.timestamp,
                     link.proof.signature,
                     link.proof.key,
-                    serde_json::to_string(&status)?,
+                    status_json,
                 ],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1711,19 +1716,60 @@ impl Ad4mDb {
         max_bytes: usize,
         initial_count: Option<usize>,
     ) -> Ad4mDbResult<(PerspectiveDiff, Vec<u64>)> {
-        let mut count = initial_count.unwrap_or(100); // Start with provided count or default to 100
-        loop {
-            let (diffs, ids) = self.get_pending_diffs(perspective_uuid, Some(count))?;
+        // Single pass over the pending diffs: serialize each row once and
+        // accumulate its size, stopping as soon as the running total would
+        // exceed max_bytes. This replaces the previous approach, which
+        // re-queried the DB and re-serialized the whole (shrinking)
+        // collection from scratch on every halving of `count`.
+        let mut stmt = self.conn.prepare(
+            "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2",
+        )?;
+        let diffs_iter = stmt.query_map(params![perspective_uuid, true], |row| {
+            let additions: Vec<LinkExpression> =
+                serde_json::from_str(&row.get::<_, String>(0).unwrap()).unwrap();
+            let removals: Vec<LinkExpression> =
+                serde_json::from_str(&row.get::<_, String>(1).unwrap()).unwrap();
+            let id = row.get::<_, u64>(2).unwrap();
+            Ok((
+                PerspectiveDiff {
+                    additions,
+                    removals,
+                },
+                id,
+            ))
+        })?;
 
-            // Check serialized size
-            let serialized = serde_json::to_string(&diffs)?;
-            if serialized.len() <= max_bytes || count == 1 {
-                return Ok((diffs, ids));
+        let max_rows = initial_count.unwrap_or(100); // Default to 100, matching previous behavior
+        let mut all_additions = Vec::new();
+        let mut all_removals = Vec::new();
+        let mut ids = Vec::new();
+        let mut accumulated_bytes: usize = 0;
+
+        for (row_index, diff_result) in diffs_iter.enumerate() {
+            let (diff, id) = diff_result?;
+            let diff_bytes = serde_json::to_string(&diff)?.len();
+
+            // Always include at least one diff (even if it alone exceeds
+            // max_bytes) so callers still make forward progress.
+            if !ids.is_empty()
+                && (accumulated_bytes + diff_bytes > max_bytes || row_index >= max_rows)
+            {
+                break;
             }
 
-            // Reduce count and try again
-            count /= 2;
+            accumulated_bytes += diff_bytes;
+            all_additions.extend(diff.additions);
+            all_removals.extend(diff.removals);
+            ids.push(id);
         }
+
+        Ok((
+            PerspectiveDiff {
+                additions: all_additions,
+                removals: all_removals,
+            },
+            ids,
+        ))
     }
 
     pub fn clear_pending_diffs(&self, perspective_uuid: &str, ids: Vec<u64>) -> Ad4mDbResult<()> {
