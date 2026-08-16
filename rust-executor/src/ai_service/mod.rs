@@ -5,13 +5,13 @@ use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
 use crate::types::ModelInput;
 #[allow(unused_imports)]
 use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
-use crate::types::{AITask, LocalModel, Model, ModelType};
+use crate::types::{AITask, LocalModel, ModelType};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use candle_core::Device;
 use chat_gpt_lib_rs::{ChatGPTClient, ChatInput, Message, Role};
 use deno_core::error::AnyError;
-use futures::{FutureExt, SinkExt};
+use futures::SinkExt;
 use holochain::test_utils::itertools::Itertools;
 use kalosm::language::*;
 use kalosm::sound::TextStream;
@@ -27,7 +27,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::sleep;
 
 mod error;
-use log::error;
+use log::{error, info};
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
@@ -323,22 +323,9 @@ impl AIService {
         let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![];
 
         if models.is_empty() {
-            // for integration tests, make sure we have Bert loaded
-            futures.push(Box::pin(
-                self.init_model(Model {
-                    id: "bert-id".to_string(),
-                    name: "bert".to_string(),
-                    model_type: ModelType::Embedding,
-                    local: Some(LocalModel {
-                        file_name: "bert".to_string(),
-                        tokenizer_source: None,
-                        huggingface_repo: None,
-                        revision: None,
-                    }),
-                    api: None,
-                })
-                .map(|_| ()),
-            ));
+            // No models configured — skip auto-loading.
+            // Tests that need Bert should configure it via the DB.
+            info!("No AI models configured — skipping auto-load");
         } else {
             for model in models.into_iter() {
                 futures.push(Box::pin(async move {
@@ -668,7 +655,6 @@ impl AIService {
 
                 let mut tasks = HashMap::<String, Task<Llama>>::new();
                 let mut task_descriptions = HashMap::<String, AITask>::new();
-                let idle_delay = Duration::from_millis(1);
 
                 rt.block_on(publish_model_status(
                     model_config.id.clone(),
@@ -682,16 +668,11 @@ impl AIService {
                     let _ = model_ready_sender.send(());
                 }
 
+                // Block on the channel — zero CPU while idle.
                 loop {
-                    match rt.block_on(async {
-                        tokio::select! {
-                            recv = llama_rx.recv() => Ok(recv),
-                            _ = tokio::time::sleep(idle_delay) => Err("timeout"),
-                        }
-                    }) {
-                        Err(_timeout) => std::thread::sleep(idle_delay * 5),
-                        Ok(None) => break,
-                        Ok(Some(task_request)) => match task_request {
+                    match rt.block_on(llama_rx.recv()) {
+                        None => break,
+                        Some(task_request) => match task_request {
                             LLMTaskRequest::Shutdown(shutdown_request) => {
                                 rt.block_on(publish_model_status(
                                     model_config.id.clone(),
@@ -1042,17 +1023,11 @@ impl AIService {
                     })
                     .expect("couldn't build Bert model");
 
-                let idle_delay = Duration::from_millis(1);
+                // Block on the channel — zero CPU while idle.
                 loop {
-                    match rt.block_on(async {
-                        tokio::select! {
-                            recv = bert_rx.recv() => Ok(recv),
-                            _ = tokio::time::sleep(idle_delay) => Err("timeout"),
-                        }
-                    }) {
-                        Err(_timeout) => std::thread::sleep(idle_delay * 5),
-                        Ok(None) => break,
-                        Ok(Some(request)) => {
+                    match rt.block_on(bert_rx.recv()) {
+                        None => break,
+                        Some(request) => {
                             let result: Result<Vec<f32>> = rt
                                 .block_on(async { model.embed(request.prompt).await })
                                 .map(|tensor| tensor.to_vec())
