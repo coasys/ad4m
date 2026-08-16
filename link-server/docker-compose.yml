@@ -1,0 +1,11 @@
+services:
+  link-server:
+    build: .
+    ports:
+      - "3456:3456"
+    volumes:
+      - link-server-data:/data
+    restart: unless-stopped
+
+volumes:
+  link-server-data:

@@ -37,6 +37,7 @@
         "@coasys/centralized-file-storage#build",
         "@coasys/eas#build",
         "@coasys/embedding-vector-language#build",
+        "@coasys/server-link-language#build",
         "@coasys/local-bootstrap-languages#build"
       ],
       "outputs": ["dist/**", "lib/**", "build/**"]
@@ -75,6 +76,9 @@
       "dependsOn": ["@coasys/ad4m-ldk#build"]
     },
     "@coasys/embedding-vector-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/server-link-language#build": {
       "dependsOn": ["@coasys/ad4m-ldk#build"]
     },
 

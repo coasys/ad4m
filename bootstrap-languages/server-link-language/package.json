@@ -1,0 +1,23 @@
+{
+  "name": "@coasys/server-link-language",
+  "version": "0.1.0",
+  "description": "AD4M link language that syncs through a self-hosted link-server",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "build": "deno run --allow-all esbuild.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-vm-modules --import tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@coasys/ad4m-ldk": "workspace:*"
+  },
+  "devDependencies": {
+    "@noble/ciphers": "^1.0.0",
+    "@noble/curves": "^1.6.0",
+    "@noble/hashes": "^1.5.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0"
+  }
+}
