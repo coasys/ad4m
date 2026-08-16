@@ -3,6 +3,8 @@
 *.js
 !executor/scripts/*.js
 !skills/ad4m/waker/*.js
+!bootstrap-languages/local/*.js
+bootstrap-languages/local/dist/
 build/*
 node_modules
 !executor/src/rollup-plugin-hc-dna.js

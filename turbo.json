@@ -36,7 +36,8 @@
         "@coasys/centralized-agent-language#build",
         "@coasys/centralized-file-storage#build",
         "@coasys/eas#build",
-        "@coasys/embedding-vector-language#build"
+        "@coasys/embedding-vector-language#build",
+        "@coasys/local-bootstrap-languages#build"
       ],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
