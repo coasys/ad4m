@@ -41,7 +41,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::time::{sleep, Instant};
 use tokio::{join, time};
 use urlencoding;
@@ -64,7 +64,6 @@ static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;
 static IMMEDIATE_COMMITS_COUNT: usize = 20;
 static QUERY_SUBSCRIPTION_TIMEOUT: u64 = 60; // 1 minute in seconds (was 5 min)
-static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
 
 fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
@@ -281,7 +280,6 @@ pub struct PerspectiveInstance {
     pub uuid: String,
 
     pub created_from_join: bool,
-    pub is_fast_polling: bool,
     pub retries: u32,
 
     is_teardown: Arc<AtomicBool>,
@@ -290,9 +288,12 @@ pub struct PerspectiveInstance {
     link_language: Arc<RwLock<Option<Language>>>,
     trigger_notification_check: Arc<AtomicBool>,
     trigger_prolog_subscription_check: Arc<AtomicBool>,
+    /// Wakes `pending_diffs_loop` when a new diff gets stored.
+    pending_diffs_notify: Arc<Notify>,
+    /// Wakes `subscribed_queries_loop` when a subscription check fires.
+    subscription_notify: Arc<Notify>,
     /// Predicates of links changed since last subscription check.
     changed_predicates: Arc<Mutex<ChangedPredicates>>,
-    commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
     batch_store: Arc<RwLock<HashMap<String, TimestampedBatch>>>,
@@ -344,7 +345,6 @@ impl PerspectiveInstance {
             uuid: handle.uuid.clone(),
 
             created_from_join: created_from_join.unwrap_or(false),
-            is_fast_polling: false,
             retries: 0,
             is_teardown: Arc::new(AtomicBool::new(false)),
             sdna_change_mutex: Arc::new(Mutex::new(())),
@@ -352,8 +352,9 @@ impl PerspectiveInstance {
             link_language: Arc::new(RwLock::new(None)),
             trigger_notification_check: Arc::new(AtomicBool::new(false)),
             trigger_prolog_subscription_check: Arc::new(AtomicBool::new(false)),
+            pending_diffs_notify: Arc::new(Notify::new()),
+            subscription_notify: Arc::new(Notify::new()),
             changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
-            commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
@@ -681,56 +682,70 @@ impl PerspectiveInstance {
 
     async fn pending_diffs_loop(&self) {
         let uuid = self.uuid.clone();
-        let mut interval = time::interval(Duration::from_millis(100));
-        let mut last_diff_time = None;
 
         while !self.is_teardown.load(Ordering::Acquire) {
-            interval.tick().await;
+            // Sleep until a pending diff gets stored — zero CPU while idle.
+            self.pending_diffs_notify.notified().await;
 
-            if self.has_link_language().await {
+            if self.is_teardown.load(Ordering::Acquire) {
+                return;
+            }
+
+            if !self.has_link_language().await {
+                continue;
+            }
+
+            // A diff just arrived — enter the debounce/batch window.
+            let burst_start = tokio::time::Instant::now();
+
+            loop {
+                if self.is_teardown.load(Ordering::Acquire) {
+                    return;
+                }
+
                 let (_, ids) = Ad4mDb::with_global_instance(|db| {
                     db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
                 })
                 .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
                 if ids.is_empty() {
-                    continue;
+                    break;
                 }
 
-                if last_diff_time.is_none() {
-                    // First diff in a burst - start timer
-                    last_diff_time = Some(tokio::time::Instant::now());
+                // Hard time cap — commit if burst has lasted MAX_PENDING_SECONDS.
+                if burst_start.elapsed() >= Duration::from_secs(MAX_PENDING_SECONDS) {
+                    if self.commit_pending_diffs().await.is_ok() {
+                        log::info!("Committed diffs after reaching {}s maximum wait time", MAX_PENDING_SECONDS);
+                    }
+                    break;
                 }
 
-                // Commit if either:
-                // 1. It's been MAX_PENDING_SECONDS since first diff in burst (don't collect longer than MAX_PENDING_SECONDS)
-                if last_diff_time.unwrap().elapsed() >= Duration::from_secs(MAX_PENDING_SECONDS) {
+                // Batch size cap
+                if ids.len() >= MAX_PENDING_DIFFS_COUNT {
                     if self.commit_pending_diffs().await.is_ok() {
-                        last_diff_time = None;
-                        log::info!("Committed diffs after reaching 10s maximum wait time");
+                        log::info!("Committed diffs after collecting {}", MAX_PENDING_DIFFS_COUNT);
                     }
-                // 2. It's been > 1s since last new diff (burst is over)
-                } else if !self.has_new_diffs_in_last_second().await {
-                    if self.commit_pending_diffs().await.is_ok() {
-                        last_diff_time = None;
-                        log::info!("Committed diffs after 1s of inactivity");
-                    }
-                // 3. We have collected more than 100 diffs
-                } else if ids.len() >= MAX_PENDING_DIFFS_COUNT
-                    && self.commit_pending_diffs().await.is_ok()
+                    break;
+                }
+
+                // Wait for more diffs within a 1s inactivity window.
+                match tokio::time::timeout(
+                    Duration::from_secs(1),
+                    self.pending_diffs_notify.notified(),
+                )
+                .await
                 {
-                    last_diff_time = None;
-                    log::info!("Committed diffs after collecting 100");
+                    Ok(_) => continue, // More diffs arrived — loop back and re-evaluate
+                    Err(_) => {
+                        // 1s of inactivity — burst over, commit what we have.
+                        if self.commit_pending_diffs().await.is_ok() {
+                            log::info!("Committed diffs after 1s of inactivity");
+                        }
+                        break;
+                    }
                 }
             }
         }
-    }
-
-    async fn has_new_diffs_in_last_second(&self) -> bool {
-        let timer = self.commit_debounce_timer.lock().await;
-        timer
-            .map(|instant| instant.elapsed() < tokio::time::Duration::from_secs(1))
-            .unwrap_or(false)
     }
 
     async fn has_link_language(&self) -> bool {
@@ -1068,9 +1083,8 @@ impl PerspectiveInstance {
         if !ok {
             // Store diff in DB
             Ad4mDb::with_global_instance(|db| db.add_pending_diff(&handle.uuid, diff))?;
-            // Update or start timer
-            let mut timer = self.commit_debounce_timer.lock().await;
-            *timer = Some(tokio::time::Instant::now());
+            // Wake the pending-diffs loop so it picks up the new diff immediately.
+            self.pending_diffs_notify.notify_one();
         }
 
         Ok(())
@@ -1092,6 +1106,8 @@ impl PerspectiveInstance {
                 Ad4mDb::with_global_instance(|db|
                     db.add_pending_diff(&handle_clone.uuid, &diff_clone)
                 ).expect("Couldn't write pending diff. DB should be initialized and usable at this point");
+                // Wake the pending-diffs loop so it retries promptly.
+                self_clone.pending_diffs_notify.notify_one();
             }
         });
     }
@@ -3081,6 +3097,7 @@ impl PerspectiveInstance {
                 self_clone
                     .trigger_prolog_subscription_check
                     .store(true, Ordering::Release);
+                self_clone.subscription_notify.notify_one();
 
                 // NOTE: pubsub_publish_diff is NOT called here.
                 // The synchronous caller (add_link_expression / link_mutations /
@@ -3217,6 +3234,7 @@ impl PerspectiveInstance {
                 self_clone
                     .trigger_prolog_subscription_check
                     .store(true, Ordering::Release);
+                self_clone.subscription_notify.notify_one();
             }
 
             //log::info!("🔧 PROLOG UPDATE: Total prolog update task took {:?}", spawn_start.elapsed());
@@ -4800,9 +4818,6 @@ impl PerspectiveInstance {
         // Note: the subscription loop must run even when Prolog is disabled,
         // because SPARQL subscriptions don't use Prolog at all.
 
-        let mut log_counter = 0;
-        const LOG_INTERVAL: u32 = 300; // Log every ~60 seconds (300 * 200ms)
-
         // Debounce window for batching rapid link changes into a single
         // subscription dispatch. A single Ad4mModel.save() can produce
         // multiple link inserts (one per property/flag); without a wide
@@ -4816,13 +4831,26 @@ impl PerspectiveInstance {
         // the multi-link-per-save and the rapid-saves-in-a-row cases.
         const BATCH_WINDOW_MS: u64 = 250;
 
-        while !self.is_teardown.load(Ordering::Acquire) {
-            // Check trigger without holding lock during the operation
-            let should_check = self
-                .trigger_prolog_subscription_check
-                .load(Ordering::Acquire);
+        // Periodic cleanup interval — replaces the old counter-based approach.
+        const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
-            if should_check {
+        let mut last_cleanup = Instant::now();
+
+        while !self.is_teardown.load(Ordering::Acquire) {
+            // Wait for either a subscription trigger or the cleanup interval.
+            // Zero CPU while idle — no 200ms polling.
+            let triggered = tokio::time::timeout(
+                CLEANUP_INTERVAL,
+                self.subscription_notify.notified(),
+            )
+            .await
+            .is_ok();
+
+            if self.is_teardown.load(Ordering::Acquire) {
+                return;
+            }
+
+            if triggered {
                 // Batch debounce: wait a short window for more changes to accumulate
                 sleep(Duration::from_millis(BATCH_WINDOW_MS)).await;
 
@@ -4843,11 +4871,9 @@ impl PerspectiveInstance {
                 self.check_subscribed_queries(changed_preds).await;
             }
 
-            // Periodic subscription logging and proactive timeout cleanup
-            log_counter += 1;
-            if log_counter >= LOG_INTERVAL {
-                log_counter = 0;
-                // Get perspective_uuid FIRST before acquiring subscribed_queries lock to avoid deadlock
+            // Periodic subscription cleanup and logging (~every 60s)
+            if last_cleanup.elapsed() >= CLEANUP_INTERVAL {
+                last_cleanup = Instant::now();
                 let perspective_uuid = self.uuid.clone();
                 let mut queries = self.subscribed_queries.lock().await;
 
@@ -4874,8 +4900,6 @@ impl PerspectiveInstance {
                         removed_queries.len(),
                         perspective_uuid
                     );
-                    // Notify prolog service for each removed subscription,
-                    // mirroring the flow in check_subscribed_queries().
                     for query in &removed_queries {
                         if let Err(e) = get_prolog_service()
                             .await
@@ -4909,8 +4933,6 @@ impl PerspectiveInstance {
                     }
                 }
             }
-
-            sleep(Duration::from_millis(QUERY_SUBSCRIPTION_CHECK_INTERVAL)).await;
         }
     }
 
