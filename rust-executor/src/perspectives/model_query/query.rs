@@ -72,7 +72,7 @@ pub(super) async fn execute_model_query_inner(
     let is_count_only = query_input.limit == Some(0);
     if is_count_only && all_where_pushable(query_input, shape) {
         if let Some(sparql) = build_count_sparql(shape, query_input) {
-            let result_json = store.query(&sparql)?;
+            let result_json = store.query_async(&sparql).await?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             let count = results
                 .first()
@@ -332,7 +332,7 @@ pub(super) async fn execute_model_query_inner(
     // Calculate total count
     let total_count = if sparql_pagination.is_some() {
         if let Some(count_sparql) = build_count_sparql(shape, query_input) {
-            let result_json = store.query(&count_sparql)?;
+            let result_json = store.query_async(&count_sparql).await?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             results
                 .first()

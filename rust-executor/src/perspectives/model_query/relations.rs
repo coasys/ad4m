@@ -294,7 +294,7 @@ async fn resolve_reverse_include(
     let sparql = format!(
         "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . FILTER(?target IN ({id_list})) }}"
     );
-    let result_json = store.query(&sparql)?;
+    let result_json = store.query_async(&sparql).await?;
     let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
     let mut sources_by_target: HashMap<String, Vec<String>> = HashMap::new();
