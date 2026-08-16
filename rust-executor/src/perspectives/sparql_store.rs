@@ -790,13 +790,16 @@ impl SparqlStore {
 
     /// Execute an arbitrary read-only SPARQL SELECT query, returning a JSON string.
     /// All data lives in the default graph — no union graph needed.
+    /// `parse_query` only accepts SELECT/ASK/CONSTRUCT/DESCRIBE — UPDATE
+    /// operations fail at parse time, so no separate validation pass needed.
     pub fn query(&self, query_string: &str) -> Result<String, Error> {
-        validate_readonly_query(query_string)?;
-
         let results = self
             .sparql_evaluator()
             .parse_query(query_string)
-            .map_err(|e| anyhow!("Failed to parse SPARQL query: {}", e))?
+            .map_err(|e| anyhow!(
+                "Query is not valid read-only SPARQL (only SELECT/ASK/CONSTRUCT/DESCRIBE allowed): {}",
+                e
+            ))?
             .on_store(&self.store)
             .execute()
             .map_err(|e| {
