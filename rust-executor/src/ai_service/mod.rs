@@ -5,13 +5,13 @@ use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
 use crate::types::ModelInput;
 #[allow(unused_imports)]
 use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
-use crate::types::{AITask, LocalModel, ModelType};
+use crate::types::{AITask, LocalModel, Model, ModelType};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use candle_core::Device;
 use chat_gpt_lib_rs::{ChatGPTClient, ChatInput, Message, Role};
 use deno_core::error::AnyError;
-use futures::SinkExt;
+use futures::{FutureExt, SinkExt};
 use holochain::test_utils::itertools::Itertools;
 use kalosm::language::*;
 use kalosm::sound::TextStream;
@@ -323,9 +323,22 @@ impl AIService {
         let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![];
 
         if models.is_empty() {
-            // No models configured — skip auto-loading.
-            // Tests that need Bert should configure it via the DB.
-            info!("No AI models configured — skipping auto-load");
+            // No models configured — auto-load Bert for embedding support
+            futures.push(Box::pin(
+                self.init_model(Model {
+                    id: "bert-id".to_string(),
+                    name: "bert".to_string(),
+                    model_type: ModelType::Embedding,
+                    local: Some(LocalModel {
+                        file_name: "bert".to_string(),
+                        tokenizer_source: None,
+                        huggingface_repo: None,
+                        revision: None,
+                    }),
+                    api: None,
+                })
+                .map(|_| ()),
+            ));
         } else {
             for model in models.into_iter() {
                 futures.push(Box::pin(async move {
