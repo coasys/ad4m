@@ -438,19 +438,19 @@ pub(super) async fn execute_model_query_inner(
 ///
 /// Properties whose values are stored as signed expression URIs (rather than
 /// deterministic `literal:` IRIs) need their expression data fetched from the
-/// language controller and the property's transform expression applied. That
-/// covers two cases:
-///   - `resolve_language` set to a custom (non-"literal") language address, and
-///   - the literal language with `resolve_literal: false` (envelope opt-in).
-/// Values already stored as deterministic `literal:` IRIs are left untouched
-/// by the per-value check below.
+/// language controller and the property's transform expression applied. Any
+/// property with a non-`None` `resolve_language` falls in this bucket:
+///   - `Some("literal")` → signed-envelope literal (per-value provenance).
+///   - `Some(<addr>)`    → expression on that custom language.
+/// Values stored as deterministic `literal:` IRIs (i.e. `resolve_language ==
+/// None`) are left untouched by the per-value check below.
 async fn resolve_language_transforms(
     shape: &ModelShape,
     instances: &mut [Value],
 ) -> Result<(), Error> {
     // Two kinds of properties need post-hydration work here:
-    //   - expression-resolved properties (custom resolve_language or
-    //     resolve_literal: false): fetch the expression data, then transform.
+    //   - expression-resolved properties (`resolve_language` set): fetch the
+    //     expression data, then transform.
     //   - deterministic-literal properties that carry a transform: their value
     //     is already decoded by hydration, but the transform still has to be
     //     applied to it (e.g. concat a prefix onto the stored literal).

@@ -661,7 +661,6 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: Some("forward".to_string()),
             is_scalar_relation: false,
@@ -1237,7 +1236,6 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -1802,7 +1800,6 @@ async fn test_where_filter_signed_expression_string() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -1877,7 +1874,6 @@ async fn test_where_filter_signed_expression_no_matches() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -2000,7 +1996,6 @@ async fn test_where_filter_multiple_conditions() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -2068,7 +2063,6 @@ async fn test_where_filter_missing_property_on_target() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -2134,7 +2128,6 @@ async fn test_where_filter_plain_literal_string() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -2223,7 +2216,6 @@ async fn test_where_filter_on_multiple_instances() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -2613,7 +2605,6 @@ fn scalar_prop(name: &str, predicate: &str, required: bool, flag: bool) -> Shape
             None
         },
         resolve_language: None,
-        resolve_literal: None,
         datatype: None,
         direction: None,
         is_scalar_relation: false,
@@ -2634,7 +2625,6 @@ fn collection_prop(name: &str, predicate: &str, getter: Option<&str>) -> ShapePr
         is_required: false,
         initial_value: None,
         resolve_language: None,
-        resolve_literal: None,
         datatype: None,
         direction: None,
         is_scalar_relation: false,
@@ -3375,10 +3365,10 @@ async fn test_full_model_query_ops_contains_with_pagination() {
 
 /// Build a `literal:json:<signed_envelope>` IRI — the shape produced by
 /// `expression.create("literal", value)`, i.e. what a `resolveLanguage:"literal"`
-/// (or `resolveLiteral: false`) property stores today, and what older databases
-/// that pre-date plain-literal writes hold on disk. Used both by tests that seed
-/// envelope-form data to exercise the migration path and by tests that assert
-/// envelope properties still query and sort on the inner value.
+/// property stores today, and what older databases that pre-date plain-literal
+/// writes hold on disk. Used both by tests that seed envelope-form data to
+/// exercise the migration path and by tests that assert envelope properties
+/// still query and sort on the inner value.
 fn signed_envelope_literal(value: &str) -> String {
     signed_envelope_literal_with_ts(value, "2024-01-01T00:00:00.000Z")
 }
@@ -4162,7 +4152,6 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: Some("forward".to_string()),
             is_scalar_relation: false,

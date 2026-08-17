@@ -3,26 +3,26 @@ import { buildSPARQLQuery, buildPaginationSubquery, hasJsOnlyWhereFilters } from
 // Minimal stubs for ModelMetadata
 const emptyMetadata: any = { properties: {}, relations: {} };
 
-// Metadata with a required (non-literal) property and a literal-stored property
+// Metadata with a deterministic-literal property (`name`), a signed-envelope
+// property (`category`, `resolveLanguage: "literal"`), and another
+// deterministic-literal property with an initial value (`description`).
 const richMetadata: any = {
   properties: {
     name: {
       name: 'name',
       predicate: 'flux://name',
       required: true,
-      resolveLiteral: true,
     },
     category: {
       name: 'category',
       predicate: 'flux://category',
       required: true,
-      resolveLiteral: false,  // non-literal → expression URI stored
+      resolveLanguage: 'literal',  // envelope → expression URI stored
     },
     description: {
       name: 'description',
       predicate: 'flux://description',
       initial: 'literal://string:empty',
-      resolveLiteral: true,
     },
   },
   relations: {},
@@ -41,7 +41,7 @@ describe('hasJsOnlyWhereFilters', () => {
 
   it('returns true when where has literal-stored property with comparison operator', () => {
     // gt/lt/gte/lte/between/contains remain JS-only
-    const meta: any = { properties: { rating: { name: 'rating', predicate: 'flux://rating', required: true, resolveLiteral: true } }, relations: {} };
+    const meta: any = { properties: { rating: { name: 'rating', predicate: 'flux://rating', required: true } }, relations: {} };
     expect(hasJsOnlyWhereFilters(meta, emptyRelations, { rating: { gt: 5 } })).toBe(true);
   });
 
@@ -113,7 +113,7 @@ describe('buildSPARQLQuery — parse_literal push-down filters', () => {
   it('does NOT use parse_literal for comparison operators (gt/lt)', () => {
     const meta: any = {
       properties: {
-        rating: { name: 'rating', predicate: 'flux://rating', required: true, resolveLiteral: true },
+        rating: { name: 'rating', predicate: 'flux://rating', required: true },
       },
       relations: {},
     };
@@ -204,8 +204,8 @@ describe('buildSPARQLQuery — mixed push-down + JS-only', () => {
   const modelClass: any = {};
   const mixedMeta: any = {
     properties: {
-      name: { name: 'name', predicate: 'flux://name', required: true, resolveLiteral: true },
-      rating: { name: 'rating', predicate: 'flux://rating', required: true, resolveLiteral: true },
+      name: { name: 'name', predicate: 'flux://name', required: true },
+      rating: { name: 'rating', predicate: 'flux://rating', required: true },
     },
     relations: {},
   };
@@ -224,10 +224,14 @@ describe('buildSPARQLQuery — mixed push-down + JS-only', () => {
 describe('buildSPARQLQuery — non-literal and flag properties', () => {
   const modelClass: any = {};
 
-  it('does NOT use parse_literal for non-literal (resolveLiteral: false) properties', () => {
+  it('does NOT use parse_literal for envelope (resolveLanguage: "literal") properties', () => {
+    // Envelope properties store signed expression URIs in the target position,
+    // not raw literals — the value comparison happens on the unwrapped inner
+    // data via a different code path (Rust `parse_literal_fn`), not by the JS
+    // WHERE builder emitting a `<ad4m://fn/parse_literal>` filter here.
     const meta: any = {
       properties: {
-        avatar: { name: 'avatar', predicate: 'flux://avatar', required: true, resolveLiteral: false },
+        avatar: { name: 'avatar', predicate: 'flux://avatar', required: true, resolveLanguage: 'literal' },
       },
       relations: {},
     };
@@ -312,7 +316,7 @@ describe('SPARQL-level pagination', () => {
   it('does NOT push pagination to SPARQL when JS-only where filters exist (gt operator)', () => {
     const meta: any = {
       properties: {
-        rating: { name: 'rating', predicate: 'flux://rating', required: true, resolveLiteral: true },
+        rating: { name: 'rating', predicate: 'flux://rating', required: true },
       },
       relations: {},
     };
@@ -340,7 +344,7 @@ describe('buildSPARQLQuery — set-difference patterns', () => {
   it('generates global EXISTS without parent scoping when no parent filter', () => {
     const meta: any = {
       properties: {
-        status: { name: 'status', predicate: 'flux://status', required: true, resolveLiteral: true },
+        status: { name: 'status', predicate: 'flux://status', required: true },
       },
       relations: {},
     };

@@ -191,7 +191,7 @@ describe('SHACLShape', () => {
         minInclusive: 10,
         maxInclusive: 100,
         hasValue: 'expectedValue',
-        resolveLiteral: false,
+        resolveLanguage: 'literal',
         local: true,
         writable: true,
         setter: [{ action: 'addLink', source: 'this', predicate: 'test://field', target: 'value' }],
@@ -212,7 +212,7 @@ describe('SHACLShape', () => {
       expect(prop.minInclusive).toBe(10);
       expect(prop.maxInclusive).toBe(100);
       expect(prop.hasValue).toBe('expectedValue');
-      expect(prop.resolveLiteral).toBe(false);
+      expect(prop.resolveLanguage).toBe('literal');
       expect(prop.local).toBe(true);
       expect(prop.writable).toBe(true);
       expect(prop.setter).toBeDefined();
@@ -325,20 +325,6 @@ describe('SHACLShape', () => {
       expect(reconstructed.properties[0].maxInclusive).toBe(5);
     });
 
-    it('preserves resolveLiteral', () => {
-      const original = new SHACLShape('test://Model');
-      original.addProperty({
-        name: 'content',
-        path: 'test://content',
-        resolveLiteral: true,
-      });
-
-      const json = original.toJSON();
-      const reconstructed = SHACLShape.fromJSON(json);
-
-      expect(reconstructed.properties[0].resolveLiteral).toBe(true);
-    });
-
     it('preserves resolveLanguage', () => {
       const original = new SHACLShape('test://Model');
       original.addProperty({
@@ -353,18 +339,16 @@ describe('SHACLShape', () => {
       expect(reconstructed.properties[0].resolveLanguage).toBe('lang://custom');
     });
 
-    it('preserves resolveLanguage and resolveLiteral together', () => {
+    it('preserves resolveLanguage:"literal" (envelope opt-in)', () => {
       const original = new SHACLShape('test://Model');
       original.addProperty({
         name: 'content',
         path: 'test://content',
         resolveLanguage: 'literal',
-        resolveLiteral: false,
       });
 
       const reconstructed = SHACLShape.fromJSON(original.toJSON());
       expect(reconstructed.properties[0].resolveLanguage).toBe('literal');
-      expect(reconstructed.properties[0].resolveLiteral).toBe(false);
     });
 
     it('round-trips resolveLanguage through toLinks/fromLinks', () => {
@@ -412,7 +396,7 @@ describe('SHACLShape', () => {
         hasValue: 'default',
         local: true,
         writable: true,
-        resolveLiteral: true,
+        resolveLanguage: 'literal',
         setter: [{ action: 'addLink', source: 'this', predicate: 'test://field', target: 'value' }],
         adder: [{ action: 'addLink', source: 'this', predicate: 'test://items', target: 'value' }],
         remover: [{ action: 'removeLink', source: 'this', predicate: 'test://items', target: 'value' }],
@@ -434,7 +418,7 @@ describe('SHACLShape', () => {
       expect(prop.hasValue).toBe('default');
       expect(prop.local).toBe(true);
       expect(prop.writable).toBe(true);
-      expect(prop.resolveLiteral).toBe(true);
+      expect(prop.resolveLanguage).toBe('literal');
       expect(prop.setter).toEqual(original.properties[0].setter);
       expect(prop.adder).toEqual(original.properties[0].adder);
       expect(prop.remover).toEqual(original.properties[0].remover);
@@ -652,7 +636,7 @@ describe('SHACLShape', () => {
         name: 'image',
         path: 'image://data',
         datatype: 'xsd://string',
-        resolveLiteral: false,
+        resolveLanguage: 'literal',
         transform: concat(literal('data:image/png;base64,'), focus()),
       });
 

@@ -427,72 +427,6 @@ fn round_trip_preserves_empty_resolve_language() {
     );
 }
 
-/// The resolveLiteral optimization flag round-trips independently of
-/// resolveLanguage. `false` opts a literal property out of deterministic
-/// storage (routing it through expression_create), so it must survive the
-/// SHACL writer → store → loader pipeline intact.
-#[test]
-fn round_trip_preserves_resolve_literal_false() {
-    let shacl_json = r#"{
-        "target_class": "ns://ImagePost",
-        "properties": [
-            {
-                "path": "image://data",
-                "name": "image",
-                "datatype": "xsd://string",
-                "resolve_language": "literal",
-                "resolve_literal": false
-            }
-        ]
-    }"#;
-    let shape = round_trip("ImagePost", shacl_json);
-    let prop = shape
-        .properties
-        .iter()
-        .find(|p| p.name == "image")
-        .expect("image property");
-    assert_eq!(prop.resolve_language.as_deref(), Some("literal"));
-    assert_eq!(
-        prop.resolve_literal,
-        Some(false),
-        "resolve_literal: false must survive SHACL round-trip alongside resolve_language",
-    );
-    assert!(
-        !prop.is_deterministic_literal(),
-        "resolve_literal: false means the property is not deterministic-literal stored",
-    );
-}
-
-/// The common case: literal language with the optimization enabled round-trips
-/// to a deterministic-literal property.
-#[test]
-fn round_trip_preserves_resolve_literal_true() {
-    let shacl_json = r#"{
-        "target_class": "ns://Recipe",
-        "properties": [
-            {
-                "path": "ns://name",
-                "name": "name",
-                "datatype": "xsd://string",
-                "resolve_language": "literal",
-                "resolve_literal": true
-            }
-        ]
-    }"#;
-    let shape = round_trip("Recipe", shacl_json);
-    let prop = shape
-        .properties
-        .iter()
-        .find(|p| p.name == "name")
-        .expect("name property");
-    assert_eq!(prop.resolve_language.as_deref(), Some("literal"));
-    assert_eq!(prop.resolve_literal, Some(true));
-    assert!(
-        prop.is_deterministic_literal(),
-        "literal language + resolve_literal: true is deterministic-literal stored",
-    );
-}
-
 /// A custom (non-"literal") resolveLanguage round-trips and is never treated
 /// as deterministic-literal storage.
 #[test]
@@ -520,10 +454,11 @@ fn round_trip_preserves_custom_resolve_language() {
     );
 }
 
-/// An explicit `resolveLanguage: "literal"` with no `resolveLiteral` flag selects
-/// the signed-envelope path (NOT deterministic) — the Flux message case.
+/// An explicit `resolveLanguage: "literal"` selects the signed-envelope path
+/// (NOT deterministic) — the Flux message body case. Storage mode is now
+/// derived entirely from `resolveLanguage`.
 #[test]
-fn round_trip_explicit_literal_without_flag_is_envelope() {
+fn round_trip_explicit_literal_is_envelope() {
     let shacl_json = r#"{
         "target_class": "ns://Message",
         "properties": [
@@ -537,17 +472,16 @@ fn round_trip_explicit_literal_without_flag_is_envelope() {
         .find(|p| p.name == "body")
         .expect("body property");
     assert_eq!(prop.resolve_language.as_deref(), Some("literal"));
-    assert_eq!(prop.resolve_literal, None);
     assert!(
         !prop.is_deterministic_literal(),
-        "explicit resolveLanguage:\"literal\" without a flag means the signed-envelope path",
+        "explicit resolveLanguage:\"literal\" means the signed-envelope path",
     );
 }
 
-/// A property with neither resolveLanguage nor resolveLiteral defaults to
-/// deterministic literal storage (the performance default).
+/// A property with no `resolveLanguage` defaults to deterministic typed-literal
+/// storage (the perf default — what a plain `@Property()` gets).
 #[test]
-fn round_trip_no_resolve_options_is_deterministic() {
+fn round_trip_no_resolve_language_is_deterministic() {
     let shacl_json = r#"{
         "target_class": "ns://Channel",
         "properties": [
@@ -561,10 +495,9 @@ fn round_trip_no_resolve_options_is_deterministic() {
         .find(|p| p.name == "name")
         .expect("name property");
     assert_eq!(prop.resolve_language, None);
-    assert_eq!(prop.resolve_literal, None);
     assert!(
         prop.is_deterministic_literal(),
-        "no resolve options → deterministic literal storage (perf default)",
+        "no resolveLanguage → deterministic literal storage (perf default)",
     );
 }
 

@@ -151,14 +151,14 @@ export interface SHACLPropertyShape {
   /** AD4M-specific: Writable property */
   writable?: boolean;
 
-  /** AD4M-specific: Language used to resolve the value ("literal" or a custom
-   *  language address). Custom languages route through expression_create. */
+  /** AD4M-specific: sole selector of storage mode:
+   *   - unset               → deterministic typed literal (fast POS-index
+   *                            path, the default for a plain `@Property()`).
+   *   - `"literal"`         → signed envelope on the built-in literal
+   *                            language (per-value provenance, e.g. Flux
+   *                            message bodies).
+   *   - `<custom address>`  → `expression_create` on that custom language. */
   resolveLanguage?: string;
-
-  /** AD4M-specific: When true (default) and resolveLanguage is "literal",
-   *  deterministic literal: IRIs. When false, the literal value goes through
-   *  expression_create on the literal language. */
-  resolveLiteral?: boolean;
 
   /** AD4M-specific: Setter action for this property */
   setter?: AD4MAction[];
@@ -213,9 +213,9 @@ export interface SHACLPropertyShape {
 
   /** AD4M-specific: Transform expression (SHACL-AF Node Expression).
    *  Applied to a property's resolved value in the Rust model query engine —
-   *  for values resolved through a `resolveLanguage` (a custom language, or the
-   *  literal language with `resolveLiteral: false`) and for any property that
-   *  declares a transform. */
+   *  for values resolved through a `resolveLanguage` (`"literal"` for a signed
+   *  envelope, or a custom language) and for any property that declares a
+   *  transform. */
   transform?: NodeExpression;
 }
 
@@ -540,14 +540,6 @@ export class SHACLShape {
         });
       }
 
-      if (prop.resolveLiteral != null) {
-        links.push({
-          source: propShapeId,
-          predicate: "ad4m://resolveLiteral",
-          target: `literal:${prop.resolveLiteral}`
-        });
-      }
-
       // AD4M-specific actions
       if (prop.setter && prop.setter.length > 0) {
         links.push({
@@ -820,18 +812,10 @@ export class SHACLShape {
         prop.resolveLanguage = resolveLangLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
       }
 
-      const resolveLiteralLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://resolveLiteral"
-      );
-      if (resolveLiteralLink) {
-        let val = resolveLiteralLink.target.replace(/^literal:\/\/|^literal:/, '');
-        if (val.startsWith('boolean:')) val = val.substring(8);
-        prop.resolveLiteral = val === 'true';
-      }
-      // resolveLiteral is left unset when no ad4m://resolveLiteral link exists;
-      // the storage mode is then derived from resolveLanguage (unset/"literal")
-      // by effectiveLiteralStorage — an explicit resolveLanguage:"literal"
-      // means the signed-envelope path, not deterministic.
+      // Storage mode is derived from `resolveLanguage` alone:
+      //   - unset       → deterministic typed literal (fast path)
+      //   - "literal"   → signed envelope on the built-in literal language
+      //   - <address>   → expression on that custom language
 
       // Parse action arrays
       const setterLink = links.find(l =>
@@ -1013,7 +997,6 @@ export class SHACLShape {
         local: p.local,
         writable: p.writable,
         resolve_language: p.resolveLanguage,
-        resolve_literal: p.resolveLiteral,
         setter: p.setter,
         adder: p.adder,
         remover: p.remover,
@@ -1064,9 +1047,6 @@ export class SHACLShape {
         local: p.local,
         writable: p.writable,
         resolveLanguage: p.resolve_language ?? (p as any).resolveLanguage,
-        // Left as-is (no derivation from resolveLanguage); the storage mode is
-        // computed from both fields by effectiveLiteralStorage.
-        resolveLiteral: p.resolve_literal ?? (p as any).resolveLiteral,
         setter: p.setter,
         adder: p.adder,
         remover: p.remover,

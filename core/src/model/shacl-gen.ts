@@ -169,10 +169,6 @@ export function buildSHACL(
             propShape.resolveLanguage = propMeta.resolveLanguage;
         }
 
-        if (propMeta.resolveLiteral != null) {
-            propShape.resolveLiteral = propMeta.resolveLiteral;
-        }
-
         // Explicit getter SPARQL — the executor evaluates this when
         // hydrating the property, in addition to (or instead of)
         // reading raw links via `propMeta.through`.

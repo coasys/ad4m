@@ -190,11 +190,8 @@ describe("Decorators → SHACL writer round-trip", () => {
     expect(findLinkTarget(links, "ns://Profile.name", "sh://path")).toBe(
       "ns://name",
     );
-    // A bare @Property is deterministic-literal by default — neither
-    // resolveLanguage nor resolveLiteral is set, so neither link is emitted.
-    expect(
-      findLinkTarget(links, "ns://Profile.name", "ad4m://resolveLiteral"),
-    ).toBeUndefined();
+    // A bare @Property is deterministic-literal by default — no
+    // resolveLanguage link is emitted.
     expect(
       findLinkTarget(links, "ns://Profile.name", "ad4m://resolveLanguage"),
     ).toBeUndefined();
