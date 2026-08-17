@@ -1426,6 +1426,88 @@ impl SparqlStore {
         Ok(count)
     }
 
+    /// Classify every SHACL property path by how its literal values are stored,
+    /// from `resolveLiteral` / `resolveLanguage`, exactly as
+    /// `ShapeProperty::is_deterministic_literal` does. Returns
+    /// `(deterministic_predicates, keep_envelope_predicates)`:
+    ///
+    /// - **deterministic** — bare `@Property` or `resolveLiteral: true`: values
+    ///   are plain typed literals, safe to normalize to the indexed shape.
+    /// - **keep_envelope** — `resolveLiteral: false`, an explicit
+    ///   `resolveLanguage: "literal"`, or a custom language: values carry an
+    ///   expression-level signature that must not be flattened or re-encoded.
+    ///
+    /// A predicate absent from *both* sets is not a SHACL property path at all
+    /// (e.g. `SHACLFlow`'s own `ad4m://stateName` / `stateValue` / `actionName`
+    /// bookkeeping links). Neither migration should touch those — they carry no
+    /// property value, are never model-queried, and their readers expect the
+    /// original `literal:*` IRI form.
+    ///
+    /// If the SHACL lookup yields nothing (no shapes, or query error) both sets
+    /// are empty. Each caller picks the fallback that is safe for its direction.
+    fn literal_storage_predicate_scopes(
+        &self,
+    ) -> (
+        std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
+    ) {
+        use percent_encoding::percent_decode_str;
+        let mut deterministic = std::collections::HashSet::new();
+        let mut keep_envelope = std::collections::HashSet::new();
+        let query = r#"
+            SELECT ?path ?resolveLiteral ?resolveLanguage WHERE {
+                ?propUri <sh://path> ?path .
+                OPTIONAL { ?propUri <ad4m://resolveLiteral> ?resolveLiteral . }
+                OPTIONAL { ?propUri <ad4m://resolveLanguage> ?resolveLanguage . }
+            }
+        "#;
+        if let Ok(json) = self.query(query) {
+            if let Ok(rows) = serde_json::from_str::<Vec<Value>>(&json) {
+                for row in &rows {
+                    let path = match row["path"].as_str() {
+                        Some(p) => p.to_string(),
+                        None => continue,
+                    };
+                    // resolveLiteral is stored as `literal:false` / `literal:true`.
+                    let resolve_literal = row["resolveLiteral"].as_str().map(|v| {
+                        let t = v
+                            .strip_prefix("literal://")
+                            .or_else(|| v.strip_prefix("literal:"))
+                            .unwrap_or(v);
+                        t.strip_prefix("boolean:").unwrap_or(t) == "true"
+                    });
+                    // resolveLanguage comes back as its decoded lexical value
+                    // (e.g. "literal" or a custom address); the literal:string:
+                    // forms are also tolerated for older data.
+                    let resolve_language = row["resolveLanguage"].as_str().map(|v| {
+                        let t = v
+                            .strip_prefix("literal://string:")
+                            .or_else(|| v.strip_prefix("literal:string:"))
+                            .unwrap_or(v);
+                        percent_decode_str(t)
+                            .decode_utf8()
+                            .map(|c| c.into_owned())
+                            .unwrap_or_else(|_| t.to_string())
+                    });
+                    let custom_language = matches!(resolve_language.as_deref(), Some(l) if !l.is_empty() && l != "literal");
+                    // NOT a deterministic literal: custom language, OR
+                    // resolveLiteral:false, OR an explicit resolveLanguage:"literal"
+                    // with no resolveLiteral:true.
+                    let keep = custom_language
+                        || resolve_literal == Some(false)
+                        || (resolve_literal.is_none()
+                            && resolve_language.as_deref() == Some("literal"));
+                    if keep {
+                        keep_envelope.insert(path);
+                    } else {
+                        deterministic.insert(path);
+                    }
+                }
+            }
+        }
+        (deterministic, keep_envelope)
+    }
+
     /// Rewrite link targets shaped like `literal:json:<signed_envelope>` to
     /// the typed-literal storage form of their inner `.data` value.
     ///
@@ -1449,71 +1531,12 @@ impl SparqlStore {
 
         use percent_encoding::percent_decode_str;
 
-        // Build the set of predicates whose property explicitly opts into
-        // expression resolution — `resolveLiteral: false` (signed-envelope
-        // literals) or a custom `resolveLanguage`. Flattening their envelopes
-        // would discard the expression-level signature, which is distinct from
-        // and not recoverable from the link-level signature on the reifier. We
-        // skip those predicates so only deterministic-literal (`resolveLiteral`
-        // default/true) properties get normalized to typed literals.
-        //
-        // If the SHACL lookup yields nothing (no shapes, or query error), the
-        // set is empty and every envelope is flattened — the prior behavior.
-        let keep_envelope_predicates: std::collections::HashSet<String> = {
-            let mut set = std::collections::HashSet::new();
-            let query = r#"
-                SELECT ?path ?resolveLiteral ?resolveLanguage WHERE {
-                    ?propUri <sh://path> ?path .
-                    OPTIONAL { ?propUri <ad4m://resolveLiteral> ?resolveLiteral . }
-                    OPTIONAL { ?propUri <ad4m://resolveLanguage> ?resolveLanguage . }
-                }
-            "#;
-            if let Ok(json) = self.query(query) {
-                if let Ok(rows) = serde_json::from_str::<Vec<Value>>(&json) {
-                    for row in &rows {
-                        let path = match row["path"].as_str() {
-                            Some(p) => p.to_string(),
-                            None => continue,
-                        };
-                        // resolveLiteral is stored as `literal:false` / `literal:true`.
-                        let resolve_literal = row["resolveLiteral"].as_str().map(|v| {
-                            let t = v
-                                .strip_prefix("literal://")
-                                .or_else(|| v.strip_prefix("literal:"))
-                                .unwrap_or(v);
-                            t.strip_prefix("boolean:").unwrap_or(t) == "true"
-                        });
-                        // resolveLanguage comes back as its decoded lexical value
-                        // (e.g. "literal" or a custom address); the literal:string:
-                        // forms are also tolerated for older data.
-                        let resolve_language = row["resolveLanguage"].as_str().map(|v| {
-                            let t = v
-                                .strip_prefix("literal://string:")
-                                .or_else(|| v.strip_prefix("literal:string:"))
-                                .unwrap_or(v);
-                            percent_decode_str(t)
-                                .decode_utf8()
-                                .map(|c| c.into_owned())
-                                .unwrap_or_else(|_| t.to_string())
-                        });
-                        let custom_language = matches!(resolve_language.as_deref(), Some(l) if !l.is_empty() && l != "literal");
-                        // Keep the envelope (skip flattening) whenever the property
-                        // is NOT a deterministic literal — mirrors
-                        // ShapeProperty::is_deterministic_literal:
-                        //   custom language, OR resolveLiteral:false, OR an
-                        //   explicit resolveLanguage:"literal" with no resolveLiteral:true.
-                        let keep_envelope = custom_language
-                            || resolve_literal == Some(false)
-                            || (resolve_literal.is_none()
-                                && resolve_language.as_deref() == Some("literal"));
-                        if keep_envelope {
-                            set.insert(path);
-                        }
-                    }
-                }
-            }
-            set
-        };
+        // Skip predicates whose property opts into signed expressions
+        // (resolveLiteral:false, explicit resolveLanguage:"literal", or a custom
+        // language): flattening would discard the expression-level signature,
+        // which is distinct from and not recoverable from the link-level reifier
+        // proof. Empty set (no shapes) → flatten everything, the prior behavior.
+        let (_deterministic, keep_envelope_predicates) = self.literal_storage_predicate_scopes();
 
         let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
         let ont_author = NamedNodeRef::new_unchecked(ONT_AUTHOR);
@@ -1807,6 +1830,18 @@ impl SparqlStore {
 
         log::info!("Migrating `literal:*:` IRI-shaped targets to typed RDF literals");
 
+        // Scope to SHACL deterministic-literal *property* predicates. Unlike v3
+        // (which skips only the opt-in envelope predicates and flattens
+        // everything else), v4 rewrites the RDF *encoding* of the target, so it
+        // must touch ONLY declared property values. A `literal:*` target under
+        // any other predicate — SHACLFlow's own `ad4m://stateName` / `stateValue`
+        // / `actionName` bookkeeping, or any raw non-property link — is not a
+        // subject-class property value: it is never model-queried, gains no
+        // indexed-WHERE benefit, and its readers (e.g. `SHACLFlow.fromLinks` via
+        // `Literal.fromUrl`) expect the original `literal:` IRI form. Empty set
+        // (no shapes) → migrate nothing this pass, never a blanket rewrite.
+        let (deterministic_predicates, _keep_envelope) = self.literal_storage_predicate_scopes();
+
         let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
 
         // Collect candidates by walking the reifier triples — they carry the
@@ -1837,6 +1872,11 @@ impl SparqlStore {
                 Term::Triple(t) => t,
                 _ => continue,
             };
+
+            // Only declared deterministic-literal property values (see above).
+            if !deterministic_predicates.contains(triple.predicate.as_str()) {
+                continue;
+            }
 
             // Only NamedNode objects are candidates; typed literals are
             // already in the target shape.
@@ -3302,6 +3342,12 @@ mod tests {
     #[test]
     fn test_migration_v4_rewrites_iri_literals_to_typed_literals() {
         let svc = new_service();
+        // Declare `ns://p` as a (default → deterministic) SHACL property so the
+        // migration recognizes it as a property value to normalize. Predicates
+        // with no property shape are left untouched — see
+        // test_migration_v4_skips_non_property_literals.
+        svc.add_link(&make_link("shacl://T.p", "sh://path", "ns://p"))
+            .unwrap();
         // Seed three rows whose objects are still NamedNode `literal:*:`
         // IRIs — the shape produced before the typed-literal flip.
         let make_legacy = |source: &str, predicate: &str, target: &str| {
@@ -3346,6 +3392,75 @@ mod tests {
         // Idempotent.
         let count2 = svc.migrate_iri_literals_to_typed_literals().unwrap();
         assert_eq!(count2, 0);
+    }
+
+    /// v4 must rewrite only declared property values, never a predicate's raw
+    /// bookkeeping links. A deterministic SHACL property migrates to a typed
+    /// literal; a non-property `literal:string:` target (as `SHACLFlow` writes
+    /// for its own `ad4m://stateName` links) survives untouched, so readers like
+    /// `SHACLFlow.fromLinks` still see the `literal:` IRI they parse via
+    /// `Literal.fromUrl`. Guards against the unconditional-migration regression.
+    #[test]
+    fn test_migration_v4_skips_non_property_literals() {
+        let svc = new_service();
+
+        // A declared, deterministic (default) property — a migration candidate.
+        svc.add_link(&make_link("shacl://Task.title", "sh://path", "ns://title"))
+            .unwrap();
+        svc.add_link_with_raw_iri_target(&make_link(
+            "ad4m://task-1",
+            "ns://title",
+            "literal:string:Write the guide",
+        ))
+        .unwrap();
+
+        // SHACLFlow-style internal bookkeeping — no SHACL property shape.
+        svc.add_link_with_raw_iri_target(&make_link(
+            "ad4m://flow-1",
+            "ad4m://stateName",
+            "literal:string:ready",
+        ))
+        .unwrap();
+
+        let count = svc.migrate_iri_literals_to_typed_literals().unwrap();
+        assert_eq!(count, 1, "only the declared property value should migrate");
+
+        // Declared property: now a typed literal (indexed shape).
+        let title = svc
+            .store
+            .quads_for_pattern(
+                Some(NamedNodeRef::new_unchecked("ad4m://task-1").into()),
+                Some(NamedNodeRef::new_unchecked("ns://title")),
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .next()
+            .unwrap()
+            .unwrap();
+        match title.object {
+            Term::Literal(ref l) => assert_eq!(
+                l.datatype().as_str(),
+                "http://www.w3.org/2001/XMLSchema#string"
+            ),
+            other => panic!("expected typed literal for property, got {other:?}"),
+        }
+
+        // Non-property bookkeeping: still the original literal: IRI, untouched.
+        let state = svc
+            .store
+            .quads_for_pattern(
+                Some(NamedNodeRef::new_unchecked("ad4m://flow-1").into()),
+                Some(NamedNodeRef::new_unchecked("ad4m://stateName")),
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .next()
+            .unwrap()
+            .unwrap();
+        match state.object {
+            Term::NamedNode(ref n) => assert_eq!(n.as_str(), "literal:string:ready"),
+            other => panic!("bookkeeping link must stay a literal: IRI, got {other:?}"),
+        }
     }
 
     /// The combined v3 → v4 chain leaves an envelope-form input as a typed
