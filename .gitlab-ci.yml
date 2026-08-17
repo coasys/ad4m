@@ -105,9 +105,11 @@ plugin-ad4m-tests:
   timeout: 45m
   before_script: *setup_env
   script:
-    - pnpm install --frozen-lockfile
-    - cd ./core && pnpm install --frozen-lockfile && cd ..
-    - pnpm run test-plugin-ad4m
+    # Mirror CircleCI: standalone npm project under plugins/ad4m,
+    # no root pnpm install needed.
+    - cd plugins/ad4m
+    - npm install
+    - npm test
 
 # ---------------------------------------------------------------------------
 # Stage 3 — integration tests (all depend on build-and-test binaries)
