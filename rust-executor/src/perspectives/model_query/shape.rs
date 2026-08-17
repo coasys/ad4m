@@ -140,8 +140,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     // one to re-resolve `shape_uri` from `target_class`, one for the
     // constructor itself — now 1 query total per `load_shape` call, using
     // the `shape_uri` already resolved above).
-    let constructor_actions =
-        resolve_constructor_actions(store, &shape_uri).unwrap_or_default();
+    let constructor_actions = resolve_constructor_actions(store, &shape_uri).unwrap_or_default();
 
     for prop_uri in &prop_order {
         let rows = match grouped.get(prop_uri) {
@@ -340,7 +339,10 @@ fn resolve_constructor_actions(store: &SparqlStore, shape_uri: &str) -> Option<V
 /// constructor actions (pre-resolved once per shape via
 /// [`resolve_constructor_actions`]).  Returns the `target` of any `addLink`
 /// action whose `predicate` matches `predicate`.
-fn initial_value_from_constructor(constructor_actions: &[Value], predicate: &str) -> Option<String> {
+fn initial_value_from_constructor(
+    constructor_actions: &[Value],
+    predicate: &str,
+) -> Option<String> {
     for action in constructor_actions {
         let action_name = action["action"].as_str().unwrap_or("");
         let pred = action["predicate"].as_str().unwrap_or("");

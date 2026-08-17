@@ -888,12 +888,30 @@ impl Ad4mMcpHandler {
                     // Run the blocking SPARQL query on a blocking thread with a
                     // timeout so it can't block the async runtime or hang forever
                     // (same pattern as api/perspectives_ws.rs::query_sparql).
+                    //
+                    // NOTE: spawn_blocking tasks cannot be cancelled once started.
+                    // If the timeout fires, the Oxigraph query continues until
+                    // completion on the blocking pool — but the caller gets an
+                    // immediate error. This is acceptable: Oxigraph queries run
+                    // in-process and are bounded by dataset size. Pool exhaustion
+                    // would require hundreds of concurrent 30s+ queries.
                     let sparql_perspective = perspective.clone();
+                    let handle = tokio::task::spawn_blocking(move || {
+                        sparql_perspective.sparql_query(sparql)
+                    });
                     let sparql_result = tokio::time::timeout(
                         Duration::from_secs(MCP_GETTER_SPARQL_TIMEOUT_SECS),
-                        tokio::task::spawn_blocking(move || sparql_perspective.sparql_query(sparql)),
+                        handle,
                     )
                     .await;
+                    if sparql_result.is_err() {
+                        log::warn!(
+                            "MCP getter SPARQL query timed out after {}s for property '{}' on '{}'",
+                            MCP_GETTER_SPARQL_TIMEOUT_SECS,
+                            prop_name,
+                            expression_address
+                        );
+                    }
                     match sparql_result {
                         Ok(Ok(Ok(result_json))) => {
                             if let Ok(rows) = serde_json::from_str::<
@@ -932,13 +950,15 @@ impl Ad4mMcpHandler {
                         Ok(Err(join_err)) => {
                             log::warn!(
                                 "Getter SPARQL task for {} failed to join: {}",
-                                prop_name, join_err
+                                prop_name,
+                                join_err
                             );
                         }
                         Err(_) => {
                             log::warn!(
                                 "Getter SPARQL query for {} timed out after {}s",
-                                prop_name, MCP_GETTER_SPARQL_TIMEOUT_SECS
+                                prop_name,
+                                MCP_GETTER_SPARQL_TIMEOUT_SECS
                             );
                         }
                     }

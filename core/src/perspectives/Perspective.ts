@@ -29,9 +29,9 @@ export class Perspective {
     /** Convenience function for filtering links just like with PerspectiveProxy */
     get(query: LinkQuery): LinkExpression[] {
         if(!query || !query.source && !query.predicate && !query.target) {
-            return this.links
+            return structuredClone(this.links)
         }
-        
+
         if(query.source) {
             let result = this.links
             // @ts-ignore
@@ -44,7 +44,7 @@ export class Perspective {
             if (query.untilDate) result = result.filter(l => new Date(l.timestamp) <= query.untilDate!)
             // console.debug("result", result)
             if (query.limit) result = result.slice(0, query.limit);
-            return result
+            return structuredClone(result)
         }
 
         // console.debug("getLinks 3")
@@ -59,7 +59,7 @@ export class Perspective {
             //@ts-ignore
             if (query.untilDate) result = result.filter(l => new Date(l.timestamp) <= query.untilDate!)
             if (query.limit) result = result.slice(0, query.limit);
-            return result
+            return structuredClone(result)
         }
 
         // console.debug("getLinks 4")
@@ -67,7 +67,7 @@ export class Perspective {
         //@ts-ignore
         let result = this.links.filter(link => link.data.predicate === query.predicate)
         if (query.limit) result = result.slice(0, query.limit)
-        return result
+        return structuredClone(result)
     }
 
     /** Convenience function to get the target of the first link that matches the given query
