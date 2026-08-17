@@ -69,6 +69,8 @@ export class ApiClient {
 
     private _ws: WebSocket | null = null
     private _wsCallbacks = new Set<(data: unknown) => void>()
+    private _reconnectCallbacks = new Set<() => void>()
+    private _hasConnectedOnce = false
     private _pendingCalls = new Map<string, PendingCall>()
     private _wsReady: Promise<void> | null = null
     private _wsReadyResolve: (() => void) | null = null
@@ -111,6 +113,16 @@ export class ApiClient {
                 this._wsReadyResolve = null
             }
             this._startPing()
+
+            // Fire reconnect callbacks only on reconnect (not first connect)
+            if (this._hasConnectedOnce) {
+                for (const cb of this._reconnectCallbacks) {
+                    try { cb() } catch (e) {
+                        console.error('Error in reconnect callback:', e)
+                    }
+                }
+            }
+            this._hasConnectedOnce = true
         }
 
         ws.onmessage = (event) => {
@@ -280,6 +292,14 @@ export class ApiClient {
         }
     }
 
+    /** Register a callback that fires after a successful WebSocket reconnect.
+     *  Does NOT fire on the initial connection — only on reconnects.
+     *  Returns an unsubscribe function. */
+    onReconnect(callback: () => void): () => void {
+        this._reconnectCallbacks.add(callback)
+        return () => { this._reconnectCallbacks.delete(callback) }
+    }
+
     /** Close all open WebSocket connections and reject pending calls. */
     closeAll(): void {
         // Reject pending calls
@@ -290,5 +310,6 @@ export class ApiClient {
         this._pendingCalls.clear()
         this._closeWs()
         this._wsCallbacks.clear()
+        this._reconnectCallbacks.clear()
     }
 }

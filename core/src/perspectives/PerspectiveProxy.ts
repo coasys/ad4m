@@ -75,6 +75,7 @@ export class QuerySubscriptionProxy {
     #callbacks: Set<QueryCallback>;
     #keepaliveTimer: number;
     #unsubscribe?: () => void;
+    #reconnectUnsub?: () => void;
     #latestResult: AllInstancesResult|null;
     #disposed: boolean = false;
     #initialized: Promise<boolean>;
@@ -216,6 +217,22 @@ export class QuerySubscriptionProxy {
 
         // Start the first keepalive loop
         this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
+
+        // Register for reconnect notification — on WebSocket reconnect,
+        // immediately re-subscribe instead of waiting up to 30s for the
+        // keepalive to fail and trigger resubscription.
+        if (this.#reconnectUnsub) {
+            this.#reconnectUnsub();
+        }
+        if (this.#client.onReconnect) {
+            this.#reconnectUnsub = this.#client.onReconnect(() => {
+                if (this.#disposed) return;
+                console.log('WebSocket reconnected — resubscribing query:', this.#query);
+                this.subscribe().catch(error => {
+                    console.error('Error resubscribing after reconnect:', error);
+                });
+            });
+        }
     }
 
     /** Get the subscription ID for this query subscription
@@ -308,6 +325,10 @@ export class QuerySubscriptionProxy {
         clearTimeout(this.#keepaliveTimer);
         if (this.#unsubscribe) {
             this.#unsubscribe();
+        }
+        if (this.#reconnectUnsub) {
+            this.#reconnectUnsub();
+            this.#reconnectUnsub = undefined;
         }
         this.#callbacks.clear();
         if (this.#initTimeoutId) {
