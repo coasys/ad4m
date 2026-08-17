@@ -76,7 +76,10 @@ build-and-test:
     # bails on it with --frozen-lockfile, so we must use --no-frozen-lockfile
     # for the core install and rely on the pinned @types/node in
     # core/package.json to prevent the ffi.d.ts TS-parse-error regression.
-    - pnpm install --frozen-lockfile
+    # ROOT install also needs --no-frozen-lockfile because f9a05d4c0 bumped
+    # core/package.json's @types/node from "*" → "^20.19.0" without regenerating
+    # the root pnpm-lock.yaml — ERR_PNPM_OUTDATED_LOCKFILE otherwise.
+    - pnpm install --no-frozen-lockfile
     - pnpm build-dapp
     - cd ./core && pnpm install --no-frozen-lockfile && cd ..
     - pnpm run build-deno-snapshot   # long: up to 30m cold
@@ -88,7 +91,7 @@ build-and-test:
     - cp target/release/ad4m target/release/ad4m-executor "$ARTIFACT_STASH/"
     # Re-install pnpm without patches (CircleCI does this before root tests).
     - node removePnpm.js
-    - pnpm install --frozen-lockfile || pnpm install --no-frozen-lockfile
+    - pnpm install --no-frozen-lockfile
     - cd ./core && pnpm install --no-frozen-lockfile && cd ..
     - pnpm test
   artifacts:
