@@ -32,22 +32,23 @@ stages:
   - integration
 
 # ---------------------------------------------------------------------------
-# Reusable snippet: set up the shell environment (Node via nvm + Rust + Deno +
-# Go + pnpm) exactly as CircleCI's setup_env command does.  Referenced by
-# every job via `!reference` or included as before_script.
+# Reusable snippet: set up the shell environment (Node + Rust + Deno + Go + pnpm).
+#
+# We inline all tool paths directly instead of sourcing `nvm.sh` because
+# gitlab-runner's `step_script` is a fresh subshell that doesn't inherit env
+# from `pre_build_script`, and marvin's `.bashrc` guards its nvm init behind
+# `[ -z "$PS1" ] && return` (non-interactive bash bails early).  The runner
+# host has all toolchains pre-installed under /home/marvin — we just prepend
+# their bin dirs to PATH.
 # ---------------------------------------------------------------------------
 .setup_env: &setup_env
-  - export NVM_DIR="$HOME/.nvm"
-  - '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" --no-use'
-  - |
-    NODE_PATH=$(nvm which "$NODE_VERSION" 2>/dev/null || true)
-    if [ -z "$NODE_PATH" ] || [ ! -x "$NODE_PATH" ]; then
-      echo "Node $NODE_VERSION not found, installing via nvm..."
-      nvm install "$NODE_VERSION"
-      NODE_PATH=$(nvm which "$NODE_VERSION")
-    fi
-    NODE_BIN_DIR=$(dirname "$NODE_PATH")
-    export PATH="$NODE_BIN_DIR:$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH"
+  # Pin to the exact nvm-installed Node build the runner host has.  Newer
+  # Node builds get installed by hand on the runner, not by CI.
+  - export NVM_DIR="/home/marvin/.nvm"
+  - export PATH="/home/marvin/.nvm/versions/node/v24.14.0/bin:/home/marvin/.cargo/bin:/home/marvin/.deno/bin:/home/marvin/.local/go/bin:/home/marvin/.npm-global/bin:/home/marvin/.local/bin:/home/marvin/go/bin:$PATH"
+  - export CARGO_HOME="/home/marvin/.cargo"
+  - export RUSTUP_HOME="/home/marvin/.rustup"
+  - export GOPATH="/home/marvin/go"
   - echo "Node    $(node --version)"
   - echo "npm     $(npm --version)"
   - echo "pnpm    $(pnpm --version 2>/dev/null || echo 'not installed')"
