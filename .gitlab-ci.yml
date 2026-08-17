@@ -71,9 +71,12 @@ build-and-test:
   before_script: *setup_env
   script:
     - cargo fmt --check
-    - pnpm install --no-frozen-lockfile
+    # Use --frozen-lockfile so we get the same @types/node etc. the maintainers
+    # tested against.  --no-frozen-lockfile pulled in @types/node@26.2.0 whose
+    # ffi.d.ts uses syntax the pinned TS can't parse.
+    - pnpm install --frozen-lockfile
     - pnpm build-dapp
-    - cd ./core && pnpm install --no-frozen-lockfile && cd ..
+    - cd ./core && pnpm install --frozen-lockfile && cd ..
     - pnpm run build-deno-snapshot   # long: up to 30m cold
     - rm -f target/release/ad4m target/release/ad4m-executor
     - pnpm run build-libs            # long: up to 30m cold
@@ -83,8 +86,8 @@ build-and-test:
     - cp target/release/ad4m target/release/ad4m-executor "$ARTIFACT_STASH/"
     # Re-install pnpm without patches (CircleCI does this before root tests).
     - node removePnpm.js
-    - pnpm install --no-frozen-lockfile
-    - cd ./core && pnpm install --no-frozen-lockfile && cd ..
+    - pnpm install --frozen-lockfile || pnpm install --no-frozen-lockfile
+    - cd ./core && (pnpm install --frozen-lockfile || pnpm install --no-frozen-lockfile) && cd ..
     - pnpm test
   artifacts:
     when: always
@@ -102,8 +105,8 @@ plugin-ad4m-tests:
   timeout: 45m
   before_script: *setup_env
   script:
-    - pnpm install --no-frozen-lockfile
-    - cd ./core && pnpm install --no-frozen-lockfile && cd ..
+    - pnpm install --frozen-lockfile
+    - cd ./core && pnpm install --frozen-lockfile && cd ..
     - pnpm run test-plugin-ad4m
 
 # ---------------------------------------------------------------------------
