@@ -391,17 +391,17 @@ pub struct ShapeProperty {
     pub(crate) is_flag: bool,
     pub(crate) is_required: bool,
     pub(crate) initial_value: Option<String>,
-    /// Language address used to resolve property values (the general
-    /// mechanism). `Some("literal")` is the built-in literal language;
-    /// any other address routes values through `expression_create` on that
-    /// language. `None` means values are stored raw.
+    /// Language address used to resolve property values, and the sole
+    /// selector of storage mode:
+    ///   - `None`              → deterministic typed literal (POS-index
+    ///                           fast path — the default for a plain
+    ///                           `@Property()`).
+    ///   - `Some("literal")`   → signed-envelope on the built-in literal
+    ///                           language (`expression_create` produces a
+    ///                           `{author, timestamp, data, proof}` URI).
+    ///   - `Some(<addr>)`      → `expression_create` on that custom
+    ///                           language.
     pub(crate) resolve_language: Option<String>,
-    /// Optimization flag for the literal language: `Some(true)` (the default)
-    /// stores values as deterministic `literal:*` IRIs for POS-index lookups;
-    /// `Some(false)` routes the literal value through `expression_create`,
-    /// producing a signed-envelope URI. Only meaningful when
-    /// `resolve_language` is `"literal"` / unset.
-    pub(crate) resolve_literal: Option<bool>,
     pub(crate) datatype: Option<String>,
     pub(crate) direction: Option<String>, // "forward" or "reverse" for relation properties
     pub(crate) is_scalar_relation: bool, // true for hasOne/belongsToOne (render as scalar, not array)
@@ -422,22 +422,15 @@ pub struct ShapeProperty {
 
 impl ShapeProperty {
     /// True when the property's values are stored as deterministic typed
-    /// `literal:` IRIs (POS-index friendly) rather than signed expression
-    /// envelopes. Mirrors the TS `effectiveLiteralStorage`:
-    ///   - custom resolve language            → never deterministic (envelope)
-    ///   - `resolve_literal == Some(true)`     → deterministic
-    ///   - `resolve_literal == Some(false)`    → envelope
-    ///   - unset: deterministic UNLESS `resolve_language` is explicitly
-    ///     `"literal"` (which selects the signed-envelope path)
+    /// literals (POS-index friendly) rather than signed expression
+    /// envelopes or custom-language expressions. Derived from
+    /// `resolve_language` alone:
+    ///   - `None`             → deterministic (default fast path)
+    ///   - `Some("literal")`  → envelope (per-value provenance)
+    ///   - `Some(<other>)`    → custom-language expression (never
+    ///                          deterministic)
     pub(crate) fn is_deterministic_literal(&self) -> bool {
-        if matches!(self.resolve_language.as_deref(), Some(lang) if lang != "literal") {
-            return false;
-        }
-        match self.resolve_literal {
-            Some(true) => true,
-            Some(false) => false,
-            None => self.resolve_language.as_deref() != Some("literal"),
-        }
+        self.resolve_language.is_none()
     }
 }
 

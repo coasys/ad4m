@@ -402,13 +402,13 @@ export interface PropertyMetadata {
   readOnly: boolean;
   /** Initial value if specified */
   initial?: string;
-  /** Language used to resolve the value (e.g. "literal" or a custom language
-   *  address). Custom languages route values through expression_create. */
+  /** Sole selector of storage mode:
+   *   - unset               → deterministic typed literal (fast POS-index
+   *                            path, the default for a plain `@Property()`)
+   *   - `"literal"`         → signed envelope on the built-in literal language
+   *   - `<custom address>`  → expression on that custom language
+   */
   resolveLanguage?: string;
-  /** When true (default) and resolveLanguage is "literal", values are stored
-   *  as deterministic literal: IRIs. When false, the literal value goes
-   *  through expression_create on the literal language. */
-  resolveLiteral?: boolean;
   /** Custom Prolog getter code */
   prologGetter?: string;
   /** Custom Prolog setter code */

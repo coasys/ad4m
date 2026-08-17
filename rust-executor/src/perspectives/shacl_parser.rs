@@ -50,11 +50,11 @@ pub struct PropertyShape {
     pub max_count: Option<u32>,
     pub writable: Option<bool>,
     pub local: Option<bool>,
-    /// General expression-language selector (e.g. "literal" or a custom
-    /// language address). Stored as `ad4m://resolveLanguage`.
+    /// Sole selector of storage mode. `None` → deterministic typed
+    /// literal (fast POS-index path, the default). `Some("literal")` →
+    /// signed envelope on the built-in literal language. `Some(<addr>)`
+    /// → expression on that custom language. Stored as `ad4m://resolveLanguage`.
     pub resolve_language: Option<String>,
-    /// Literal-storage optimization flag. Stored as `ad4m://resolveLiteral`.
-    pub resolve_literal: Option<bool>,
     pub node_kind: Option<String>,
     pub collection: Option<bool>,
     /// Setter action for single-valued properties
@@ -476,14 +476,6 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://resolveLanguage".to_string()),
                 target: format!("literal:string:{}", resolve_lang),
-            });
-        }
-
-        if let Some(resolve_literal) = &prop.resolve_literal {
-            links.push(Link {
-                source: prop_shape_uri.clone(),
-                predicate: Some("ad4m://resolveLiteral".to_string()),
-                target: format!("literal:{}", resolve_literal),
             });
         }
 

@@ -52,14 +52,12 @@ pub struct ShaclProperty {
     /// Target SHACL node shape URI (sh:class). When present, linked nodes
     /// must conform to this shape, enabling typed construction.
     pub class: Option<String>,
-    /// Language address for resolving property values (ad4m://resolveLanguage).
-    /// When set to a custom (non-"literal") language, values are passed through
-    /// `expression_create` on that language instead of being stored as
-    /// deterministic `literal:` IRIs.
+    /// Sole selector of storage mode (`ad4m://resolveLanguage`):
+    ///   - `None`             → deterministic typed literal (fast path).
+    ///   - `Some("literal")`  → signed envelope on the built-in literal
+    ///                          language.
+    ///   - `Some(<addr>)`     → expression on that custom language.
     pub resolve_language: Option<String>,
-    /// When true (default), store as deterministic literal: IRIs.
-    /// When false, values go through expression_create on the literal language.
-    pub resolve_literal: Option<bool>,
 }
 
 impl ShaclClass {
@@ -201,7 +199,6 @@ fn shape_to_shacl_class(class_name: &str, shape: &ModelShape) -> ShaclClass {
                 getter: p.getter.clone(),
                 class: class_uri,
                 resolve_language: p.resolve_language.clone(),
-                resolve_literal: p.resolve_literal,
             }
         })
         .collect();
@@ -422,30 +419,6 @@ pub async fn load_class_properties_with_uri(
             _ => None,
         };
 
-        // Get resolveLiteral (ad4m://resolveLiteral) — explicit flag only. The
-        // storage mode (incl. explicit resolveLanguage:"literal" → envelope) is
-        // decided downstream from both this flag and resolve_language.
-        let resolve_literal = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("ad4m://resolveLiteral".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) if !links.is_empty() => {
-                let target = &links[0].data.target;
-                let val = target
-                    .strip_prefix("literal://boolean:")
-                    .or_else(|| target.strip_prefix("literal:boolean:"))
-                    .or_else(|| target.strip_prefix("literal://"))
-                    .or_else(|| target.strip_prefix("literal:"))
-                    .unwrap_or(target);
-                Some(val == "true")
-            }
-            _ => None,
-        };
-
         properties.push(ShaclProperty {
             name: prop_name,
             is_collection,
@@ -457,7 +430,6 @@ pub async fn load_class_properties_with_uri(
             getter,
             class: class_uri,
             resolve_language,
-            resolve_literal,
         });
     }
 
@@ -537,37 +509,6 @@ pub async fn resolve_property_predicate(
         property_name,
         class_name,
         available.join(", ")
-    ))
-}
-
-/// Resolve whether a property uses literal storage for a given class.
-/// Returns `Ok(Some(true/false))` if the property has resolve_literal set,
-/// or `Err` if the class/property is not found.
-/// Matching is case-insensitive because dynamic tool names are lowercased.
-pub async fn resolve_property_resolve_literal(
-    perspective: &PerspectiveInstance,
-    class_name: &str,
-    property_name: &str,
-) -> Result<Option<bool>, String> {
-    let properties = load_class_properties(perspective, class_name).await;
-    if properties.is_empty() {
-        return Err(format!("No SHACL shape found for class '{}'", class_name));
-    }
-    let prop_lower = property_name.to_lowercase();
-    for prop in &properties {
-        if prop.name == property_name || prop.name.to_lowercase() == prop_lower {
-            return Ok(prop.resolve_literal);
-        }
-    }
-    Err(format!(
-        "Property '{}' not found in class '{}'. Available properties: {}",
-        property_name,
-        class_name,
-        properties
-            .iter()
-            .map(|p| p.name.clone())
-            .collect::<Vec<_>>()
-            .join(", ")
     ))
 }
 

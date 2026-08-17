@@ -4024,44 +4024,17 @@ impl PerspectiveInstance {
         Ok(None)
     }
 
-    /// Read the explicit `ad4m://resolveLiteral` flag for a property, if present.
+    /// Get the resolve language address (`ad4m://resolveLanguage`) for a property.
     ///
-    /// Returns `None` when the flag is absent — it is NOT derived from
-    /// `resolveLanguage`. The effective storage mode (see `resolve_property_value`
-    /// / `ShapeProperty::is_deterministic_literal`) combines this flag with
-    /// `resolveLanguage`: an explicit `resolveLanguage:"literal"` selects the
-    /// signed-envelope path, while an unspecified property defaults to a
-    /// deterministic literal.
-    pub async fn get_resolve_literal_from_shacl(
-        &self,
-        class_name: &str,
-        property: &str,
-    ) -> Result<Option<bool>, AnyError> {
-        let prop_suffix = format!("{}.{}", class_name, property);
-
-        let links = self
-            .sparql_store
-            .get_links_by_predicate_and_source_suffix("ad4m://resolveLiteral", &prop_suffix)?;
-
-        if let Some(link) = links.first() {
-            let val = link
-                .data
-                .target
-                .strip_prefix("literal://boolean:")
-                .or_else(|| link.data.target.strip_prefix("literal:boolean:"))
-                .or_else(|| link.data.target.strip_prefix("literal://"))
-                .or_else(|| link.data.target.strip_prefix("literal:"))
-                .unwrap_or(&link.data.target);
-            return Ok(Some(val == "true"));
-        }
-
-        Ok(None)
-    }
-
-    /// Get the resolve language address (ad4m://resolveLanguage) for a property.
-    /// This is the general expression-language selector: `"literal"` selects the
-    /// built-in literal language; any other address routes values through
-    /// `expression_create` on that language.
+    /// This is the sole selector of storage mode:
+    ///   - `None`             → deterministic typed literal (POS-index
+    ///                          fast path — the default for a plain
+    ///                          `@Property()`).
+    ///   - `Some("literal")`  → signed envelope on the built-in literal
+    ///                          language (per-value provenance, e.g.
+    ///                          Flux message bodies).
+    ///   - `Some(<addr>)`     → `expression_create` on that custom
+    ///                          language.
     pub async fn get_resolve_language_from_shacl(
         &self,
         class_name: &str,
@@ -4119,13 +4092,11 @@ impl PerspectiveInstance {
         let resolve_language = self
             .get_resolve_language_from_shacl(class_name, property)
             .await?;
-        let resolve_literal = self
-            .get_resolve_literal_from_shacl(class_name, property)
-            .await?;
 
-        // A custom (non-"literal") resolve language routes the value through
-        // `expression_create` on that language, producing a signed-envelope URI
-        // with author/timestamp/proof. This is the general dev behavior.
+        // Storage mode derives entirely from `resolveLanguage`:
+        //   - unset            → deterministic typed literal (fast path)
+        //   - Some("literal")  → signed envelope on the literal language
+        //   - Some(<addr>)     → expression_create on that custom language
         if let Some(lang) = resolve_language.as_deref() {
             if lang != "literal" {
                 let controller = crate::languages::LanguageController::global_instance();
@@ -4143,13 +4114,11 @@ impl PerspectiveInstance {
             }
         }
 
-        // Literal-language storage. The value goes through a signed-envelope
-        // expression when the property explicitly opts in — `resolveLiteral:
-        // false`, or an explicit `resolveLanguage:"literal"` with no
-        // resolveLiteral flag (the dev/Flux behavior). Otherwise (resolveLiteral
-        // true, or neither set) it is stored as a deterministic literal: IRI.
-        let envelope = resolve_literal == Some(false)
-            || (resolve_literal.is_none() && resolve_language.as_deref() == Some("literal"));
+        // Literal-language storage. The property explicitly opts into the
+        // signed-envelope path via `resolveLanguage:"literal"` (per-value
+        // provenance, e.g. Flux message bodies); otherwise (resolveLanguage
+        // unset) the value is stored as a deterministic literal: IRI.
+        let envelope = resolve_language.as_deref() == Some("literal");
 
         if envelope {
             let controller = crate::languages::LanguageController::global_instance();

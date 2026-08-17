@@ -138,21 +138,23 @@ function jsonToModelInstance<T extends Ad4mModel>(
  * // Define a recipe model
  * @Model({ name: "Recipe" })
  * class Recipe extends Ad4mModel {
- *   // Property resolved through the built-in literal language (the default).
- *   // `resolveLanguage` selects HOW a value is resolved ("literal" or a custom
- *   // language address); `resolveLiteral` is an optimization that applies only
- *   // when resolveLanguage is "literal" — true (default) stores a deterministic
- *   // literal: IRI, false routes through expression_create for a signed envelope.
- *   @Property({
- *     through: "recipe://name",
- *     resolveLanguage: "literal", // default
- *     resolveLiteral: true        // default
- *   })
+ *   // Plain property — no `resolveLanguage` → deterministic typed literal
+ *   // storage (fast POS-index path). This is the perf default.
+ *   @Property({ through: "recipe://name" })
  *   name: string = "";
  *
+ *   // Property that needs per-value provenance (e.g. a signed message body):
+ *   // `resolveLanguage: "literal"` routes values through expression_create on
+ *   // the built-in literal language, producing a signed envelope URI
+ *   // (author/timestamp/proof) instead of a bare typed literal.
+ *   @Property({
+ *     through: "recipe://signed_note",
+ *     resolveLanguage: "literal"
+ *   })
+ *   signedNote: string = "";
+ *
  *   // Property resolved through a custom language: values are routed through
- *   // expression_create on that language (signed-envelope URIs). resolveLiteral
- *   // is ignored for a custom resolveLanguage.
+ *   // expression_create on that language (signed expression URIs).
  *   @Optional({
  *     through: "recipe://photo",
  *     resolveLanguage: "QmFileStorageLanguageAddress..."
@@ -314,7 +316,7 @@ export class Ad4mModel {
    * ```typescript
    * @Model({ name: "Recipe" })
    * class Recipe extends Ad4mModel {
-   *   @Property({ through: "recipe://name", resolveLanguage: "literal", resolveLiteral: true })
+   *   @Property({ through: "recipe://name" })
    *   name: string = "";
    *
    *   @HasMany({ through: "recipe://ingredient" })
@@ -353,7 +355,6 @@ export class Ad4mModel {
         readOnly: !(options.writable ?? false),
         ...(options.initial !== undefined && { initial: options.initial }),
         ...(options.resolveLanguage !== undefined && { resolveLanguage: options.resolveLanguage }),
-        ...(options.resolveLiteral !== undefined && { resolveLiteral: options.resolveLiteral }),
         ...(options.prologGetter !== undefined && { prologGetter: options.prologGetter }),
         ...(options.getter !== undefined && { getter: options.getter }),
         ...(options.prologSetter !== undefined && { prologSetter: options.prologSetter }),
@@ -420,7 +421,6 @@ export class Ad4mModel {
               required: isRequired,
               readOnly: propertySchema["x-ad4m"]?.writable === false,
               ...(propertySchema["x-ad4m"]?.resolveLanguage !== undefined && { resolveLanguage: propertySchema["x-ad4m"].resolveLanguage }),
-              ...(propertySchema["x-ad4m"]?.resolveLiteral !== undefined && { resolveLiteral: propertySchema["x-ad4m"].resolveLiteral }),
               ...(propertySchema["x-ad4m"]?.initial && { initial: propertySchema["x-ad4m"].initial }),
               ...(propertySchema["x-ad4m"]?.local !== undefined && { local: propertySchema["x-ad4m"].local })
             };
@@ -1895,8 +1895,7 @@ export class Ad4mModel {
    * // With explicit configuration
    * const PersonClass = Ad4mModel.fromJSONSchema(schema, {
    *   name: "Person",
-   *   namespace: "person://",
-   *   resolveLiteral: true
+   *   namespace: "person://"
    * });
    * 
    * // With property mapping
@@ -1941,7 +1940,7 @@ export class Ad4mModel {
    * Unlike `fromJSONSchema()`, no predicate inference is required —
    * `SHACLShape` already contains the exact predicate URI in `path` for
    * every property. The method reads each property's `path`, `maxCount`,
-   * `writable`, and `resolveLiteral` directly and writes them to the
+   * `writable`, and `resolveLanguage` directly and writes them to the
    * WeakMap metadata registries.
    *
    * Properties with `hasValue` (flag / type-discrimination markers) are
@@ -2043,7 +2042,6 @@ export class Ad4mModel {
           through: prop.path,
           writable: prop.writable ?? true,
           ...(prop.resolveLanguage !== undefined && { resolveLanguage: prop.resolveLanguage }),
-          ...(prop.resolveLiteral !== undefined && { resolveLiteral: prop.resolveLiteral }),
           ...(prop.local !== undefined && { local: prop.local }),
         });
       }

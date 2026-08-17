@@ -89,8 +89,9 @@ function looksLikeUri(value: string): boolean {
 
 /**
  * Convert a JS value to its literal: IRI form, matching how the Rust executor
- * stores property values with resolveLiteral: true (the default).
- * Strings that already look like URIs are returned as-is.
+ * stores property values in the default deterministic-literal path
+ * (`resolveLanguage` unset). Strings that already look like URIs are returned
+ * as-is.
  *
  * Exported so write-side helpers (e.g. `Ad4mModel.setProperty`'s literal
  * resolve path) can keep their on-disk form aligned with what
@@ -120,24 +121,21 @@ export type LiteralStorageMode =
 
 /**
  * Derive the effective storage mode from a property's explicit options.
- * `resolveLanguage` and `resolveLiteral` are NOT defaulted at the decorator
- * level, so absence is meaningful:
- *   - neither set                       → deterministic (the perf default)
- *   - resolveLanguage:"literal" (explicit) → envelope (signed literal expression)
- *   - resolveLiteral:true               → deterministic (explicit opt-in)
- *   - resolveLiteral:false              → envelope
- *   - resolveLanguage:<custom>          → that language's expression
- * resolveLiteral, when set, wins over the language-implied default.
+ * `resolveLanguage` is the sole selector and is NOT defaulted at the
+ * decorator level:
+ *   - unset               → deterministic typed literal (the perf default
+ *                            for a plain `@Property()`)
+ *   - `"literal"`         → signed envelope on the built-in literal language
+ *                            (per-value provenance, e.g. Flux message bodies)
+ *   - `<custom address>`  → signed expression on that custom language
  */
 export function effectiveLiteralStorage(meta: {
   resolveLanguage?: string;
-  resolveLiteral?: boolean;
 }): LiteralStorageMode {
   const lang = meta.resolveLanguage;
-  if (lang !== undefined && lang !== "literal") return { kind: "custom", language: lang };
-  if (meta.resolveLiteral === true) return { kind: "deterministic" };
-  if (meta.resolveLiteral === false) return { kind: "envelope" };
-  return lang === "literal" ? { kind: "envelope" } : { kind: "deterministic" };
+  if (lang === undefined) return { kind: "deterministic" };
+  if (lang === "literal") return { kind: "envelope" };
+  return { kind: "custom", language: lang };
 }
 
 /**
