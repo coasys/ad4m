@@ -627,9 +627,27 @@ async fn e2e_updates_existing_instance_via_id() {
          got {seeded_links:#?}"
     );
 
-    // And no duplicate: the seeded title must not also exist on a fresh base.
+    // The single title link must carry a *new* value — the whole point of the
+    // seeded-overlay branch is that the gate lets the LLM overwrite in place.
+    // A test that only asserts one link exists would silently pass if the gate
+    // held the seed unchanged (real == SEEDED_TITLE), so read the seeded base
+    // back through model_query and require the persisted title to differ.
     let seeded_lower = SEEDED_TITLE.to_lowercase();
     let rows = model_instances(&perspective, "Task", &["title"]).await;
+    let seeded_row_title = rows
+        .iter()
+        .find(|r| r.get("id").and_then(|i| i.as_str()) == Some(SEEDED_BASE))
+        .and_then(|r| r.get("title").and_then(|t| t.as_str()))
+        .map(str::to_string);
+    assert!(
+        seeded_row_title
+            .as_deref()
+            .is_some_and(|t| !t.eq_ignore_ascii_case(SEEDED_TITLE)),
+        "the upsert must have overwritten the seeded title; \
+         got title={seeded_row_title:?}, seeded={SEEDED_TITLE:?}"
+    );
+
+    // And no duplicate: the seeded title must not also exist on a fresh base.
     assert!(
         !rows.iter().any(|r| {
             r.get("id")

@@ -148,9 +148,15 @@ async fn overlay_classes_present(perspective: &PerspectiveInstance) -> anyhow::R
 /// as `run`). It lives *outside* the interpreted data tree — like the
 /// auto-processor's `ad4m://claim/…` nodes — so it never clutters the SoA graph;
 /// it is reached only by traversal from each affected base's overlay `run` link.
+///
+/// `batch_id` groups the run-node write with the pass's overlay writes so a
+/// partial Phase 3 failure rolls back atomically (see the guarded batch in
+/// `super::gate_apply_and_persist`). Test helpers that only need the run node
+/// on its own can pass `None`.
 pub(crate) async fn mint_interpretation_run(
     perspective: &mut PerspectiveInstance,
     meta: &InterpretationRunMeta,
+    batch_id: Option<String>,
     context: &AgentContext,
 ) -> anyhow::Result<String> {
     let run_uri = format!("ad4m://interp/run/{}", meta.run_id);
@@ -168,7 +174,7 @@ pub(crate) async fn mint_interpretation_run(
             },
             run_uri.clone(),
             Some(values),
-            None,
+            batch_id,
             context,
         )
         .await

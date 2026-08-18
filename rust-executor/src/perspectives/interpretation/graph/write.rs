@@ -14,11 +14,16 @@ use uuid::Uuid;
 /// existing link under that predicate, then add the new one. A generic
 /// single-valued link upsert — used by the provenance overlay to keep
 /// `inferred/<p>` (and `run`) single-valued and current across passes.
+///
+/// `batch_id` groups the underlying `remove_links` + `add_link` into a caller-
+/// owned batch so a mid-write failure rolls back atomically. Pass `None` for
+/// unbatched writes (e.g. test seeding).
 pub(crate) async fn replace_link(
     perspective: &mut PerspectiveInstance,
     base: &str,
     predicate: &str,
     target: &str,
+    batch_id: Option<String>,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
     let existing = perspective
@@ -30,7 +35,7 @@ pub(crate) async fn replace_link(
         .await?;
     if !existing.is_empty() {
         let exprs: Vec<LinkExpression> = existing.into_iter().map(Into::into).collect();
-        perspective.remove_links(exprs, None).await?;
+        perspective.remove_links(exprs, batch_id.clone()).await?;
     }
     perspective
         .add_link(
@@ -40,7 +45,7 @@ pub(crate) async fn replace_link(
                 target: target.to_string(),
             },
             LinkStatus::Shared,
-            None,
+            batch_id,
             context,
         )
         .await?;
