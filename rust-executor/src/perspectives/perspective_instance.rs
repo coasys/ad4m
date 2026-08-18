@@ -397,8 +397,142 @@ impl PerspectiveInstance {
             self.pending_diffs_loop(),
             self.subscribed_queries_loop(),
             self.fallback_sync_loop(),
-            self.auto_processor_watch_loop(AgentContext::main_agent()),
+            self.auto_processor_supervisor(),
         );
+    }
+
+    /// Dispatch between single-user (one main-agent loop, as before) and
+    /// multi-user (one loop per recently-seen managed user) auto-processor
+    /// spawning. Single-user mode preserves prior behaviour; multi-user mode
+    /// (`enable_multi_user: true`) skips the main-agent loop entirely — running
+    /// interpretation as the host DID would attribute every minted instance to
+    /// the host on a shared perspective, which the multi-user model rejects.
+    async fn auto_processor_supervisor(&self) {
+        if crate::user_management::is_multi_user_enabled() {
+            self.managed_user_auto_processor_supervisor().await;
+        } else {
+            self.auto_processor_watch_loop(AgentContext::main_agent())
+                .await;
+        }
+    }
+
+    /// Multi-user auto-processor spawn loop. Every supervisor tick it
+    /// re-computes the set of managed users whose `last_seen` falls inside
+    /// `MANAGED_USER_ONLINE_WINDOW_S` (the same freshness window
+    /// `capabilities::track_last_seen_from_token` uses), spawns a per-user
+    /// `auto_processor_watch_loop` for any newly-online user, and aborts the
+    /// loop of any user who has aged out. Users that go offline are cheap to
+    /// re-spawn on next activity, so the transient churn is bounded.
+    ///
+    /// Why per-user rather than a single main-agent loop:
+    ///   `elect_author` returns `Me` only when the loop's `AgentContext` DID
+    ///   is among the batch's authors. On a hosting node whose main agent is
+    ///   the host key, every managed user's utterance elects `Other(user)`
+    ///   forever and no pass ever runs — the exact symptom we hit on Marvin
+    ///   with James in a live call.
+    async fn managed_user_auto_processor_supervisor(&self) {
+        use crate::perspectives::auto_processor::watcher::{
+            select_online_managed_users, MANAGED_USER_ONLINE_WINDOW_S,
+        };
+        use std::collections::HashMap;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use tokio::task::JoinHandle;
+
+        /// How often the supervisor re-evaluates the online-user set. Short
+        /// enough that a user joining a call sees interpretation within
+        /// ~1 tick; long enough that we do not hammer the DB.
+        const SUPERVISOR_TICK_MS: u64 = 5_000;
+
+        let mut per_user_loops: HashMap<String, JoinHandle<()>> = HashMap::new();
+        let uuid = self.uuid.clone();
+
+        while !self.is_teardown.load(Ordering::Acquire) {
+            let now_s = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(d) => d.as_secs() as i64,
+                Err(_) => {
+                    sleep(Duration::from_millis(SUPERVISOR_TICK_MS)).await;
+                    continue;
+                }
+            };
+
+            let users_result =
+                Ad4mDb::with_global_instance(|db| db.list_users()).map_err(|e| e.to_string());
+            let user_tuples: Vec<(String, Option<i64>)> = match users_result {
+                Ok(users) => users
+                    .into_iter()
+                    .map(|u| (u.username, u.last_seen))
+                    .collect(),
+                Err(e) => {
+                    log::warn!(
+                        "auto_processor supervisor `{uuid}`: could not list users ({e}); \
+                         retrying in {SUPERVISOR_TICK_MS}ms"
+                    );
+                    sleep(Duration::from_millis(SUPERVISOR_TICK_MS)).await;
+                    continue;
+                }
+            };
+
+            let online =
+                select_online_managed_users(user_tuples, now_s, MANAGED_USER_ONLINE_WINDOW_S);
+            let online_set: std::collections::HashSet<&String> = online.iter().collect();
+
+            // Reap: drop entries for users who finished, aged out, or are no
+            // longer online. `handle.abort()` unwinds the loop's await points;
+            // `is_teardown` is not toggled by abort so the perspective stays
+            // healthy for other tasks.
+            per_user_loops.retain(|email, handle| {
+                if handle.is_finished() {
+                    log::debug!(
+                        "auto_processor supervisor `{uuid}`: loop for user `{email}` finished; \
+                         removing"
+                    );
+                    return false;
+                }
+                if !online_set.contains(email) {
+                    log::info!(
+                        "auto_processor supervisor `{uuid}`: user `{email}` aged out of \
+                         freshness window; aborting loop"
+                    );
+                    handle.abort();
+                    return false;
+                }
+                true
+            });
+
+            // Spawn loops for newly-online users. `for_user_email` is a pure
+            // constructor; DID / wallet resolution happens lazily inside the
+            // loop, so an email whose key never loaded still fails loudly
+            // there — not silently at spawn.
+            for email in online {
+                if per_user_loops.contains_key(&email) {
+                    continue;
+                }
+                let ctx = AgentContext::for_user_email(email.clone());
+                let this = self.clone();
+                let uuid_clone = uuid.clone();
+                let email_clone = email.clone();
+                let handle = tokio::spawn(async move {
+                    log::info!(
+                        "auto_processor supervisor `{uuid_clone}`: starting loop for user \
+                         `{email_clone}`"
+                    );
+                    this.auto_processor_watch_loop(ctx).await;
+                });
+                per_user_loops.insert(email, handle);
+            }
+
+            sleep(Duration::from_millis(SUPERVISOR_TICK_MS)).await;
+        }
+
+        // Teardown: abort every per-user loop deliberately. `is_teardown` is
+        // already visible to the child loops, but aborting is faster than
+        // waiting for their 500ms tick to observe it.
+        for (email, handle) in per_user_loops.drain() {
+            log::debug!(
+                "auto_processor supervisor `{uuid}`: teardown — aborting loop for `{email}`"
+            );
+            handle.abort();
+        }
     }
 
     pub async fn teardown_background_tasks(&self) {
