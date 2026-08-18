@@ -1068,6 +1068,7 @@ export class SHACLShape {
         filter: p.filter,
         transform: p.transform,
         interpretation_hint: p.interpretationHint,
+        identity: p.identity,
       })),
       constructor_actions: this.constructor_actions,
       destructor_actions: this.destructor_actions,
@@ -1119,6 +1120,7 @@ export class SHACLShape {
         filter: p.filter,
         transform: p.transform,
         interpretationHint: p.interpretation_hint,
+        identity: p.identity,
       });
     }
 
