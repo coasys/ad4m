@@ -576,14 +576,36 @@ async fn e2e_updates_existing_instance_via_id() {
         .await;
         let placements = run_interpretation_e2e(&mut perspective, &shapes, &transcript, &ctx).await;
         let touched_seeded = placements.iter().any(|(base, _)| base == SEEDED_BASE);
+        // The test is about the LLM-owned overwrite branch, so a "successful"
+        // attempt requires BOTH the id-emission (touched the seeded base) AND
+        // an actual title change through the gate. Otherwise gemma3:12b's
+        // occasional owner-only Update passes the retry gate but leaves the
+        // strengthened title-changed assertion to flake downstream.
+        let title_changed_on_seeded = if touched_seeded {
+            let rows = model_instances(&perspective, "Task", &["title"]).await;
+            rows.iter()
+                .find(|r| r.get("id").and_then(|i| i.as_str()) == Some(SEEDED_BASE))
+                .and_then(|r| r.get("title").and_then(|t| t.as_str()))
+                .is_some_and(|t| !t.eq_ignore_ascii_case(SEEDED_TITLE))
+        } else {
+            false
+        };
         last = Some((perspective, shapes, placements));
-        if touched_seeded {
+        if touched_seeded && title_changed_on_seeded {
             if attempt > 1 {
-                println!("[e2e] upsert satisfied on attempt {attempt}/{MAX_ATTEMPTS}");
+                println!(
+                    "[e2e] upsert + title-change satisfied on attempt {attempt}/{MAX_ATTEMPTS}"
+                );
             }
             break;
         }
-        println!("[e2e] attempt {attempt}/{MAX_ATTEMPTS}: LLM did not emit an id; retrying");
+        if !touched_seeded {
+            println!("[e2e] attempt {attempt}/{MAX_ATTEMPTS}: LLM did not emit an id; retrying");
+        } else {
+            println!(
+                "[e2e] attempt {attempt}/{MAX_ATTEMPTS}: LLM touched the seeded base but left the title unchanged; retrying"
+            );
+        }
     }
     let (perspective, shapes, placements) = last.expect("retry loop ran at least once");
     assert_persisted(&perspective, &shapes, &placements).await;
