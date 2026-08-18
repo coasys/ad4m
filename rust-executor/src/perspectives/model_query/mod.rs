@@ -91,12 +91,12 @@ mod query;
 mod relations;
 #[cfg(test)]
 mod round_trip_tests;
-mod shape;
+pub(crate) mod shape;
 mod sparql_builder;
 #[cfg(test)]
 mod test_helpers;
 pub(crate) mod types;
-mod utils;
+pub(crate) mod utils;
 
 pub use getters::evaluate_getters_batch;
 pub use query::execute_model_query;

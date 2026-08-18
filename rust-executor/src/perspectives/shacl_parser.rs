@@ -18,6 +18,11 @@ pub struct AD4MAction {
 pub struct SHACLShape {
     pub target_class: String,
     pub properties: Vec<PropertyShape>,
+    /// Natural-language hint describing what this class represents, used to steer
+    /// LLM interpretation (generic "English hint → model instance" mechanism).
+    /// Emitted as an `ad4m://interpretation_hint` link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpretation_hint: Option<String>,
     /// Constructor actions for creating instances
     #[serde(default)]
     pub constructor_actions: Vec<AD4MAction>,
@@ -45,6 +50,16 @@ pub struct ConformanceCondition {
 pub struct PropertyShape {
     pub path: String,
     pub name: Option<String>,
+    /// Natural-language hint describing this property's meaning, injected into the
+    /// interpretation prompt / generated tool schema as semantic guidance for the LLM.
+    /// Emitted as an `ad4m://interpretation_hint` link on the property node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpretation_hint: Option<String>,
+    /// Marks this property as the class's dedup identity (the "title-like"
+    /// interpretation key). Emitted as an `ad4m://identity` link on the
+    /// property node when `Some(true)`. No identity declared ⇒ no dedup.
+    #[serde(default)]
+    pub identity: Option<bool>,
     pub datatype: Option<String>,
     pub min_count: Option<u32>,
     pub max_count: Option<u32>,
@@ -376,6 +391,15 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         target: shape.target_class.clone(),
     });
 
+    // Natural-language interpretation hint (steers LLM interpretation)
+    if let Some(hint) = &shape.interpretation_hint {
+        links.push(Link {
+            source: shape_uri.clone(),
+            predicate: Some("ad4m://interpretation_hint".to_string()),
+            target: format!("literal:string:{}", hint),
+        });
+    }
+
     // Constructor actions (stored as JSON in literal)
     if !shape.constructor_actions.is_empty() {
         let constructor_json =
@@ -433,6 +457,25 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             predicate: Some("sh://path".to_string()),
             target: prop.path.clone(),
         });
+
+        // Natural-language property interpretation hint (semantic guidance for interpretation/tooling)
+        if let Some(hint) = &prop.interpretation_hint {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://interpretation_hint".to_string()),
+                target: format!("literal:string:{}", hint),
+            });
+        }
+
+        // Dedup identity marker: the property the extractor treats as the
+        // class's title-like interpretation key. No identity ⇒ no dedup.
+        if prop.identity == Some(true) {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://identity".to_string()),
+                target: "literal:string:true".to_string(),
+            });
+        }
 
         // Optional constraints
         if let Some(datatype) = &prop.datatype {
@@ -767,6 +810,66 @@ mod tests {
             .iter()
             .any(|l| l.source == "recipe://Recipe.name"
                 && l.predicate == Some("sh://path".to_string())));
+    }
+
+    #[test]
+    fn test_parse_shacl_with_interpretation_hint() {
+        // Natural-language interpretation hints on the class and on a property should be
+        // emitted as `ad4m://interpretation_hint` links so the generic extractor / MCP
+        // tooling can inject them as semantic guidance for the LLM.
+        let shacl_json = r#"{
+            "target_class": "soa://Task",
+            "interpretation_hint": "A concrete unit of work someone intends to do. Extract when there is an actionable outcome with a plausible owner; ignore vague aspirations.",
+            "properties": [
+                {
+                    "path": "soa://title",
+                    "name": "title",
+                    "interpretation_hint": "Imperative one-line summary of the work, e.g. 'Extract LLM processing from Flux'.",
+                    "datatype": "xsd://string",
+                    "min_count": 1,
+                    "max_count": 1
+                }
+            ]
+        }"#;
+
+        let links = parse_shacl_to_links(shacl_json, "Task").unwrap();
+
+        // Class-level interpretation-hint link on the shape node.
+        assert!(
+            links.iter().any(|l| l.source == "soa://TaskShape"
+                && l.predicate == Some("ad4m://interpretation_hint".to_string())
+                && l.target
+                    .starts_with("literal:string:A concrete unit of work")),
+            "expected an ad4m://interpretation_hint link on the class shape"
+        );
+
+        // Property-level interpretation-hint link on the property shape node.
+        assert!(
+            links.iter().any(|l| l.source == "soa://Task.title"
+                && l.predicate == Some("ad4m://interpretation_hint".to_string())
+                && l.target
+                    .starts_with("literal:string:Imperative one-line summary")),
+            "expected an ad4m://interpretation_hint link on the property shape"
+        );
+    }
+
+    #[test]
+    fn test_parse_shacl_without_interpretation_hint_emits_none() {
+        // Interpretation hints are optional; absence must not emit an interpretation_hint link.
+        let shacl_json = r#"{
+            "target_class": "recipe://Recipe",
+            "properties": [
+                { "path": "recipe://name", "name": "name", "datatype": "xsd://string" }
+            ]
+        }"#;
+
+        let links = parse_shacl_to_links(shacl_json, "Recipe").unwrap();
+        assert!(
+            !links
+                .iter()
+                .any(|l| l.predicate == Some("ad4m://interpretation_hint".to_string())),
+            "no ad4m://interpretation_hint link should be emitted when the hint is absent"
+        );
     }
 
     #[test]
