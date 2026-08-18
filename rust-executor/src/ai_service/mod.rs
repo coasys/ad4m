@@ -27,7 +27,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::sleep;
 
 mod error;
-use log::error;
+use log::{error, info};
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
@@ -323,7 +323,7 @@ impl AIService {
         let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![];
 
         if models.is_empty() {
-            // for integration tests, make sure we have Bert loaded
+            // No models configured — auto-load Bert for embedding support
             futures.push(Box::pin(
                 self.init_model(Model {
                     id: "bert-id".to_string(),
@@ -681,7 +681,6 @@ impl AIService {
 
                 let mut tasks = HashMap::<String, Task<Llama>>::new();
                 let mut task_descriptions = HashMap::<String, AITask>::new();
-                let idle_delay = Duration::from_millis(1);
 
                 rt.block_on(publish_model_status(
                     model_config.id.clone(),
@@ -695,16 +694,11 @@ impl AIService {
                     let _ = model_ready_sender.send(());
                 }
 
+                // Block on the channel — zero CPU while idle.
                 loop {
-                    match rt.block_on(async {
-                        tokio::select! {
-                            recv = llama_rx.recv() => Ok(recv),
-                            _ = tokio::time::sleep(idle_delay) => Err("timeout"),
-                        }
-                    }) {
-                        Err(_timeout) => std::thread::sleep(idle_delay * 5),
-                        Ok(None) => break,
-                        Ok(Some(task_request)) => match task_request {
+                    match rt.block_on(llama_rx.recv()) {
+                        None => break,
+                        Some(task_request) => match task_request {
                             LLMTaskRequest::Shutdown(shutdown_request) => {
                                 rt.block_on(publish_model_status(
                                     model_config.id.clone(),
@@ -1067,17 +1061,11 @@ impl AIService {
                     })
                     .expect("couldn't build Bert model");
 
-                let idle_delay = Duration::from_millis(1);
+                // Block on the channel — zero CPU while idle.
                 loop {
-                    match rt.block_on(async {
-                        tokio::select! {
-                            recv = bert_rx.recv() => Ok(recv),
-                            _ = tokio::time::sleep(idle_delay) => Err("timeout"),
-                        }
-                    }) {
-                        Err(_timeout) => std::thread::sleep(idle_delay * 5),
-                        Ok(None) => break,
-                        Ok(Some(request)) => {
+                    match rt.block_on(bert_rx.recv()) {
+                        None => break,
+                        Some(request) => {
                             let result: Result<Vec<f32>> = rt
                                 .block_on(async { model.embed(request.prompt).await })
                                 .map(|tensor| tensor.to_vec())
