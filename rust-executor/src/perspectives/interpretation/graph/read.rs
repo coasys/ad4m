@@ -31,7 +31,7 @@ pub async fn gather_transcript(
         .map_err(|e| anyhow::anyhow!("gather_transcript: get_links failed: {e:#}"))?;
     let mut out = Vec::with_capacity(links.len());
     for l in links {
-        if let Some(body) = decode_literal_string(&l.data.target) {
+        if let Some(body) = decode_transcript_body(&l.data.target) {
             out.push(TranscriptTurn {
                 speaker: l.author,
                 text: body,
@@ -50,6 +50,39 @@ pub(crate) fn decode_literal_string(uri: &str) -> Option<String> {
     use ad4m_client::literal::{Literal, LiteralValue};
     match Literal::from_url(uri.to_string()).ok()?.get().ok()? {
         LiteralValue::String(s) => Some(s),
+        _ => None,
+    }
+}
+
+/// Decode a transcript body from a `literal:` URI, resolving an **expression
+/// envelope** as well as a bare string.
+///
+/// A property declared with `resolveLanguage` — which `@Property` sets by
+/// default, so *every* ORM-declared body has it — is not stored as
+/// `literal:string:…`. Setting it creates an expression in the Literal
+/// language, so the stored target is a signed envelope:
+///
+/// ```json
+/// literal:json:{"author":"did:key:…","timestamp":"…","data":"the words","proof":{…}}
+/// ```
+///
+/// [`decode_literal_string`] answers `None` for that (it is `LiteralValue::Json`,
+/// not `String`), which made both gathers silently skip every row and report an
+/// empty transcript — indistinguishable from a conversation with nothing in it.
+/// The fixtures write `ns://body` as a bare literal, so the path had only ever
+/// been exercised against text no ORM model produces.
+///
+/// So: a string literal is the body; a JSON envelope carrying a string `data` is
+/// the body inside it; anything else is still not a message body.
+pub(crate) fn decode_transcript_body(uri: &str) -> Option<String> {
+    use ad4m_client::literal::{Literal, LiteralValue};
+    match Literal::from_url(uri.to_string()).ok()?.get().ok()? {
+        LiteralValue::String(s) => Some(s),
+        // An expression envelope. `data` is the payload the author signed; the
+        // envelope's own `author`/`timestamp` are richer than the link
+        // reifier's and a caller could prefer them, but reading the body is
+        // what unblocks the gather.
+        LiteralValue::Json(v) => v.get("data").and_then(|d| d.as_str()).map(|s| s.to_string()),
         _ => None,
     }
 }
@@ -121,7 +154,7 @@ pub async fn gather_transcript_sparql(
             );
         };
         let text = if raw_text.starts_with("literal:") {
-            match decode_literal_string(raw_text) {
+            match decode_transcript_body(raw_text) {
                 Some(s) => s,
                 None => continue, // non-string literal — not a message body
             }
@@ -331,6 +364,34 @@ mod tests {
     use super::*;
 
     use crate::perspectives::interpretation_test_support::*;
+
+    /// A body stored by a property with `resolveLanguage` — which `@Property` sets by default — is a
+    /// signed expression envelope, not a bare string. Reading only the bare form made both gathers
+    /// skip every row and report an empty transcript, which is indistinguishable from a conversation
+    /// with nothing in it: no error, no warning, no event.
+    #[test]
+    fn transcript_body_reads_an_expression_envelope() {
+        use ad4m_client::literal::Literal;
+
+        // What `@Optional` (no resolveLanguage) stores.
+        let bare = Literal::from_string("the words".to_string()).to_url().unwrap();
+        assert_eq!(decode_transcript_body(&bare).as_deref(), Some("the words"));
+
+        // What `@Property` stores: an expression created in the Literal language.
+        let envelope = Literal::from_json(serde_json::json!({
+            "author": "did:key:z6Mkabc",
+            "timestamp": "2026-08-18T16:18:21.287Z",
+            "data": "the words",
+            "proof": { "key": "did:key:z6Mkabc#z6Mkabc", "signature": "deadbeef" },
+        }))
+        .to_url()
+        .unwrap();
+        assert_eq!(decode_transcript_body(&envelope).as_deref(), Some("the words"));
+
+        // Still not a message body: JSON with no string `data`.
+        let other = Literal::from_json(serde_json::json!({ "count": 3 })).to_url().unwrap();
+        assert_eq!(decode_transcript_body(&other), None);
+    }
 
     #[tokio::test]
     async fn existing_instance_context_reads_id_and_identity() {
