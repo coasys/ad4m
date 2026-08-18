@@ -289,7 +289,9 @@ pub(crate) async fn setup_interpretation_e2e(
     // makes every e2e test self-contained — otherwise running one in isolation
     // (with no earlier test having inserted the row) leaves the task unspawned
     // and the first `prompt()` fails with "Task ... not spawned".
-    let _ = crate::perspectives::interpretation::ensure_interpretation_task();
+    crate::perspectives::interpretation::ensure_interpretation_task()
+        .await
+        .expect("ensure_interpretation_task");
     service
         .set_default_model(ModelType::Llm, model_id)
         .await
