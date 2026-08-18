@@ -331,6 +331,37 @@ pub fn elect_author(authors: &[String], online_dids: &[String], self_did: &str) 
     AuthorElection::NoneOnline
 }
 
+/// Threshold (seconds) after which a managed user is treated as offline for
+/// auto-processor loop supervision purposes. Mirrors the freshness window used
+/// by `capabilities::track_last_seen_from_token` for last-seen tracking, so a
+/// user active by that surface is also considered active here.
+pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 300;
+
+/// Pure filter: from a list of `(user_email, last_seen_seconds)` tuples, return
+/// the emails of users whose `last_seen` is within `threshold_s` of `now_s`.
+///
+/// Split from the live supervisor loop so the freshness policy is trivially
+/// testable — no DB, no wall clock, no spawning. `last_seen == None` means
+/// "never seen since server boot" and is treated as offline (a fresh managed
+/// user who has not yet authenticated should not gate an LLM loop against
+/// their DID). `last_seen > now_s` is capped to "just now" — a client with
+/// a slightly-fast clock is still online, not future-perfect.
+pub fn select_online_managed_users<I>(users: I, now_s: i64, threshold_s: i64) -> Vec<String>
+where
+    I: IntoIterator<Item = (String, Option<i64>)>,
+{
+    let cutoff = now_s.saturating_sub(threshold_s);
+    users
+        .into_iter()
+        .filter_map(|(email, last_seen)| {
+            let ls = last_seen?;
+            // Clamp future timestamps forward-into-online; still filter by cutoff.
+            let effective = ls.min(now_s);
+            (effective >= cutoff).then_some(email)
+        })
+        .collect()
+}
+
 /// Turn an [`AutoProcessorConfig::dedup_strategy_json`] blob into a live
 /// [`DedupStrategy`]. Missing / unparseable / unknown-kind blobs fall back to
 /// [`DedupStrategy::NormalizedString`] with a warn log, preserving the
@@ -758,6 +789,57 @@ mod tests {
             elect_author(&authors, &online, "did:key:me"),
             AuthorElection::Other("did:key:alice".into())
         );
+    }
+
+    // ---- select_online_managed_users ---------------------------------------
+
+    /// The supervisor filters by wall-clock freshness — users seen within the
+    /// window get a loop; users beyond it do not. Empty-last-seen is the
+    /// never-yet-authenticated case and is excluded (we do not want to spawn
+    /// an LLM loop against a DID that has never touched the server).
+    #[test]
+    fn selects_users_within_freshness_window() {
+        let now = 1_000_000_i64;
+        let window = 300_i64;
+        let online = select_online_managed_users(
+            vec![
+                ("alice@x".into(), Some(now - 10)),   // seen 10s ago
+                ("bob@x".into(), Some(now - 299)),    // right on the edge, still in
+                ("carol@x".into(), Some(now - 301)),  // just past — out
+                ("dave@x".into(), Some(now - 5_000)), // long stale — out
+                ("eve@x".into(), None),               // never seen — out
+            ],
+            now,
+            window,
+        );
+        assert_eq!(online, vec!["alice@x", "bob@x"]);
+    }
+
+    /// A last-seen slightly in the future (client clock skew) still counts
+    /// as online — the effective timestamp is clamped forward-into-now. Only
+    /// a stale absolute time-since-window pushes a user out.
+    #[test]
+    fn future_last_seen_is_treated_as_online() {
+        let now = 1_000_000_i64;
+        let window = 300_i64;
+        let online = select_online_managed_users(
+            vec![
+                ("skewed@x".into(), Some(now + 60)), // 1 min in the future
+                ("stale@x".into(), Some(now - 400)), // 400s ago — out
+            ],
+            now,
+            window,
+        );
+        assert_eq!(online, vec!["skewed@x"]);
+    }
+
+    /// Empty input → empty output; the supervisor treats an empty user list
+    /// as "no managed users online right now" and spawns no loops.
+    #[test]
+    fn empty_input_selects_no_users() {
+        let selected =
+            select_online_managed_users(Vec::<(String, Option<i64>)>::new(), 1_000_000, 300);
+        assert!(selected.is_empty());
     }
 
     // ---- WatcherState -------------------------------------------------------

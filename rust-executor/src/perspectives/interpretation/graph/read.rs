@@ -31,7 +31,7 @@ pub async fn gather_transcript(
         .map_err(|e| anyhow::anyhow!("gather_transcript: get_links failed: {e:#}"))?;
     let mut out = Vec::with_capacity(links.len());
     for l in links {
-        if let Some(body) = decode_literal_string(&l.data.target) {
+        if let Some(body) = decode_transcript_body(&l.data.target) {
             out.push(TranscriptTurn {
                 speaker: l.author,
                 text: body,
@@ -50,6 +50,42 @@ pub(crate) fn decode_literal_string(uri: &str) -> Option<String> {
     use ad4m_client::literal::{Literal, LiteralValue};
     match Literal::from_url(uri.to_string()).ok()?.get().ok()? {
         LiteralValue::String(s) => Some(s),
+        _ => None,
+    }
+}
+
+/// Decode a transcript body from a `literal:` URI, resolving an **expression
+/// envelope** as well as a bare string.
+///
+/// A property declared with `resolveLanguage` — which `@Property` sets by
+/// default, so *every* ORM-declared body has it — is not stored as
+/// `literal:string:…`. Setting it creates an expression in the Literal
+/// language, so the stored target is a signed envelope:
+///
+/// ```json
+/// literal:json:{"author":"did:key:…","timestamp":"…","data":"the words","proof":{…}}
+/// ```
+///
+/// [`decode_literal_string`] answers `None` for that (it is `LiteralValue::Json`,
+/// not `String`), which made both gathers silently skip every row and report an
+/// empty transcript — indistinguishable from a conversation with nothing in it.
+/// The fixtures write `ns://body` as a bare literal, so the path had only ever
+/// been exercised against text no ORM model produces.
+///
+/// So: a string literal is the body; a JSON envelope carrying a string `data` is
+/// the body inside it; anything else is still not a message body.
+pub(crate) fn decode_transcript_body(uri: &str) -> Option<String> {
+    use ad4m_client::literal::{Literal, LiteralValue};
+    match Literal::from_url(uri.to_string()).ok()?.get().ok()? {
+        LiteralValue::String(s) => Some(s),
+        // An expression envelope. `data` is the payload the author signed; the
+        // envelope's own `author`/`timestamp` are richer than the link
+        // reifier's and a caller could prefer them, but reading the body is
+        // what unblocks the gather.
+        LiteralValue::Json(v) => v
+            .get("data")
+            .and_then(|d| d.as_str())
+            .map(|s| s.to_string()),
         _ => None,
     }
 }
@@ -121,7 +157,7 @@ pub async fn gather_transcript_sparql(
             );
         };
         let text = if raw_text.starts_with("literal:") {
-            match decode_literal_string(raw_text) {
+            match decode_transcript_body(raw_text) {
                 Some(s) => s,
                 None => continue, // non-string literal — not a message body
             }
@@ -334,6 +370,143 @@ mod tests {
     use super::*;
 
     use crate::perspectives::interpretation_test_support::*;
+
+    /// A body stored by a property with `resolveLanguage` — which `@Property` sets by default — is a
+    /// signed expression envelope, not a bare string. Reading only the bare form made both gathers
+    /// skip every row and report an empty transcript, which is indistinguishable from a conversation
+    /// with nothing in it: no error, no warning, no event.
+    #[test]
+    fn transcript_body_reads_an_expression_envelope() {
+        use ad4m_client::literal::Literal;
+
+        // What `@Optional` (no resolveLanguage) stores.
+        let bare = Literal::from_string("the words".to_string())
+            .to_url()
+            .unwrap();
+        assert_eq!(decode_transcript_body(&bare).as_deref(), Some("the words"));
+
+        // What `@Property` stores: an expression created in the Literal language.
+        let envelope = Literal::from_json(serde_json::json!({
+            "author": "did:key:z6Mkabc",
+            "timestamp": "2026-08-18T16:18:21.287Z",
+            "data": "the words",
+            "proof": { "key": "did:key:z6Mkabc#z6Mkabc", "signature": "deadbeef" },
+        }))
+        .to_url()
+        .unwrap();
+        assert_eq!(
+            decode_transcript_body(&envelope).as_deref(),
+            Some("the words")
+        );
+
+        // Still not a message body: JSON with no string `data`.
+        let other = Literal::from_json(serde_json::json!({ "count": 3 }))
+            .to_url()
+            .unwrap();
+        assert_eq!(decode_transcript_body(&other), None);
+    }
+
+    /// Link-based gather over an envelope-shaped body — the shape any @Property
+    /// declaration produces. Complements the unit test above by proving the
+    /// callsite in gather_transcript itself decodes envelope targets end to end.
+    /// The pre-fix code returned an empty vec here, silently, which is the exact
+    /// symptom James hit in WE.
+    #[tokio::test]
+    async fn gather_transcript_reads_expression_envelope_body() {
+        use crate::types::{Link, LinkStatus};
+        use ad4m_client::literal::Literal;
+
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        let envelope = Literal::from_json(serde_json::json!({
+            "author": "did:key:z6Mkalice",
+            "timestamp": "2026-08-18T16:18:21.287Z",
+            "data": "hello from the envelope",
+            "proof": { "key": "did:key:z6Mkalice#z6Mkalice", "signature": "deadbeef" },
+        }))
+        .to_url()
+        .unwrap();
+
+        p.add_link(
+            Link {
+                source: "msg://envelope-1".into(),
+                predicate: Some("ns://body".into()),
+                target: envelope,
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed envelope body link");
+
+        let turns = gather_transcript(&p, "msg://envelope-1", "ns://body")
+            .await
+            .expect("gather");
+        assert_eq!(turns.len(), 1, "envelope body must yield a turn");
+        assert_eq!(turns[0].text, "hello from the envelope");
+    }
+
+    /// SPARQL-based gather over an envelope-shaped body. This is the exact
+    /// codepath the AutoProcessor takes in production. Pre-fix, the row bound
+    /// `?text` to the `literal:json:` envelope, `decode_literal_string` returned
+    /// None, and the row was silently dropped — the tick then fired successfully
+    /// producing nothing, indistinguishable from a conversation with no content.
+    #[tokio::test]
+    async fn gather_transcript_sparql_reads_expression_envelope_body() {
+        use crate::types::{Link, LinkStatus};
+        use ad4m_client::literal::Literal;
+
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        // Seed one message with an envelope body + author + timestamp on the message
+        // itself (a simpler shape than the reifier pattern — the point here is the
+        // decode step, not the reifier plumbing).
+        let envelope = Literal::from_json(serde_json::json!({
+            "author": "did:key:z6Mkalice",
+            "timestamp": "2026-08-18T16:18:21.287Z",
+            "data": "hello via sparql",
+            "proof": { "key": "did:key:z6Mkalice#z6Mkalice", "signature": "deadbeef" },
+        }))
+        .to_url()
+        .unwrap();
+
+        for (predicate, target) in [
+            ("ns://body", envelope.as_str()),
+            ("ns://author", "did:key:z6Mkalice"),
+            ("ns://ts", "2026-08-18T16:18:21.287Z"),
+        ] {
+            p.add_link(
+                Link {
+                    source: "msg://sparql-envelope-1".into(),
+                    predicate: Some(predicate.into()),
+                    target: target.into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed link");
+        }
+
+        let sparql = r#"SELECT ?speaker ?text ?timestamp WHERE {
+            ?m <ns://body> ?text .
+            ?m <ns://author> ?speaker .
+            ?m <ns://ts> ?timestamp .
+        }"#;
+        let turns = gather_transcript_sparql(&p, sparql)
+            .await
+            .expect("gather via sparql");
+        assert_eq!(
+            turns.len(),
+            1,
+            "envelope body must survive the SPARQL gather"
+        );
+        assert_eq!(turns[0].text, "hello via sparql");
+        assert_eq!(turns[0].speaker, "did:key:z6Mkalice");
+        assert_eq!(turns[0].timestamp, "2026-08-18T16:18:21.287Z");
+    }
 
     #[tokio::test]
     async fn existing_instance_context_reads_id_and_identity() {
