@@ -230,25 +230,26 @@ pub fn plan_interpretation_ops_resolved(
     // full index.
     let mut out = Vec::with_capacity(placed.len());
     for p in &placed {
-        if !p.emit {
-            continue;
-        }
-        let values = scalar_values(p.shape, p.inst);
-        if p.is_update {
-            if !values.is_empty() {
-                out.push(InterpretationOp::Update {
+        if p.emit {
+            let values = scalar_values(p.shape, p.inst);
+            if p.is_update {
+                if !values.is_empty() {
+                    out.push(InterpretationOp::Update {
+                        base: p.base.clone(),
+                        class: p.inst.class.clone(),
+                        values,
+                    });
+                }
+            } else {
+                out.push(InterpretationOp::Create {
                     base: p.base.clone(),
                     class: p.inst.class.clone(),
                     values,
                 });
             }
-        } else {
-            out.push(InterpretationOp::Create {
-                base: p.base.clone(),
-                class: p.inst.class.clone(),
-                values,
-            });
         }
+        // Resolve relations for ALL slots (including deduplicated ones) —
+        // AddLinks is additive and the existing-link guard suppresses repeats.
         let rel_links = resolve_relation_links(
             p.shape,
             p.inst,
