@@ -11,16 +11,21 @@
 
 #![cfg(test)]
 
-use super::interpretation::{class_local_name, run_interpretation};
+use super::interpretation::{
+    apply_interpretation_ops, class_local_name, existing_instance_context,
+    plan_interpretation_ops_with_context, run_interpretation, run_interpretation_with_strategy,
+    DedupStrategy, ExistingInstances, ExistingLinks, InstanceContext, InterpretationOp,
+    ProposedInstance,
+};
 use super::model_query::shape::load_shape;
-use super::model_query::types::ModelShape;
+use super::model_query::types::{ModelShape, ParentScope};
 use super::perspective_instance::{PerspectiveInstance, SdnaType, SubjectClassOption};
 use super::shacl_parser::parse_shacl_to_links;
 use super::sparql_store::SparqlStore;
 use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Once;
 
 static INIT_DB: Once = Once::new();
@@ -45,7 +50,7 @@ pub(crate) const BELIEF_SDNA: &str = r#"{
 
 pub(crate) const INTENTION_SDNA: &str = r#"{
   "target_class":"ns://Intention",
-  "interpretation_hint":"Something a participant commits to doing - an actionable outcome with a plausible owner.",
+  "interpretation_hint":"A first-person commitment to do something - the speaker themselves saying they will act (e.g., 'I'll write X', 'I plan to do Y'). If work is being assigned to someone else, that is a Task, not an Intention.",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://intention"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://intention","min_count":1,"max_count":1},
@@ -56,7 +61,7 @@ pub(crate) const INTENTION_SDNA: &str = r#"{
 
 pub(crate) const TASK_SDNA: &str = r#"{
   "target_class":"ns://Task",
-  "interpretation_hint":"A concrete, actionable unit of work to be done, ideally with an owner. Not a belief or a vague aspiration.",
+  "interpretation_hint":"A concrete unit of work assigned to a person, typically by someone else (e.g., 'X, can you do Y by Z?', 'we need X to happen'). If the speaker is themselves committing to it in first person, that is an Intention. Not a belief or a vague aspiration.",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://task"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
@@ -109,19 +114,6 @@ pub(crate) const VISION_SDNA: &str = r#"{
   ]
 }"#;
 
-/// A class whose declared identity is `name`, not the default `title`. Used to
-/// verify the prompt exposes the identity field name so the model does not
-/// silently emit `title` for a non-`title`-identity class and bypass dedup.
-pub(crate) const PERSON_SDNA: &str = r#"{
-  "target_class":"ns://Person",
-  "interpretation_hint":"A person mentioned in the conversation.",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://person"}],
-  "properties":[
-    {"path":"ns://type","name":"type","has_value":"ns://person","min_count":1,"max_count":1},
-    {"path":"ns://name","name":"name","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"Person's name as used in the transcript.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://name","target":"value"}]}
-  ]
-}"#;
-
 pub(crate) const PLAN_SDNA: &str = r#"{
   "target_class":"ns://Plan",
   "interpretation_hint":"A concrete approach or sequence of steps intended to achieve a goal.",
@@ -130,6 +122,22 @@ pub(crate) const PLAN_SDNA: &str = r#"{
     {"path":"ns://type","name":"type","has_value":"ns://plan","min_count":1,"max_count":1},
     {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"Summary of the plan or approach.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
     {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","interpretation_hint":"Who owns the plan, if stated.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]}
+  ]
+}"#;
+
+/// The Flux-shaped grouping class: `name` is the identity (dedup key), `summary`
+/// is a mutable rolling scalar the extractor is asked to *grow* rather than
+/// replace. Used by the Flux-grouping / persistent-topics e2e tests: the model
+/// must resolve continuing turns to an existing subgroup's `id` (upsert path)
+/// and a topic shift must mint a fresh one.
+pub(crate) const CONVERSATION_SUBGROUP_SDNA: &str = r#"{
+  "target_class":"ns://ConversationSubgroup",
+  "interpretation_hint":"A coherent conversational thread — a set of turns focused on the same topic. Group turns discussing the same subject under one subgroup; a clear shift in subject starts a new subgroup. When an existing subgroup already covers the topic being discussed, REUSE its id (via the `id` field on the proposed instance) instead of creating a duplicate. CRITICAL DECISION RULE: read each `existing` entry's `title` (its topic name) BEFORE deciding whether to reuse an id. Only reuse an existing subgroup's id when the current turns are clearly on the SAME topic as that subgroup's title. If the current turns are on a different topic — even if there is only one existing subgroup — leave `id` unset and mint a NEW subgroup. Reusing an id for a genuinely unrelated topic silently overwrites the existing subgroup and destroys data.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://conversationsubgroup"}],
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://conversationsubgroup","min_count":1,"max_count":1},
+    {"path":"ns://name","name":"name","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"Short label for the topic (2-5 words).","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://name","target":"value"}]},
+    {"path":"ns://summary","name":"summary","min_count":0,"max_count":1,"resolve_language":"literal","interpretation_hint":"1-2 sentence rolling summary of what has been discussed in THIS subgroup specifically — its own topic only. When updating an existing subgroup, incorporate ONLY the new turns that belong to this subgroup's topic, extending the existing summary rather than replacing it. NEVER fold in turns about a different topic: if the current turns are on a new topic they belong to a NEW subgroup, so leave this one's `id` and `summary` out of your output entirely and let it stay exactly as it is.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://summary","target":"value"}]}
   ]
 }"#;
 
@@ -172,24 +180,80 @@ pub(crate) fn shape_from_sdna(class: &str, sdna: &str) -> ModelShape {
     load_shape(&store, class).unwrap()
 }
 
-// ---- real-LLM harness (Ollama over the OpenAI-compatible API) --------------
+// ---- harnesses --------------------------------------------------------------
 
-/// Stand up `AIService` with the Ollama-backed default model plus a fresh
-/// private perspective and the given SoA classes. Returns everything a test
-/// needs to drive interpretation (optionally after pre-seeding the perspective).
-pub(crate) async fn setup_interpretation_e2e(
+/// Bring up a fresh private perspective with the given SoA classes registered as
+/// REAL subject classes, **without** standing up `AIService` — for unit tests
+/// that exercise perspective writes (upsert, `apply_interpretation_ops`) but
+/// never call a model.
+///
+/// The `add_sdna` registration is what makes `create_subject` / `update_subject`
+/// work: they read each class's `ad4m://constructor` + per-property
+/// `ad4m://setter` actions from the perspective's store, not from the in-memory
+/// `ModelShape`. Without it they error with "No SHACL constructor found".
+pub(crate) async fn setup_perspective_no_llm(
     class_sdnas: &[(&str, &str)],
 ) -> (PerspectiveInstance, Vec<ModelShape>, AgentContext) {
     use crate::agent::AgentService;
-    use crate::ai_service::AIService;
     use crate::prolog_service::init_prolog_service;
     use crate::test_utils::setup_wallet;
-    use crate::types::{ModelApiInput, ModelInput, ModelType, PerspectiveHandle, PerspectiveState};
+    use crate::types::{PerspectiveHandle, PerspectiveState};
 
     setup_wallet();
     ensure_db_init();
     AgentService::init_global_test_instance();
     init_prolog_service().await;
+
+    let mut perspective = PerspectiveInstance::new(
+        PerspectiveHandle {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            name: Some("Interpretation test".into()),
+            shared_url: None,
+            neighbourhood: None,
+            state: PerspectiveState::Private,
+            owners: None,
+        },
+        None,
+    );
+    let ctx = AgentContext::main_agent();
+    perspective
+        .ensure_prolog_engine_pool_for_context(&ctx)
+        .await
+        .expect("prolog engine pool");
+
+    for (class, sdna) in class_sdnas {
+        perspective
+            .add_sdna(
+                (*class).to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some((*sdna).to_string()),
+                &ctx,
+            )
+            .await
+            .expect("add_sdna");
+    }
+
+    let shapes: Vec<ModelShape> = class_sdnas
+        .iter()
+        .map(|(class, sdna)| shape_from_sdna(class, sdna))
+        .collect();
+
+    (perspective, shapes, ctx)
+}
+
+// ---- real-LLM harness (Ollama over the OpenAI-compatible API) --------------
+
+/// Stand up `AIService` with the Ollama-backed default model on top of
+/// [`setup_perspective_no_llm`]. Returns everything a test needs to drive
+/// interpretation (optionally after pre-seeding the perspective).
+pub(crate) async fn setup_interpretation_e2e(
+    class_sdnas: &[(&str, &str)],
+) -> (PerspectiveInstance, Vec<ModelShape>, AgentContext) {
+    use crate::ai_service::AIService;
+    use crate::types::{ModelApiInput, ModelInput, ModelType};
+
+    let (perspective, shapes, ctx) = setup_perspective_no_llm(class_sdnas).await;
 
     // init_global_instance re-inits; each test adds its own model immediately
     // after, so re-init between tests (--test-threads=1) is safe.
@@ -218,68 +282,144 @@ pub(crate) async fn setup_interpretation_e2e(
         })
         .await
         .expect("add_model");
+    // Insert the interpretation task row BEFORE setting the default model:
+    // `ensure_interpretation_task` only writes the DB row, and it's
+    // `set_default_model`'s respawn loop (over `model_id == "default"` tasks)
+    // that actually registers the task with the LLM worker. Priming it here
+    // makes every e2e test self-contained — otherwise running one in isolation
+    // (with no earlier test having inserted the row) leaves the task unspawned
+    // and the first `prompt()` fails with "Task ... not spawned".
+    crate::perspectives::interpretation::ensure_interpretation_task()
+        .await
+        .expect("ensure_interpretation_task");
     service
         .set_default_model(ModelType::Llm, model_id)
         .await
         .expect("set_default_model(Llm)");
 
-    let mut perspective = PerspectiveInstance::new(
-        PerspectiveHandle {
-            uuid: uuid::Uuid::new_v4().to_string(),
-            name: Some("Interpretation e2e".into()),
-            shared_url: None,
-            neighbourhood: None,
-            state: PerspectiveState::Private,
-            owners: None,
-        },
-        None,
-    );
-    let ctx = AgentContext::main_agent();
-    perspective
-        .ensure_prolog_engine_pool_for_context(&ctx)
-        .await
-        .expect("prolog engine pool");
-
-    // Register each class as a REAL subject class (constructor + setter actions)
-    // in the perspective, so `create_subject` can read its SDNA. Without this it
-    // errors with "No SHACL constructor found".
-    for (class, sdna) in class_sdnas {
-        perspective
-            .add_sdna(
-                (*class).to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some((*sdna).to_string()),
-                &ctx,
-            )
-            .await
-            .expect("add_sdna");
-    }
-
-    let shapes: Vec<ModelShape> = class_sdnas
-        .iter()
-        .map(|(class, sdna)| shape_from_sdna(class, sdna))
-        .collect();
-
     (perspective, shapes, ctx)
 }
 
+/// Register (and load) an `AIService` embedding model named `interpretation-embed`
+/// — a local candle Bert (CPU) — so the `DedupStrategy::Semantic` path can embed
+/// identity strings through `AIService::embed` rather than any external endpoint.
+/// The channel is keyed by the model *name*, which is what `semantic_from_env`
+/// (default `interpretation-embed`) passes to `embed`. Idempotent-ish: only the
+/// one semantic-dedup e2e needs it, so it isn't part of the default setup (Bert
+/// load is not free).
+pub(crate) async fn register_interpretation_embedding_model() {
+    use crate::types::{ModelInput, ModelType};
+    let service = crate::ai_service::AIService::global_instance()
+        .await
+        .expect("AIService global instance");
+    service
+        .add_model(ModelInput {
+            name: "interpretation-embed".into(),
+            model_type: ModelType::Embedding,
+            local: None,
+            api: None,
+        })
+        .await
+        .expect("add_model(Embedding)");
+}
+
+/// Read back the links written under each affected `base`. Production
+/// `run_interpretation` is link-free (it returns only base URIs), but a few e2e
+/// tests assert on the *edges* a run wrote (a resolved `topic-of` relation, a
+/// reified `SemanticRelationship`), which live on links rather than in
+/// model_query scalar state. The test harness reads them back here so those
+/// tests keep working without production returning links.
+pub(crate) async fn read_back_placements(
+    perspective: &PerspectiveInstance,
+    bases: &[String],
+) -> Vec<(String, Vec<Link>)> {
+    let mut out = Vec::with_capacity(bases.len());
+    for base in bases {
+        let stored = perspective
+            .get_links(&crate::types::LinkQuery {
+                source: Some(base.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links readback");
+        let links: Vec<Link> = stored.into_iter().map(|d| d.data.clone()).collect();
+        out.push((base.clone(), links));
+    }
+    out
+}
+
 /// Run interpretation against the real LLM under the standard `soa://ext/` prefix,
-/// and dump the affected instance base URIs for the test log.
+/// returning the affected instances with their written links read back (see
+/// [`read_back_placements`]).
 pub(crate) async fn run_interpretation_e2e(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
     transcript: &[(&str, &str)],
     ctx: &AgentContext,
+) -> Vec<(String, Vec<Link>)> {
+    let transcript: Vec<(String, String)> = transcript
+        .iter()
+        .map(|(s, t)| (s.to_string(), t.to_string()))
+        .collect();
+    let bases = run_interpretation(perspective, shapes, &transcript, "soa://ext/", ctx, None)
+        .await
+        .expect("run_interpretation against real LLM to succeed");
+    let placements = read_back_placements(perspective, &bases).await;
+    print_placements(&placements);
+    placements
+}
+
+/// Like [`run_interpretation_e2e`] but with an explicit [`DedupStrategy`] —
+/// used by the semantic-dedup e2e to opt into the embedding-based dedup path
+/// without changing the default that every other e2e test relies on.
+pub(crate) async fn run_interpretation_e2e_with_strategy(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[(&str, &str)],
+    ctx: &AgentContext,
+    strategy: &DedupStrategy,
+) -> Vec<(String, Vec<Link>)> {
+    let transcript: Vec<(String, String)> = transcript
+        .iter()
+        .map(|(s, t)| (s.to_string(), t.to_string()))
+        .collect();
+    let bases = run_interpretation_with_strategy(
+        perspective,
+        shapes,
+        &transcript,
+        "soa://ext/",
+        ctx,
+        strategy,
+        None,
+    )
+    .await
+    .expect("run_interpretation_with_strategy against real LLM to succeed");
+    let placements = read_back_placements(perspective, &bases).await;
+    print_placements(&placements);
+    placements
+}
+
+/// Like [`run_interpretation_e2e`] but with an explicit existing-instance
+/// `scope` (a [`ParentScope`]) — the channel-scoping a Flux-style processor
+/// applies so the model only sees the subgroups belonging to *this* channel.
+/// Returns the affected instance bases so the caller can wire fresh instances
+/// into the scoped sub-graph between passes.
+pub(crate) async fn run_interpretation_e2e_scoped(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[(&str, &str)],
+    ctx: &AgentContext,
+    scope: Option<&ParentScope>,
 ) -> Vec<String> {
     let transcript: Vec<(String, String)> = transcript
         .iter()
         .map(|(s, t)| (s.to_string(), t.to_string()))
         .collect();
-    let bases = run_interpretation(perspective, shapes, &transcript, "soa://ext/", ctx)
+    let bases = run_interpretation(perspective, shapes, &transcript, "soa://ext/", ctx, scope)
         .await
-        .expect("run_interpretation against real LLM to succeed");
-    print_bases(&bases);
+        .expect("run_interpretation (scoped) against real LLM to succeed");
+    let placements = read_back_placements(perspective, &bases).await;
+    print_placements(&placements);
     bases
 }
 
@@ -289,10 +429,14 @@ pub(crate) async fn run_interpretation_e2e(
 pub(crate) async fn run_e2e(
     class_sdnas: &[(&str, &str)],
     transcript: &[(&str, &str)],
-) -> (PerspectiveInstance, Vec<ModelShape>, Vec<String>) {
+) -> (
+    PerspectiveInstance,
+    Vec<ModelShape>,
+    Vec<(String, Vec<Link>)>,
+) {
     let (mut perspective, shapes, ctx) = setup_interpretation_e2e(class_sdnas).await;
-    let bases = run_interpretation_e2e(&mut perspective, &shapes, transcript, &ctx).await;
-    (perspective, shapes, bases)
+    let placements = run_interpretation_e2e(&mut perspective, &shapes, transcript, &ctx).await;
+    (perspective, shapes, placements)
 }
 
 /// Like [`run_e2e`], but retries the whole interpretation up to `attempts` times
@@ -305,26 +449,56 @@ pub(crate) async fn run_e2e_until(
     transcript: &[(&str, &str)],
     attempts: u8,
     ok: impl Fn(&HashMap<String, usize>) -> bool,
-) -> (PerspectiveInstance, Vec<ModelShape>, Vec<String>) {
+) -> (
+    PerspectiveInstance,
+    Vec<ModelShape>,
+    Vec<(String, Vec<Link>)>,
+) {
     let mut last = None;
     for i in 1..=attempts {
-        let (p, shapes, bases) = run_e2e(class_sdnas, transcript).await;
+        let (p, shapes, placements) = run_e2e(class_sdnas, transcript).await;
         let counts = graph_count_by_type(&p, &shapes).await;
         if ok(&counts) {
-            return (p, shapes, bases);
+            return (p, shapes, placements);
         }
         eprintln!(
             "[e2e] attempt {i}/{attempts} did not satisfy retry guard (got {counts:?}); retrying"
         );
-        last = Some((p, shapes, bases));
+        last = Some((p, shapes, placements));
     }
     last.expect("run_e2e_until: attempts must be >= 1")
 }
 
-pub(crate) fn print_bases(bases: &[String]) {
-    println!("e2e affected instances: {}", bases.len());
-    for base in bases {
-        println!("  instance {base}");
+/// Like [`run_e2e_until`], but the retry guard inspects the *placements* rather
+/// than graph counts — for properties that live on the links a run wrote (e.g.
+/// "a relation edge resolved to a co-minted sibling") rather than on how many
+/// instances of each class ended up in the graph.
+pub(crate) async fn run_e2e_until_placements(
+    class_sdnas: &[(&str, &str)],
+    transcript: &[(&str, &str)],
+    attempts: u8,
+    ok: impl Fn(&[(String, Vec<Link>)]) -> bool,
+) -> (
+    PerspectiveInstance,
+    Vec<ModelShape>,
+    Vec<(String, Vec<Link>)>,
+) {
+    let mut last = None;
+    for i in 1..=attempts {
+        let (p, shapes, placements) = run_e2e(class_sdnas, transcript).await;
+        if ok(&placements) {
+            return (p, shapes, placements);
+        }
+        eprintln!("[e2e] attempt {i}/{attempts} did not satisfy retry guard; retrying");
+        last = Some((p, shapes, placements));
+    }
+    last.expect("run_e2e_until_placements: attempts must be >= 1")
+}
+
+pub(crate) fn print_placements(placements: &[(String, Vec<Link>)]) {
+    println!("e2e placements: {} instance(s)", placements.len());
+    for (base, links) in placements {
+        println!("  instance {base} ({} link(s))", links.len());
     }
 }
 
@@ -339,6 +513,27 @@ pub(crate) async fn seed_instance(
     base: &str,
     title: &str,
 ) {
+    seed_instance_with_props(
+        perspective,
+        ctx,
+        shape,
+        base,
+        serde_json::json!({ "title": title }),
+    )
+    .await;
+}
+
+/// Like [`seed_instance`] but accepts an arbitrary props object — used when the
+/// class's identity is a non-`title` field (e.g. `ConversationSubgroup.name`) or
+/// the seed needs to carry secondary scalars (e.g. `summary`) so a subsequent
+/// interpretation pass can *update* them in place.
+pub(crate) async fn seed_instance_with_props(
+    perspective: &mut PerspectiveInstance,
+    ctx: &AgentContext,
+    shape: &ModelShape,
+    base: &str,
+    props: serde_json::Value,
+) {
     perspective
         .create_subject(
             SubjectClassOption {
@@ -346,19 +541,19 @@ pub(crate) async fn seed_instance(
                 query: None,
             },
             base.to_string(),
-            Some(serde_json::json!({ "title": title })),
+            Some(props),
             None,
             ctx,
         )
         .await
-        .expect("seed_instance create_subject");
+        .expect("seed_instance_with_props create_subject");
 }
 
 // ---- graph-state accessors / assertions (read back via `model_query`) -------
 //
 // These read the *final graph state* through `PerspectiveInstance::model_query`
 // — the symmetric counterpart to the write side (`create_subject`) and the read
-// side (`existing_instance_identities`) — rather than inspecting the placement links
+// side (`existing_instance_context`) — rather than inspecting the placement links
 // `run_interpretation` returned. Tests assert what's actually persisted in the
 // perspective, decoded through each class's own shape/getters.
 
@@ -459,7 +654,7 @@ pub(crate) async fn graph_owners_lower(
 pub(crate) async fn assert_persisted(
     perspective: &PerspectiveInstance,
     shapes: &[ModelShape],
-    bases: &[String],
+    placements: &[(String, Vec<Link>)],
 ) {
     let mut persisted_ids = std::collections::HashSet::new();
     for shape in shapes {
@@ -470,10 +665,236 @@ pub(crate) async fn assert_persisted(
             }
         }
     }
-    for base in bases {
+    for (base, _links) in placements {
         assert!(
             persisted_ids.contains(base),
             "base {base} not readable back as a model instance; persisted ids: {persisted_ids:?}"
         );
     }
+}
+
+// ---- relocated interpretation unit-test fixtures ----
+
+/// An empty existing-instance context, typed — the interpretation path takes
+/// the id-keyed [`ExistingInstances`] map now, so a bare `HashMap::new()` can't
+/// be inferred.
+pub(crate) fn no_existing() -> ExistingInstances {
+    HashMap::new()
+}
+
+/// Build an [`ExistingInstances`] map (id → context) from a list of instances,
+/// keyed by each instance's own `id`. The single-source shape the production
+/// code threads everywhere; tests that used to hand-build class→identity or
+/// id-set projections construct this instead.
+pub(crate) fn existing_map(instances: Vec<InstanceContext>) -> ExistingInstances {
+    let mut out = ExistingInstances::new();
+    for i in instances {
+        out.entry(i.id.clone()).or_default().push(i);
+    }
+    out
+}
+
+/// Convenience for planner tests that only exercise id membership (Create vs
+/// Update routing / relation-ref validation) and don't read identity/props:
+/// build minimal entries keyed by the given ids.
+pub(crate) fn existing_ids(ids: &[&str]) -> ExistingInstances {
+    existing_map(
+        ids.iter()
+            .map(|id| InstanceContext {
+                id: (*id).to_string(),
+                title: String::new(),
+                class: String::new(),
+                properties: BTreeMap::new(),
+            })
+            .collect(),
+    )
+}
+
+/// Convenience for dedup tests that only care about (class, identity) pairs:
+/// synthesize a deterministic id per entry so the instance is addressable in
+/// the id-keyed map without the test spelling one out.
+pub(crate) fn existing_by_identity(entries: &[(&str, &str)]) -> ExistingInstances {
+    existing_map(
+        entries
+            .iter()
+            .enumerate()
+            .map(|(i, (class, title))| InstanceContext {
+                id: format!("test://existing/{class}/{i}"),
+                title: (*title).to_string(),
+                class: (*class).to_string(),
+                properties: BTreeMap::new(),
+            })
+            .collect(),
+    )
+}
+
+/// Pull a named property's string value off each parsed instance. These are
+/// pure parse-level assertions over the raw LLM JSON — there is no graph and no
+/// dedup here, so this takes the field name explicitly rather than assuming a
+/// `title`. (Dedup identity is class-declared and handled graph-side in
+/// `filter_already_present` / `existing_instance_context`.)
+pub(crate) fn prop_values<'a>(instances: &'a [ProposedInstance], key: &str) -> Vec<&'a str> {
+    instances
+        .iter()
+        .filter_map(|i| i.props.get(key).and_then(|v| v.as_str()))
+        .collect()
+}
+
+/// Base URI of the Nth (0-based) `Create` op, in op order. Panics if absent.
+pub(crate) fn nth_create_base(ops: &[InterpretationOp], n: usize) -> String {
+    ops.iter()
+        .filter_map(|op| match op {
+            InterpretationOp::Create { base, .. } => Some(base.clone()),
+            _ => None,
+        })
+        .nth(n)
+        .expect("expected a Create op at that index")
+}
+
+/// The links of the `AddLinks` op anchored on `source`, or an empty slice.
+pub(crate) fn addlinks_for<'a>(ops: &'a [InterpretationOp], source: &str) -> &'a [Link] {
+    ops.iter()
+        .find_map(|op| match op {
+            InterpretationOp::AddLinks { source: s, links } if s == source => {
+                Some(links.as_slice())
+            }
+            _ => None,
+        })
+        .unwrap_or(&[])
+}
+
+pub(crate) fn targets_of(links: &[Link], predicate: &str) -> Vec<String> {
+    links
+        .iter()
+        .filter(|l| l.predicate.as_deref() == Some(predicate))
+        .map(|l| l.target.clone())
+        .collect()
+}
+
+/// Collect the `(source, predicate, target)` triples an op set's `AddLinks` would
+/// write — the existing-link state a *subsequent* planner pass reads back to stay
+/// idempotent (James #883 #4). Mirrors what `existing_relation_links` returns
+/// after those ops are applied, without needing a live perspective.
+pub(crate) fn links_from_ops(ops: &[InterpretationOp]) -> ExistingLinks {
+    let mut out = ExistingLinks::new();
+    for op in ops {
+        if let InterpretationOp::AddLinks { links, .. } = op {
+            for l in links {
+                out.insert((
+                    l.source.clone(),
+                    l.predicate.clone().unwrap_or_default(),
+                    l.target.clone(),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// Decoded targets of `(base, predicate)` in the store, sorted — the shape
+/// assertions want, independent of the non-deterministic signed-envelope
+/// encoding a `literal` resolve-language produces.
+pub(crate) async fn decoded_targets(
+    perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+    base: &str,
+    predicate: &str,
+) -> Vec<serde_json::Value> {
+    use crate::perspectives::model_query::utils::parse_literal_value;
+    use crate::types::LinkQuery;
+    let links = perspective
+        .get_links(&LinkQuery {
+            source: Some(base.to_string()),
+            predicate: Some(predicate.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("get_links");
+    let mut out: Vec<serde_json::Value> = links
+        .iter()
+        .map(|l| parse_literal_value(&l.data.target))
+        .collect();
+    out.sort_by_key(|v| v.to_string());
+    out
+}
+
+/// Plan + apply a single proposal against a live perspective. Mirrors
+/// `run_interpretation`: seeds `known_existing_ids` from
+/// `existing_instance_context` so an `id` on the proposal is trusted only when
+/// the perspective actually holds that base — a hallucinated id routes to
+/// Create, just like in production.
+pub(crate) async fn apply_one(
+    perspective: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
+    shapes: &[crate::perspectives::model_query::types::ModelShape],
+    ctx: &crate::agent::AgentContext,
+    inst: ProposedInstance,
+) -> Vec<InterpretationOp> {
+    let existing_ctx = existing_instance_context(perspective, shapes, None)
+        .await
+        .expect("existing_instance_context");
+    let ops = plan_interpretation_ops_with_context(
+        shapes,
+        std::slice::from_ref(&inst),
+        "soa://ext/",
+        &existing_ctx,
+    );
+    apply_interpretation_ops(perspective, &ops, ctx)
+        .await
+        .expect("apply_interpretation_ops");
+    ops
+}
+
+pub(crate) fn proposal(
+    class: &str,
+    id: Option<&str>,
+    props: &[(&str, serde_json::Value)],
+) -> ProposedInstance {
+    ProposedInstance {
+        class: class.to_string(),
+        id: id.map(|s| s.to_string()),
+        props: props
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
+    }
+}
+
+/// Seed the perspective with `(msg_uri, author, body_text)` triples wired as
+/// two direct links per message: `<msg> <ns://body> <literal:string:...>` and
+/// `<msg> <ns://author> <did:key:...>`. Mirrors the shape a Flux-style channel
+/// perspective would present and the SPARQL queries in these tests target.
+pub(crate) async fn seed_message(
+    perspective: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
+    ctx: &crate::agent::AgentContext,
+    msg_uri: &str,
+    author: &str,
+    body: &str,
+    body_predicate: &str,
+) {
+    use crate::types::{Link, LinkStatus};
+    perspective
+        .add_link(
+            Link {
+                source: msg_uri.into(),
+                predicate: Some(body_predicate.into()),
+                target: format!("literal:string:{body}"),
+            },
+            LinkStatus::Local,
+            None,
+            ctx,
+        )
+        .await
+        .expect("seed_message body");
+    perspective
+        .add_link(
+            Link {
+                source: msg_uri.into(),
+                predicate: Some("ns://author".into()),
+                target: author.into(),
+            },
+            LinkStatus::Local,
+            None,
+            ctx,
+        )
+        .await
+        .expect("seed_message author");
 }

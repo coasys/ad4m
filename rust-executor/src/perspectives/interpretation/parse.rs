@@ -106,3 +106,220 @@ fn strip_trailing_commas(input: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perspectives::interpretation::*;
+    use crate::perspectives::interpretation_test_support::*;
+
+    #[test]
+    fn parses_clean_json_array() {
+        let raw = r#"[
+          {"class":"Intention","title":"Extract LLM processing from Flux into ADAM","owner":"Nico"},
+          {"class":"Belief","title":"Graph viz is the hardest part"}
+        ]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].class, "Intention");
+        assert_eq!(out[0].props.get("owner").unwrap().as_str(), Some("Nico"));
+        assert_eq!(
+            prop_values(&out, "title"),
+            vec![
+                "Extract LLM processing from Flux into ADAM",
+                "Graph viz is the hardest part"
+            ]
+        );
+    }
+
+    #[test]
+    fn strips_code_fences() {
+        let raw = "```json\n[{\"class\":\"Belief\",\"title\":\"X\"}]\n```";
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].class, "Belief");
+    }
+
+    #[test]
+    fn strips_think_block() {
+        let raw =
+            "<think>Let me find the intentions...</think>\n[{\"class\":\"Intention\",\"title\":\"Do X\"}]";
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].class, "Intention");
+    }
+
+    #[test]
+    fn tolerates_trailing_commas() {
+        let raw = r#"[
+          {"class":"Task","title":"A",},
+          {"class":"Task","title":"B"},
+        ]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(prop_values(&out, "title"), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn trailing_comma_cleanup_preserves_commas_inside_strings() {
+        let raw = r#"[
+          {"class":"Belief","title":"Hello, world}"},
+          {"class":"Task","title":"A, B, and C]"},
+        ]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0].props.get("title").unwrap().as_str(),
+            Some("Hello, world}")
+        );
+        assert_eq!(
+            out[1].props.get("title").unwrap().as_str(),
+            Some("A, B, and C]")
+        );
+    }
+
+    #[test]
+    fn trailing_commas_stripped_despite_odd_quotes_in_prose() {
+        // Regression: `clean_llm_json` must extract the JSON block BEFORE stripping
+        // trailing commas. The prose prefix here carries an odd number of `"`
+        // (one, before "here's"), which — if the comma-stripper scanned the whole
+        // text — inverts its `in_string` flag before the real JSON begins, so the
+        // genuine trailing commas below would not be stripped and the payload would
+        // fail to parse. Extracting first confines the scanner to actual JSON.
+        let raw = "The model replied: \"here's your data\n[\n  {\"class\":\"Task\",\"title\":\"A\",},\n  {\"class\":\"Task\",\"title\":\"B\"},\n]";
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(prop_values(&out, "title"), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn empty_array_yields_no_instances() {
+        assert!(parse_interpretation_response("[]").unwrap().is_empty());
+        // and empty inside a fence / with whitespace
+        assert!(parse_interpretation_response("```json\n[]\n```")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn garbage_is_an_error_not_a_panic() {
+        assert!(parse_interpretation_response("not json at all").is_err());
+    }
+
+    #[test]
+    fn extracts_array_from_surrounding_prose() {
+        // Real gemma3:12b output observed on CI 2026-08-07 (job 19580):
+        // wrapped its reply in <analysis> narration followed by the JSON array.
+        let raw = r#"<analysis>
+    Turn 1: Nico assigns work to James.
+    Turn 2: Sure -> commitment (Task); "still think the WS layer is cleanest" -> Belief.
+    Turn 3: Nico asks about perspectives with no subject classes -> Question.
+</analysis>
+
+
+[
+  {"class": "ExtTask", "title": "Write the integration test for the interpretation endpoint", "owner": "James"},
+  {"class": "ExtBelief", "title": "The WS layer is the cleanest way to expose this"},
+  {"class": "ExtQuestion", "title": "How do we handle a perspective that has no subject classes registered?"}
+]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].class, "ExtTask");
+        assert_eq!(out[0].props.get("owner").unwrap().as_str(), Some("James"));
+        assert_eq!(out[2].class, "ExtQuestion");
+    }
+
+    #[test]
+    fn extracts_single_object_when_no_array() {
+        let raw = "Here is the extracted item:\n{\"class\":\"Belief\",\"title\":\"X\"}\nthanks";
+        // A bare object isn't the interpretation contract (array of instances) so
+        // this must still error — but extract_bracketed shouldn't panic.
+        let err = parse_interpretation_response(raw).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("interpretation JSON parse failed"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_error_does_not_leak_llm_payload() {
+        // The cleaned LLM payload can carry the raw conversation transcript. It
+        // must not appear in the error message, because retry_interpretation_parse
+        // logs this error on every failed attempt. Only safe metadata (length) is
+        // allowed to surface.
+        let secret = "TOP_SECRET_DINNER_PLAN alice met bob at the safehouse";
+        let raw = format!("[{{ \"class\":\"Note\", \"title\":\"{secret}\", NOT_JSON");
+        let err = parse_interpretation_response(&raw).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            !msg.contains(secret),
+            "parse error must not include the LLM payload; got: {msg}"
+        );
+        assert!(
+            msg.contains("payload length"),
+            "parse error must include the payload length metadata; got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_interpretation_parse_succeeds_on_first_attempt() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let attempts_clone = attempts.clone();
+        let out = retry_interpretation_parse(move |_| {
+            let a = attempts_clone.clone();
+            async move {
+                a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(r#"[{"class":"Belief","title":"X"}]"#.to_string())
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_interpretation_parse_recovers_after_bad_parse() {
+        // First attempt returns unparseable garbage; second returns valid JSON.
+        // retry_interpretation_parse must call again and succeed within budget.
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let attempts_clone = attempts.clone();
+        let out = retry_interpretation_parse(move |_| {
+            let a = attempts_clone.clone();
+            async move {
+                let n = a.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if n == 1 {
+                    Ok("total garbage, not json".to_string())
+                } else {
+                    Ok(r#"[{"class":"Intention","title":"Y"}]"#.to_string())
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_interpretation_parse_fails_after_max_attempts() {
+        // Every attempt returns garbage → we exhaust INTERPRETATION_MAX_ATTEMPTS
+        // and propagate the last parse error rather than looping forever.
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let attempts_clone = attempts.clone();
+        let result: anyhow::Result<Vec<ProposedInstance>> = retry_interpretation_parse(move |_| {
+            let a = attempts_clone.clone();
+            async move {
+                a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok("never parseable".to_string())
+            }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            INTERPRETATION_MAX_ATTEMPTS
+        );
+    }
+}
