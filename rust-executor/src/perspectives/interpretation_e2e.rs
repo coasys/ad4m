@@ -864,17 +864,15 @@ async fn e2e_flux_grouping_updates_seeded_subgroup_on_topic_continuation() {
 }
 
 /// A transcript on a *new* topic must mint a fresh `ConversationSubgroup`, not
-/// mis-update the seeded one. This is the topic-shift half of the Flux-grouping
-/// checkbox: paired with the continuation test above, together they prove the
-/// extractor makes the attach-vs-grow-vs-create decision the way Flux's grouping
-/// pass does — via `plan_interpretation_ops_with_context` routing on the model's
-/// proposed `id`.
+/// mis-update the seeded one. Seeds one subgroup on payments/webhooks, then
+/// feeds a transcript that explicitly switches topic to a Q3 retrospective.
+/// A well-behaved extractor mints a fresh subgroup for the new topic and leaves
+/// the seeded payments summary untouched.
 ///
-/// The topic-shift half of the Flux-grouping e2e checkbox. Seeds one
-/// `ConversationSubgroup` on payments/webhooks, then feeds a transcript that
-/// explicitly switches topic to a Q3 retrospective. A well-behaved extractor
-/// mints a fresh subgroup for the new topic and leaves the seeded payments
-/// summary untouched.
+/// This is the topic-shift half of the Flux-grouping checkbox: paired with the
+/// continuation test above, together they prove the extractor makes the
+/// attach-vs-grow-vs-create decision via `plan_interpretation_ops_with_context`
+/// routing on the model's proposed `id`.
 ///
 /// Reliably green on Marvin gemma3:12b (first-attempt on repeated local runs)
 /// once three model-centric levers combine — no external code guardrail:
