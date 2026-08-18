@@ -562,16 +562,50 @@ async fn e2e_updates_existing_instance_via_id() {
             SEEDED_TITLE,
         )
         .await;
+        // In production the seeded task would have been minted by a prior
+        // interpretation pass; seed its overlay so the §4 gate lets this pass
+        // replace the title in place (real title == last inference), exercising
+        // the LLM-owns → overwrite branch this test is about.
+        seed_llm_overlay(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            SEEDED_BASE,
+            serde_json::json!({ "title": SEEDED_TITLE }),
+        )
+        .await;
         let placements = run_interpretation_e2e(&mut perspective, &shapes, &transcript, &ctx).await;
         let touched_seeded = placements.iter().any(|(base, _)| base == SEEDED_BASE);
+        // The test is about the LLM-owned overwrite branch, so a "successful"
+        // attempt requires BOTH the id-emission (touched the seeded base) AND
+        // an actual title change through the gate. Otherwise gemma3:12b's
+        // occasional owner-only Update passes the retry gate but leaves the
+        // strengthened title-changed assertion to flake downstream.
+        let title_changed_on_seeded = if touched_seeded {
+            let rows = model_instances(&perspective, "Task", &["title"]).await;
+            rows.iter()
+                .find(|r| r.get("id").and_then(|i| i.as_str()) == Some(SEEDED_BASE))
+                .and_then(|r| r.get("title").and_then(|t| t.as_str()))
+                .is_some_and(|t| !t.eq_ignore_ascii_case(SEEDED_TITLE))
+        } else {
+            false
+        };
         last = Some((perspective, shapes, placements));
-        if touched_seeded {
+        if touched_seeded && title_changed_on_seeded {
             if attempt > 1 {
-                println!("[e2e] upsert satisfied on attempt {attempt}/{MAX_ATTEMPTS}");
+                println!(
+                    "[e2e] upsert + title-change satisfied on attempt {attempt}/{MAX_ATTEMPTS}"
+                );
             }
             break;
         }
-        println!("[e2e] attempt {attempt}/{MAX_ATTEMPTS}: LLM did not emit an id; retrying");
+        if !touched_seeded {
+            println!("[e2e] attempt {attempt}/{MAX_ATTEMPTS}: LLM did not emit an id; retrying");
+        } else {
+            println!(
+                "[e2e] attempt {attempt}/{MAX_ATTEMPTS}: LLM touched the seeded base but left the title unchanged; retrying"
+            );
+        }
     }
     let (perspective, shapes, placements) = last.expect("retry loop ran at least once");
     assert_persisted(&perspective, &shapes, &placements).await;
@@ -615,9 +649,27 @@ async fn e2e_updates_existing_instance_via_id() {
          got {seeded_links:#?}"
     );
 
-    // And no duplicate: the seeded title must not also exist on a fresh base.
+    // The single title link must carry a *new* value — the whole point of the
+    // seeded-overlay branch is that the gate lets the LLM overwrite in place.
+    // A test that only asserts one link exists would silently pass if the gate
+    // held the seed unchanged (real == SEEDED_TITLE), so read the seeded base
+    // back through model_query and require the persisted title to differ.
     let seeded_lower = SEEDED_TITLE.to_lowercase();
     let rows = model_instances(&perspective, "Task", &["title"]).await;
+    let seeded_row_title = rows
+        .iter()
+        .find(|r| r.get("id").and_then(|i| i.as_str()) == Some(SEEDED_BASE))
+        .and_then(|r| r.get("title").and_then(|t| t.as_str()))
+        .map(str::to_string);
+    assert!(
+        seeded_row_title
+            .as_deref()
+            .is_some_and(|t| !t.eq_ignore_ascii_case(SEEDED_TITLE)),
+        "the upsert must have overwritten the seeded title; \
+         got title={seeded_row_title:?}, seeded={SEEDED_TITLE:?}"
+    );
+
+    // And no duplicate: the seeded title must not also exist on a fresh base.
     assert!(
         !rows.iter().any(|r| {
             r.get("id")
@@ -773,26 +825,48 @@ async fn e2e_flux_grouping_updates_seeded_subgroup_on_topic_continuation() {
             setup_interpretation_e2e(&[("ConversationSubgroup", CONVERSATION_SUBGROUP_SDNA)]).await;
         let sg_shape = &shapes[0];
 
+        let payments_props = serde_json::json!({
+            "name": "Payments infrastructure",
+            "summary": "The team discussed dropped webhook retries during a recent payments outage and the need for better observability on failure payloads."
+        });
         seed_instance_with_props(
             &mut perspective,
             &ctx,
             sg_shape,
             payments_base,
-            serde_json::json!({
-                "name": "Payments infrastructure",
-                "summary": "The team discussed dropped webhook retries during a recent payments outage and the need for better observability on failure payloads."
-            }),
+            payments_props.clone(),
         )
         .await;
+        // Seed the overlay too: in production this subgroup would have been minted
+        // by a prior interpretation pass (which writes an overlay), so the §4 gate
+        // must see it as LLM-authored to let this continuation grow its summary.
+        seed_llm_overlay(
+            &mut perspective,
+            &ctx,
+            sg_shape,
+            payments_base,
+            payments_props,
+        )
+        .await;
+
+        let onboarding_props = serde_json::json!({
+            "name": "Onboarding UX",
+            "summary": "Ideas about smoothing the first-run flow for brand-new users, including copy tweaks and default profile fields."
+        });
         seed_instance_with_props(
             &mut perspective,
             &ctx,
             sg_shape,
             onboarding_base,
-            serde_json::json!({
-                "name": "Onboarding UX",
-                "summary": "Ideas about smoothing the first-run flow for brand-new users, including copy tweaks and default profile fields."
-            }),
+            onboarding_props.clone(),
+        )
+        .await;
+        seed_llm_overlay(
+            &mut perspective,
+            &ctx,
+            sg_shape,
+            onboarding_base,
+            onboarding_props,
         )
         .await;
 
