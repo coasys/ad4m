@@ -164,11 +164,10 @@ impl HolochainService {
                                     let sig_broadcasters = conductor_clone.subscribe_to_app_signals(new_app_id.installed_app_id.clone());
                                     streams.insert(new_app_id.installed_app_id.clone(), tokio_stream::wrappers::BroadcastStream::new(sig_broadcasters));
                                 }
-                                // Add a gentle backoff when no signals are available to prevent busy-waiting
-                                _ = tokio::time::sleep(tokio::time::Duration::from_millis(1)) => {
-                                    // This provides a small backoff to prevent excessive CPU usage
-                                    // when no signals are being processed
-                                }
+                                // Backoff when no signals arrive and the StreamMap
+                                // is empty — prevents select! from busy-spinning.
+                                // Real signals arrive via the branches above.
+                                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {}
                                 else => break,
                             }
                         }
