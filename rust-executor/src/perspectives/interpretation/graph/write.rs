@@ -171,7 +171,11 @@ pub fn plan_interpretation_ops_resolved(
                     // different class must Create, never Update — running this
                     // class's setters against a foreign-class node clobbers links
                     // on shared predicates.
-                    Some(id) if existing.get(id).is_some_and(|entries| entries.iter().any(|ctx| ctx.class == inst.class)) => {
+                    Some(id)
+                        if existing.get(id).is_some_and(|entries| {
+                            entries.iter().any(|ctx| ctx.class == inst.class)
+                        }) =>
+                    {
                         (id.clone(), true)
                     }
                     _ => {
