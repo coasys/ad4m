@@ -1331,14 +1331,16 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
     let _ = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
     super::interpretation_test_support::register_interpretation_embedding_model().await;
 
-    let existing: ExistingInstances = [InstanceContext {
-        id: "soa://existing/task/webrtc".to_string(),
-        title: "Finish the WebRTC call module".to_string(),
-        class: "Task".to_string(),
-        properties: BTreeMap::new(),
-    }]
+    let existing: ExistingInstances = [(
+        "soa://existing/task/webrtc".to_string(),
+        vec![InstanceContext {
+            id: "soa://existing/task/webrtc".to_string(),
+            title: "Finish the WebRTC call module".to_string(),
+            class: "Task".to_string(),
+            properties: BTreeMap::new(),
+        }],
+    )]
     .into_iter()
-    .map(|i| (i.id.clone(), i))
     .collect();
     let identity_props: HashMap<String, String> =
         HashMap::from([("Task".to_string(), "title".to_string())]);

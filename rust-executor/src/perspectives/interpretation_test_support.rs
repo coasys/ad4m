@@ -687,7 +687,11 @@ pub(crate) fn no_existing() -> ExistingInstances {
 /// code threads everywhere; tests that used to hand-build class→identity or
 /// id-set projections construct this instead.
 pub(crate) fn existing_map(instances: Vec<InstanceContext>) -> ExistingInstances {
-    instances.into_iter().map(|i| (i.id.clone(), i)).collect()
+    let mut out = ExistingInstances::new();
+    for i in instances {
+        out.entry(i.id.clone()).or_default().push(i);
+    }
+    out
 }
 
 /// Convenience for planner tests that only exercise id membership (Create vs

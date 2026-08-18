@@ -171,15 +171,15 @@ pub fn plan_interpretation_ops_resolved(
                     // different class must Create, never Update — running this
                     // class's setters against a foreign-class node clobbers links
                     // on shared predicates.
-                    Some(id) if existing.get(id).is_some_and(|ctx| ctx.class == inst.class) => {
+                    Some(id) if existing.get(id).is_some_and(|entries| entries.iter().any(|ctx| ctx.class == inst.class)) => {
                         (id.clone(), true)
                     }
                     _ => {
                         if let Some(hallucinated) = &inst.id {
                             match existing.get(hallucinated) {
-                                Some(ctx) => log::debug!(
-                                    "interpretation: proposed id {hallucinated:?} is class '{}', not '{}'; routing to Create",
-                                    ctx.class,
+                                Some(entries) => log::debug!(
+                                    "interpretation: proposed id {hallucinated:?} has classes [{}], not '{}'; routing to Create",
+                                    entries.iter().map(|e| e.class.as_str()).collect::<Vec<_>>().join(", "),
                                     inst.class
                                 ),
                                 None => log::debug!(
