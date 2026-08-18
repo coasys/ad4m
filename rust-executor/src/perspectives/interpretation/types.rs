@@ -32,15 +32,13 @@ pub struct ProposedInstance {
 }
 
 /// The existing instances in scope for an interpretation pass, keyed by base
-/// URI (`id`). This is the **single source of truth** the whole pass reads:
-/// the prompt view ([`build_interpretation_input`]), the deterministic dedup
-/// safety net ([`filter_already_present`] / semantic), and Create-vs-Update
-/// routing ([`plan_interpretation_ops_with_context`]) all project what they
-/// need from this one map — instead of separately-threaded `class → identity`
-/// and `id-set` views that could drift out of sync. Each [`InstanceContext`]
-/// still carries its own `id`, so the value is self-describing; the key is
-/// that same id, promoted for O(1) "does the graph hold this id?" checks.
-pub type ExistingInstances = HashMap<String, InstanceContext>;
+/// URI (`id`). A single base can conform to multiple subject classes, so each
+/// key maps to a `Vec` of entries. This is the **single source of truth** the
+/// whole pass reads: the prompt view ([`build_interpretation_input`]), the
+/// deterministic dedup safety net ([`filter_already_present`] / semantic), and
+/// Create-vs-Update routing ([`plan_interpretation_ops_with_context`]) all
+/// project what they need from this one map.
+pub type ExistingInstances = HashMap<String, Vec<InstanceContext>>;
 
 /// The relation edges already present in the graph for an interpretation pass,
 /// as canonical `(source, predicate, target)` triples. Threaded into the planner

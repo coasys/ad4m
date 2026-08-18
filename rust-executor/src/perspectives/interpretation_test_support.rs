@@ -289,7 +289,9 @@ pub(crate) async fn setup_interpretation_e2e(
     // makes every e2e test self-contained — otherwise running one in isolation
     // (with no earlier test having inserted the row) leaves the task unspawned
     // and the first `prompt()` fails with "Task ... not spawned".
-    let _ = crate::perspectives::interpretation::ensure_interpretation_task();
+    crate::perspectives::interpretation::ensure_interpretation_task()
+        .await
+        .expect("ensure_interpretation_task");
     service
         .set_default_model(ModelType::Llm, model_id)
         .await
@@ -727,7 +729,11 @@ pub(crate) fn no_existing() -> ExistingInstances {
 /// code threads everywhere; tests that used to hand-build class→identity or
 /// id-set projections construct this instead.
 pub(crate) fn existing_map(instances: Vec<InstanceContext>) -> ExistingInstances {
-    instances.into_iter().map(|i| (i.id.clone(), i)).collect()
+    let mut out = ExistingInstances::new();
+    for i in instances {
+        out.entry(i.id.clone()).or_default().push(i);
+    }
+    out
 }
 
 /// Convenience for planner tests that only exercise id membership (Create vs

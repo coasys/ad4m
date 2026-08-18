@@ -898,17 +898,15 @@ async fn e2e_flux_grouping_updates_seeded_subgroup_on_topic_continuation() {
 }
 
 /// A transcript on a *new* topic must mint a fresh `ConversationSubgroup`, not
-/// mis-update the seeded one. This is the topic-shift half of the Flux-grouping
-/// checkbox: paired with the continuation test above, together they prove the
-/// extractor makes the attach-vs-grow-vs-create decision the way Flux's grouping
-/// pass does — via `plan_interpretation_ops_with_context` routing on the model's
-/// proposed `id`.
+/// mis-update the seeded one. Seeds one subgroup on payments/webhooks, then
+/// feeds a transcript that explicitly switches topic to a Q3 retrospective.
+/// A well-behaved extractor mints a fresh subgroup for the new topic and leaves
+/// the seeded payments summary untouched.
 ///
-/// The topic-shift half of the Flux-grouping e2e checkbox. Seeds one
-/// `ConversationSubgroup` on payments/webhooks, then feeds a transcript that
-/// explicitly switches topic to a Q3 retrospective. A well-behaved extractor
-/// mints a fresh subgroup for the new topic and leaves the seeded payments
-/// summary untouched.
+/// This is the topic-shift half of the Flux-grouping checkbox: paired with the
+/// continuation test above, together they prove the extractor makes the
+/// attach-vs-grow-vs-create decision via `plan_interpretation_ops_with_context`
+/// routing on the model's proposed `id`.
 ///
 /// Reliably green on Marvin gemma3:12b (first-attempt on repeated local runs)
 /// once three model-centric levers combine — no external code guardrail:
@@ -1367,14 +1365,16 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
     let _ = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
     super::interpretation_test_support::register_interpretation_embedding_model().await;
 
-    let existing: ExistingInstances = [InstanceContext {
-        id: "soa://existing/task/webrtc".to_string(),
-        title: "Finish the WebRTC call module".to_string(),
-        class: "Task".to_string(),
-        properties: BTreeMap::new(),
-    }]
+    let existing: ExistingInstances = [(
+        "soa://existing/task/webrtc".to_string(),
+        vec![InstanceContext {
+            id: "soa://existing/task/webrtc".to_string(),
+            title: "Finish the WebRTC call module".to_string(),
+            class: "Task".to_string(),
+            properties: BTreeMap::new(),
+        }],
+    )]
     .into_iter()
-    .map(|i| (i.id.clone(), i))
     .collect();
     let identity_props: HashMap<String, String> =
         HashMap::from([("Task".to_string(), "title".to_string())]);
