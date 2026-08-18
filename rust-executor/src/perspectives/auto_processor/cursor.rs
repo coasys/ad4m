@@ -137,6 +137,7 @@ mod tests {
                 processor: processor_node("proc-a"),
                 sources: vec!["aaa111".into(), "bbb222".into()],
             }),
+            None,
             &ctx,
         )
         .await
@@ -155,6 +156,7 @@ mod tests {
                 processor: processor_node("proc-b"),
                 sources: vec!["ccc333".into()],
             }),
+            None,
             &ctx,
         )
         .await
@@ -173,6 +175,7 @@ mod tests {
                 processor: processor_node("proc-a"),
                 sources: vec!["old999".into()],
             }),
+            None,
             &ctx,
         )
         .await
@@ -268,7 +271,7 @@ mod tests {
             prompt_version: "p".into(),
             ran_at: "1000".into(),
         };
-        mint_interpretation_run(&mut p, &meta, None, &ctx)
+        mint_interpretation_run(&mut p, &meta, None, None, &ctx)
             .await
             .expect("mint one-shot");
         let ids = load_processed_source_ids(&p, "proc-a", 1_500, Some(600))
@@ -337,6 +340,7 @@ mod tests {
                 processor: processor_node("cursor-skip"),
                 sources: vec![pending.id.clone()],
             }),
+            None,
             &ctx,
         )
         .await
@@ -412,6 +416,7 @@ mod tests {
                     .map(|t| PendingTurn::from_transcript(t).id)
                     .collect(),
             }),
+            None,
             &ctx,
         )
         .await
