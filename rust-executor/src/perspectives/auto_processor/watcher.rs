@@ -31,7 +31,7 @@ use super::config::AutoProcessorConfig;
 use super::events::{emit, AutoProcessorEvent, AutoProcessorStep};
 
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// Stable id for a `(speaker, text, timestamp)` transcript turn — the atom the
 /// polling watch loop feeds to [`WatcherState::record_item`] and (indirectly)
@@ -640,6 +640,26 @@ pub async fn run_one_pass(
         .base_prefix
         .clone()
         .unwrap_or_else(|| format!("ad4m://autoprocessor/{}/instance/", cfg.processor_id));
+
+    // Pre-pass snapshot of every instance URI the interpretation classes
+    // already know about — the whole perspective, NOT filtered by
+    // `existing_scope`, because we need to know whether a returned base
+    // pre-existed anywhere (not just within our dedup scope). Used below to
+    // distinguish freshly-created bases from upserts of already-existing
+    // instances for mint-scope linking (CodeRabbit #902 review): linking an
+    // upserted pre-existing instance would multi-parent unrelated graph state
+    // into our scope. Skipped entirely when mint_scope is absent — nothing
+    // consumes the snapshot in that path.
+    let pre_existing_uris: HashSet<String> = if cfg.mint_scope.is_some() {
+        crate::perspectives::interpretation::existing_instance_context(perspective, &shapes, None)
+            .await?
+            .into_values()
+            .flat_map(|instances| instances.into_iter().map(|i| i.id))
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
     let bases = run_interpretation_with_strategy_and_model(
         perspective,
         &shapes,
@@ -659,18 +679,30 @@ pub async fn run_one_pass(
         }),
     )
     .await?;
-    signal!(AutoProcessorStep::Processed, bases = &bases);
 
     // Mint-scope child links: if the processor declares a `mint_scope`, wire
-    // every freshly minted base as a child under the target node via the
+    // every **freshly created** base as a child under the target node via the
     // configured predicate — turning the SoA-tree "children live under this
-    // node" from a URI-prefix convention into an actual graph edge. Written
-    // outside the interpretation batch: if the executor crashes between the
-    // mint and the link write, the base is orphaned but the next pass will
-    // upsert by identity + re-attempt the link write (idempotent).
+    // node" from a URI-prefix convention into an actual graph edge. We filter
+    // to freshly-created bases (not present in `pre_existing_uris`) so that
+    // upserts of pre-existing instances don't get re-parented into our scope
+    // (CodeRabbit #902 review). Written outside the interpretation batch: if
+    // the executor crashes between the mint and the link write, the base is
+    // orphaned but the next pass will upsert by identity + re-attempt the
+    // link write (idempotent). The `Processed` signal fires only after the
+    // mint-scope write succeeds, so observers never see a false "done" state.
     if let Some(mint_scope) = &cfg.mint_scope {
-        write_mint_scope_links(perspective, mint_scope, &bases, context, &cfg.processor_id).await?;
+        let created = partition_created(&bases, &pre_existing_uris);
+        write_mint_scope_links(
+            perspective,
+            mint_scope,
+            &created,
+            context,
+            &cfg.processor_id,
+        )
+        .await?;
     }
+    signal!(AutoProcessorStep::Processed, bases = &bases);
 
     Ok(PassOutcome::Won { bases })
 }
@@ -680,6 +712,19 @@ pub async fn run_one_pass(
 /// [`Scope::Model`] is treated as configuration error rather than a silent
 /// no-op — the caller should have constructed a `Raw` variant when it needs
 /// mint-time child linking.
+///
+/// Return every URI in `bases` that is NOT in `pre_existing`, preserving
+/// original order. Used by mint-scope linking (CodeRabbit #902 review) to
+/// exclude upserts of pre-existing instances — writing a mint-scope link
+/// for those would multi-parent unrelated graph state into our scope.
+fn partition_created<'a>(bases: &'a [String], pre_existing: &HashSet<String>) -> Vec<String> {
+    bases
+        .iter()
+        .filter(|b| !pre_existing.contains(*b))
+        .cloned()
+        .collect()
+}
+
 async fn write_mint_scope_links(
     perspective: &mut PerspectiveInstance,
     mint_scope: &Scope,
@@ -1305,6 +1350,52 @@ mod tests {
             .await
             .expect("get_links");
         assert!(links.is_empty(), "no bases → no links");
+    }
+
+    // ---- partition_created (CodeRabbit #902 fix) ---------------------------
+
+    /// Every base that was NOT in the pre-pass snapshot is created; every base
+    /// that WAS in the snapshot is an upsert and must not be linked into the
+    /// mint scope (would multi-parent unrelated graph state).
+    #[test]
+    fn partition_created_filters_upserts_out() {
+        let bases = vec![
+            "soa://new/task-a".to_string(),
+            "soa://existing/task-b".to_string(),
+            "soa://new/task-c".to_string(),
+        ];
+        let mut pre: HashSet<String> = HashSet::new();
+        pre.insert("soa://existing/task-b".into());
+        pre.insert("soa://existing/task-z-untouched".into()); // extra pre-existing not in bases
+        let created = partition_created(&bases, &pre);
+        assert_eq!(
+            created,
+            vec!["soa://new/task-a", "soa://new/task-c"],
+            "pre-existing bases are excluded, order preserved for the rest"
+        );
+    }
+
+    /// Empty pre-existing set → every returned base is "created."
+    #[test]
+    fn partition_created_all_new_when_snapshot_empty() {
+        let bases = vec!["a".to_string(), "b".to_string()];
+        let created = partition_created(&bases, &HashSet::new());
+        assert_eq!(created, bases);
+    }
+
+    /// Every base pre-existed → the created set is empty (no mint-scope
+    /// linking should happen this pass).
+    #[test]
+    fn partition_created_all_upserts_returns_empty() {
+        let bases = vec!["a".to_string(), "b".to_string()];
+        let mut pre: HashSet<String> = HashSet::new();
+        pre.insert("a".into());
+        pre.insert("b".into());
+        let created = partition_created(&bases, &pre);
+        assert!(
+            created.is_empty(),
+            "when every base pre-existed, no new links are written"
+        );
     }
 
     /// `Model` scope has no predicate, so mint-time child linking is a config
