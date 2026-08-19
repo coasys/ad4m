@@ -18,17 +18,19 @@ const INTERP_OVERLAY_TARGET_CLASS: &str = "ad4m://InterpretationOverlay";
 /// Target-class URI of [`INTERP_RUN_CLASS`] — used to detect prior registration.
 const INTERP_RUN_TARGET_CLASS: &str = "ad4m://InterpretationRun";
 
-/// Hard-wired SDNA for the [`INTERP_RUN_CLASS`] subject class. Mirrors the
-/// interpretation SoA fixtures' SHACL shape: a `type` flag plus literal scalars.
+/// Hard-wired SDNA for the [`INTERP_RUN_CLASS`] subject class. No dedicated
+/// `ad4m://type` flag — Nico 2026-08-19: "type flags are an anti-pattern
+/// for subject classes; match over all the properties instead." Conformance
+/// is by the presence of `run_id` (identity), same pattern
+/// `InterpretationOverlay` already uses (`kind` is its discriminator).
 /// None of the scalars use `resolveLanguage` — they are deterministic
 /// `literal:string:` targets, which keeps provenance stable and cheaply
 /// decodable (no signed-envelope round-trip).
 const INTERP_RUN_SDNA: &str = r#"{
   "target_class":"ad4m://InterpretationRun",
   "interpretation_hint":"One interpretation pass: the model + prompt version that wrote a batch of inferred data.",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ad4m://type","target":"ad4m://interpretation-run"}],
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ad4m://interp/run_id","target":"placeholder"}],
   "properties":[
-    {"path":"ad4m://type","name":"type","has_value":"ad4m://interpretation-run","min_count":1,"max_count":1},
     {"path":"ad4m://interp/run_id","name":"run_id","identity":true,"min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/run_id","target":"value"}]},
     {"path":"ad4m://interp/model","name":"model","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/model","target":"value"}]},
     {"path":"ad4m://interp/prompt_version","name":"prompt_version","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/prompt_version","target":"value"}]},
@@ -257,7 +259,6 @@ mod sdna_parity_tests {
         );
         let actual = parsed_paths(INTERP_RUN_SDNA);
         let expected: BTreeSet<String> = [
-            "ad4m://type",
             "ad4m://interp/run_id",
             "ad4m://interp/model",
             "ad4m://interp/prompt_version",

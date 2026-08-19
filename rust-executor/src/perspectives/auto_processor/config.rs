@@ -42,9 +42,15 @@ const AUTO_PROCESSOR_TARGET_CLASS: &str = "ad4m://AutoProcessor";
 
 /// Hard-wired SDNA for the [`AUTO_PROCESSOR_CLASS`] subject class.
 ///
-/// The `type` flag is the class discriminator (and, with the other
-/// `min_count: 1` properties, the `model_query` conformance pattern: a
-/// half-synced node missing a required scalar simply is not an instance yet).
+/// No dedicated `rdf://type` flag by design (Nico 2026-08-19: "type flags
+/// are an anti-pattern for subject classes; match over all the properties
+/// instead"). Conformance is entirely by the presence of the required
+/// scalars: a node with `processor_id` + `source_scope_query` +
+/// `interpretation_class` + `debounce_ms` + `batch_max` + `claim_ttl_ms`
+/// IS an AutoProcessor. A half-synced node missing any of them is simply
+/// not an instance yet. Same pattern the `InterpretationOverlay` class
+/// already uses (`kind` is its discriminator).
+///
 /// `interpretation_class` is declared `collection` — the marker the shape
 /// reader keys on for a multi-valued *literal* property — so its `addLink`
 /// setter accumulates class URIs instead of replacing them, and hydration
@@ -53,9 +59,8 @@ const AUTO_PROCESSOR_TARGET_CLASS: &str = "ad4m://AutoProcessor";
 const AUTO_PROCESSOR_SDNA: &str = r#"{
   "target_class":"ad4m://AutoProcessor",
   "interpretation_hint":"An automatic interpretation processor: the content it watches, the classes it materializes, and its batching/claim timings.",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"rdf://type","target":"ad4m://AutoProcessor"}],
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ad4m://processor_id","target":"placeholder"}],
   "properties":[
-    {"path":"rdf://type","name":"type","has_value":"ad4m://AutoProcessor","min_count":1,"max_count":1},
     {"path":"ad4m://processor_id","name":"processor_id","identity":true,"min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://processor_id","target":"value"}]},
     {"path":"ad4m://source_scope_query","name":"source_scope_query","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://source_scope_query","target":"value"}]},
     {"path":"ad4m://base_prefix","name":"base_prefix","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://base_prefix","target":"value"}]},
@@ -425,7 +430,6 @@ mod tests {
             "ad4m://processor_id",
             "ad4m://source_scope_query",
             "ad4m://source_window_ms",
-            "rdf://type",
         ]
         .into_iter()
         .collect()

@@ -101,12 +101,9 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
   // ── InterpretationRun ──────────────────────────────────────────────────────
 
   it("InterpretationRun.findAll() returns completed-run nodes", async () => {
-    // Simulate a completed interpretation run.
-    await p.add(new Link({
-      source: "ad4m://interp/run/run-001",
-      predicate: "ad4m://type",
-      target: "ad4m://interpretation-run",
-    }));
+    // Simulate a completed interpretation run. No `ad4m://type` link
+    // needed — the class dropped its type discriminator; conformance is
+    // by `runId` (identity) alone.
     await p.add(new Link({
       source: "ad4m://interp/run/run-001",
       predicate: "ad4m://interp/run_id",
@@ -127,12 +124,11 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
   // ── AutoProcessorConfig ────────────────────────────────────────────────────
 
   it("AutoProcessorConfig.findAll() returns processor configuration nodes", async () => {
-    // Simulate what addAutoProcessor writes to the perspective.
-    await p.add(new Link({
-      source: "ad4m://autoprocessor/my-proc",
-      predicate: "rdf://type",
-      target: "ad4m://AutoProcessor",
-    }));
+    // Simulate what addAutoProcessor writes to the perspective. No
+    // `rdf://type` link needed — the class dropped its type discriminator;
+    // conformance is by the presence of the required scalars
+    // (`processor_id`, `source_scope_query`, `debounce_ms`, `batch_max`,
+    // `claim_ttl_ms`, `interpretation_class`).
     await p.add(new Link({
       source: "ad4m://autoprocessor/my-proc",
       predicate: "ad4m://processor_id",
@@ -190,7 +186,6 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
     expect(shape.target_class, "target class must match Rust SDNA")
       .to.equal("ad4m://AutoProcessor");
     const expected = new Set([
-      "rdf://type",
       "ad4m://processor_id",
       "ad4m://source_scope_query",
       "ad4m://base_prefix",
@@ -219,7 +214,6 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
     expect(shape.target_class, "target class must match Rust SDNA")
       .to.equal("ad4m://InterpretationRun");
     const expected = new Set([
-      "ad4m://type",
       "ad4m://interp/run_id",
       "ad4m://interp/model",
       "ad4m://interp/prompt_version",
