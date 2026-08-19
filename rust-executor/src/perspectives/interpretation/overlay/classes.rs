@@ -239,8 +239,22 @@ mod sdna_parity_tests {
             .collect()
     }
 
+    fn parsed_target_class(sdna: &str) -> String {
+        let parsed: serde_json::Value =
+            serde_json::from_str(sdna).expect("SDNA const must be valid JSON");
+        parsed["target_class"]
+            .as_str()
+            .expect("SDNA must declare a `target_class`")
+            .to_string()
+    }
+
     #[test]
     fn interp_run_sdna_paths_match_ts_side() {
+        assert_eq!(
+            parsed_target_class(INTERP_RUN_SDNA),
+            "ad4m://InterpretationRun",
+            "target_class must match the TS @Model target"
+        );
         let actual = parsed_paths(INTERP_RUN_SDNA);
         let expected: BTreeSet<String> = [
             "ad4m://type",
@@ -265,6 +279,11 @@ mod sdna_parity_tests {
 
     #[test]
     fn interp_overlay_sdna_paths_match_ts_side() {
+        assert_eq!(
+            parsed_target_class(INTERP_OVERLAY_SDNA),
+            "ad4m://InterpretationOverlay",
+            "target_class must match the TS @Model target"
+        );
         let actual = parsed_paths(INTERP_OVERLAY_SDNA);
         // NOTE: the overlay class carries no `type` flag by design — the
         // `kind` link IS the discriminator, so exactly two paths are

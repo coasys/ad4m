@@ -186,7 +186,9 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
     const paths = new Set(shape.properties.map((p: any) => p.path));
 
     // Mirrors Rust `AUTO_PROCESSOR_SDNA` in rust-executor/src/perspectives/
-    // auto_processor/config.rs (property `path` values).
+    // auto_processor/config.rs.
+    expect(shape.target_class, "target class must match Rust SDNA")
+      .to.equal("ad4m://AutoProcessor");
     const expected = new Set([
       "rdf://type",
       "ad4m://processor_id",
@@ -213,7 +215,9 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
     const paths = new Set(shape.properties.map((p: any) => p.path));
 
     // Mirrors Rust `INTERP_RUN_SDNA` in rust-executor/src/perspectives/
-    // interpretation/overlay/classes.rs (property `path` values).
+    // interpretation/overlay/classes.rs.
+    expect(shape.target_class, "target class must match Rust SDNA")
+      .to.equal("ad4m://InterpretationRun");
     const expected = new Set([
       "ad4m://type",
       "ad4m://interp/run_id",
@@ -235,6 +239,8 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
     // Mirrors Rust `INTERP_OVERLAY_SDNA` in rust-executor/src/perspectives/
     // interpretation/overlay/classes.rs. NOTE: the overlay class carries no
     // `type` flag by design — the `kind` link is the discriminator.
+    expect(shape.target_class, "target class must match Rust SDNA")
+      .to.equal("ad4m://InterpretationOverlay");
     const expected = new Set([
       "ad4m://interp/kind",
       "ad4m://interp/run",

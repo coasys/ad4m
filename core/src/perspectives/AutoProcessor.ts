@@ -3,7 +3,16 @@
 // `AutoProcessorConfig` / `auto_processor::events::AutoProcessorEvent`
 // (serde `camelCase`).
 
-import type { Scope } from "../model/types";
+/**
+ * Raw form of `Scope` (parent node + linking predicate) — the only variant
+ * the WebSocket auto-processor config accepts. `Scope`'s model form
+ * (`{ model: typeof Ad4mModel, id, field? }`) references a JS class
+ * constructor, which JSON.stringify silently drops, so the executor would
+ * receive `{ id }` and the scope would be unresolvable. Client callers who
+ * hold a model class should resolve its predicate via
+ * `ModelQueryBuilder.buildParentScope()` first and pass the result here.
+ */
+export type RawScope = { id: string; predicate: string };
 
 /** One step in an auto-processor pass (serde camelCase of the Rust enum). */
 export type AutoProcessorStep =
@@ -92,20 +101,19 @@ export interface AddAutoProcessorConfig {
    * Optional parent-scope filter for the dedup lookup: when set, only
    * existing instances of the interpretation classes that live under this
    * scope are candidates for upsert. Omit for the whole-perspective dedup
-   * set (pre-scope behaviour). Both `Scope` variants are accepted.
+   * set (pre-scope behaviour). Raw form only — see `RawScope`.
    */
-  existingScope?: Scope;
+  existingScope?: RawScope;
   /**
    * Optional parent-scope target for newly minted instances: when set,
    * every base URI the pass CREATES is additionally linked as a child of
    * `mintScope.id` via the scope's predicate — turning the SoA-tree
    * "children live under this node" pattern from a URI-prefix convention
    * into an actual graph edge. Upserts of pre-existing instances are NOT
-   * linked (would multi-parent unrelated graph state). Must be the **Raw**
-   * form of `Scope` (`{ id, predicate }`); `Model` scopes carry no linking
-   * predicate and error at watch time.
+   * linked (would multi-parent unrelated graph state). Raw form only —
+   * see `RawScope`; the Rust watcher rejects `Model` scopes at runtime.
    */
-  mintScope?: Scope;
+  mintScope?: RawScope;
 }
 
 /**

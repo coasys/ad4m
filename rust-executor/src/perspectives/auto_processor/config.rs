@@ -441,6 +441,12 @@ mod tests {
     fn auto_processor_sdna_paths_match_ts_side() {
         let parsed: serde_json::Value = serde_json::from_str(AUTO_PROCESSOR_SDNA)
             .expect("AUTO_PROCESSOR_SDNA must be valid JSON");
+        assert_eq!(
+            parsed["target_class"].as_str(),
+            Some("ad4m://AutoProcessor"),
+            "target_class must match the TS @Model target (checked in \
+             interpretation-models.test.ts)."
+        );
         let actual: BTreeSet<&str> = parsed["properties"]
             .as_array()
             .expect("`properties` must be an array")

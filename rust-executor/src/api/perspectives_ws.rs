@@ -534,6 +534,13 @@ async fn query_prolog(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 /// Server-side timeout for SPARQL queries (seconds).
 const SPARQL_QUERY_TIMEOUT_SECS: u64 = 30;
 
+/// Timeout for `run_interpretation` — an LLM interpretation pass includes
+/// prompt build + model call + planning + writes. Longer than the SPARQL
+/// budget because the LLM leg alone can take tens of seconds on local
+/// models; short enough that a stalled provider cannot pin a WS slot
+/// forever (a slot held past this bound returns a 408 to the caller).
+const RUN_INTERPRETATION_TIMEOUT_SECS: u64 = 300;
+
 async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -1035,6 +1042,7 @@ async fn run_interpretation_handler(
 
     // Target classes: the caller's explicit selection, or (default) all subject
     // classes registered in the perspective.
+    let explicit_selection = matches!(&body.classes, Some(sel) if !sel.is_empty());
     let class_names = match &body.classes {
         Some(sel) if !sel.is_empty() => sel.clone(),
         _ => perspective
@@ -1043,11 +1051,25 @@ async fn run_interpretation_handler(
             .map_err(|e| WsRpcError::internal(e.to_string()))?,
     };
     let mut shapes = Vec::with_capacity(class_names.len());
-    for name in class_names {
-        match perspective.get_shape(&name) {
+    let mut unresolved: Vec<String> = Vec::new();
+    for name in &class_names {
+        match perspective.get_shape(name) {
             Ok(shape) => shapes.push((*shape).clone()),
-            Err(e) => log::warn!("runInterpretation: skipping class '{}': {}", name, e),
+            Err(e) => {
+                log::warn!("runInterpretation: skipping class '{}': {}", name, e);
+                unresolved.push(name.clone());
+            }
         }
+    }
+    // Explicit-selection failure surfaces the actual cause: the caller
+    // passed class names and every one of them failed to resolve. Falling
+    // back to the "no subject classes to extract into" default-path
+    // message would misdirect them.
+    if explicit_selection && !unresolved.is_empty() && shapes.is_empty() {
+        return Err(WsRpcError::bad_request(format!(
+            "runInterpretation: none of the requested classes could be resolved: [{}]",
+            unresolved.join(", ")
+        )));
     }
     if shapes.is_empty() {
         return Err(WsRpcError::bad_request(
@@ -1069,20 +1091,44 @@ async fn run_interpretation_handler(
         })
         .collect();
 
-    let bases = crate::perspectives::interpretation::run_interpretation(
-        &mut perspective,
-        &shapes,
-        &transcript,
-        &body.base_prefix,
-        &agent_context,
-        // Existing-instance scope: this direct WS entry point interprets over
-        // the whole perspective (no per-channel sub-scope). #883 added the
-        // `scope` plumbing; the AutoProcessor is where a channel scope is
-        // supplied.
-        None,
+    // Bound the LLM call: a stalled provider must not pin a WS request slot
+    // indefinitely. Matches the pattern used by `query_sparql` /
+    // `model_query_handler` / `evaluate_getters_handler`, but with a longer
+    // budget appropriate for the interpretation pass (see
+    // `RUN_INTERPRETATION_TIMEOUT_SECS`).
+    let bases = match tokio::time::timeout(
+        Duration::from_secs(RUN_INTERPRETATION_TIMEOUT_SECS),
+        crate::perspectives::interpretation::run_interpretation(
+            &mut perspective,
+            &shapes,
+            &transcript,
+            &body.base_prefix,
+            &agent_context,
+            // Existing-instance scope: this direct WS entry point
+            // interprets over the whole perspective (no per-channel
+            // sub-scope). #883 added the `scope` plumbing; the
+            // AutoProcessor is where a channel scope is supplied.
+            None,
+        ),
     )
     .await
-    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    {
+        Ok(Ok(bases)) => bases,
+        Ok(Err(e)) => return Err(WsRpcError::internal(e.to_string())),
+        Err(_) => {
+            log::warn!(
+                "run_interpretation timed out after {}s",
+                RUN_INTERPRETATION_TIMEOUT_SECS
+            );
+            return Err(WsRpcError {
+                code: 408,
+                message: format!(
+                    "runInterpretation timed out after {}s",
+                    RUN_INTERPRETATION_TIMEOUT_SECS
+                ),
+            });
+        }
+    };
 
     if !bases.is_empty() {
         if let Err(e) = reserve_credits(&ctx.user_email, bases.len() as f64 * DEFAULT_LINK_WRITE) {
@@ -1116,6 +1162,35 @@ async fn add_auto_processor_handler(
 
     let body: AddAutoProcessorRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    // Validate before persisting: `load_processors` silently skips configs
+    // that violate these invariants, so if we accept a bad one the caller
+    // sees a "success" response but the processor never runs. Bounce it
+    // back at the boundary instead. Ranges mirror
+    // `AutoProcessorConfig::config_from_instance` (rust-executor/src/
+    // perspectives/auto_processor/config.rs).
+    if body.interpretation_classes.is_empty() {
+        return Err(WsRpcError::bad_request(
+            "`interpretationClasses` must be non-empty",
+        ));
+    }
+    if body.debounce_ms < 0 {
+        return Err(WsRpcError::bad_request("`debounceMs` must be >= 0"));
+    }
+    if body.batch_max == 0 {
+        return Err(WsRpcError::bad_request("`batchMax` must be >= 1"));
+    }
+    if body.claim_ttl_ms <= 0 {
+        return Err(WsRpcError::bad_request("`claimTtlMs` must be > 0"));
+    }
+    if body.source_window_ms.is_some_and(|w| w <= 0) {
+        return Err(WsRpcError::bad_request(
+            "`sourceWindowMs` must be > 0 when set (omit for no window)",
+        ));
+    }
+    if body.max_wait_ms.is_some_and(|w| w < 0) {
+        return Err(WsRpcError::bad_request("`maxWaitMs` must be >= 0 when set"));
+    }
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
@@ -1213,6 +1288,11 @@ async fn interpretation_overlays_handler(
 
     let body: InterpretationOverlaysRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![body.uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
     let perspective = get_perspective_with_access(&body.uuid, &ctx).await?;
     let overlays = list_overlays(&perspective)
         .await
