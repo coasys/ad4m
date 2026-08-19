@@ -305,10 +305,8 @@ pub async fn existing_instance_context(
             })
             .unwrap_or_default();
 
-        // Key each instance by its own base URI (the single-source id-keyed
-        // map). Ids are globally unique across classes, so no collision.
         for row in rows {
-            out.insert(row.id.clone(), row);
+            out.entry(row.id.clone()).or_default().push(row);
         }
     }
     Ok(out)
@@ -528,14 +526,14 @@ mod tests {
             .expect("existing_instance_context");
         assert_eq!(ctx_map.len(), 1, "one seeded instance; got {ctx_map:#?}");
         // Id-keyed single source: look the instance up by its base URI.
-        let inst = ctx_map
+        let entries = ctx_map
             .get("soa://existing/task/1")
             .expect("instance keyed by its id");
+        assert_eq!(entries.len(), 1);
+        let inst = &entries[0];
         assert_eq!(inst.id, "soa://existing/task/1");
         assert_eq!(inst.title, "Migrate the SHACL parser");
         assert_eq!(inst.class, "Task");
-        // Task's `owner` scalar is unset on this seed → nothing to render;
-        // stays empty so the prompt does not carry an empty `properties` block.
         assert!(
             inst.properties.is_empty(),
             "task with only identity set must carry no secondary scalars; got {:?}",
@@ -621,11 +619,11 @@ mod tests {
             1,
             "parent-scoped context must exclude tree B; got {scoped:#?}"
         );
-        let inst = scoped
+        let entries = scoped
             .get("soa://tree-a/task/1")
             .expect("tree-A task present");
-        assert_eq!(inst.id, "soa://tree-a/task/1");
-        assert_eq!(inst.title, "Task under tree A");
+        assert_eq!(entries[0].id, "soa://tree-a/task/1");
+        assert_eq!(entries[0].title, "Task under tree A");
     }
 
     #[tokio::test]
@@ -654,9 +652,10 @@ mod tests {
             .await
             .expect("existing_instance_context");
         assert_eq!(ctx_map.len(), 1, "one seeded instance; got {ctx_map:#?}");
-        let inst = ctx_map
+        let entries = ctx_map
             .get("soa://existing/subgroup/payments")
             .expect("subgroup keyed by its id");
+        let inst = &entries[0];
         assert_eq!(inst.title, "Payments infrastructure");
         assert_eq!(
             inst.properties.get("summary").map(String::as_str),
@@ -664,9 +663,6 @@ mod tests {
             "summary scalar must be populated; got {:?}",
             inst.properties
         );
-        // Identity value must not be duplicated under `properties` (it is
-        // already carried by `title`); the type flag must never leak in either
-        // (setter-managed, not LLM-visible state).
         assert!(!inst.properties.contains_key("name"));
         assert!(!inst.properties.contains_key("type"));
     }

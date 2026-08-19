@@ -38,7 +38,7 @@ That's it — the overlay is provenance **and** last-inferred baseline **and** s
 
 ## 4. How it behaves (per write)
 
-Every LLM write instantiates/updates the overlay over the base. Behaviour depends on `write_mode` (§6) and whether the value is still the LLM's own:
+Every LLM write instantiates/updates the overlay over the base. There is one write path (§6); behaviour depends on whether the value is still the LLM's own:
 
 **Create (new instance):**
 - Write the real instance (its real class + values) **and** an overlay `{kind: create, run, inferred/<p> = <same values>}`.

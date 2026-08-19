@@ -581,14 +581,36 @@ async fn e2e_updates_existing_instance_via_id() {
         .await;
         let placements = run_interpretation_e2e(&mut perspective, &shapes, &transcript, &ctx).await;
         let touched_seeded = placements.iter().any(|(base, _)| base == SEEDED_BASE);
+        // The test is about the LLM-owned overwrite branch, so a "successful"
+        // attempt requires BOTH the id-emission (touched the seeded base) AND
+        // an actual title change through the gate. Otherwise gemma3:12b's
+        // occasional owner-only Update passes the retry gate but leaves the
+        // strengthened title-changed assertion to flake downstream.
+        let title_changed_on_seeded = if touched_seeded {
+            let rows = model_instances(&perspective, "Task", &["title"]).await;
+            rows.iter()
+                .find(|r| r.get("id").and_then(|i| i.as_str()) == Some(SEEDED_BASE))
+                .and_then(|r| r.get("title").and_then(|t| t.as_str()))
+                .is_some_and(|t| !t.eq_ignore_ascii_case(SEEDED_TITLE))
+        } else {
+            false
+        };
         last = Some((perspective, shapes, placements));
-        if touched_seeded {
+        if touched_seeded && title_changed_on_seeded {
             if attempt > 1 {
-                println!("[e2e] upsert satisfied on attempt {attempt}/{MAX_ATTEMPTS}");
+                println!(
+                    "[e2e] upsert + title-change satisfied on attempt {attempt}/{MAX_ATTEMPTS}"
+                );
             }
             break;
         }
-        println!("[e2e] attempt {attempt}/{MAX_ATTEMPTS}: LLM did not emit an id; retrying");
+        if !touched_seeded {
+            println!("[e2e] attempt {attempt}/{MAX_ATTEMPTS}: LLM did not emit an id; retrying");
+        } else {
+            println!(
+                "[e2e] attempt {attempt}/{MAX_ATTEMPTS}: LLM touched the seeded base but left the title unchanged; retrying"
+            );
+        }
     }
     let (perspective, shapes, placements) = last.expect("retry loop ran at least once");
     assert_persisted(&perspective, &shapes, &placements).await;
@@ -632,9 +654,27 @@ async fn e2e_updates_existing_instance_via_id() {
          got {seeded_links:#?}"
     );
 
-    // And no duplicate: the seeded title must not also exist on a fresh base.
+    // The single title link must carry a *new* value — the whole point of the
+    // seeded-overlay branch is that the gate lets the LLM overwrite in place.
+    // A test that only asserts one link exists would silently pass if the gate
+    // held the seed unchanged (real == SEEDED_TITLE), so read the seeded base
+    // back through model_query and require the persisted title to differ.
     let seeded_lower = SEEDED_TITLE.to_lowercase();
     let rows = model_instances(&perspective, "Task", &["title"]).await;
+    let seeded_row_title = rows
+        .iter()
+        .find(|r| r.get("id").and_then(|i| i.as_str()) == Some(SEEDED_BASE))
+        .and_then(|r| r.get("title").and_then(|t| t.as_str()))
+        .map(str::to_string);
+    assert!(
+        seeded_row_title
+            .as_deref()
+            .is_some_and(|t| !t.eq_ignore_ascii_case(SEEDED_TITLE)),
+        "the upsert must have overwritten the seeded title; \
+         got title={seeded_row_title:?}, seeded={SEEDED_TITLE:?}"
+    );
+
+    // And no duplicate: the seeded title must not also exist on a fresh base.
     assert!(
         !rows.iter().any(|r| {
             r.get("id")
@@ -903,17 +943,15 @@ async fn e2e_flux_grouping_updates_seeded_subgroup_on_topic_continuation() {
 }
 
 /// A transcript on a *new* topic must mint a fresh `ConversationSubgroup`, not
-/// mis-update the seeded one. This is the topic-shift half of the Flux-grouping
-/// checkbox: paired with the continuation test above, together they prove the
-/// extractor makes the attach-vs-grow-vs-create decision the way Flux's grouping
-/// pass does — via `plan_interpretation_ops_with_context` routing on the model's
-/// proposed `id`.
+/// mis-update the seeded one. Seeds one subgroup on payments/webhooks, then
+/// feeds a transcript that explicitly switches topic to a Q3 retrospective.
+/// A well-behaved extractor mints a fresh subgroup for the new topic and leaves
+/// the seeded payments summary untouched.
 ///
-/// The topic-shift half of the Flux-grouping e2e checkbox. Seeds one
-/// `ConversationSubgroup` on payments/webhooks, then feeds a transcript that
-/// explicitly switches topic to a Q3 retrospective. A well-behaved extractor
-/// mints a fresh subgroup for the new topic and leaves the seeded payments
-/// summary untouched.
+/// This is the topic-shift half of the Flux-grouping checkbox: paired with the
+/// continuation test above, together they prove the extractor makes the
+/// attach-vs-grow-vs-create decision via `plan_interpretation_ops_with_context`
+/// routing on the model's proposed `id`.
 ///
 /// Reliably green on Marvin gemma3:12b (first-attempt on repeated local runs)
 /// once three model-centric levers combine — no external code guardrail:
@@ -2270,14 +2308,16 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
     let _ = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
     super::interpretation_test_support::register_interpretation_embedding_model().await;
 
-    let existing: ExistingInstances = [InstanceContext {
-        id: "soa://existing/task/webrtc".to_string(),
-        title: "Finish the WebRTC call module".to_string(),
-        class: "Task".to_string(),
-        properties: BTreeMap::new(),
-    }]
+    let existing: ExistingInstances = [(
+        "soa://existing/task/webrtc".to_string(),
+        vec![InstanceContext {
+            id: "soa://existing/task/webrtc".to_string(),
+            title: "Finish the WebRTC call module".to_string(),
+            class: "Task".to_string(),
+            properties: BTreeMap::new(),
+        }],
+    )]
     .into_iter()
-    .map(|i| (i.id.clone(), i))
     .collect();
     let identity_props: HashMap<String, String> =
         HashMap::from([("Task".to_string(), "title".to_string())]);

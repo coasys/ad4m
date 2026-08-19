@@ -125,7 +125,10 @@ pub(crate) async fn apply_with_overlay(
         if cursor.is_some() {
             ensure_interpretation_overlay_classes(perspective, context).await?;
             let meta = InterpretationRunMeta::from_task(task, run_id, ran_at);
-            mint_interpretation_run(perspective, &meta, cursor, context).await?;
+            // Empty-ops fast-path: no overlays to write, so nothing to keep
+            // atomic with the run mint — the cursor-only run is the whole
+            // Phase 3 for this pass. `None` batch keeps this call cheap.
+            mint_interpretation_run(perspective, &meta, cursor, None, context).await?;
         }
         return Ok(Vec::new());
     }
@@ -195,15 +198,70 @@ pub(crate) async fn apply_with_overlay(
     // Phase 2: apply the gated real ops (own batch, atomic).
     super::apply_interpretation_ops(perspective, &real_ops, context).await?;
 
-    // Phase 3: mint the run + write the overlays. AutoProcessor always mints
-    // a run (cursor present) so consumed turn IDs land even when this pass
-    // wrote no overlay. One-shot interpretation still mints only when there
-    // is an overlay to anchor.
+    // Phase 3: mint the run + write the overlays.
+    //
+    // Two independent triggers combine here:
+    //   * `!overlays.is_empty()` — one-shot interpretation only mints when
+    //     there is an overlay to anchor to a run.
+    //   * `cursor.is_some()` — AutoProcessor always mints a run so consumed
+    //     turn IDs land on it even when this pass wrote no overlay (the
+    //     empty-batch bookkeeping the processed-turn cursor needs).
+    //
+    // Either trigger opens a Phase-3 batch that groups the run mint AND every
+    // overlay write together, so a mid-write failure rolls back the run node
+    // and every partial `inferred/<p>` link atomically. Without the batch a
+    // crash between overlay writes would leave `inferred/<p>` out of sync with
+    // the (already-committed) real value; `gate_update` would then read
+    // `real != inferred` and permanently classify the property as
+    // human-diverged, dropping every subsequent LLM proposal on that field.
     if !overlays.is_empty() || cursor.is_some() {
         let meta = InterpretationRunMeta::from_task(task, run_id, ran_at);
-        let run_uri = mint_interpretation_run(perspective, &meta, cursor, context).await?;
-        for ow in &overlays {
-            write_overlay(perspective, ow, &run_uri, context).await?;
+        let batch_id = perspective.create_batch().await;
+        let mut phase3_err: Option<anyhow::Error> = None;
+
+        'overlay: {
+            let run_uri = match mint_interpretation_run(
+                perspective,
+                &meta,
+                cursor,
+                Some(batch_id.clone()),
+                context,
+            )
+            .await
+            {
+                Ok(uri) => uri,
+                Err(e) => {
+                    phase3_err = Some(e);
+                    break 'overlay;
+                }
+            };
+            for ow in &overlays {
+                if let Err(e) =
+                    write_overlay(perspective, ow, &run_uri, Some(batch_id.clone()), context).await
+                {
+                    phase3_err = Some(e);
+                    break 'overlay;
+                }
+            }
+        }
+
+        if let Some(e) = phase3_err {
+            // Drop the half-built batch so it does not sit in `batch_store` for
+            // BATCH_TIMEOUT_SECS. Mirrors the discard-on-error pattern used by
+            // `apply_interpretation_ops` in Phase 2.
+            let _ = perspective.discard_batch(&batch_id).await;
+            return Err(e);
+        }
+
+        if let Err(e) = perspective.commit_batch(batch_id.clone(), context).await {
+            // Defense-in-depth: `commit_batch` already removes the batch on
+            // entry, so this discard is a no-op today. Kept explicit so the
+            // "no lingering batch on any error path" invariant survives future
+            // changes to `commit_batch`'s control flow.
+            let _ = perspective.discard_batch(&batch_id).await;
+            return Err(anyhow::anyhow!(
+                "gate_apply_and_persist: phase 3 commit_batch failed: {e:#}"
+            ));
         }
     }
 
@@ -250,13 +308,13 @@ pub(crate) async fn seed_overlay(
         prompt_version: "seed".to_string(),
         ran_at: "0".to_string(),
     };
-    let run_uri = mint_interpretation_run(perspective, &meta, None, context).await?;
+    let run_uri = mint_interpretation_run(perspective, &meta, None, None, context).await?;
     let ow = OverlayWrite {
         base: base.to_string(),
         kind: OverlayKind::Create,
         inferred,
     };
-    write_overlay(perspective, &ow, &run_uri, context).await
+    write_overlay(perspective, &ow, &run_uri, None, context).await
 }
 
 #[cfg(test)]

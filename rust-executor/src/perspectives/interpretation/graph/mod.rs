@@ -15,8 +15,10 @@ pub(crate) fn instances_by_class(
     existing: &ExistingInstances,
 ) -> BTreeMap<String, Vec<&InstanceContext>> {
     let mut out: BTreeMap<String, Vec<&InstanceContext>> = BTreeMap::new();
-    for inst in existing.values() {
-        out.entry(inst.class.clone()).or_default().push(inst);
+    for entries in existing.values() {
+        for inst in entries {
+            out.entry(inst.class.clone()).or_default().push(inst);
+        }
     }
     for rows in out.values_mut() {
         rows.sort_by(|a, b| a.id.cmp(&b.id));

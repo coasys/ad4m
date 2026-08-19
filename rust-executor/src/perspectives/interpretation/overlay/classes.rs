@@ -144,10 +144,16 @@ pub(crate) async fn ensure_interpretation_overlay_classes(
 /// as `run`). It lives *outside* the interpreted data tree — like the
 /// auto-processor's `ad4m://claim/…` nodes — so it never clutters the SoA graph;
 /// it is reached only by traversal from each affected base's overlay `run` link.
+///
+/// `batch_id` groups the run-node write with the pass's overlay writes so a
+/// partial Phase 3 failure rolls back atomically (see the guarded batch in
+/// `super::gate_apply_and_persist`). Test helpers that only need the run node
+/// on its own can pass `None`.
 pub(crate) async fn mint_interpretation_run(
     perspective: &mut PerspectiveInstance,
     meta: &InterpretationRunMeta,
     cursor: Option<&InterpretationRunCursor>,
+    batch_id: Option<String>,
     context: &AgentContext,
 ) -> anyhow::Result<String> {
     let run_uri = format!("ad4m://interp/run/{}", meta.run_id);
@@ -173,13 +179,15 @@ pub(crate) async fn mint_interpretation_run(
             },
             run_uri.clone(),
             Some(values),
-            None,
+            batch_id.clone(),
             context,
         )
         .await
         .map_err(|e| anyhow::anyhow!("mint_interpretation_run: create_subject failed: {e:#}"))?;
     // `create_subject` applies one value per property; remaining collection
-    // members go through the same `addLink` setter one at a time.
+    // members go through the same `addLink` setter one at a time. Threaded on
+    // the same `batch_id` so the whole run mint (initial values + follow-on
+    // source-id bumps) commits atomically with the pass's overlay writes.
     for id in rest_sources {
         perspective
             .update_subject(
@@ -189,7 +197,7 @@ pub(crate) async fn mint_interpretation_run(
                 },
                 run_uri.clone(),
                 serde_json::json!({ "sources": id }),
-                None,
+                batch_id.clone(),
                 context,
             )
             .await

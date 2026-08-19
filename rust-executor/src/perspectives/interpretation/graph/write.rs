@@ -14,11 +14,16 @@ use uuid::Uuid;
 /// existing link under that predicate, then add the new one. A generic
 /// single-valued link upsert — used by the provenance overlay to keep
 /// `inferred/<p>` (and `run`) single-valued and current across passes.
+///
+/// `batch_id` groups the underlying `remove_links` + `add_link` into a caller-
+/// owned batch so a mid-write failure rolls back atomically. Pass `None` for
+/// unbatched writes (e.g. test seeding).
 pub(crate) async fn replace_link(
     perspective: &mut PerspectiveInstance,
     base: &str,
     predicate: &str,
     target: &str,
+    batch_id: Option<String>,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
     let existing = perspective
@@ -30,7 +35,7 @@ pub(crate) async fn replace_link(
         .await?;
     if !existing.is_empty() {
         let exprs: Vec<LinkExpression> = existing.into_iter().map(Into::into).collect();
-        perspective.remove_links(exprs, None).await?;
+        perspective.remove_links(exprs, batch_id.clone()).await?;
     }
     perspective
         .add_link(
@@ -40,7 +45,7 @@ pub(crate) async fn replace_link(
                 target: target.to_string(),
             },
             LinkStatus::Shared,
-            None,
+            batch_id,
             context,
         )
         .await?;
@@ -210,15 +215,19 @@ pub fn plan_interpretation_ops_resolved(
                     // different class must Create, never Update — running this
                     // class's setters against a foreign-class node clobbers links
                     // on shared predicates.
-                    Some(id) if existing.get(id).is_some_and(|ctx| ctx.class == inst.class) => {
+                    Some(id)
+                        if existing.get(id).is_some_and(|entries| {
+                            entries.iter().any(|ctx| ctx.class == inst.class)
+                        }) =>
+                    {
                         (id.clone(), true)
                     }
                     _ => {
                         if let Some(hallucinated) = &inst.id {
                             match existing.get(hallucinated) {
-                                Some(ctx) => log::debug!(
-                                    "interpretation: proposed id {hallucinated:?} is class '{}', not '{}'; routing to Create",
-                                    ctx.class,
+                                Some(entries) => log::debug!(
+                                    "interpretation: proposed id {hallucinated:?} has classes [{}], not '{}'; routing to Create",
+                                    entries.iter().map(|e| e.class.as_str()).collect::<Vec<_>>().join(", "),
                                     inst.class
                                 ),
                                 None => log::debug!(
@@ -272,25 +281,26 @@ pub fn plan_interpretation_ops_resolved(
     // full index.
     let mut out = Vec::with_capacity(placed.len());
     for p in &placed {
-        if !p.emit {
-            continue;
-        }
-        let values = scalar_values(p.shape, p.inst);
-        if p.is_update {
-            if !values.is_empty() {
-                out.push(InterpretationOp::Update {
+        if p.emit {
+            let values = scalar_values(p.shape, p.inst);
+            if p.is_update {
+                if !values.is_empty() {
+                    out.push(InterpretationOp::Update {
+                        base: p.base.clone(),
+                        class: p.inst.class.clone(),
+                        values,
+                    });
+                }
+            } else {
+                out.push(InterpretationOp::Create {
                     base: p.base.clone(),
                     class: p.inst.class.clone(),
                     values,
                 });
             }
-        } else {
-            out.push(InterpretationOp::Create {
-                base: p.base.clone(),
-                class: p.inst.class.clone(),
-                values,
-            });
         }
+        // Resolve relations for ALL slots (including deduplicated ones) —
+        // AddLinks is additive and the existing-link guard suppresses repeats.
         let rel_links = resolve_relation_links(
             p.shape,
             p.inst,

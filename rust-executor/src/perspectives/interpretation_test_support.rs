@@ -283,12 +283,19 @@ pub(crate) async fn setup_interpretation_e2e(
         .await
         .expect("add_model");
     // Insert the interpretation task row BEFORE setting the default model:
-    // `register_interpretation_task` only writes the DB row (no spawn), and it's
-    // `set_default_model`'s respawn loop (over `model_id == "default"` tasks)
-    // that actually registers the task with the LLM worker. Priming it here
-    // makes every e2e test self-contained — otherwise running one in isolation
-    // (with no earlier test having inserted the row) leaves the task unspawned
-    // and the first `prompt()` fails with "Task ... not spawned".
+    // `register_interpretation_task` only writes the DB row (no spawn), and
+    // it's `set_default_model`'s respawn loop (over `model_id == "default"`
+    // tasks) that actually registers the task with the LLM worker. Priming it
+    // here makes every e2e test self-contained — otherwise running one in
+    // isolation (with no earlier test having inserted the row) leaves the task
+    // unspawned and the first `prompt()` fails with "Task ... not spawned".
+    //
+    // Do NOT call `ensure_interpretation_task` here: it spawns as part of its
+    // idempotency guarantee, and spawning resolves `model_id == "default"` at
+    // spawn-time via `get_default_model`. The default has not been set yet on
+    // this line, so the spawn would fail with "Task needs default model but no
+    // default set". `register_interpretation_task` (write-only) lets
+    // `set_default_model` do the spawn once the default is actually there.
     let _ = crate::perspectives::interpretation::register_interpretation_task();
     service
         .set_default_model(ModelType::Llm, model_id)
@@ -727,7 +734,11 @@ pub(crate) fn no_existing() -> ExistingInstances {
 /// code threads everywhere; tests that used to hand-build class→identity or
 /// id-set projections construct this instead.
 pub(crate) fn existing_map(instances: Vec<InstanceContext>) -> ExistingInstances {
-    instances.into_iter().map(|i| (i.id.clone(), i)).collect()
+    let mut out = ExistingInstances::new();
+    for i in instances {
+        out.entry(i.id.clone()).or_default().push(i);
+    }
+    out
 }
 
 /// Convenience for planner tests that only exercise id membership (Create vs
