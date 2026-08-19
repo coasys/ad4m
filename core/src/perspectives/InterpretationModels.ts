@@ -72,6 +72,27 @@ export class AutoProcessorConfig extends Ad4mModel {
   /** Serialised `DedupStrategy` JSON (absent = NormalizedString). */
   @Optional({ through: "ad4m://dedup_strategy", resolveLanguage: "literal" })
   dedupStrategy?: string;
+
+  /**
+   * Serialised `Scope` JSON (absent = whole-perspective dedup set).
+   * Constrains the existing-instance lookup to the subtree rooted at
+   * `Scope.id` linked via `Scope.predicate` — the SoA-tree "existing items
+   * live under THIS project node" pattern. Stored as an opaque JSON blob
+   * because SHACL properties carry no rich-object type-check; the Rust
+   * watcher parses it back into `Scope`.
+   */
+  @Optional({ through: "ad4m://existing_scope", resolveLanguage: "literal" })
+  existingScope?: string;
+
+  /**
+   * Serialised `Scope` JSON (absent = mint sites are unlinked). When set,
+   * every freshly created base URI gets an additional `Scope.id
+   * --Scope.predicate--> new-uri` link written into the perspective, so
+   * mints become first-class children of the target scope. Must be the
+   * `Raw` form of `Scope`; `Model` scopes carry no linking predicate.
+   */
+  @Optional({ through: "ad4m://mint_scope", resolveLanguage: "literal" })
+  mintScope?: string;
 }
 
 // ── InterpretationRun ───────────────────────────────────────────────────────

@@ -192,10 +192,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const field = options?.field;
 
     if (typeof modelOrPredicate === 'string') {
-      // Raw predicate string → raw form of ParentScope
+      // Raw predicate string → raw form of Scope
       this.queryParams.parent = { id, predicate: modelOrPredicate };
     } else if (typeof modelOrPredicate === 'function') {
-      // Model class → model form of ParentScope
+      // Model class → model form of Scope
       this.queryParams.parent = { id, model: modelOrPredicate, ...(field && { field }) };
     } else if (typeof idOrInstance !== 'string') {
       // Ad4mModel instance — derive model class from constructor

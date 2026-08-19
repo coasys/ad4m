@@ -1132,6 +1132,8 @@ async fn add_auto_processor_handler(
         claim_ttl_ms: body.claim_ttl_ms,
         dedup_strategy_json: body.dedup_strategy_json,
         source_window_ms: body.source_window_ms,
+        existing_scope: body.existing_scope,
+        mint_scope: body.mint_scope,
     };
     write_processor(&mut perspective, &cfg, &agent_context)
         .await

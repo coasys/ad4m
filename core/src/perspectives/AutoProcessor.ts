@@ -3,6 +3,8 @@
 // `AutoProcessorConfig` / `auto_processor::events::AutoProcessorEvent`
 // (serde `camelCase`).
 
+import type { Scope } from "../model/types";
+
 /** One step in an auto-processor pass (serde camelCase of the Rust enum). */
 export type AutoProcessorStep =
   | "batchReady"
@@ -86,6 +88,24 @@ export interface AddAutoProcessorConfig {
    * runs.
    */
   sourceWindowMs?: number;
+  /**
+   * Optional parent-scope filter for the dedup lookup: when set, only
+   * existing instances of the interpretation classes that live under this
+   * scope are candidates for upsert. Omit for the whole-perspective dedup
+   * set (pre-scope behaviour). Both `Scope` variants are accepted.
+   */
+  existingScope?: Scope;
+  /**
+   * Optional parent-scope target for newly minted instances: when set,
+   * every base URI the pass CREATES is additionally linked as a child of
+   * `mintScope.id` via the scope's predicate — turning the SoA-tree
+   * "children live under this node" pattern from a URI-prefix convention
+   * into an actual graph edge. Upserts of pre-existing instances are NOT
+   * linked (would multi-parent unrelated graph state). Must be the **Raw**
+   * form of `Scope` (`{ id, predicate }`); `Model` scopes carry no linking
+   * predicate and error at watch time.
+   */
+  mintScope?: Scope;
 }
 
 /**

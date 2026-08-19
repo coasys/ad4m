@@ -607,6 +607,20 @@ pub struct AddAutoProcessorRequest {
     /// past runs.
     #[serde(default)]
     pub source_window_ms: Option<i64>,
+    /// Optional parent-scope filter for the dedup lookup: when set, only
+    /// existing instances of the interpretation classes that live under this
+    /// scope are candidates for upsert. Omit for the whole-perspective dedup
+    /// set (pre-scope behaviour).
+    #[serde(default)]
+    pub existing_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Optional parent-scope target for newly minted instances: when set, every
+    /// base URI the pass CREATES is additionally linked as a child of
+    /// `mint_scope.id` via the scope's predicate. Upserts of pre-existing
+    /// instances are NOT linked. Must be the `Raw` variant of `Scope`
+    /// (id + predicate); `Model` scopes carry no linking predicate and error
+    /// at watch time.
+    #[serde(default)]
+    pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
 }
 
 /// `perspective.acceptInterpretation` / `perspective.rejectInterpretation` —
