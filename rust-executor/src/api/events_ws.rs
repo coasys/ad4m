@@ -26,7 +26,7 @@
 //! | `transcription-text`          | (inline)      | userDid                | AI transcription text                |
 //! | `model-loading-status`        | (inline)      | broadcast              | AI model loading status              |
 //! | `query-subscription-update`   | (inline)      | perspective owner      | Live query subscription update       |
-//! | `auto-processor-event`        | (inline)      | broadcast              | Auto-processor pass step signal      |
+//! | `auto-processor-event`        | (inline)      | pass owner DID         | Auto-processor pass step signal      |
 //!
 //! ## Client → Server messages
 //!
