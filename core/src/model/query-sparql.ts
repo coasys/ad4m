@@ -98,6 +98,12 @@ function looksLikeUri(value: string): boolean {
  * `queryToSPARQL()` filters against — otherwise the same value can be
  * stored as `<literal:string:https%3A...>` from one path while WHERE
  * builders probe `<https://example.com>` from the other.
+ *
+ * The object/array arm mirrors Rust's `Literal::from_json` in
+ * `perspective_instance.rs::resolve_property_value` (which routes
+ * `Value::Object | Value::Array` through JSON encoding). Without it, JS
+ * would fall through to `String(value)` and turn `{a: 1}` into
+ * `"[object Object]"` and `[1, 2, 3]` into `"1,2,3"` before wrapping.
  */
 export function valueToLiteralIri(value: any): string {
   if (typeof value === 'string') {
@@ -108,6 +114,18 @@ export function valueToLiteralIri(value: any): string {
     return Literal.from(value).toUrl();
   }
   if (typeof value === 'boolean') {
+    return Literal.from(value).toUrl();
+  }
+  // Objects and arrays: route through Literal.from so we emit
+  // `literal:json:*` (mirrors Rust `Literal::from_json`). Without this
+  // arm we fall through to `String(value)` which turns objects into
+  // `"[object Object]"` and arrays into `"1,2"` — silently storing the
+  // wrong shape and breaking equality filters (`findAll({ where:
+  // { config: {...} } })` would match against `"[object Object]"`).
+  // The `value !== null` guard preserves the historical fallthrough for
+  // `null` (→ `literal:string:null`), since `Literal.from(null).toUrl()`
+  // throws on the empty-literal check.
+  if (value !== null && typeof value === 'object') {
     return Literal.from(value).toUrl();
   }
   return Literal.from(String(value)).toUrl();
