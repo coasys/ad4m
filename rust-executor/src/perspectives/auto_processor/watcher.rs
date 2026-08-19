@@ -697,6 +697,20 @@ pub async fn run_one_pass(
         HashSet::new()
     };
 
+    // Mid-pass emit context (Nico 2026-08-20): when `debug_mode` is on the
+    // engine emits `LlmRequestSent` (with prompt) right before the LLM call
+    // and `LlmResponseReceived` (with response) as soon as it returns, so a
+    // UI can show "waiting on LLM" between the two events instead of a
+    // single lump payload at `Processed`. `None` when debug_mode is off —
+    // engine skips the mid-pass emits.
+    let emit_ctx = cfg
+        .debug_mode
+        .then(|| super::events::InterpretationEmitContext {
+            perspective_uuid: uuid.clone(),
+            processor_id: cfg.processor_id.clone(),
+            agent_did: me.clone(),
+            item_ids: item_ids.clone(),
+        });
     let outcome = run_interpretation_with_strategy_and_model(
         perspective,
         &shapes,
@@ -716,9 +730,9 @@ pub async fn run_one_pass(
         }),
         // Debug: when the processor is in `debug_mode`, the outcome carries
         // the raw LLM prompt + response, and the interpretation engine also
-        // persists them on the `InterpretationRun` node. Fed into the
-        // `Processed` event below so a subscribed UI sees them live.
+        // persists them on the `InterpretationRun` node.
         cfg.debug_mode,
+        emit_ctx.as_ref(),
     )
     .await?;
     let bases = outcome.bases;
@@ -746,19 +760,18 @@ pub async fn run_one_pass(
         )
         .await?;
     }
-    // Emit the `Processed` event. When the processor is in debug mode, the
-    // interpretation outcome carried the raw LLM prompt + response back; we
-    // attach them to the event so a subscribed UI can render "what the model
-    // saw and returned" live. Wire-level DID filtering (events_ws
-    // `matches_auto_processor_pass_owner`) already scopes this to the pass
-    // owner, so the payload never leaks to observers who did not run it.
-    let mut ev = AutoProcessorEvent::new(&uuid, &cfg.processor_id, AutoProcessorStep::Processed)
+    // Emit the `Processed` event. Carries the final `bases` list — the
+    // LLM prompt + response now travel via the mid-pass `LlmRequestSent`
+    // and `LlmResponseReceived` events (Nico 2026-08-20), so a subscribing
+    // UI can render "waiting on LLM" between them instead of only seeing
+    // one lump payload here at the end. `_debug` is intentionally not
+    // attached to `Processed` any more — the persistent `InterpretationRun`
+    // (`debug_prompt` / `debug_response`) is the post-hoc lookup channel.
+    let _ = debug; // consumed by the interpretation engine → InterpretationRun
+    let ev = AutoProcessorEvent::new(&uuid, &cfg.processor_id, AutoProcessorStep::Processed)
         .with_agent_did(&me)
         .with_items(&item_ids)
         .with_bases(&bases);
-    if let Some(d) = debug {
-        ev = ev.with_llm_io(d.prompt, d.response);
-    }
     emit(ev).await;
     // Neighbourhood-state: pass complete on this executor. Consumers use
     // this to close out the `Claimed` row they showed for the same

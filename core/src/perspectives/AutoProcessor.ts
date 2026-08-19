@@ -14,7 +14,44 @@
  */
 export type RawScope = { id: string; predicate: string };
 
-/** One step in an auto-processor pass (serde camelCase of the Rust enum). */
+/**
+ * One step in an auto-processor pass (serde camelCase of the Rust enum).
+ *
+ * ## Lifecycle (winning peer, debug_mode: true)
+ *
+ * A pass on the winning executor emits, in order:
+ *
+ *  1. `batchReady`             — debounced batch reached threshold, pass starting
+ *  2. `claimed`                — this executor won the `try_claim`
+ *  3. `gatheringTranscript`    — pulling the batch's transcript turns
+ *  4. `runningInterpretation`  — about to invoke the LLM
+ *  5. `llmRequestSent`         — prompt built + dispatched; carries `llmInput`
+ *                                (only when `debug_mode: true`)
+ *  6. `llmResponseReceived`    — LLM response arrived; carries `llmOutput`
+ *                                (only when `debug_mode: true`) — the UI can
+ *                                render "waiting on LLM" between steps 5 and 6
+ *  7. `processed`              — pass complete; carries `bases[]` (new/updated
+ *                                instance URIs)
+ *
+ * ## Lifecycle (losing peer, or short-circuit)
+ *
+ * - `batchReady` → `backedOff`       — another peer claimed the batch first
+ * - `batchReady` → `awaitingAuthor`  — no author of the batch is online
+ * - `batchReady` → `notCandidate`    — this peer stood down for an earlier author
+ * - `claimed` → `shapesMissing`      — a configured class shape hasn't synced
+ * - `claimed` → `emptyTranscript`    — the batch drained empty
+ *
+ * ## Payload fields per step
+ *
+ * All steps carry `perspectiveUuid`, `processorId`, `agentDid`, `itemIds[]`.
+ * Additional payload:
+ *
+ * - `backedOff`, `notCandidate`         → `detail` = holder / elected-author DID
+ * - `shapesMissing`                     → `detail` = comma-joined missing class URIs
+ * - `llmRequestSent`                    → `llmInput` = raw prompt
+ * - `llmResponseReceived`               → `llmOutput` = raw LLM response
+ * - `processed`                         → `bases[]` = new/updated instance URIs
+ */
 export type AutoProcessorStep =
   | "batchReady"
   | "claimed"
@@ -23,6 +60,8 @@ export type AutoProcessorStep =
   | "notCandidate"
   | "gatheringTranscript"
   | "runningInterpretation"
+  | "llmRequestSent"
+  | "llmResponseReceived"
   | "processed"
   | "shapesMissing"
   | "emptyTranscript";

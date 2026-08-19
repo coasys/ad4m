@@ -344,6 +344,7 @@ pub async fn run_interpretation_with_strategy(
         scope,
         None,
         false,
+        None,
     )
     .await
     .map(|out| out.bases)
@@ -390,6 +391,12 @@ pub async fn run_interpretation_with_strategy_and_model(
     scope: Option<&Scope>,
     cursor: Option<&InterpretationRunCursor>,
     debug_mode: bool,
+    // When `debug_mode` is on and this is `Some`, the engine emits
+    // `LlmRequestSent` (with the prompt) right before the LLM call and
+    // `LlmResponseReceived` (with the response) right after — mid-pass
+    // events so a UI can render "waiting on LLM" between them, not just
+    // one lump payload at `Processed`. Nico 2026-08-20 ask.
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
 ) -> anyhow::Result<InterpretationOutcome> {
     // Returns a task already spawned into its LLM worker, so `prompt` can use it
     // immediately (see `ensure_interpretation_task_for_model`).
@@ -420,6 +427,31 @@ pub async fn run_interpretation_with_strategy_and_model(
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
 
+    // Mid-pass observability (Nico 2026-08-20): emit `LlmRequestSent` right
+    // before the LLM call so a UI can flip to "waiting on LLM" state. Only
+    // fires in debug_mode with a supplied emit_ctx. LLM calls take
+    // seconds-to-minutes on local models, so one payload-at-end
+    // (`Processed`) hides the entire wait; splitting into request/response
+    // events gives the UI a real progress signal.
+    if debug_mode {
+        if let Some(ctx) = emit_ctx {
+            use crate::perspectives::auto_processor::events::{
+                emit, AutoProcessorEvent, AutoProcessorStep,
+            };
+            emit(
+                AutoProcessorEvent::new(
+                    &ctx.perspective_uuid,
+                    &ctx.processor_id,
+                    AutoProcessorStep::LlmRequestSent,
+                )
+                .with_agent_did(&ctx.agent_did)
+                .with_items(&ctx.item_ids)
+                .with_llm_input(prompt.clone()),
+            )
+            .await;
+        }
+    }
+
     // When `debug_mode` is on we need the raw response verbatim (not just the
     // parsed instances) to surface via the event + persist on the run node.
     // Capture the last-observed raw text through a shared cell inside the
@@ -448,6 +480,33 @@ pub async fn run_interpretation_with_strategy_and_model(
         }
     })
     .await?;
+
+    // Mid-pass observability: emit `LlmResponseReceived` with the raw
+    // response as soon as the LLM returns, before the planner + writes
+    // run. UI flips from "waiting on LLM" to "planning writes" here.
+    if debug_mode {
+        if let Some(ctx) = emit_ctx {
+            use crate::perspectives::auto_processor::events::{
+                emit, AutoProcessorEvent, AutoProcessorStep,
+            };
+            let captured = debug_response_capture
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone())
+                .unwrap_or_default();
+            emit(
+                AutoProcessorEvent::new(
+                    &ctx.perspective_uuid,
+                    &ctx.processor_id,
+                    AutoProcessorStep::LlmResponseReceived,
+                )
+                .with_agent_did(&ctx.agent_did)
+                .with_items(&ctx.item_ids)
+                .with_llm_output(captured),
+            )
+            .await;
+        }
+    }
 
     // Hard dedup guarantee: even if the model ignored the `existing` hint, an
     // already-present (class, identity value) never becomes a *new* instance.

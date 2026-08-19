@@ -44,6 +44,17 @@ pub enum AutoProcessorStep {
     GatheringTranscript,
     /// Running the LLM interpretation over the gathered transcript.
     RunningInterpretation,
+    /// The LLM prompt has been built and dispatched — the pass is now
+    /// waiting on the model. Emitted only when the processor is in
+    /// `debug_mode`; carries the prompt on `llm_input`. Paired with
+    /// [`AutoProcessorStep::LlmResponseReceived`] so a UI can render a
+    /// "waiting on LLM" state between the two events (LLM calls take
+    /// seconds-to-minutes on local models).
+    LlmRequestSent,
+    /// The LLM response has arrived — the pass is about to plan and
+    /// commit writes. Emitted only when the processor is in `debug_mode`;
+    /// carries the response on `llm_output`.
+    LlmResponseReceived,
     /// The pass completed and wrote `bases` (the created/updated instance
     /// URIs; may be empty if the model proposed nothing new).
     Processed,
@@ -124,6 +135,21 @@ impl AutoProcessorEvent {
     /// this from leaking to observers who did not run the pass.
     pub fn with_llm_io(mut self, input: String, output: String) -> Self {
         self.llm_input = Some(input);
+        self.llm_output = Some(output);
+        self
+    }
+    /// Attach only the LLM prompt — used for
+    /// [`AutoProcessorStep::LlmRequestSent`] so a UI can render the
+    /// dispatched prompt without waiting for the response.
+    pub fn with_llm_input(mut self, input: String) -> Self {
+        self.llm_input = Some(input);
+        self
+    }
+    /// Attach only the LLM response — used for
+    /// [`AutoProcessorStep::LlmResponseReceived`] so a UI can render the
+    /// raw model output as soon as it lands, before the planner + writes
+    /// finish.
+    pub fn with_llm_output(mut self, output: String) -> Self {
         self.llm_output = Some(output);
         self
     }
@@ -272,4 +298,22 @@ pub async fn subscribe_neighbourhood_state() -> broadcast::Receiver<String> {
         .await
         .subscribe(&AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC)
         .await
+}
+
+/// Everything the interpretation engine needs to emit its own
+/// `AutoProcessorEvent`s (`LlmRequestSent`, `LlmResponseReceived`) without
+/// pulling in the watcher's context. Populated by the watcher and passed
+/// down when a processor is in `debug_mode`; `None` skips all engine-side
+/// emissions.
+///
+/// The engine emits directly here (via [`emit`]) rather than via a
+/// callback / channel to avoid the sync/async closure gymnastics — the
+/// only cost is a compile-time dep on this module, which is acceptable
+/// because live-debug telemetry IS an auto-processor concern.
+#[derive(Debug, Clone)]
+pub struct InterpretationEmitContext {
+    pub perspective_uuid: String,
+    pub processor_id: String,
+    pub agent_did: String,
+    pub item_ids: Vec<String>,
 }
