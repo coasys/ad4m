@@ -396,8 +396,143 @@ impl PerspectiveInstance {
             self.nh_sync_loop(),
             self.pending_diffs_loop(),
             self.subscribed_queries_loop(),
-            self.fallback_sync_loop()
+            self.fallback_sync_loop(),
+            self.auto_processor_supervisor(),
         );
+    }
+
+    /// Dispatch between single-user (one main-agent loop, as before) and
+    /// multi-user (one loop per recently-seen managed user) auto-processor
+    /// spawning. Single-user mode preserves prior behaviour; multi-user mode
+    /// (`enable_multi_user: true`) skips the main-agent loop entirely — running
+    /// interpretation as the host DID would attribute every minted instance to
+    /// the host on a shared perspective, which the multi-user model rejects.
+    async fn auto_processor_supervisor(&self) {
+        if crate::user_management::is_multi_user_enabled() {
+            self.managed_user_auto_processor_supervisor().await;
+        } else {
+            self.auto_processor_watch_loop(AgentContext::main_agent())
+                .await;
+        }
+    }
+
+    /// Multi-user auto-processor spawn loop. Every supervisor tick it
+    /// re-computes the set of managed users whose `last_seen` falls inside
+    /// `MANAGED_USER_ONLINE_WINDOW_S` (the same freshness window
+    /// `capabilities::track_last_seen_from_token` uses), spawns a per-user
+    /// `auto_processor_watch_loop` for any newly-online user, and aborts the
+    /// loop of any user who has aged out. Users that go offline are cheap to
+    /// re-spawn on next activity, so the transient churn is bounded.
+    ///
+    /// Why per-user rather than a single main-agent loop:
+    ///   `elect_author` returns `Me` only when the loop's `AgentContext` DID
+    ///   is among the batch's authors. On a hosting node whose main agent is
+    ///   the host key, every managed user's utterance elects `Other(user)`
+    ///   forever and no pass ever runs — the exact symptom we hit on Marvin
+    ///   with James in a live call.
+    async fn managed_user_auto_processor_supervisor(&self) {
+        use crate::perspectives::auto_processor::watcher::{
+            select_online_managed_users, MANAGED_USER_ONLINE_WINDOW_S,
+        };
+        use std::collections::HashMap;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use tokio::task::JoinHandle;
+
+        /// How often the supervisor re-evaluates the online-user set. Short
+        /// enough that a user joining a call sees interpretation within
+        /// ~1 tick; long enough that we do not hammer the DB.
+        const SUPERVISOR_TICK_MS: u64 = 5_000;
+
+        let mut per_user_loops: HashMap<String, JoinHandle<()>> = HashMap::new();
+        let uuid = self.uuid.clone();
+
+        while !self.is_teardown.load(Ordering::Acquire) {
+            let now_s = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(d) => d.as_secs() as i64,
+                Err(_) => {
+                    sleep(Duration::from_millis(SUPERVISOR_TICK_MS)).await;
+                    continue;
+                }
+            };
+
+            let users_result =
+                Ad4mDb::with_global_instance(|db| db.list_users()).map_err(|e| e.to_string());
+            let user_tuples: Vec<(String, Option<i64>)> = match users_result {
+                Ok(users) => users
+                    .into_iter()
+                    .map(|u| (u.username, u.last_seen))
+                    .collect(),
+                Err(e) => {
+                    log::warn!(
+                        "auto_processor supervisor `{uuid}`: could not list users ({e}); \
+                         retrying in {SUPERVISOR_TICK_MS}ms"
+                    );
+                    sleep(Duration::from_millis(SUPERVISOR_TICK_MS)).await;
+                    continue;
+                }
+            };
+
+            let online =
+                select_online_managed_users(user_tuples, now_s, MANAGED_USER_ONLINE_WINDOW_S);
+            let online_set: std::collections::HashSet<&String> = online.iter().collect();
+
+            // Reap: drop entries for users who finished, aged out, or are no
+            // longer online. `handle.abort()` unwinds the loop's await points;
+            // `is_teardown` is not toggled by abort so the perspective stays
+            // healthy for other tasks.
+            per_user_loops.retain(|email, handle| {
+                if handle.is_finished() {
+                    log::debug!(
+                        "auto_processor supervisor `{uuid}`: loop for user `{email}` finished; \
+                         removing"
+                    );
+                    return false;
+                }
+                if !online_set.contains(email) {
+                    log::info!(
+                        "auto_processor supervisor `{uuid}`: user `{email}` aged out of \
+                         freshness window; aborting loop"
+                    );
+                    handle.abort();
+                    return false;
+                }
+                true
+            });
+
+            // Spawn loops for newly-online users. `for_user_email` is a pure
+            // constructor; DID / wallet resolution happens lazily inside the
+            // loop, so an email whose key never loaded still fails loudly
+            // there — not silently at spawn.
+            for email in online {
+                if per_user_loops.contains_key(&email) {
+                    continue;
+                }
+                let ctx = AgentContext::for_user_email(email.clone());
+                let this = self.clone();
+                let uuid_clone = uuid.clone();
+                let email_clone = email.clone();
+                let handle = tokio::spawn(async move {
+                    log::info!(
+                        "auto_processor supervisor `{uuid_clone}`: starting loop for user \
+                         `{email_clone}`"
+                    );
+                    this.auto_processor_watch_loop(ctx).await;
+                });
+                per_user_loops.insert(email, handle);
+            }
+
+            sleep(Duration::from_millis(SUPERVISOR_TICK_MS)).await;
+        }
+
+        // Teardown: abort every per-user loop deliberately. `is_teardown` is
+        // already visible to the child loops, but aborting is faster than
+        // waiting for their 500ms tick to observe it.
+        for (email, handle) in per_user_loops.drain() {
+            log::debug!(
+                "auto_processor supervisor `{uuid}`: teardown — aborting loop for `{email}`"
+            );
+            handle.abort();
+        }
     }
 
     pub async fn teardown_background_tasks(&self) {
@@ -3482,10 +3617,18 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Seconds a locally-managed multi-tenancy user's `last_seen` may lag before
+    /// we treat them as offline for telepresence. Mirrors the 5-minute window
+    /// `agent::capabilities` already uses to throttle last-seen updates.
+    const LOCAL_ONLINE_THRESHOLD_SECS: i64 = 300;
+
     pub async fn online_agents(&self) -> Result<Vec<OnlineAgent>, AnyError> {
+        // Remote peers via the link language's telepresence adapter (when one is
+        // present — i.e. a real multi-executor neighbourhood).
         let link_language_clone = self.link_language.read().await.clone();
-        if let Some(mut link_language) = link_language_clone {
-            Ok(link_language
+        let has_link_language = link_language_clone.is_some();
+        let mut agents: Vec<OnlineAgent> = if let Some(mut link_language) = link_language_clone {
+            link_language
                 .get_online_agents()
                 .await?
                 .into_iter()
@@ -3493,10 +3636,55 @@ impl PerspectiveInstance {
                     a.status.verify_signatures();
                     a
                 })
-                .collect())
+                .collect()
         } else {
-            Err(self.no_link_language_error().await)
+            Vec::new()
+        };
+
+        // Co-located multi-tenancy users: a neighbourhood's locally-managed
+        // participants are "online" when they've hit any authed API within the
+        // last-seen window — no Holochain round-trip needed. Mirrors
+        // `send_signal`'s local re-routing so telepresence is transparent across
+        // the multi-tenancy (one executor) vs. multi-executor boundary. This is
+        // the presence source the auto-processor's `elect_author` reads.
+        let handle = self.persisted.lock().await.clone();
+        if handle.shared_url.is_some() {
+            let owners: Vec<String> = handle.owners.clone().unwrap_or_default();
+            if !owners.is_empty() {
+                let now = chrono::Utc::now().timestamp();
+                let managed =
+                    Ad4mDb::with_global_instance(|db| db.list_users()).unwrap_or_default();
+                for user in managed {
+                    let recently_active = user
+                        .last_seen
+                        .map_or(false, |ls| now - ls < Self::LOCAL_ONLINE_THRESHOLD_SECS);
+                    if recently_active
+                        && owners.contains(&user.did)
+                        && !agents.iter().any(|a| a.did == user.did)
+                    {
+                        agents.push(OnlineAgent {
+                            did: user.did,
+                            status: PerspectiveExpression::default(),
+                        });
+                    }
+                }
+            }
         }
+
+        // Stay strictly additive: preserve the historical "no telepresence
+        // source" error whenever there's no link language AND we found no
+        // locally-online managed users. Callers (notably the auto-processor
+        // watcher) rely on that error to fall through to their claim-based path
+        // rather than reading an empty set as "everyone is offline". We only
+        // diverge from the old link-language passthrough when we actually have
+        // co-located managed users to report. (A link language that returns an
+        // empty set is a genuine "nobody online" and stays `Ok(vec![])`, as
+        // before.)
+        if agents.is_empty() && !has_link_language {
+            return Err(self.no_link_language_error().await);
+        }
+
+        Ok(agents)
     }
 
     pub async fn set_online_status(&self, status: PerspectiveExpression) -> Result<(), AnyError> {
@@ -4265,6 +4453,60 @@ impl PerspectiveInstance {
         //log::info!("🎯 CREATE SUBJECT: Total create_subject took {:?}", create_start.elapsed());
 
         Ok(())
+    }
+
+    /// Patch property values on an instance that already exists: runs the
+    /// class's `ad4m://setter` actions for the given properties **without** the
+    /// constructor.
+    ///
+    /// This is [`Self::create_subject`] minus the class-minting half. Per
+    /// property the write is byte-for-byte what `create_subject` would do —
+    /// same setter commands, same `resolve_property_value` encoding, so a
+    /// `setSingleTarget` setter still replaces that predicate's current target
+    /// — but the constructor's type-flag link is left untouched, since the
+    /// instance is already of that class. Use it to refine an existing node
+    /// (rename, fill a missing field) rather than mint a duplicate.
+    ///
+    /// Properties with no declared setter are skipped, exactly as in
+    /// `create_subject`. An empty/absent value set is a no-op.
+    pub async fn update_subject(
+        &mut self,
+        subject_class: SubjectClassOption,
+        expression_address: String,
+        values: serde_json::Value,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let class_name = self
+            .subject_class_option_to_class_name(subject_class, context)
+            .await?;
+
+        let mut commands: Vec<Command> = Vec::new();
+        if let serde_json::Value::Object(obj) = values {
+            for (prop, value) in obj.iter() {
+                let Some(setter_commands) =
+                    self.get_property_setter_actions(&class_name, prop).await?
+                else {
+                    continue;
+                };
+                let target_value = self
+                    .resolve_property_value(&class_name, prop, value, context)
+                    .await?;
+                for setter_cmd in setter_commands.iter() {
+                    commands.push(Command {
+                        target: Some(target_value.clone()),
+                        ..setter_cmd.clone()
+                    });
+                }
+            }
+        }
+
+        if commands.is_empty() {
+            return Ok(());
+        }
+
+        self.execute_commands(commands, expression_address, vec![], batch_id, context)
+            .await
     }
 
     pub async fn get_subject_data(
@@ -5056,6 +5298,230 @@ impl PerspectiveInstance {
         log::debug!("Fallback sync loop ended for perspective {}", uuid);
     }
 
+    /// Auto-processor watch loop (P-B2b2 polling MVP).
+    ///
+    /// One instance per perspective, joined into `start_background_tasks`.
+    /// Every `TICK_MS`:
+    ///   1. Load every `AutoProcessorConfig` declared on this perspective's
+    ///      shared graph (`load_processors`). Zero configs = no-op tick.
+    ///   2. Per config, run its `source_scope_query` to gather the current
+    ///      transcript (`?speaker` `?text` `?timestamp`), drop turns older
+    ///      than `source_window_ms` when set, hash each remaining turn, and
+    ///      skip IDs already in this processor's `InterpretationRun.sources`
+    ///      (windowed by `ran_at` only when `source_window_ms` is set).
+    ///   3. Per config, `drain_ready_batch(cfg, now_ms)` — if a batch is ready
+    ///      (i.e. `debounce_ms` elapsed since the last `record_item`), run
+    ///      `run_one_pass` in-line. `Won` writes `processor` + `sources` on the
+    ///      new run node (the durable cursor). `BackedOff` holds the ids back
+    ///      locally for `claim_ttl_ms` — the winner's sources are what really
+    ///      retire them, but they only arrive once links sync, and re-racing
+    ///      the claim every debounce window until then is pure churn.
+    ///      `ShapesMissing` and `EmptyTranscript` do not write sources, so the
+    ///      ids are retried once the shape or transcript lands.
+    ///
+    /// This is the "polling MVP". The event-driven variant
+    /// (subscribe to `PERSPECTIVE_LINK_ADDED_TOPIC`, record `link.data.source`
+    /// deltas) is a follow-up optimisation — the coordination correctness
+    /// envelope is the same because the `ProcessingClaim` (P-A) is the real
+    /// double-processing guard, not the trigger latency.
+    /// `context` is the agent this executor runs passes as — production passes
+    /// the main agent; a multi-user test spawns one loop per managed user so the
+    /// `ProcessingClaim` election runs across distinct DIDs on one executor.
+    pub(crate) async fn auto_processor_watch_loop(&self, context: AgentContext) {
+        use crate::perspectives::auto_processor::watcher::WatcherState;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        const TICK_MS: u64 = 500;
+
+        let uuid = self.uuid.clone();
+        let mut watcher = WatcherState::new();
+
+        while !self.is_teardown.load(Ordering::Acquire) {
+            sleep(Duration::from_millis(TICK_MS)).await;
+            if self.is_teardown.load(Ordering::Acquire) {
+                return;
+            }
+            let now_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(d) => d.as_millis() as i64,
+                Err(_) => continue, // clock before epoch — skip tick
+            };
+            self.run_auto_processor_tick(&mut watcher, now_ms, &context)
+                .await;
+        }
+
+        log::debug!("auto_processor_watch_loop ended for perspective {}", uuid);
+    }
+
+    /// One tick of the auto-processor watch loop, factored out so tests can
+    /// drive the processor deterministically (feed a `now_ms`, no 500ms sleeps)
+    /// and observe it purely through the [`events`](crate::perspectives::auto_processor::events)
+    /// signals — exercising the exact production path the background loop runs,
+    /// with no manual interpretation or transcript wrangling.
+    ///
+    /// Loads every declared `AutoProcessorConfig`, records new-since-processed
+    /// transcript turns into `watcher` (gather minus this processor's
+    /// `InterpretationRun.sources`, optionally windowed), then drains and runs
+    /// any ready batch.
+    ///
+    /// `context` is the agent this executor runs the pass as — the production
+    /// loop passes the main agent; a multi-user test passes each managed user's
+    /// context so the `ProcessingClaim` election runs across distinct DIDs
+    /// (proving two users on one executor don't double-process).
+    pub(crate) async fn run_auto_processor_tick(
+        &self,
+        watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState,
+        now_ms: i64,
+        context: &AgentContext,
+    ) {
+        use crate::perspectives::auto_processor::{
+            config::load_processors,
+            cursor::{load_processed_source_ids, turn_in_source_window},
+            events::{emit, AutoProcessorEvent, AutoProcessorStep},
+            watcher::{run_one_pass, PassOutcome, PendingTurn},
+        };
+
+        let uuid = self.uuid.clone();
+        let configs = match load_processors(self).await {
+            Ok(cs) => cs,
+            Err(e) => {
+                log::warn!(
+                    "auto_processor_tick [{}]: load_processors failed: {e:#}",
+                    uuid
+                );
+                return;
+            }
+        };
+        if configs.is_empty() {
+            return;
+        }
+
+        // 1. Record new-since-last-processed turns per config (payload kept).
+        for cfg in &configs {
+            let transcript = match crate::perspectives::interpretation::gather_transcript_sparql(
+                self,
+                &cfg.source_scope_query,
+            )
+            .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    log::warn!(
+                        "auto_processor `{}` [{}]: gather_transcript_sparql failed: {e:#}",
+                        cfg.processor_id,
+                        uuid
+                    );
+                    continue;
+                }
+            };
+            let processed = match load_processed_source_ids(
+                self,
+                &cfg.processor_id,
+                now_ms,
+                cfg.source_window_ms,
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!(
+                        "auto_processor `{}` [{}]: load_processed_source_ids failed: {e:#}",
+                        cfg.processor_id,
+                        uuid
+                    );
+                    continue;
+                }
+            };
+            for turn in &transcript {
+                if let Some(window_ms) = cfg.source_window_ms {
+                    if !turn_in_source_window(&turn.timestamp, now_ms, window_ms) {
+                        continue;
+                    }
+                }
+                let pending = PendingTurn::from_transcript(turn);
+                if processed.contains(&pending.id)
+                    || watcher.is_deferred(&cfg.processor_id, &pending.id, now_ms)
+                {
+                    continue;
+                }
+                watcher.record_item(&cfg.processor_id, pending, now_ms);
+            }
+        }
+
+        // 2. Drain + run a pass per config.
+        for cfg in &configs {
+            let Some(batch) = watcher.drain_ready_batch(cfg, now_ms) else {
+                continue;
+            };
+            // Signal the batch is ready before the pass runs, so listeners
+            // (tests, the WS layer) can await "processing started".
+            emit(
+                AutoProcessorEvent::new(&uuid, &cfg.processor_id, AutoProcessorStep::BatchReady)
+                    .with_items(&batch.iter().map(|t| t.id.clone()).collect::<Vec<_>>()),
+            )
+            .await;
+            let mut perspective_clone = self.clone();
+            // Stall-fallback: if this batch has been standing down for its online
+            // elected author past `claim_ttl_ms`, escalate past election straight
+            // to the claim (the min-DID claim still prevents doubles among peers
+            // that escalate together).
+            let item_ids: Vec<String> = batch.iter().map(|t| t.id.clone()).collect();
+            let batch_id = crate::perspectives::auto_processor::claim::batch_key(&item_ids);
+            let escalate = watcher.should_escalate(&batch_id, now_ms, cfg.claim_ttl_ms);
+            let outcome = match run_one_pass(
+                &mut perspective_clone,
+                cfg,
+                &batch,
+                now_ms,
+                context,
+                escalate,
+            )
+            .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    log::warn!(
+                        "auto_processor `{}` [{}]: run_one_pass errored (batch len={}): {e:#}",
+                        cfg.processor_id,
+                        uuid,
+                        batch.len()
+                    );
+                    continue;
+                }
+            };
+            match outcome {
+                PassOutcome::Won { .. } => {
+                    // Sources are on the new InterpretationRun; next tick's
+                    // cursor SPARQL skips these ids. Clear any stall clock.
+                    watcher.clear_standdown(&batch_id);
+                }
+                PassOutcome::BackedOff { .. } => {
+                    // The winner's `sources` are the durable record, but they
+                    // only reach us once their links sync. Hold the ids back
+                    // until the claim would have expired so we neither re-race
+                    // the batch every debounce window nor lose it if the
+                    // winner crashes before writing.
+                    watcher.defer_turns(&cfg.processor_id, &item_ids, now_ms, cfg.claim_ttl_ms);
+                    watcher.clear_standdown(&batch_id);
+                }
+                PassOutcome::NotCandidate { .. } => {
+                    // Stood down for an *online* elected author. Start/continue
+                    // the stall clock so a persistently-inactive elected author
+                    // eventually trips the escalation above. Not marked processed
+                    // — retried next tick (the author acts, or we escalate).
+                    watcher.note_standdown(batch_id, now_ms);
+                }
+                PassOutcome::AwaitingAuthor
+                | PassOutcome::ShapesMissing { .. }
+                | PassOutcome::EmptyTranscript => {
+                    // Do NOT mark processed, and do NOT accrue stall time:
+                    // AwaitingAuthor is "no participant online at all" (the
+                    // wait-for-a-participant policy, not a stalled author); the
+                    // others are transient config/transcript states.
+                }
+            }
+        }
+    }
+
     /// Reset the fallback sync interval to 30 seconds when new links are added
     /// This ensures that new links get synced quickly
     async fn reset_fallback_sync_interval(&self) {
@@ -5098,6 +5564,16 @@ impl PerspectiveInstance {
             },
         );
         batch_uuid
+    }
+
+    /// Drop a pending batch from the in-memory store without committing it.
+    /// Returns `true` if the batch was present, `false` if it had already been
+    /// consumed (e.g. by a successful `commit_batch`) or timed out. Callers
+    /// that abandon a batch mid-build (a `create_subject` in a loop failing)
+    /// should call this so the batch does not linger for `BATCH_TIMEOUT_SECS`
+    /// waiting on the next `create_batch` sweep to prune it.
+    pub async fn discard_batch(&self, batch_uuid: &str) -> bool {
+        self.batch_store.write().await.remove(batch_uuid).is_some()
     }
 
     pub async fn commit_batch(
@@ -5358,6 +5834,43 @@ mod tests {
         links.sort_by(cmp);
         all_links_sorted.sort_by(cmp);
         assert_eq!(links, all_links_sorted);
+    }
+
+    #[tokio::test]
+    async fn discard_batch_removes_pending_batch_and_is_idempotent() {
+        let mut perspective = setup().await;
+        let ctx = AgentContext::main_agent();
+
+        let batch_id = perspective.create_batch().await;
+
+        // First discard: batch is present, removed, returns true.
+        assert!(
+            perspective.discard_batch(&batch_id).await,
+            "first discard should report the batch was present"
+        );
+
+        // Second discard on the same id: already gone, returns false.
+        assert!(
+            !perspective.discard_batch(&batch_id).await,
+            "second discard should be a no-op"
+        );
+
+        // commit_batch on a discarded id must now fail with the well-known
+        // \"No batch found\" error — proves the batch was really pruned.
+        let err = perspective
+            .commit_batch(batch_id.clone(), &ctx)
+            .await
+            .expect_err("commit_batch after discard must fail");
+        assert!(
+            format!("{err}").to_lowercase().contains("no batch found"),
+            "unexpected commit_batch error after discard: {err}"
+        );
+
+        // Discarding an id that never existed is a no-op, not a panic.
+        assert!(
+            !perspective.discard_batch("does-not-exist").await,
+            "discarding an unknown id should return false without panicking"
+        );
     }
 
     #[tokio::test]

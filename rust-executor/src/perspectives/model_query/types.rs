@@ -176,14 +176,17 @@ where
     }
 }
 
-/// Parent scope for scoped queries.
+/// A named subgraph scope: a parent node + linking predicate.
 ///
-/// When a query targets instances that are children of a specific parent
-/// (e.g. "all Messages belonging to Channel X"), the parent scope constrains
-/// the SPARQL query with an additional triple pattern.
-#[derive(Debug, Clone, Deserialize)]
+/// Reusable across contexts that need to identify "the subtree under node X
+/// linked via predicate P": query-time filtering (e.g. "all Messages belonging
+/// to Channel X" as a `parent` filter on `ModelQueryInput`) AND write-time
+/// scoping (e.g. AutoProcessor's `existing_scope` / `mint_scope` fields — the
+/// former constrains dedup lookups; the latter turns each new mint into a
+/// child link under the given node).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum ParentScope {
+pub enum Scope {
     Model {
         model: String,
         id: String,
@@ -245,7 +248,7 @@ pub struct ProjectionInput {
 #[serde(rename_all = "camelCase")]
 pub struct ModelQueryInput {
     #[serde(default)]
-    pub parent: Option<ParentScope>,
+    pub parent: Option<Scope>,
     #[serde(default)]
     pub properties: Option<Vec<String>>,
     #[serde(default)]
@@ -418,6 +421,16 @@ pub struct ShapeProperty {
     /// Transform expression (SHACL-AF Node Expression).
     /// Applied in hydration for resolveLanguage properties.
     pub(super) transform: Option<TransformExpression>,
+    /// Natural-language hint describing this property's meaning, read back from
+    /// the `ad4m://interpretation_hint` link on the property node.  Surfaced so the
+    /// generic LLM extractor (and MCP tool-schema generation) can inject it as
+    /// semantic guidance.  `None` when the SDNA declared no hint.
+    pub(crate) interpretation_hint: Option<String>,
+    /// Whether this property is the class's dedup identity (its title-like
+    /// interpretation key), read back from the `ad4m://identity` link on the
+    /// property node.  `false` when the SDNA declared no identity — a class
+    /// with no identity property is never deduplicated.
+    pub(crate) identity: bool,
 }
 
 impl ShapeProperty {
@@ -468,6 +481,11 @@ pub struct ModelShape {
     /// Enriched relation metadata for include resolution, populated
     /// directly from the perspective's SHACL triples.
     pub(crate) include_relations: Vec<ShapeRelation>,
+    /// Class-level natural-language hint, read back from the
+    /// `ad4m://interpretation_hint` link on the shape node.  Steers the generic
+    /// LLM extractor toward what instances of this class represent.  `None`
+    /// when the SDNA declared no class hint.
+    pub(crate) interpretation_hint: Option<String>,
 }
 
 impl ModelShape {

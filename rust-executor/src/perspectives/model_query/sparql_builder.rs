@@ -16,7 +16,7 @@
 use serde_json::Value;
 
 use super::types::{
-    InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, ParentScope, SortKey,
+    InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope, SortKey,
     SparqlPagination, WhereCondition,
 };
 use super::utils::{
@@ -327,7 +327,7 @@ pub(super) fn build_query_patterns(
     // Parent filter
     if let Some(ref parent) = query.parent {
         match parent {
-            ParentScope::Raw { id, predicate } => {
+            Scope::Raw { id, predicate } => {
                 if let (Ok(safe_id), Ok(safe_pred)) = (validate_iri(id), validate_iri(predicate)) {
                     conformance_patterns.push(format!("    <{safe_id}> <{safe_pred}> ?source ."));
                 } else {
@@ -338,7 +338,7 @@ pub(super) fn build_query_patterns(
                     );
                 }
             }
-            ParentScope::Model { id, field, model } => {
+            Scope::Model { id, field, model } => {
                 let safe_id = match validate_iri(id) {
                     Ok(s) => s,
                     Err(_) => {
