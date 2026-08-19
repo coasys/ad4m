@@ -26,9 +26,12 @@ use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{Link, LinkStatus};
 
-use super::claim::{try_claim, ClaimOutcome};
+use super::claim::{batch_key, try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
-use super::events::{emit, AutoProcessorEvent, AutoProcessorStep};
+use super::events::{
+    emit, emit_neighbourhood_state, AutoProcessorEvent, AutoProcessorNeighbourhoodState,
+    AutoProcessorStep, NeighbourhoodPhase,
+};
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
@@ -594,6 +597,20 @@ pub async fn run_one_pass(
         return Ok(PassOutcome::BackedOff { holder });
     }
     signal!(AutoProcessorStep::Claimed);
+    // Neighbourhood-state (Nico 2026-08-19): a small perspective-scoped
+    // event so a UI can render "someone is auto-processing here". Distinct
+    // from `AutoProcessorStep::Claimed` above (which is DID-scoped and
+    // carries the batch payload) — this one is delivered to every reader
+    // of the perspective, and carries only the claimant + batch key.
+    let batch_key_hex = batch_key(&item_ids);
+    emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+        &uuid,
+        &cfg.processor_id,
+        &me,
+        &batch_key_hex,
+        NeighbourhoodPhase::Claimed,
+    ))
+    .await;
 
     // 2. Resolve shapes.
     let store = &*perspective.sparql_store;
@@ -616,6 +633,18 @@ pub async fn run_one_pass(
             AutoProcessorStep::ShapesMissing,
             detail = missing.join(", ")
         );
+        // Close the neighbourhood-state Claimed row: this pass claimed the
+        // batch but is walking away without processing it. Without this,
+        // an observer's UI would keep showing "in progress" for a batch
+        // that will only clear when the claim TTL-expires.
+        emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+            &uuid,
+            &cfg.processor_id,
+            &me,
+            &batch_key_hex,
+            NeighbourhoodPhase::Abandoned,
+        ))
+        .await;
         return Ok(PassOutcome::ShapesMissing { missing });
     }
 
@@ -627,6 +656,14 @@ pub async fn run_one_pass(
             cfg.processor_id
         );
         signal!(AutoProcessorStep::EmptyTranscript);
+        emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+            &uuid,
+            &cfg.processor_id,
+            &me,
+            &batch_key_hex,
+            NeighbourhoodPhase::Abandoned,
+        ))
+        .await;
         return Ok(PassOutcome::EmptyTranscript);
     }
     let transcript: Vec<TranscriptTurn> = turns.iter().map(|t| t.as_transcript()).collect();
@@ -723,6 +760,17 @@ pub async fn run_one_pass(
         ev = ev.with_llm_io(d.prompt, d.response);
     }
     emit(ev).await;
+    // Neighbourhood-state: pass complete on this executor. Consumers use
+    // this to close out the `Claimed` row they showed for the same
+    // `batch_key`.
+    emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+        &uuid,
+        &cfg.processor_id,
+        &me,
+        &batch_key_hex,
+        NeighbourhoodPhase::Finished,
+    ))
+    .await;
 
     Ok(PassOutcome::Won { bases })
 }

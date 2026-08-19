@@ -14,7 +14,9 @@
 //! Emission is fire-and-forget: a pass never fails or blocks because nobody is
 //! listening (`broadcast::Sender::send` drops silently with no receivers).
 
-use crate::pubsub::{get_global_pubsub, AUTO_PROCESSOR_EVENT_TOPIC};
+use crate::pubsub::{
+    get_global_pubsub, AUTO_PROCESSOR_EVENT_TOPIC, AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -181,4 +183,93 @@ where
             Err(_) => return None,
         }
     }
+}
+
+// ── Neighbourhood state event (Nico 2026-08-19) ────────────────────────────
+//
+// Small, high-signal event that fires when THIS executor claims or finishes
+// a batch. Perspective-scoped (delivered to anyone with read access), no
+// batch payload — the point is "someone is auto-processing", not what they
+// are processing. Cross-executor sync via Holochain is NOT covered here;
+// clients that need to see peer claims from other nodes subscribe to
+// `link-added` and filter for the `has_claim` predicate.
+
+/// Coarse-grained pass phase for the observability stream. Distinct from
+/// `AutoProcessorStep` — that has 10 fine-grained steps for the pass owner;
+/// this has just the two transitions a neighbour cares about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NeighbourhoodPhase {
+    /// This executor wrote a `ProcessingClaim` — a pass has started on this
+    /// node.
+    Claimed,
+    /// The pass this executor claimed has completed successfully.
+    Finished,
+    /// The pass this executor started did NOT commit — either short-circuited
+    /// (missing shape / empty batch) or errored out; the claim will TTL-expire.
+    Abandoned,
+}
+
+/// One observation of an auto-processor pass by THIS executor. Small on
+/// purpose: perspective + processor + claimant DID + batch key + phase.
+/// Consumers merge these across ticks + across peers (via link-added on
+/// `has_claim`) to render "who is currently processing what."
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoProcessorNeighbourhoodState {
+    /// UUID of the perspective the pass runs on.
+    pub perspective_uuid: String,
+    /// The processor's id (`AutoProcessorConfig::processor_id`).
+    pub processor_id: String,
+    /// DID that claimed the batch — the executor's own DID for locally
+    /// initiated passes.
+    pub claimant_did: String,
+    /// Content hash of the batch (see [`super::claim::batch_key`]) — lets a
+    /// consumer merge `Claimed` and `Finished` events for the same batch
+    /// without duplicating rows.
+    pub batch_key: String,
+    /// Which lifecycle transition this event marks.
+    pub phase: NeighbourhoodPhase,
+}
+
+impl AutoProcessorNeighbourhoodState {
+    pub fn new(
+        perspective_uuid: &str,
+        processor_id: &str,
+        claimant_did: &str,
+        batch_key: &str,
+        phase: NeighbourhoodPhase,
+    ) -> Self {
+        Self {
+            perspective_uuid: perspective_uuid.to_string(),
+            processor_id: processor_id.to_string(),
+            claimant_did: claimant_did.to_string(),
+            batch_key: batch_key.to_string(),
+            phase,
+        }
+    }
+}
+
+/// Publish a neighbourhood-state event on the dedicated topic.
+/// Fire-and-forget, same rules as [`emit`].
+pub async fn emit_neighbourhood_state(event: AutoProcessorNeighbourhoodState) {
+    match serde_json::to_string(&event) {
+        Ok(json) => {
+            get_global_pubsub()
+                .await
+                .publish(&AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC, &json)
+                .await;
+        }
+        Err(e) => {
+            log::warn!("auto_processor::events: failed to serialize neighbourhood state: {e:#}")
+        }
+    }
+}
+
+/// Raw subscription to the neighbourhood-state topic (JSON strings).
+pub async fn subscribe_neighbourhood_state() -> broadcast::Receiver<String> {
+    get_global_pubsub()
+        .await
+        .subscribe(&AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC)
+        .await
 }

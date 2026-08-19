@@ -16,7 +16,7 @@ import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
-import type { AddAutoProcessorConfig, AutoProcessorEvent, InterpretationOverlayInfo } from "./AutoProcessor";
+import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
@@ -604,6 +604,19 @@ export class PerspectiveProxy {
     /** Subscribe to this perspective's auto-processor step signals. */
     async addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): Promise<void> {
         return await this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb)
+    }
+
+    /**
+     * Subscribe to this perspective's auto-processor neighbourhood-state
+     * events — fires when this executor claims / finishes / abandons a
+     * batch. Perspective-scoped, so a UI can render "someone is
+     * auto-processing this" without receiving the batch payload. See
+     * `AutoProcessorNeighbourhoodStateEvent`.
+     */
+    async addAutoProcessorNeighbourhoodStateListener(
+        cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
+    ): Promise<void> {
+        return await this.#client.addAutoProcessorNeighbourhoodStateListener(this.#handle.uuid, cb)
     }
 
     /**

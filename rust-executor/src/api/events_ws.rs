@@ -27,6 +27,7 @@
 //! | `model-loading-status`        | (inline)      | broadcast              | AI model loading status              |
 //! | `query-subscription-update`   | (inline)      | perspective owner      | Live query subscription update       |
 //! | `auto-processor-event`        | (inline)      | pass owner DID         | Auto-processor pass step signal      |
+//! | `auto-processor-neighbourhood-state` | (inline) | perspective owner DID | Coarse-grained neighbourhood view of "someone is auto-processing" |
 //!
 //! ## Client → Server messages
 //!
@@ -51,10 +52,11 @@ use crate::agent::{did_for_context, AgentContext};
 use crate::pubsub::{
     get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, AI_MODEL_LOADING_STATUS,
     AI_TRANSCRIPTION_TEXT_TOPIC, APPS_CHANGED, AUTO_PROCESSOR_EVENT_TOPIC,
-    EXCEPTION_OCCURRED_TOPIC, HOSTING_USER_INFO_CHANGED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC,
-    PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC,
-    PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
-    PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
+    AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC, EXCEPTION_OCCURRED_TOPIC,
+    HOSTING_USER_INFO_CHANGED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
+    PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
+    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_REMOVED_TOPIC,
+    PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
     RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
 
@@ -111,7 +113,8 @@ pub(crate) async fn build_event_stream(
     let d_trans = resolved_did.clone();
     let d_notif = resolved_did.clone();
     let d_query_sub = resolved_did.clone();
-    let d_auto_processor = resolved_did;
+    let d_auto_processor = resolved_did.clone();
+    let d_auto_processor_state = resolved_did;
 
     let pubsub = get_global_pubsub().await;
 
@@ -361,6 +364,20 @@ pub(crate) async fn build_event_stream(
         matches_auto_processor_pass_owner
     );
 
+    // ── Auto-processor neighbourhood-state (Nico 2026-08-19 follow-up) ──
+    // Perspective-scoped observability: anyone with perspective read access
+    // sees "someone is auto-processing this" without seeing the batch
+    // payload or the LLM I/O. Distinct from `auto-processor-event` above,
+    // which is DID-scoped to the pass owner.
+    let s_auto_processor_state = did_stream!(
+        pubsub
+            .subscribe(&AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC)
+            .await,
+        "auto-processor-neighbourhood-state",
+        d_auto_processor_state,
+        matches_auto_processor_neighbourhood_state_reader
+    );
+
     // ── Merge all streams ──
     let agent = stream::select(
         stream::select(s_status, s_apps),
@@ -374,7 +391,13 @@ pub(crate) async fn build_event_stream(
     let runtime = stream::select(s_msg, stream::select(s_notif, s_exc));
     let ai = stream::select(
         s_trans,
-        stream::select(s_loading, stream::select(s_query_sub, s_auto_processor)),
+        stream::select(
+            s_loading,
+            stream::select(
+                s_query_sub,
+                stream::select(s_auto_processor, s_auto_processor_state),
+            ),
+        ),
     );
 
     let top = stream::select(
@@ -583,6 +606,31 @@ pub(crate) fn matches_query_subscription_owner(msg: &str, current_did: Option<&s
 /// the caller. A missing `perspectiveUuid` or `agentDid` (malformed event)
 /// fails closed. An admin session with no DID (`current_did = None`) sees
 /// every event — same escape hatch every other `did_stream!` handler has.
+/// Neighbourhood-state filter — anyone with perspective read access sees
+/// the event. Distinct from [`matches_auto_processor_pass_owner`] which
+/// gates on DID as well: neighbourhood state is deliberately a broadcast
+/// (per Nico 2026-08-19), so a UI can render "someone else on this
+/// executor is auto-processing". Fails closed on malformed events or a
+/// missing `perspectiveUuid` — a stray event with no attribution should
+/// not leak to every observer.
+pub(crate) fn matches_auto_processor_neighbourhood_state_reader(
+    msg: &str,
+    current_did: Option<&str>,
+) -> bool {
+    let Some(did) = current_did else {
+        return true;
+    };
+    let map = match serde_json::from_str::<serde_json::Value>(msg) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => return false,
+    };
+    let uuid = match map.get("perspectiveUuid") {
+        Some(serde_json::Value::String(u)) => u.as_str(),
+        _ => return false,
+    };
+    perspective_is_owned_by(uuid, did)
+}
+
 pub(crate) fn matches_auto_processor_pass_owner(msg: &str, current_did: Option<&str>) -> bool {
     let Some(did) = current_did else {
         return true;
@@ -683,6 +731,56 @@ mod auto_processor_filter_tests {
             Some("did:key:alice")
         ));
         assert!(!matches_auto_processor_pass_owner(
+            "[]",
+            Some("did:key:alice")
+        ));
+    }
+}
+
+#[cfg(test)]
+mod auto_processor_neighbourhood_state_tests {
+    //! [`matches_auto_processor_neighbourhood_state_reader`] — perspective-
+    //! owner scoped, deliberately broadcast semantics (Nico 2026-08-19:
+    //! "we should be able to see if anyone was autoprocessing"). Fails
+    //! closed on missing perspectiveUuid or malformed JSON.
+    //! `perspective_is_owned_by` short-circuits to `true` when the
+    //! perspective is not in the global registry (this test setup), so
+    //! these cases exercise the parse + missing-field checks in isolation.
+    use super::matches_auto_processor_neighbourhood_state_reader;
+
+    #[test]
+    fn admin_none_did_sees_every_event() {
+        let msg = r#"{"perspectiveUuid":"p","claimantDid":"did:key:alice","phase":"claimed"}"#;
+        assert!(matches_auto_processor_neighbourhood_state_reader(msg, None));
+    }
+
+    #[test]
+    fn any_reader_did_gets_event_regardless_of_claimant() {
+        // Broadcast semantics: not filtered by claimant. Bob observes
+        // Alice's pass on the same executor.
+        let msg = r#"{"perspectiveUuid":"p","claimantDid":"did:key:alice","phase":"claimed"}"#;
+        assert!(matches_auto_processor_neighbourhood_state_reader(
+            msg,
+            Some("did:key:bob")
+        ));
+    }
+
+    #[test]
+    fn missing_perspective_uuid_fails_closed() {
+        let msg = r#"{"claimantDid":"did:key:alice","phase":"claimed"}"#;
+        assert!(!matches_auto_processor_neighbourhood_state_reader(
+            msg,
+            Some("did:key:alice")
+        ));
+    }
+
+    #[test]
+    fn malformed_json_fails_closed() {
+        assert!(!matches_auto_processor_neighbourhood_state_reader(
+            "not json",
+            Some("did:key:alice")
+        ));
+        assert!(!matches_auto_processor_neighbourhood_state_reader(
             "[]",
             Some("did:key:alice")
         ));

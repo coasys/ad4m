@@ -48,6 +48,38 @@ export interface AutoProcessorEvent {
   llmOutput?: string;
 }
 
+/**
+ * Coarse-grained phase of a neighbourhood-state event.
+ *
+ * `claimed` — this executor just started a pass.
+ * `finished` — the pass completed successfully.
+ * `abandoned` — the pass short-circuited (missing shape / empty batch /
+ *   error); the claim will TTL-expire.
+ */
+export type NeighbourhoodPhase = "claimed" | "finished" | "abandoned";
+
+/**
+ * `auto-processor-neighbourhood-state` — perspective-scoped observability
+ * event. Fires when THIS executor claims, finishes, or abandons a batch.
+ * Anyone with perspective read access sees it, so a UI can render "someone
+ * is auto-processing this" without receiving the batch payload or LLM I/O.
+ *
+ * Cross-executor visibility (peer's claim reaching us via Holochain sync) is
+ * NOT covered here; consumers who need that subscribe to `link-added` and
+ * filter for the `has_claim` predicate on the shared perspective.
+ */
+export interface AutoProcessorNeighbourhoodStateEvent {
+  type: "auto-processor-neighbourhood-state";
+  perspectiveUuid: string;
+  processorId: string;
+  /** DID that claimed the batch — the pass owner's DID. */
+  claimantDid: string;
+  /** SHA-256 hex of the batch's item-id set — merge `claimed` + `finished`
+   *  for the same key to render a single row in a UI. */
+  batchKey: string;
+  phase: NeighbourhoodPhase;
+}
+
 /** Configuration for `perspective.addAutoProcessor` (everything but `uuid`). */
 export interface AddAutoProcessorConfig {
   /** Human-meaningful processor id (unique per perspective). */
