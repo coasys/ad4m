@@ -364,6 +364,8 @@ function createFakeChildProcess() {
 describe("ensureExecutorRunning", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    mockSpawn.mockClear();
+    mockExecFileSync.mockClear();
   });
 
   it("returns 'already_running' when executor is already running", async () => {
@@ -1641,6 +1643,8 @@ describe("ad4mPlugin", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     _resetModuleState();
+    mockSpawn.mockClear();
+    mockExecFileSync.mockClear();
   });
 
   it("registers expected tools and services", async () => {
@@ -2893,7 +2897,7 @@ describe("WakerSubscriptionManager", () => {
       }),
     };
     return {
-      ProxyClass: vi.fn(() => proxy),
+      ProxyClass: vi.fn(function () { return proxy; }),
       proxy,
       /** Simulate the subscription delivering a result */
       deliver: (result: any) => {
