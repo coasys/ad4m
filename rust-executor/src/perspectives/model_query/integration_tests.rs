@@ -3398,6 +3398,7 @@ async fn test_full_model_query_ops_contains_with_pagination() {
 /// writes hold on disk. Used both by tests that seed envelope-form data to
 /// exercise the migration path and by tests that assert envelope properties
 /// still query and sort on the inner value.
+#[allow(dead_code)]
 fn signed_envelope_literal(value: &str) -> String {
     signed_envelope_literal_with_ts(value, "2024-01-01T00:00:00.000Z")
 }

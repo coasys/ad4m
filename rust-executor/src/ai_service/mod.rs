@@ -27,7 +27,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::sleep;
 
 mod error;
-use log::{error, info};
+use log::error;
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 

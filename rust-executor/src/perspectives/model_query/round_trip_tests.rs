@@ -637,7 +637,7 @@ async fn e2e_shacl_shape_with_where_ops() {
         );
     }
 
-    let ts = "1700000000000";
+    let _ts = "1700000000000";
     let items = [
         "test://post-1",
         "test://post-2",

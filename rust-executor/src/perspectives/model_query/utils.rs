@@ -103,7 +103,7 @@ pub(super) const MAX_INCLUDE_DEPTH: u8 = 8;
 
 /// Parse a `literal:` URI into a typed JSON value, or return the input as a
 /// string when it is not a literal URI.
-pub(super) fn parse_literal_value(uri: &str) -> Value {
+pub(crate) fn parse_literal_value(uri: &str) -> Value {
     let body = if let Some(rest) = uri.strip_prefix("literal:") {
         rest
     } else {
