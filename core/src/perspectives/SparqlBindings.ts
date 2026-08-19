@@ -50,13 +50,39 @@ export function parseSparqlCount(result: CountBinding[] | undefined | null): num
  * Returns `''` for `undefined`/empty input. Falls through to the raw value
  * if decoding fails — bindings against properties resolved through a custom
  * language are already raw URIs and should pass through unchanged.
- * `literal:json:` objects are JSON-stringified for display.
+ *
+ * Signed-envelope literals
+ * ------------------------
+ * Properties declared with `resolveLanguage: 'literal'` are written through
+ * the built-in `literal` language, which wraps the value in a signed
+ * expression envelope (`{ author, timestamp, data, proof }`) and encodes
+ * the whole envelope as a `literal:json:` URL — see
+ * `rust-executor/src/languages/mod.rs::expression_create` (literal branch).
+ * On read, `parseLit` unwraps `.data` from that envelope so callers get the
+ * original scalar value instead of the envelope JSON.
+ *
+ * The Channel V refactor moved most scalar properties to deterministic
+ * typed XSD literals which no longer round-trip through this envelope — for
+ * those properties the SPARQL binding is already the lexical form and this
+ * helper decodes to the primitive.  Signed-envelope literals still exist
+ * for any property that opts back into `resolveLanguage: 'literal'` (e.g.
+ * per-message provenance for chat bodies), which is why the `.data` unwrap
+ * is preserved here.
+ *
+ * Non-envelope JSON objects (`literal:json:` payloads that are not signed
+ * envelopes) are JSON-stringified for display.
  */
 export function parseLit(val: string | undefined | null): string {
   if (val === undefined || val === null || val === '') return '';
   try {
     const result = Literal.fromUrl(val).get();
-    if (typeof result === 'object' && result !== null) return JSON.stringify(result);
+    if (typeof result === 'object' && result !== null) {
+      // Signed-envelope literal (resolveLanguage: 'literal' properties):
+      // unwrap `.data` when it's a string primitive.
+      const data = (result as { data?: unknown }).data;
+      if (typeof data === 'string') return data;
+      return JSON.stringify(result);
+    }
     return String(result);
   } catch {
     return val;
