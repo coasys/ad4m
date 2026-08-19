@@ -115,8 +115,10 @@ pub(crate) async fn accept_interpretation(
             .and_then(|p| p.strip_prefix(INFERRED_PREFIX))
             .expect("filtered to inferred links");
         // Copy the staged literal target verbatim onto the real predicate — same
-        // encoding the interpreter writes for a literal-valued property.
-        replace_link(perspective, base, real_pred, &l.data.target, context).await?;
+        // encoding the interpreter writes for a literal-valued property. Accept
+        // is a user-triggered single-property operation, so no caller-owned
+        // batch to thread — `None` matches every other one-shot call site.
+        replace_link(perspective, base, real_pred, &l.data.target, None, context).await?;
         perspective
             .remove_links(vec![LinkExpression::from(l.clone())], None)
             .await?;
