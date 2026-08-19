@@ -401,15 +401,27 @@ impl PerspectiveInstance {
         );
     }
 
-    /// Dispatch between single-user (one main-agent loop, as before) and
-    /// multi-user (one loop per recently-seen managed user) auto-processor
-    /// spawning. Single-user mode preserves prior behaviour; multi-user mode
-    /// (`enable_multi_user: true`) skips the main-agent loop entirely — running
-    /// interpretation as the host DID would attribute every minted instance to
-    /// the host on a shared perspective, which the multi-user model rejects.
+    /// Dispatch between single-user (one main-agent loop) and multi-user
+    /// (main-agent loop PLUS a per-online-managed-user loop) auto-processor
+    /// spawning.
+    ///
+    /// The main-agent loop always runs. In multi-user mode `elect_author`
+    /// walks the batch's message-order authors and returns `Other(managed-user)`
+    /// on any batch authored by a managed user, so the main-agent loop stands
+    /// down cheaply (no LLM call) and the winning managed user's own loop does
+    /// the interpretation with the correct provenance DID. When no managed
+    /// user is present as a batch author — e.g. the host itself posted, or
+    /// a JS integration test drives the perspective through the admin client
+    /// before any managed user comes online — the main-agent loop is the only
+    /// eligible processor and runs the pass itself. This keeps
+    /// `auto-processor.test.ts` (multi-user mode set, but no managed users
+    /// created) working without regressing the Marvin per-user attribution.
     async fn auto_processor_supervisor(&self) {
         if crate::user_management::is_multi_user_enabled() {
-            self.managed_user_auto_processor_supervisor().await;
+            let _ = join!(
+                self.auto_processor_watch_loop(AgentContext::main_agent()),
+                self.managed_user_auto_processor_supervisor(),
+            );
         } else {
             self.auto_processor_watch_loop(AgentContext::main_agent())
                 .await;
