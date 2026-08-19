@@ -74,19 +74,45 @@ export function parseSparqlCount(result: CountBinding[] | undefined | null): num
  */
 export function parseLit(val: string | undefined | null): string {
   if (val === undefined || val === null || val === '') return '';
+
+  // Fast-path 1: `literal:*` URLs from properties written through the built-in
+  // `literal` language.  On Channel V typed-XSD-literal properties, these
+  // decode straight to a primitive; on `resolveLanguage: 'literal'` properties
+  // (per-message provenance in chat/synergy) they decode to a signed-envelope
+  // object we unwrap via `.data`.
   try {
     const result = Literal.fromUrl(val).get();
     if (typeof result === 'object' && result !== null) {
-      // Signed-envelope literal (resolveLanguage: 'literal' properties):
-      // unwrap `.data` when it's a string primitive.
       const data = (result as { data?: unknown }).data;
       if (typeof data === 'string') return data;
       return JSON.stringify(result);
     }
     return String(result);
   } catch {
-    return val;
+    // fall through to plain-JSON envelope detection
   }
+
+  // Fast-path 2: envelope stored/returned as a bare JSON string rather than a
+  // `literal:json:*` URL.  Depending on the storage backend and query path,
+  // SPARQL bindings for `resolveLanguage: 'literal'` properties can surface
+  // the envelope object directly as its JSON serialisation (Oxigraph typed
+  // xsd:string of the JSON, or a Channel V pass-through) instead of the URL
+  // form.  Detect that shape by parsing the string and unwrapping `.data`
+  // when it looks like a signed envelope; anything else passes through
+  // unchanged so plain text (e.g. "just a string") is not corrupted.
+  if (val.length >= 2 && val.charCodeAt(0) === 0x7b /* '{' */) {
+    try {
+      const parsed = JSON.parse(val);
+      if (parsed && typeof parsed === 'object') {
+        const data = (parsed as { data?: unknown }).data;
+        if (typeof data === 'string') return data;
+      }
+    } catch {
+      // not JSON — fall through and return the raw value
+    }
+  }
+
+  return val;
 }
 
 /** Decode a `Literal`-encoded binding to a number. Returns 0 on empty/invalid input. */

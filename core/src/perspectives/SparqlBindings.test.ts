@@ -51,6 +51,33 @@ describe('parseLit', () => {
     const payload = { data: { nested: 'object' } };
     expect(parseLit(Literal.from(payload).toUrl())).toBe(JSON.stringify(payload));
   });
+
+  // Some storage backends / query paths surface signed envelopes for
+  // `resolveLanguage: 'literal'` properties as a bare JSON string rather
+  // than a `literal:json:*` URL — the Flux Synergy view hit this when
+  // Message.body arrived as `{"author":..,"timestamp":..,"data":"hi","proof":..}`
+  // straight out of a SPARQL binding.  parseLit must still unwrap `.data`
+  // in that shape or the raw envelope leaks into the chat UI.
+  it('extracts .data from a plain-JSON signed envelope (no literal: URL wrapper)', () => {
+    const envelope = JSON.stringify({
+      author: 'did:key:z6MkTest',
+      timestamp: '2026-08-19T14:00:00.000Z',
+      data: '<p>hello</p>',
+      proof: { key: 'did:key:z6MkTest#z6MkTest', signature: 'deadbeef' },
+    });
+    expect(parseLit(envelope)).toBe('<p>hello</p>');
+  });
+
+  it('leaves plain-JSON objects without a string .data unchanged', () => {
+    // Not an envelope — preserve original JSON so downstream code sees
+    // exactly what was stored.
+    const raw = JSON.stringify({ foo: 'bar' });
+    expect(parseLit(raw)).toBe(raw);
+  });
+
+  it('leaves plain text values that happen to start with `{` unchanged', () => {
+    expect(parseLit('{ not really json')).toBe('{ not really json');
+  });
 });
 
 describe('parseLitNumber', () => {
