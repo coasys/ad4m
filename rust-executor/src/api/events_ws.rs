@@ -110,7 +110,8 @@ pub(crate) async fn build_event_stream(
     let d_apps = resolved_did.clone();
     let d_trans = resolved_did.clone();
     let d_notif = resolved_did.clone();
-    let d_query_sub = resolved_did;
+    let d_query_sub = resolved_did.clone();
+    let d_auto_processor = resolved_did;
 
     let pubsub = get_global_pubsub().await;
 
@@ -347,13 +348,17 @@ pub(crate) async fn build_event_stream(
     );
 
     // ── Auto-processor step signals ──
-    // Broadcast (not owner-filtered): the event carries `perspectiveUuid` +
-    // `processorId`, so a client subscribes and filters to the perspective it
-    // cares about. This is how a Flux-style UI shows "collecting → running LLM
-    // → done" and awaits the next batch.
-    let s_auto_processor = broadcast_stream!(
+    // DID-scoped: an event is delivered ONLY to the DID whose pass produced
+    // it (Nico's call, CodeRabbit #881). In multi-user hosting mode the
+    // hosting agent's session does NOT see events for a managed user's
+    // pass — even though both share the executor — so provenance /
+    // observability match reality. See
+    // [`matches_auto_processor_pass_owner`] for the exact rule.
+    let s_auto_processor = did_stream!(
         pubsub.subscribe(&AUTO_PROCESSOR_EVENT_TOPIC).await,
-        "auto-processor-event"
+        "auto-processor-event",
+        d_auto_processor,
+        matches_auto_processor_pass_owner
     );
 
     // ── Merge all streams ──
@@ -572,6 +577,38 @@ pub(crate) fn matches_query_subscription_owner(msg: &str, current_did: Option<&s
     }
 }
 
+/// Auto-processor events are delivered ONLY to the DID whose pass produced
+/// the event — Nico's call for CodeRabbit #881: even a perspective owner
+/// should not see events for a managed user's pass unless that user is also
+/// the caller. A missing `perspectiveUuid` or `agentDid` (malformed event)
+/// fails closed. An admin session with no DID (`current_did = None`) sees
+/// every event — same escape hatch every other `did_stream!` handler has.
+pub(crate) fn matches_auto_processor_pass_owner(msg: &str, current_did: Option<&str>) -> bool {
+    let Some(did) = current_did else {
+        return true;
+    };
+    let map = match serde_json::from_str::<serde_json::Value>(msg) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => return false,
+    };
+    let uuid = match map.get("perspectiveUuid") {
+        Some(serde_json::Value::String(u)) => u.as_str(),
+        _ => return false,
+    };
+    if !perspective_is_owned_by(uuid, did) {
+        return false;
+    }
+    // Agent-DID filter: only the DID whose pass produced this event sees it.
+    // A pass by a managed user is delivered to that user's client, not to the
+    // hosting agent, even though both share the executor.
+    match map.get("agentDid") {
+        Some(serde_json::Value::String(agent)) => agent == did,
+        // No `agentDid` on the event → malformed or executor-side pass with
+        // no attribution; fail closed rather than leak to every observer.
+        _ => false,
+    }
+}
+
 fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
     use crate::perspectives::get_perspective;
     match get_perspective(uuid) {
@@ -586,5 +623,68 @@ fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
             Err(_) => true,
         },
         None => true,
+    }
+}
+
+#[cfg(test)]
+mod auto_processor_filter_tests {
+    //! `matches_auto_processor_pass_owner` — CodeRabbit #881 review + Nico's
+    //! Aug-19 call: an event is delivered ONLY to the DID whose pass produced
+    //! it, so a hosting agent's session never sees events for a managed
+    //! user's pass. `perspective_is_owned_by` short-circuits to `true` when
+    //! the perspective is not in the global registry (this test setup), so
+    //! these cases exercise the DID-attribution portion in isolation.
+    use super::matches_auto_processor_pass_owner;
+
+    #[test]
+    fn admin_none_did_sees_every_event() {
+        let msg = r#"{"perspectiveUuid":"p","agentDid":"did:key:alice"}"#;
+        assert!(matches_auto_processor_pass_owner(msg, None));
+    }
+
+    #[test]
+    fn matching_agent_did_delivers() {
+        let msg = r#"{"perspectiveUuid":"p","agentDid":"did:key:alice"}"#;
+        assert!(matches_auto_processor_pass_owner(
+            msg,
+            Some("did:key:alice")
+        ));
+    }
+
+    #[test]
+    fn mismatched_agent_did_drops() {
+        let msg = r#"{"perspectiveUuid":"p","agentDid":"did:key:alice"}"#;
+        assert!(!matches_auto_processor_pass_owner(msg, Some("did:key:bob")));
+    }
+
+    #[test]
+    fn missing_agent_did_fails_closed() {
+        // Malformed / no attribution → do not leak to every observer.
+        let msg = r#"{"perspectiveUuid":"p"}"#;
+        assert!(!matches_auto_processor_pass_owner(
+            msg,
+            Some("did:key:alice")
+        ));
+    }
+
+    #[test]
+    fn missing_perspective_uuid_fails_closed() {
+        let msg = r#"{"agentDid":"did:key:alice"}"#;
+        assert!(!matches_auto_processor_pass_owner(
+            msg,
+            Some("did:key:alice")
+        ));
+    }
+
+    #[test]
+    fn malformed_json_fails_closed() {
+        assert!(!matches_auto_processor_pass_owner(
+            "not json",
+            Some("did:key:alice")
+        ));
+        assert!(!matches_auto_processor_pass_owner(
+            "[]",
+            Some("did:key:alice")
+        ));
     }
 }
