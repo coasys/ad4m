@@ -394,12 +394,78 @@ export default function ad4mPlugin(api: any) {
   }
 
   /**
-   * Obtain a JWT token from a running executor via MCP capability request.
+   * Helper: detect "user not found" errors from the executor.
+   */
+  function isUserNotFoundError(error: string | undefined): boolean {
+    if (!error) return false;
+    const lower = error.toLowerCase();
+    return lower.includes("user not found") || lower.includes("user does not exist") || lower.includes("account not found");
+  }
+
+  /**
+   * Obtain a JWT token from a running executor.
+   *
+   * When email/password credentials exist in config, tries multi-user login
+   * first (login_email, with auto-signup on "user not found"). Falls back to
+   * the capability-request flow (6-digit code from launcher UI).
+   *
    * Returns the JWT string or empty string on failure.
    */
   async function obtainJwtFromExecutor(): Promise<string> {
+    const email = providedConfig.email;
+    const password = providedConfig.password;
+
     try {
       const initResp = await mcpInitialize(endpoint);
+
+      // Multi-user: try email/password login first
+      if (email && password) {
+        logger.info(`[ad4m] Attempting email/password login for ${email}...`);
+
+        const loginResult = await mcpCallTool(
+          endpoint,
+          "login_email",
+          { email, password },
+          initResp.sessionId,
+        );
+        const loginData = extractMcpResultData(loginResult);
+
+        if (loginData?.token) {
+          logger.info("[ad4m] Email/password login successful!");
+          return loginData.token;
+        }
+
+        // User doesn't exist — signup then retry login
+        if (isUserNotFoundError(loginData?.error)) {
+          logger.info("[ad4m] User not found. Attempting signup...");
+          const signupResult = await mcpCallTool(
+            endpoint,
+            "signup",
+            { email, password },
+            initResp.sessionId,
+          );
+          const signupData = extractMcpResultData(signupResult);
+          if (signupData?.did) {
+            logger.info(`[ad4m] Signup successful! DID: ${signupData.did}`);
+            const retryLogin = await mcpCallTool(
+              endpoint,
+              "login_email",
+              { email, password },
+              initResp.sessionId,
+            );
+            const retryData = extractMcpResultData(retryLogin);
+            if (retryData?.token) {
+              logger.info("[ad4m] Login after signup successful!");
+              return retryData.token;
+            }
+          }
+        }
+
+        logger.warn(`[ad4m] Email login failed: ${JSON.stringify(loginData?.error ?? loginData)}`);
+        return "";
+      }
+
+      // Default: capability request flow (6-digit code from launcher UI)
       const capResult = await mcpCallTool(
         endpoint,
         "request_capability",

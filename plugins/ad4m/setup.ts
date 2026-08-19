@@ -280,7 +280,6 @@ async function setupExternalMode(
           mcpEndpoint: endpoint,
           token: userToken,
           email,
-          password,
           multiUser: "true",
           wakeToken,
         });
@@ -296,7 +295,6 @@ async function setupExternalMode(
           mcpEndpoint: endpoint,
           token: verifiedToken,
           email,
-          password,
           multiUser: "true",
           wakeToken,
         });
@@ -607,7 +605,6 @@ function printConfigSnippet(
     if (values.token) config.token = values.token;
     if (values.multiUser) config.multiUser = true;
     if (values.email) config.email = values.email;
-    if (values.password) config.password = values.password;
   }
 
   if (values.wakeToken) config.wakeToken = values.wakeToken;

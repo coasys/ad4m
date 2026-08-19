@@ -35,9 +35,9 @@ export interface PluginConfig {
   runHolochain?: boolean;
   /** External mode: on a multi-user node, provision the assistant's own user identity (signup + login) instead of requesting a capability against the node's base agent. */
   multiUser?: boolean;
-  /** External multi-user: the assistant's user email/identifier (auto-generated on first setup if omitted). */
+  /** Multi-user: the assistant's user email/identifier. Persisted by setup for re-authentication. */
   email?: string;
-  /** External multi-user: the assistant's user password (auto-generated on first setup if omitted). */
+  /** Multi-user: password for runtime re-authentication. NOT persisted by setup — provide via AD4M_PASSWORD env var or set manually for headless operation. */
   password?: string;
 }
 
