@@ -131,8 +131,10 @@ pub(crate) async fn accept_interpretation(
 
 /// Reject the overlay's suggestion(s) on `base`. `property = Some(p)` drops just
 /// that suggestion. `property = None` rejects the whole base: a `create` overlay
-/// deletes the suggested instance outright; an `update` overlay is removed while
-/// the real (pre-inference) value is left untouched.
+/// deletes the suggested instance outright — including any inbound links (e.g.
+/// an AutoProcessor `mint_scope` parent link) that would otherwise dangle after
+/// the base is gone; an `update` overlay is removed while the real
+/// (pre-inference) value is left untouched.
 pub(crate) async fn reject_interpretation(
     perspective: &mut PerspectiveInstance,
     base: &str,
@@ -141,9 +143,20 @@ pub(crate) async fn reject_interpretation(
 ) -> anyhow::Result<()> {
     let _ = context;
     let all = links_from(perspective, base).await?;
-    let kind = match first_target(&all, OVERLAY_KIND_PRED) {
+    let raw_kind = match first_target(&all, OVERLAY_KIND_PRED) {
         Some(k) => k,
         None => anyhow::bail!("reject_interpretation: no overlay on `{base}`"),
+    };
+    // `write_overlay` uses `create_subject`'s setter path, which encodes a
+    // non-URI string target as `literal:string:<value>`. Compare against the
+    // decoded value or a whole-base reject of a `create` silently takes the
+    // update branch and leaves the LLM-authored instance orphaned in the
+    // graph (CodeRabbit #881 review). `parse_literal_value` also handles the
+    // constructor's plain-string target (`"create"`) — that branch returns
+    // `Value::String("create")` unchanged.
+    let kind = match parse_literal_value(&raw_kind) {
+        serde_json::Value::String(s) => s,
+        other => other.to_string(),
     };
 
     if let Some(_prop) = property {
@@ -154,8 +167,23 @@ pub(crate) async fn reject_interpretation(
 
     // Whole-base reject.
     if kind == "create" {
-        // The LLM authored the whole instance — discard it and its overlay.
-        remove(perspective, all.iter().collect()).await
+        // The LLM authored the whole instance — discard it, its overlay, AND
+        // every inbound link that points at it (e.g. the `mint_scope` parent
+        // link an AutoProcessor writes). Without the inbound sweep, a
+        // parent-scope UI querying "children of X" would keep seeing a link
+        // to a base whose scalars have all been deleted (CodeRabbit #881
+        // review).
+        remove(perspective, all.iter().collect()).await?;
+        let inbound = perspective
+            .get_links(&LinkQuery {
+                target: Some(base.to_string()),
+                ..Default::default()
+            })
+            .await?;
+        if !inbound.is_empty() {
+            remove(perspective, inbound.iter().collect()).await?;
+        }
+        Ok(())
     } else {
         // Update: drop only the overlay (kind + run + all inferred), keep the
         // real value the human/prior state already holds.
@@ -354,6 +382,84 @@ mod tests {
         assert!(
             preds_on(&p, base).await.is_empty(),
             "suggested instance fully removed"
+        );
+    }
+
+    /// Production kind values are literal-encoded by the SDNA setter path
+    /// (`write_overlay` → `create_subject` → `setSingleTarget` on a
+    /// non-URI string). A whole-base reject must normalise the target
+    /// before comparing to `"create"`, or it silently takes the update
+    /// branch and leaves the LLM-authored instance orphaned — CodeRabbit
+    /// #881 review. Also verifies inbound-link sweep so an AutoProcessor
+    /// `mint_scope` parent link doesn't dangle after the base is gone.
+    #[tokio::test]
+    async fn reject_create_normalises_literal_kind_and_sweeps_inbound_links() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[]).await;
+        let base = "soa://ext/Task/lit";
+        add(&mut p, base, "soa://title", "literal:string:Ship", &ctx).await;
+        // Production-shaped `kind`: literal-encoded, exactly what
+        // `write_overlay` writes via the SDNA setter.
+        add(
+            &mut p,
+            base,
+            OVERLAY_KIND_PRED,
+            "literal:string:create",
+            &ctx,
+        )
+        .await;
+        add(
+            &mut p,
+            base,
+            OVERLAY_RUN_PRED,
+            "ad4m://interp/run/rlit",
+            &ctx,
+        )
+        .await;
+        add(
+            &mut p,
+            base,
+            &format!("{INFERRED_PREFIX}soa://title"),
+            "literal:string:Ship",
+            &ctx,
+        )
+        .await;
+        // Simulate an inbound `mint_scope` parent link the auto-processor
+        // would have written.
+        let parent = "soa://project/lit";
+        let contains_pred = "soa://contains";
+        p.add_link(
+            crate::types::Link {
+                source: parent.into(),
+                predicate: Some(contains_pred.into()),
+                target: base.into(),
+            },
+            crate::types::LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        reject_interpretation(&mut p, base, None, &ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            preds_on(&p, base).await.is_empty(),
+            "literal-encoded kind still routes to the create branch: \
+             suggested instance fully removed"
+        );
+        let inbound_after = p
+            .get_links(&LinkQuery {
+                target: Some(base.into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            inbound_after.is_empty(),
+            "inbound links to the rejected base are also swept, no dangling \
+             parent references"
         );
     }
 

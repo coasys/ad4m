@@ -86,9 +86,28 @@ pub fn build_interpretation_input(
                 // enforced downstream when the planner resolves refs.
                 .filter(|r| r.direction == "forward")
                 .map(|r| {
+                    // Collision-aware label (CodeRabbit #881 review): the
+                    // planner indexes instances by whatever `class_label`
+                    // returns for the target class, so relation `targetClass`
+                    // MUST match that label. Bare `target_class_name` would
+                    // fork the ref lookup when two shapes share a local name
+                    // (e.g. `flux://Task` vs `soa://Task`) — the LLM's
+                    // `new:Task:1` would resolve to the wrong bucket or drop
+                    // the relation entirely. `target_class_uri` is the
+                    // *shape* URI (`ns://TaskShape`), not the class URI, so
+                    // we resolve the target shape by matching `shape_uri`
+                    // and then feed its `target_class` to `class_label`. No
+                    // match (or empty `target_class_uri`) falls back to the
+                    // bare name — same fallback the rest of the pipeline
+                    // uses.
+                    let target_class_label = shapes
+                        .iter()
+                        .find(|s| !s.shape_uri.is_empty() && s.shape_uri == r.target_class_uri)
+                        .map(|s| class_label(&s.target_class, shapes))
+                        .unwrap_or_else(|| r.target_class_name.clone());
                     serde_json::json!({
                         "name": r.name,
-                        "targetClass": r.target_class_name,
+                        "targetClass": target_class_label,
                         "hint": rel_hint_by_pred.get(r.predicate.as_str()).and_then(|h| *h),
                     })
                 })
