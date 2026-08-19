@@ -2,7 +2,7 @@ use super::*;
 use crate::perspectives::interpretation::types::{
     ExistingInstances, ExistingLinks, InstanceContext, TranscriptTurn,
 };
-use crate::perspectives::model_query::types::{ModelShape, ParentScope};
+use crate::perspectives::model_query::types::{ModelShape, Scope};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -207,7 +207,7 @@ pub async fn gather_transcript_sparql(
 pub async fn existing_instance_context(
     perspective: &PerspectiveInstance,
     shapes: &[ModelShape],
-    scope: Option<&ParentScope>,
+    scope: Option<&Scope>,
 ) -> anyhow::Result<ExistingInstances> {
     let mut out: ExistingInstances = HashMap::new();
     for shape in shapes {
@@ -241,7 +241,7 @@ pub async fn existing_instance_context(
         requested.push(idp_name.clone());
         requested.extend(scalar_names.iter().cloned());
         // Build the model-query as structured JSON so an optional `scope`
-        // (a `ParentScope`) can be spliced in as the query's `parent` filter —
+        // (a `Scope`) can be spliced in as the query's `parent` filter —
         // constraining the existing-instance set to a sub-graph/tree rather
         // than every instance of the class in the perspective. `None` keeps the
         // pre-scope behaviour (all instances). The actual scope is supplied at
@@ -556,7 +556,7 @@ mod tests {
         // of the class in the perspective. The runner (#885) supplies the scope; here
         // we prove the parameter actually narrows the set. Two Tasks, each linked
         // under a different parent node.
-        use crate::perspectives::model_query::types::ParentScope;
+        use crate::perspectives::model_query::types::Scope;
         use crate::types::{Link, LinkStatus};
 
         let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
@@ -607,7 +607,7 @@ mod tests {
         );
 
         // Scoped to parent A: only the task under tree A survives.
-        let scope = ParentScope::Raw {
+        let scope = Scope::Raw {
             id: "soa://parent/a".into(),
             predicate: "ns://contains".into(),
         };

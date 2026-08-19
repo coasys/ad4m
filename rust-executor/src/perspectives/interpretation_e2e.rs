@@ -1113,7 +1113,7 @@ async fn link_under_channel(
 #[tokio::test]
 async fn e2e_flux_grouping_scoped_incremental_lifecycle() {
     use crate::perspectives::interpretation::existing_instance_context;
-    use crate::perspectives::model_query::types::ParentScope;
+    use crate::perspectives::model_query::types::Scope;
 
     let channel = "soa://channel/general";
     let contains = "ns://contains";
@@ -1125,7 +1125,7 @@ async fn e2e_flux_grouping_scoped_incremental_lifecycle() {
         let (mut perspective, shapes, ctx) =
             setup_interpretation_e2e(&[("ConversationSubgroup", CONVERSATION_SUBGROUP_SDNA)]).await;
         let sg_shape = &shapes[0];
-        let scope = ParentScope::Raw {
+        let scope = Scope::Raw {
             id: channel.into(),
             predicate: contains.into(),
         };
@@ -1477,6 +1477,8 @@ async fn auto_processor_pass_lands_interpretation_instance() {
         claim_ttl_ms: 60_000,
         dedup_strategy_json: None,
         source_window_ms: None,
+        existing_scope: None,
+        mint_scope: None,
     };
     write_processor(&mut perspective, &cfg, &ctx)
         .await
@@ -1673,6 +1675,8 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         claim_ttl_ms: 60_000,
         dedup_strategy_json: None,
         source_window_ms: None,
+        existing_scope: None,
+        mint_scope: None,
     };
     let task_cfg = AutoProcessorConfig {
         processor_id: "pc-task-proc".into(),
@@ -1686,6 +1690,8 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         claim_ttl_ms: 60_000,
         dedup_strategy_json: None,
         source_window_ms: None,
+        existing_scope: None,
+        mint_scope: None,
     };
 
     write_processor(&mut perspective, &intent_cfg, &ctx)
@@ -1927,6 +1933,8 @@ async fn auto_processor_high_level_signal_driven_pass() {
             claim_ttl_ms: 60_000,
             dedup_strategy_json: None,
             source_window_ms: None,
+            existing_scope: None,
+            mint_scope: None,
         };
         write_processor(&mut perspective, &cfg, &ctx)
             .await
@@ -2103,6 +2111,8 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
             claim_ttl_ms: 60_000,
             dedup_strategy_json: None,
             source_window_ms: None,
+            existing_scope: None,
+            mint_scope: None,
         };
         write_processor(&mut perspective, &cfg, &ctx_main)
             .await
@@ -2244,6 +2254,8 @@ async fn auto_processor_election_only_online_participants_process() {
         claim_ttl_ms: 60_000,
         dedup_strategy_json: None,
         source_window_ms: None,
+        existing_scope: None,
+        mint_scope: None,
     };
 
     // Case 1 — a batch authored by carol (offline) then bob (online), in that
@@ -2376,7 +2388,7 @@ async fn e2e_run_interpretation_honours_parent_scope() {
     use crate::perspectives::interpretation::{
         run_interpretation_with_strategy, DedupStrategy, TranscriptTurn,
     };
-    use crate::perspectives::model_query::types::ParentScope;
+    use crate::perspectives::model_query::types::Scope;
     use crate::types::{Link, LinkStatus};
 
     let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
@@ -2414,11 +2426,11 @@ async fn e2e_run_interpretation_honours_parent_scope() {
         model: "interpretation-embed".to_string(),
         threshold: 0.6,
     };
-    let in_scope = ParentScope::Raw {
+    let in_scope = Scope::Raw {
         id: "soa://parent/b".into(),
         predicate: "ns://contains".into(),
     };
-    let out_scope = ParentScope::Raw {
+    let out_scope = Scope::Raw {
         id: "soa://parent/a".into(),
         predicate: "ns://contains".into(),
     };
