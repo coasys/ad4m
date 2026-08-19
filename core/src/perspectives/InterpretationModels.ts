@@ -16,7 +16,7 @@
  */
 
 import { Ad4mModel } from "../model/Ad4mModel";
-import { Flag, HasMany, Optional, Property } from "../model/decorators";
+import { HasMany, Optional, Property } from "../model/decorators";
 import { Model } from "../model/decorators";
 
 // ── AutoProcessorConfig ─────────────────────────────────────────────────────
@@ -34,11 +34,9 @@ import { Model } from "../model/decorators";
 @Model({ name: "AutoProcessor" })
 export class AutoProcessorConfig extends Ad4mModel {
   /** Unique processor id — the dedup key for auto-processor instances. */
-  // Declared FIRST so `buildSHACL` derives the shape namespace from
-  // `ad4m://processor_id` — target_class then resolves to `ad4m://AutoProcessor`,
-  // exactly what the Rust SDNA declares. Putting the `@Flag` first (whose
-  // `through: "rdf://type"` would win the namespace race) forked target_class
-  // to `rdf://AutoProcessorConfig` — CI-caught mismatch (2026-08-19).
+  // First-declared property: `buildSHACL` derives the shape namespace from
+  // its `through` prefix, so `ad4m://processor_id` → `ad4m://` → target_class
+  // `ad4m://AutoProcessor` (matches Rust `AUTO_PROCESSOR_TARGET_CLASS`).
   @Property({ through: "ad4m://processor_id", required: true, identity: true })
   processorId: string = "";
 
@@ -112,12 +110,11 @@ export class AutoProcessorConfig extends Ad4mModel {
   @Optional({ through: "ad4m://debug_mode", resolveLanguage: "literal" })
   debugMode?: string;
 
-  // Declared LAST so `buildSHACL`'s "first property wins the namespace" rule
-  // picks up `ad4m://` from `processorId` (declared first). If this @Flag
-  // came first, namespace would resolve to `rdf://` and target_class would
-  // mismatch the Rust `ad4m://AutoProcessor`.
-  @Flag({ through: "rdf://type", value: "ad4m://AutoProcessor" })
-  type: string = "ad4m://AutoProcessor";
+  // No `@Flag` type discriminator (Nico 2026-08-19: "type flags are an
+  // anti-pattern for subject classes; match over all the properties
+  // instead"). Conformance is by the presence of `processorId` +
+  // `sourceScopeQuery` + `interpretationClasses` + `debounceMs` +
+  // `batchMax` + `claimTtlMs` — the Rust SDNA takes the same shape.
 }
 
 // ── InterpretationRun ───────────────────────────────────────────────────────
@@ -126,8 +123,9 @@ export class AutoProcessorConfig extends Ad4mModel {
 
 @Model({ name: "InterpretationRun" })
 export class InterpretationRun extends Ad4mModel {
-  @Flag({ through: "ad4m://type", value: "ad4m://interpretation-run" })
-  type: string = "ad4m://interpretation-run";
+  // No `@Flag` type discriminator — Rust SDNA drops `ad4m://type` too.
+  // Conformance is by `runId` (identity) — same pattern
+  // `InterpretationOverlay` already uses (`kind` is its discriminator).
 
   /** UUID for this run — the dedup key across run nodes. */
   @Property({ through: "ad4m://interp/run_id", required: true, identity: true })
