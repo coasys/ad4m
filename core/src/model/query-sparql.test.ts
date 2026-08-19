@@ -1,4 +1,4 @@
-import { buildSPARQLQuery, buildPaginationSubquery, hasJsOnlyWhereFilters, valueToLiteralIri } from './query-sparql';
+import { buildSPARQLQuery, buildPaginationSubquery, hasJsOnlyWhereFilters, looksLikeUri, valueToLiteralIri } from './query-sparql';
 import { Literal } from '../Literal';
 
 // Minimal stubs for ModelMetadata
@@ -584,5 +584,42 @@ describe('valueToLiteralIri', () => {
     const url = valueToLiteralIri(null);
     expect(url).toBe('literal:string:null');
     expect(Literal.fromUrl(url).get()).toBe('null');
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// looksLikeUri — shared write-side predicate that MUST agree with the
+// Rust-side `is_safe_iri_target` / `looks_like_absolute_iri`. See the
+// doc comment on `looksLikeUri` for why drift produces silent no-match
+// reads (PR #874).
+// ---------------------------------------------------------------------------
+describe('looksLikeUri', () => {
+  it('accepts well-formed absolute IRIs', () => {
+    expect(looksLikeUri('did:key:z6Mk123')).toBe(true);
+    expect(looksLikeUri('literal:string:hello')).toBe(true);
+    expect(looksLikeUri('http://example.com/foo')).toBe(true);
+  });
+
+  it('rejects scheme-lookalike prose that would fail Rust validate_iri', () => {
+    expect(looksLikeUri('Note: buy milk')).toBe(false);
+    expect(looksLikeUri('Re: standup')).toBe(false);
+    expect(looksLikeUri('TODO: fix this')).toBe(false);
+  });
+
+  it('rejects control chars, whitespace, and SPARQL-breaking chars', () => {
+    expect(looksLikeUri('tag:2025:new\nline')).toBe(false);
+    expect(looksLikeUri('tag:2025:tab\there')).toBe(false);
+    expect(looksLikeUri('http://example.com/foo bar')).toBe(false);
+    expect(looksLikeUri('foo:<bar>')).toBe(false);
+    expect(looksLikeUri('foo:{bar}')).toBe(false);
+    expect(looksLikeUri('foo:"quoted')).toBe(false);
+  });
+
+  it('rejects non-IRI shapes', () => {
+    expect(looksLikeUri('just plain text')).toBe(false);
+    expect(looksLikeUri('42')).toBe(false);
+    expect(looksLikeUri(':no-scheme')).toBe(false);
+    expect(looksLikeUri('1abc:foo')).toBe(false);
   });
 });

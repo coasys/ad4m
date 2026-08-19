@@ -1,3 +1,4 @@
+use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::sdna::{generic_link_fact, is_sdna_link};
@@ -4324,13 +4325,13 @@ impl PerspectiveInstance {
         } else {
             let uri = match value {
                 serde_json::Value::String(s) => {
-                    // If the value is already a valid URI (has a scheme), use it directly.
-                    // Otherwise wrap it in a literal:// URI so link targets are always valid URIs.
-                    static URI_SCHEME_RE: std::sync::OnceLock<regex::Regex> =
-                        std::sync::OnceLock::new();
-                    let re = URI_SCHEME_RE
-                        .get_or_init(|| regex::Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-._]*:").unwrap());
-                    if re.is_match(s) {
+                    // If the value is already a well-formed absolute IRI, store it as a
+                    // raw NamedNode target. Otherwise wrap it in a `literal:string:*`
+                    // URI so link targets are always valid IRIs and stay round-trippable
+                    // through the query side. The predicate is shared with
+                    // `model_query::utils::looks_like_absolute_iri` — see
+                    // `is_safe_iri_target` for why they MUST agree.
+                    if is_safe_iri_target(s) {
                         s.clone()
                     } else {
                         Literal::from_string(s.clone())
