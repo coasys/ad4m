@@ -372,11 +372,19 @@ export class SHACLShape {
       if (prop.local !== undefined) {
         turtle += `    ad4m:local ${prop.local} ;\n`;
       }
-      
+
       if (prop.writable !== undefined) {
         turtle += `    ad4m:writable ${prop.writable} ;\n`;
       }
-      
+
+      // Interpreter dedup key: `toLinks()` and `toJSON()` preserve
+      // `identity`; a Turtle export must too or the round-trip through
+      // Turtle silently drops the interpretation-dedup marker
+      // (CodeRabbit #881 review).
+      if (prop.identity !== undefined) {
+        turtle += `    ad4m:identity ${prop.identity} ;\n`;
+      }
+
       // Remove trailing semicolon and close bracket
       turtle = turtle.slice(0, -2) + '\n';
       turtle += isLast ? `  ] .\n` : `  ] ;\n`;

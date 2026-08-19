@@ -62,7 +62,13 @@ async function registerLlm(ad4m: any): Promise<void> {
 export default function autoProcessorNeighbourhoodTests(testContext: TestContext) {
   return () => {
     describe("Auto-processor across two executors", function () {
-      this.timeout(600_000);
+      // Cumulative wait budget in the slowest test is 240s + 240s + 120s = 600s
+      // plus `sharedChannel` executor-boot and processor-sync time. A 600s
+      // suite timeout would fire on a slow-but-correct run just before the
+      // last `waitUntil` reports its own diagnostic — masking the real cause
+      // (CodeRabbit #881 review). Give the suite enough head-room that a
+      // waitUntil budget expiry surfaces first.
+      this.timeout(900_000);
       /**
        * Alice publishes a neighbourhood, Bob joins, both register the class and
        * the LLM, and Alice registers one processor whose config syncs to Bob.

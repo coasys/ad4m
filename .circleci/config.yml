@@ -144,6 +144,12 @@ jobs:
       - run:
           name: Run integration tests
           command: |
+            # Fresh per-run artifact dir: the self-hosted coasys/marvin
+            # runner keeps /tmp across jobs, so a bare `mkdir -p` would
+            # publish stale logs from earlier runs alongside the current
+            # ones (CodeRabbit #881 review). Wipe first so `store_artifacts`
+            # only sees this run's output.
+            rm -rf /tmp/test-artifacts
             mkdir -p /tmp/test-artifacts
             set -o pipefail
             cd ./tests/js && pnpm run test-main 2>&1 | tee /tmp/test-artifacts/mocha.log

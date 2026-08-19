@@ -311,6 +311,11 @@ export class PerspectiveClient {
      * Subscribe to auto-processor step signals. `cb` fires for every
      * `auto-processor-event` on `uuid` (BatchReady → Claimed/BackedOff/… →
      * Processed), letting a UI show progress and await the next batch.
+     *
+     * Registered on the per-uuid `#linkUnsubscribers` map so
+     * `PerspectiveProxy.dispose()` → `removeAllListeners(uuid)` cleans the
+     * subscription up; using the global `#unsubscribers` array would leak
+     * callbacks across repeated view lifecycles (CodeRabbit #881 review).
      */
     async addAutoProcessorEventListener(uuid: String, cb: (event: AutoProcessorEvent) => void): Promise<void> {
         const unsub = this.#apiClient.subscribe(
@@ -320,7 +325,9 @@ export class PerspectiveClient {
                 }
             }
         )
-        this.#unsubscribers.push(unsub)
+        let existing = this.#linkUnsubscribers.get(uuid as string) || []
+        existing.push(unsub)
+        this.#linkUnsubscribers.set(uuid as string, existing)
         await this.#apiClient.waitForSubscription()
     }
 

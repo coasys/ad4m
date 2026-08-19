@@ -169,7 +169,20 @@ describe("AutoProcessor runs for managed users on a hosted node", function () {
     // Give the supervisor its first tick (5s) to spawn per-user loops.
     await sleep(6_000);
 
-    const bobP = (await bob!.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+    // `perspective.add` assigns the caller as the owner, so a strict
+    // ownership regime would make Bob's `byUUID` return `null`
+    // (CodeRabbit #881 review). On the current hosted-node/multi-user
+    // path Bob is a managed user on Alice's executor, so he does see the
+    // perspective, but assert it here so a future ownership tightening
+    // surfaces a clear diagnostic instead of a silent NPE on `bobP.add`.
+    const bobPRaw = await bob!.perspective.byUUID(handle.uuid);
+    expect(
+      bobPRaw,
+      "Bob (managed user on the same executor) must resolve Alice's perspective — " +
+        "if this fails, publish the perspective as a neighbourhood or add Bob " +
+        "as an owner before this line.",
+    ).to.exist;
+    const bobP = bobPRaw as PerspectiveProxy;
 
     // One turn from each managed user's own JWT'd client — so each link is
     // signed by that user's DID and the body link's reifier carries the

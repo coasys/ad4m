@@ -33,7 +33,16 @@ async function titleOf(p: PerspectiveProxy, base: string): Promise<string | unde
   const links = await p.get(new LinkQuery({ source: base, predicate: "soa://title" }));
   const t = links[0]?.data.target;
   if (!t) return undefined;
-  return decodeURIComponent(t.replace(/^literal:string:/, ""));
+  const body = t.replace(/^literal:string:/, "");
+  // `decodeURIComponent` throws `URIError` on any lone `%` — an LLM-generated
+  // title like "100% coverage" would then crash the test with a decode error
+  // instead of an assertion message. Fall back to the raw body so the caller
+  // still gets a comparable string (CodeRabbit #881 review).
+  try {
+    return decodeURIComponent(body);
+  } catch {
+    return body;
+  }
 }
 
 describe("perspective.runInterpretation (WS + real LLM)", function () {
