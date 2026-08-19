@@ -76,8 +76,14 @@ pub async fn events_ws(
 
     let auth_token = context.auth_token.clone();
     let user_email = user_email_from_token(auth_token.clone());
+    // Captured before the upgrade so the stream builder knows whether the
+    // caller is an admin credential. Admin is the ONLY escape hatch for
+    // per-DID filters — an ordinary session whose DID hasn't resolved yet
+    // must not be silently promoted to admin (CodeRabbit #881 review, Nico
+    // 2026-08-19: "do not treat an unresolved DID as administrator access").
+    let is_admin = context.is_admin_credential;
 
-    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, auth_token, user_email)))
+    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, auth_token, user_email, is_admin)))
 }
 
 /// Build the merged event stream for a given user.
@@ -87,6 +93,7 @@ pub async fn events_ws(
 pub(crate) async fn build_event_stream(
     auth_token: String,
     user_email: Option<String>,
+    is_admin: bool,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     use futures::stream;
     use tokio_stream::wrappers::BroadcastStream;
@@ -354,12 +361,36 @@ pub(crate) async fn build_event_stream(
     // pass — even though both share the executor — so provenance /
     // observability match reality. See
     // [`matches_auto_processor_pass_owner`] for the exact rule.
-    let s_auto_processor = did_stream!(
-        pubsub.subscribe(&AUTO_PROCESSOR_EVENT_TOPIC).await,
-        "auto-processor-event",
-        d_auto_processor,
-        matches_auto_processor_pass_owner
-    );
+    //
+    // Inlined (not `did_stream!`) so the filter closure can capture
+    // `is_admin`. Ordinary sessions whose DID has not yet resolved
+    // (`did_for_context` failed at line 96 — Nico 2026-08-19) MUST NOT be
+    // silently treated as administrator; the filter fails closed in that
+    // case. Only an explicit admin credential grants the "see everything"
+    // escape hatch.
+    let s_auto_processor = {
+        let rx = pubsub.subscribe(&AUTO_PROCESSOR_EVENT_TOPIC).await;
+        let admin = is_admin;
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let current_did = d_auto_processor.clone();
+                async move {
+                    match result {
+                        Ok(ref msg)
+                            if matches_auto_processor_pass_owner(
+                                msg,
+                                current_did.as_deref(),
+                                admin,
+                            ) =>
+                        {
+                            Some(wrap_event("auto-processor-event", msg))
+                        }
+                        _ => None,
+                    }
+                }
+            })
+    };
 
     // ── Merge all streams ──
     let agent = stream::select(
@@ -385,10 +416,15 @@ pub(crate) async fn build_event_stream(
     Box::pin(top)
 }
 
-async fn handle_events_ws(mut socket: WebSocket, auth_token: String, user_email: Option<String>) {
+async fn handle_events_ws(
+    mut socket: WebSocket,
+    auth_token: String,
+    user_email: Option<String>,
+    is_admin: bool,
+) {
     log::info!("Events WebSocket connected");
 
-    let mut event_stream = build_event_stream(auth_token, user_email).await;
+    let mut event_stream = build_event_stream(auth_token, user_email, is_admin).await;
 
     loop {
         tokio::select! {
@@ -581,11 +617,28 @@ pub(crate) fn matches_query_subscription_owner(msg: &str, current_did: Option<&s
 /// the event — Nico's call for CodeRabbit #881: even a perspective owner
 /// should not see events for a managed user's pass unless that user is also
 /// the caller. A missing `perspectiveUuid` or `agentDid` (malformed event)
-/// fails closed. An admin session with no DID (`current_did = None`) sees
-/// every event — same escape hatch every other `did_stream!` handler has.
-pub(crate) fn matches_auto_processor_pass_owner(msg: &str, current_did: Option<&str>) -> bool {
-    let Some(did) = current_did else {
+/// fails closed.
+///
+/// `is_admin` is the ONLY escape hatch: an admin credential (checked at WS
+/// setup, `AuthContext.is_admin_credential`) sees every event. An ordinary
+/// session whose DID has not yet resolved (`did_for_context` failed —
+/// happens when the client connects before `agent.generate()` completes)
+/// is treated as fail-closed, NOT as admin, per CodeRabbit's second-round
+/// review. Nico 2026-08-19: "do not treat an unresolved DID as
+/// administrator access."
+pub(crate) fn matches_auto_processor_pass_owner(
+    msg: &str,
+    current_did: Option<&str>,
+    is_admin: bool,
+) -> bool {
+    if is_admin {
         return true;
+    }
+    // Non-admin + unresolved DID: fail closed. The previous behaviour
+    // (`None => true`) leaked every event to any ordinary session whose
+    // DID hadn't finished resolving.
+    let Some(did) = current_did else {
+        return false;
     };
     let map = match serde_json::from_str::<serde_json::Value>(msg) {
         Ok(serde_json::Value::Object(map)) => map,
@@ -631,15 +684,35 @@ mod auto_processor_filter_tests {
     //! `matches_auto_processor_pass_owner` — CodeRabbit #881 review + Nico's
     //! Aug-19 call: an event is delivered ONLY to the DID whose pass produced
     //! it, so a hosting agent's session never sees events for a managed
-    //! user's pass. `perspective_is_owned_by` short-circuits to `true` when
-    //! the perspective is not in the global registry (this test setup), so
+    //! user's pass. `is_admin` (from `AuthContext.is_admin_credential`) is
+    //! the only escape hatch — an unresolved DID is NOT silently promoted.
+    //! `perspective_is_owned_by` short-circuits to `true` when the
+    //! perspective is not in the global registry (this test setup), so
     //! these cases exercise the DID-attribution portion in isolation.
     use super::matches_auto_processor_pass_owner;
 
     #[test]
-    fn admin_none_did_sees_every_event() {
+    fn admin_sees_every_event_regardless_of_did() {
         let msg = r#"{"perspectiveUuid":"p","agentDid":"did:key:alice"}"#;
-        assert!(matches_auto_processor_pass_owner(msg, None));
+        // Admin + no resolved DID: still delivers (the explicit escape hatch).
+        assert!(matches_auto_processor_pass_owner(msg, None, true));
+        // Admin + some other DID: still delivers.
+        assert!(matches_auto_processor_pass_owner(
+            msg,
+            Some("did:key:bob"),
+            true
+        ));
+    }
+
+    #[test]
+    fn unresolved_did_non_admin_fails_closed() {
+        // The CodeRabbit-flagged case: an ordinary session whose DID hasn't
+        // resolved (`did_for_context` failed — happens when the client
+        // connects before `agent.generate()` finishes) MUST NOT be treated
+        // as administrator. Previously `None => true` leaked every event
+        // to that session; now it drops.
+        let msg = r#"{"perspectiveUuid":"p","agentDid":"did:key:alice"}"#;
+        assert!(!matches_auto_processor_pass_owner(msg, None, false));
     }
 
     #[test]
@@ -647,14 +720,19 @@ mod auto_processor_filter_tests {
         let msg = r#"{"perspectiveUuid":"p","agentDid":"did:key:alice"}"#;
         assert!(matches_auto_processor_pass_owner(
             msg,
-            Some("did:key:alice")
+            Some("did:key:alice"),
+            false
         ));
     }
 
     #[test]
     fn mismatched_agent_did_drops() {
         let msg = r#"{"perspectiveUuid":"p","agentDid":"did:key:alice"}"#;
-        assert!(!matches_auto_processor_pass_owner(msg, Some("did:key:bob")));
+        assert!(!matches_auto_processor_pass_owner(
+            msg,
+            Some("did:key:bob"),
+            false
+        ));
     }
 
     #[test]
@@ -663,7 +741,8 @@ mod auto_processor_filter_tests {
         let msg = r#"{"perspectiveUuid":"p"}"#;
         assert!(!matches_auto_processor_pass_owner(
             msg,
-            Some("did:key:alice")
+            Some("did:key:alice"),
+            false
         ));
     }
 
@@ -672,7 +751,8 @@ mod auto_processor_filter_tests {
         let msg = r#"{"agentDid":"did:key:alice"}"#;
         assert!(!matches_auto_processor_pass_owner(
             msg,
-            Some("did:key:alice")
+            Some("did:key:alice"),
+            false
         ));
     }
 
@@ -680,11 +760,13 @@ mod auto_processor_filter_tests {
     fn malformed_json_fails_closed() {
         assert!(!matches_auto_processor_pass_owner(
             "not json",
-            Some("did:key:alice")
+            Some("did:key:alice"),
+            false
         ));
         assert!(!matches_auto_processor_pass_owner(
             "[]",
-            Some("did:key:alice")
+            Some("did:key:alice"),
+            false
         ));
     }
 }
