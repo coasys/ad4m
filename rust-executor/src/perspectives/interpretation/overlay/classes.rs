@@ -34,7 +34,9 @@ const INTERP_RUN_SDNA: &str = r#"{
     {"path":"ad4m://interp/prompt_version","name":"prompt_version","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/prompt_version","target":"value"}]},
     {"path":"ad4m://interp/ran_at","name":"ran_at","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/ran_at","target":"value"}]},
     {"path":"ad4m://interp/processor","name":"processor","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/processor","target":"value"}]},
-    {"path":"ad4m://interp/sources","name":"sources","collection":true,"min_count":0,"setter":[{"action":"addLink","source":"this","predicate":"ad4m://interp/sources","target":"value"}]}
+    {"path":"ad4m://interp/sources","name":"sources","collection":true,"min_count":0,"setter":[{"action":"addLink","source":"this","predicate":"ad4m://interp/sources","target":"value"}]},
+    {"path":"ad4m://interp/debug_prompt","name":"debug_prompt","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/debug_prompt","target":"value"}]},
+    {"path":"ad4m://interp/debug_response","name":"debug_response","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/debug_response","target":"value"}]}
   ]
 }"#;
 
@@ -80,6 +82,13 @@ pub(crate) struct InterpretationRunMeta {
     /// the prompt that produced this pass's inferences.
     pub prompt_version: String,
     pub ran_at: String,
+    /// Optional live-debug prompt string persisted on the run when the caller
+    /// enables observability (AutoProcessor `debug_mode`). `None` in the
+    /// normal path — LLM prompts are large and syncing them across a
+    /// neighbourhood by default would blow the shared-graph payload.
+    pub debug_prompt: Option<String>,
+    /// Optional live-debug response string, same rules as `debug_prompt`.
+    pub debug_response: Option<String>,
 }
 
 impl InterpretationRunMeta {
@@ -102,6 +111,8 @@ impl InterpretationRunMeta {
             model: task.model_id.clone(),
             prompt_version,
             ran_at,
+            debug_prompt: None,
+            debug_response: None,
         }
     }
 }
@@ -125,15 +136,16 @@ pub(crate) async fn ensure_interpretation_overlay_classes(
         context,
     )
     .await?;
-    // `sources` is the newest property on the run class, so a perspective that
-    // registered the pre-cursor SDNA is refreshed rather than left with a shape
-    // whose `processor`/`sources` setters do not exist.
+    // `debug_response` is the newest property on the run class, so a
+    // perspective that registered the pre-debug SDNA is refreshed rather
+    // than left with a shape whose `debug_prompt`/`debug_response` setters
+    // do not exist — `write_processor` would silently drop those values.
     ensure_subject_class(
         perspective,
         INTERP_RUN_CLASS,
         INTERP_RUN_TARGET_CLASS,
         INTERP_RUN_SDNA,
-        Some("ad4m://interp/sources"),
+        Some("ad4m://interp/debug_response"),
         context,
     )
     .await
@@ -170,6 +182,16 @@ pub(crate) async fn mint_interpretation_run(
             values["sources"] = first.clone().into();
             rest_sources.extend(rest.iter().cloned());
         }
+    }
+    // Debug-mode: persist raw LLM I/O onto the run so a UI can look it up
+    // post-hoc, not just via the live `Processed` event (which a slow client
+    // could miss). Omitted when the caller left them `None` — the normal
+    // non-debug pass.
+    if let Some(prompt) = &meta.debug_prompt {
+        values["debug_prompt"] = prompt.clone().into();
+    }
+    if let Some(response) = &meta.debug_response {
+        values["debug_response"] = response.clone().into();
     }
     perspective
         .create_subject(
@@ -264,6 +286,8 @@ mod sdna_parity_tests {
             "ad4m://interp/ran_at",
             "ad4m://interp/processor",
             "ad4m://interp/sources",
+            "ad4m://interp/debug_prompt",
+            "ad4m://interp/debug_response",
         ]
         .iter()
         .map(|s| s.to_string())

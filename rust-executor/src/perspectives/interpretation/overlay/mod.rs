@@ -120,11 +120,16 @@ pub(crate) async fn apply_with_overlay(
     ran_at: String,
     context: &AgentContext,
     cursor: Option<&InterpretationRunCursor>,
+    debug: Option<&crate::perspectives::interpretation::InterpretationDebug>,
 ) -> anyhow::Result<Vec<String>> {
     if ops.is_empty() {
         if cursor.is_some() {
             ensure_interpretation_overlay_classes(perspective, context).await?;
-            let meta = InterpretationRunMeta::from_task(task, run_id, ran_at);
+            let mut meta = InterpretationRunMeta::from_task(task, run_id, ran_at);
+            if let Some(d) = debug {
+                meta.debug_prompt = Some(d.prompt.clone());
+                meta.debug_response = Some(d.response.clone());
+            }
             // Empty-ops fast-path: no overlays to write, so nothing to keep
             // atomic with the run mint — the cursor-only run is the whole
             // Phase 3 for this pass. `None` batch keeps this call cheap.
@@ -215,7 +220,11 @@ pub(crate) async fn apply_with_overlay(
     // `real != inferred` and permanently classify the property as
     // human-diverged, dropping every subsequent LLM proposal on that field.
     if !overlays.is_empty() || cursor.is_some() {
-        let meta = InterpretationRunMeta::from_task(task, run_id, ran_at);
+        let mut meta = InterpretationRunMeta::from_task(task, run_id, ran_at);
+        if let Some(d) = debug {
+            meta.debug_prompt = Some(d.prompt.clone());
+            meta.debug_response = Some(d.response.clone());
+        }
         let batch_id = perspective.create_batch().await;
         let mut phase3_err: Option<anyhow::Error> = None;
 
@@ -307,6 +316,8 @@ pub(crate) async fn seed_overlay(
         model: "seed".to_string(),
         prompt_version: "seed".to_string(),
         ran_at: "0".to_string(),
+        debug_prompt: None,
+        debug_response: None,
     };
     let run_uri = mint_interpretation_run(perspective, &meta, None, None, context).await?;
     let ow = OverlayWrite {
@@ -361,6 +372,7 @@ mod tests {
             run_id.to_string(),
             "1700000000000".to_string(),
             ctx,
+            None,
             None,
         )
         .await

@@ -93,6 +93,15 @@ export class AutoProcessorConfig extends Ad4mModel {
    */
   @Optional({ through: "ad4m://mint_scope", resolveLanguage: "literal" })
   mintScope?: string;
+
+  /**
+   * Live debug knob (`"true"` / `"false"` string, per SDNA literal-string
+   * encoding). When on, the pass enriches its `processed` event with the
+   * raw LLM prompt + response AND persists the same strings on the pass's
+   * `InterpretationRun`. Absent = default `"false"` (no debug telemetry).
+   */
+  @Optional({ through: "ad4m://debug_mode", resolveLanguage: "literal" })
+  debugMode?: string;
 }
 
 // ── InterpretationRun ───────────────────────────────────────────────────────
@@ -131,6 +140,15 @@ export class InterpretationRun extends Ad4mModel {
    */
   @HasMany({ through: "ad4m://interp/sources" })
   sources: string[] = [];
+
+  /** Raw LLM prompt this pass fed the model. Present only when the pass's
+   *  AutoProcessor had `debugMode: true`. Absent by default. */
+  @Optional({ through: "ad4m://interp/debug_prompt", resolveLanguage: "literal" })
+  debugPrompt?: string;
+
+  /** Raw LLM response this pass received. Same rules as `debugPrompt`. */
+  @Optional({ through: "ad4m://interp/debug_response", resolveLanguage: "literal" })
+  debugResponse?: string;
 }
 
 // ── InterpretationOverlay ───────────────────────────────────────────────────

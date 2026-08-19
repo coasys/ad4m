@@ -343,8 +343,10 @@ pub async fn run_interpretation_with_strategy(
         None,
         scope,
         None,
+        false,
     )
     .await
+    .map(|out| out.bases)
 }
 
 /// [`run_interpretation_with_strategy`] with an optional per-call LLM model
@@ -354,6 +356,29 @@ pub async fn run_interpretation_with_strategy(
 ///
 /// `model_override = None` reuses the exact task row every existing caller
 /// already uses, so behaviour is unchanged for all non-processor callers.
+/// Optional live-debug capture for a single interpretation pass — the raw
+/// prompt fed to the LLM and its response, verbatim. Populated only when the
+/// caller opts in via `debug_mode` (e.g. AutoProcessor `debug_mode: true`).
+/// Kept out of the base `Vec<String>` return so a normal pass does not carry
+/// tens of KB of prompt text through every call site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterpretationDebug {
+    pub prompt: String,
+    pub response: String,
+}
+
+/// Enhanced outcome of one interpretation pass: the affected instance bases
+/// (create/update/relations touched) plus optional live-debug capture.
+///
+/// This is the shape `run_interpretation_with_strategy_and_model` returns
+/// now; delegators (`run_interpretation`, `run_interpretation_with_strategy`)
+/// preserve their `Vec<String>` return by extracting `.bases`.
+#[derive(Debug, Clone)]
+pub struct InterpretationOutcome {
+    pub bases: Vec<String>,
+    pub debug: Option<InterpretationDebug>,
+}
+
 pub async fn run_interpretation_with_strategy_and_model(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
@@ -364,7 +389,8 @@ pub async fn run_interpretation_with_strategy_and_model(
     model_override: Option<&str>,
     scope: Option<&Scope>,
     cursor: Option<&InterpretationRunCursor>,
-) -> anyhow::Result<Vec<String>> {
+    debug_mode: bool,
+) -> anyhow::Result<InterpretationOutcome> {
     // Returns a task already spawned into its LLM worker, so `prompt` can use it
     // immediately (see `ensure_interpretation_task_for_model`).
     let task = ensure_interpretation_task_for_model(model_override).await?;
@@ -394,15 +420,30 @@ pub async fn run_interpretation_with_strategy_and_model(
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
 
+    // When `debug_mode` is on we need the raw response verbatim (not just the
+    // parsed instances) to surface via the event + persist on the run node.
+    // Capture the last-observed raw text through a shared cell inside the
+    // retry callback so we hold on to the successful response text (retries
+    // only happen when parsing fails, so the final successful attempt is what
+    // ends up in the cell).
+    let debug_response_capture: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
     let instances = retry_interpretation_parse(|_attempt| {
         let service = service.clone();
         let task_id = task.task_id.clone();
         let prompt = prompt.clone();
+        let capture = debug_response_capture.clone();
+        let want_capture = debug_mode;
         async move {
             let result = service
                 .prompt(task_id, prompt)
                 .await
                 .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
+            if want_capture {
+                if let Ok(mut slot) = capture.lock() {
+                    *slot = Some(result.text.clone());
+                }
+            }
             Ok(result.text)
         }
     })
@@ -441,6 +482,22 @@ pub async fn run_interpretation_with_strategy_and_model(
     // `InterpretationRun` is minted per pass and threaded onto every overlay.
     let run_id = uuid::Uuid::new_v4().to_string();
     let ran_at = chrono::Utc::now().timestamp_millis().to_string();
+    // Build the debug capture struct once so the shared cell's contents live
+    // exactly one hop: extracted here, cloned into the meta persisted on the
+    // run node, and returned to the caller for the live event.
+    let debug = if debug_mode {
+        let response = debug_response_capture
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .unwrap_or_default();
+        Some(InterpretationDebug {
+            prompt: prompt.clone(),
+            response,
+        })
+    } else {
+        None
+    };
     let bases = apply_with_overlay(
         perspective,
         shapes,
@@ -450,12 +507,13 @@ pub async fn run_interpretation_with_strategy_and_model(
         ran_at,
         context,
         cursor,
+        debug.as_ref(),
     )
     .await?;
 
     // The affected instance base URIs (created, updated, or given new
     // relations). Links are owned by `create_subject` / `update_subject`.
-    Ok(bases)
+    Ok(InterpretationOutcome { bases, debug })
 }
 
 #[cfg(test)]

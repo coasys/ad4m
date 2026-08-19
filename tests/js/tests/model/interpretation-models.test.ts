@@ -204,6 +204,7 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
       "ad4m://dedup_strategy",
       "ad4m://existing_scope",
       "ad4m://mint_scope",
+      "ad4m://debug_mode",
     ]);
 
     expect(paths, "TS shape must declare exactly the Rust SDNA property paths")
@@ -226,6 +227,8 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
       "ad4m://interp/ran_at",
       "ad4m://interp/processor",
       "ad4m://interp/sources",
+      "ad4m://interp/debug_prompt",
+      "ad4m://interp/debug_response",
     ]);
 
     expect(paths, "TS shape must declare exactly the Rust SDNA property paths")

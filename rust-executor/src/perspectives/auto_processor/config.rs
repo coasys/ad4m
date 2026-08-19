@@ -68,7 +68,8 @@ const AUTO_PROCESSOR_SDNA: &str = r#"{
     {"path":"ad4m://source_window_ms","name":"source_window_ms","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://source_window_ms","target":"value"}]},
     {"path":"ad4m://dedup_strategy","name":"dedup_strategy","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://dedup_strategy","target":"value"}]},
     {"path":"ad4m://existing_scope","name":"existing_scope","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://existing_scope","target":"value"}]},
-    {"path":"ad4m://mint_scope","name":"mint_scope","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://mint_scope","target":"value"}]}
+    {"path":"ad4m://mint_scope","name":"mint_scope","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://mint_scope","target":"value"}]},
+    {"path":"ad4m://debug_mode","name":"debug_mode","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://debug_mode","target":"value"}]}
   ]
 }"#;
 
@@ -150,6 +151,18 @@ pub struct AutoProcessorConfig {
     /// May differ from [`Self::existing_scope`] — a watcher can read from a
     /// broader subtree than it writes into, or vice-versa.
     pub mint_scope: Option<Scope>,
+    /// Live debug knob for UI observability. When `true`, each pass:
+    /// * enriches the `Processed` [`super::events::AutoProcessorEvent`] with
+    ///   the raw LLM prompt and response strings, so a subscribed client can
+    ///   render "what the model actually saw and returned" in real time; and
+    /// * persists the same prompt+response on the [`InterpretationRun`]
+    ///   subject class as `debug_prompt`/`debug_response`, so a UI can look
+    ///   the pass up historically even if it missed the WS event.
+    /// Default: `false`. Off saves both wire and graph-sync payload — LLM
+    /// prompts + responses are large (10s of KB), and every enabled peer
+    /// would sync them for every pass. Turn on per-processor when you need
+    /// to introspect a specific run.
+    pub debug_mode: bool,
 }
 
 /// Deterministic node URI for an AutoProcessor. Deterministic in
@@ -224,6 +237,12 @@ pub async fn write_processor(
             .map_err(|e| anyhow::anyhow!("write_processor: serialize mint_scope: {e:#}"))?;
         values["mint_scope"] = json.into();
     }
+    // Persist `debug_mode` only when non-default (`true`); an omitted link is
+    // the load-time default `false`, so we keep the SDNA lean for the common
+    // "no debugging" case.
+    if cfg.debug_mode {
+        values["debug_mode"] = "true".into();
+    }
     perspective
         .create_subject(class_option(), node.clone(), Some(values), None, context)
         .await
@@ -273,7 +292,7 @@ pub async fn load_processors(
             "processor_id", "source_scope_query", "base_prefix",
             "interpretation_class", "debounce_ms", "batch_min", "batch_max",
             "max_wait_ms", "claim_ttl_ms", "dedup_strategy", "source_window_ms",
-            "existing_scope", "mint_scope",
+            "existing_scope", "mint_scope", "debug_mode",
         ]
     })
     .to_string();
@@ -380,6 +399,21 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         None => None,
     };
 
+    // Absent `debug_mode` → default `false`. Present-but-unparseable is a
+    // config error (bail, same policy as the other scalars): a hand-edited
+    // typo shouldn't silently run without debug telemetry when the caller
+    // asked for it.
+    let debug_mode = match scalar("debug_mode") {
+        Some(s) => match s.parse::<bool>() {
+            Ok(v) => v,
+            Err(_) => {
+                log::warn!("config_from_instance: debug_mode is not `true`/`false`");
+                return None;
+            }
+        },
+        None => false,
+    };
+
     Some(AutoProcessorConfig {
         processor_id: scalar("processor_id")?,
         source_scope_query: scalar("source_scope_query")?,
@@ -394,6 +428,7 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         source_window_ms,
         existing_scope,
         mint_scope,
+        debug_mode,
     })
 }
 
@@ -417,6 +452,7 @@ mod tests {
             "ad4m://batch_min",
             "ad4m://claim_ttl_ms",
             "ad4m://debounce_ms",
+            "ad4m://debug_mode",
             "ad4m://dedup_strategy",
             "ad4m://existing_scope",
             "ad4m://interpretation_class",
@@ -488,6 +524,7 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            debug_mode: false,
         }
     }
 

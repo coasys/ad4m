@@ -1209,6 +1209,7 @@ async fn add_auto_processor_handler(
         source_window_ms: body.source_window_ms,
         existing_scope: body.existing_scope,
         mint_scope: body.mint_scope,
+        debug_mode: body.debug_mode.unwrap_or(false),
     };
     write_processor(&mut perspective, &cfg, &agent_context)
         .await

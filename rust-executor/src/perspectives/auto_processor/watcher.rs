@@ -660,7 +660,7 @@ pub async fn run_one_pass(
         HashSet::new()
     };
 
-    let bases = run_interpretation_with_strategy_and_model(
+    let outcome = run_interpretation_with_strategy_and_model(
         perspective,
         &shapes,
         &transcript,
@@ -677,8 +677,15 @@ pub async fn run_one_pass(
             processor: super::config::processor_node(&cfg.processor_id),
             sources: item_ids.clone(),
         }),
+        // Debug: when the processor is in `debug_mode`, the outcome carries
+        // the raw LLM prompt + response, and the interpretation engine also
+        // persists them on the `InterpretationRun` node. Fed into the
+        // `Processed` event below so a subscribed UI sees them live.
+        cfg.debug_mode,
     )
     .await?;
+    let bases = outcome.bases;
+    let debug = outcome.debug;
 
     // Mint-scope child links: if the processor declares a `mint_scope`, wire
     // every **freshly created** base as a child under the target node via the
@@ -702,7 +709,20 @@ pub async fn run_one_pass(
         )
         .await?;
     }
-    signal!(AutoProcessorStep::Processed, bases = &bases);
+    // Emit the `Processed` event. When the processor is in debug mode, the
+    // interpretation outcome carried the raw LLM prompt + response back; we
+    // attach them to the event so a subscribed UI can render "what the model
+    // saw and returned" live. Wire-level DID filtering (events_ws
+    // `matches_auto_processor_pass_owner`) already scopes this to the pass
+    // owner, so the payload never leaks to observers who did not run it.
+    let mut ev = AutoProcessorEvent::new(&uuid, &cfg.processor_id, AutoProcessorStep::Processed)
+        .with_agent_did(&me)
+        .with_items(&item_ids)
+        .with_bases(&bases);
+    if let Some(d) = debug {
+        ev = ev.with_llm_io(d.prompt, d.response);
+    }
+    emit(ev).await;
 
     Ok(PassOutcome::Won { bases })
 }
@@ -787,6 +807,7 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            debug_mode: false,
         }
     }
 

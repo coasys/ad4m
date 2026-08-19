@@ -41,6 +41,11 @@ export interface AutoProcessorEvent {
   bases: string[];
   /** Free-form context for the step (a holder/elected DID, an error, …). */
   detail?: string;
+  /** Raw LLM prompt this pass fed the model. Present on `processed` only
+   *  when the processor was configured with `debugMode: true`. */
+  llmInput?: string;
+  /** Raw LLM response this pass received. Same rules as `llmInput`. */
+  llmOutput?: string;
 }
 
 /** Configuration for `perspective.addAutoProcessor` (everything but `uuid`). */
@@ -114,6 +119,16 @@ export interface AddAutoProcessorConfig {
    * see `RawScope`; the Rust watcher rejects `Model` scopes at runtime.
    */
   mintScope?: RawScope;
+  /**
+   * Live debug knob for UI observability. When `true`, each pass enriches
+   * the `processed` `auto-processor-event` with the raw LLM prompt +
+   * response, and persists the same strings on the pass's
+   * `InterpretationRun` (`debugPrompt` / `debugResponse`) so a UI can look
+   * them up post-hoc even if it missed the live event. Default `false` —
+   * LLM I/O is large (tens of KB) and would otherwise inflate every event
+   * and every shared-graph sync.
+   */
+  debugMode?: boolean;
 }
 
 /**

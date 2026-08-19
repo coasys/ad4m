@@ -75,6 +75,15 @@ pub struct AutoProcessorEvent {
     /// Free-form context for the step (a holder/elected DID, an error, …).
     #[serde(default)]
     pub detail: Option<String>,
+    /// Live-debug raw LLM prompt for this pass. Present on `Processed` only
+    /// when the processor was configured with `AutoProcessorConfig.debug_mode
+    /// = true`. Absent (`None`) in the normal path — LLM prompts are 10s of
+    /// KB and would otherwise inflate every event.
+    #[serde(default)]
+    pub llm_input: Option<String>,
+    /// Live-debug raw LLM response for this pass. Same rules as `llm_input`.
+    #[serde(default)]
+    pub llm_output: Option<String>,
 }
 
 impl AutoProcessorEvent {
@@ -87,6 +96,8 @@ impl AutoProcessorEvent {
             item_ids: Vec::new(),
             bases: Vec::new(),
             detail: None,
+            llm_input: None,
+            llm_output: None,
         }
     }
     pub fn with_agent_did(mut self, did: &str) -> Self {
@@ -103,6 +114,15 @@ impl AutoProcessorEvent {
     }
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
+        self
+    }
+    /// Attach live-debug LLM I/O — only set from a pass whose
+    /// `AutoProcessorConfig.debug_mode` is `true`. Payload sizes are large
+    /// (10s of KB); the wire-level DID filter (Nico's 2026-08-19 call) keeps
+    /// this from leaking to observers who did not run the pass.
+    pub fn with_llm_io(mut self, input: String, output: String) -> Self {
+        self.llm_input = Some(input);
+        self.llm_output = Some(output);
         self
     }
 }

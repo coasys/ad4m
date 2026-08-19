@@ -621,6 +621,13 @@ pub struct AddAutoProcessorRequest {
     /// at watch time.
     #[serde(default)]
     pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Live debug knob for UI observability. When `true`, each pass enriches
+    /// the `Processed` `auto-processor-event` with the raw LLM prompt +
+    /// response, and persists them on the corresponding `InterpretationRun`
+    /// (`debug_prompt` / `debug_response`). Default `false` — LLM I/O is
+    /// large and blows the wire + shared-graph sync when always on.
+    #[serde(default)]
+    pub debug_mode: Option<bool>,
 }
 
 /// `perspective.acceptInterpretation` / `perspective.rejectInterpretation` —
