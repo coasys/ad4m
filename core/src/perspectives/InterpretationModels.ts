@@ -24,12 +24,21 @@ import { Model } from "../model/decorators";
 // One node per registered processor; the node URI is
 // `ad4m://autoprocessor/<processorId>`.
 
-@Model({ name: "AutoProcessorConfig" })
+// Model name = "AutoProcessor" (NOT "AutoProcessorConfig") to match the Rust
+// hardwired subject class in `perspectives/auto_processor/config.rs` — that
+// alignment is what the SDNA parity test in
+// `tests/js/tests/model/interpretation-models.test.ts` guards. The TS class
+// symbol keeps the `Config` suffix for readability (`AutoProcessorConfig` reads
+// better than a bare `AutoProcessor` for an "instances of the config record"
+// query), but the on-graph subject class it registers is `AutoProcessor`.
+@Model({ name: "AutoProcessor" })
 export class AutoProcessorConfig extends Ad4mModel {
-  @Flag({ through: "rdf://type", value: "ad4m://AutoProcessor" })
-  type: string = "ad4m://AutoProcessor";
-
   /** Unique processor id — the dedup key for auto-processor instances. */
+  // Declared FIRST so `buildSHACL` derives the shape namespace from
+  // `ad4m://processor_id` — target_class then resolves to `ad4m://AutoProcessor`,
+  // exactly what the Rust SDNA declares. Putting the `@Flag` first (whose
+  // `through: "rdf://type"` would win the namespace race) forked target_class
+  // to `rdf://AutoProcessorConfig` — CI-caught mismatch (2026-08-19).
   @Property({ through: "ad4m://processor_id", required: true, identity: true })
   processorId: string = "";
 
@@ -102,6 +111,13 @@ export class AutoProcessorConfig extends Ad4mModel {
    */
   @Optional({ through: "ad4m://debug_mode", resolveLanguage: "literal" })
   debugMode?: string;
+
+  // Declared LAST so `buildSHACL`'s "first property wins the namespace" rule
+  // picks up `ad4m://` from `processorId` (declared first). If this @Flag
+  // came first, namespace would resolve to `rdf://` and target_class would
+  // mismatch the Rust `ad4m://AutoProcessor`.
+  @Flag({ through: "rdf://type", value: "ad4m://AutoProcessor" })
+  type: string = "ad4m://AutoProcessor";
 }
 
 // ── InterpretationRun ───────────────────────────────────────────────────────
