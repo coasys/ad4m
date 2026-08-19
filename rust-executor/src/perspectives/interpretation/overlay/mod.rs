@@ -43,7 +43,8 @@ mod classes;
 mod gate;
 mod write;
 
-use classes::{
+pub use classes::InterpretationRunCursor;
+pub(crate) use classes::{
     ensure_interpretation_overlay_classes, mint_interpretation_run, InterpretationRunMeta,
 };
 use gate::{gate_update, inferred_snapshot};
@@ -103,8 +104,9 @@ pub(super) struct OverlayWrite {
 /// Order of operations matters: the human-divergence gate and the last-inferred
 /// baseline are read from the graph state *before* this pass writes anything, so
 /// all reads happen first, then the gated real ops are applied, then the
-/// overlays. The run node is minted lazily — only when there is at least one
-/// overlay to anchor to it.
+/// overlays. The run node is minted when there is at least one overlay to
+/// anchor, **or** when an AutoProcessor cursor must be recorded (even if the
+/// LLM wrote nothing — those turns are still consumed).
 pub(crate) async fn apply_with_overlay(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
@@ -113,8 +115,17 @@ pub(crate) async fn apply_with_overlay(
     run_id: String,
     ran_at: String,
     context: &AgentContext,
+    cursor: Option<&InterpretationRunCursor>,
 ) -> anyhow::Result<Vec<String>> {
     if ops.is_empty() {
+        if cursor.is_some() {
+            ensure_interpretation_overlay_classes(perspective, context).await?;
+            let meta = InterpretationRunMeta::from_task(task, run_id, ran_at);
+            // Empty-ops fast-path: no overlays to write, so nothing to keep
+            // atomic with the run mint — the cursor-only run is the whole
+            // Phase 3 for this pass. `None` batch keeps this call cheap.
+            mint_interpretation_run(perspective, &meta, cursor, None, context).await?;
+        }
         return Ok(Vec::new());
     }
 
@@ -183,29 +194,43 @@ pub(crate) async fn apply_with_overlay(
     // Phase 2: apply the gated real ops (own batch, atomic).
     super::apply_interpretation_ops(perspective, &real_ops, context).await?;
 
-    // Phase 3: mint the run + write the overlays (only if any were planned).
-    // The whole phase lives in one caller-owned batch so a mid-write failure
-    // rolls back the run node AND every partial `inferred/<p>` link together.
-    // Without this, a crash between overlay writes would leave `inferred/<p>`
-    // out of sync with the (already-committed) real value; `gate_update` would
-    // then read `real != inferred` and permanently classify the property as
-    // human-diverged, dropping every subsequent LLM proposal.
-    if !overlays.is_empty() {
+    // Phase 3: mint the run + write the overlays.
+    //
+    // Two independent triggers combine here:
+    //   * `!overlays.is_empty()` — one-shot interpretation only mints when
+    //     there is an overlay to anchor to a run.
+    //   * `cursor.is_some()` — AutoProcessor always mints a run so consumed
+    //     turn IDs land on it even when this pass wrote no overlay (the
+    //     empty-batch bookkeeping the processed-turn cursor needs).
+    //
+    // Either trigger opens a Phase-3 batch that groups the run mint AND every
+    // overlay write together, so a mid-write failure rolls back the run node
+    // and every partial `inferred/<p>` link atomically. Without the batch a
+    // crash between overlay writes would leave `inferred/<p>` out of sync with
+    // the (already-committed) real value; `gate_update` would then read
+    // `real != inferred` and permanently classify the property as
+    // human-diverged, dropping every subsequent LLM proposal on that field.
+    if !overlays.is_empty() || cursor.is_some() {
         let meta = InterpretationRunMeta::from_task(task, run_id, ran_at);
         let batch_id = perspective.create_batch().await;
         let mut phase3_err: Option<anyhow::Error> = None;
 
         'overlay: {
-            let run_uri =
-                match mint_interpretation_run(perspective, &meta, Some(batch_id.clone()), context)
-                    .await
-                {
-                    Ok(uri) => uri,
-                    Err(e) => {
-                        phase3_err = Some(e);
-                        break 'overlay;
-                    }
-                };
+            let run_uri = match mint_interpretation_run(
+                perspective,
+                &meta,
+                cursor,
+                Some(batch_id.clone()),
+                context,
+            )
+            .await
+            {
+                Ok(uri) => uri,
+                Err(e) => {
+                    phase3_err = Some(e);
+                    break 'overlay;
+                }
+            };
             for ow in &overlays {
                 if let Err(e) =
                     write_overlay(perspective, ow, &run_uri, Some(batch_id.clone()), context).await
@@ -279,7 +304,7 @@ pub(crate) async fn seed_overlay(
         prompt_version: "seed".to_string(),
         ran_at: "0".to_string(),
     };
-    let run_uri = mint_interpretation_run(perspective, &meta, None, context).await?;
+    let run_uri = mint_interpretation_run(perspective, &meta, None, None, context).await?;
     let ow = OverlayWrite {
         base: base.to_string(),
         kind: OverlayKind::Create,
@@ -332,6 +357,7 @@ mod tests {
             run_id.to_string(),
             "1700000000000".to_string(),
             ctx,
+            None,
         )
         .await
         .expect("apply_with_overlay")

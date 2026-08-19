@@ -1,8 +1,9 @@
 use super::{
-    apply_with_overlay, build_interpretation_input, class_local_name, ensure_interpretation_task,
-    existing_instance_context, existing_relation_links, identity_property,
-    parse_interpretation_response, plan_interpretation_ops_resolved,
-    resolve_already_present_with_strategy, DedupStrategy, InterpretationOp, ProposedInstance,
+    apply_with_overlay, build_interpretation_input, class_local_name,
+    ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
+    identity_property, parse_interpretation_response, plan_interpretation_ops_resolved,
+    resolve_already_present_with_strategy, DedupStrategy, InterpretationOp,
+    InterpretationRunCursor, ProposedInstance, TranscriptTurn,
 };
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::{ModelShape, ParentScope};
@@ -297,7 +298,7 @@ pub async fn apply_interpretation_ops(
 pub async fn run_interpretation(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
-    transcript: &[(String, String)],
+    transcript: &[TranscriptTurn],
     base_prefix: &str,
     context: &AgentContext,
     scope: Option<&ParentScope>,
@@ -326,15 +327,47 @@ pub async fn run_interpretation(
 pub async fn run_interpretation_with_strategy(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
-    transcript: &[(String, String)],
+    transcript: &[TranscriptTurn],
     base_prefix: &str,
     context: &AgentContext,
     dedup_strategy: &DedupStrategy,
     scope: Option<&ParentScope>,
 ) -> anyhow::Result<Vec<String>> {
+    run_interpretation_with_strategy_and_model(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        dedup_strategy,
+        None,
+        scope,
+        None,
+    )
+    .await
+}
+
+/// [`run_interpretation_with_strategy`] with an optional per-call LLM model
+/// override — routes the interpretation prompt through the AI-task DB row
+/// bound to `model_override` (falling back to the shared default row when
+/// `None`).
+///
+/// `model_override = None` reuses the exact task row every existing caller
+/// already uses, so behaviour is unchanged for all non-processor callers.
+pub async fn run_interpretation_with_strategy_and_model(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    dedup_strategy: &DedupStrategy,
+    model_override: Option<&str>,
+    scope: Option<&ParentScope>,
+    cursor: Option<&InterpretationRunCursor>,
+) -> anyhow::Result<Vec<String>> {
     // Returns a task already spawned into its LLM worker, so `prompt` can use it
-    // immediately (see `ensure_interpretation_task`).
-    let task = ensure_interpretation_task().await?;
+    // immediately (see `ensure_interpretation_task_for_model`).
+    let task = ensure_interpretation_task_for_model(model_override).await?;
     // Existing-instance snapshot: gives the model both the `id` handle to
     // upsert/reference (so it can refine or link an existing node instead of
     // duplicating) and the identity value to recognise it by. This one
@@ -413,8 +446,17 @@ pub async fn run_interpretation_with_strategy(
     // `InterpretationRun` is minted per pass and threaded onto every overlay.
     let run_id = uuid::Uuid::new_v4().to_string();
     let ran_at = chrono::Utc::now().timestamp_millis().to_string();
-    let bases =
-        apply_with_overlay(perspective, shapes, ops, &task, run_id, ran_at, context).await?;
+    let bases = apply_with_overlay(
+        perspective,
+        shapes,
+        ops,
+        &task,
+        run_id,
+        ran_at,
+        context,
+        cursor,
+    )
+    .await?;
 
     // The affected instance base URIs (created, updated, or given new
     // relations). Links are owned by `create_subject` / `update_subject`.
@@ -559,16 +601,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gather_transcript_sparql_returns_speaker_and_decoded_text() {
+    async fn gather_transcript_sparql_returns_speaker_text_and_timestamp() {
         // The generic SPARQL gather must:
         //   1. run an arbitrary SELECT against the perspective's Oxigraph store,
-        //   2. bind `?speaker` (the raw NamedNode string, e.g. "did:key:alice"),
+        //   2. bind `?speaker` from the body-link reifier (`ad4m://ontology/author`
+        //      = the signing agent, NOT a separate ns://author property),
         //   3. bind `?text` and, when it's a `literal:string:...` URI, decode it,
-        //   4. preserve caller-visible ordering by returning rows as SPARQL gave
+        //   4. bind `?timestamp` from the same reifier,
+        //   5. preserve caller-visible ordering by returning rows as SPARQL gave
         //      them (deterministic when ORDER BY is in the query).
-        use crate::perspectives::interpretation::graph::gather_transcript_sparql;
+        use crate::agent::did_for_context;
+        use crate::perspectives::interpretation::graph::{
+            gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
+        };
         let (mut perspective, _shapes, ctx) =
             setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        let me = did_for_context(&ctx).expect("test agent DID");
         seed_message(
             &mut perspective,
             &ctx,
@@ -578,6 +626,9 @@ mod tests {
             "ns://body",
         )
         .await;
+        // Link timestamps are RFC3339 millis; sleep so ORDER BY ?timestamp is
+        // deterministic rather than a same-millisecond tie (undefined order).
+        std::thread::sleep(std::time::Duration::from_millis(2));
         seed_message(
             &mut perspective,
             &ctx,
@@ -588,23 +639,26 @@ mod tests {
         )
         .await;
 
-        let query = r#"
-        SELECT ?speaker ?text WHERE {
-            ?m <ns://body> ?text .
-            ?m <ns://author> ?speaker .
-        }
-        ORDER BY ?m
-    "#;
-        let turns = gather_transcript_sparql(&perspective, query)
+        let turns = gather_transcript_sparql(&perspective, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
             .await
             .expect("gather_transcript_sparql");
-        assert_eq!(
-            turns,
-            vec![
-                ("did:key:alice".to_string(), "hello world".to_string()),
-                ("did:key:bob".to_string(), "second turn".to_string()),
-            ],
-            "SPARQL rows must materialise as (speaker, decoded text) turns in order"
+        assert_eq!(turns.len(), 2, "got {turns:#?}");
+        assert_eq!(turns[0].text, "hello world");
+        assert_eq!(turns[1].text, "second turn");
+        // Speaker is the link signer (test agent), not the ns://author target.
+        assert_eq!(turns[0].speaker, me);
+        assert_eq!(turns[1].speaker, me);
+        assert!(
+            !turns[0].timestamp.is_empty() && !turns[1].timestamp.is_empty(),
+            "reifier timestamp must be bound; got {turns:#?}"
+        );
+        assert_ne!(
+            turns[0].timestamp, turns[1].timestamp,
+            "sequentially seeded links must have distinct timestamps"
+        );
+        assert!(
+            turns[0].timestamp < turns[1].timestamp,
+            "ORDER BY ?timestamp must be chronological; got {turns:#?}"
         );
     }
 
@@ -613,7 +667,9 @@ mod tests {
         // Proves this is a real scope, not a rebranded gather-everything. Seed one
         // "body"-predicated message and one "system-log" message; a query that
         // filters on `ns://body` must return exactly the first.
-        use crate::perspectives::interpretation::graph::gather_transcript_sparql;
+        use crate::perspectives::interpretation::graph::{
+            gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
+        };
         let (mut perspective, _shapes, ctx) =
             setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
         seed_message(
@@ -635,16 +691,134 @@ mod tests {
         )
         .await;
 
-        let scoped = gather_transcript_sparql(
+        let scoped = gather_transcript_sparql(&perspective, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
+            .await
+            .expect("gather_transcript_sparql");
+        assert_eq!(
+            scoped.len(),
+            1,
+            "scoped query must exclude messages under other predicates; got {scoped:#?}"
+        );
+        assert_eq!(scoped[0].text, "I'll ship the doc");
+    }
+
+    #[tokio::test]
+    async fn gather_transcript_sparql_rejects_missing_timestamp() {
+        use crate::perspectives::interpretation::graph::gather_transcript_sparql;
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        seed_message(
+            &mut perspective,
+            &ctx,
+            "msg://1",
+            "did:key:alice",
+            "hello",
+            "ns://body",
+        )
+        .await;
+        let err = gather_transcript_sparql(
             &perspective,
             "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . }",
         )
         .await
-        .expect("gather_transcript_sparql");
-        assert_eq!(
-            scoped,
-            vec![("did:key:alice".to_string(), "I'll ship the doc".to_string())],
-            "scoped query must exclude messages under other predicates"
+        .expect_err("query without ?timestamp must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("?timestamp"),
+            "error must mention the missing binding; got {msg}"
         );
+    }
+
+    // ---- interpretation_task_name_for_model + ensure_..._for_model --------
+
+    /// Default (None) is the shared name; Some(model) yields a distinct
+    /// `?model=<id>` variant so the DB row and the AIService routing key are
+    /// keyed per model. Colons inside the model id (`gemma3:12b`) are preserved.
+    #[test]
+    fn task_name_default_vs_per_model_variants() {
+        assert_eq!(
+            interpretation_task_name_for_model(None),
+            INTERPRETATION_TASK_NAME
+        );
+        assert_eq!(
+            interpretation_task_name_for_model(Some("gemma3:12b")),
+            format!("{INTERPRETATION_TASK_NAME}?model=gemma3:12b")
+        );
+        assert_ne!(
+            interpretation_task_name_for_model(Some("gemma3:12b")),
+            interpretation_task_name_for_model(Some("qwen3.5-27b")),
+            "per-model names must be distinct"
+        );
+    }
+
+    /// `ensure_interpretation_task_for_model` creates a separate DB row per model,
+    /// re-uses that row on the next call (idempotent), and never touches the
+    /// shared default row when a model is specified.
+    #[test]
+    fn ensure_for_model_creates_isolated_row_per_model_and_is_idempotent() {
+        ensure_db_init();
+
+        // Wipe any leftover rows for the two model-specific names we're about to
+        // create so this test is a real insert path regardless of order.
+        let target_names = [
+            interpretation_task_name_for_model(Some("gemma3:12b")),
+            interpretation_task_name_for_model(Some("qwen3.5-27b")),
+        ];
+        let leftover: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+            .unwrap()
+            .into_iter()
+            .filter(|t| target_names.contains(&t.name))
+            .collect();
+        for t in leftover {
+            Ad4mDb::with_global_instance(|db| db.remove_task(t.task_id.clone())).unwrap();
+        }
+
+        // DB-only primitive (no model/GPU): registers the per-model row and
+        // reports whether it minted it. The async `ensure_..._for_model` wrapper
+        // additionally spawns the task.
+        let (gemma_first, gemma_created) =
+            register_interpretation_task_for_model(Some("gemma3:12b")).unwrap();
+        assert!(gemma_created, "first call after wipe must insert the row");
+        assert_eq!(gemma_first.name, target_names[0]);
+        assert_eq!(gemma_first.model_id, "gemma3:12b");
+        assert!(gemma_first
+            .system_prompt
+            .contains("You extract typed instances"));
+
+        // Idempotent: second call must return the same row, not insert a duplicate.
+        let (gemma_second, gemma_created_again) =
+            register_interpretation_task_for_model(Some("gemma3:12b")).unwrap();
+        assert!(
+            !gemma_created_again,
+            "second call must find the existing row"
+        );
+        assert_eq!(gemma_first.task_id, gemma_second.task_id);
+
+        // Distinct model → distinct DB row.
+        let (qwen, _) = register_interpretation_task_for_model(Some("qwen3.5-27b")).unwrap();
+        assert_ne!(qwen.task_id, gemma_first.task_id);
+        assert_eq!(qwen.model_id, "qwen3.5-27b");
+
+        // The default row is untouched — model overrides never mutate the shared
+        // task every other caller depends on.
+        let (default_row, _) = register_interpretation_task().unwrap();
+        assert_eq!(default_row.model_id, "default");
+        assert_ne!(default_row.task_id, gemma_first.task_id);
+        assert_ne!(default_row.task_id, qwen.task_id);
+
+        // Exactly one row per (target_name), no accidental duplicates left behind.
+        for name in &target_names {
+            let rows: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+                .unwrap()
+                .into_iter()
+                .filter(|t| &t.name == name)
+                .collect();
+            assert_eq!(
+                rows.len(),
+                1,
+                "expected exactly one row for {name}, got {}",
+                rows.len()
+            );
+        }
     }
 }

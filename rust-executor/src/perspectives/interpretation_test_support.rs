@@ -15,7 +15,7 @@ use super::interpretation::{
     apply_interpretation_ops, class_local_name, existing_instance_context,
     plan_interpretation_ops_with_context, run_interpretation, run_interpretation_with_strategy,
     DedupStrategy, ExistingInstances, ExistingLinks, InstanceContext, InterpretationOp,
-    ProposedInstance,
+    ProposedInstance, TranscriptTurn,
 };
 use super::model_query::shape::load_shape;
 use super::model_query::types::{ModelShape, ParentScope};
@@ -283,15 +283,20 @@ pub(crate) async fn setup_interpretation_e2e(
         .await
         .expect("add_model");
     // Insert the interpretation task row BEFORE setting the default model:
-    // `ensure_interpretation_task` only writes the DB row, and it's
-    // `set_default_model`'s respawn loop (over `model_id == "default"` tasks)
-    // that actually registers the task with the LLM worker. Priming it here
-    // makes every e2e test self-contained — otherwise running one in isolation
-    // (with no earlier test having inserted the row) leaves the task unspawned
-    // and the first `prompt()` fails with "Task ... not spawned".
-    crate::perspectives::interpretation::ensure_interpretation_task()
-        .await
-        .expect("ensure_interpretation_task");
+    // `register_interpretation_task` only writes the DB row (no spawn), and
+    // it's `set_default_model`'s respawn loop (over `model_id == "default"`
+    // tasks) that actually registers the task with the LLM worker. Priming it
+    // here makes every e2e test self-contained — otherwise running one in
+    // isolation (with no earlier test having inserted the row) leaves the task
+    // unspawned and the first `prompt()` fails with "Task ... not spawned".
+    //
+    // Do NOT call `ensure_interpretation_task` here: it spawns as part of its
+    // idempotency guarantee, and spawning resolves `model_id == "default"` at
+    // spawn-time via `get_default_model`. The default has not been set yet on
+    // this line, so the spawn would fail with "Task needs default model but no
+    // default set". `register_interpretation_task` (write-only) lets
+    // `set_default_model` do the spawn once the default is actually there.
+    let _ = crate::perspectives::interpretation::register_interpretation_task();
     service
         .set_default_model(ModelType::Llm, model_id)
         .await
@@ -357,9 +362,9 @@ pub(crate) async fn run_interpretation_e2e(
     transcript: &[(&str, &str)],
     ctx: &AgentContext,
 ) -> Vec<(String, Vec<Link>)> {
-    let transcript: Vec<(String, String)> = transcript
+    let transcript: Vec<TranscriptTurn> = transcript
         .iter()
-        .map(|(s, t)| (s.to_string(), t.to_string()))
+        .map(|(s, t)| TranscriptTurn::from_speaker_text(*s, *t))
         .collect();
     let bases = run_interpretation(perspective, shapes, &transcript, "soa://ext/", ctx, None)
         .await
@@ -379,9 +384,9 @@ pub(crate) async fn run_interpretation_e2e_with_strategy(
     ctx: &AgentContext,
     strategy: &DedupStrategy,
 ) -> Vec<(String, Vec<Link>)> {
-    let transcript: Vec<(String, String)> = transcript
+    let transcript: Vec<TranscriptTurn> = transcript
         .iter()
-        .map(|(s, t)| (s.to_string(), t.to_string()))
+        .map(|(s, t)| TranscriptTurn::from_speaker_text(*s, *t))
         .collect();
     let bases = run_interpretation_with_strategy(
         perspective,
@@ -411,9 +416,9 @@ pub(crate) async fn run_interpretation_e2e_scoped(
     ctx: &AgentContext,
     scope: Option<&ParentScope>,
 ) -> Vec<String> {
-    let transcript: Vec<(String, String)> = transcript
+    let transcript: Vec<TranscriptTurn> = transcript
         .iter()
-        .map(|(s, t)| (s.to_string(), t.to_string()))
+        .map(|(s, t)| TranscriptTurn::from_speaker_text(*s, *t))
         .collect();
     let bases = run_interpretation(perspective, shapes, &transcript, "soa://ext/", ctx, scope)
         .await
