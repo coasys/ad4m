@@ -314,6 +314,8 @@ mod tests {
             claim_ttl_ms: 60_000,
             dedup_strategy_json: None,
             source_window_ms: None,
+            existing_scope: None,
+            mint_scope: None,
         };
         write_processor(&mut p, &cfg, &ctx)
             .await
@@ -387,6 +389,8 @@ mod tests {
             claim_ttl_ms: 60_000,
             dedup_strategy_json: None,
             source_window_ms: None,
+            existing_scope: None,
+            mint_scope: None,
         };
         write_processor(&mut p, &cfg, &ctx)
             .await
@@ -472,6 +476,8 @@ mod tests {
             claim_ttl_ms: 60_000,
             dedup_strategy_json: None,
             source_window_ms: None,
+            existing_scope: None,
+            mint_scope: None,
         };
         write_processor(&mut p, &cfg, &ctx)
             .await
@@ -527,6 +533,8 @@ mod tests {
             claim_ttl_ms: 60_000,
             dedup_strategy_json: None,
             source_window_ms: None,
+            existing_scope: None,
+            mint_scope: None,
         };
         write_processor(&mut p, &cfg, &ctx)
             .await
@@ -597,6 +605,8 @@ mod tests {
             claim_ttl_ms: 60_000,
             dedup_strategy_json: None,
             source_window_ms: Some(1), // 1ms — anything not stamped this millisecond is old
+            existing_scope: None,
+            mint_scope: None,
         };
         write_processor(&mut p, &cfg, &ctx)
             .await
@@ -651,6 +661,8 @@ mod tests {
             claim_ttl_ms: 60_000,
             dedup_strategy_json: None,
             source_window_ms: None,
+            existing_scope: None,
+            mint_scope: None,
         };
         write_processor(&mut p, &cfg, &ctx)
             .await

@@ -176,14 +176,17 @@ where
     }
 }
 
-/// Parent scope for scoped queries.
+/// A named subgraph scope: a parent node + linking predicate.
 ///
-/// When a query targets instances that are children of a specific parent
-/// (e.g. "all Messages belonging to Channel X"), the parent scope constrains
-/// the SPARQL query with an additional triple pattern.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// Reusable across contexts that need to identify "the subtree under node X
+/// linked via predicate P": query-time filtering (e.g. "all Messages belonging
+/// to Channel X" as a `parent` filter on `ModelQueryInput`) AND write-time
+/// scoping (e.g. AutoProcessor's `existing_scope` / `mint_scope` fields — the
+/// former constrains dedup lookups; the latter turns each new mint into a
+/// child link under the given node).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum ParentScope {
+pub enum Scope {
     Model {
         model: String,
         id: String,
@@ -245,7 +248,7 @@ pub struct ProjectionInput {
 #[serde(rename_all = "camelCase")]
 pub struct ModelQueryInput {
     #[serde(default)]
-    pub parent: Option<ParentScope>,
+    pub parent: Option<Scope>,
     #[serde(default)]
     pub properties: Option<Vec<String>>,
     #[serde(default)]

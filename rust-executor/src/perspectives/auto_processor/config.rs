@@ -28,6 +28,7 @@
 //! [`config_from_instance`].
 
 use crate::agent::AgentContext;
+use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 
 use super::scalar_string;
@@ -65,7 +66,9 @@ const AUTO_PROCESSOR_SDNA: &str = r#"{
     {"path":"ad4m://max_wait_ms","name":"max_wait_ms","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://max_wait_ms","target":"value"}]},
     {"path":"ad4m://claim_ttl_ms","name":"claim_ttl_ms","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://claim_ttl_ms","target":"value"}]},
     {"path":"ad4m://source_window_ms","name":"source_window_ms","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://source_window_ms","target":"value"}]},
-    {"path":"ad4m://dedup_strategy","name":"dedup_strategy","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://dedup_strategy","target":"value"}]}
+    {"path":"ad4m://dedup_strategy","name":"dedup_strategy","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://dedup_strategy","target":"value"}]},
+    {"path":"ad4m://existing_scope","name":"existing_scope","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://existing_scope","target":"value"}]},
+    {"path":"ad4m://mint_scope","name":"mint_scope","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://mint_scope","target":"value"}]}
   ]
 }"#;
 
@@ -130,6 +133,23 @@ pub struct AutoProcessorConfig {
     /// union of this processor's run sources. `<= 0` is invalid and the
     /// processor is not loaded.
     pub source_window_ms: Option<i64>,
+    /// Optional parent-scope filter passed to
+    /// [`crate::perspectives::interpretation::graph::existing_instance_context`]
+    /// when the watcher gathers existing instances for dedup. `None` keeps the
+    /// whole-perspective behaviour (all instances of every class are
+    /// candidates for upsert). Setting it constrains the dedup lookup to the
+    /// subtree rooted at [`Scope::id`] linked via [`Scope::predicate`] — the
+    /// SoA-tree pattern of "existing items live under THIS project node."
+    pub existing_scope: Option<Scope>,
+    /// Optional parent-scope target for newly minted instances. When set, every
+    /// new base URI returned by an interpretation pass gets an additional
+    /// `Scope::id --predicate--> new-uri` link written into the perspective,
+    /// so the minted instance becomes a first-class child of the target scope
+    /// (not just a URI-prefix convention). `None` skips the child-link write
+    /// and preserves the pre-scope behaviour where mint sites are unlinked.
+    /// May differ from [`Self::existing_scope`] — a watcher can read from a
+    /// broader subtree than it writes into, or vice-versa.
+    pub mint_scope: Option<Scope>,
 }
 
 /// Deterministic node URI for an AutoProcessor. Deterministic in
@@ -194,6 +214,16 @@ pub async fn write_processor(
     if let Some(source_window_ms) = cfg.source_window_ms {
         values["source_window_ms"] = source_window_ms.to_string().into();
     }
+    if let Some(existing_scope) = &cfg.existing_scope {
+        let json = serde_json::to_string(existing_scope)
+            .map_err(|e| anyhow::anyhow!("write_processor: serialize existing_scope: {e:#}"))?;
+        values["existing_scope"] = json.into();
+    }
+    if let Some(mint_scope) = &cfg.mint_scope {
+        let json = serde_json::to_string(mint_scope)
+            .map_err(|e| anyhow::anyhow!("write_processor: serialize mint_scope: {e:#}"))?;
+        values["mint_scope"] = json.into();
+    }
     perspective
         .create_subject(class_option(), node.clone(), Some(values), None, context)
         .await
@@ -243,6 +273,7 @@ pub async fn load_processors(
             "processor_id", "source_scope_query", "base_prefix",
             "interpretation_class", "debounce_ms", "batch_min", "batch_max",
             "max_wait_ms", "claim_ttl_ms", "dedup_strategy", "source_window_ms",
+            "existing_scope", "mint_scope",
         ]
     })
     .to_string();
@@ -326,6 +357,29 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         return None;
     }
 
+    // Scope JSON blobs — a present-but-unparseable value is a config error
+    // (bail, same policy as other required-shape fields). Absent → None.
+    let existing_scope = match scalar("existing_scope") {
+        Some(json) => match serde_json::from_str::<Scope>(&json) {
+            Ok(scope) => Some(scope),
+            Err(e) => {
+                log::warn!("config_from_instance: existing_scope parse failed: {e:#}");
+                return None;
+            }
+        },
+        None => None,
+    };
+    let mint_scope = match scalar("mint_scope") {
+        Some(json) => match serde_json::from_str::<Scope>(&json) {
+            Ok(scope) => Some(scope),
+            Err(e) => {
+                log::warn!("config_from_instance: mint_scope parse failed: {e:#}");
+                return None;
+            }
+        },
+        None => None,
+    };
+
     Some(AutoProcessorConfig {
         processor_id: scalar("processor_id")?,
         source_scope_query: scalar("source_scope_query")?,
@@ -338,6 +392,8 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         claim_ttl_ms,
         dedup_strategy_json: scalar("dedup_strategy"),
         source_window_ms,
+        existing_scope,
+        mint_scope,
     })
 }
 
@@ -366,6 +422,8 @@ mod tests {
             claim_ttl_ms: 120_000,
             dedup_strategy_json: Some(r#"{"kind":"normalized"}"#.into()),
             source_window_ms: None,
+            existing_scope: None,
+            mint_scope: None,
         }
     }
 
@@ -464,6 +522,78 @@ mod tests {
         write_processor(&mut p, &cfg, &ctx).await.expect("write");
         let loaded = load_processors(&p).await.expect("load");
         assert_eq!(loaded[0].source_window_ms, Some(42));
+    }
+
+    /// Both `Scope` variants round-trip verbatim through SDNA-serialized JSON.
+    /// Absent scopes stay `None`. Two independent processors may configure
+    /// different scopes without cross-contamination — the config
+    /// `PartialEq`/`Eq` assertion confirms every field survives verbatim.
+    #[tokio::test]
+    async fn scope_fields_optional_roundtrip() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        // Case 1: both scopes absent (baseline).
+        let bare = sample_config("bare");
+        write_processor(&mut p, &bare, &ctx).await.expect("write");
+
+        // Case 2: `Raw` scope on both sides — different parent nodes so we can
+        // prove they don't get conflated on read.
+        let mut raw = sample_config("raw-scoped");
+        raw.existing_scope = Some(Scope::Raw {
+            id: "soa://project/42".into(),
+            predicate: "soa://contains".into(),
+        });
+        raw.mint_scope = Some(Scope::Raw {
+            id: "soa://project/42/backlog".into(),
+            predicate: "ad4m://has_child".into(),
+        });
+        write_processor(&mut p, &raw, &ctx).await.expect("write");
+
+        // Case 3: `Model` scope — verifies the second untagged variant survives
+        // the JSON round-trip too (a bare `Raw` would silently match `Model`
+        // if the deserializer preferred the first variant).
+        let mut model = sample_config("model-scoped");
+        model.existing_scope = Some(Scope::Model {
+            model: "Project".into(),
+            id: "soa://project/42".into(),
+            field: Some("tasks".into()),
+        });
+        model.mint_scope = None;
+        write_processor(&mut p, &model, &ctx).await.expect("write");
+
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded.len(), 3, "three processors round-trip");
+        // load_processors sorts by processor_id → bare, model-scoped, raw-scoped.
+        assert_eq!(loaded[0], bare);
+        assert_eq!(loaded[1], model);
+        assert_eq!(loaded[2], raw);
+    }
+
+    /// A `mint_scope` value that fails to parse as JSON is a config error, so
+    /// the processor is skipped rather than silently loaded without scope
+    /// wiring — otherwise a hand-edited scope with a typo would mint
+    /// unlinked children as if it were correctly configured.
+    #[tokio::test]
+    async fn load_skips_node_with_unparseable_scope() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        write_processor(&mut p, &sample_config("good-scope"), &ctx)
+            .await
+            .expect("write");
+        write_processor(&mut p, &sample_config("garbled-scope"), &ctx)
+            .await
+            .expect("write");
+        p.update_subject(
+            class_option(),
+            processor_node("garbled-scope"),
+            serde_json::json!({ "mint_scope": "not-json {" }),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed garbled scope");
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].processor_id, "good-scope");
     }
 
     /// A node typed AutoProcessor but missing every required scalar (here: a

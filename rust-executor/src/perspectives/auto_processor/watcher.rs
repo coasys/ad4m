@@ -22,7 +22,9 @@ use crate::perspectives::interpretation::{
     TranscriptTurn,
 };
 use crate::perspectives::model_query::load_shape_from_store;
+use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::types::{Link, LinkStatus};
 
 use super::claim::{try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
@@ -646,11 +648,11 @@ pub async fn run_one_pass(
         context,
         &dedup,
         None,
-        // Existing-instance scope: not yet wired from the processor config —
-        // #883 added the plumbing (`existing_instance_context(scope)`), but the
-        // per-channel scope belongs to a follow-up config field. `None` keeps
-        // today's whole-perspective existing-set behaviour.
-        None,
+        // Existing-instance scope: constrains dedup to a subtree when the
+        // processor config specifies one, e.g. "existing Task instances that
+        // live under project X." `None` keeps the whole-perspective existing
+        // set — the pre-scope-config behaviour.
+        cfg.existing_scope.as_ref(),
         Some(&InterpretationRunCursor {
             processor: super::config::processor_node(&cfg.processor_id),
             sources: item_ids.clone(),
@@ -658,7 +660,63 @@ pub async fn run_one_pass(
     )
     .await?;
     signal!(AutoProcessorStep::Processed, bases = &bases);
+
+    // Mint-scope child links: if the processor declares a `mint_scope`, wire
+    // every freshly minted base as a child under the target node via the
+    // configured predicate — turning the SoA-tree "children live under this
+    // node" from a URI-prefix convention into an actual graph edge. Written
+    // outside the interpretation batch: if the executor crashes between the
+    // mint and the link write, the base is orphaned but the next pass will
+    // upsert by identity + re-attempt the link write (idempotent).
+    if let Some(mint_scope) = &cfg.mint_scope {
+        write_mint_scope_links(perspective, mint_scope, &bases, context, &cfg.processor_id).await?;
+    }
+
     Ok(PassOutcome::Won { bases })
+}
+
+/// Add a `mint_scope.id --predicate--> new_base_uri` link for every URI in
+/// `bases`. Only [`Scope::Raw`] carries an explicit predicate, so
+/// [`Scope::Model`] is treated as configuration error rather than a silent
+/// no-op — the caller should have constructed a `Raw` variant when it needs
+/// mint-time child linking.
+async fn write_mint_scope_links(
+    perspective: &mut PerspectiveInstance,
+    mint_scope: &Scope,
+    bases: &[String],
+    context: &AgentContext,
+    processor_id: &str,
+) -> anyhow::Result<()> {
+    let (parent_id, predicate) = match mint_scope {
+        Scope::Raw { id, predicate } => (id.clone(), predicate.clone()),
+        Scope::Model { .. } => {
+            anyhow::bail!(
+                "auto_processor `{processor_id}`: mint_scope must be a `Raw` scope \
+                 (id + predicate); `Model` scopes carry no linking predicate"
+            );
+        }
+    };
+    for base in bases {
+        perspective
+            .add_link(
+                Link {
+                    source: parent_id.clone(),
+                    predicate: Some(predicate.clone()),
+                    target: base.clone(),
+                },
+                LinkStatus::Shared,
+                None,
+                context,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "auto_processor `{processor_id}`: mint_scope add_link({parent_id} -> {base}) \
+                     failed: {e:#}"
+                )
+            })?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -682,6 +740,8 @@ mod tests {
             claim_ttl_ms: 60_000,
             dedup_strategy_json: None,
             source_window_ms: None,
+            existing_scope: None,
+            mint_scope: None,
         }
     }
 
@@ -1182,5 +1242,89 @@ mod tests {
             }
             other => panic!("expected ShapesMissing, got {other:?}"),
         }
+    }
+
+    // ---- write_mint_scope_links -------------------------------------------
+
+    /// `Raw` mint_scope + N minted bases → N shared `parent --predicate--> base`
+    /// links land on the perspective. Verifies the SoA-tree child-link write is
+    /// atomic in intent (one call, N links) and uses the configured predicate.
+    #[tokio::test]
+    async fn write_mint_scope_links_writes_one_shared_link_per_base() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let scope = Scope::Raw {
+            id: "soa://project/42".into(),
+            predicate: "soa://contains".into(),
+        };
+        let bases = vec![
+            "soa://project/42/task/a".to_string(),
+            "soa://project/42/task/b".to_string(),
+        ];
+        write_mint_scope_links(&mut p, &scope, &bases, &ctx, "test-proc")
+            .await
+            .expect("write_mint_scope_links");
+        let links = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some("soa://project/42".into()),
+                predicate: Some("soa://contains".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        let targets: std::collections::BTreeSet<String> =
+            links.iter().map(|l| l.data.target.clone()).collect();
+        assert_eq!(
+            targets,
+            bases
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            "every minted base linked as child under the mint_scope parent"
+        );
+        for l in &links {
+            assert_eq!(l.status, Some(LinkStatus::Shared), "child link must sync");
+        }
+    }
+
+    /// Empty base list → no writes; a no-op is still success.
+    #[tokio::test]
+    async fn write_mint_scope_links_handles_empty_bases() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let scope = Scope::Raw {
+            id: "soa://p".into(),
+            predicate: "soa://c".into(),
+        };
+        write_mint_scope_links(&mut p, &scope, &[], &ctx, "empty")
+            .await
+            .expect("write_mint_scope_links");
+        let links = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some("soa://p".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert!(links.is_empty(), "no bases → no links");
+    }
+
+    /// `Model` scope has no predicate, so mint-time child linking is a config
+    /// error rather than a silent no-op: the config declared a mint target,
+    /// dropping it would create unlinked bases under a UI expecting children.
+    #[tokio::test]
+    async fn write_mint_scope_links_errors_on_model_scope() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let scope = Scope::Model {
+            model: "Project".into(),
+            id: "soa://project/42".into(),
+            field: None,
+        };
+        let err = write_mint_scope_links(&mut p, &scope, &["x".into()], &ctx, "modelled")
+            .await
+            .expect_err("model scope must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("must be a `Raw` scope"),
+            "error mentions the shape mismatch: {msg}"
+        );
     }
 }

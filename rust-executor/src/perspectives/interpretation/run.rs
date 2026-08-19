@@ -6,7 +6,7 @@ use super::{
     InterpretationRunCursor, ProposedInstance, TranscriptTurn,
 };
 use crate::agent::AgentContext;
-use crate::perspectives::model_query::types::{ModelShape, ParentScope};
+use crate::perspectives::model_query::types::{ModelShape, Scope};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::LinkStatus;
 use std::collections::HashMap;
@@ -301,7 +301,7 @@ pub async fn run_interpretation(
     transcript: &[TranscriptTurn],
     base_prefix: &str,
     context: &AgentContext,
-    scope: Option<&ParentScope>,
+    scope: Option<&Scope>,
 ) -> anyhow::Result<Vec<String>> {
     run_interpretation_with_strategy(
         perspective,
@@ -331,7 +331,7 @@ pub async fn run_interpretation_with_strategy(
     base_prefix: &str,
     context: &AgentContext,
     dedup_strategy: &DedupStrategy,
-    scope: Option<&ParentScope>,
+    scope: Option<&Scope>,
 ) -> anyhow::Result<Vec<String>> {
     run_interpretation_with_strategy_and_model(
         perspective,
@@ -362,7 +362,7 @@ pub async fn run_interpretation_with_strategy_and_model(
     context: &AgentContext,
     dedup_strategy: &DedupStrategy,
     model_override: Option<&str>,
-    scope: Option<&ParentScope>,
+    scope: Option<&Scope>,
     cursor: Option<&InterpretationRunCursor>,
 ) -> anyhow::Result<Vec<String>> {
     // Returns a task already spawned into its LLM worker, so `prompt` can use it

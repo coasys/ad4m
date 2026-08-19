@@ -18,7 +18,7 @@ use super::interpretation::{
     ProposedInstance, TranscriptTurn,
 };
 use super::model_query::shape::load_shape;
-use super::model_query::types::{ModelShape, ParentScope};
+use super::model_query::types::{ModelShape, Scope};
 use super::perspective_instance::{PerspectiveInstance, SdnaType, SubjectClassOption};
 use super::shacl_parser::parse_shacl_to_links;
 use super::sparql_store::SparqlStore;
@@ -405,7 +405,7 @@ pub(crate) async fn run_interpretation_e2e_with_strategy(
 }
 
 /// Like [`run_interpretation_e2e`] but with an explicit existing-instance
-/// `scope` (a [`ParentScope`]) — the channel-scoping a Flux-style processor
+/// `scope` (a [`Scope`]) — the channel-scoping a Flux-style processor
 /// applies so the model only sees the subgroups belonging to *this* channel.
 /// Returns the affected instance bases so the caller can wire fresh instances
 /// into the scoped sub-graph between passes.
@@ -414,7 +414,7 @@ pub(crate) async fn run_interpretation_e2e_scoped(
     shapes: &[ModelShape],
     transcript: &[(&str, &str)],
     ctx: &AgentContext,
-    scope: Option<&ParentScope>,
+    scope: Option<&Scope>,
 ) -> Vec<String> {
     let transcript: Vec<TranscriptTurn> = transcript
         .iter()

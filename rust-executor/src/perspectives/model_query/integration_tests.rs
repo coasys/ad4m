@@ -3805,7 +3805,7 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         &store,
         "Message",
         &ModelQueryInput {
-            parent: Some(ParentScope::Raw {
+            parent: Some(Scope::Raw {
                 id: "test://channel-2".to_string(),
                 predicate: "ad4m://has_child".to_string(),
             }),
