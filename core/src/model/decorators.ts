@@ -335,6 +335,15 @@ export interface PropertyOptions {
      * ```
      */
     options?: Array<{ value: string; label?: string }>;
+
+    /**
+     * Natural-language hint that steers the generic LLM extractor when
+     * turning a transcript into typed subject-class instances.  Emitted as
+     * an `ad4m://interpretation_hint` link on the property shape and surfaced
+     * on `ShapeProperty.interpretation_hint` by the Rust model query so the
+     * extractor prompt can quote it verbatim.
+     */
+    interpretationHint?: string;
 }
 
 
@@ -506,6 +515,14 @@ export interface ModelConfig {
      * The name of the entity.
      */
     name: string;
+
+    /**
+     * Natural-language hint that steers the generic LLM extractor when
+     * turning a transcript into instances of this class.  Emitted as an
+     * `ad4m://interpretation_hint` link on the SHACL shape node and surfaced
+     * on `ModelShape.interpretation_hint` by the Rust model query.
+     */
+    interpretationHint?: string;
 }
 
 /**
@@ -584,6 +601,7 @@ export function Model(opts: ModelConfig) {
                 getRelationsMetadata(target),
                 buildConformanceFilter,
                 seed,
+                opts.interpretationHint,
             ));
         }
 

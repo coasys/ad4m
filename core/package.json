@@ -55,7 +55,11 @@
   },
   "patchedDependencies": {},
   "pnpm": {
-    "patchedDependencies": {}
+    "patchedDependencies": {},
+    "overrides": {
+      "@types/node": "18.11.10",
+      "pako": "2.1.0"
+    }
   },
   "version": "0.13.0-test-9"
 }

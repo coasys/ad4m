@@ -426,3 +426,70 @@ fn round_trip_preserves_empty_resolve_language() {
         "empty-string resolveLanguage must survive SHACL round-trip (not be coerced to None)",
     );
 }
+
+/// S1 (generic-interpretation): the natural-language interpretation hint declared on a
+/// subject class and its properties must survive the writer → store → loader
+/// round-trip and surface on `ModelShape.interpretation_hint` /
+/// `ShapeProperty.interpretation_hint`, so the generic LLM extractor can read them
+/// via `get_shape` without re-querying the SHACL graph.
+#[test]
+fn round_trip_surfaces_interpretation_hint_on_class_and_property() {
+    let shacl_json = r#"{
+        "target_class": "ns://Intention",
+        "interpretation_hint": "A concrete unit of work someone intends to do. Extract when there is an actionable outcome with a plausible owner; ignore vague aspirations.",
+        "properties": [
+            {
+                "path": "ns://title",
+                "name": "title",
+                "datatype": "xsd://string",
+                "min_count": 1,
+                "max_count": 1,
+                "interpretation_hint": "Imperative one-line summary of the work, e.g. 'Extract LLM processing from Flux'."
+            }
+        ]
+    }"#;
+    let shape = round_trip("Intention", shacl_json);
+
+    assert_eq!(
+        shape.interpretation_hint.as_deref(),
+        Some("A concrete unit of work someone intends to do. Extract when there is an actionable outcome with a plausible owner; ignore vague aspirations."),
+        "class-level interpretation hint should surface on ModelShape",
+    );
+
+    let title = shape
+        .properties
+        .iter()
+        .find(|p| p.name == "title")
+        .expect("title property");
+    assert_eq!(
+        title.interpretation_hint.as_deref(),
+        Some("Imperative one-line summary of the work, e.g. 'Extract LLM processing from Flux'."),
+        "per-property interpretation hint should surface on ShapeProperty",
+    );
+}
+
+/// Absence of a hint must round-trip to `None` (no spurious link, no empty
+/// string) — the extractor treats `None` as "no guidance for this field".
+#[test]
+fn round_trip_absent_interpretation_hint_is_none() {
+    let shacl_json = r#"{
+        "target_class": "ns://Plain",
+        "properties": [
+            { "path": "ns://name", "name": "name", "datatype": "xsd://string" }
+        ]
+    }"#;
+    let shape = round_trip("Plain", shacl_json);
+    assert!(
+        shape.interpretation_hint.is_none(),
+        "no class hint declared → ModelShape.interpretation_hint must be None",
+    );
+    let name = shape
+        .properties
+        .iter()
+        .find(|p| p.name == "name")
+        .expect("name property");
+    assert!(
+        name.interpretation_hint.is_none(),
+        "no property hint declared → ShapeProperty.interpretation_hint must be None",
+    );
+}

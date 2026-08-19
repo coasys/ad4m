@@ -4213,6 +4213,60 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// Patch property values on an instance that already exists: runs the
+    /// class's `ad4m://setter` actions for the given properties **without** the
+    /// constructor.
+    ///
+    /// This is [`Self::create_subject`] minus the class-minting half. Per
+    /// property the write is byte-for-byte what `create_subject` would do —
+    /// same setter commands, same `resolve_property_value` encoding, so a
+    /// `setSingleTarget` setter still replaces that predicate's current target
+    /// — but the constructor's type-flag link is left untouched, since the
+    /// instance is already of that class. Use it to refine an existing node
+    /// (rename, fill a missing field) rather than mint a duplicate.
+    ///
+    /// Properties with no declared setter are skipped, exactly as in
+    /// `create_subject`. An empty/absent value set is a no-op.
+    pub async fn update_subject(
+        &mut self,
+        subject_class: SubjectClassOption,
+        expression_address: String,
+        values: serde_json::Value,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let class_name = self
+            .subject_class_option_to_class_name(subject_class, context)
+            .await?;
+
+        let mut commands: Vec<Command> = Vec::new();
+        if let serde_json::Value::Object(obj) = values {
+            for (prop, value) in obj.iter() {
+                let Some(setter_commands) =
+                    self.get_property_setter_actions(&class_name, prop).await?
+                else {
+                    continue;
+                };
+                let target_value = self
+                    .resolve_property_value(&class_name, prop, value, context)
+                    .await?;
+                for setter_cmd in setter_commands.iter() {
+                    commands.push(Command {
+                        target: Some(target_value.clone()),
+                        ..setter_cmd.clone()
+                    });
+                }
+            }
+        }
+
+        if commands.is_empty() {
+            return Ok(());
+        }
+
+        self.execute_commands(commands, expression_address, vec![], batch_id, context)
+            .await
+    }
+
     pub async fn get_subject_data(
         &mut self,
         subject_class: SubjectClassOption,
@@ -5046,6 +5100,16 @@ impl PerspectiveInstance {
         batch_uuid
     }
 
+    /// Drop a pending batch from the in-memory store without committing it.
+    /// Returns `true` if the batch was present, `false` if it had already been
+    /// consumed (e.g. by a successful `commit_batch`) or timed out. Callers
+    /// that abandon a batch mid-build (a `create_subject` in a loop failing)
+    /// should call this so the batch does not linger for `BATCH_TIMEOUT_SECS`
+    /// waiting on the next `create_batch` sweep to prune it.
+    pub async fn discard_batch(&self, batch_uuid: &str) -> bool {
+        self.batch_store.write().await.remove(batch_uuid).is_some()
+    }
+
     pub async fn commit_batch(
         &mut self,
         batch_uuid: String,
@@ -5304,6 +5368,43 @@ mod tests {
         links.sort_by(cmp);
         all_links_sorted.sort_by(cmp);
         assert_eq!(links, all_links_sorted);
+    }
+
+    #[tokio::test]
+    async fn discard_batch_removes_pending_batch_and_is_idempotent() {
+        let mut perspective = setup().await;
+        let ctx = AgentContext::main_agent();
+
+        let batch_id = perspective.create_batch().await;
+
+        // First discard: batch is present, removed, returns true.
+        assert!(
+            perspective.discard_batch(&batch_id).await,
+            "first discard should report the batch was present"
+        );
+
+        // Second discard on the same id: already gone, returns false.
+        assert!(
+            !perspective.discard_batch(&batch_id).await,
+            "second discard should be a no-op"
+        );
+
+        // commit_batch on a discarded id must now fail with the well-known
+        // \"No batch found\" error — proves the batch was really pruned.
+        let err = perspective
+            .commit_batch(batch_id.clone(), &ctx)
+            .await
+            .expect_err("commit_batch after discard must fail");
+        assert!(
+            format!("{err}").to_lowercase().contains("no batch found"),
+            "unexpected commit_batch error after discard: {err}"
+        );
+
+        // Discarding an id that never existed is a no-op, not a panic.
+        assert!(
+            !perspective.discard_batch("does-not-exist").await,
+            "discarding an unknown id should return false without panicking"
+        );
     }
 
     #[tokio::test]
