@@ -6,13 +6,29 @@ import type { TranscriptTurn } from "./TranscriptTurn";
  * SHACL subject classes. Shapes are resolved server-side from the
  * perspective's registered classes, so callers pass only the transcript.
  */
-export type RunInterpretationRequest = { uuid: string, transcript: Array<TranscriptTurn>,
+export type RunInterpretationRequest = { uuid: string, transcript: Array<TranscriptTurn>, 
 /**
  * URI namespace new instance identities are minted under, e.g. `soa://ext/`.
  */
-basePrefix: string,
+basePrefix: string, 
 /**
  * Local names of the subject classes to extract into (e.g. `["Task","Belief"]`).
  * `None`/empty selects all subject classes registered in the perspective.
  */
-classes: Array<string> | null, };
+classes: Array<string> | null, 
+/**
+ * Optional parent-scope filter for the dedup lookup: when set, only
+ * existing instances of the target classes that live under this scope
+ * are candidates for upsert. `None` = whole-perspective dedup set (the
+ * pre-scope default). Same semantics as `AutoProcessorConfig.existingScope`.
+ */
+existingScope?: any, 
+/**
+ * Optional parent-scope target for newly minted instances: when set,
+ * every base URI the pass CREATES is additionally linked as a child of
+ * `mintScope.id` via the scope's predicate. Upserts of pre-existing
+ * instances are NOT linked (would multi-parent unrelated graph state).
+ * Must be the `Raw` variant of `Scope` (id + predicate). Same semantics
+ * as `AutoProcessorConfig.mintScope`.
+ */
+mintScope?: any, };
