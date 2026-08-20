@@ -367,6 +367,28 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         );
         await waitUntil(() => retired().length >= 4, 240_000, "the second wave to be processed");
 
+        // DEBUG: dump the full sequence of processor events so we can see WHO
+        // fired WHAT and WHEN. Also snapshot each peer's InterpretationRun
+        // state at assertion time — this tells us whether the dup is
+        // Alice-vs-Bob (coordination), Alice-vs-Alice (own cursor missed),
+        // or shows up on both peers (sync ordering).
+        // eslint-disable-next-line no-console
+        console.log("[flux-waves DEBUG]", JSON.stringify({
+          firstWave,
+          eventsForProcessor: eventsFor(processorId).map((e) => ({
+            step: e.step,
+            agentDid: e.agentDid,
+            itemIds: e.itemIds,
+            detail: (e as any).detail,
+          })),
+          aliceRunsFinal: (await InterpretationRun.findAll(sharedAliceP)).map(r => ({
+            runId: r.runId, processor: r.processor, sources: r.sources,
+          })),
+          bobRunsFinal: (await InterpretationRun.findAll(sharedBobP)).map(r => ({
+            runId: r.runId, processor: r.processor, sources: r.sources,
+          })),
+        }, null, 2));
+
         // The whole point: four turns, four retirements, no turn twice — across
         // two executors that both saw all four.
         const ids = retired();
