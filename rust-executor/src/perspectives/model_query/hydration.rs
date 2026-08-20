@@ -144,16 +144,22 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
 
     for (name, mut values) in collection_values {
         values.sort_by_key(|&(_, ts)| ts);
-        let is_relation = shape
-            .properties
-            .iter()
-            .any(|p| p.name == name && p.direction.is_some());
+        // Wire-form check runs uniformly across relation-collections and
+        // literal-collections: any target starting with `literal:` is the
+        // AD4M convention for an encoded literal (see `literal://` prefix
+        // handling in `types/core.rs` and `perspectives/migration.rs`),
+        // and no valid subject-instance URI ever uses that prefix. Under
+        // PR #874 typed literals a `HasMany<string>` (e.g.
+        // `InterpretationRun.sources` holding turn-IDs as plain hex)
+        // lands its writes as `literal:string:<hex>` wire form; without
+        // this decode the caller receives the encoded form and any
+        // subsequent comparison to plain values (like `event.itemIds`)
+        // silently mismatches. HasMany-of-URI is unaffected because
+        // subject-instance URIs never carry the `literal:` prefix.
         let arr: Vec<Value> = values
             .iter()
             .map(|&(target, _)| {
-                if is_relation {
-                    Value::String(target.to_string())
-                } else if target.starts_with("literal:") {
+                if target.starts_with("literal:") {
                     parse_literal_value(target)
                 } else {
                     Value::String(target.to_string())
@@ -273,7 +279,10 @@ mod tests {
         assert_eq!(messages.len(), 2, "messages must have 2 items");
         assert_eq!(conversations.len(), 2, "conversations must have 2 items");
 
-        let expected_ids: Vec<&str> = vec!["literal:string:app1", "literal:string:conv1"];
+        // Wire-form `literal:string:X` targets are decoded to plain `X`
+        // by the hydrator — the AD4M `literal:` prefix is the encoding
+        // marker, not part of the value.
+        let expected_ids: Vec<&str> = vec!["app1", "conv1"];
         for rel_name in &["views", "messages", "conversations"] {
             let ids: Vec<String> = result[rel_name]
                 .as_array()
@@ -283,7 +292,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 ids, expected_ids,
-                "{} must contain both child IDs",
+                "{} must contain both child IDs (decoded)",
                 rel_name
             );
         }
@@ -343,7 +352,8 @@ mod tests {
 
         assert_eq!(alpha.len(), 1, "alpha has 1 item");
         assert_eq!(beta.len(), 2, "beta has 2 items");
-        assert_eq!(alpha[0].as_str().unwrap(), "literal:string:a1");
+        // Decoded wire-form.
+        assert_eq!(alpha[0].as_str().unwrap(), "a1");
     }
 
     #[test]
@@ -408,6 +418,101 @@ mod tests {
 
         assert_eq!(result["views"].as_array().unwrap().len(), 1);
         assert_eq!(result["posts"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_hydrate_hasmany_of_uri_targets_pass_through_unchanged() {
+        // The common case: relation targets are subject-instance URIs
+        // (e.g. `flux://message/abc`, `did:key:z…`). These never start
+        // with `literal:` and must pass through the hydrator verbatim
+        // so downstream reference lookups still resolve.
+        let s = shape("Channel", vec![relation("messages", "ad4m://has_child")]);
+        let inst = inst_links(
+            "flux://channel/general",
+            vec![
+                ("ad4m://has_child", "flux://message/m1"),
+                ("ad4m://has_child", "did:key:z6MkabcXYZ"),
+                ("ad4m://has_child", "https://example.com/thing"),
+            ],
+        );
+
+        let result = hydrate_one(&s, &inst).unwrap();
+        let messages: Vec<String> = result["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            messages,
+            vec![
+                "flux://message/m1".to_string(),
+                "did:key:z6MkabcXYZ".to_string(),
+                "https://example.com/thing".to_string(),
+            ],
+            "URI relation targets must round-trip byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn test_hydrate_hasmany_of_literal_string_targets_decodes() {
+        // The bug this fix closes: a `HasMany<string>` (e.g. the
+        // auto-processor's `InterpretationRun.sources` holding turn-IDs
+        // as plain hex) reaches the store as `literal:string:<hex>`
+        // wire form under PR #874. Before the fix, `is_relation`
+        // short-circuited the decode and the caller received the
+        // encoded form, silently breaking any comparison against plain
+        // values (like `event.itemIds`).
+        let s = shape("Run", vec![relation("sources", "ad4m://interp/sources")]);
+        let inst = inst_links(
+            "ad4m://interp/run/abc",
+            vec![
+                ("ad4m://interp/sources", "literal:string:turn-hex-1"),
+                ("ad4m://interp/sources", "literal:string:turn-hex-2"),
+            ],
+        );
+
+        let result = hydrate_one(&s, &inst).unwrap();
+        let sources: Vec<String> = result["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            sources,
+            vec!["turn-hex-1".to_string(), "turn-hex-2".to_string()],
+            "wire-form `literal:string:<hex>` HasMany targets must be decoded to plain values",
+        );
+    }
+
+    #[test]
+    fn test_hydrate_hasmany_mixed_uri_and_literal_targets() {
+        // Defensive: a HasMany with a mix of URIs and literals (e.g. a
+        // migration in flight) must decode only the wire-form entries
+        // and leave URIs untouched. No single-branch fixture in the
+        // existing tests exercises this — before the fix, both were
+        // kept raw; after the fix, the two are distinguished on the
+        // `literal:` prefix alone.
+        let s = shape("Mix", vec![relation("targets", "ns://ref")]);
+        let inst = inst_links(
+            "ns://mix/1",
+            vec![
+                ("ns://ref", "flux://message/real"),
+                ("ns://ref", "literal:string:legacy-string"),
+            ],
+        );
+        let result = hydrate_one(&s, &inst).unwrap();
+        let targets: Vec<String> = result["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            targets,
+            vec!["flux://message/real".to_string(), "legacy-string".to_string()],
+        );
     }
 
     #[test]
