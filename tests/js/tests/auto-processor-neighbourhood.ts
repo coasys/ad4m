@@ -62,13 +62,14 @@ async function registerLlm(ad4m: any): Promise<void> {
 export default function autoProcessorNeighbourhoodTests(testContext: TestContext) {
   return () => {
     describe("Auto-processor across two executors", function () {
-      // Cumulative wait budget in the slowest test is 240s + 240s + 120s = 600s
-      // plus `sharedChannel` executor-boot and processor-sync time. A 600s
-      // suite timeout would fire on a slow-but-correct run just before the
-      // last `waitUntil` reports its own diagnostic — masking the real cause
-      // (CodeRabbit #881 review). Give the suite enough head-room that a
-      // waitUntil budget expiry surfaces first.
-      this.timeout(900_000);
+      // Cumulative wait budget in the slowest test is 240s + 240s + 240s + 120s
+      // = 840s plus `sharedChannel` executor-boot and processor-sync time. A
+      // tighter suite timeout would fire on a slow-but-correct run just before
+      // the last `waitUntil` reports its own diagnostic — masking the real
+      // cause (CodeRabbit #881 review). Bumped from 900s to 1_200s to give
+      // the cross-peer cursor barrier its full 240s budget on Marvin runs
+      // where p-diff-sync gossip stalls (2026-08-20).
+      this.timeout(1_200_000);
       /**
        * Alice publishes a neighbourhood, Bob joins, both register the class and
        * the LLM, and Alice registers one processor whose config syncs to Bob.
@@ -205,6 +206,13 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         // reports duplicates. The bare Alice-side `retired().length >= 2`
         // wait is Alice-local; the assertion below is cross-peer.
         await InterpretationRun.register(bobP);
+        // 240s budget: matches the wave-processing waits. p-diff-sync gossip
+        // on Marvin under CI load can take >2 min to deliver a fresh
+        // revision (2026-08-20 CI logs show repeated `latest_revision result:
+        // null` polls for the full run), which is why the earlier 120s
+        // budget expired. If this expires too, the failure diagnostic
+        // ("wave-1 InterpretationRun.sources to sync to Bob") is still
+        // clearer than the pre-barrier "expected 4 got 6".
         await waitUntil(
           async () => {
             const bobRuns = await InterpretationRun.findAll(bobP);
@@ -214,7 +222,7 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
                 firstWave.every((id) => r.sources!.includes(id)),
             );
           },
-          120_000,
+          240_000,
           "wave-1 InterpretationRun.sources to sync to Bob before wave 2",
         );
 
