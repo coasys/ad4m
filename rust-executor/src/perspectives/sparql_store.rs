@@ -180,68 +180,119 @@ fn status_str(status: &Option<LinkStatus>) -> &'static str {
 /// `literal:string:` / `literal:json:` NamedNode forms working in case
 /// any pre-migration link store still feeds them through.
 fn parse_literal_fn(args: &[Term]) -> Option<Term> {
-    use percent_encoding::percent_decode_str;
     if args.len() != 1 {
         return None;
     }
     match &args[0] {
         Term::Literal(l) => {
-            let dt = l.datatype().as_str();
-            if dt == ONT_JSON {
-                if let Ok(json_val) = serde_json::from_str::<Value>(l.value()) {
-                    if let Some(data) = json_val.get("data") {
-                        let data_str = match data {
-                            Value::String(s) => s.clone(),
-                            other => serde_json::to_string(other).unwrap_or_default(),
-                        };
-                        return Some(Literal::new_simple_literal(data_str).into());
-                    }
-                }
-                return Some(Literal::new_simple_literal(l.value()).into());
+            let raw = l.value();
+            let datatype = l.datatype().as_str();
+            if let Some(parsed) = decode_literal_payload(raw, Some(datatype)) {
+                return Some(Literal::new_simple_literal(parsed).into());
             }
-            // xsd:string / xsd:integer / xsd:decimal / xsd:boolean — the
-            // lexical form is already the parsed value.
-            Some(Literal::new_simple_literal(l.value()).into())
+            // Typed-literal fallback: convert to a plain xsd:string with the
+            // same lexical form. Model-query WHERE clauses compare the result
+            // of `<ad4m://fn/parse_literal>(?var)` against a string constant
+            // (`"true"`, `"42"`, …) with SPARQL `=`, which is strict about
+            // datatypes — `"true"^^xsd:boolean = "true"` returns false. The
+            // pre-refactor code always did this simple-literal wrap for the
+            // xsd:* datatypes; without it, boolean/integer/decimal WHEREs
+            // silently return zero rows. Regression covered by
+            // model_query::integration_tests::
+            //   test_full_model_query_signed_expression_boolean_where
+            Some(Literal::new_simple_literal(raw).into())
         }
         Term::NamedNode(n) => {
-            let val = n.as_str();
-            let body = match val.strip_prefix("literal:") {
-                Some(b) => b,
-                None => return Some(args[0].clone()),
-            };
-            if let Some(rest) = body.strip_prefix("string:") {
-                let decoded = percent_decode_str(rest)
-                    .decode_utf8()
-                    .map(|c| c.into_owned())
-                    .unwrap_or_else(|_| rest.to_string());
-                return Some(Literal::new_simple_literal(decoded).into());
+            let raw = n.as_str();
+            if let Some(parsed) = decode_literal_payload(raw, None) {
+                return Some(Literal::new_simple_literal(parsed).into());
             }
-            if let Some(rest) = body.strip_prefix("number:") {
-                return Some(Literal::new_simple_literal(rest).into());
-            }
-            if let Some(rest) = body.strip_prefix("boolean:") {
-                return Some(Literal::new_simple_literal(rest).into());
-            }
-            if let Some(rest) = body.strip_prefix("json:") {
-                let decoded = percent_decode_str(rest)
-                    .decode_utf8()
-                    .map(|c| c.into_owned())
-                    .unwrap_or_else(|_| rest.to_string());
-                if let Ok(json_val) = serde_json::from_str::<Value>(&decoded) {
-                    if let Some(data) = json_val.get("data") {
-                        let data_str = match data {
-                            Value::String(s) => s.clone(),
-                            other => serde_json::to_string(other).unwrap_or(decoded.clone()),
-                        };
-                        return Some(Literal::new_simple_literal(data_str).into());
-                    }
-                }
-                return Some(Literal::new_simple_literal(decoded).into());
-            }
+            // Not a `literal:` URI — hand back the NamedNode unchanged so
+            // callers can still work with e.g. `ad4m://` addresses.
             Some(args[0].clone())
         }
         _ => Some(args[0].clone()),
     }
+}
+
+/// Extract the "parsed value" from a raw literal payload, mirroring the
+/// production language's own `parseLiteral`. Returns `None` when the payload
+/// isn't in one of the recognised envelope shapes — callers then hand back
+/// the original term unchanged.
+///
+/// Recognised shapes, tried in order:
+///   1. `literal:string:<url-encoded>` — URL-decode the tail
+///   2. `literal:number:<n>` / `literal:boolean:<b>` — return the tail
+///   3. `literal:json:<url-encoded JSON>` — URL-decode + parse; if it's a
+///      signed-expression envelope (`{author,timestamp,data,proof}`), return
+///      only `.data`; otherwise return the decoded JSON
+///   4. `datatype == ad4m:json` — parse the value as JSON; if it's an
+///      envelope with `.data`, return `.data`; otherwise return the value
+///   5. Raw JSON that happens to be an envelope with `.data` — return `.data`
+///      (regression guard: envelope-unwrapping used to fire regardless of
+///      datatype, and the mention-detection path in Flux still depends on
+///      that. See PR #880 CI failure on `fix/agent-harness-findings`.)
+fn decode_literal_payload(raw: &str, datatype: Option<&str>) -> Option<String> {
+    use percent_encoding::percent_decode_str;
+
+    if let Some(body) = raw.strip_prefix("literal:") {
+        if let Some(rest) = body.strip_prefix("string:") {
+            return Some(
+                percent_decode_str(rest)
+                    .decode_utf8()
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| rest.to_string()),
+            );
+        }
+        if let Some(rest) = body.strip_prefix("number:") {
+            return Some(rest.to_string());
+        }
+        if let Some(rest) = body.strip_prefix("boolean:") {
+            return Some(rest.to_string());
+        }
+        if let Some(rest) = body.strip_prefix("json:") {
+            let decoded = percent_decode_str(rest)
+                .decode_utf8()
+                .map(|c| c.into_owned())
+                .unwrap_or_else(|_| rest.to_string());
+            return Some(unwrap_envelope_or_original(&decoded));
+        }
+        // "literal:" prefix but unknown scheme — return the whole raw string
+        // (matches the pre-refactor "return args[0].clone()" fallback).
+        return None;
+    }
+
+    // No `literal:` prefix — this is the typed-literal storage path. Try
+    // JSON-envelope unwrapping when either the RDF datatype says so or the
+    // raw value happens to be a valid envelope; otherwise the caller keeps
+    // the original term.
+    let is_json_datatype = datatype.map(|d| d == ONT_JSON).unwrap_or(false);
+    if is_json_datatype {
+        return Some(unwrap_envelope_or_original(raw));
+    }
+    if let Some(unwrapped) = try_unwrap_envelope(raw) {
+        return Some(unwrapped);
+    }
+    None
+}
+
+/// Parse `raw` as JSON; if it's an object with a `data` field, return the
+/// field's string value (or a JSON re-serialisation of a non-string value).
+/// Returns `None` when `raw` is not parseable JSON or has no `data` field.
+fn try_unwrap_envelope(raw: &str) -> Option<String> {
+    let json_val = serde_json::from_str::<Value>(raw).ok()?;
+    let data = json_val.get("data")?;
+    Some(match data {
+        Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    })
+}
+
+/// As `try_unwrap_envelope`, but returns the original string when unwrapping
+/// fails — used on paths that have already committed to returning *some*
+/// string (e.g. after decoding `literal:json:`).
+fn unwrap_envelope_or_original(raw: &str) -> String {
+    try_unwrap_envelope(raw).unwrap_or_else(|| raw.to_string())
 }
 
 fn strip_html_fn(args: &[Term]) -> Option<Term> {
@@ -3647,5 +3698,38 @@ mod tests {
             "query() must keep wire-encoding ?t for internal callers: {}",
             internal_result
         );
+    }
+}
+
+#[cfg(test)]
+mod parse_literal_tests {
+    use super::parse_literal_fn;
+    use oxigraph::model::{Literal, Term};
+
+    fn parsed(value: &str) -> String {
+        let term: Term = Literal::new_simple_literal(value).into();
+        match parse_literal_fn(&[term]) {
+            Some(Term::Literal(l)) => l.value().to_string(),
+            other => panic!("expected a literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_literal_returns_only_the_data_field_not_author() {
+        // A signed message expression: parse_literal must return only `.data`, so
+        // a mention query matching on the parsed target never wakes on the author
+        // DID sitting beside the content. Regression guard for the self-wake path.
+        let v = "literal:json:{\"author\":\"did:key:zAgentDID\",\"timestamp\":\"t\",\"data\":\"weekly harvest report\"}";
+        let out = parsed(v);
+        assert_eq!(out, "weekly harvest report");
+        assert!(
+            !out.contains("zAgentDID"),
+            "author DID must not appear in the matched text: {out}"
+        );
+    }
+
+    #[test]
+    fn string_literal_is_url_decoded() {
+        assert_eq!(parsed("literal:string:hello%20world"), "hello world");
     }
 }
