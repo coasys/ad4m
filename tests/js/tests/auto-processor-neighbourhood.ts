@@ -154,18 +154,22 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
           "gossip warm-up: Alice's marker link to reach Bob",
         );
 
-        // Register all subject classes up-front, before any pass runs. This
-        // drains the SHACL writes for ConversationSubgroup +
-        // InterpretationRun + InterpretationOverlay into the setup window,
-        // so the first-pass `ensure_interpretation_overlay_classes` inside
-        // the executor is a no-op and doesn't compete for immediate-commit
-        // slots (`IMMEDIATE_COMMITS_COUNT=20`) with the pass's own writes.
+        // Register ConversationSubgroup on both peers so the LLM can extract
+        // into it. Do NOT pre-register InterpretationRun / InterpretationOverlay
+        // here — those are hard-wired classes owned by Rust
+        // (`ensure_interpretation_overlay_classes`) with hand-written SDNA that
+        // uses SNAKE_CASE property names (`run_id`, `sources`, `kind`, `run`)
+        // matching how the interpretation engine calls `create_subject`.
+        // Registering them from TS would write the @Model-generated SDNA
+        // instead, whose properties are CAMEL_CASE (`runId`, `run`) — and
+        // `ensure_interpretation_overlay_classes` short-circuits once the
+        // class is registered under any SDNA. That leaves Rust's
+        // `create_subject({run_id: ...})` unable to find a matching setter,
+        // so the placeholder `literal:string:uninitialized` never gets
+        // overwritten (2026-08-20 debug: runs on both peers reported
+        // `runId: "uninitialized", sources: []` for hours).
         await ConversationSubgroup.register(sharedAliceP);
         await ConversationSubgroup.register(sharedBobP);
-        await InterpretationRun.register(sharedAliceP);
-        await InterpretationRun.register(sharedBobP);
-        await InterpretationOverlay.register(sharedAliceP);
-        await InterpretationOverlay.register(sharedBobP);
 
         // One merged event stream from both executors. Per-test event
         // filtering is by `processorId` on the consumer side, so each `it`
@@ -332,48 +336,18 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         // watcher still thinks all 4 turns are new — Bob re-processes
         // w1a+w1b, and `retired()` reports duplicates.
         //
-        // DEBUG: dump what Bob actually has so we can see what's failing.
-        // Log Alice's own view AND Bob's view: findAll on both, raw links,
-        // firstWave contents. Data before theories.
-        const stripLiteral = (s: string): string =>
-          typeof s === "string" ? s.replace(/^literal:string:/, "") : s;
-        let debugTicks = 0;
+        // Wait for wave-1's `InterpretationRun.sources` cursor to reach Bob.
+        // Under #874 typed-literal storage, model_query's hydration decodes
+        // `literal:*:` targets via `parse_literal_value`, so `r.sources` is
+        // an array of plain turn-id hex strings — matching `event.itemIds`.
         await waitUntil(
           async () => {
-            debugTicks++;
             const bobRuns = await InterpretationRun.findAll(sharedBobP);
-            const aliceRuns = await InterpretationRun.findAll(sharedAliceP);
-            // Also raw links to see what shape sources take on the wire.
-            const aliceRawSources = await sharedAliceP.get(
-              new LinkQuery({ predicate: "ad4m://interp/sources" }),
+            return bobRuns.some(
+              (r) =>
+                Array.isArray(r.sources) &&
+                firstWave.every((id) => r.sources!.includes(id)),
             );
-            const bobRawSources = await sharedBobP.get(
-              new LinkQuery({ predicate: "ad4m://interp/sources" }),
-            );
-            if (debugTicks === 1 || debugTicks % 20 === 0) {
-              // eslint-disable-next-line no-console
-              console.log(`[wave-1 barrier tick ${debugTicks}]`, JSON.stringify({
-                firstWave,
-                firstWaveStripped: firstWave.map(stripLiteral),
-                aliceRuns: aliceRuns.map(r => ({ runId: r.runId, sources: r.sources })),
-                bobRuns: bobRuns.map(r => ({ runId: r.runId, sources: r.sources })),
-                aliceRawSourceCount: aliceRawSources.length,
-                aliceRawSourceSample: aliceRawSources.slice(0, 4).map(l => ({
-                  source: l.data.source, target: l.data.target,
-                })),
-                bobRawSourceCount: bobRawSources.length,
-                bobRawSourceSample: bobRawSources.slice(0, 4).map(l => ({
-                  source: l.data.source, target: l.data.target,
-                })),
-              }, null, 2));
-            }
-            // Match ANY form: raw, stripped, or containing the id substring.
-            const targets = firstWave.map(stripLiteral);
-            return bobRuns.some((r) => {
-              const rawSources = Array.isArray(r.sources) ? r.sources : [];
-              const stripped = rawSources.map(stripLiteral);
-              return targets.every((t) => stripped.includes(t) || rawSources.includes(t));
-            });
           },
           180_000,
           "wave-1 InterpretationRun.sources to sync to Bob before wave 2",
