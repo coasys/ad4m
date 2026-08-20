@@ -180,6 +180,18 @@ async fn holochain_signal_receiver() {
                     Signal::System(_) => {
                         info!("Received system signal");
                     }
+                    // HC 0.7.0 added Signal::AppDirect (direct peer-to-peer
+                    // signal that bypasses the DHT). AD4M's per-language
+                    // signal routing goes through Signal::App only; direct
+                    // signals are logged and ignored here — individual
+                    // languages that want direct-signal support can wire it
+                    // in later via a dedicated handler.
+                    _ => {
+                        log::debug!(
+                            "Received unhandled Holochain signal variant: {:?}",
+                            signal
+                        );
+                    }
                 }
             } else {
                 // stream_receiver.recv() returned None — channel closed.

@@ -100,10 +100,6 @@ impl ModuleLoader for StringModuleLoader {
         _maybe_referrer: std::option::Option<&Url>,
         _is_dyn_import: bool,
         _request_module_type: RequestedModuleType,
-        // deno v2.9 added a 5th parameter to ModuleLoader::load — the source-
-        // map handler. We don't need source-map manipulation for AD4M's
-        // string modules, so ignore it.
-        _source_map_getter: Option<&deno_core::SourceMapGetter>,
     ) -> ModuleLoadResponse {
         match module_specifier.to_file_path() {
             Ok(path) => match std::fs::read_to_string(&path) {
