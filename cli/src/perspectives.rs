@@ -119,6 +119,67 @@ pub enum PerspectiveFunctions {
     },
 }
 
+/// The kind of link change carried by a perspective watch event.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum LinkChangeKind {
+    Added,
+    Removed,
+    Updated,
+}
+
+impl LinkChangeKind {
+    /// ANSI-coloured label for terminal output.
+    pub fn label(self) -> &'static str {
+        match self {
+            LinkChangeKind::Added => "\x1b[32m+ ADDED",
+            LinkChangeKind::Removed => "\x1b[31m- REMOVED",
+            LinkChangeKind::Updated => "\x1b[33m~ UPDATED",
+        }
+    }
+}
+
+/// A classified perspective link-watch event, ready to render.
+#[derive(Debug, PartialEq)]
+pub struct LinkWatchEvent {
+    pub kind: LinkChangeKind,
+    pub link: serde_json::Value,
+}
+
+/// Classify a raw event from the executor's events websocket for `watch <id>`.
+///
+/// Returns `Some` only for a link change on the watched perspective. The executor
+/// serialises the perspective id as `perspectiveUuid` and an updated link as
+/// `newLink`/`oldLink` (camelCase — see `PerspectiveLinkWithOwner` and
+/// `PerspectiveLinkUpdatedWithOwner`), so this reads those keys. Reading `uuid`
+/// or `link` for updates silently matches nothing. A matched event always yields
+/// a payload (falling back to the whole event) so a change is never dropped.
+///
+/// Pure over the event JSON, so it unit-tests without a live executor.
+pub fn classify_link_watch_event(
+    event: &serde_json::Value,
+    watched_id: &str,
+) -> Option<LinkWatchEvent> {
+    let event_uuid = event
+        .get("perspectiveUuid")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if event_uuid != watched_id {
+        return None;
+    }
+    let (kind, key) = match event.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        "link-added" => (LinkChangeKind::Added, "link"),
+        "link-removed" => (LinkChangeKind::Removed, "link"),
+        "link-updated" => (LinkChangeKind::Updated, "newLink"),
+        _ => return None,
+    };
+    let link = event
+        .get(key)
+        .or_else(|| event.get("data"))
+        .cloned()
+        .unwrap_or_else(|| event.clone());
+    Some(LinkWatchEvent { kind, link })
+}
+
 pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>) -> Result<()> {
     if command.is_none() {
         // Use interactive perspective selector instead of just printing
@@ -182,37 +243,17 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             loop {
                 match rx.recv().await {
                     Ok(event) => {
-                        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                        let event_uuid = event.get("uuid").and_then(|v| v.as_str()).unwrap_or("");
-                        if event_uuid != id {
-                            continue;
-                        }
-                        match event_type {
-                            "link-added" | "link-removed" | "link-updated" => {
-                                let label = match event_type {
-                                    "link-added" => "\x1b[32m+ ADDED",
-                                    "link-removed" => "\x1b[31m- REMOVED",
-                                    "link-updated" => "\x1b[33m~ UPDATED",
-                                    _ => unreachable!(),
-                                };
-                                if let Some(link_val) =
-                                    event.get("link").or_else(|| event.get("data"))
-                                {
-                                    if let Ok(link) = serde_json::from_value::<
-                                        ad4m_client::types::LinkExpression,
-                                    >(
-                                        link_val.clone()
-                                    ) {
-                                        print!("{}\x1b[0m ", label);
-                                        print_link(link.into());
-                                    } else {
-                                        println!("{}\x1b[0m {}", label, link_val);
-                                    }
-                                } else {
-                                    println!("{}\x1b[0m {}", label, event);
-                                }
+                        if let Some(change) = classify_link_watch_event(&event, &id) {
+                            let label = change.kind.label();
+                            if let Ok(link) = serde_json::from_value::<
+                                ad4m_client::types::LinkExpression,
+                            >(change.link.clone())
+                            {
+                                print!("{}\x1b[0m ", label);
+                                print_link(link.into());
+                            } else {
+                                println!("{}\x1b[0m {}", label, change.link);
                             }
-                            _ => {}
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -509,5 +550,90 @@ async fn interactive_perspective_selector(ad4m_client: Ad4mClient) -> Result<()>
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Wire shapes match the executor's `PerspectiveLinkWithOwner` (added/removed)
+    // and `PerspectiveLinkUpdatedWithOwner` (updated), both `rename_all=camelCase`.
+    fn added_event(uuid: &str) -> serde_json::Value {
+        json!({
+            "type": "link-added",
+            "perspectiveUuid": uuid,
+            "link": { "author": "did:key:z6Mkxyz", "timestamp": "t", "data": { "source": "s", "predicate": "p", "target": "tgt" } },
+            "owner": "did:key:z6Mkxyz"
+        })
+    }
+
+    #[test]
+    fn classifies_link_added_on_the_watched_perspective() {
+        let ev = added_event("uuid-1");
+        let got = classify_link_watch_event(&ev, "uuid-1").expect("should classify");
+        assert_eq!(got.kind, LinkChangeKind::Added);
+        assert_eq!(
+            got.link.get("author").and_then(|v| v.as_str()),
+            Some("did:key:z6Mkxyz")
+        );
+    }
+
+    #[test]
+    fn ignores_events_for_a_different_perspective() {
+        let ev = added_event("uuid-OTHER");
+        // Regression guard: the id lives under `perspectiveUuid`, not `uuid`.
+        assert_eq!(classify_link_watch_event(&ev, "uuid-1"), None);
+    }
+
+    #[test]
+    fn reads_the_perspective_id_from_perspectiveuuid_not_uuid() {
+        // The old code read `uuid`, which the executor never emits — so every
+        // event mismatched and `watch` displayed nothing. Pin the correct key.
+        let ev = json!({ "type": "link-added", "uuid": "uuid-1", "perspectiveUuid": "uuid-1", "link": {} });
+        assert!(classify_link_watch_event(&ev, "uuid-1").is_some());
+        let wrong = json!({ "type": "link-added", "uuid": "uuid-1", "link": {} }); // no perspectiveUuid
+        assert_eq!(classify_link_watch_event(&wrong, "uuid-1"), None);
+    }
+
+    #[test]
+    fn link_updated_reads_newlink_not_link() {
+        // Updated events carry `newLink`/`oldLink`, never a bare `link`.
+        let ev = json!({
+            "type": "link-updated",
+            "perspectiveUuid": "uuid-1",
+            "newLink": { "marker": "NEW" },
+            "oldLink": { "marker": "OLD" }
+        });
+        let got = classify_link_watch_event(&ev, "uuid-1").expect("should classify update");
+        assert_eq!(got.kind, LinkChangeKind::Updated);
+        assert_eq!(got.link.get("marker").and_then(|v| v.as_str()), Some("NEW"));
+    }
+
+    #[test]
+    fn classifies_removed() {
+        let ev = json!({ "type": "link-removed", "perspectiveUuid": "uuid-1", "link": { "marker": "R" } });
+        assert_eq!(
+            classify_link_watch_event(&ev, "uuid-1").unwrap().kind,
+            LinkChangeKind::Removed
+        );
+    }
+
+    #[test]
+    fn ignores_non_link_event_types() {
+        let ev = json!({ "type": "agent-updated", "perspectiveUuid": "uuid-1", "agent": {} });
+        assert_eq!(classify_link_watch_event(&ev, "uuid-1"), None);
+    }
+
+    #[test]
+    fn matched_event_missing_payload_falls_back_to_whole_event() {
+        // Never silently drop a matched change: with no `link` key, surface the event.
+        let ev = json!({ "type": "link-added", "perspectiveUuid": "uuid-1" });
+        let got = classify_link_watch_event(&ev, "uuid-1").expect("should still classify");
+        assert_eq!(
+            got.link.get("type").and_then(|v| v.as_str()),
+            Some("link-added")
+        );
     }
 }
