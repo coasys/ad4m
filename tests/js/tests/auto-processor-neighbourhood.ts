@@ -18,6 +18,15 @@
  * INTERPRETATION_E2E_BASE_URL.
  */
 import { PerspectiveProxy, Perspective, Link, LinkQuery, InterpretationRun } from "@coasys/ad4m";
+
+// Under PR #874 typed literals, `mint_interpretation_run`'s string `sources`
+// go through `resolve_property_value` and land as typed `xsd:string`. On
+// read they surface as `literal:string:<hex>` (HasMany relation targets are
+// kept in wire form by `model_query::hydration`, per audit 2026-08-20).
+// Both `event.itemIds` (raw hex from `PendingTurn.id`) and raw link targets
+// on `perspective.get` come back in one of two shapes; normalise both.
+const stripLiteral = (s: string): string =>
+  s.startsWith("literal:string:") ? s.slice("literal:string:".length) : s;
 import type { AutoProcessorEvent } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
 import { sleep } from "../utils/utils";
@@ -257,19 +266,51 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         // peer's cursor know wave-1 is retired and can filter it out of a
         // wave-2 batch. This is the load-bearing sync gap that makes or
         // breaks two-executor coordination; give it plenty of headroom.
+        //
+        // Two subtleties (both from live CI evidence 2026-08-20 evening):
+        //   (a) The OTHER peer may never have had `InterpretationRun` SHACL
+        //       registered — `ensure_interpretation_overlay_classes` fires
+        //       from the pass path, and if the peer's watcher hasn't run a
+        //       pass yet (backed off due to the claim, or the config hasn't
+        //       synced) the class is unknown. `InterpretationRun.findAll(p)`
+        //       throws "No SHACL shape stored for class 'InterpretationRun'".
+        //   (b) HasMany relation targets ride through as `literal:string:<id>`
+        //       under #874 typed literals (hydration keeps relation targets
+        //       in wire form), while `event.itemIds` is plain hex. Strip
+        //       before comparing.
+        // Both dodged by looking up the run on the AUTHOR peer (which
+        // definitely has SHACL — its pass registered it) and then polling
+        // the OTHER peer for the raw source-links (no SHACL required).
         const wave1Author = [...wave1Dids][0];
+        const wave1AuthorP = wave1Author === aliceDid ? aliceP : bobP;
         const otherPeer = wave1Author === aliceDid ? bobP : aliceP;
+        const otherLabel = wave1Author === aliceDid ? "Bob" : "Alice";
+
+        const authorRuns = await InterpretationRun.findAll(wave1AuthorP);
+        const wave1Run = authorRuns.find(
+          (r) =>
+            Array.isArray(r.sources) &&
+            firstWave.every((id) => r.sources!.map(stripLiteral).includes(id)),
+        );
+        if (!wave1Run) {
+          throw new Error(
+            `wave-1 run not found on author peer; runs=${JSON.stringify(
+              authorRuns.map((r) => ({ id: r.id, sources: r.sources })),
+            )} firstWave=${JSON.stringify(firstWave)}`,
+          );
+        }
+        const runUri = wave1Run.id;
+
         await waitUntil(
           async () => {
-            const runs = await InterpretationRun.findAll(otherPeer);
-            return runs.some(
-              (r) =>
-                Array.isArray(r.sources) &&
-                firstWave.every((id) => r.sources!.includes(id)),
+            const links = await otherPeer.get(
+              new LinkQuery({ source: runUri, predicate: "ad4m://interp/sources" }),
             );
+            const targets = new Set(links.map((l) => stripLiteral(l.data.target)));
+            return firstWave.every((id) => targets.has(id));
           },
           240_000,
-          `wave-1 InterpretationRun to sync to the OTHER peer (${wave1Author === aliceDid ? "Bob" : "Alice"})`,
+          `wave-1 sources for ${runUri} to sync to ${otherLabel}`,
         );
 
         await say(bobP, "msg://w2a", "Separately, the retro is moved to Thursday morning.");
@@ -279,18 +320,38 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         // Dump the final event sequence + both peers' run state whether or
         // not the assertion passes — this is what turned the flake diagnosis
         // from speculation into a fix.
+        // `findAll` throws when the class isn't SHACL-registered (see the
+        // barrier's note on why the OTHER peer often lacks it). Fall back
+        // to raw link enumeration so the dump lands regardless.
+        const runsFor = async (p: PerspectiveProxy) => {
+          try {
+            return (await InterpretationRun.findAll(p)).map((r) => ({
+              runId: r.runId, processor: r.processor, sources: r.sources,
+            }));
+          } catch (e) {
+            const links = await p.get(
+              new LinkQuery({ predicate: "ad4m://interp/sources" }),
+            );
+            const bySource = new Map<string, string[]>();
+            for (const l of links) {
+              const src = l.data.source;
+              const arr = bySource.get(src) ?? [];
+              arr.push(stripLiteral(l.data.target));
+              bySource.set(src, arr);
+            }
+            return [...bySource.entries()].map(([id, sources]) => ({
+              id, sources, _fallback: `findAll threw: ${(e as Error).message}`,
+            }));
+          }
+        };
         // eslint-disable-next-line no-console
         console.log("[flux-waves DEBUG]", JSON.stringify({
           aliceDid, bobDid, firstWave,
           eventsForProcessor: events.filter((e) => e.processorId === "flux-waves").map((e) => ({
             step: e.step, agentDid: e.agentDid, itemIds: e.itemIds, detail: (e as any).detail,
           })),
-          aliceRunsFinal: (await InterpretationRun.findAll(aliceP)).map((r) => ({
-            runId: r.runId, processor: r.processor, sources: r.sources,
-          })),
-          bobRunsFinal: (await InterpretationRun.findAll(bobP)).map((r) => ({
-            runId: r.runId, processor: r.processor, sources: r.sources,
-          })),
+          aliceRunsFinal: await runsFor(aliceP),
+          bobRunsFinal: await runsFor(bobP),
         }, null, 2));
 
         // The whole point: four turns, four retirements, no turn twice — across
