@@ -1091,6 +1091,26 @@ async fn run_interpretation_handler(
         })
         .collect();
 
+    // Pre-pass snapshot of every instance URI the target classes already
+    // know about — used below to filter mint-scope linking to freshly
+    // created bases only. Skipped entirely when mint_scope is absent so
+    // one-shot callers not using mint-scope pay nothing. Matches the
+    // watcher's approach (`auto_processor::watcher::pass::run_pass`).
+    let pre_existing_uris: std::collections::HashSet<String> = if body.mint_scope.is_some() {
+        crate::perspectives::interpretation::existing_instance_context(
+            &mut perspective,
+            &shapes,
+            None,
+        )
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .into_values()
+        .flat_map(|instances| instances.into_iter().map(|i| i.id))
+        .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
     // Bound the LLM call: a stalled provider must not pin a WS request slot
     // indefinitely. Matches the pattern used by `query_sparql` /
     // `model_query_handler` / `evaluate_getters_handler`, but with a longer
@@ -1104,11 +1124,12 @@ async fn run_interpretation_handler(
             &transcript,
             &body.base_prefix,
             &agent_context,
-            // Existing-instance scope: this direct WS entry point
-            // interprets over the whole perspective (no per-channel
-            // sub-scope). #883 added the `scope` plumbing; the
-            // AutoProcessor is where a channel scope is supplied.
-            None,
+            // Existing-instance scope: when the caller supplies one,
+            // dedup lookup is restricted to instances under that subtree
+            // (same semantics as `AutoProcessorConfig.existingScope`).
+            // `None` keeps the whole-perspective dedup set — the
+            // pre-scope default that #883 originally added the plumbing for.
+            body.existing_scope.as_ref(),
         ),
     )
     .await
@@ -1129,6 +1150,28 @@ async fn run_interpretation_handler(
             });
         }
     };
+
+    // Mint-scope child links: same rule as AutoProcessor — only freshly
+    // created bases get an extra `mintScope.id --predicate--> new_base` edge
+    // so upserts of pre-existing instances don't get re-parented into the
+    // caller's scope. Written outside the interpretation batch (the watcher
+    // takes the same approach): if this write fails the base is orphaned,
+    // but a subsequent call will upsert by identity and re-attempt.
+    if let Some(mint_scope) = body.mint_scope.as_ref() {
+        let created = crate::perspectives::auto_processor::watcher::partition_created(
+            &bases,
+            &pre_existing_uris,
+        );
+        crate::perspectives::auto_processor::watcher::write_mint_scope_links(
+            &mut perspective,
+            mint_scope,
+            &created,
+            &agent_context,
+            "runInterpretation",
+        )
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    }
 
     if !bases.is_empty() {
         if let Err(e) = reserve_credits(&ctx.user_email, bases.len() as f64 * DEFAULT_LINK_WRITE) {

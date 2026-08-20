@@ -19,7 +19,6 @@ export class ConversationSubgroup extends Ad4mModel {
   @Property({
     through: "ns://name",
     required: true,
-    resolveLanguage: "literal",
     identity: true,
     interpretationHint: "Short label for the topic (2-5 words).",
   })
@@ -27,7 +26,6 @@ export class ConversationSubgroup extends Ad4mModel {
 
   @Property({
     through: "ns://summary",
-    resolveLanguage: "literal",
     interpretationHint:
       "1-2 sentence rolling summary of what has been discussed in THIS subgroup specifically — its own topic only. When updating an existing subgroup, incorporate ONLY the new turns that belong to this subgroup's topic, extending the existing summary rather than replacing it. NEVER fold in turns about a different topic.",
   })

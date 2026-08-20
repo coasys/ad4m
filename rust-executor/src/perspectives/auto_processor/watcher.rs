@@ -798,7 +798,10 @@ pub async fn run_one_pass(
 /// original order. Used by mint-scope linking (CodeRabbit #902 review) to
 /// exclude upserts of pre-existing instances — writing a mint-scope link
 /// for those would multi-parent unrelated graph state into our scope.
-fn partition_created<'a>(bases: &'a [String], pre_existing: &HashSet<String>) -> Vec<String> {
+pub(crate) fn partition_created<'a>(
+    bases: &'a [String],
+    pre_existing: &HashSet<String>,
+) -> Vec<String> {
     bases
         .iter()
         .filter(|b| !pre_existing.contains(*b))
@@ -806,7 +809,7 @@ fn partition_created<'a>(bases: &'a [String], pre_existing: &HashSet<String>) ->
         .collect()
 }
 
-async fn write_mint_scope_links(
+pub(crate) async fn write_mint_scope_links(
     perspective: &mut PerspectiveInstance,
     mint_scope: &Scope,
     bases: &[String],

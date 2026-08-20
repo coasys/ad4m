@@ -11,7 +11,7 @@ import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
-import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo } from "./AutoProcessor";
+import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope } from "./AutoProcessor";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -261,11 +261,25 @@ export class PerspectiveClient {
      * retries on parse failure), so it can legitimately take minutes on slower
      * or CPU-only models. We raise the default 30s RPC timeout here to 20 min
      * (matches the CI `--timeout 1200000` for the interpretation tests).
+     *
+     * `existingScope` and `mintScope` match the AutoProcessor semantics:
+     * `existingScope` constrains the dedup lookup to instances under a
+     * subtree; `mintScope` links every FRESHLY-created base as a child of
+     * `mintScope.id` via its predicate (upserts of pre-existing instances
+     * are NOT re-parented — same rule as the watcher).
      */
-    async runInterpretation(uuid: string, transcript: TranscriptTurn[], basePrefix: string, classes?: string[]): Promise<string[]> {
+    async runInterpretation(
+        uuid: string,
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        classes?: string[],
+        existingScope?: RawScope,
+        mintScope?: RawScope,
+    ): Promise<string[]> {
         const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
         return this.#apiClient.call<string[]>(
-            'perspective.runInterpretation', { uuid, transcript, basePrefix, classes },
+            'perspective.runInterpretation',
+            { uuid, transcript, basePrefix, classes, existingScope, mintScope },
             RUN_INTERPRETATION_TIMEOUT_MS,
         )
     }

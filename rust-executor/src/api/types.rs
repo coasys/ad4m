@@ -553,6 +553,22 @@ pub struct RunInterpretationRequest {
     /// Local names of the subject classes to extract into (e.g. `["Task","Belief"]`).
     /// `None`/empty selects all subject classes registered in the perspective.
     pub classes: Option<Vec<String>>,
+    /// Optional parent-scope filter for the dedup lookup: when set, only
+    /// existing instances of the target classes that live under this scope
+    /// are candidates for upsert. `None` = whole-perspective dedup set (the
+    /// pre-scope default). Same semantics as `AutoProcessorConfig.existingScope`.
+    #[serde(default)]
+    #[ts(optional, type = "any")]
+    pub existing_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Optional parent-scope target for newly minted instances: when set,
+    /// every base URI the pass CREATES is additionally linked as a child of
+    /// `mintScope.id` via the scope's predicate. Upserts of pre-existing
+    /// instances are NOT linked (would multi-parent unrelated graph state).
+    /// Must be the `Raw` variant of `Scope` (id + predicate). Same semantics
+    /// as `AutoProcessorConfig.mintScope`.
+    #[serde(default)]
+    #[ts(optional, type = "any")]
+    pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
 }
 
 /// Register a neighbourhood auto-processor on a perspective. The executor's
