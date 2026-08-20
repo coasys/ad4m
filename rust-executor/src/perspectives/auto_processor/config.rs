@@ -60,8 +60,7 @@ const AUTO_PROCESSOR_TARGET_CLASS: &str = "ad4m://AutoProcessor";
 // build its expectations from IT — no hand-maintained parallel reference in
 // either language (2026-08-20 debug: hardcoded references in both tests
 // missed the property-name divergence entirely).
-const AUTO_PROCESSOR_SDNA: &str =
-    include_str!("../hardwired_sdna/auto_processor.json");
+const AUTO_PROCESSOR_SDNA: &str = include_str!("../hardwired_sdna/auto_processor.json");
 
 /// Everything the executor watcher (P-B2) needs to schedule and run a single
 /// auto-processor pass over a source perspective.

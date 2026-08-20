@@ -28,8 +28,7 @@ const INTERP_RUN_TARGET_CLASS: &str = "ad4m://InterpretationRun";
 /// decodable (no signed-envelope round-trip).
 // See auto_processor::config for why the SDNA blobs are external JSON files
 // loaded via `include_str!`.
-const INTERP_RUN_SDNA: &str =
-    include_str!("../../hardwired_sdna/interpretation_run.json");
+const INTERP_RUN_SDNA: &str = include_str!("../../hardwired_sdna/interpretation_run.json");
 
 /// AutoProcessor cursor extras on an [`InterpretationRun`]: the processor
 /// instance URI (`ad4m://autoprocessor/<id>`) and the turn IDs this pass
@@ -52,8 +51,7 @@ pub struct InterpretationRunCursor {
 /// as a plain link target rather than literal-encoded. The dynamic `inferred/<p>`
 /// links are NOT declared here — their predicates vary per instance, so they are
 /// written directly as parallel links (see [`super::write::write_overlay`]).
-const INTERP_OVERLAY_SDNA: &str =
-    include_str!("../../hardwired_sdna/interpretation_overlay.json");
+const INTERP_OVERLAY_SDNA: &str = include_str!("../../hardwired_sdna/interpretation_overlay.json");
 
 /// Identity + provenance for one interpretation pass — minted once per
 /// [`crate::perspectives::interpretation::run_interpretation`] call and threaded
