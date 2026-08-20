@@ -330,24 +330,31 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         // once Alice's `InterpretationRun.sources` reaches his copy of the
         // perspective. Without this barrier, wave 2 lands on Bob while his
         // watcher still thinks all 4 turns are new — Bob re-processes
-        // w1a+w1b, and `retired()` (which aggregates BOTH executors' local
-        // `processed` events) reports duplicates.
+        // w1a+w1b, and `retired()` reports duplicates.
         //
-        // 300s budget: p-diff-sync gossip on Marvin under CI load can take
-        // several minutes to deliver a fresh revision, especially the
-        // FIRST cross-peer roundtrip on a warmed neighbourhood. If this
-        // still expires the failure diagnostic ("wave-1 InterpretationRun
-        // .sources to sync to Bob") points at the underlying sync layer.
+        // Under #874's typed-literal storage: the `sources` collection uses
+        // an `addLink target=value` setter with no `resolveLanguage`, so
+        // `resolve_property_value` wraps each non-URI turn-id string as
+        // `literal:string:<id>` for storage. `HasMany` returns targets
+        // verbatim (wire form) on read, so `r.sources` contains
+        // `literal:string:...` entries. `event.itemIds` (the source of
+        // `firstWave`) is the RAW turn-id string. Normalise BOTH sides to
+        // the plain id before comparing — otherwise the comparison is
+        // structurally guaranteed to fail even when sync worked.
+        const stripLiteral = (s: string): string =>
+          s.replace(/^literal:string:/, "");
         await waitUntil(
           async () => {
             const bobRuns = await InterpretationRun.findAll(sharedBobP);
-            return bobRuns.some(
-              (r) =>
-                Array.isArray(r.sources) &&
-                firstWave.every((id) => r.sources!.includes(id)),
-            );
+            const targets = new Set(firstWave.map(stripLiteral));
+            return bobRuns.some((r) => {
+              if (!Array.isArray(r.sources)) return false;
+              const norm = new Set(r.sources.map(stripLiteral));
+              for (const t of targets) if (!norm.has(t)) return false;
+              return true;
+            });
           },
-          300_000,
+          180_000,
           "wave-1 InterpretationRun.sources to sync to Bob before wave 2",
         );
 
