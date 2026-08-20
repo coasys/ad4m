@@ -280,7 +280,16 @@ export interface PropertyOptions {
     readOnly?: boolean;
 
     /**
-     * The language used to store the property. Can be the default `Literal` Language or a custom language address.
+     * The language used to resolve/store the property value — and the sole
+     * selector of storage mode. Not defaulted:
+     *   - unset (the default for a plain `@Property()`) → deterministic
+     *     typed literal storage (`literal:string:` / `:number:` / `:boolean:` /
+     *     `:json:` IRIs stored as XSD-typed RDF literals; POS-index friendly).
+     *   - `"literal"` → the built-in literal language: values go through
+     *     `expression_create`, producing a signed-envelope URI with
+     *     author/timestamp/proof (per-value provenance, e.g. Flux message
+     *     bodies).
+     *   - a custom language address → `expression_create` on that language.
      */
     resolveLanguage?: string;
 
@@ -387,7 +396,7 @@ function applyPropertyMetadata(opts: PropertyOptions) {
  *
  * @description
  * Equivalent to `@Property` but defaults `required` to `false` and does not
- * apply `resolveLanguage` or `initial` defaults.  Use this when a property
+ * apply any `initial` defaults.  Use this when a property
  * may or may not have a value, and you want full control over its configuration.
  *
  * @example
@@ -546,8 +555,7 @@ export interface ModelConfig {
  * @Model({ name: "Recipe" })
  * class Recipe extends Ad4mModel {
  *   @Property({
- *     through: "recipe://name",
- *     resolveLanguage: "literal"
+ *     through: "recipe://name"
  *   })
  *   name: string = "";
  * 
@@ -621,7 +629,9 @@ export function Model(opts: ModelConfig) {
  * Smart defaults (all overridable):
  * - `required` → `false`
  * - `readOnly` → `false`
- * - `resolveLanguage` → `"literal"`
+ * - `resolveLanguage` → unset → deterministic typed literal storage
+ *   (the perf default). Set `resolveLanguage: "literal"` for a signed-envelope
+ *   value, or a custom language address to resolve through that language.
  * - `initial` → `undefined` (no link created until a value is explicitly set)
  * 
  * Properties are optional by default. When a model instance is created without
@@ -654,7 +664,8 @@ export function Model(opts: ModelConfig) {
  *   })
  *   role: string = "";
  * 
- *   // Optional property with literal resolution
+ *   // Optional property with signed-envelope literal storage
+ *   // (per-value provenance)
  *   @Property({
  *     through: "user://bio",
  *     resolveLanguage: "literal"
@@ -667,18 +678,22 @@ export function Model(opts: ModelConfig) {
  * @param {string} opts.through - The predicate URI for the property
  * @param {boolean} [opts.required=false] - Whether the property is required (adds query filters and sentinel initial value)
  * @param {string} [opts.initial] - Initial value (defaults to "literal:string:uninitialized" when required)
- * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
+ * @param {string} [opts.resolveLanguage] - Value-resolution language: unset (deterministic typed literal, the perf default), "literal" (signed envelope), or a custom language address
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function Property(opts: PropertyOptions) {
     const required = opts.required ?? false;
+    // `resolveLanguage` is intentionally NOT defaulted here.
+    // The effective storage mode is derived from what the user explicitly set:
+    //   - unset             → deterministic typed literal (the perf default)
+    //   - "literal"         → signed literal envelope (per-value provenance)
+    //   - <custom address>  → expression on that custom language
     return applyPropertyMetadata({
         ...opts,
         required,
         readOnly: opts.readOnly ?? false,
-        resolveLanguage: opts.resolveLanguage ?? "literal",
         initial: opts.initial ?? (required ? "literal:string:uninitialized" : undefined),
     });
 }
@@ -734,7 +749,7 @@ export function Property(opts: PropertyOptions) {
  * @param {PropertyOptions} opts - Property configuration
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (if property should have one)
- * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
+ * @param {string} [opts.resolveLanguage] - Value-resolution language: unset (deterministic typed literal, the perf default), "literal" (signed envelope), or a custom language address
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */

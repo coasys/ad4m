@@ -394,6 +394,16 @@ pub struct ShapeProperty {
     pub(crate) is_flag: bool,
     pub(crate) is_required: bool,
     pub(crate) initial_value: Option<String>,
+    /// Language address used to resolve property values, and the sole
+    /// selector of storage mode:
+    ///   - `None`              → deterministic typed literal (POS-index
+    ///                           fast path — the default for a plain
+    ///                           `@Property()`).
+    ///   - `Some("literal")`   → signed-envelope on the built-in literal
+    ///                           language (`expression_create` produces a
+    ///                           `{author, timestamp, data, proof}` URI).
+    ///   - `Some(<addr>)`      → `expression_create` on that custom
+    ///                           language.
     pub(crate) resolve_language: Option<String>,
     pub(crate) datatype: Option<String>,
     pub(crate) direction: Option<String>, // "forward" or "reverse" for relation properties
@@ -421,6 +431,20 @@ pub struct ShapeProperty {
     /// property node.  `false` when the SDNA declared no identity — a class
     /// with no identity property is never deduplicated.
     pub(crate) identity: bool,
+}
+
+impl ShapeProperty {
+    /// True when the property's values are stored as deterministic typed
+    /// literals (POS-index friendly) rather than signed expression
+    /// envelopes or custom-language expressions. Derived from
+    /// `resolve_language` alone:
+    ///   - `None`             → deterministic (default fast path)
+    ///   - `Some("literal")`  → envelope (per-value provenance)
+    ///   - `Some(<other>)`    → custom-language expression (never
+    ///                          deterministic)
+    pub(crate) fn is_deterministic_literal(&self) -> bool {
+        self.resolve_language.is_none()
+    }
 }
 
 /// Enriched relation metadata for include (eager-loading) resolution.

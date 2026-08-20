@@ -151,7 +151,13 @@ export interface SHACLPropertyShape {
   /** AD4M-specific: Writable property */
   writable?: boolean;
 
-  /** AD4M-specific: Language to resolve property values through */
+  /** AD4M-specific: sole selector of storage mode:
+   *   - unset               → deterministic typed literal (fast POS-index
+   *                            path, the default for a plain `@Property()`).
+   *   - `"literal"`         → signed envelope on the built-in literal
+   *                            language (per-value provenance, e.g. Flux
+   *                            message bodies).
+   *   - `<custom address>`  → `expression_create` on that custom language. */
   resolveLanguage?: string;
 
   /** AD4M-specific: Setter action for this property */
@@ -206,8 +212,10 @@ export interface SHACLPropertyShape {
   filter?: boolean;
 
   /** AD4M-specific: Transform expression (SHACL-AF Node Expression).
-   *  Applied to resolved property values in the Rust model query engine.
-   *  Only used for properties with resolveLanguage set. */
+   *  Applied to a property's resolved value in the Rust model query engine —
+   *  for values resolved through a `resolveLanguage` (`"literal"` for a signed
+   *  envelope, or a custom language) and for any property that declares a
+   *  transform. */
   transform?: NodeExpression;
 
   /** AD4M-specific: Natural-language hint that steers the generic LLM
@@ -836,12 +844,18 @@ export class SHACLShape {
         prop.writable = val === 'true';
       }
 
+      // The general language selector (e.g. "literal" or a custom address).
       const resolveLangLink = links.find(l =>
         l.source === propShapeId && l.predicate === "ad4m://resolveLanguage"
       );
       if (resolveLangLink) {
         prop.resolveLanguage = resolveLangLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
       }
+
+      // Storage mode is derived from `resolveLanguage` alone:
+      //   - unset       → deterministic typed literal (fast path)
+      //   - "literal"   → signed envelope on the built-in literal language
+      //   - <address>   → expression on that custom language
 
       // Parse action arrays
       const setterLink = links.find(l =>
@@ -1083,7 +1097,7 @@ export class SHACLShape {
         hasValue: p.has_value,
         local: p.local,
         writable: p.writable,
-        resolveLanguage: p.resolve_language,
+        resolveLanguage: p.resolve_language ?? (p as any).resolveLanguage,
         setter: p.setter,
         adder: p.adder,
         remover: p.remover,

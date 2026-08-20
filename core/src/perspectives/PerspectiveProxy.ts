@@ -1462,36 +1462,39 @@ export class PerspectiveProxy {
      */
     async getFlow(name: string): Promise<SHACLFlow | null> {
         const flowNameLiteral = Literal.from(name).toUrl();
-        
+
         // Find flow URI from name mapping
         const flowUriLinks = await this.get(new LinkQuery({
             source: flowNameLiteral,
             predicate: "ad4m://flow_uri"
         }));
-        
+
         if (flowUriLinks.length === 0) {
             return null;
         }
-        
+
         const flowUri = flowUriLinks[0].data.target;
-        // Compute alternate prefix for state/transition URIs
-        const alternatePrefix = flowUri.endsWith('Flow') 
-            ? flowUri.slice(0, -4) + '.'
-            : flowUri + '.';
-        
-        // Fetch flow links using SPARQL to match flowUri source OR alternatePrefix sources
-        const sparqlQuery = `SELECT ?s ?p ?o WHERE {
-            ?s ?p ?o .
-            FILTER(?s = <${flowUri}> || STRSTARTS(STR(?s), "${alternatePrefix}"))
-        }`;
-        const sparqlResult = await this.querySparql(sparqlQuery);
-        
-        const flowLinks = (sparqlResult || []).map((r: any) => ({
-            source: r.s,
-            predicate: r.p,
-            target: r.o
+
+        // Fetch flow-level links (hasState, hasTransition, flowable, startAction)
+        const flowLevelLinks = await this.get(new LinkQuery({ source: flowUri }));
+
+        // Collect state and transition URIs, then fetch their child links
+        const childUris = flowLevelLinks
+            .filter(l => l.data.predicate === "ad4m://hasState"
+                      || l.data.predicate === "ad4m://hasTransition")
+            .map(l => l.data.target);
+        const childResults = await Promise.all(
+            childUris.map(uri => this.get(new LinkQuery({ source: uri })))
+        );
+
+        // Flatten into the {source, predicate, target} shape fromLinks expects
+        const allExprs = [...flowLevelLinks, ...childResults.flat()];
+        const flowLinks = allExprs.map(l => ({
+            source: l.data.source,
+            predicate: l.data.predicate,
+            target: l.data.target
         }));
-        
+
         return SHACLFlow.fromLinks(flowLinks, flowUri);
     }
 

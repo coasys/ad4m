@@ -161,6 +161,11 @@ pub async fn gather_transcript_sparql(
                 Some(s) => s,
                 None => continue, // non-string literal — not a message body
             }
+        } else if let Some(data) = serde_json::from_str::<serde_json::Value>(raw_text)
+            .ok()
+            .and_then(|v| v.get("data").and_then(|d| d.as_str()).map(String::from))
+        {
+            data
         } else {
             raw_text.to_string()
         };

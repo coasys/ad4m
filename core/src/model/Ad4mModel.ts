@@ -11,7 +11,7 @@ import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSON
 import type { SHACLShape } from "../shacl/SHACLShape";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
-import { buildSPARQLQuery } from "./query-sparql";
+import { buildSPARQLQuery, valueToLiteralIri, effectiveLiteralStorage } from "./query-sparql";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import {
   normalizeValue,
@@ -138,13 +138,29 @@ function jsonToModelInstance<T extends Ad4mModel>(
  * // Define a recipe model
  * @Model({ name: "Recipe" })
  * class Recipe extends Ad4mModel {
- *   // Required property with literal value
+ *   // Plain property — no `resolveLanguage` → deterministic typed literal
+ *   // storage (fast POS-index path). This is the perf default.
+ *   @Property({ through: "recipe://name" })
+ *   name: string = "";
+ *
+ *   // Property that needs per-value provenance (e.g. a signed message body):
+ *   // `resolveLanguage: "literal"` routes values through expression_create on
+ *   // the built-in literal language, producing a signed envelope URI
+ *   // (author/timestamp/proof) instead of a bare typed literal.
  *   @Property({
- *     through: "recipe://name",
+ *     through: "recipe://signed_note",
  *     resolveLanguage: "literal"
  *   })
- *   name: string = "";
- * 
+ *   signedNote: string = "";
+ *
+ *   // Property resolved through a custom language: values are routed through
+ *   // expression_create on that language (signed expression URIs).
+ *   @Optional({
+ *     through: "recipe://photo",
+ *     resolveLanguage: "QmFileStorageLanguageAddress..."
+ *   })
+ *   photo: string = "";
+ *
  *   // Optional property with custom initial value
  *   @Optional({
  *     through: "recipe://status",
@@ -300,9 +316,9 @@ export class Ad4mModel {
    * ```typescript
    * @Model({ name: "Recipe" })
    * class Recipe extends Ad4mModel {
-   *   @Property({ through: "recipe://name", resolveLanguage: "literal" })
+   *   @Property({ through: "recipe://name" })
    *   name: string = "";
-   *   
+   *
    *   @HasMany({ through: "recipe://ingredient" })
    *   ingredients: string[] = [];
    * }
@@ -404,7 +420,7 @@ export class Ad4mModel {
               predicate: predicate,
               required: isRequired,
               readOnly: propertySchema["x-ad4m"]?.writable === false,
-              ...(propertySchema["x-ad4m"]?.resolveLanguage && { resolveLanguage: propertySchema["x-ad4m"].resolveLanguage }),
+              ...(propertySchema["x-ad4m"]?.resolveLanguage !== undefined && { resolveLanguage: propertySchema["x-ad4m"].resolveLanguage }),
               ...(propertySchema["x-ad4m"]?.initial && { initial: propertySchema["x-ad4m"].initial }),
               ...(propertySchema["x-ad4m"]?.local !== undefined && { local: propertySchema["x-ad4m"].local })
             };
@@ -425,20 +441,31 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective where this model will be stored
    * @param baseExpression - Optional expression URI for this instance.
-   *             If omitted, a random Literal URL is generated.
+   *             If omitted, a random `ad4m://obj/<id>` IRI is generated,
+   *             independent of any property content — this is what keeps
+   *             two instances with identical property values distinct.
    * @param source - Optional source expression this instance is linked to
-   * 
+   *
    * @example
    * ```typescript
    * // Create a new recipe with auto-generated base expression
    * const recipe = new Recipe(perspective);
-   * 
+   *
    * // Create with specific base expression
-   * const recipe = new Recipe(perspective, "literal:...");
+   * const recipe = new Recipe(perspective, "ad4m://obj/existing-id");
    * ```
    */
   constructor(perspective: PerspectiveProxy, baseExpression?: string) {
-    this._baseExpression = baseExpression ? baseExpression : Literal.from(makeRandomId(24)).toUrl();
+    // Use a dedicated `ad4m://obj/<id>` scheme for auto-generated
+    // baseExpressions instead of `Literal.from(...).toUrl()`'s
+    // `literal:string:<id>`. After typed-literal storage lands, the storage
+    // layer translates any `literal:string:X` target into a typed
+    // `"X"^^xsd:string` literal — which is correct for property values but
+    // wrong for relation targets (which must remain NamedNode IRIs). Using
+    // a distinct scheme keeps auto-generated instance IDs unambiguously
+    // IRIs, so relation links like `<post> --has_comment--> <comment-id>`
+    // round-trip correctly through the SPARQL store.
+    this._baseExpression = baseExpression ? baseExpression : `ad4m://obj/${makeRandomId(24)}`;
     this._perspective = perspective;
   }
 
@@ -1082,16 +1109,21 @@ export class Ad4mModel {
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generatePropertySetterAction(key, metadata);
 
-    // Get resolve language from metadata (replaces Prolog query)
-    let resolveLanguage = metadata.resolveLanguage;
-
     // Skip storing empty/null/undefined values to avoid invalid empty literals (e.g. literal:string:)
     if (value === undefined || value === null || value === "") {
       return;
     }
 
-    if (resolveLanguage) {
-      value = await this._perspective.createExpression(value, resolveLanguage);
+    const mode = effectiveLiteralStorage(metadata);
+    if (mode.kind === "custom") {
+      // Custom language: route through expression_create on that language.
+      value = await this._perspective.createExpression(value, mode.language);
+    } else if (mode.kind === "envelope") {
+      // Built-in literal language: signed-envelope expression (provenance).
+      value = await this._perspective.createExpression(value, "literal");
+    } else {
+      // Deterministic literal: IRI (POS-index friendly).
+      value = valueToLiteralIri(value);
     }
 
     await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value }], batchId);
@@ -1235,34 +1267,26 @@ export class Ad4mModel {
       (p) => p.required || p.flag || p.initial !== undefined
     );
 
-    // Track properties that have resolveLanguage (non-literal) so they can be
-    // set via setProperty after createSubject (which doesn't resolve languages).
-    const deferredResolveLanguageProps: string[] = [];
+    // Track properties resolved through expression_create — a signed literal
+    // envelope or a custom (non-"literal") resolveLanguage. These may fail
+    // inside a batch context, so defer them to setProperty after createSubject.
+    const deferredExpressionProps: string[] = [];
 
     if (hasConstructor) {
-      // First filter out the properties that are not relations (arrays)
       const initialValues = {};
       for (const [key, value] of Object.entries(this)) {
         if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
-          // Check if this property requires language resolution (e.g. file storage).
-          // If so, resolve the expression *before* passing to createSubject so
-          // the constructor receives a valid URI instead of raw data.
           const propMeta = metadata.properties[key];
-          if (propMeta?.resolveLanguage && propMeta.resolveLanguage !== 'literal' && typeof value === 'object') {
-            // Defer these properties — they need createExpression which may
-            // fail inside a batch context on some languages.  We'll set them
-            // via setProperty after createSubject.
-            deferredResolveLanguageProps.push(key);
+          if (propMeta && effectiveLiteralStorage(propMeta).kind !== "deterministic") {
+            deferredExpressionProps.push(key);
             continue;
           }
           initialValues[key] = value;
         }
       }
 
-      // Get the class name instead of passing the instance to avoid Prolog query generation
       const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
 
-      // Create the subject with the initial values
       await this.perspective.createSubject(
         className,
         this._baseExpression,
@@ -1276,10 +1300,7 @@ export class Ad4mModel {
     // property writing so that scalar values are persisted as links.
     await this.innerUpdate(!hasConstructor, batchId)
 
-    // Now handle any deferred resolveLanguage properties that were excluded
-    // from initialValues.  setProperty will call createExpression to upload
-    // the data to the appropriate language and store the resulting URI.
-    for (const key of deferredResolveLanguageProps) {
+    for (const key of deferredExpressionProps) {
       const value = (this as any)[key];
       if (value !== undefined && value !== null) {
         await this.setProperty(key, value, batchId);
@@ -1874,8 +1895,7 @@ export class Ad4mModel {
    * // With explicit configuration
    * const PersonClass = Ad4mModel.fromJSONSchema(schema, {
    *   name: "Person",
-   *   namespace: "person://",
-   *   resolveLanguage: "literal"
+   *   namespace: "person://"
    * });
    * 
    * // With property mapping
