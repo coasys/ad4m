@@ -187,10 +187,7 @@ async fn holochain_signal_receiver() {
                     // languages that want direct-signal support can wire it
                     // in later via a dedicated handler.
                     _ => {
-                        log::debug!(
-                            "Received unhandled Holochain signal variant: {:?}",
-                            signal
-                        );
+                        log::debug!("Received unhandled Holochain signal variant: {:?}", signal);
                     }
                 }
             } else {

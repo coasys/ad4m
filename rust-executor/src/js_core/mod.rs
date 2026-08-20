@@ -304,7 +304,9 @@ impl JsCore {
         // deno v2.9: JsRuntime::resolve() now returns futures resolving to
         // Box<JsError> (was CoreError in older deno_core). SmartGlobalVariableFuture's
         // trait bound was updated to match.
-        SmartGlobalVariableFuture<impl Future<Output = Result<v8::Global<v8::Value>, Box<deno_core::error::JsError>>>>,
+        SmartGlobalVariableFuture<
+            impl Future<Output = Result<v8::Global<v8::Value>, Box<deno_core::error::JsError>>>,
+        >,
         AnyError,
     > {
         let wrapped_script = format!(

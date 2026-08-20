@@ -181,7 +181,7 @@ const TIMEOUT_DURATION: Duration = Duration::from_secs(90);
 
 const APP_INSTALL_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
 
-#[op2(async(lazy))]  // op2 v2.9: not fast-compatible (complex serde arg)
+#[op2(async(lazy))] // op2 v2.9: not fast-compatible (complex serde arg)
 async fn start_holochain_conductor(
     #[serde] config: LocalConductorConfig,
 ) -> Result<(), AnyhowWrapperError> {
@@ -205,7 +205,7 @@ async fn log_dht_status() -> Result<(), AnyhowWrapperError> {
     }
 }
 
-#[op2(async(lazy))]  // op2 v2.9: not fast-compatible (complex serde arg)
+#[op2(async(lazy))] // op2 v2.9: not fast-compatible (complex serde arg)
 #[serde]
 async fn install_app(
     #[serde] install_app_payload: InstallAppPayload,
@@ -233,7 +233,7 @@ async fn get_app_info(#[string] app_id: String) -> Result<Option<AppInfo>, Anyho
 
 //TODO
 //Have install app use lair to generate the membrane proof
-#[op2(async(lazy))]  // op2 v2.9: not fast-compatible (complex serde arg)
+#[op2(async(lazy))] // op2 v2.9: not fast-compatible (complex serde arg)
 #[serde]
 async fn call_zome_function(
     #[string] app_id: String,

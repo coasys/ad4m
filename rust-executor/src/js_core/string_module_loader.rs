@@ -42,12 +42,7 @@ fn maybe_transpile(
         // deno v2.9: ModuleLoaderError = JsErrorBox (type alias). Neither
         // ::Core nor ::NotFound enum variants exist anymore — use the
         // JsErrorBox constructor helpers instead.
-        Err(e) => {
-            Err(deno_error::JsErrorBox::new(
-                e.get_class(),
-                e.get_message(),
-            ))
-        }
+        Err(e) => Err(deno_error::JsErrorBox::new(e.get_class(), e.get_message())),
     }
 }
 
@@ -81,12 +76,17 @@ impl ModuleLoader for StringModuleLoader {
         Ok(module_specifier)
     }
 
+    // deno v2.9 trait signature:
+    //   fn load(&self, &url::Url, Option<&ModuleLoadReferrer>, ModuleLoadOptions)
+    //     -> ModuleLoadResponse
+    // The old (specifier, referrer, is_dyn_import, request_module_type) 4-arg
+    // shape was collapsed — dyn_import + request_module_type moved onto the
+    // ModuleLoadOptions struct.
     fn load(
         &self,
-        module_specifier: &ModuleSpecifier,
-        _maybe_referrer: std::option::Option<&Url>,
-        _is_dyn_import: bool,
-        _request_module_type: RequestedModuleType,
+        module_specifier: &Url,
+        _maybe_referrer: std::option::Option<&deno_core::ModuleLoadReferrer>,
+        _options: deno_core::ModuleLoadOptions,
     ) -> ModuleLoadResponse {
         match module_specifier.to_file_path() {
             Ok(path) => match std::fs::read_to_string(&path) {
