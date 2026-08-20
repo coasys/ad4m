@@ -7,26 +7,14 @@
  * language, so the claim and the processed-turn cursor have to coordinate
  * through the shared graph with real sync latency in between.
  *
- * Per-test setup: each `it` spins up its OWN fresh neighbourhood (new social-
- * context language, new publish, new join). Sharing a neighbourhood across
- * tests looked tempting for speed but hid a real coordination bug — reverted
- * on 2026-08-20 evening after debug output showed Alice's wave-1
- * InterpretationRun never syncing to Bob on the second processor in a shared
- * perspective. Clean-slate per test is the right shape here.
+ * Each `it` spins up its OWN fresh neighbourhood (new social-context language,
+ * new publish, new join) — clean-slate coordination per test, no cross-test
+ * carry-over.
  *
  * Model/endpoint are overridable via INTERPRETATION_E2E_MODEL /
  * INTERPRETATION_E2E_BASE_URL.
  */
 import { PerspectiveProxy, Perspective, Link, LinkQuery, InterpretationRun } from "@coasys/ad4m";
-
-// Under PR #874 typed literals, `mint_interpretation_run`'s string `sources`
-// go through `resolve_property_value` and land as typed `xsd:string`. On
-// read they surface as `literal:string:<hex>` (HasMany relation targets are
-// kept in wire form by `model_query::hydration`, per audit 2026-08-20).
-// Both `event.itemIds` (raw hex from `PendingTurn.id`) and raw link targets
-// on `perspective.get` come back in one of two shapes; normalise both.
-const stripLiteral = (s: string): string =>
-  s.startsWith("literal:string:") ? s.slice("literal:string:".length) : s;
 import type { AutoProcessorEvent } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
 import { sleep } from "../utils/utils";
@@ -55,6 +43,13 @@ const SCOPE_QUERY = `SELECT ?speaker ?text ?timestamp WHERE {
 }
 ORDER BY ?timestamp`;
 
+// Under PR #874 typed literals, `mint_interpretation_run`'s string `sources`
+// land as typed `xsd:string`. Both `event.itemIds` (raw hex from
+// `PendingTurn.id`) and link targets read via `perspective.get` surface as
+// one of `"<hex>"` or `"literal:string:<hex>"`; normalise before comparing.
+const stripLiteral = (s: string): string =>
+  s.startsWith("literal:string:") ? s.slice("literal:string:".length) : s;
+
 async function registerLlm(ad4m: any): Promise<void> {
   const modelId = await ad4m.ai.addModel({
     name: "interpretation-llm",
@@ -70,7 +65,7 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
       // Cumulative wait budget in the slowest test:
       //   sharedChannel gossip warm-up (up to 180s)
       // + wave-1 processed (up to 240s)
-      // + wave-1 InterpretationRun synced to Bob (up to 240s)
+      // + wave-1 InterpretationRun synced to the other peer (up to 240s)
       // + wave-2 processed (up to 240s)
       // + subgroups converge (up to 120s)
       // = up to 1_060s. Suite timeout 1_500s gives every waitUntil budget
@@ -157,16 +152,10 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         await p.add(new Link({ source: uri, predicate: "ns://body", target: `literal:string:${body}` }));
       }
 
-      /** Identify a peer by the first few chars of its DID for readable logs. */
-      const alicePId = testContext.alice ? "alice" : "alice";  // labels only
-      /** Get the DID of a `PerspectiveProxy`'s owner via the executor's agent. */
+      /** DID of the agent behind a given executor client. */
       async function agentDid(ad4m: any): Promise<string> {
-        try {
-          const status = await ad4m.agent.status();
-          return status?.did || "unknown";
-        } catch {
-          return "unknown";
-        }
+        const status = await ad4m.agent.status();
+        return status?.did || "unknown";
       }
 
       it("processes a shared channel exactly once (claim coordinates)", async () => {
@@ -226,34 +215,23 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         const retired = () =>
           events.filter((e) => e.step === "processed").flatMap((e) => e.itemIds);
 
-        // Wave 1 is authored by Alice, wave 2 by Bob. Both land in the same
-        // shared channel, so each peer re-gathers the other's turns on every
-        // tick — only the claim and the cursor keep a turn from being
-        // interpreted twice, once per executor.
+        // Wave 1 authored by Alice, wave 2 by Bob. Both land in the same shared
+        // channel, so each peer re-gathers the other's turns on every tick —
+        // only the claim and the cursor keep a turn from being interpreted
+        // twice, once per executor.
         await say(aliceP, "msg://w1a", "Our webhook retries keep dropping during payment outages.");
         await say(aliceP, "msg://w1b", "Right, the payments queue cannot replay what got dropped.");
         await waitUntil(() => retired().length >= 2, 240_000, "the first wave to be processed");
 
         const firstWave = retired();
-        // Wave-1 must be attributable to exactly one peer here — if we already
-        // see both DIDs having emitted a processed event for these items, the
-        // claim didn't coordinate and there's no point continuing (better to
-        // fail here with a specific diagnostic than downstream on a stress
-        // assertion).
+
+        // Wave-1 must be attributable to exactly one peer. Failing here (not
+        // downstream) points at the claim mechanism directly.
         const wave1Dids = new Set(
           events
             .filter((e) => e.step === "processed" && (e.itemIds ?? []).some((id) => firstWave.includes(id)))
             .map((e) => e.agentDid),
         );
-        if (wave1Dids.size !== 1) {
-          // eslint-disable-next-line no-console
-          console.log("[flux-waves DEBUG]", JSON.stringify({
-            firstWave,
-            eventsForProcessor: events.filter((e) => e.processorId === "flux-waves").map((e) => ({
-              step: e.step, agentDid: e.agentDid, itemIds: e.itemIds, detail: (e as any).detail,
-            })),
-          }, null, 2));
-        }
         expect(
           wave1Dids.size,
           `wave 1 must be processed by exactly ONE peer, got dids=${JSON.stringify(
@@ -262,12 +240,11 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         ).to.equal(1);
 
         // Wait for wave-1's InterpretationRun to sync ACROSS to the OTHER
-        // peer — the one who didn't process wave 1. Only then does the other
-        // peer's cursor know wave-1 is retired and can filter it out of a
-        // wave-2 batch. This is the load-bearing sync gap that makes or
-        // breaks two-executor coordination; give it plenty of headroom.
+        // peer — the one who didn't process wave 1. Only then does that peer's
+        // cursor know wave-1 is retired and can filter it out of a wave-2
+        // batch.
         //
-        // Two subtleties (both from live CI evidence 2026-08-20 evening):
+        // Two subtleties (both from live CI evidence 2026-08-20):
         //   (a) The OTHER peer may never have had `InterpretationRun` SHACL
         //       registered — `ensure_interpretation_overlay_classes` fires
         //       from the pass path, and if the peer's watcher hasn't run a
@@ -316,43 +293,6 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         await say(bobP, "msg://w2a", "Separately, the retro is moved to Thursday morning.");
         await say(bobP, "msg://w2b", "I'll book the room and send the invite.");
         await waitUntil(() => retired().length >= 4, 240_000, "the second wave to be processed");
-
-        // Dump the final event sequence + both peers' run state whether or
-        // not the assertion passes — this is what turned the flake diagnosis
-        // from speculation into a fix.
-        // `findAll` throws when the class isn't SHACL-registered (see the
-        // barrier's note on why the OTHER peer often lacks it). Fall back
-        // to raw link enumeration so the dump lands regardless.
-        const runsFor = async (p: PerspectiveProxy) => {
-          try {
-            return (await InterpretationRun.findAll(p)).map((r) => ({
-              runId: r.runId, processor: r.processor, sources: r.sources,
-            }));
-          } catch (e) {
-            const links = await p.get(
-              new LinkQuery({ predicate: "ad4m://interp/sources" }),
-            );
-            const bySource = new Map<string, string[]>();
-            for (const l of links) {
-              const src = l.data.source;
-              const arr = bySource.get(src) ?? [];
-              arr.push(stripLiteral(l.data.target));
-              bySource.set(src, arr);
-            }
-            return [...bySource.entries()].map(([id, sources]) => ({
-              id, sources, _fallback: `findAll threw: ${(e as Error).message}`,
-            }));
-          }
-        };
-        // eslint-disable-next-line no-console
-        console.log("[flux-waves DEBUG]", JSON.stringify({
-          aliceDid, bobDid, firstWave,
-          eventsForProcessor: events.filter((e) => e.processorId === "flux-waves").map((e) => ({
-            step: e.step, agentDid: e.agentDid, itemIds: e.itemIds, detail: (e as any).detail,
-          })),
-          aliceRunsFinal: await runsFor(aliceP),
-          bobRunsFinal: await runsFor(bobP),
-        }, null, 2));
 
         // The whole point: four turns, four retirements, no turn twice — across
         // two executors that both saw all four.
