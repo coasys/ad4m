@@ -540,7 +540,11 @@ mod tests {
         // where enabling the datatype would rewrite every target.
         let s = shape(
             "Mix",
-            vec![relation_with_datatype("targets", "ns://ref", "xsd://string")],
+            vec![relation_with_datatype(
+                "targets",
+                "ns://ref",
+                "xsd://string",
+            )],
         );
         let inst = inst_links(
             "ns://mix/1",

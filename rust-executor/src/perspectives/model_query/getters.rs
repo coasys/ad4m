@@ -325,9 +325,7 @@ pub(super) fn evaluate_getters(
                                 } else {
                                     let arr: Vec<Value> = values
                                         .map(|v| {
-                                            v.iter()
-                                                .map(|s| decode_getter_target(s, dt))
-                                                .collect()
+                                            v.iter().map(|s| decode_getter_target(s, dt)).collect()
                                         })
                                         .unwrap_or_default();
                                     obj.insert(prop.name.clone(), Value::Array(arr));
