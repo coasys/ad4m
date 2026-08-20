@@ -28,6 +28,22 @@ use super::types::{IncludeValue, ModelShape, ShapeProperty};
 use super::utils::{parse_literal_value, validate_iri};
 use crate::perspectives::sparql_store::SparqlStore;
 
+/// If a SPARQL getter row's raw string carries the AD4M encoded-literal
+/// marker (`literal:string:X`, `literal:number:X`, etc.) decode it to
+/// its typed JSON value; otherwise return the string verbatim. Matches
+/// the collection-hydration branch's convention in `hydration.rs`
+/// (fix ac3d4274a); keeps the two hydration paths in lockstep so a
+/// `HasMany<string>` behaves the same whether it was read via the
+/// plain-triple scan or a `@HasMany({ getter: "SELECT ..." })`. URI
+/// targets never start with `literal:`, so pass through unchanged.
+fn decode_getter_target(target: &str) -> Value {
+    if target.starts_with("literal:") {
+        parse_literal_value(target)
+    } else {
+        Value::String(target.to_string())
+    }
+}
+
 /// Evaluate property getters for a batch of instances, returning only the
 /// getter-computed properties.
 ///
@@ -289,24 +305,33 @@ pub(super) fn evaluate_getters(
                         };
                         let values = grouped.get(id_owned.as_str());
                         if let Some(obj) = inst.as_object_mut() {
+                            // Symmetry with `hydration.rs`'s collection
+                            // branch (fixed in ac3d4274a): a target
+                            // starting with `literal:` is the AD4M
+                            // encoded-literal marker; decode it uniformly
+                            // across collections and singletons, whether
+                            // the value came in through a plain SPARQL
+                            // scan or through a getter query. URI
+                            // targets never carry the `literal:` prefix
+                            // so pass through byte-for-byte.
                             if prop.is_collection {
                                 if prop.is_scalar_relation {
                                     let val = values
                                         .and_then(|v| v.first())
-                                        .map(|s| Value::String(s.clone()))
+                                        .map(|s| decode_getter_target(s))
                                         .unwrap_or(Value::Null);
                                     obj.insert(prop.name.clone(), val);
                                 } else {
                                     let arr: Vec<Value> = values
                                         .map(|v| {
-                                            v.iter().map(|s| Value::String(s.clone())).collect()
+                                            v.iter().map(|s| decode_getter_target(s)).collect()
                                         })
                                         .unwrap_or_default();
                                     obj.insert(prop.name.clone(), Value::Array(arr));
                                 }
                             } else {
                                 if let Some(val) = values.and_then(|v| v.first()) {
-                                    obj.insert(prop.name.clone(), Value::String(val.clone()));
+                                    obj.insert(prop.name.clone(), decode_getter_target(val));
                                 }
                             }
                         }
@@ -448,4 +473,47 @@ pub(super) fn apply_where_filter_to_relation(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod decode_getter_target_tests {
+    //! Lock in the getter-path decode convention so a HasMany-of-string
+    //! read through a `@HasMany({ getter: "SELECT ..." })` sees the same
+    //! plain-value round-trip as one read through a plain-triple scan.
+    use super::*;
+
+    #[test]
+    fn plain_uri_passes_through() {
+        assert_eq!(
+            decode_getter_target("ad4m://SomeClass/instance/abc"),
+            Value::String("ad4m://SomeClass/instance/abc".into())
+        );
+    }
+
+    #[test]
+    fn did_target_passes_through() {
+        assert_eq!(
+            decode_getter_target("did:key:z6Mk..."),
+            Value::String("did:key:z6Mk...".into())
+        );
+    }
+
+    #[test]
+    fn literal_string_wire_form_decodes() {
+        // Percent-encoded because `parse_literal_value` decodes the URL
+        // encoding baked into `Literal::from_string(...).to_url()`.
+        assert_eq!(
+            decode_getter_target("literal:string:hello%20world"),
+            Value::String("hello world".into())
+        );
+    }
+
+    #[test]
+    fn literal_number_wire_form_decodes_to_typed_json() {
+        // `parse_literal_value` promotes numeric wire form to a JSON
+        // number, not a string.
+        let v = decode_getter_target("literal:number:42");
+        assert!(v.is_number(), "expected typed JSON number, got {v:?}");
+        assert_eq!(v.as_i64(), Some(42));
+    }
 }
