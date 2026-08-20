@@ -192,95 +192,10 @@ pub(crate) async fn mint_interpretation_run(
     Ok(run_uri)
 }
 
-#[cfg(test)]
-mod sdna_parity_tests {
-    //! Parity guards: [`INTERP_RUN_SDNA`] and [`INTERP_OVERLAY_SDNA`] must
-    //! declare exactly the SHACL property `path` URIs the TS `@Model`
-    //! classes (`InterpretationRun`, `InterpretationOverlay` in
-    //! `core/src/perspectives/InterpretationModels.ts`) declare.
-    //!
-    //! Checked mirror-side in
-    //! `tests/js/tests/model/interpretation-models.test.ts`. Update BOTH
-    //! sides together when adding a hardwired property; a rename or
-    //! addition on one side silently forks the SDNA and makes
-    //! cross-language instances invisible to each other's readers.
-    use super::*;
-    use std::collections::BTreeSet;
-
-    fn parsed_paths(sdna: &str) -> BTreeSet<String> {
-        let parsed: serde_json::Value =
-            serde_json::from_str(sdna).expect("SDNA const must be valid JSON");
-        parsed["properties"]
-            .as_array()
-            .expect("`properties` must be an array")
-            .iter()
-            .map(|p| {
-                p["path"]
-                    .as_str()
-                    .expect("every property must declare a `path`")
-                    .to_string()
-            })
-            .collect()
-    }
-
-    fn parsed_target_class(sdna: &str) -> String {
-        let parsed: serde_json::Value =
-            serde_json::from_str(sdna).expect("SDNA const must be valid JSON");
-        parsed["target_class"]
-            .as_str()
-            .expect("SDNA must declare a `target_class`")
-            .to_string()
-    }
-
-    #[test]
-    fn interp_run_sdna_paths_match_ts_side() {
-        assert_eq!(
-            parsed_target_class(INTERP_RUN_SDNA),
-            "ad4m://InterpretationRun",
-            "target_class must match the TS @Model target"
-        );
-        let actual = parsed_paths(INTERP_RUN_SDNA);
-        let expected: BTreeSet<String> = [
-            "ad4m://interp/run_id",
-            "ad4m://interp/model",
-            "ad4m://interp/prompt_version",
-            "ad4m://interp/ran_at",
-            "ad4m://interp/processor",
-            "ad4m://interp/sources",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        assert_eq!(
-            actual, expected,
-            "Rust INTERP_RUN_SDNA property paths drifted from the TS parity spec. \
-             Update both sides together: this test AND \
-             `tests/js/tests/model/interpretation-models.test.ts` \
-             `InterpretationRun @Model shape matches …` reference set."
-        );
-    }
-
-    #[test]
-    fn interp_overlay_sdna_paths_match_ts_side() {
-        assert_eq!(
-            parsed_target_class(INTERP_OVERLAY_SDNA),
-            "ad4m://InterpretationOverlay",
-            "target_class must match the TS @Model target"
-        );
-        let actual = parsed_paths(INTERP_OVERLAY_SDNA);
-        // NOTE: the overlay class carries no `type` flag by design — the
-        // `kind` link IS the discriminator, so exactly two paths are
-        // expected.
-        let expected: BTreeSet<String> = ["ad4m://interp/kind", "ad4m://interp/run"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(
-            actual, expected,
-            "Rust INTERP_OVERLAY_SDNA property paths drifted from the TS parity spec. \
-             Update both sides together: this test AND \
-             `tests/js/tests/model/interpretation-models.test.ts` \
-             `InterpretationOverlay @Model shape matches …` reference set."
-        );
-    }
-}
+// SDNA-parity tests live TS-side in
+// `tests/js/tests/model/interpretation-models.test.ts` — they read the same
+// `hardwired_sdna/*.json` files this module `include_str!`s and compare the
+// (path, name) pairs against `@Model.generateSHACL().shape.properties`. A
+// hardcoded Rust-side reference set here would fork the source of truth
+// (2026-08-20 bug: paths matched, names diverged, both Rust and TS parity
+// tests passed while `create_subject` writes silently no-op'd).

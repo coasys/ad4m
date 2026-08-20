@@ -445,69 +445,15 @@ mod tests {
     use super::*;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
     use crate::types::{Link, LinkQuery, LinkStatus};
-    use std::collections::BTreeSet;
 
-    /// The set of SHACL property `path` URIs the hardwired AutoProcessor SDNA
-    /// declares. Shared with the TS-side parity check in
-    /// `tests/js/tests/model/interpretation-models.test.ts` — updating this
-    /// requires updating the TS test at the same time. Kept alphabetically
-    /// sorted so a `BTreeSet` comparison surfaces additions / removals
-    /// cleanly in test diffs.
-    fn expected_auto_processor_sdna_paths() -> BTreeSet<&'static str> {
-        [
-            "ad4m://base_prefix",
-            "ad4m://batch_max",
-            "ad4m://batch_min",
-            "ad4m://claim_ttl_ms",
-            "ad4m://debounce_ms",
-            "ad4m://dedup_strategy",
-            "ad4m://existing_scope",
-            "ad4m://interpretation_class",
-            "ad4m://max_wait_ms",
-            "ad4m://mint_scope",
-            "ad4m://processor_id",
-            "ad4m://source_scope_query",
-            "ad4m://source_window_ms",
-        ]
-        .into_iter()
-        .collect()
-    }
-
-    /// Parity guard: [`AUTO_PROCESSOR_SDNA`] must declare exactly the property
-    /// paths the TS `AutoProcessorConfig` @Model class declares (checked in
-    /// `interpretation-models.test.ts::AutoProcessorConfig @Model shape
-    /// matches Rust AUTO_PROCESSOR_SDNA`). A rename or addition on one side
-    /// without the other silently forks the SDNA and makes cross-language
-    /// instances invisible to each other's readers.
-    #[test]
-    fn auto_processor_sdna_paths_match_ts_side() {
-        let parsed: serde_json::Value = serde_json::from_str(AUTO_PROCESSOR_SDNA)
-            .expect("AUTO_PROCESSOR_SDNA must be valid JSON");
-        assert_eq!(
-            parsed["target_class"].as_str(),
-            Some("ad4m://AutoProcessor"),
-            "target_class must match the TS @Model target (checked in \
-             interpretation-models.test.ts)."
-        );
-        let actual: BTreeSet<&str> = parsed["properties"]
-            .as_array()
-            .expect("`properties` must be an array")
-            .iter()
-            .map(|p| {
-                p["path"]
-                    .as_str()
-                    .expect("every property must declare a `path`")
-            })
-            .collect();
-        let expected = expected_auto_processor_sdna_paths();
-        assert_eq!(
-            actual, expected,
-            "Rust SDNA property paths drifted from the TS parity spec. \
-             Update both sides together: this test AND \
-             `tests/js/tests/model/interpretation-models.test.ts` \
-             `AutoProcessorConfig @Model shape matches …` reference set."
-        );
-    }
+    // SDNA parity is checked TS-side in
+    // `tests/js/tests/model/interpretation-models.test.ts`, which reads the
+    // same `hardwired_sdna/auto_processor.json` this module `include_str!`s
+    // and compares (path, name) pairs against
+    // `AutoProcessorConfig.generateSHACL().shape`. A hardcoded Rust-side
+    // reference set would fork the source of truth (2026-08-20 bug: paths
+    // matched, names diverged, both sides' parity tests passed while
+    // `create_subject` writes silently no-op'd).
 
     fn sample_config(id: &str) -> AutoProcessorConfig {
         AutoProcessorConfig {

@@ -178,31 +178,18 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
 
   // ── SDNA parity — TS @Model shape agrees with Rust hardwired SDNA ──────────
   //
-  // The three hardwired classes below carry TWO parallel SHACL declarations —
-  // one in Rust (`config::AUTO_PROCESSOR_SDNA`, `overlay::classes::
-  // INTERP_RUN_SDNA`, `INTERP_OVERLAY_SDNA`) and one on the TS side via the
-  // `@Model` decorators in `InterpretationModels.ts`. They MUST stay in sync
-  // or a TS-written instance becomes invisible / unreadable to the Rust
-  // watcher (and vice-versa). These tests pin the invariant by asserting the
-  // TS-generated shape's property PREDICATES match the Rust-declared set,
-  // property-by-property. If either side gains or renames a property, the
-  // corresponding test fails until both sides move together.
+  // The hardwired classes carry a SHACL declaration on both sides: the Rust
+  // executor `include_str!`s `rust-executor/src/perspectives/hardwired_sdna/
+  // *.json`; the TS side generates its shape from the `@Model` decorators in
+  // `InterpretationModels.ts`. They MUST agree — a TS-written instance that
+  // uses a different setter name from the Rust reader silently no-ops the
+  // write (2026-08-20 debug: paths matched, names diverged, and every earlier
+  // hardcoded-reference-set parity test happily passed).
   //
-  // The reference sets below are the source of truth. Update BOTH sides at
-  // once when adding a hardwired property.
-
-  // The Rust SDNA JSON is the single source of truth. Both the runtime Rust
-  // `INTERP_RUN_SDNA` / `INTERP_OVERLAY_SDNA` / `AUTO_PROCESSOR_SDNA` constants
-  // AND the parity tests below load the SAME JSON files from
-  // `rust-executor/src/perspectives/hardwired_sdna/*.json` — so a rename on
-  // one side is IMPOSSIBLE without moving the other side, because both come
-  // from the same file. That's what the previous version's separate hardcoded
-  // reference tables couldn't guarantee (2026-08-20 debug: both sides had the
-  // same paths but different names, and neither test noticed).
-  //
-  // The comparison is by (path, name) pairs: path defines what predicate the
-  // link store uses; name is what `create_subject({name: value})` keys the
-  // setter lookup on. Divergence in either silently no-ops writes.
+  // The tests below defend against that by loading the SAME JSON files the
+  // executor uses and comparing (path, name) pairs. Path = the RDF predicate
+  // on the link; name = the `create_subject({name: value})` setter lookup
+  // key. Both must match for a write to land.
 
   const SDNA_DIR = path.resolve(
     __dirname,
