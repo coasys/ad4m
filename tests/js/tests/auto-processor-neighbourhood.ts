@@ -21,7 +21,14 @@
  * provides for the Rust e2e suite too. Model/endpoint are overridable via
  * INTERPRETATION_E2E_MODEL / INTERPRETATION_E2E_BASE_URL.
  */
-import { PerspectiveProxy, Perspective, Link, LinkQuery, InterpretationRun } from "@coasys/ad4m";
+import {
+  PerspectiveProxy,
+  Perspective,
+  Link,
+  LinkQuery,
+  InterpretationRun,
+  InterpretationOverlay,
+} from "@coasys/ad4m";
 import type { AutoProcessorEvent } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
 import { sleep } from "../utils/utils";
@@ -130,6 +137,26 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         await ConversationSubgroup.register(aliceP);
         await ConversationSubgroup.register(bobP);
 
+        // Pre-register the interpretation-overlay hard-wired classes on BOTH
+        // peers up-front, so `ensure_interpretation_overlay_classes` inside
+        // the pass is a no-op. Otherwise the very first pass fires ~35+
+        // SHACL link writes for `InterpretationRun` + `InterpretationOverlay`
+        // SDNA in tight succession — enough to hit the per-perspective
+        // `IMMEDIATE_COMMITS_COUNT=20` throttle in
+        // `perspective_instance::commit` and push the rest into the
+        // pending-diff queue (which only drains on a 3s / 1s-idle timer).
+        // Under that backlog the wave-1 `InterpretationRun` never reaches
+        // Bob's copy within the barrier's budget, and Bob's watcher never
+        // sees the wave-1 messages either, so wave 2 races.
+        //
+        // Registering up-front drains those writes during the warm-up window,
+        // when the test is idle and gossip has time to catch up (2026-08-20
+        // Marvin sync-latency investigation).
+        await InterpretationRun.register(aliceP);
+        await InterpretationRun.register(bobP);
+        await InterpretationOverlay.register(aliceP);
+        await InterpretationOverlay.register(bobP);
+
         // One merged stream: each executor reports its own passes, tagged with
         // the DID that ran them, so "who did what" is readable from one list.
         const events: AutoProcessorEvent[] = [];
@@ -219,20 +246,18 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
 
         const firstWave = retired();
 
-        // Register the InterpretationRun @Model class on Bob so we can query
-        // Bob's local graph for Alice's synced run — this doubles as the
-        // "wait for cursor sync" barrier before we author wave 2.
-        //
-        // The race we're closing: Alice's `processed` fires on her local
-        // event stream the instant she writes the run, but Bob only learns
-        // that w1a+w1b are retired once Alice's `InterpretationRun.sources`
-        // links Holochain-sync to Bob's copy of the perspective. Without
-        // this barrier, wave 2 lands on Bob while his watcher still thinks
-        // all 4 turns are new — Bob re-processes w1a+w1b, and `retired()`
-        // (which aggregates BOTH executors' local `processed` events)
-        // reports duplicates. The bare Alice-side `retired().length >= 2`
-        // wait is Alice-local; the assertion below is cross-peer.
-        await InterpretationRun.register(bobP);
+        // Wait for Bob to see any InterpretationRun (his own OR Alice's
+        // synced) whose sources cover firstWave. The race we're closing:
+        // Alice's `processed` fires on her local event stream the instant
+        // she writes the run, but Bob only learns that w1a+w1b are retired
+        // once Alice's `InterpretationRun.sources` reaches his copy of the
+        // perspective. Without this barrier, wave 2 lands on Bob while his
+        // watcher still thinks all 4 turns are new — Bob re-processes
+        // w1a+w1b, and `retired()` (which aggregates BOTH executors' local
+        // `processed` events) reports duplicates. The bare Alice-side
+        // `retired().length >= 2` wait is Alice-local; the assertion below
+        // is cross-peer.  `InterpretationRun` was already registered on Bob
+        // during sharedChannel warm-up.
         // 300s budget: p-diff-sync gossip on Marvin under CI load can take
         // several minutes to deliver a fresh revision — the previous 120s
         // and 240s budgets both timed out. The gossip warm-up in
