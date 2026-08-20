@@ -160,7 +160,7 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
     await p.add(new Link({
       source: "ad4m://autoprocessor/my-proc",
       predicate: "ad4m://interpretation_class",
-      target: "literal:string:ad4m://Task",
+      target: "ad4m://Task",
     }));
 
     const configs = await AutoProcessorConfig.findAll(p);
