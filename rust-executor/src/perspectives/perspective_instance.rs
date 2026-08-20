@@ -214,7 +214,12 @@ mod inbound_touches_shacl_tests {
 
     #[test]
     fn sh_vocabulary_triggers_invalidation() {
-        for predicate in ["sh://property", "sh://path", "sh://datatype", "sh://minCount"] {
+        for predicate in [
+            "sh://property",
+            "sh://path",
+            "sh://datatype",
+            "sh://minCount",
+        ] {
             assert!(
                 inbound_touches_shacl(&diff(vec![link(
                     "ad4m://SomeShape.prop",

@@ -511,7 +511,10 @@ mod tests {
             .collect();
         assert_eq!(
             targets,
-            vec!["flux://message/real".to_string(), "legacy-string".to_string()],
+            vec![
+                "flux://message/real".to_string(),
+                "legacy-string".to_string()
+            ],
         );
     }
 
