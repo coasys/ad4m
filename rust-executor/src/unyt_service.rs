@@ -342,6 +342,11 @@ roles:
                     RoleSettings::Provisioned {
                         membrane_proof: Some(membrane_proof),
                         modifiers: None,
+                        // HC 0.7.0 added init_properties: opaque app-defined
+                        // bytes made available to the cell during init().
+                        // Unyt doesn't use this facility — None means "no
+                        // extra bytes at init".
+                        init_properties: None,
                     },
                 );
                 Some(settings)

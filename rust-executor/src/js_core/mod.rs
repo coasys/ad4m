@@ -174,7 +174,10 @@ impl JsCore {
                 deno_rt_native_addon_loader: None,
                 module_loader,
                 permissions,
-                blob_store: Default::default(),
+                // deno v2.9: blob_store takes Arc<dyn BlobStoreTrait>; dyn Trait
+                // doesn't implement Default. deno_web is re-exported by
+                // deno_runtime, so we can construct its concrete BlobStore (empty).
+                blob_store: std::sync::Arc::new(deno_runtime::deno_web::BlobStore::default()),
                 broadcast_channel: Default::default(),
                 feature_checker: Default::default(),
                 node_services: Default::default(),

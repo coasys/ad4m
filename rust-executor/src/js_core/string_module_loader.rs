@@ -39,30 +39,14 @@ fn maybe_transpile(
                 maybe_code_cache,
             ))
         }
-        // deno v2.9 API drift here:
-        //   - CoreError is now Boxed(CoreErrorKind) with `#[from] Box<JsError>` on Js
-        //   - JsError gained additional_properties + stack_is_custom fields
-        //   - JsErrorBox no longer exposes NotFound/Core enum-style constructors
-        //
-        // Simplest way to bridge an anyhow-shaped transpile error into a
-        // ModuleLoaderError is via CoreError conversion chain:
-        //   Box<JsError> -> CoreErrorKind::Js -> CoreError -> ModuleLoaderError::Core
+        // deno v2.9: ModuleLoaderError = JsErrorBox (type alias). Neither
+        // ::Core nor ::NotFound enum variants exist anymore — use the
+        // JsErrorBox constructor helpers instead.
         Err(e) => {
-            let js_err = Box::new(JsError {
-                name: Some(e.get_class().to_string()),
-                message: Some(e.get_message().to_string()),
-                stack: None,
-                cause: None,
-                exception_message: String::new(),
-                frames: Vec::new(),
-                source_line: None,
-                source_line_frame_index: None,
-                aggregated: None,
-                additional_properties: Vec::new(),
-                stack_is_custom: false,
-            });
-            let core_err: CoreError = js_err.into();
-            Err(ModuleLoaderError::Core(core_err))
+            Err(deno_error::JsErrorBox::new(
+                e.get_class(),
+                e.get_message(),
+            ))
         }
     }
 }
@@ -90,7 +74,10 @@ impl ModuleLoader for StringModuleLoader {
         referrer: &str,
         _kind: ResolutionKind,
     ) -> Result<ModuleSpecifier, ModuleLoaderError> {
-        let module_specifier = deno_core::resolve_import(specifier, referrer)?;
+        // deno v2.9: resolve_import returns ModuleResolutionError which
+        // doesn't have a From<..> for JsErrorBox; wrap manually.
+        let module_specifier = deno_core::resolve_import(specifier, referrer)
+            .map_err(|e| deno_error::JsErrorBox::type_error(e.to_string()))?;
         Ok(module_specifier)
     }
 
@@ -106,7 +93,12 @@ impl ModuleLoader for StringModuleLoader {
                 Ok(code) => ModuleLoadResponse::Sync(maybe_transpile(module_specifier, code)),
                 Err(e) => {
                     log::error!("Error reading file {:?}: {}", path, e);
-                    ModuleLoadResponse::Sync(Err(ModuleLoaderError::NotFound))
+                    // deno v2.9: ModuleLoaderError::NotFound gone. Use
+                    // JsErrorBox::new with the standard NotFound class.
+                    ModuleLoadResponse::Sync(Err(deno_error::JsErrorBox::new(
+                        "NotFound",
+                        format!("Module not found: {}", module_specifier),
+                    )))
                 }
             },
             Err(_err) => {
@@ -128,7 +120,11 @@ impl ModuleLoader for StringModuleLoader {
                             ))
                         }
                     }
-                    None => Err(ModuleLoaderError::NotFound),
+                    // deno v2.9: ::NotFound variant gone; use JsErrorBox::new.
+                    None => Err(deno_error::JsErrorBox::new(
+                        "NotFound",
+                        format!("Module not found: {}", module_specifier),
+                    )),
                 })
             }
         }

@@ -433,7 +433,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         static V8_FLAGS_INIT: Once = Once::new();
         V8_FLAGS_INIT.call_once(|| {
             deno_core::v8::V8::set_flags_from_string("--max-opt=0");
-            deno_core::JsRuntime::init_platform(None, false);
+            // deno v2.9: init_platform signature changed — was (Option, bool),
+            // now takes only Option<v8::SharedRef<v8::Platform>>. The second
+            // `bool` argument (`predictable`) was removed.
+            deno_core::JsRuntime::init_platform(None);
         });
     }
 
