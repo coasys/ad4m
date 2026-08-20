@@ -45,7 +45,11 @@ export class AutoProcessorConfig extends Ad4mModel {
   sourceScopeQuery: string = "";
 
   /** URI prefix for minted instances; omit for the per-processor default. */
-  @Optional({ through: "ad4m://base_prefix", resolveLanguage: "literal" })
+  // No resolveLanguage — Rust SDNA declares none for this property, so under
+  // PR #874 both sides get the fast deterministic typed-literal path.
+  // (resolveLanguage: "literal" would ask the executor for a signed envelope
+  // that the Rust writer never produces for config metadata.)
+  @Optional({ through: "ad4m://base_prefix" })
   basePrefix?: string;
 
   /** Class URIs (SHACL targetClass) to materialise each pass. */
@@ -57,7 +61,7 @@ export class AutoProcessorConfig extends Ad4mModel {
   debounceMs: string = "200";
 
   /** Minimum batch size before a pass runs (default 1). */
-  @Optional({ through: "ad4m://batch_min", resolveLanguage: "literal" })
+  @Optional({ through: "ad4m://batch_min" })
   batchMin?: string;
 
   /** Maximum items per pass. */
@@ -65,7 +69,7 @@ export class AutoProcessorConfig extends Ad4mModel {
   batchMax: string = "32";
 
   /** Safety flush (ms) for a sub-`batchMin` batch; absent = wait indefinitely. */
-  @Optional({ through: "ad4m://max_wait_ms", resolveLanguage: "literal" })
+  @Optional({ through: "ad4m://max_wait_ms" })
   maxWaitMs?: string;
 
   /** How long a won claim is authoritative before peers may re-claim (ms). */
@@ -73,11 +77,11 @@ export class AutoProcessorConfig extends Ad4mModel {
   claimTtlMs: string = "60000";
 
   /** How far back (ms) each pass looks; absent = unbounded. */
-  @Optional({ through: "ad4m://source_window_ms", resolveLanguage: "literal" })
+  @Optional({ through: "ad4m://source_window_ms" })
   sourceWindowMs?: string;
 
   /** Serialised `DedupStrategy` JSON (absent = NormalizedString). */
-  @Optional({ through: "ad4m://dedup_strategy", resolveLanguage: "literal" })
+  @Optional({ through: "ad4m://dedup_strategy" })
   dedupStrategy?: string;
 
   /**
@@ -88,7 +92,7 @@ export class AutoProcessorConfig extends Ad4mModel {
    * because SHACL properties carry no rich-object type-check; the Rust
    * watcher parses it back into `Scope`.
    */
-  @Optional({ through: "ad4m://existing_scope", resolveLanguage: "literal" })
+  @Optional({ through: "ad4m://existing_scope" })
   existingScope?: string;
 
   /**
@@ -98,7 +102,7 @@ export class AutoProcessorConfig extends Ad4mModel {
    * mints become first-class children of the target scope. Must be the
    * `Raw` form of `Scope`; `Model` scopes carry no linking predicate.
    */
-  @Optional({ through: "ad4m://mint_scope", resolveLanguage: "literal" })
+  @Optional({ through: "ad4m://mint_scope" })
   mintScope?: string;
 
   // No `@Flag` type discriminator (Nico 2026-08-19: "type flags are an
@@ -123,19 +127,19 @@ export class InterpretationRun extends Ad4mModel {
   runId: string = "";
 
   /** LLM model id used for this run. */
-  @Optional({ through: "ad4m://interp/model", resolveLanguage: "literal" })
+  @Optional({ through: "ad4m://interp/model" })
   model?: string;
 
   /** SHA-256 hex of the system prompt + few-shots at the time of the run. */
-  @Optional({ through: "ad4m://interp/prompt_version", resolveLanguage: "literal" })
+  @Optional({ through: "ad4m://interp/prompt_version" })
   promptVersion?: string;
 
   /** RFC3339 timestamp when the run completed. */
-  @Optional({ through: "ad4m://interp/ran_at", resolveLanguage: "literal" })
+  @Optional({ through: "ad4m://interp/ran_at" })
   ranAt?: string;
 
   /** URI of the AutoProcessorConfig node that triggered this run. */
-  @Optional({ through: "ad4m://interp/processor", resolveLanguage: "literal" })
+  @Optional({ through: "ad4m://interp/processor" })
   processor?: string;
 
   /**
@@ -171,10 +175,10 @@ export class InterpretationOverlay extends Ad4mModel {
    * changes to an existing one (`"update"`).  This is the discriminator link
    * that makes a node identifiable as an overlay.
    */
-  @Property({ through: "ad4m://interp/kind", required: true, resolveLanguage: "literal" })
+  @Property({ through: "ad4m://interp/kind", required: true })
   kind: string = "";
 
   /** URI of the InterpretationRun that last wrote this overlay, if present. */
-  @Optional({ through: "ad4m://interp/run", resolveLanguage: "literal" })
+  @Optional({ through: "ad4m://interp/run" })
   run?: string;
 }
