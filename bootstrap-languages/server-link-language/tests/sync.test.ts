@@ -78,6 +78,9 @@ let roomKey: Uint8Array | null;
 
 function setup(transport: MockTransport): void {
     resetAdapters();
+    // Wipe any leftover batch state so a previous test's queued diff can't
+    // flush against this test's transport.
+    syncModule._resetBatchStateForTests();
     initStorage(new MockStorage());
     initTransport(transport);
     initConfig(config);
@@ -350,5 +353,184 @@ describe("sync: render / currentRevision", () => {
         assert.equal(syncModule.currentRevision(), "");
         store.setRevision("rev-x");
         assert.equal(syncModule.currentRevision(), "rev-x");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// coalesceDiffs — pure logic
+// ---------------------------------------------------------------------------
+
+describe("sync: coalesceDiffs (batch merge safety)", () => {
+    function link(overrides: Partial<LinkExpression["data"]> & { sig?: string; author?: string }): LinkExpression {
+        const { sig, author, ...data } = overrides;
+        return {
+            author: author ?? "did:key:zAuthor",
+            timestamp: "2026-01-01T00:00:00.000Z",
+            data: { source: "s", target: "t", predicate: "p", ...data },
+            proof: { signature: sig ?? "", key: "key" },
+        };
+    }
+
+    it("merges consecutive pure additions into a single segment (bulk-add hot path)", () => {
+        const diffs = Array.from({ length: 1500 }, (_, i) => ({
+            additions: [link({ source: `s${i}` })],
+            removals: [] as LinkExpression[],
+        }));
+        const segments = syncModule.coalesceDiffs(diffs);
+        assert.equal(segments.length, 1, "1500 pure additions should collapse to one POST");
+        assert.equal(segments[0].additions.length, 1500);
+        assert.equal(segments[0].removals.length, 0);
+    });
+
+    it("splits when a later diff adds a link that an earlier diff removed (remove-then-add preserves ordering)", () => {
+        // User intent: remove X, then re-add X → X should exist afterwards.
+        // Merging would give additions:[X],removals:[X]. Server applies adds
+        // then removes, and X would be gone. Split forces two POSTs so the
+        // server applies them in caller order.
+        const X = link({ source: "x", sig: "sig-X" });
+        const segments = syncModule.coalesceDiffs([
+            { additions: [], removals: [X] },
+            { additions: [X], removals: [] },
+        ]);
+        assert.equal(segments.length, 2);
+        assert.deepEqual(segments[0].removals, [X]);
+        assert.deepEqual(segments[1].additions, [X]);
+    });
+
+    it("splits when a later diff removes a link that an earlier diff added", () => {
+        // User intent: add X, then remove X → X should be gone.
+        // Merging here would happen to give the right answer (adds-then-removes
+        // in server order), but caller-visible ordering is still preserved by
+        // splitting — critical for anything relying on emitted-diff sequence.
+        const X = link({ source: "x", sig: "sig-X" });
+        const segments = syncModule.coalesceDiffs([
+            { additions: [X], removals: [] },
+            { additions: [], removals: [X] },
+        ]);
+        assert.equal(segments.length, 2);
+    });
+
+    it("merges when link identities never collide across the boundary", () => {
+        const X = link({ source: "x", sig: "sig-X" });
+        const Y = link({ source: "y", sig: "sig-Y" });
+        const segments = syncModule.coalesceDiffs([
+            { additions: [X], removals: [] },
+            { additions: [Y], removals: [] },
+            { additions: [], removals: [X] },
+        ]);
+        // First two diffs merge (X-add + Y-add, no collision). Third splits
+        // because removing X collides with the segment's X-add.
+        assert.equal(segments.length, 2);
+        assert.deepEqual(segments[0].additions.map((l) => l.data.source), ["x", "y"]);
+        assert.deepEqual(segments[1].removals.map((l) => l.data.source), ["x"]);
+    });
+
+    it("falls back to a data+author+timestamp key when signatures are empty", () => {
+        // Fixtures without real signatures must still split correctly.
+        const X = link({ source: "x", sig: "" });
+        const segments = syncModule.coalesceDiffs([
+            { additions: [], removals: [X] },
+            { additions: [X], removals: [] },
+        ]);
+        assert.equal(segments.length, 2, "identity fallback should detect the collision");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// enqueueCommitBatched / drainCommitBatch — flush behavior
+// ---------------------------------------------------------------------------
+
+describe("sync: enqueueCommitBatched", () => {
+    function makeCommitTransport(): { transport: MockTransport; posts: any[] } {
+        const transport = new MockTransport();
+        const posts: any[] = [];
+        transport.route(
+            (url, method) => method === "POST" && url.endsWith("/commit"),
+            (_url, _method, body) => {
+                posts.push(JSON.parse(body));
+                return { status: 200, headers: {}, body: "{}" };
+            },
+        );
+        return { transport, posts };
+    }
+
+    it("collapses a burst of 1500 addLinks into ONE POST (the stress-test hot path)", async () => {
+        const { transport, posts } = makeCommitTransport();
+        setup(transport);
+        for (let i = 0; i < 1500; i++) {
+            syncModule.enqueueCommitBatched({
+                additions: [{
+                    author: "did:key:zAuthor",
+                    timestamp: `2026-01-01T00:00:00.${String(i).padStart(3, "0")}Z`,
+                    data: { source: `s${i}`, target: "t", predicate: "p" },
+                    proof: { signature: `sig-${i}`, key: "k" },
+                }],
+                removals: [],
+            });
+        }
+        await syncModule.drainCommitBatch();
+        assert.equal(posts.length, 1, "microtask flush should coalesce the burst into one POST");
+        assert.equal(posts[0].additions.length, 1500);
+    });
+
+    it("splits into two POSTs when remove(X) is followed by add(X)", async () => {
+        const { transport, posts } = makeCommitTransport();
+        setup(transport);
+        const X: LinkExpression = {
+            author: "did:key:zAuthor",
+            timestamp: "2026-01-01T00:00:00.000Z",
+            data: { source: "x", target: "t", predicate: "p" },
+            proof: { signature: "sig-X", key: "k" },
+        };
+        syncModule.enqueueCommitBatched({ additions: [], removals: [X] });
+        syncModule.enqueueCommitBatched({ additions: [X], removals: [] });
+        await syncModule.drainCommitBatch();
+        assert.equal(posts.length, 2, "must not swap remove-then-add into add-then-remove");
+        assert.deepEqual(posts[0].removals.length, 1);
+        assert.deepEqual(posts[1].additions.length, 1);
+    });
+
+    it("drainCommitBatch flushes anything still pending (used by teardown)", async () => {
+        const { transport, posts } = makeCommitTransport();
+        setup(transport);
+        syncModule.enqueueCommitBatched({
+            additions: [{
+                author: "did:key:zAuthor",
+                timestamp: "2026-01-01T00:00:00.000Z",
+                data: { source: "s", target: "t", predicate: "p" },
+                proof: { signature: "sig", key: "k" },
+            }],
+            removals: [],
+        });
+        await syncModule.drainCommitBatch();
+        assert.equal(posts.length, 1);
+    });
+
+    it("a segment that fails does not block subsequent segments", async () => {
+        const transport = new MockTransport();
+        const posts: any[] = [];
+        let call = 0;
+        transport.route(
+            (url, method) => method === "POST" && url.endsWith("/commit"),
+            (_url, _method, body) => {
+                call++;
+                posts.push(JSON.parse(body));
+                if (call === 1) return { status: 500, headers: {}, body: "boom" };
+                return { status: 200, headers: {}, body: "{}" };
+            },
+        );
+        setup(transport);
+        const X: LinkExpression = {
+            author: "did:key:zAuthor",
+            timestamp: "2026-01-01T00:00:00.000Z",
+            data: { source: "x", target: "t", predicate: "p" },
+            proof: { signature: "sig-X", key: "k" },
+        };
+        // Forces two segments (remove-then-add of the same identity).
+        syncModule.enqueueCommitBatched({ additions: [], removals: [X] });
+        syncModule.enqueueCommitBatched({ additions: [X], removals: [] });
+        await syncModule.drainCommitBatch();
+        assert.equal(posts.length, 2, "the second segment must still be attempted after the first fails");
+        assert.ok(syncStates.includes("LinkLanguageInstalledButNotSynced"));
     });
 });

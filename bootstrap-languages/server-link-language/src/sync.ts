@@ -146,43 +146,45 @@ export async function commit(diff: PerspectiveDiff): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Batched commit — coalesce contiguous synchronous commits into one POST
+// Batched commit — coalesce contiguous synchronous commits into as few POSTs
+// as possible WITHOUT reordering user-visible operations.
 //
 // Motivation: `alice.perspective.addLink()` × 1500 in a tight loop produced
-// 1500 sequential POSTs to /rooms/<room>/commit under Holochain, each
-// blocking the next `addLink`. The stress-test integration ran ~200s and
-// timed out. Holochain's link language does not have this shape because
-// commits go into a local Holochain source-chain first and network
-// propagation is decoupled from the caller's await.
+// 1500 sequential POSTs to /rooms/<room>/commit, each blocking the next
+// `addLink`. The stress-test integration ran ~200s and timed out.
 //
 // Design:
-//   - Every `enqueueCommitBatched(diff)` merges additions/removals into a
-//     single pending diff and schedules a microtask flush if not already
-//     scheduled. Returns after enqueuing — the actual POST happens later.
-//   - The microtask flush drains the whole pending batch in ONE POST so the
-//     server sees `additions[]` as long as the batch grew. Preserves ordering
-//     within the batch.
-//   - Send errors are logged; the language does not retry batches (a batch
-//     that failed is dropped from the pending queue rather than blocking
-//     subsequent writes). Callers relying on strict commit-error semantics
-//     must use the direct `commit()` above.
+//   - Every `enqueueCommitBatched(diff)` appends the diff to a queue and
+//     schedules a microtask flush if not already scheduled. Returns after
+//     enqueuing — the actual POST(s) happen later.
+//   - The flush walks the queue in order and greedily merges adjacent diffs
+//     into "segments" where each segment can be sent as one POST without
+//     losing caller-visible ordering. A merge is UNSAFE iff any link
+//     identity appears in one merged side's additions and the other's
+//     removals — in that case we start a new segment and send a separate
+//     POST so the server applies them in caller order.
+//     (The server applies additions before removals within a single POST:
+//     link-server/src/db.ts::applyDiffAndAppend. So merging `remove(X);
+//     add(X)` into `additions:[X], removals:[X]` would silently swap the
+//     order → X gone when the caller expected X to remain.)
+//   - Common bulk-add case (1500 unique addLinks) → 1 segment → 1 POST.
+//   - Send errors are logged per segment; a failed segment is dropped and
+//     subsequent segments still POST (they are ordering-independent from a
+//     dropped one by construction — the split points guarantee it).
+//     Callers relying on strict commit-error semantics must use `commit()`.
 // ---------------------------------------------------------------------------
 
-let _pendingBatch: PerspectiveDiff | null = null;
+let _pendingQueue: PerspectiveDiff[] = [];
 let _flushScheduled = false;
 let _inflight: Promise<void> = Promise.resolve();
 
-/** Enqueue a diff to be flushed in a single POST at the next microtask. */
+/** Enqueue a diff to be flushed on the next microtask. */
 export function enqueueCommitBatched(diff: PerspectiveDiff): void {
-    if (!_pendingBatch) {
-        _pendingBatch = { additions: [], removals: [] };
-    }
-    _pendingBatch.additions.push(...diff.additions);
-    _pendingBatch.removals.push(...diff.removals);
+    _pendingQueue.push(diff);
     if (!_flushScheduled) {
         _flushScheduled = true;
-        // Serialize flushes: each flush waits for the previous to finish
-        // before starting, so we never have two overlapping POSTs stepping on
+        // Serialize flushes: each waits for the previous to finish before
+        // starting, so we never have two overlapping POSTs stepping on
         // sequence order.
         _inflight = _inflight.then(() => flushBatch());
     }
@@ -191,23 +193,69 @@ export function enqueueCommitBatched(diff: PerspectiveDiff): void {
 async function flushBatch(): Promise<void> {
     // Snapshot + reset FIRST so any commits arriving during the POST land in
     // the next batch, not this one.
-    const batch = _pendingBatch;
-    _pendingBatch = null;
+    const queue = _pendingQueue;
+    _pendingQueue = [];
     _flushScheduled = false;
-    if (!batch || (batch.additions.length === 0 && batch.removals.length === 0)) {
-        return;
+    if (queue.length === 0) return;
+
+    const segments = coalesceDiffs(queue);
+    for (const segment of segments) {
+        if (segment.additions.length === 0 && segment.removals.length === 0) continue;
+        try {
+            await commit(segment);
+        } catch (err) {
+            console.error(
+                `[server-link-language] batched commit failed (${segment.additions.length} adds, ` +
+                `${segment.removals.length} removes) — this segment is NOT retried; ` +
+                `writes are safe locally but the server missed them.`,
+                err,
+            );
+            deps().emitSyncState?.("LinkLanguageInstalledButNotSynced");
+        }
     }
-    try {
-        await commit(batch);
-    } catch (err) {
-        console.error(
-            `[server-link-language] batched commit failed (${batch.additions.length} adds, ` +
-            `${batch.removals.length} removes) — this batch is NOT retried; ` +
-            `writes are safe locally but the server missed them.`,
-            err,
-        );
-        deps().emitSyncState?.("LinkLanguageInstalledButNotSynced");
+}
+
+/**
+ * Coalesce a queue of diffs into the minimum number of segments that
+ * preserve observable server-side ordering. See the block comment above
+ * for the merge-safety rule.
+ *
+ * Identity: `proof.signature` — a signature over the link's canonical
+ * payload, so two links with the same signature are the same link from
+ * every consumer's perspective. Empty signatures fall back to a
+ * data+author+timestamp key so test fixtures without real signatures still
+ * split correctly.
+ */
+export function coalesceDiffs(queue: PerspectiveDiff[]): PerspectiveDiff[] {
+    const segments: PerspectiveDiff[] = [];
+    for (const next of queue) {
+        const current = segments[segments.length - 1];
+        if (!current) {
+            segments.push({ additions: [...next.additions], removals: [...next.removals] });
+            continue;
+        }
+        const currentAddIds = new Set(current.additions.map(linkIdentity));
+        const currentRemIds = new Set(current.removals.map(linkIdentity));
+        const conflict =
+            next.additions.some((l) => currentRemIds.has(linkIdentity(l))) ||
+            next.removals.some((l) => currentAddIds.has(linkIdentity(l)));
+        if (conflict) {
+            segments.push({ additions: [...next.additions], removals: [...next.removals] });
+        } else {
+            current.additions.push(...next.additions);
+            current.removals.push(...next.removals);
+        }
     }
+    return segments;
+}
+
+function linkIdentity(link: LinkExpression): string {
+    const sig = link.proof?.signature;
+    if (sig) return `sig:${sig}`;
+    // Deterministic fallback matching the fields link-server uses to hash
+    // (see link-server/src/types.ts::canonicalLinkPayload). Ensures
+    // signature-less test fixtures still collide correctly.
+    return `raw:${link.author}|${link.timestamp}|${link.data?.source ?? ""}|${link.data?.predicate ?? ""}|${link.data?.target ?? ""}`;
 }
 
 /** Test/teardown hook: await any in-flight flush + one pending flush so a
@@ -215,10 +263,19 @@ async function flushBatch(): Promise<void> {
  * the hot path. */
 export async function drainCommitBatch(): Promise<void> {
     await _inflight;
-    if (_pendingBatch) {
+    if (_pendingQueue.length > 0) {
         await flushBatch();
     }
     await _inflight;
+}
+
+/** Test-only: clear all batch state without draining. Used by unit tests
+ * that spin up fresh mock adapters between cases and don't want stale
+ * queued diffs from the previous case flushing against them. */
+export function _resetBatchStateForTests(): void {
+    _pendingQueue = [];
+    _flushScheduled = false;
+    _inflight = Promise.resolve();
 }
 
 // ---------------------------------------------------------------------------
