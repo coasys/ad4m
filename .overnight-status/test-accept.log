@@ -1,0 +1,54 @@
+warning: patch for the non root package will be ignored, specify patch at the workspace root:
+package:   /home/data/code/ad4m/.worktrees/extraction-ws-ts/rust-executor/Cargo.toml
+workspace: /home/data/code/ad4m/.worktrees/extraction-ws-ts/Cargo.toml
+warning: ad4m-executor@0.13.0-test-9: Downloading alliance DNA v0.61.0 from GitHub...
+warning: ad4m-executor@0.13.0-test-9: Downloaded alliance DNA v0.61.0 (4801296 bytes)
+   Compiling ad4m-executor v0.13.0-test-9 (/home/data/code/ad4m/.worktrees/extraction-ws-ts/rust-executor)
+warning: unused imports: `OverlayView` and `overlay_of`
+  --> rust-executor/src/perspectives/interpretation/overlay/mod.rs:48:43
+   |
+48 |     accept_interpretation, list_overlays, overlay_of, reject_interpretation, OverlayView,
+   |                                           ^^^^^^^^^^                         ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `super::plan_interpretation_ops_with_context`
+  --> rust-executor/src/perspectives/interpretation/run.rs:10:5
+   |
+10 | use super::plan_interpretation_ops_with_context;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `semantic_dedup_pure` is never used
+   --> rust-executor/src/perspectives/interpretation/dedup.rs:135:15
+    |
+135 | pub(crate) fn semantic_dedup_pure(
+    |               ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `identity_values_by_class` is never used
+  --> rust-executor/src/perspectives/interpretation/graph/mod.rs:31:15
+   |
+31 | pub(crate) fn identity_values_by_class(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `ad4m-executor` (lib) generated 3 warnings (run `cargo fix --lib -p ad4m-executor` to apply 1 suggestion)
+warning: `ad4m-executor` (lib test) generated 2 warnings (1 duplicate) (run `cargo fix --lib -p ad4m-executor --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 2m 15s
+warning: the following packages contain code that will be rejected by a future version of Rust: xml5ever v0.16.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (target/release/deps/rust_executor-5dce9033875f1596)
+
+running 3 tests
+test perspectives::interpretation::overlay::accept::tests::accept_deletes_overlay_keeps_real_value ... ok
+test perspectives::interpretation::overlay::accept::tests::reject_create_deletes_whole_instance ... ok
+test perspectives::interpretation::overlay::accept::tests::reject_update_keeps_real_drops_overlay ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 821 filtered out; finished in 0.02s
+
+     Running unittests src/bin/generate_snapshot.rs (target/release/deps/generate_snapshot-ec63b2d2eae551b2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

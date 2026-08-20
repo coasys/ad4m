@@ -154,12 +154,21 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
       predicate: "ad4m://claim_ttl_ms",
       target: "literal:string:30000",
     }));
+    // `interpretation_class` is min_count: 1 in the Rust SDNA; without it
+    // the Rust loader skips the config. Seed one so the fixture models what
+    // the loader would actually accept (CodeRabbit #881, 2026-08-19).
+    await p.add(new Link({
+      source: "ad4m://autoprocessor/my-proc",
+      predicate: "ad4m://interpretation_class",
+      target: "literal:string:ad4m://Task",
+    }));
 
     const configs = await AutoProcessorConfig.findAll(p);
     expect(configs.length).to.equal(1);
     expect(configs[0].processorId).to.equal("my-proc");
     expect(configs[0].debounceMs).to.equal("300");
     expect(configs[0].batchMax).to.equal("16");
+    expect(configs[0].interpretationClasses).to.deep.equal(["ad4m://Task"]);
   });
 
   // ── SDNA parity — TS @Model shape agrees with Rust hardwired SDNA ──────────

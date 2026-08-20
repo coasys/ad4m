@@ -1,0 +1,32 @@
+warning: patch for the non root package will be ignored, specify patch at the workspace root:
+package:   /home/data/code/ad4m/.worktrees/extraction-ws-ts/rust-executor/Cargo.toml
+workspace: /home/data/code/ad4m/.worktrees/extraction-ws-ts/Cargo.toml
+warning: ad4m-executor@0.13.0-test-9: Downloading alliance DNA v0.61.0 from GitHub...
+warning: ad4m-executor@0.13.0-test-9: Downloaded alliance DNA v0.61.0 (4801296 bytes)
+   Compiling ad4m-executor v0.13.0-test-9 (/home/data/code/ad4m/.worktrees/extraction-ws-ts/rust-executor)
+warning: unused imports: `OverlayView` and `overlay_of`
+  --> rust-executor/src/perspectives/interpretation/overlay/mod.rs:48:43
+   |
+48 |     accept_interpretation, list_overlays, overlay_of, reject_interpretation, OverlayView,
+   |                                           ^^^^^^^^^^                         ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `semantic_dedup_pure` is never used
+   --> rust-executor/src/perspectives/interpretation/dedup.rs:135:15
+    |
+135 | pub(crate) fn semantic_dedup_pure(
+    |               ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `identity_values_by_class` is never used
+  --> rust-executor/src/perspectives/interpretation/graph/mod.rs:31:15
+   |
+31 | pub(crate) fn identity_values_by_class(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `ad4m-executor` (lib) generated 3 warnings (run `cargo fix --lib -p ad4m-executor` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 1m 38s
+warning: the following packages contain code that will be rejected by a future version of Rust: xml5ever v0.16.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
