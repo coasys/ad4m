@@ -412,7 +412,12 @@ export interface PropertyMetadata {
   readOnly: boolean;
   /** Initial value if specified */
   initial?: string;
-  /** Language for resolution (e.g., "literal") */
+  /** Sole selector of storage mode:
+   *   - unset               → deterministic typed literal (fast POS-index
+   *                            path, the default for a plain `@Property()`)
+   *   - `"literal"`         → signed envelope on the built-in literal language
+   *   - `<custom address>`  → expression on that custom language
+   */
   resolveLanguage?: string;
   /** Custom Prolog getter code */
   prologGetter?: string;

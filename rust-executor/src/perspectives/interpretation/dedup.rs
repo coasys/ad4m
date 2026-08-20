@@ -1,6 +1,6 @@
 use super::graph::{instances_by_class, normalize_identity};
 use super::types::{ExistingInstances, ProposedInstance};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// How identity-dedup resolved one proposed instance, while **keeping its slot**
 /// in the LLM's emission order so relation ordinals (`new:<Class>:<n>`) still
@@ -132,12 +132,14 @@ pub(crate) async fn embed_via_ai_service(
 /// `existing_vecs` and `proposed_vecs` are grouped by class local-name. A
 /// proposal whose class has no entry in `proposed_vecs` is kept (nothing to
 /// dedup); a class with no existing vectors also passes everything through.
+#[cfg(test)]
 pub(crate) fn semantic_dedup_pure(
     instances: Vec<ProposedInstance>,
     existing_vecs: &HashMap<String, Vec<Vec<f32>>>,
     proposed_vecs: &HashMap<String, Vec<(usize, Vec<f32>)>>,
     threshold: f32,
 ) -> Vec<ProposedInstance> {
+    use std::collections::HashSet;
     let mut drop: HashSet<usize> = HashSet::new();
     for (class, entries) in proposed_vecs.iter() {
         let Some(existing) = existing_vecs.get(class) else {

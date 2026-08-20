@@ -145,6 +145,11 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
 
         let path = first["path"].as_str().unwrap_or("").to_string();
         let datatype = first["datatype"].as_str().map(|s| s.to_string());
+        // Sole selector of storage mode. `None` → deterministic typed
+        // literal (fast POS-index path). `Some("literal")` → signed
+        // envelope on the built-in literal language. `Some(<addr>)` →
+        // custom-language expression. Preserved verbatim, including an
+        // explicit empty string.
         let resolve_language = first["resolveLanguage"]
             .as_str()
             .map(decode_literal_string_target);

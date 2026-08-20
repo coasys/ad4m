@@ -47,20 +47,25 @@ export function formatQueryValue(value: any): string {
  *
  * @param predicate  - The predicate URI for the property
  * @param condition  - The Where condition value
- * @param opts       - Optional settings (e.g. `resolveLanguage`)
+ * @param opts       - Optional settings. `isDeterministicLiteral` (default
+ *                     `true`) selects the direct typed-literal WHERE path.
+ *                     Set to `false` when the property stores a signed
+ *                     envelope (`resolveLanguage: "literal"`) or a
+ *                     custom-language expression — the envelope path unwraps
+ *                     with `parse_literal` before comparing.
  * @returns A single SPARQL condition string
  */
 export function buildWhereCondition(
     predicate: string,
     condition: WhereCondition,
-    opts?: { resolveLanguage?: string; varIndex?: number },
+    opts?: { isDeterministicLiteral?: boolean; varIndex?: number },
 ): string {
     const escapedPredicate = escapeQueryString(predicate);
-    // For literal-resolved properties, we match against the raw IRI (which is a literal: URI)
-    // For language-resolved properties, we match against the plain URI
-    // For literal-resolved properties, values are stored as IRIs like <literal:string:VALUE>
-    // For language-resolved properties, values are plain URIs
-    const isLiteral = !opts?.resolveLanguage || opts.resolveLanguage === 'literal';
+    // For deterministic-literal properties, values are stored as typed
+    // literals like `"X"^^xsd:string` (or the legacy `<literal:string:VALUE>`
+    // IRI form). For envelope / custom-language properties the target is a
+    // signed expression URI; comparisons need to unwrap via `parse_literal`.
+    const isLiteral = opts?.isDeterministicLiteral !== false;
 
     const varSuffix = opts?.varIndex ?? 0;
 
@@ -183,23 +188,28 @@ export function compileWhereClause(
         if (['id', 'author', 'timestamp'].includes(propertyName)) continue;
 
         let predicate: string;
-        let resolveLanguage: string | undefined;
+        // Storage mode is derived from `resolveLanguage` alone:
+        //   - undefined      → deterministic typed literal (fast POS-index path)
+        //   - "literal"      → signed envelope on the literal language
+        //   - custom address → expression on that custom language
+        // Envelope and custom-language properties both need the `parse_literal`
+        // unwrap path, so we treat any `resolveLanguage`-carrying property as
+        // non-deterministic here.
+        let isDeterministicLiteral: boolean | undefined;
 
         if (metadata) {
             const propMeta = metadata.properties[propertyName];
             if (propMeta) {
                 predicate = propMeta.predicate;
-                resolveLanguage = propMeta.resolveLanguage;
+                isDeterministicLiteral = propMeta.resolveLanguage === undefined;
             } else {
-                // Property not found in metadata — treat name as raw predicate URI
                 predicate = propertyName;
             }
         } else {
-            // No metadata — treat name as raw predicate URI
             predicate = propertyName;
         }
 
-        const cond = buildWhereCondition(predicate, condition, { resolveLanguage, varIndex: conditions.length });
+        const cond = buildWhereCondition(predicate, condition, { isDeterministicLiteral, varIndex: conditions.length });
         if (cond) {
             conditions.push(cond);
         }

@@ -106,3 +106,9 @@ pub use types::{
     IncludeValue, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, ProjectionInput,
     Scope, ShapeResolver, WhereCondition, WhereOps,
 };
+/// Re-export the shared IRI-safety predicate so write-side callers
+/// (e.g. `perspective_instance::resolve_property_value`,
+/// `mcp::tools::create_property_expression`) can gate raw-`NamedNode`
+/// storage on the same rule the SPARQL query builder uses.  See
+/// [`utils::is_safe_iri_target`] for the full contract.
+pub use utils::is_safe_iri_target;

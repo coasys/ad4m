@@ -1,3 +1,4 @@
+use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::sdna::{generic_link_fact, is_sdna_link};
@@ -3077,9 +3078,13 @@ impl PerspectiveInstance {
         .await
     }
 
-    /// Execute a SPARQL query against this perspective's Oxigraph store
+    /// Execute a SPARQL query against this perspective's Oxigraph store.
+    /// This is the generic `perspective.querySparql` entrypoint — the query
+    /// text is caller-supplied, so it uses `query_arbitrary` rather than
+    /// `query` (no wire-format re-encoding of coincidentally-named
+    /// `?target`/`?t` bindings; see `SparqlStore::query_arbitrary`).
     pub fn sparql_query(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_store.query(&query)
+        self.sparql_store.query_arbitrary(&query)
     }
 
     /// Execute a model query — the executor-side replacement for
@@ -4220,14 +4225,23 @@ impl PerspectiveInstance {
         Ok(None)
     }
 
-    /// Get resolve language from SHACL links
+    /// Get the resolve language address (`ad4m://resolveLanguage`) for a property.
+    ///
+    /// This is the sole selector of storage mode:
+    ///   - `None`             → deterministic typed literal (POS-index
+    ///                          fast path — the default for a plain
+    ///                          `@Property()`).
+    ///   - `Some("literal")`  → signed envelope on the built-in literal
+    ///                          language (per-value provenance, e.g.
+    ///                          Flux message bodies).
+    ///   - `Some(<addr>)`     → `expression_create` on that custom
+    ///                          language.
     pub async fn get_resolve_language_from_shacl(
         &self,
         class_name: &str,
         property: &str,
     ) -> Result<Option<String>, AnyError> {
         let prop_suffix = format!("{}.{}", class_name, property);
-        let _uuid = self.uuid.clone();
 
         let links = self
             .sparql_store
@@ -4276,35 +4290,60 @@ impl PerspectiveInstance {
         value: &serde_json::Value,
         context: &AgentContext,
     ) -> Result<String, AnyError> {
-        // Get resolve language from SHACL links
         let resolve_language = self
             .get_resolve_language_from_shacl(class_name, property)
             .await?;
 
-        if let Some(resolve_language) = resolve_language {
-            // Create an expression for the value
+        // Storage mode derives entirely from `resolveLanguage`:
+        //   - unset            → deterministic typed literal (fast path)
+        //   - Some("literal")  → signed envelope on the literal language
+        //   - Some(<addr>)     → expression_create on that custom language
+        if let Some(lang) = resolve_language.as_deref() {
+            if lang != "literal" {
+                let controller = crate::languages::LanguageController::global_instance();
+                let agent_context = context.clone();
+                return match controller
+                    .expression_create(lang, value.clone(), &agent_context)
+                    .await
+                {
+                    Ok(url) => Ok(url),
+                    Err(e) => {
+                        log::warn!("Failed to create expression on {}: {}", lang, e);
+                        Ok(value.to_string())
+                    }
+                };
+            }
+        }
+
+        // Literal-language storage. The property explicitly opts into the
+        // signed-envelope path via `resolveLanguage:"literal"` (per-value
+        // provenance, e.g. Flux message bodies); otherwise (resolveLanguage
+        // unset) the value is stored as a deterministic literal: IRI.
+        let envelope = resolve_language.as_deref() == Some("literal");
+
+        if envelope {
             let controller = crate::languages::LanguageController::global_instance();
             let agent_context = context.clone();
             match controller
-                .expression_create(&resolve_language, value.clone(), &agent_context)
+                .expression_create("literal", value.clone(), &agent_context)
                 .await
             {
                 Ok(url) => Ok(url),
                 Err(e) => {
-                    log::warn!("Failed to create expression on {}: {}", resolve_language, e);
-                    Ok(value.to_string())
+                    log::warn!("Failed to create expression on literal: {}", e);
+                    Err(anyhow!("Failed to create literal expression: {}", e))
                 }
             }
         } else {
             let uri = match value {
                 serde_json::Value::String(s) => {
-                    // If the value is already a valid URI (has a scheme), use it directly.
-                    // Otherwise wrap it in a literal:// URI so link targets are always valid URIs.
-                    static URI_SCHEME_RE: std::sync::OnceLock<regex::Regex> =
-                        std::sync::OnceLock::new();
-                    let re = URI_SCHEME_RE
-                        .get_or_init(|| regex::Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-._]*:").unwrap());
-                    if re.is_match(s) {
+                    // If the value is already a well-formed absolute IRI, store it as a
+                    // raw NamedNode target. Otherwise wrap it in a `literal:string:*`
+                    // URI so link targets are always valid IRIs and stay round-trippable
+                    // through the query side. The predicate is shared with
+                    // `model_query::utils::looks_like_absolute_iri` — see
+                    // `is_safe_iri_target` for why they MUST agree.
+                    if is_safe_iri_target(s) {
                         s.clone()
                     } else {
                         Literal::from_string(s.clone())
@@ -4323,7 +4362,23 @@ impl PerspectiveInstance {
                             .map_err(|e| anyhow!("Failed to encode number as literal URI: {}", e))?
                     }
                 }
-                _ => value.to_string(),
+                // Booleans become deterministic `literal:boolean:` IRIs, matching
+                // the TS `valueToLiteralIri` / `Literal` encoding. The storage
+                // layer turns these into typed `xsd:boolean` terms for indexed
+                // WHERE matching, and the read path decodes them back to a JSON
+                // bool. The Rust `Literal` helper has no boolean variant, so we
+                // format the wire form directly.
+                serde_json::Value::Bool(b) => format!("literal:boolean:{b}"),
+                // Objects / arrays become deterministic `literal:json:` IRIs so
+                // they round-trip back to JSON values rather than being stored
+                // as raw `value.to_string()` targets (which the storage layer
+                // would keep as opaque NamedNode IRIs and read back as strings).
+                serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                    Literal::from_json(value.clone())
+                        .to_url()
+                        .map_err(|e| anyhow!("Failed to encode JSON as literal URI: {}", e))?
+                }
+                serde_json::Value::Null => value.to_string(),
             };
             Ok(uri)
         }
@@ -6638,10 +6693,13 @@ mod tests {
             .await
             .expect("add TaskBoard");
 
-        let board = "literal:string:test_board";
-        let active1 = "literal:string:active1";
-        let active2 = "literal:string:active2";
-        let done1 = "literal:string:done1";
+        // IDs used in subject position must be real IRIs — typed-literal
+        // storage strips `literal:string:` wrappers from object position, so
+        // a value used as both subject and target wouldn't round-trip.
+        let board = "ad4m://test_board";
+        let active1 = "ad4m://active1";
+        let active2 = "ad4m://active2";
+        let done1 = "ad4m://done1";
         let signed_active = "literal:string:active";
         let signed_done = "literal:string:done";
         let signed_title = "literal:string:t";
