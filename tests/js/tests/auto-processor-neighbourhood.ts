@@ -332,26 +332,47 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         // watcher still thinks all 4 turns are new — Bob re-processes
         // w1a+w1b, and `retired()` reports duplicates.
         //
-        // Under #874's typed-literal storage: the `sources` collection uses
-        // an `addLink target=value` setter with no `resolveLanguage`, so
-        // `resolve_property_value` wraps each non-URI turn-id string as
-        // `literal:string:<id>` for storage. `HasMany` returns targets
-        // verbatim (wire form) on read, so `r.sources` contains
-        // `literal:string:...` entries. `event.itemIds` (the source of
-        // `firstWave`) is the RAW turn-id string. Normalise BOTH sides to
-        // the plain id before comparing — otherwise the comparison is
-        // structurally guaranteed to fail even when sync worked.
+        // DEBUG: dump what Bob actually has so we can see what's failing.
+        // Log Alice's own view AND Bob's view: findAll on both, raw links,
+        // firstWave contents. Data before theories.
         const stripLiteral = (s: string): string =>
-          s.replace(/^literal:string:/, "");
+          typeof s === "string" ? s.replace(/^literal:string:/, "") : s;
+        let debugTicks = 0;
         await waitUntil(
           async () => {
+            debugTicks++;
             const bobRuns = await InterpretationRun.findAll(sharedBobP);
-            const targets = new Set(firstWave.map(stripLiteral));
+            const aliceRuns = await InterpretationRun.findAll(sharedAliceP);
+            // Also raw links to see what shape sources take on the wire.
+            const aliceRawSources = await sharedAliceP.get(
+              new LinkQuery({ predicate: "ad4m://interp/sources" }),
+            );
+            const bobRawSources = await sharedBobP.get(
+              new LinkQuery({ predicate: "ad4m://interp/sources" }),
+            );
+            if (debugTicks === 1 || debugTicks % 20 === 0) {
+              // eslint-disable-next-line no-console
+              console.log(`[wave-1 barrier tick ${debugTicks}]`, JSON.stringify({
+                firstWave,
+                firstWaveStripped: firstWave.map(stripLiteral),
+                aliceRuns: aliceRuns.map(r => ({ runId: r.runId, sources: r.sources })),
+                bobRuns: bobRuns.map(r => ({ runId: r.runId, sources: r.sources })),
+                aliceRawSourceCount: aliceRawSources.length,
+                aliceRawSourceSample: aliceRawSources.slice(0, 4).map(l => ({
+                  source: l.data.source, target: l.data.target,
+                })),
+                bobRawSourceCount: bobRawSources.length,
+                bobRawSourceSample: bobRawSources.slice(0, 4).map(l => ({
+                  source: l.data.source, target: l.data.target,
+                })),
+              }, null, 2));
+            }
+            // Match ANY form: raw, stripped, or containing the id substring.
+            const targets = firstWave.map(stripLiteral);
             return bobRuns.some((r) => {
-              if (!Array.isArray(r.sources)) return false;
-              const norm = new Set(r.sources.map(stripLiteral));
-              for (const t of targets) if (!norm.has(t)) return false;
-              return true;
+              const rawSources = Array.isArray(r.sources) ? r.sources : [];
+              const stripped = rawSources.map(stripLiteral);
+              return targets.every((t) => stripped.includes(t) || rawSources.includes(t));
             });
           },
           180_000,
