@@ -425,14 +425,58 @@ describe("sync: coalesceDiffs (batch merge safety)", () => {
         assert.deepEqual(segments[1].removals.map((l) => l.data.source), ["x"]);
     });
 
-    it("falls back to a data+author+timestamp key when signatures are empty", () => {
-        // Fixtures without real signatures must still split correctly.
+    it("uses canonical fields (not signature) — same link with different signatures collides", () => {
+        // Two links with identical canonical fields but different
+        // signatures ARE the same link from the server's perspective
+        // (linkHash ignores the signature). A signature-based identity
+        // would let remove(oldSig) + add(newSig) merge into one segment
+        // and the server would apply add-then-remove → X gone, contrary
+        // to caller intent. Canonical-only identity forces the split.
+        const oldSig = link({ source: "x", sig: "sig-old" });
+        const reSigned = link({ source: "x", sig: "sig-new" });
+        const segments = syncModule.coalesceDiffs([
+            { additions: [], removals: [oldSig] },
+            { additions: [reSigned], removals: [] },
+        ]);
+        assert.equal(segments.length, 2, "identity must treat re-signed links as the same link");
+    });
+
+    it("works for signature-less fixtures via canonical fields", () => {
+        // Same canonical fields, no signature at all → same identity.
         const X = link({ source: "x", sig: "" });
         const segments = syncModule.coalesceDiffs([
             { additions: [], removals: [X] },
             { additions: [X], removals: [] },
         ]);
-        assert.equal(segments.length, 2, "identity fallback should detect the collision");
+        assert.equal(segments.length, 2, "signature-less links must still collide by canonical fields");
+    });
+
+    it("distinguishes links whose fields would collide under naïve pipe-serialisation", () => {
+        // author="a|b" timestamp="t" vs author="a" timestamp="b|t" would
+        // collide under `${author}|${timestamp}`. JSON serialisation
+        // escapes the boundary so identities stay distinct — meaning a
+        // remove of A must NOT be treated as a conflict with a segment
+        // containing B, and vice versa.
+        const A: LinkExpression = {
+            author: "a|b",
+            timestamp: "t",
+            data: { source: "s", target: "t", predicate: "p" },
+            proof: { signature: "", key: "k" },
+        };
+        const B: LinkExpression = {
+            author: "a",
+            timestamp: "b|t",
+            data: { source: "s", target: "t", predicate: "p" },
+            proof: { signature: "", key: "k" },
+        };
+        // Adding both together shouldn't count as a self-conflict when a
+        // later diff removes A: only A's segment should conflict.
+        const segments = syncModule.coalesceDiffs([
+            { additions: [A, B], removals: [] },
+            { additions: [], removals: [A] },
+        ]);
+        assert.equal(segments.length, 2);
+        assert.equal(segments[1].removals[0].author, "a|b");
     });
 });
 
@@ -506,17 +550,44 @@ describe("sync: enqueueCommitBatched", () => {
         assert.equal(posts.length, 1);
     });
 
-    it("a segment that fails does not block subsequent segments", async () => {
+    it("retries a failing segment with backoff and succeeds when the server recovers", async () => {
+        const transport = new MockTransport();
+        let calls = 0;
+        transport.route(
+            (url, method) => method === "POST" && url.endsWith("/commit"),
+            () => {
+                calls++;
+                if (calls < 3) return { status: 500, headers: {}, body: "transient" };
+                return { status: 200, headers: {}, body: "{}" };
+            },
+        );
+        setup(transport);
+        syncModule.enqueueCommitBatched({
+            additions: [{
+                author: "did:key:zAuthor",
+                timestamp: "2026-01-01T00:00:00.000Z",
+                data: { source: "s", target: "t", predicate: "p" },
+                proof: { signature: "sig", key: "k" },
+            }],
+            removals: [],
+        });
+        await syncModule.drainCommitBatch();
+        assert.equal(calls, 3, "must retry up to MAX_COMMIT_ATTEMPTS on transient failure");
+        assert.ok(!syncStates.includes("LinkLanguageInstalledButNotSynced"),
+            "successful retry should not emit the not-synced state");
+    });
+
+    it("aborts the queue tail when a segment fails all retries", async () => {
+        // Segments are split precisely because they conflict on link
+        // identity — letting a downstream segment land after an upstream
+        // hard-failed would leave server + local store divergent.
         const transport = new MockTransport();
         const posts: any[] = [];
-        let call = 0;
         transport.route(
             (url, method) => method === "POST" && url.endsWith("/commit"),
             (_url, _method, body) => {
-                call++;
                 posts.push(JSON.parse(body));
-                if (call === 1) return { status: 500, headers: {}, body: "boom" };
-                return { status: 200, headers: {}, body: "{}" };
+                return { status: 500, headers: {}, body: "hard failure" };
             },
         );
         setup(transport);
@@ -526,11 +597,14 @@ describe("sync: enqueueCommitBatched", () => {
             data: { source: "x", target: "t", predicate: "p" },
             proof: { signature: "sig-X", key: "k" },
         };
-        // Forces two segments (remove-then-add of the same identity).
+        // Forces three segments: remove(X); add(X); remove(X).
         syncModule.enqueueCommitBatched({ additions: [], removals: [X] });
         syncModule.enqueueCommitBatched({ additions: [X], removals: [] });
+        syncModule.enqueueCommitBatched({ additions: [], removals: [X] });
         await syncModule.drainCommitBatch();
-        assert.equal(posts.length, 2, "the second segment must still be attempted after the first fails");
+        // First segment: 3 attempts (MAX_COMMIT_ATTEMPTS) — all fail.
+        // Then the tail is aborted, so segments 2 and 3 are NOT attempted.
+        assert.equal(posts.length, 3, "only the first segment's 3 retry attempts should hit the wire");
         assert.ok(syncStates.includes("LinkLanguageInstalledButNotSynced"));
     });
 });

@@ -168,11 +168,23 @@ export async function commit(diff: PerspectiveDiff): Promise<void> {
 //     add(X)` into `additions:[X], removals:[X]` would silently swap the
 //     order → X gone when the caller expected X to remain.)
 //   - Common bulk-add case (1500 unique addLinks) → 1 segment → 1 POST.
-//   - Send errors are logged per segment; a failed segment is dropped and
-//     subsequent segments still POST (they are ordering-independent from a
-//     dropped one by construction — the split points guarantee it).
-//     Callers relying on strict commit-error semantics must use `commit()`.
+//   - Per-segment bounded retries with exponential backoff (replaces the
+//     old `commitWithRetry`). If a segment still fails after
+//     `MAX_COMMIT_ATTEMPTS`, the WHOLE tail of subsequent segments is
+//     aborted — segments were split precisely because they conflict on
+//     link identity, so letting a later segment land after an earlier one
+//     failed would leave the server in a state that neither matches the
+//     caller's intent nor the local store (e.g. remove(X) fails + add(X)
+//     succeeds → server has X, local re-added it, but the intended remove
+//     never happened). We emit `LinkLanguageInstalledButNotSynced` so the
+//     executor knows to treat the language as behind. The local store
+//     already reflects every write (index.ts applies before enqueueing);
+//     there is no automatic re-push path — a hard-failed batch requires
+//     external recovery (teardown + rejoin, or a future re-push flow).
 // ---------------------------------------------------------------------------
+
+const MAX_COMMIT_ATTEMPTS = 3;
+const RETRY_BASE_DELAY_MS = 200;
 
 let _pendingQueue: PerspectiveDiff[] = [];
 let _flushScheduled = false;
@@ -199,20 +211,48 @@ async function flushBatch(): Promise<void> {
     if (queue.length === 0) return;
 
     const segments = coalesceDiffs(queue);
-    for (const segment of segments) {
+    for (let i = 0; i < segments.length; i++) {
+        const segment = segments[i];
         if (segment.additions.length === 0 && segment.removals.length === 0) continue;
-        try {
-            await commit(segment);
-        } catch (err) {
+        const ok = await commitSegmentWithRetries(segment);
+        if (!ok) {
+            const remaining = segments.length - i - 1;
             console.error(
-                `[server-link-language] batched commit failed (${segment.additions.length} adds, ` +
-                `${segment.removals.length} removes) — this segment is NOT retried; ` +
-                `writes are safe locally but the server missed them.`,
-                err,
+                `[server-link-language] batched flush aborted: segment ${i + 1}/${segments.length} ` +
+                `failed after ${MAX_COMMIT_ATTEMPTS} attempts (${segment.additions.length} adds, ` +
+                `${segment.removals.length} removes)` +
+                (remaining > 0
+                    ? `; skipping ${remaining} downstream segment(s) to avoid divergent partial-apply.`
+                    : ".") +
+                ` Local store already reflects all writes; server is behind. ` +
+                `The language has no automatic re-push path — a subsequent sync() only PULLS.`,
             );
             deps().emitSyncState?.("LinkLanguageInstalledButNotSynced");
+            return;
         }
     }
+}
+
+async function commitSegmentWithRetries(segment: PerspectiveDiff): Promise<boolean> {
+    let delay = RETRY_BASE_DELAY_MS;
+    for (let attempt = 1; attempt <= MAX_COMMIT_ATTEMPTS; attempt++) {
+        try {
+            await commit(segment);
+            return true;
+        } catch (err) {
+            const isLast = attempt === MAX_COMMIT_ATTEMPTS;
+            console.error(
+                `[server-link-language] batched commit attempt ${attempt}/${MAX_COMMIT_ATTEMPTS} ` +
+                `failed (${segment.additions.length} adds, ${segment.removals.length} removes)` +
+                (isLast ? " — giving up." : `; retrying in ${delay}ms.`),
+                err,
+            );
+            if (isLast) return false;
+            await new Promise<void>((resolve) => setTimeout(resolve, delay));
+            delay *= 2;
+        }
+    }
+    return false;
 }
 
 /**
@@ -220,11 +260,10 @@ async function flushBatch(): Promise<void> {
  * preserve observable server-side ordering. See the block comment above
  * for the merge-safety rule.
  *
- * Identity: `proof.signature` — a signature over the link's canonical
- * payload, so two links with the same signature are the same link from
- * every consumer's perspective. Empty signatures fall back to a
- * data+author+timestamp key so test fixtures without real signatures still
- * split correctly.
+ * Identity: canonical fields (`author`, `timestamp`, `source`, `predicate`,
+ * `target`) serialised via JSON.stringify. Matches the server's own
+ * linkHash inputs — see `linkIdentity` below for why signature is
+ * deliberately excluded.
  */
 export function coalesceDiffs(queue: PerspectiveDiff[]): PerspectiveDiff[] {
     const segments: PerspectiveDiff[] = [];
@@ -250,12 +289,28 @@ export function coalesceDiffs(queue: PerspectiveDiff[]): PerspectiveDiff[] {
 }
 
 function linkIdentity(link: LinkExpression): string {
-    const sig = link.proof?.signature;
-    if (sig) return `sig:${sig}`;
-    // Deterministic fallback matching the fields link-server uses to hash
-    // (see link-server/src/types.ts::canonicalLinkPayload). Ensures
-    // signature-less test fixtures still collide correctly.
-    return `raw:${link.author}|${link.timestamp}|${link.data?.source ?? ""}|${link.data?.predicate ?? ""}|${link.data?.target ?? ""}`;
+    // Canonical fields ONLY — matches link-server's canonicalLinkPayload
+    // for plaintext data (link-server/src/types.ts::canonicalLinkPayload:
+    // {source, predicate, target, author, timestamp}). We deliberately do
+    // NOT include proof.signature: two links with identical canonical
+    // fields but different signatures (e.g. re-signed after a key
+    // rotation) are the SAME link from the server's perspective, and
+    // treating them as different identities would let a remove(oldSig)
+    // + add(newSig) sequence merge into one segment → additions:[X],
+    // removals:[X] → server applies add-then-remove → X gone, contrary
+    // to the caller's intent.
+    //
+    // JSON.stringify is collision-resistant: separators and quotes in any
+    // string field are escaped rather than interpretable as boundaries, so
+    // (author: "a|b", timestamp: "t") and (author: "a", timestamp: "b|t")
+    // never produce the same key.
+    return JSON.stringify([
+        link.author,
+        link.timestamp,
+        link.data?.source ?? "",
+        link.data?.predicate ?? null,
+        link.data?.target ?? "",
+    ]);
 }
 
 /** Test/teardown hook: await any in-flight flush + one pending flush so a
