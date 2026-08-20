@@ -1,15 +1,16 @@
 import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
 import { TestContext } from './integration.test'
 import { sleep } from "../utils/utils";
-import fs from "fs";
-import { v4 as uuidv4 } from 'uuid';
+import { LinkLangConfig, publishLinkLanguage } from "../utils/linkLangConfig";
 import { expect } from "chai";
 
-const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 let aliceP1: null | PerspectiveProxy = null;
 let bobP1: null | PerspectiveHandle = null;
 
-export default function neighbourhoodTests(testContext: TestContext) {
+// `getLinkLang` is a getter (not a value) because callers wire the config in a
+// `before()` hook — the value doesn't exist yet when this factory runs at
+// import time. See integration.test.ts for the call sites.
+export default function neighbourhoodTests(testContext: TestContext, getLinkLang: () => LinkLangConfig) {
     return () => {
         describe('Neighbourhood', () => {
             it('can publish and join locally @alice', async () => {
@@ -21,7 +22,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(create.state).to.be.equal(PerspectiveState.Private);
 
                 //Create unique perspective-diff-sync to simulate real scenario
-                const socialContext = await ad4mClient.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's perspective-diff-sync"}));
+                const socialContext = await publishLinkLanguage(ad4mClient, getLinkLang(), "Alice's perspective-diff-sync");
                 expect(socialContext.name).to.be.equal("Alice's perspective-diff-sync");
 
                 let link = new LinkExpression()
@@ -63,7 +64,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const bob = testContext.bob
 
                 const aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob"}));
+                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob");
                 expect(socialContext.name).to.be.equal("Alice's neighbourhood with Bob");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
 
@@ -83,7 +84,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const bob = testContext.bob
 
                 const aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob test shared links"}));
+                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob test shared links");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
 
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
@@ -118,7 +119,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const bob = testContext.bob
 
                 aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob test local links"}));
+                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob test local links");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
                 console.log("neighbourhoodUrl", neighbourhoodUrl);
                 bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
@@ -149,7 +150,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const bob = testContext.bob
 
                 aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob stress test"}));
+                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob stress test");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
                 console.log("neighbourhoodUrl", neighbourhoodUrl);
                 bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
@@ -327,7 +328,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     const bob = testContext.bob
 
                     const aliceP1 = await alice.perspective.add("telepresence")
-                    const linkLang = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood for Telepresence"}));
+                    const linkLang = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood for Telepresence");
                     const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, linkLang.address, new Perspective())
                     await sleep(5000)
                     const bobP1Handle = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
