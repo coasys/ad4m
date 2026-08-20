@@ -53,7 +53,8 @@ pub struct MentionWakerConfigParams {
 /// string literal. Mention terms come from profile names / `name_override`
 /// — untrusted input, potentially attacker-controlled in a shared
 /// neighbourhood — so without this, a `"` or `\` breaks out of the literal
-/// and can inject arbitrary SPARQL into the mention-matching FILTER.
+/// and can inject arbitrary SPARQL into the mention-matching FILTER. Also
+/// escapes CR/LF/TAB, which SPARQL STRING_LITERAL2 forbids raw.
 fn escape_sparql_literal(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -340,18 +341,6 @@ pub fn build_mention_query(names: &[String], did: &str, body_predicate: Option<&
             ontology_guard, mention_predicate
         ),
     }
-}
-
-/// Escape a string for embedding inside a SPARQL double-quoted literal.
-/// Backslash first, then the double-quote and the control characters that a
-/// STRING_LITERAL2 forbids raw (CR/LF/TAB) — a term carrying a newline would
-/// otherwise produce an unparseable query.
-fn escape_sparql_literal(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
 }
 
 /// Build a mention-subscription id keyed on the perspective.
