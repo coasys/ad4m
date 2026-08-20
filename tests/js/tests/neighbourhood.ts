@@ -533,7 +533,12 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     // @ts-ignore - Ignoring the type error since we know the implementation supports loopback
                     await bobNH!.sendBroadcastU(bobSignal, true)
 
-                    await pollUntil(() => bobCalls >= 2, { label: "bob receives own loopback broadcast" })
+                    // Wait for BOTH counters. Bob's local loopback echo lands
+                    // on Bob's own pubsub within microseconds; Alice receives
+                    // via the link-language broadcast which is much slower.
+                    // Polling on just `bobCalls >= 2` returns as soon as the
+                    // fast half lands and races the aliceCalls assertion below.
+                    await pollUntil(() => bobCalls >= 2 && aliceCalls >= 2, { label: "bob+alice receive bob's loopback broadcast" })
 
                     expect(bobCalls).to.be.equal(2) // Bob should receive his own broadcast
                     expect(aliceCalls).to.be.equal(2) // Alice should receive Bob's broadcast
