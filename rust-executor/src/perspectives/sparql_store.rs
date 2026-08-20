@@ -189,7 +189,10 @@ fn parse_literal_fn(args: &[Term]) -> Option<Term> {
     // literal migration everything was NamedNode-encoded, after it same
     // payloads land as Literals, and a query may still see either shape.
     let (raw, datatype) = match &args[0] {
-        Term::Literal(l) => (l.value().to_string(), Some(l.datatype().as_str().to_string())),
+        Term::Literal(l) => (
+            l.value().to_string(),
+            Some(l.datatype().as_str().to_string()),
+        ),
         Term::NamedNode(n) => (n.as_str().to_string(), None),
         _ => return Some(args[0].clone()),
     };
