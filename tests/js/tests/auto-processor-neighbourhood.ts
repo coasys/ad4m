@@ -7,19 +7,32 @@
  * language, so the claim and the processed-turn cursor have to coordinate
  * through the shared graph with real sync latency in between.
  *
- * Flow (mirrors ./neighbourhood.ts's publish/join pattern):
+ * Setup (once per describe, in `before`):
  *   1. Alice creates a perspective and publishes it as a neighbourhood.
  *   2. Bob joins → both share the graph, so claim + subgroup links sync.
- *   3. Both register the ConversationSubgroup class + the LLM; Alice registers
- *      one auto-processor (its config syncs to Bob).
- *   4. Messages are posted into the shared channel.
- *   5. Both executors' watch loops run and coordinate over the shared graph.
+ *   3. Explicit gossip warm-up: Alice writes a marker link, we wait until Bob
+ *      sees it. Proves the sync path is live before any test runs.
+ *   4. Register ConversationSubgroup + the interpretation-overlay hard-wired
+ *      classes on BOTH peers up-front — drains the SHACL writes into the
+ *      warm-up window when the test is idle.
+ *   5. Register the LLM on both peers.
  *
- * The neighbourhood is published and joined here, the same way ./neighbourhood.ts
- * does it, so this needs nothing from the environment beyond what the rest of
- * the integration suite already needs — plus a reachable LLM, which the runner
- * provides for the Rust e2e suite too. Model/endpoint are overridable via
- * INTERPRETATION_E2E_MODEL / INTERPRETATION_E2E_BASE_URL.
+ * Per-test isolation via graph portioning (Nico 2026-08-20):
+ *   Each `it` block works over its OWN subtree of the shared perspective —
+ *   messages live under a per-test scope root (`soa://ap-<test>/`), and the
+ *   processor's `sourceScopeQuery` walks only that root. Two processors on
+ *   the same perspective therefore see disjoint message sets, so they don't
+ *   cross-contaminate each other's cursors or subgroup mints. `existingScope`
+ *   + `mintScope` additionally isolate the interpreted-instance side (upsert
+ *   scope + mint-scope linking) as belt-and-suspenders.
+ *
+ * Reusing the neighbourhood avoids paying the full Holochain gossip-bootstrap
+ * on every test — the earlier "fresh neighbourhood per it" pattern reliably
+ * timed out on Marvin under CI load (2026-08-20 investigation, jobs 21598,
+ * 21612, 21624, 21680).
+ *
+ * Model/endpoint are overridable via INTERPRETATION_E2E_MODEL /
+ * INTERPRETATION_E2E_BASE_URL.
  */
 import {
   PerspectiveProxy,
@@ -43,19 +56,28 @@ const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
 const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
 
-// Speaker and timestamp come off the body link's reifier, not an app-level
-// `ns://author` predicate: `?timestamp` is required (it is what makes a turn
-// identifiable to the processed-turn cursor) and only the reifier carries it.
-// Note the consequence here: `?speaker` is the DID that *signed* the link, so
-// each peer's own messages carry that peer as the speaker — which is what the
-// authorship election runs on.
-const SCOPE_QUERY = `SELECT ?speaker ?text ?timestamp WHERE {
-  ?m <ns://body> ?text .
-  ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
-  ?r <ad4m://ontology/author> ?speaker .
-  ?r <ad4m://ontology/timestamp> ?timestamp .
+// Predicate linking a scope-root node to the message URIs it contains.
+// Used both by `say()` (to make each test's messages children of its scope
+// root) and by the scope query below (to gather them by walking that edge).
+const HAS_MSG = "soa://has-msg";
+
+/**
+ * Build a `sourceScopeQuery` that gathers only messages under `scopeRoot`.
+ *
+ * `?speaker` and `?timestamp` still come off the body-link reifier — required
+ * bindings the processed-turn cursor keys on — same shape as
+ * `BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY`, plus a scope-root parent edge.
+ */
+function scopedSourceQuery(scopeRoot: string): string {
+  return `SELECT ?speaker ?text ?timestamp WHERE {
+    <${scopeRoot}> <${HAS_MSG}> ?m .
+    ?m <ns://body> ?text .
+    ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
+    ?r <ad4m://ontology/author> ?speaker .
+    ?r <ad4m://ontology/timestamp> ?timestamp .
+  }
+  ORDER BY ?timestamp`;
 }
-ORDER BY ?timestamp`;
 
 async function registerLlm(ad4m: any): Promise<void> {
   const modelId = await ad4m.ai.addModel({
@@ -69,29 +91,35 @@ async function registerLlm(ad4m: any): Promise<void> {
 export default function autoProcessorNeighbourhoodTests(testContext: TestContext) {
   return () => {
     describe("Auto-processor across two executors", function () {
-      // Cumulative wait budget in the slowest test:
-      //   sharedChannel gossip warm-up (up to 180s)
-      // + wave-1 processed (up to 240s)
-      // + wave-1 cursor synced to Bob (up to 300s)
-      // + wave-2 processed (up to 240s)
-      // + subgroups converge (up to 120s)
-      // = up to 1_080s. Suite timeout 1_500s gives every waitUntil budget
-      // enough head-room to report its own diagnostic before Mocha times
-      // out the whole test (CodeRabbit #881: never mask the real barrier).
+      // Per-test wait budgets: setup warm-up (≤180s) + wave-1 processed
+      // (≤240s) + cross-peer cursor sync (≤300s) + wave-2 processed (≤240s)
+      // + subgroup convergence (≤120s) ≈ 1_080s worst case. Cap the suite at
+      // 1_500s so every `waitUntil` has room to report its own diagnostic
+      // before Mocha times out the whole test (CodeRabbit #881: never mask
+      // the real barrier).
       this.timeout(1_500_000);
-      /**
-       * Alice publishes a neighbourhood, Bob joins, both register the class and
-       * the LLM, and Alice registers one processor whose config syncs to Bob.
-       * Returns both proxies plus the merged event stream from both executors.
-       */
-      async function sharedChannel(processorId: string, config: Record<string, unknown> = {}) {
+
+      // Shared neighbourhood used by every `it` in this describe. Established
+      // exactly once in `before`. Per-test isolation is by scope root
+      // (different portion of this same graph per test), not by fresh
+      // neighbourhoods — the old "publish per it" pattern paid the full
+      // Holochain gossip-bootstrap cost each time and timed out under
+      // Marvin CI load (2026-08-20).
+      let sharedAliceP: PerspectiveProxy;
+      let sharedBobP: PerspectiveProxy;
+      const allEvents: AutoProcessorEvent[] = [];
+
+      before(async function () {
+        // Setup can take a while on cold Marvin — see the 180s warm-up wait.
+        this.timeout(600_000);
+
         const alice = testContext.alice;
         const bob = testContext.bob;
 
         await registerLlm(alice);
         await registerLlm(bob);
 
-        const aliceHandle = await alice.perspective.add(`ap-channel-${processorId}`);
+        const aliceHandle = await alice.perspective.add(`ap-shared-${uuidv4()}`);
         const socialContext = await alice.languages.applyTemplateAndPublish(
           DIFF_SYNC_OFFICIAL,
           JSON.stringify({ uid: uuidv4(), name: "auto-processor neighbourhood" }),
@@ -106,103 +134,118 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         await testContext.makeAllNodesKnown();
         await sleep(2000);
 
-        const aliceP = (await alice.perspective.byUUID(aliceHandle.uuid)) as PerspectiveProxy;
-        const bobP = (await bob.perspective.byUUID(bobHandle.uuid)) as PerspectiveProxy;
+        sharedAliceP = (await alice.perspective.byUUID(aliceHandle.uuid)) as PerspectiveProxy;
+        sharedBobP = (await bob.perspective.byUUID(bobHandle.uuid)) as PerspectiveProxy;
 
-        // Explicit gossip warm-up: each `it` in this describe currently spins
-        // up a fresh neighbourhood (new language template, new publish/join),
-        // so p-diff-sync has to bootstrap its gossip peers from scratch on
-        // every test. If gossip isn't actually flowing yet, any subsequent
-        // cross-peer expectation (like the wave test's cursor barrier) will
-        // fail with a confusing timeout deep inside the test.
-        //
-        // Prove the sync path works at setup time: Alice writes a marker
-        // link, we wait until it reaches Bob. If gossip is broken we fail
-        // here with a clear diagnostic, not 4 minutes later on wave 2's
-        // barrier. If it's fine we proceed with confidence that further
-        // link writes will sync in bounded time (2026-08-20 Marvin flake).
+        // Explicit gossip warm-up: prove the sync path is up before any
+        // test runs anything critical. If gossip is broken we fail here
+        // with a clear diagnostic (3 minutes into setup) rather than
+        // 5 minutes into a test's barrier.
         const marker = `warmup://${uuidv4()}`;
-        await aliceP.add(
+        await sharedAliceP.add(
           new Link({ source: marker, predicate: "ns://ping", target: "literal:string:ok" }),
         );
         await waitUntil(
           async () => {
-            const links = await bobP.get(new LinkQuery({ source: marker }));
+            const links = await sharedBobP.get(new LinkQuery({ source: marker }));
             return links.length > 0;
           },
           180_000,
           "gossip warm-up: Alice's marker link to reach Bob",
         );
 
-        await ConversationSubgroup.register(aliceP);
-        await ConversationSubgroup.register(bobP);
+        // Register all subject classes up-front, before any pass runs. This
+        // drains the SHACL writes for ConversationSubgroup +
+        // InterpretationRun + InterpretationOverlay into the setup window,
+        // so the first-pass `ensure_interpretation_overlay_classes` inside
+        // the executor is a no-op and doesn't compete for immediate-commit
+        // slots (`IMMEDIATE_COMMITS_COUNT=20`) with the pass's own writes.
+        await ConversationSubgroup.register(sharedAliceP);
+        await ConversationSubgroup.register(sharedBobP);
+        await InterpretationRun.register(sharedAliceP);
+        await InterpretationRun.register(sharedBobP);
+        await InterpretationOverlay.register(sharedAliceP);
+        await InterpretationOverlay.register(sharedBobP);
 
-        // Pre-register the interpretation-overlay hard-wired classes on BOTH
-        // peers up-front, so `ensure_interpretation_overlay_classes` inside
-        // the pass is a no-op. Otherwise the very first pass fires ~35+
-        // SHACL link writes for `InterpretationRun` + `InterpretationOverlay`
-        // SDNA in tight succession — enough to hit the per-perspective
-        // `IMMEDIATE_COMMITS_COUNT=20` throttle in
-        // `perspective_instance::commit` and push the rest into the
-        // pending-diff queue (which only drains on a 3s / 1s-idle timer).
-        // Under that backlog the wave-1 `InterpretationRun` never reaches
-        // Bob's copy within the barrier's budget, and Bob's watcher never
-        // sees the wave-1 messages either, so wave 2 races.
-        //
-        // Registering up-front drains those writes during the warm-up window,
-        // when the test is idle and gossip has time to catch up (2026-08-20
-        // Marvin sync-latency investigation).
-        await InterpretationRun.register(aliceP);
-        await InterpretationRun.register(bobP);
-        await InterpretationOverlay.register(aliceP);
-        await InterpretationOverlay.register(bobP);
+        // One merged event stream from both executors. Per-test event
+        // filtering is by `processorId` on the consumer side, so each `it`
+        // block only sees its own processor's events.
+        await sharedAliceP.addAutoProcessorEventListener((e) => allEvents.push(e));
+        await sharedBobP.addAutoProcessorEventListener((e) => allEvents.push(e));
+      });
 
-        // One merged stream: each executor reports its own passes, tagged with
-        // the DID that ran them, so "who did what" is readable from one list.
-        const events: AutoProcessorEvent[] = [];
-        await aliceP.addAutoProcessorEventListener((e) => events.push(e));
-        await bobP.addAutoProcessorEventListener((e) => events.push(e));
+      /**
+       * Add a message under a scope root. `say()` links the message URI to the
+       * scope root via `HAS_MSG`, so `scopedSourceQuery(scopeRoot)` will
+       * gather it. Only messages linked under the correct scope root are
+       * visible to a scoped processor, so tests don't cross-contaminate.
+       */
+      async function say(
+        p: PerspectiveProxy,
+        scopeRoot: string,
+        uri: string,
+        body: string,
+      ) {
+        await p.add(new Link({ source: scopeRoot, predicate: HAS_MSG, target: uri }));
+        await p.add(new Link({ source: uri, predicate: "ns://body", target: `literal:string:${body}` }));
+      }
 
-        await aliceP.addAutoProcessor({
+      /** Events from `allEvents` filtered to the given processor. */
+      function eventsFor(processorId: string): AutoProcessorEvent[] {
+        return allEvents.filter((e) => e.processorId === processorId);
+      }
+
+      it("processes a shared channel exactly once (claim coordinates)", async () => {
+        const processorId = "flux-channel";
+        const scopeRoot = "soa://ap-c/root";
+
+        await sharedAliceP.addAutoProcessor({
           processorId,
-          sourceScopeQuery: SCOPE_QUERY,
+          sourceScopeQuery: scopedSourceQuery(scopeRoot),
           interpretationClasses: ["ns://ConversationSubgroup"],
           debounceMs: 200,
           batchMin: 2,
           batchMax: 32,
           claimTtlMs: 60_000,
-          ...config,
+          // Isolate this processor's dedup lookup + mint side to its own
+          // subtree so `ConversationSubgroup.findAll` scoped below sees only
+          // subgroups this processor minted.
+          existingScope: { id: scopeRoot, predicate: HAS_MSG },
+          mintScope: { id: scopeRoot, predicate: HAS_MSG },
         } as any);
         await sleep(2000);
 
-        return { aliceP, bobP, events };
-      }
-
-      async function say(p: PerspectiveProxy, uri: string, body: string) {
-        await p.add(new Link({ source: uri, predicate: "ns://body", target: `literal:string:${body}` }));
-      }
-
-      it("processes a shared channel exactly once (claim coordinates)", async () => {
-        const { aliceP, events } = await sharedChannel("flux-channel");
-
         await say(
-          aliceP,
+          sharedAliceP,
+          scopeRoot,
           "msg://c1",
           "Our webhook retries keep dropping during payment outages — we lose the failed events.",
         );
         await say(
-          aliceP,
+          sharedAliceP,
+          scopeRoot,
           "msg://c2",
           "Right, the payments queue has no way to replay what got dropped last time.",
         );
 
-        // Wait until at least one subgroup is visible — same 4-minute budget as
-        // the wave-division test uses.
-        let subgroups: ConversationSubgroup[] = [];
+        // Wait until at least one subgroup is visible IN THIS SCOPE — same
+        // 4-minute budget as the wave-division test uses.
+        let subgroups: string[] = [];
         await waitUntil(
           async () => {
-            subgroups = await ConversationSubgroup.findAll(aliceP);
-            const processedCount = events.filter((e) => e.step === "processed").length;
+            // Subgroups this processor minted are linked under `scopeRoot`
+            // via `mintScope`. Query for children of the scope root to isolate
+            // to this test's outputs (avoids counting anything test 2 might
+            // have produced first, in case order changes).
+            const childLinks = await sharedAliceP.get(
+              new LinkQuery({ source: scopeRoot, predicate: HAS_MSG }),
+            );
+            subgroups = childLinks
+              .map((l) => l.data.target)
+              .filter((t) => t.startsWith("ad4m://") || t.startsWith("soa://"));
+            const processedCount = eventsFor(processorId).filter(
+              (e) => e.step === "processed",
+            ).length;
             return processedCount >= 1 && subgroups.length >= 1;
           },
           240_000,
@@ -211,7 +254,13 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
 
         // The load-bearing assertion: exactly ONE subgroup — the claim stopped
         // the two executors from both minting one for the same batch.
-        expect(subgroups.length, `expected exactly 1 subgroup, got ${subgroups.length}`).to.equal(1);
+        // Note: `subgroups` includes the two msg:// URIs (children of the
+        // scope root) plus the minted subgroup base. Filter for the minted
+        // one.
+        const minted = subgroups.filter(
+          (uri) => !uri.startsWith("msg://") && !uri.startsWith("warmup://"),
+        );
+        expect(minted.length, `expected exactly 1 minted subgroup, got ${JSON.stringify(minted)}`).to.equal(1);
 
         // Corroborate the coordination via signals: exactly one executor
         // `processed`. The exactly-one-subgroup outcome above is the
@@ -225,23 +274,51 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         // than the claim) — asserting one of (a)/(b) fires would over-specify
         // the mechanism and turn a legitimate flow into a flake.
         const processedDids = new Set(
-          events.filter((e) => e.step === "processed" && e.agentDid).map((e) => e.agentDid),
+          eventsFor(processorId)
+            .filter((e) => e.step === "processed" && e.agentDid)
+            .map((e) => e.agentDid),
         );
         expect(processedDids.size, "exactly one executor should have processed").to.equal(1);
       });
 
       it("divides successive waves between the executors without re-processing a turn", async () => {
-        const { aliceP, bobP, events } = await sharedChannel("flux-waves", { batchMin: 2 });
+        const processorId = "flux-waves";
+        const scopeRoot = "soa://ap-w/root";
+
+        await sharedAliceP.addAutoProcessor({
+          processorId,
+          sourceScopeQuery: scopedSourceQuery(scopeRoot),
+          interpretationClasses: ["ns://ConversationSubgroup"],
+          debounceMs: 200,
+          batchMin: 2,
+          batchMax: 32,
+          claimTtlMs: 60_000,
+          existingScope: { id: scopeRoot, predicate: HAS_MSG },
+          mintScope: { id: scopeRoot, predicate: HAS_MSG },
+        } as any);
+        await sleep(2000);
 
         const retired = () =>
-          events.filter((e) => e.step === "processed").flatMap((e) => e.itemIds);
+          eventsFor(processorId)
+            .filter((e) => e.step === "processed")
+            .flatMap((e) => e.itemIds);
 
         // Wave 1 is authored by Alice, wave 2 by Bob. Both land in the same
-        // shared channel, so each peer re-gathers the other's turns on every
+        // scope subtree, so each peer re-gathers the other's turns on every
         // tick — only the claim and the cursor keep a turn from being
         // interpreted twice, once per executor.
-        await say(aliceP, "msg://w1a", "Our webhook retries keep dropping during payment outages.");
-        await say(aliceP, "msg://w1b", "Right, the payments queue cannot replay what got dropped.");
+        await say(
+          sharedAliceP,
+          scopeRoot,
+          "msg://w1a",
+          "Our webhook retries keep dropping during payment outages.",
+        );
+        await say(
+          sharedAliceP,
+          scopeRoot,
+          "msg://w1b",
+          "Right, the payments queue cannot replay what got dropped.",
+        );
         await waitUntil(() => retired().length >= 2, 240_000, "the first wave to be processed");
 
         const firstWave = retired();
@@ -254,21 +331,16 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         // perspective. Without this barrier, wave 2 lands on Bob while his
         // watcher still thinks all 4 turns are new — Bob re-processes
         // w1a+w1b, and `retired()` (which aggregates BOTH executors' local
-        // `processed` events) reports duplicates. The bare Alice-side
-        // `retired().length >= 2` wait is Alice-local; the assertion below
-        // is cross-peer.  `InterpretationRun` was already registered on Bob
-        // during sharedChannel warm-up.
+        // `processed` events) reports duplicates.
+        //
         // 300s budget: p-diff-sync gossip on Marvin under CI load can take
-        // several minutes to deliver a fresh revision — the previous 120s
-        // and 240s budgets both timed out. The gossip warm-up in
-        // `sharedChannel` proves the SYNC PATH is up, but that doesn't
-        // bound per-link latency. If this still expires the failure
-        // diagnostic ("wave-1 InterpretationRun.sources to sync to Bob")
-        // points at the underlying p-diff-sync reliability rather than at
-        // our test.
+        // several minutes to deliver a fresh revision, especially the
+        // FIRST cross-peer roundtrip on a warmed neighbourhood. If this
+        // still expires the failure diagnostic ("wave-1 InterpretationRun
+        // .sources to sync to Bob") points at the underlying sync layer.
         await waitUntil(
           async () => {
-            const bobRuns = await InterpretationRun.findAll(bobP);
+            const bobRuns = await InterpretationRun.findAll(sharedBobP);
             return bobRuns.some(
               (r) =>
                 Array.isArray(r.sources) &&
@@ -279,8 +351,18 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
           "wave-1 InterpretationRun.sources to sync to Bob before wave 2",
         );
 
-        await say(bobP, "msg://w2a", "Separately, the retro is moved to Thursday morning.");
-        await say(bobP, "msg://w2b", "I'll book the room and send the invite.");
+        await say(
+          sharedBobP,
+          scopeRoot,
+          "msg://w2a",
+          "Separately, the retro is moved to Thursday morning.",
+        );
+        await say(
+          sharedBobP,
+          scopeRoot,
+          "msg://w2b",
+          "I'll book the room and send the invite.",
+        );
         await waitUntil(() => retired().length >= 4, 240_000, "the second wave to be processed");
 
         // The whole point: four turns, four retirements, no turn twice — across
@@ -295,18 +377,24 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
           "the second wave must not re-process the first",
         ).to.equal(firstWave.length);
 
-        // Both executors converge on the same graph.
+        // Both executors converge on the same subgroup set for THIS scope.
+        // Filter to subgroups under this test's scope root so any subgroups
+        // from the first test don't inflate the counts.
+        const scopedSubgroupCount = async (p: PerspectiveProxy): Promise<number> => {
+          const children = await p.get(new LinkQuery({ source: scopeRoot, predicate: HAS_MSG }));
+          return children
+            .map((l) => l.data.target)
+            .filter((t) => !t.startsWith("msg://") && !t.startsWith("warmup://")).length;
+        };
         await waitUntil(
-          async () =>
-            (await ConversationSubgroup.findAll(aliceP)).length ===
-            (await ConversationSubgroup.findAll(bobP)).length,
+          async () => (await scopedSubgroupCount(sharedAliceP)) === (await scopedSubgroupCount(sharedBobP)),
           120_000,
           "both executors to converge on the same subgroups",
         );
-        const seen = await ConversationSubgroup.findAll(aliceP);
-        expect(seen.length, "the waves must have produced at least one subgroup").to.be.greaterThan(
-          0,
-        );
+        expect(
+          await scopedSubgroupCount(sharedAliceP),
+          "the waves must have produced at least one subgroup in this scope",
+        ).to.be.greaterThan(0);
       });
     });
   };
