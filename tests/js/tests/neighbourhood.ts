@@ -44,8 +44,13 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 expect(perspective?.neighbourhood!.data.linkLanguage).to.be.equal(socialContext.address);
                 expect(perspective?.neighbourhood!.data.meta.links.length).to.be.equal(1);
                 
-                // The perspective should start in NeighbourhoodCreationInitiated state
-                expect(perspective?.state).to.be.equal(PerspectiveState.NeighboudhoodCreationInitiated);
+                // The perspective should have left Private state. It may still be in
+                // NeighbourhoodCreationInitiated, or may have already reached Synced if
+                // the link-language startup completed before this poll returned — both are valid.
+                expect([
+                    PerspectiveState.NeighboudhoodCreationInitiated,
+                    PerspectiveState.Synced,
+                ]).to.include(perspective?.state);
                 
                 // Wait for the perspective to transition to Synced state
                 let tries = 0;
