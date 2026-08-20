@@ -47,6 +47,7 @@ mod types;
 
 pub use dedup::*;
 pub use graph::*;
+pub use overlay::InterpretationRunCursor;
 pub(crate) use overlay::*;
 pub use parse::*;
 pub use prompt::*;

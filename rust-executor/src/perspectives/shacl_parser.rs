@@ -65,6 +65,10 @@ pub struct PropertyShape {
     pub max_count: Option<u32>,
     pub writable: Option<bool>,
     pub local: Option<bool>,
+    /// Sole selector of storage mode. `None` → deterministic typed
+    /// literal (fast POS-index path, the default). `Some("literal")` →
+    /// signed envelope on the built-in literal language. `Some(<addr>)`
+    /// → expression on that custom language. Stored as `ad4m://resolveLanguage`.
     pub resolve_language: Option<String>,
     pub node_kind: Option<String>,
     pub collection: Option<bool>,

@@ -129,16 +129,21 @@ export function buildSHACL(
             path: propMeta.through,
         };
 
-        // Determine datatype from initial value or resolveLanguage
-        if (propMeta.resolveLanguage === "literal") {
-            propShape.datatype = "xsd://string";
-        } else if (propMeta.initial) {
+        // Determine datatype from JS field value type; the resolve* options
+        // control storage mode (deterministic vs envelope), not scalar type.
+        // A value stored on the literal language (deterministic or envelope,
+        // i.e. resolveLanguage unset or "literal") gets a string datatype when
+        // no initial value pins a more specific type. A custom resolveLanguage
+        // yields an expression URI, not a literal.
+        const isLiteral =
+            propMeta.resolveLanguage === undefined || propMeta.resolveLanguage === "literal";
+        if (propMeta.initial !== undefined || isLiteral) {
             const initialType = typeof obj[propName];
             if (initialType === "number") {
                 propShape.datatype = "xsd://integer";
             } else if (initialType === "boolean") {
                 propShape.datatype = "xsd://boolean";
-            } else if (initialType === "string") {
+            } else if (initialType === "string" || isLiteral) {
                 propShape.datatype = "xsd://string";
             }
         }

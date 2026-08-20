@@ -46,6 +46,40 @@ pub struct MentionWakerConfigParams {
 }
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+/// Escape a string for safe interpolation inside a double-quoted SPARQL
+/// string literal. Mention terms come from profile names / `name_override`
+/// — untrusted input, potentially attacker-controlled in a shared
+/// neighbourhood — so without this, a `"` or `\` breaks out of the literal
+/// and can inject arbitrary SPARQL into the mention-matching FILTER.
+fn escape_sparql_literal(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+/// Validate that a value intended to be an IRI is safe for interpolation
+/// inside a SPARQL string literal (`STR(?x) = "..."`).  A well-formed IRI
+/// has a scheme (e.g. `ad4m:`, `did:`, `literal:`) and must not contain
+/// `"` or `\` which would break out of the enclosing double-quoted literal.
+fn validate_sparql_iri(s: &str) -> Result<&str, String> {
+    if !s.contains(':') {
+        return Err(format!("expected IRI (scheme:...), got: {}", s));
+    }
+    if s.contains('"') || s.contains('\\') {
+        return Err(format!(
+            "IRI contains characters unsafe for SPARQL interpolation: {}",
+            s
+        ));
+    }
+    Ok(s)
+}
+
+// ============================================================================
 // Tool Implementations
 // ============================================================================
 
@@ -74,15 +108,21 @@ impl Ad4mMcpHandler {
             } else {
                 Self::encode_literal(parent)
             };
+            if let Err(e) = validate_sparql_iri(&parent_encoded) {
+                return json!({"error": format!("Invalid parent_address: {}", e)}).to_string();
+            }
             format!(
                 "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?source) = \"{}\" && STR(?predicate) = \"ad4m://has_child\") }}",
                 parent_encoded
             )
         } else if let Some(ref predicate) = p.predicate {
+            if let Err(e) = validate_sparql_iri(predicate) {
+                return json!({"error": format!("Invalid predicate: {}", e)}).to_string();
+            }
             if let Some(ref target) = p.target_value {
                 format!(
                     "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) = \"{}\" && STR(?target) = \"{}\") }}",
-                    predicate, target
+                    predicate, escape_sparql_literal(target)
                 )
             } else {
                 format!(
@@ -98,6 +138,7 @@ impl Ad4mMcpHandler {
                     .properties
                     .iter()
                     .filter_map(|prop| prop.predicate.clone())
+                    .filter(|p| validate_sparql_iri(p).is_ok())
                     .collect();
 
                 if predicates.is_empty() {
@@ -213,6 +254,7 @@ impl Ad4mMcpHandler {
                 .iter()
                 .find(|prop| prop.name.to_lowercase() == "body")
                 .and_then(|prop| prop.predicate.clone())
+                .filter(|p| validate_sparql_iri(p).is_ok())
         } else {
             None
         };
@@ -327,7 +369,7 @@ pub fn build_mention_sub_id(perspective_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_mention_query, build_mention_sub_id};
+    use super::*;
 
     #[test]
     fn scoped_query_excludes_ontology_proof_metadata() {
@@ -406,5 +448,55 @@ mod tests {
             a,
             build_mention_sub_id("c41dfd35-769e-474f-a2e6-4e5d580615c8")
         );
+    }
+
+    #[test]
+    fn test_escape_sparql_literal_neutralizes_quote_breakout() {
+        // A profile name / name_override containing a `"` must not be able
+        // to close the SPARQL string literal early and inject a second
+        // CONTAINS(...) clause (or worse) into the mention FILTER.
+        let malicious = r#"x") || CONTAINS(STR(?target), "leaked"#;
+        let escaped = escape_sparql_literal(malicious);
+
+        let condition = format!("CONTAINS(LCASE(STR(?target)), \"{}\")", escaped);
+
+        // The whole payload must resolve to a single string literal — i.e.
+        // exactly two unescaped double quotes (the ones we added), none
+        // contributed by the input.
+        let unescaped_quote_count = condition
+            .char_indices()
+            .filter(|&(i, c)| c == '"' && (i == 0 || condition.as_bytes()[i - 1] != b'\\'))
+            .count();
+        assert_eq!(
+            unescaped_quote_count, 2,
+            "escaped payload must not introduce unescaped quotes: {condition}"
+        );
+    }
+
+    #[test]
+    fn test_escape_sparql_literal_handles_backslash_and_control_chars() {
+        assert_eq!(escape_sparql_literal(r"a\b"), r"a\\b");
+        assert_eq!(escape_sparql_literal("a\"b"), "a\\\"b");
+        assert_eq!(escape_sparql_literal("a\nb"), "a\\nb");
+        assert_eq!(escape_sparql_literal("plain"), "plain");
+    }
+
+    #[test]
+    fn test_validate_sparql_iri_accepts_valid_iris() {
+        assert!(validate_sparql_iri("ad4m://has_child").is_ok());
+        assert!(validate_sparql_iri("did:key:z6Mk123").is_ok());
+        assert!(validate_sparql_iri("literal:string:hello").is_ok());
+        assert!(validate_sparql_iri("urn:isbn:0451450523").is_ok());
+    }
+
+    #[test]
+    fn test_validate_sparql_iri_rejects_no_scheme() {
+        assert!(validate_sparql_iri("no-scheme-here").is_err());
+    }
+
+    #[test]
+    fn test_validate_sparql_iri_rejects_injection_chars() {
+        assert!(validate_sparql_iri(r#"ad4m://x" || true || ""#).is_err());
+        assert!(validate_sparql_iri(r"ad4m://x\n").is_err());
     }
 }

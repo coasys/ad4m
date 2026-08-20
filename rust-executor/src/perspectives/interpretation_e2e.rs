@@ -1108,7 +1108,7 @@ async fn link_under_channel(
 #[tokio::test]
 async fn e2e_flux_grouping_scoped_incremental_lifecycle() {
     use crate::perspectives::interpretation::existing_instance_context;
-    use crate::perspectives::model_query::types::ParentScope;
+    use crate::perspectives::model_query::types::Scope;
 
     let channel = "soa://channel/general";
     let contains = "ns://contains";
@@ -1120,7 +1120,7 @@ async fn e2e_flux_grouping_scoped_incremental_lifecycle() {
         let (mut perspective, shapes, ctx) =
             setup_interpretation_e2e(&[("ConversationSubgroup", CONVERSATION_SUBGROUP_SDNA)]).await;
         let sg_shape = &shapes[0];
-        let scope = ParentScope::Raw {
+        let scope = Scope::Raw {
             id: channel.into(),
             predicate: contains.into(),
         };
@@ -1386,6 +1386,916 @@ async fn e2e_semantic_dedup_drops_reworded_duplicate() {
     );
 }
 
+// ---- auto_processor P-B2b smoke (real LLM) ---------------------------------
+
+/// P-B2b end-to-end smoke: the full auto-processor wiring — config written to
+/// the shared graph, read back via `load_processors`, transcript surfaced via
+/// the config's SPARQL scope, `WatcherState` batches the turns, `run_one_pass`
+/// wins the claim and drives the real LLM through the interpretation engine —
+/// produces an actual typed instance on the perspective.
+///
+/// This is the "does the whole stack breathe end-to-end with a real model"
+/// gate before P-C (multi-peer demo). The async polling of
+/// `auto_processor_watch_loop` itself is exhaustively unit-tested elsewhere;
+/// what this test uniquely exercises is the LLM round-trip on top of that
+/// scaffolding.
+#[tokio::test]
+async fn auto_processor_pass_lands_interpretation_instance() {
+    use crate::perspectives::auto_processor::config::{
+        load_processors, write_processor, AutoProcessorConfig,
+    };
+    use crate::perspectives::auto_processor::watcher::{
+        run_one_pass, PassOutcome, PendingTurn, WatcherState,
+    };
+    use crate::perspectives::interpretation::{
+        gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
+    };
+    use crate::types::{LinkQuery, LinkStatus};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let (mut perspective, _shapes, ctx) =
+        setup_interpretation_e2e(&[("Intention", INTENTION_SDNA)]).await;
+
+    // Seed two transcript turns as (msg -> body, msg -> author) link pairs.
+    // Both are first-person commitments so gemma3:12b classifies them as
+    // Intentions with reasonable reliability.
+    for (uri, author, body) in [
+        (
+            "msg://smoke-1",
+            "did:key:alice",
+            "I'll finish the interpretation refactor tonight.",
+        ),
+        (
+            "msg://smoke-2",
+            "did:key:bob",
+            "I plan to review the diff first thing tomorrow morning.",
+        ),
+    ] {
+        perspective
+            .add_link(
+                Link {
+                    source: uri.into(),
+                    predicate: Some("ns://body".into()),
+                    target: format!("literal:string:{body}"),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed body");
+        perspective
+            .add_link(
+                Link {
+                    source: uri.into(),
+                    predicate: Some("ns://author".into()),
+                    target: author.into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed author");
+    }
+
+    // Write the processor config into the shared graph.
+    let cfg = AutoProcessorConfig {
+        processor_id: "smoke-auto-processor".into(),
+        source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+        base_prefix: None,
+        interpretation_classes: vec!["ns://Intention".into()],
+        debounce_ms: 50,
+        batch_min: 1,
+        batch_max: 32,
+        max_wait_ms: None,
+        claim_ttl_ms: 60_000,
+        dedup_strategy_json: None,
+        source_window_ms: None,
+        existing_scope: None,
+        mint_scope: None,
+    };
+    write_processor(&mut perspective, &cfg, &ctx)
+        .await
+        .expect("write_processor");
+
+    // Round-trip the config back through `load_processors` — validates the
+    // shared-graph link shape holds under the same perspective the watcher
+    // would poll in production.
+    let loaded = load_processors(&perspective)
+        .await
+        .expect("load_processors");
+    assert_eq!(loaded.len(), 1, "single processor written and loaded back");
+    let cfg_loaded = &loaded[0];
+    assert_eq!(cfg_loaded.processor_id, "smoke-auto-processor");
+    assert_eq!(
+        cfg_loaded.interpretation_classes,
+        vec!["ns://Intention".to_string()]
+    );
+
+    // Mimic one watch-loop tick: fetch transcript, feed WatcherState, drain,
+    // run. The polling loop itself is not driven here; the pure state and its
+    // debounce/cap contract are covered by unit tests in
+    // `auto_processor::watcher::tests`.
+    let transcript = gather_transcript_sparql(&perspective, &cfg_loaded.source_scope_query)
+        .await
+        .expect("gather_transcript_sparql");
+    assert_eq!(
+        transcript.len(),
+        2,
+        "SPARQL scope must surface both seeded turns; got {transcript:#?}"
+    );
+
+    let mut watcher = WatcherState::new();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    for turn in &transcript {
+        watcher.record_item(
+            &cfg_loaded.processor_id,
+            PendingTurn::from_transcript(turn),
+            now_ms,
+        );
+    }
+    // Advance `now` past the debounce window so `drain_ready_batch` releases.
+    let drain_at = now_ms + cfg_loaded.debounce_ms + 10;
+    let batch = watcher
+        .drain_ready_batch(cfg_loaded, drain_at)
+        .expect("drain returns the ready batch");
+    assert_eq!(
+        batch.len(),
+        2,
+        "both seeded turns should drain in one batch"
+    );
+
+    let outcome = run_one_pass(&mut perspective, cfg_loaded, &batch, drain_at, &ctx, false)
+        .await
+        .expect("run_one_pass");
+    let bases = match outcome {
+        PassOutcome::Won { bases } => bases,
+        other => panic!(
+            "expected PassOutcome::Won; got {other:?}. Bare private perspective has no other \
+             claimants or online peers, so Won is the only legitimate outcome once shapes and \
+             transcript both resolve."
+        ),
+    };
+    assert!(
+        !bases.is_empty(),
+        "at least one Intention instance must have been minted"
+    );
+
+    // Confirm each base actually carries state in the perspective — proves the
+    // pass wrote through `create_subject`, not just returned a URI.
+    for base in &bases {
+        let links = perspective
+            .get_links(&LinkQuery {
+                source: Some(base.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links readback");
+        assert!(
+            !links.is_empty(),
+            "instance `{base}` must carry at least one link (type flag + title setter)"
+        );
+        assert!(
+            links
+                .iter()
+                .any(|l| l.data.predicate.as_deref() == Some("ns://type")
+                    && l.data.target == "ns://intention"),
+            "instance `{base}` must carry the Intention type flag; got links={links:#?}"
+        );
+    }
+}
+
+// ---- auto_processor P-C — Flux-parity concurrent-processors demo -----------
+
+/// P-C: two [`AutoProcessorConfig`]s on ONE perspective, sharing one SPARQL
+/// scope over the same seeded turns, but with DISJOINT
+/// `interpretation_classes` (`ns://Intention` vs. `ns://Task`). Proves the
+/// Flux-parity invariant that a single perspective can host multiple
+/// concurrent processors without cross-contamination:
+///
+/// * `run_one_pass` only feeds each processor its OWN configured shape into
+///   the interpretation engine, so the Intention-only processor can NEVER
+///   mint a Task and vice versa — an isolation guarantee that holds under
+///   any LLM classification (code-enforced, not model-dependent).
+/// * Distinct `processor_id`s produce distinct `batch_key`s → each processor
+///   claims independently; neither pass backs off, both win.
+/// * Distinct `base_prefix`es (`ad4m://autoprocessor/<processor_id>/instance/`)
+///   guarantee the two processors' base URI sets are disjoint at the write
+///   layer — no double-writing to the same base for the same turn.
+///
+/// This is the P-B closure milestone: the whole auto-processor stack
+/// (config → shared graph → SPARQL scope → WatcherState → claim election →
+/// per-processor interpretation) has now been driven end-to-end for a
+/// multi-processor perspective with a real model.
+#[tokio::test]
+async fn auto_processor_two_configs_no_cross_contamination() {
+    use crate::perspectives::auto_processor::config::{
+        load_processors, write_processor, AutoProcessorConfig,
+    };
+    use crate::perspectives::auto_processor::watcher::{
+        run_one_pass, PassOutcome, PendingTurn, WatcherState,
+    };
+    use crate::perspectives::interpretation::{
+        gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
+    };
+    use crate::types::{LinkQuery, LinkStatus};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Both classes registered on the same perspective so each processor's
+    // shape resolves under `load_shape_from_store`.
+    let (mut perspective, _shapes, ctx) =
+        setup_interpretation_e2e(&[("Intention", INTENTION_SDNA), ("Task", TASK_SDNA)]).await;
+
+    // Seed one clear first-person commitment (Intention-shaped) and one
+    // clear third-person assignment (Task-shaped). Note that whichever way
+    // gemma3:12b classifies each turn is IRRELEVANT to the invariants
+    // asserted here — the class isolation is code-enforced (each processor
+    // only receives its own shape). The realism of the transcript is just
+    // to keep the model's output non-degenerate.
+    for (uri, author, body) in [
+        (
+            "msg://pc-1",
+            "did:key:alice",
+            "I'll finalize the executor watcher wiring tonight.",
+        ),
+        (
+            "msg://pc-2",
+            "did:key:bob",
+            "Alice, can you get the CI dashboards live by Friday?",
+        ),
+    ] {
+        perspective
+            .add_link(
+                Link {
+                    source: uri.into(),
+                    predicate: Some("ns://body".into()),
+                    target: format!("literal:string:{body}"),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed body");
+        perspective
+            .add_link(
+                Link {
+                    source: uri.into(),
+                    predicate: Some("ns://author".into()),
+                    target: author.into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed author");
+    }
+
+    let source_scope = BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+
+    let intent_cfg = AutoProcessorConfig {
+        processor_id: "pc-intent-proc".into(),
+        source_scope_query: source_scope.into(),
+        base_prefix: None,
+        interpretation_classes: vec!["ns://Intention".into()],
+        debounce_ms: 50,
+        batch_min: 1,
+        batch_max: 32,
+        max_wait_ms: None,
+        claim_ttl_ms: 60_000,
+        dedup_strategy_json: None,
+        source_window_ms: None,
+        existing_scope: None,
+        mint_scope: None,
+    };
+    let task_cfg = AutoProcessorConfig {
+        processor_id: "pc-task-proc".into(),
+        source_scope_query: source_scope.into(),
+        base_prefix: None,
+        interpretation_classes: vec!["ns://Task".into()],
+        debounce_ms: 50,
+        batch_min: 1,
+        batch_max: 32,
+        max_wait_ms: None,
+        claim_ttl_ms: 60_000,
+        dedup_strategy_json: None,
+        source_window_ms: None,
+        existing_scope: None,
+        mint_scope: None,
+    };
+
+    write_processor(&mut perspective, &intent_cfg, &ctx)
+        .await
+        .expect("write intent");
+    write_processor(&mut perspective, &task_cfg, &ctx)
+        .await
+        .expect("write task");
+
+    let loaded = load_processors(&perspective)
+        .await
+        .expect("load_processors");
+    assert_eq!(loaded.len(), 2, "both processors written and loaded back");
+
+    let transcript = gather_transcript_sparql(&perspective, source_scope)
+        .await
+        .expect("gather_transcript_sparql");
+    assert_eq!(
+        transcript.len(),
+        2,
+        "SPARQL scope must surface both seeded turns; got {transcript:#?}"
+    );
+
+    // Feed both processors the same turns via one WatcherState. Per-processor
+    // pending state is isolated (unit-tested in
+    // `auto_processor::watcher::tests::per_processor_state_is_isolated`); each
+    // drain returns that processor's own copy of the batch.
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let mut watcher = WatcherState::new();
+    for cfg_ref in &loaded {
+        for turn in &transcript {
+            watcher.record_item(
+                &cfg_ref.processor_id,
+                PendingTurn::from_transcript(turn),
+                now_ms,
+            );
+        }
+    }
+
+    // Advance past the debounce window so `drain_ready_batch` releases.
+    let drain_at = now_ms + intent_cfg.debounce_ms + 10;
+
+    // Run each processor once and collect (processor_id, class_uri, bases).
+    let mut runs: Vec<(String, String, Vec<String>)> = Vec::with_capacity(2);
+    for cfg_ref in &loaded {
+        let batch = watcher
+            .drain_ready_batch(cfg_ref, drain_at)
+            .unwrap_or_else(|| {
+                panic!(
+                    "processor `{}` must have a ready batch after debounce",
+                    cfg_ref.processor_id
+                )
+            });
+        assert_eq!(
+            batch.len(),
+            2,
+            "each processor's batch must contain both turns; got {batch:?} for `{}`",
+            cfg_ref.processor_id
+        );
+        let outcome = run_one_pass(&mut perspective, cfg_ref, &batch, drain_at, &ctx, false)
+            .await
+            .expect("run_one_pass");
+        let bases = match outcome {
+            PassOutcome::Won { bases } => bases,
+            other => panic!(
+                "processor `{}` expected PassOutcome::Won; got {other:?}. Distinct \
+                 processor_ids produce distinct batch_keys, so each pass MUST win its \
+                 own claim election on this bare private perspective.",
+                cfg_ref.processor_id
+            ),
+        };
+        assert!(
+            !bases.is_empty(),
+            "processor `{}` must mint at least one instance for its class `{}`",
+            cfg_ref.processor_id,
+            cfg_ref.interpretation_classes[0]
+        );
+        runs.push((
+            cfg_ref.processor_id.clone(),
+            cfg_ref.interpretation_classes[0].clone(),
+            bases,
+        ));
+    }
+
+    // Invariant 1: each base carries its processor's expected type flag, and
+    // NEVER the other processor's flag.
+    let flag_for = |class_uri: &str| -> String {
+        // `ns://Intention` → `ns://intention` (the constructor's type-flag
+        // target — lowercase local name).
+        let local = class_uri
+            .rsplit_once("://")
+            .map(|(_, l)| l)
+            .unwrap_or(class_uri);
+        format!("ns://{}", local.to_lowercase())
+    };
+    for (proc_id, class_uri, bases) in &runs {
+        let own_flag = flag_for(class_uri);
+        let foreign_flag = if own_flag == "ns://intention" {
+            "ns://task".to_string()
+        } else {
+            "ns://intention".to_string()
+        };
+        for base in bases {
+            let links = perspective
+                .get_links(&LinkQuery {
+                    source: Some(base.clone()),
+                    ..Default::default()
+                })
+                .await
+                .expect("get_links readback");
+            assert!(
+                !links.is_empty(),
+                "instance `{base}` (from `{proc_id}`) must carry at least one link"
+            );
+            assert!(
+                links
+                    .iter()
+                    .any(|l| l.data.predicate.as_deref() == Some("ns://type")
+                        && l.data.target == own_flag),
+                "instance `{base}` (from `{proc_id}`) must carry its own class flag \
+                 `{own_flag}`; got links={links:#?}"
+            );
+            assert!(
+                !links
+                    .iter()
+                    .any(|l| l.data.predicate.as_deref() == Some("ns://type")
+                        && l.data.target == foreign_flag),
+                "instance `{base}` (from `{proc_id}`) MUST NOT carry the foreign class \
+                 flag `{foreign_flag}` — cross-contamination between processors on the \
+                 same perspective is a P-C invariant violation; got links={links:#?}"
+            );
+        }
+    }
+
+    // Invariant 2: base URI sets are disjoint. Distinct `base_prefix`es
+    // (`ad4m://autoprocessor/<processor_id>/instance/`) make double-writing
+    // to the same base for the same turn structurally impossible.
+    let intent_bases: std::collections::HashSet<&String> = runs
+        .iter()
+        .find(|(id, _, _)| id == "pc-intent-proc")
+        .map(|(_, _, b)| b.iter().collect())
+        .expect("intent-proc run captured");
+    let task_bases: std::collections::HashSet<&String> = runs
+        .iter()
+        .find(|(id, _, _)| id == "pc-task-proc")
+        .map(|(_, _, b)| b.iter().collect())
+        .expect("task-proc run captured");
+    let overlap: Vec<&&String> = intent_bases.intersection(&task_bases).collect();
+    assert!(
+        overlap.is_empty(),
+        "processor base URI sets must be disjoint (distinct base_prefix per \
+         processor_id); overlap = {overlap:?}"
+    );
+    for b in &intent_bases {
+        assert!(
+            b.starts_with("ad4m://autoprocessor/pc-intent-proc/instance/"),
+            "intent-proc base `{b}` must carry the intent-proc base_prefix"
+        );
+    }
+    for b in &task_bases {
+        assert!(
+            b.starts_with("ad4m://autoprocessor/pc-task-proc/instance/"),
+            "task-proc base `{b}` must carry the task-proc base_prefix"
+        );
+    }
+}
+
+// ---- auto_processor P-B2c: high-level, signal-driven, no manual interpretation
+
+/// The clean high-level auto-processor integration test: write a processor
+/// config + seed a channel's messages, then let the **real watch-loop tick**
+/// (`run_auto_processor_tick`) do everything — gather the transcript, debounce,
+/// claim, run the LLM, write the instances — while the test only *observes* it
+/// through the [`events`](crate::perspectives::auto_processor::events) signals
+/// and asserts the outcome. No manual `run_interpretation`, no manual transcript
+/// wrangling: exactly what a Flux channel does when new messages arrive.
+///
+/// Proves: (a) the loop settles and drains a batch (the debounce fix — a
+/// re-gathered duplicate no longer resets the clock), (b) it emits the pass
+/// lifecycle `BatchReady → Claimed → GatheringTranscript → RunningInterpretation
+/// → Processed`, awaitable by a listener, and (c) it actually creates the
+/// ConversationSubgroup on the perspective.
+///
+/// Real-LLM (gemma3:12b). Retry loop for model non-determinism.
+#[tokio::test]
+async fn auto_processor_high_level_signal_driven_pass() {
+    use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+    use crate::perspectives::auto_processor::events::{
+        next_event_matching, subscribe, AutoProcessorStep,
+    };
+    use crate::perspectives::auto_processor::watcher::WatcherState;
+    use crate::types::{Link, LinkStatus};
+    use std::time::Duration;
+
+    let processor_id = "flux-channel-proc";
+    let attempts = 3u8;
+    let mut last_err: Option<String> = None;
+
+    for attempt in 1..=attempts {
+        let (mut perspective, _shapes, ctx) =
+            setup_interpretation_e2e(&[("ConversationSubgroup", CONVERSATION_SUBGROUP_SDNA)]).await;
+
+        // Seed a channel's worth of messages on one topic — link pairs, exactly
+        // as a Flux channel perspective holds them.
+        for (uri, author, body) in [
+            ("msg://c1", "did:key:ana", "Our webhook retries keep dropping during payment outages — we lose the failed events."),
+            ("msg://c2", "did:key:ben", "Right, the payments queue has no way to replay what got dropped last time."),
+        ] {
+            for (pred, target) in [
+                ("ns://body", format!("literal:string:{body}")),
+                ("ns://author", author.to_string()),
+            ] {
+                perspective
+                    .add_link(
+                        Link { source: uri.into(), predicate: Some(pred.into()), target },
+                        LinkStatus::Local,
+                        None,
+                        &ctx,
+                    )
+                    .await
+                    .expect("seed channel message link");
+            }
+        }
+
+        // Write the processor into the shared graph — the loop reads it back.
+        let cfg = AutoProcessorConfig {
+            processor_id: processor_id.into(),
+            source_scope_query:
+                crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            base_prefix: None,
+            interpretation_classes: vec!["ns://ConversationSubgroup".into()],
+            debounce_ms: 50,
+            batch_min: 2,
+            batch_max: 32,
+            max_wait_ms: None,
+            claim_ttl_ms: 60_000,
+            dedup_strategy_json: None,
+            source_window_ms: None,
+            existing_scope: None,
+            mint_scope: None,
+        };
+        write_processor(&mut perspective, &cfg, &ctx)
+            .await
+            .expect("write_processor");
+
+        // Observe the pass purely through the event stream.
+        let mut rx = subscribe().await;
+        let mut watcher = WatcherState::new();
+
+        // Tick 1 records the two turns (debounce not yet elapsed → no drain).
+        perspective
+            .run_auto_processor_tick(&mut watcher, 1_000, &ctx)
+            .await;
+        // Tick 2, past the debounce window: the re-gathered duplicates don't
+        // reset the clock (the fix), so the batch drains and the real pass runs.
+        perspective
+            .run_auto_processor_tick(&mut watcher, 1_100, &ctx)
+            .await;
+
+        // Await the terminal signal — this is what a WS client / test waits on
+        // instead of polling the graph. Scope the predicate to THIS perspective:
+        // `emit` publishes to a process-global channel, so another perspective
+        // reusing the same `processor_id` could otherwise match.
+        let persp_uuid = perspective.uuid.clone();
+        let processed_ev = next_event_matching(&mut rx, Duration::from_secs(90), |e| {
+            e.processor_id == processor_id
+                && e.perspective_uuid == persp_uuid
+                && e.step == AutoProcessorStep::Processed
+        })
+        .await;
+        let Some(ev) = processed_ev else {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: no `Processed` signal within timeout"
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        };
+        if ev.bases.is_empty() {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: Processed signal carried no bases"
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        }
+
+        // The subgroup must actually exist on the perspective, with a
+        // payments-flavoured summary — created entirely by the loop.
+        let rows =
+            model_instances(&perspective, "ConversationSubgroup", &["name", "summary"]).await;
+        if rows.is_empty() {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: loop signalled Processed but no ConversationSubgroup persisted"
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        }
+        let any_payments = rows.iter().any(|r| {
+            let name = r
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let summary = r
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            contains_any(&name, &["payment", "webhook", "retry", "queue"])
+                || contains_any(
+                    &summary,
+                    &["payment", "webhook", "retry", "queue", "replay"],
+                )
+        });
+        if !any_payments {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: subgroup created but not about the channel topic: {rows:#?}"
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        }
+
+        // Full high-level pass held on this attempt.
+        return;
+    }
+    panic!(
+        "auto_processor high-level signal-driven e2e failed after {attempts} attempts: {}",
+        last_err.unwrap_or_default()
+    );
+}
+
+/// Two users, one executor (ad4m multi-tenancy), driven by the REAL spawned
+/// background loop: the `ProcessingClaim` must stop the same channel batch from
+/// being processed twice. This is the step toward the full two-executor
+/// neighbourhood test (#881); here both "peers" live in one process and share
+/// the perspective graph, so a claim written by one is immediately visible to
+/// the other.
+///
+/// Rather than driving `run_auto_processor_tick` by hand, this spawns the actual
+/// `auto_processor_watch_loop` — one per managed user — so it exercises the
+/// perspective's real autonomous loop (poll → debounce → claim → LLM → write).
+/// The claim election is min-DID over active claimants, so the smaller-DID
+/// user's loop is started first: it is the sole claimant, wins, and processes;
+/// then the other user's loop is started. Same-process, the winner's `sources`
+/// are already in the graph, so the loser typically skips rather than
+/// `BackedOff`. Load-bearing assertions: winner `Processed`, loser never
+/// `Processed`, and exactly ONE ConversationSubgroup.
+///
+/// Real-LLM (gemma3:12b). Retry loop for model non-determinism.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_processor_two_users_one_executor_no_double_processing() {
+    use crate::agent::{did_for_context, AgentContext, AgentService};
+    use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+    use crate::perspectives::auto_processor::events::{
+        next_event_matching, subscribe, AutoProcessorStep,
+    };
+    use crate::types::{Link, LinkStatus};
+    use std::time::Duration;
+
+    let processor_id = "shared-channel-proc";
+    let attempts = 3u8;
+    let mut last_err: Option<String> = None;
+
+    for attempt in 1..=attempts {
+        let (mut perspective, _shapes, ctx_main) =
+            setup_interpretation_e2e(&[("ConversationSubgroup", CONVERSATION_SUBGROUP_SDNA)]).await;
+
+        // Two managed users on the one executor — distinct DIDs so the claim
+        // election has two real candidates.
+        AgentService::ensure_user_key_exists("alice@e2e").expect("user A key");
+        AgentService::ensure_user_key_exists("bob@e2e").expect("user B key");
+        let ctx_a = AgentContext::for_user_email("alice@e2e".to_string());
+        let ctx_b = AgentContext::for_user_email("bob@e2e".to_string());
+        let did_a = did_for_context(&ctx_a).expect("did A");
+        let did_b = did_for_context(&ctx_b).expect("did B");
+        assert_ne!(did_a, did_b, "two managed users must have distinct DIDs");
+
+        // Smaller-DID user is the claim winner → start its loop first.
+        let (ctx_win, did_win, ctx_lose, did_lose) = if did_a <= did_b {
+            (ctx_a, did_a, ctx_b, did_b)
+        } else {
+            (ctx_b, did_b, ctx_a, did_a)
+        };
+
+        // Seed a channel's messages + register one processor.
+        for (uri, author, body) in [
+            ("msg://s1", "did:key:ana", "Our webhook retries keep dropping during payment outages — we lose the failed events."),
+            ("msg://s2", "did:key:ben", "Right, the payments queue has no way to replay what got dropped last time."),
+        ] {
+            for (pred, target) in [
+                ("ns://body", format!("literal:string:{body}")),
+                ("ns://author", author.to_string()),
+            ] {
+                perspective
+                    .add_link(
+                        Link { source: uri.into(), predicate: Some(pred.into()), target },
+                        LinkStatus::Local,
+                        None,
+                        &ctx_main,
+                    )
+                    .await
+                    .expect("seed channel message link");
+            }
+        }
+        let cfg = AutoProcessorConfig {
+            processor_id: processor_id.into(),
+            source_scope_query:
+                crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            base_prefix: None,
+            interpretation_classes: vec!["ns://ConversationSubgroup".into()],
+            debounce_ms: 100,
+            batch_min: 2,
+            batch_max: 32,
+            max_wait_ms: None,
+            claim_ttl_ms: 60_000,
+            dedup_strategy_json: None,
+            source_window_ms: None,
+            existing_scope: None,
+            mint_scope: None,
+        };
+        write_processor(&mut perspective, &cfg, &ctx_main)
+            .await
+            .expect("write_processor");
+
+        // Scope event predicates to THIS perspective — `emit` is process-global,
+        // so a concurrent test/perspective on the same `processor_id` must not match.
+        let persp_uuid = perspective.uuid.clone();
+        let mut rx = subscribe().await;
+
+        // Spawn the winner's REAL background loop — it polls, debounces, claims
+        // (sole candidate), runs the LLM and writes the subgroup autonomously.
+        let p_win = perspective.clone();
+        let win_loop = tokio::spawn(async move { p_win.auto_processor_watch_loop(ctx_win).await });
+        let processed = next_event_matching(&mut rx, Duration::from_secs(90), |e| {
+            e.processor_id == processor_id
+                && e.perspective_uuid == persp_uuid
+                && e.step == AutoProcessorStep::Processed
+                && e.agent_did.as_deref() == Some(did_win.as_str())
+        })
+        .await;
+
+        // Now start the loser's loop. Same-process, the winner's `sources` are
+        // already in the graph, so the loser usually skips the batch outright
+        // rather than reaching the claim — `BackedOff` is one valid outcome,
+        // not a required one. What must hold either way is that the loser
+        // never runs the pass, so wait for `Processed` from *them* and require
+        // the wait to time out.
+        let p_lose = perspective.clone();
+        let lose_loop =
+            tokio::spawn(async move { p_lose.auto_processor_watch_loop(ctx_lose).await });
+        let loser_processed = next_event_matching(&mut rx, Duration::from_secs(4), |e| {
+            e.processor_id == processor_id
+                && e.perspective_uuid == persp_uuid
+                && e.step == AutoProcessorStep::Processed
+                && e.agent_did.as_deref() == Some(did_lose.as_str())
+        })
+        .await;
+
+        // Stop both background loops (shared is_teardown flag).
+        perspective.teardown_background_tasks().await;
+        let _ = win_loop.await;
+        let _ = lose_loop.await;
+
+        // Not a retryable model wobble: if the loser ran the pass at all, the
+        // claim + cursor failed to coordinate and no amount of retrying is
+        // going to make that correct.
+        assert!(
+            loser_processed.is_none(),
+            "loser ({did_lose}) processed the batch — claim + cursor did not coordinate"
+        );
+
+        if processed.is_none() {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: winner ({did_win}) never signalled Processed"
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        }
+
+        // Load-bearing: exactly ONE subgroup across the two loops.
+        let subgroups = model_instances(&perspective, "ConversationSubgroup", &["name"]).await;
+        if subgroups.len() != 1 {
+            last_err = Some(format!(
+                "attempt {attempt}/{attempts}: expected exactly 1 subgroup (claim must dedup), got {}: {subgroups:#?}",
+                subgroups.len()
+            ));
+            eprintln!("[e2e] {}", last_err.as_ref().unwrap());
+            continue;
+        }
+
+        // No double-processing held on this attempt.
+        return;
+    }
+    panic!(
+        "two-user (real background loop) no-double-processing e2e failed after {attempts} attempts: {}",
+        last_err.unwrap_or_default()
+    );
+}
+
+/// Real-telepresence authorship election (Option A — only *participants* process).
+/// On a SHARED perspective with real managed users whose presence flows through
+/// `online_agents()`, the pass must go to the **first online message-author in
+/// message order**, skipping offline authors, and a peer that is not that author
+/// stands down — while a peer whose batch has *no* online author waits rather
+/// than processing a channel it doesn't participate in. No LLM: `run_one_pass`
+/// returns the election verdict before the interpretation step.
+#[tokio::test]
+async fn auto_processor_election_only_online_participants_process() {
+    use crate::agent::{did_for_context, AgentContext, AgentService};
+    use crate::db::Ad4mDb;
+    use crate::perspectives::auto_processor::config::AutoProcessorConfig;
+    use crate::perspectives::auto_processor::watcher::{run_one_pass, PassOutcome, PendingTurn};
+    use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+
+    let (mut perspective, _shapes, _ctx_main) = setup_perspective_no_llm(&[]).await;
+
+    // Four managed participants, each a real key + a listable user row (so the
+    // co-located `online_agents` path can report their presence).
+    let mk = |email: &str| -> (AgentContext, String) {
+        AgentService::ensure_user_key_exists(email).expect("user key");
+        let ctx = AgentContext::for_user_email(email.to_string());
+        let did = did_for_context(&ctx).expect("did");
+        Ad4mDb::with_global_instance(|db| db.add_user(email, &did, "pw")).expect("add_user");
+        (ctx, did)
+    };
+    let (_ctx_carol, did_carol) = mk("carol@e2e");
+    let (_ctx_bob, did_bob) = mk("bob@e2e");
+    let (ctx_alice, did_alice) = mk("alice@e2e");
+    let (ctx_dave, did_dave) = mk("dave@e2e");
+
+    // Make the perspective a shared neighbourhood owned by all four, so
+    // `online_agents()` reports co-located presence instead of erroring.
+    {
+        let mut h = perspective.persisted.lock().await;
+        h.shared_url = Some("test://neighbourhood".into());
+        h.owners = Some(vec![
+            did_carol.clone(),
+            did_bob.clone(),
+            did_alice.clone(),
+            did_dave.clone(),
+        ]);
+    }
+    // "Log in" bob, alice, dave (recent last_seen ⇒ online). carol stays offline.
+    for email in ["bob@e2e", "alice@e2e", "dave@e2e"] {
+        Ad4mDb::with_global_instance(|db| db.update_user_last_seen(email)).expect("last_seen");
+    }
+
+    let cfg = AutoProcessorConfig {
+        processor_id: "election".into(),
+        source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+        base_prefix: None,
+        interpretation_classes: vec!["ns://ConversationSubgroup".into()],
+        debounce_ms: 0,
+        batch_min: 1,
+        batch_max: 32,
+        max_wait_ms: None,
+        claim_ttl_ms: 60_000,
+        dedup_strategy_json: None,
+        source_window_ms: None,
+        existing_scope: None,
+        mint_scope: None,
+    };
+
+    // Case 1 — a batch authored by carol (offline) then bob (online), in that
+    // message order. alice is online but is NOT the first online author, so she
+    // must stand down for bob (carol is skipped because she is offline).
+    let batch = vec![
+        PendingTurn {
+            id: "m1".into(),
+            speaker: did_carol.clone(),
+            text: "m1".into(),
+            timestamp: "t1".into(),
+        },
+        PendingTurn {
+            id: "m2".into(),
+            speaker: did_bob.clone(),
+            text: "m2".into(),
+            timestamp: "t2".into(),
+        },
+    ];
+    let out = run_one_pass(&mut perspective, &cfg, &batch, 1_000, &ctx_alice, false)
+        .await
+        .expect("alice pass");
+    assert!(
+        matches!(out, PassOutcome::NotCandidate { ref winner } if winner == &did_bob),
+        "alice stands down for the first ONLINE author (bob); carol offline is skipped — got {out:?}"
+    );
+
+    // Case 2 — a batch whose only author (carol) is offline. dave is online but
+    // authored nothing here, so nobody processes: the pass waits for a
+    // participant rather than letting a bystander run it.
+    let batch2 = vec![PendingTurn {
+        id: "solo".into(),
+        speaker: did_carol.clone(),
+        text: "solo".into(),
+        timestamp: "t".into(),
+    }];
+    let out2 = run_one_pass(&mut perspective, &cfg, &batch2, 2_000, &ctx_dave, false)
+        .await
+        .expect("dave pass");
+    assert!(
+        matches!(out2, PassOutcome::AwaitingAuthor),
+        "no online author for the batch ⇒ wait (bystander dave must not process) — got {out2:?}"
+    );
+}
+
 /// Deterministic proof that the `DedupStrategy::Semantic` path — AIService's
 /// local Bert embeddings + cosine threshold — actually drops a paraphrased
 /// duplicate while keeping an unrelated item. The LLM-driven e2e above only
@@ -1470,8 +2380,10 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
 ///     is created as a new instance. Retried until the model proposes it.
 #[tokio::test]
 async fn e2e_run_interpretation_honours_parent_scope() {
-    use crate::perspectives::interpretation::{run_interpretation_with_strategy, DedupStrategy};
-    use crate::perspectives::model_query::types::ParentScope;
+    use crate::perspectives::interpretation::{
+        run_interpretation_with_strategy, DedupStrategy, TranscriptTurn,
+    };
+    use crate::perspectives::model_query::types::Scope;
     use crate::types::{Link, LinkStatus};
 
     let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
@@ -1500,7 +2412,7 @@ async fn e2e_run_interpretation_honours_parent_scope() {
         .await
         .expect("parent link");
 
-    let transcript = vec![(
+    let transcript = vec![TranscriptTurn::from_speaker_text(
         "Nico".to_string(),
         "Reminder for the team: we still need to provision the staging database — it's blocking QA."
             .to_string(),
@@ -1509,11 +2421,11 @@ async fn e2e_run_interpretation_honours_parent_scope() {
         model: "interpretation-embed".to_string(),
         threshold: 0.6,
     };
-    let in_scope = ParentScope::Raw {
+    let in_scope = Scope::Raw {
         id: "soa://parent/b".into(),
         predicate: "ns://contains".into(),
     };
-    let out_scope = ParentScope::Raw {
+    let out_scope = Scope::Raw {
         id: "soa://parent/a".into(),
         predicate: "ns://contains".into(),
     };
