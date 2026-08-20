@@ -266,8 +266,18 @@ export function buildSHACL(
             path: synthesizedPath,
         };
 
-        // Relations typically contain IRIs
-        relShape.nodeKind = 'IRI';
+        // A relation with a declared `datatype` holds encoded literal
+        // values (e.g. `HasMany<string>` with `datatype: "xsd:string"`).
+        // Everything else is a URI relation pointing at another
+        // instance. The executor uses `sh:datatype` on hydration to
+        // decide whether to decode `literal:<type>:<value>` wire form
+        // (yes for literals, no for URIs).
+        if (relMeta.datatype) {
+            relShape.datatype = relMeta.datatype;
+            relShape.nodeKind = 'Literal';
+        } else {
+            relShape.nodeKind = 'IRI';
+        }
 
         // Encode relation kind so the executor can derive direction and
         // scalar-vs-collection rendering without consulting the JS class.

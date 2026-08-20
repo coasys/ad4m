@@ -144,22 +144,25 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
 
     for (name, mut values) in collection_values {
         values.sort_by_key(|&(_, ts)| ts);
-        // Wire-form check runs uniformly across relation-collections and
-        // literal-collections: any target starting with `literal:` is the
-        // AD4M convention for an encoded literal (see `literal://` prefix
-        // handling in `types/core.rs` and `perspectives/migration.rs`),
-        // and no valid subject-instance URI ever uses that prefix. Under
-        // PR #874 typed literals a `HasMany<string>` (e.g.
-        // `InterpretationRun.sources` holding turn-IDs as plain hex)
-        // lands its writes as `literal:string:<hex>` wire form; without
-        // this decode the caller receives the encoded form and any
-        // subsequent comparison to plain values (like `event.itemIds`)
-        // silently mismatches. HasMany-of-URI is unaffected because
-        // subject-instance URIs never carry the `literal:` prefix.
+        // Whether to decode `literal:<type>:<value>` wire form is a
+        // shape-level decision, not a per-target one. A relation with
+        // `sh:datatype` (produced by `@HasMany({ datatype: "xsd:string" })`
+        // or the equivalent JSON key on a hardwired class) holds encoded
+        // literal values — the writer wraps `HasMany<string>` targets as
+        // `literal:string:<hex>` under PR #874 typed literals, and the
+        // reader must unwrap. A relation without `sh:datatype` points at
+        // instance URIs (Recipe→Ingredient, Channel→Message, DIDs,
+        // external URLs); those pass through byte-for-byte even when a
+        // URI happens to start with `literal:`. See the `sh:datatype` vs
+        // `sh:class` distinction in SHACL — this is the same split.
+        let decode_literals = shape
+            .properties
+            .iter()
+            .any(|p| p.name == name && p.datatype.is_some());
         let arr: Vec<Value> = values
             .iter()
             .map(|&(target, _)| {
-                if target.starts_with("literal:") {
+                if decode_literals && target.starts_with("literal:") {
                     parse_literal_value(target)
                 } else {
                     Value::String(target.to_string())
@@ -279,10 +282,12 @@ mod tests {
         assert_eq!(messages.len(), 2, "messages must have 2 items");
         assert_eq!(conversations.len(), 2, "conversations must have 2 items");
 
-        // Wire-form `literal:string:X` targets are decoded to plain `X`
-        // by the hydrator — the AD4M `literal:` prefix is the encoding
-        // marker, not part of the value.
-        let expected_ids: Vec<&str> = vec!["app1", "conv1"];
+        // Shape here uses plain `relation()` (no `sh:datatype`) — a
+        // URI relation. Even though the fixture stored `literal:string:X`
+        // targets, they pass through unchanged because the property does
+        // not opt into literal decoding.  Tests that exercise the decode
+        // path use a shape whose relation declares `datatype`.
+        let expected_ids: Vec<&str> = vec!["literal:string:app1", "literal:string:conv1"];
         for rel_name in &["views", "messages", "conversations"] {
             let ids: Vec<String> = result[rel_name]
                 .as_array()
@@ -292,7 +297,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 ids, expected_ids,
-                "{} must contain both child IDs (decoded)",
+                "{} must contain both child IDs (URI relation pass-through)",
                 rel_name
             );
         }
@@ -352,8 +357,9 @@ mod tests {
 
         assert_eq!(alpha.len(), 1, "alpha has 1 item");
         assert_eq!(beta.len(), 2, "beta has 2 items");
-        // Decoded wire-form.
-        assert_eq!(alpha[0].as_str().unwrap(), "a1");
+        // URI relation, no `sh:datatype` — targets pass through
+        // unchanged even when they carry the reserved `literal:` prefix.
+        assert_eq!(alpha[0].as_str().unwrap(), "literal:string:a1");
     }
 
     #[test]
@@ -459,11 +465,19 @@ mod tests {
         // The bug this fix closes: a `HasMany<string>` (e.g. the
         // auto-processor's `InterpretationRun.sources` holding turn-IDs
         // as plain hex) reaches the store as `literal:string:<hex>`
-        // wire form under PR #874. Before the fix, `is_relation`
-        // short-circuited the decode and the caller received the
-        // encoded form, silently breaking any comparison against plain
-        // values (like `event.itemIds`).
-        let s = shape("Run", vec![relation("sources", "ad4m://interp/sources")]);
+        // wire form under PR #874. The property declares
+        // `sh:datatype xsd:string` (the `@HasMany({ datatype:
+        // "xsd:string" })` case), so the reader unwraps the wire form
+        // and callers see plain values, matching what any subsequent
+        // comparison (e.g. against `event.itemIds`) expects.
+        let s = shape(
+            "Run",
+            vec![relation_with_datatype(
+                "sources",
+                "ad4m://interp/sources",
+                "xsd://string",
+            )],
+        );
         let inst = inst_links(
             "ad4m://interp/run/abc",
             vec![
@@ -487,14 +501,47 @@ mod tests {
     }
 
     #[test]
-    fn test_hydrate_hasmany_mixed_uri_and_literal_targets() {
-        // Defensive: a HasMany with a mix of URIs and literals (e.g. a
-        // migration in flight) must decode only the wire-form entries
-        // and leave URIs untouched. No single-branch fixture in the
-        // existing tests exercises this — before the fix, both were
-        // kept raw; after the fix, the two are distinguished on the
-        // `literal:` prefix alone.
-        let s = shape("Mix", vec![relation("targets", "ns://ref")]);
+    fn test_hydrate_hasmany_of_uri_relation_ignores_literal_prefix() {
+        // Companion to the decode test: a URI relation (no `sh:datatype`)
+        // passes targets through unchanged even when they carry the
+        // reserved `literal:` prefix. Guards against the bug where a
+        // relation-collection blindly decoded any `literal:*` target.
+        let s = shape("Chan", vec![relation("posts", "ad4m://has_child")]);
+        let inst = inst_links(
+            "ad4m://chan/1",
+            vec![
+                ("ad4m://has_child", "literal:string:post_uri_1"),
+                ("ad4m://has_child", "ad4m://post/normal_uri"),
+            ],
+        );
+        let result = hydrate_one(&s, &inst).unwrap();
+        let posts: Vec<String> = result["posts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            posts,
+            vec![
+                "literal:string:post_uri_1".to_string(),
+                "ad4m://post/normal_uri".to_string(),
+            ],
+            "URI relation targets must not be decoded even when the URI carries the `literal:` prefix",
+        );
+    }
+
+    #[test]
+    fn test_hydrate_hasmany_of_string_datatype_mixed_targets_decode_selectively() {
+        // A literal-valued HasMany (declares `sh:datatype`) with a mix
+        // of wire-form and non-wire-form entries: only the entries
+        // carrying the `literal:` prefix get decoded, non-matching
+        // entries pass through unchanged. Guards against an overreach
+        // where enabling the datatype would rewrite every target.
+        let s = shape(
+            "Mix",
+            vec![relation_with_datatype("targets", "ns://ref", "xsd://string")],
+        );
         let inst = inst_links(
             "ns://mix/1",
             vec![

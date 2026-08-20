@@ -28,16 +28,17 @@ use super::types::{IncludeValue, ModelShape, ShapeProperty};
 use super::utils::{parse_literal_value, validate_iri};
 use crate::perspectives::sparql_store::SparqlStore;
 
-/// If a SPARQL getter row's raw string carries the AD4M encoded-literal
-/// marker (`literal:string:X`, `literal:number:X`, etc.) decode it to
-/// its typed JSON value; otherwise return the string verbatim. Matches
-/// the collection-hydration branch's convention in `hydration.rs`
-/// (fix ac3d4274a); keeps the two hydration paths in lockstep so a
-/// `HasMany<string>` behaves the same whether it was read via the
-/// plain-triple scan or a `@HasMany({ getter: "SELECT ..." })`. URI
-/// targets never start with `literal:`, so pass through unchanged.
-fn decode_getter_target(target: &str) -> Value {
-    if target.starts_with("literal:") {
+/// Decode a SPARQL getter row's raw string based on the property's
+/// declared `sh:datatype`. When the property declares a datatype it
+/// holds encoded literal values (`@HasMany({ datatype: "xsd:string" })`
+/// or the equivalent JSON key on a hardwired class), so
+/// `literal:<type>:<value>` wire form gets unwrapped to its typed JSON
+/// value. Without a datatype the property points at instance URIs and
+/// the value passes through byte-for-byte — even when a URI happens to
+/// start with `literal:`. Matches the plain-triple scan branch in
+/// `hydration.rs`, which reads the same `sh:datatype` from the shape.
+fn decode_getter_target(target: &str, datatype: Option<&str>) -> Value {
+    if datatype.is_some() && target.starts_with("literal:") {
         parse_literal_value(target)
     } else {
         Value::String(target.to_string())
@@ -306,32 +307,34 @@ pub(super) fn evaluate_getters(
                         let values = grouped.get(id_owned.as_str());
                         if let Some(obj) = inst.as_object_mut() {
                             // Symmetry with `hydration.rs`'s collection
-                            // branch (fixed in ac3d4274a): a target
-                            // starting with `literal:` is the AD4M
-                            // encoded-literal marker; decode it uniformly
-                            // across collections and singletons, whether
-                            // the value came in through a plain SPARQL
-                            // scan or through a getter query. URI
-                            // targets never carry the `literal:` prefix
-                            // so pass through byte-for-byte.
+                            // branch: `literal:<type>:<value>` wire form
+                            // gets decoded when the property declares
+                            // `sh:datatype` (`@HasMany({ datatype:
+                            // "xsd:string" })`), otherwise passes through
+                            // byte-for-byte. Keeps the plain-triple scan
+                            // and the getter path in lockstep so a value
+                            // hydrated either way behaves the same.
+                            let dt = prop.datatype.as_deref();
                             if prop.is_collection {
                                 if prop.is_scalar_relation {
                                     let val = values
                                         .and_then(|v| v.first())
-                                        .map(|s| decode_getter_target(s))
+                                        .map(|s| decode_getter_target(s, dt))
                                         .unwrap_or(Value::Null);
                                     obj.insert(prop.name.clone(), val);
                                 } else {
                                     let arr: Vec<Value> = values
                                         .map(|v| {
-                                            v.iter().map(|s| decode_getter_target(s)).collect()
+                                            v.iter()
+                                                .map(|s| decode_getter_target(s, dt))
+                                                .collect()
                                         })
                                         .unwrap_or_default();
                                     obj.insert(prop.name.clone(), Value::Array(arr));
                                 }
                             } else {
                                 if let Some(val) = values.and_then(|v| v.first()) {
-                                    obj.insert(prop.name.clone(), decode_getter_target(val));
+                                    obj.insert(prop.name.clone(), decode_getter_target(val, dt));
                                 }
                             }
                         }
@@ -480,40 +483,66 @@ mod decode_getter_target_tests {
     //! Lock in the getter-path decode convention so a HasMany-of-string
     //! read through a `@HasMany({ getter: "SELECT ..." })` sees the same
     //! plain-value round-trip as one read through a plain-triple scan.
+    //! Decode fires only when the property declares `sh:datatype` — URI
+    //! relations pass through unchanged even when a target happens to
+    //! start with `literal:`.
     use super::*;
 
     #[test]
-    fn plain_uri_passes_through() {
+    fn uri_relation_passes_through_without_datatype() {
         assert_eq!(
-            decode_getter_target("ad4m://SomeClass/instance/abc"),
+            decode_getter_target("ad4m://SomeClass/instance/abc", None),
             Value::String("ad4m://SomeClass/instance/abc".into())
         );
     }
 
     #[test]
-    fn did_target_passes_through() {
+    fn did_target_passes_through_without_datatype() {
         assert_eq!(
-            decode_getter_target("did:key:z6Mk..."),
+            decode_getter_target("did:key:z6Mk...", None),
             Value::String("did:key:z6Mk...".into())
         );
     }
 
     #[test]
-    fn literal_string_wire_form_decodes() {
+    fn literal_prefixed_uri_passes_through_when_no_datatype_declared() {
+        // A URI that happens to start with `literal:` — e.g. because a
+        // caller chose it as an instance ID — is NOT touched when the
+        // property is a URI relation (no `sh:datatype`). Ensures the
+        // decode is a shape-level opt-in, not a per-target heuristic.
+        assert_eq!(
+            decode_getter_target("literal:string:legacy_uri", None),
+            Value::String("literal:string:legacy_uri".into())
+        );
+    }
+
+    #[test]
+    fn literal_string_wire_form_decodes_when_datatype_is_string() {
         // Percent-encoded because `parse_literal_value` decodes the URL
         // encoding baked into `Literal::from_string(...).to_url()`.
         assert_eq!(
-            decode_getter_target("literal:string:hello%20world"),
+            decode_getter_target("literal:string:hello%20world", Some("xsd://string")),
             Value::String("hello world".into())
         );
     }
 
     #[test]
-    fn literal_number_wire_form_decodes_to_typed_json() {
+    fn literal_number_wire_form_decodes_to_typed_json_when_datatype_declared() {
         // `parse_literal_value` promotes numeric wire form to a JSON
         // number, not a string.
-        let v = decode_getter_target("literal:number:42");
+        let v = decode_getter_target("literal:number:42", Some("xsd://integer"));
         assert!(v.is_number(), "expected typed JSON number, got {v:?}");
         assert_eq!(v.as_i64(), Some(42));
+    }
+
+    #[test]
+    fn uri_target_passes_through_even_when_datatype_declared() {
+        // Guards against over-eager decode. Even with a datatype set,
+        // any target that does not carry the `literal:` prefix is a
+        // URI and passes through unchanged.
+        assert_eq!(
+            decode_getter_target("ad4m://Foo/instance/1", Some("xsd://string")),
+            Value::String("ad4m://Foo/instance/1".into())
+        );
     }
 }
