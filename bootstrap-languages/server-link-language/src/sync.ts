@@ -133,11 +133,92 @@ export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: nu
 // Outbound — commit
 // ---------------------------------------------------------------------------
 
+/**
+ * Direct single-shot commit. Callers that need error propagation (test
+ * harnesses, non-batching write paths) can await this. Used by
+ * `enqueueCommitBatched` below to send the accumulated batch.
+ */
 export async function commit(diff: PerspectiveDiff): Promise<void> {
     const { config, getToken } = deps();
     const token = await getToken();
     await api.commitDiff(config, token, toWireDiff(diff));
     deps().emitSyncState?.("Synced");
+}
+
+// ---------------------------------------------------------------------------
+// Batched commit — coalesce contiguous synchronous commits into one POST
+//
+// Motivation: `alice.perspective.addLink()` × 1500 in a tight loop produced
+// 1500 sequential POSTs to /rooms/<room>/commit under Holochain, each
+// blocking the next `addLink`. The stress-test integration ran ~200s and
+// timed out. Holochain's link language does not have this shape because
+// commits go into a local Holochain source-chain first and network
+// propagation is decoupled from the caller's await.
+//
+// Design:
+//   - Every `enqueueCommitBatched(diff)` merges additions/removals into a
+//     single pending diff and schedules a microtask flush if not already
+//     scheduled. Returns after enqueuing — the actual POST happens later.
+//   - The microtask flush drains the whole pending batch in ONE POST so the
+//     server sees `additions[]` as long as the batch grew. Preserves ordering
+//     within the batch.
+//   - Send errors are logged; the language does not retry batches (a batch
+//     that failed is dropped from the pending queue rather than blocking
+//     subsequent writes). Callers relying on strict commit-error semantics
+//     must use the direct `commit()` above.
+// ---------------------------------------------------------------------------
+
+let _pendingBatch: PerspectiveDiff | null = null;
+let _flushScheduled = false;
+let _inflight: Promise<void> = Promise.resolve();
+
+/** Enqueue a diff to be flushed in a single POST at the next microtask. */
+export function enqueueCommitBatched(diff: PerspectiveDiff): void {
+    if (!_pendingBatch) {
+        _pendingBatch = { additions: [], removals: [] };
+    }
+    _pendingBatch.additions.push(...diff.additions);
+    _pendingBatch.removals.push(...diff.removals);
+    if (!_flushScheduled) {
+        _flushScheduled = true;
+        // Serialize flushes: each flush waits for the previous to finish
+        // before starting, so we never have two overlapping POSTs stepping on
+        // sequence order.
+        _inflight = _inflight.then(() => flushBatch());
+    }
+}
+
+async function flushBatch(): Promise<void> {
+    // Snapshot + reset FIRST so any commits arriving during the POST land in
+    // the next batch, not this one.
+    const batch = _pendingBatch;
+    _pendingBatch = null;
+    _flushScheduled = false;
+    if (!batch || (batch.additions.length === 0 && batch.removals.length === 0)) {
+        return;
+    }
+    try {
+        await commit(batch);
+    } catch (err) {
+        console.error(
+            `[server-link-language] batched commit failed (${batch.additions.length} adds, ` +
+            `${batch.removals.length} removes) — this batch is NOT retried; ` +
+            `writes are safe locally but the server missed them.`,
+            err,
+        );
+        deps().emitSyncState?.("LinkLanguageInstalledButNotSynced");
+    }
+}
+
+/** Test/teardown hook: await any in-flight flush + one pending flush so a
+ * subsequent teardown or read sees a settled server state. Not called on
+ * the hot path. */
+export async function drainCommitBatch(): Promise<void> {
+    await _inflight;
+    if (_pendingBatch) {
+        await flushBatch();
+    }
+    await _inflight;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +278,9 @@ export async function performSync(): Promise<PerspectiveDiff> {
         return await catchUp();
     } catch (err) {
         console.error("[server-link-language] sync failed:", err);
-        deps().emitSyncState?.("NotSynced");
+        // See index.ts comment on the same value — must be a valid
+        // PerspectiveState variant on the executor side.
+        deps().emitSyncState?.("LinkLanguageInstalledButNotSynced");
         return { additions: [], removals: [] };
     }
 }

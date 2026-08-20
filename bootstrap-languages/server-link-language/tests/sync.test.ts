@@ -234,14 +234,16 @@ describe("sync: catchUp / performSync", () => {
         assert.equal(store.getSequence(), 1);
     });
 
-    it("performSync never throws — logs and reports NotSynced on failure", async () => {
+    it("performSync never throws — logs and reports LinkLanguageInstalledButNotSynced on failure", async () => {
         const transport = new MockTransport();
         setup(transport);
         transport.route(() => true, () => ({ status: 500, headers: {}, body: "server error" }));
 
         const result = await syncModule.performSync();
         assert.deepEqual(result, { additions: [], removals: [] });
-        assert.ok(syncStates.includes("NotSynced"));
+        // Must be a valid `PerspectiveState` variant on the executor side —
+        // see the comment in src/sync.ts::performSync.
+        assert.ok(syncStates.includes("LinkLanguageInstalledButNotSynced"));
     });
 });
 

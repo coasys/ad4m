@@ -108,38 +108,6 @@ async function setupRoomKey(): Promise<void> {
     }
 }
 
-/**
- * Pushes a diff to the server with a single short retry. Never throws —
- * a failure here means the link is safely stored locally but not yet
- * synced; it will NOT be automatically resent (no persistent outbox in
- * this version, see AGENTS.md "Known limitations").
- */
-async function commitWithRetry(diff: PerspectiveDiff): Promise<void> {
-    try {
-        await syncModule.commit(diff);
-        return;
-    } catch (err) {
-        console.error("[server-link-language] commit push failed, retrying once:", err);
-    }
-    try {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        await syncModule.commit(diff);
-    } catch (err) {
-        console.error(
-            "[server-link-language] commit push failed after retry — link is saved locally but was " +
-            "NOT synced to the server and will not be automatically retried.",
-            err,
-        );
-        // PerspectiveState variant name — the executor deserialises this against
-// its enum (rust-executor/src/types/domain.rs::PerspectiveState) and rejects
-// anything it doesn't know. "NotSynced" is not a variant; the semantically
-// correct value for "we own the language, we know we're behind" is
-// LinkLanguageInstalledButNotSynced. The SCREAMING_SNAKE form is the
-// primary serde name, but the PascalCase alias is also accepted.
-getRuntime().emitSyncStateChange("LinkLanguageInstalledButNotSynced");
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Language definition
 // ---------------------------------------------------------------------------
@@ -294,8 +262,12 @@ getRuntime().emitSyncStateChange("LinkLanguageInstalledButNotSynced");
             // 1. Store links locally (plaintext, always — see src/sync.ts module doc).
             store.applyDiff(diff);
 
-            // 2. Push to the server (encrypted on the wire if this room has E2E enabled).
-            await commitWithRetry(diff);
+            // 2. Queue the push to the server. `enqueueCommitBatched` returns
+            //    immediately after appending to the batch; the actual POST
+            //    happens on a microtask flush, so a tight loop of addLink()
+            //    calls collapses into one POST (see the batching block in
+            //    sync.ts for why).
+            syncModule.enqueueCommitBatched(diff);
 
             // 3. Emit so local subscribers see it immediately.
             getRuntime().emitPerspectiveDiff(diff);
