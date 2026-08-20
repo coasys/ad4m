@@ -25,8 +25,9 @@ import flatLanguageTests from "./flat-language.test";
 import agentLanguageTests from "./agent-language";
 import socialDNATests from "./social-dna-flow";
 
-// Skip the server-link matrix when its hash isn't published yet (older
-// prepare-test runs, or a partial local build). Holochain matrix always runs.
+// Both link-language hashes are required — prepare-test must publish both.
+// The absence check happens in the outer before(), so a missing file fails
+// loudly rather than silently dropping half the matrix.
 const SERVER_LINK_HASH_PATH = "./scripts/server-link-language-hash";
 const SERVER_LINK_HASH = fs.existsSync(SERVER_LINK_HASH_PATH)
     ? fs.readFileSync(SERVER_LINK_HASH_PATH).toString().trim()
@@ -143,18 +144,19 @@ describe("Integration tests", function () {
 
           await testContext.makeAllNodesKnown()
 
-          // Boot a link-server for the server-link-language matrix leg. Only
-          // when the language was actually published in prepare-test — an
-          // absent hash means we skip the leg entirely rather than fail the
-          // whole suite.
-          if (SERVER_LINK_HASH) {
-              linkServer = await startLinkServer();
-              serverLinkConfig = serverLinkLang(SERVER_LINK_HASH, linkServer.url);
-          } else {
-              console.warn(
-                  `[integration] ${SERVER_LINK_HASH_PATH} missing — skipping server-link neighbourhood matrix. Re-run prepare-test to enable.`,
+          // Boot a link-server for the server-link-language matrix leg.
+          // Fail hard if the hash file is missing — a broken prepare-test
+          // must not silently drop half the matrix; that's the exact drift
+          // this suite exists to catch.
+          if (!SERVER_LINK_HASH) {
+              throw new Error(
+                  `[integration] ${SERVER_LINK_HASH_PATH} is missing or empty. ` +
+                  `Server-link-language did not publish during prepare-test — ` +
+                  `fix that before running the integration suite (this test must not run without it).`,
               );
           }
+          linkServer = await startLinkServer();
+          serverLinkConfig = serverLinkLang(SERVER_LINK_HASH, linkServer.url);
         })
 
         after(async () => {
@@ -174,12 +176,10 @@ describe("Integration tests", function () {
         // getter closes over the outer `serverLinkConfig` so it picks up the
         // real value after the outer before() runs.
         describe('Neighbourhood [holochain]', neighbourhoodTests(testContext, () => holochainConfig))
-        if (SERVER_LINK_HASH) {
-            describe('Neighbourhood [server-link]', neighbourhoodTests(testContext, () => {
-                if (!serverLinkConfig) throw new Error("server-link config not initialised — before() didn't run?");
-                return serverLinkConfig;
-            }))
-        }
+        describe('Neighbourhood [server-link]', neighbourhoodTests(testContext, () => {
+            if (!serverLinkConfig) throw new Error("server-link config not initialised — before() didn't run?");
+            return serverLinkConfig;
+        }))
         describe('Auto-processor (two executors)', autoProcessorNeighbourhoodTests(testContext))
         describe('Cross-peer SHACL shape sync', crossPeerShapeSyncTests(testContext))
     })
