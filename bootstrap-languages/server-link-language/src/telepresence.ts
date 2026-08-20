@@ -9,6 +9,10 @@ import type { ClientWsMessage, DID, OnlineAgent, ServerWsMessage } from "./types
 
 export interface TelepresenceDeps {
     send: (msg: ClientWsMessage) => void;
+    /** Local DID. The server broadcasts the full room roster (including us)
+     * on every `set-online-status`, so we must filter self out client-side.
+     * `""` (never set) means no filter — safe fallback for tests. */
+    getMyDid: () => string;
 }
 
 let _deps: TelepresenceDeps | null = null;
@@ -59,15 +63,20 @@ export async function setOnlineStatus(status: unknown): Promise<void> {
 }
 
 export async function getOnlineAgents(): Promise<OnlineAgent[]> {
-    // Filter out peers we've seen join but who haven't broadcast a status yet.
-    // The executor's OnlineAgent (rust-executor/src/types/domain.rs) requires a
-    // `status: PerspectiveExpression` field — non-optional. Returning a bare
-    // `{did}` (as we do internally for `peer-joined` before the peer calls
-    // `setOnlineStatus`) triggers `RpcError: RPC error 500: missing field
-    // \`status\`` on the executor side. Every `set-online-status` triggers an
-    // `online-agents` broadcast from the server (link-server/src/ws.ts), so
-    // status-less peers appear in this list as soon as they announce themselves.
-    return Array.from(onlineAgents.values()).filter((a) => a.status !== undefined);
+    // Two filters:
+    //   1. Drop self. The server rebroadcasts the FULL room roster (including
+    //      the caller) on every `set-online-status`, so without this the local
+    //      agent appears in its own `onlineAgents` list.
+    //   2. Drop status-less peers. The executor's `OnlineAgent`
+    //      (rust-executor/src/types/domain.rs) requires a non-optional
+    //      `status: PerspectiveExpression`; returning bare `{did}` (which we
+    //      store internally for `peer-joined` before the peer calls
+    //      `setOnlineStatus`) triggers `RpcError: RPC error 500: missing field
+    //      \`status\``.
+    const myDid = deps().getMyDid();
+    return Array.from(onlineAgents.values()).filter(
+        (a) => a.status !== undefined && a.did !== myDid,
+    );
 }
 
 export async function sendSignal(remoteAgentDid: DID, payload: unknown): Promise<object> {
