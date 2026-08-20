@@ -389,6 +389,10 @@ roles:
         network_seed: None,
         roles_settings,
         ignore_genesis_failure: false,
+        // HC 0.7.0 added restore_from_dht: when true, suppresses genesis and
+        // rebuilds the source chain from the DHT (requires agent_key: Some).
+        // Fresh Unyt install — we want normal genesis.
+        restore_from_dht: false,
     };
 
     match hc.install_app(payload).await {

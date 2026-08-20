@@ -505,10 +505,16 @@ impl HolochainService {
                 network_config.bootstrap_url = Url2::parse("http://bootstrap.ad4m.dev:4433");
             }
 
+            // HC 0.7.0 dropped NetworkConfig.signal_url — the signal-server
+            // concept was folded into bootstrap+relay. Old AD4M code set
+            // signal_url to a WS URL for direct peer signaling; under 0.7
+            // this responsibility moved to the iroh relay (relay_url).
+            // The use_proxy toggle now falls through to the relay_url block
+            // below, since "proxy" and "relay" mean the same thing in the
+            // new topology. Preserving the local_config.proxy_url semantic
+            // by overriding relay_url when use_proxy is set.
             if local_config.use_proxy {
-                network_config.signal_url = Url2::parse(local_config.proxy_url.as_str());
-            } else {
-                network_config.signal_url = Url2::parse("ws://bootstrap.ad4m.dev:4433");
+                network_config.relay_url = Url2::parse(local_config.proxy_url.as_str());
             }
 
             if let Some(relay_url) = local_config.relay_url {
@@ -537,11 +543,18 @@ impl HolochainService {
             //    crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
             //{
             info!("Applying unyt space override for DNA {}", dna_hash);
+            // HC 0.7.0: SpaceNetworkOverride no longer has signal_url — the
+            // signal-server responsibility moved to the iroh relay. We drop
+            // that field and keep bootstrap_url + relay_url + auth material.
+            // UNYT_SIGNAL_URL is intentionally ignored here (it was pointing
+            // at a legacy websocket signaller that isn't part of the 0.7
+            // topology). If Unyt needs a distinct relay endpoint from the
+            // one implied by UNYT_RELAY_URL, that's a Unyt-side concern to
+            // reconfigure post-migration.
             config.network.space_overrides.insert(
                 dna_hash,
                 SpaceNetworkOverride {
                     bootstrap_url: Some(Url2::parse(crate::unyt_service::UNYT_BOOTSTRAP_URL)),
-                    signal_url: Some(Url2::parse(crate::unyt_service::UNYT_SIGNAL_URL)),
                     base64_auth_material: None,
                     relay_url: Some(Url2::parse(crate::unyt_service::UNYT_RELAY_URL)),
                 },

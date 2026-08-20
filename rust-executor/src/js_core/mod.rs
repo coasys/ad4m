@@ -119,8 +119,12 @@ impl JsCore {
             }
         }
 
+        // deno v2.9 removed `allow_all` from PermissionsOptions — the old
+        // semantics of "allow_all = true bypasses everything" is now expressed
+        // by passing None for each allow/deny list. When allow_all was false
+        // (as in AD4M's sandboxed language runtime), the field was already a
+        // no-op, so simply removing it preserves behavior.
         let permissions_opts = PermissionsOptions {
-            allow_all: false,
             allow_read: Some(allowed_paths.clone()),
             deny_read: None,
             allow_write: Some(allowed_paths),
@@ -137,6 +141,7 @@ impl JsCore {
             allow_ffi: None,
             deny_ffi: None,
             prompt: false,
+            ..Default::default()
         };
 
         let permissions = Permissions::from_options(&*permission_desc_parser, &permissions_opts)
@@ -179,6 +184,11 @@ impl JsCore {
                 shared_array_buffer_store: Default::default(),
                 compiled_wasm_module_store: Default::default(),
                 v8_code_cache: Default::default(),
+                // deno v2.9 added a bundle_provider field to WorkerServiceOptions
+                // (Option<Arc<dyn BundleProvider>>). AD4M doesn't need Deno's
+                // module-bundle facility — our language modules load via the
+                // StringModuleLoader instead — so None is the right value.
+                bundle_provider: None,
                 fs,
             },
             worker_options,
@@ -288,7 +298,10 @@ impl JsCore {
         &self,
         script: String,
     ) -> Result<
-        SmartGlobalVariableFuture<impl Future<Output = Result<v8::Global<v8::Value>, CoreError>>>,
+        // deno v2.9: JsRuntime::resolve() now returns futures resolving to
+        // Box<JsError> (was CoreError in older deno_core). SmartGlobalVariableFuture's
+        // trait bound was updated to match.
+        SmartGlobalVariableFuture<impl Future<Output = Result<v8::Global<v8::Value>, Box<deno_core::error::JsError>>>>,
         AnyError,
     > {
         let wrapped_script = format!(

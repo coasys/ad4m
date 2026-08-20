@@ -39,17 +39,31 @@ fn maybe_transpile(
                 maybe_code_cache,
             ))
         }
-        Err(e) => Err(ModuleLoaderError::Core(CoreError::Js(JsError {
-            name: Some(e.get_class().to_string()),
-            message: Some(e.get_message().to_string()),
-            stack: None,
-            cause: None,
-            exception_message: String::new(),
-            frames: Vec::new(),
-            source_line: None,
-            source_line_frame_index: None,
-            aggregated: None,
-        }))),
+        // deno v2.9 API drift here:
+        //   - CoreError is now Boxed(CoreErrorKind) with `#[from] Box<JsError>` on Js
+        //   - JsError gained additional_properties + stack_is_custom fields
+        //   - JsErrorBox no longer exposes NotFound/Core enum-style constructors
+        //
+        // Simplest way to bridge an anyhow-shaped transpile error into a
+        // ModuleLoaderError is via CoreError conversion chain:
+        //   Box<JsError> -> CoreErrorKind::Js -> CoreError -> ModuleLoaderError::Core
+        Err(e) => {
+            let js_err = Box::new(JsError {
+                name: Some(e.get_class().to_string()),
+                message: Some(e.get_message().to_string()),
+                stack: None,
+                cause: None,
+                exception_message: String::new(),
+                frames: Vec::new(),
+                source_line: None,
+                source_line_frame_index: None,
+                aggregated: None,
+                additional_properties: Vec::new(),
+                stack_is_custom: false,
+            });
+            let core_err: CoreError = js_err.into();
+            Err(ModuleLoaderError::Core(core_err))
+        }
     }
 }
 
@@ -86,6 +100,10 @@ impl ModuleLoader for StringModuleLoader {
         _maybe_referrer: std::option::Option<&Url>,
         _is_dyn_import: bool,
         _request_module_type: RequestedModuleType,
+        // deno v2.9 added a 5th parameter to ModuleLoader::load — the source-
+        // map handler. We don't need source-map manipulation for AD4M's
+        // string modules, so ignore it.
+        _source_map_getter: Option<&deno_core::SourceMapGetter>,
     ) -> ModuleLoadResponse {
         match module_specifier.to_file_path() {
             Ok(path) => match std::fs::read_to_string(&path) {

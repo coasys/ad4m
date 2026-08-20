@@ -8,6 +8,40 @@ members = [
 ]
 
 [patch.crates-io]
+# coasys/lair 0.7.1-coasys-rusqlite-0.40 fork: upstream lair 0.7.1 with
+# rusqlite bumped from ^0.37 to ^0.40. Needed because upstream lair 0.7.1's
+# rusqlite ^0.37 uses libsqlite3-sys ^0.35, which conflicts with coasys/deno
+# v2.9.5's deno_cache (rusqlite ^0.40 → libsqlite3-sys ^0.38) via the
+# Cargo links="sqlite3" single-owner constraint. Bumping lair's rusqlite pin
+# up aligns the whole chain.
+#
+# The identical [patch] lives in coasys/holochain 0.7.0-space-override-coasys
+# so HC itself resolves; but cargo [patch.crates-io] does NOT propagate through
+# git deps into the consuming workspace, so AD4M must redeclare it here.
+lair_keystore = { git = "https://github.com/coasys/lair.git", branch = "0.7.1-coasys-rusqlite-0.40" }
+lair_keystore_api = { git = "https://github.com/coasys/lair.git", branch = "0.7.1-coasys-rusqlite-0.40" }
+hc_seed_bundle = { git = "https://github.com/coasys/lair.git", branch = "0.7.1-coasys-rusqlite-0.40" }
+
+# coasys/sqlx fork: upstream sqlx 0.9.0 with sqlx-sqlite's libsqlite3-sys
+# upper bound loosened from <0.38 to <0.39. Needed because coasys/holochain
+# 0.7.0's holochain_state uses sqlx 0.9.0, but coasys/deno v2.9.5's
+# deno_cache uses rusqlite 0.40 (which needs libsqlite3-sys ^0.38). Only
+# one crate can own links="sqlite3", so the whole chain must converge on
+# libsqlite3-sys 0.38.
+#
+# Patching the WHOLE sqlx family (not just sqlx-sqlite) so that Describe<DB>,
+# QueryDriver, and other cross-crate types have consistent identity. Mixing
+# a fork sqlx-sqlite with crates.io sqlx-core / sqlx-macros-core produces
+# E0277 trait-bound errors (Describe<Sqlite> not Serialize) because the
+# two crates see two different `sqlx_core::database::Database` traits.
+sqlx = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
+sqlx-core = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
+sqlx-macros = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
+sqlx-macros-core = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
+sqlx-mysql = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
+sqlx-postgres = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
+sqlx-sqlite = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
+
 # DEBUG: Using forked kitsune2 with debugging instrumentation and fixed default behavior
 # These patches ensure ad4m uses the fixed kitsune2 that doesn't default to blocking
 #kitsune2_api = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
