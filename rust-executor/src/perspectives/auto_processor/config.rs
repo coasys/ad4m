@@ -56,26 +56,12 @@ const AUTO_PROCESSOR_TARGET_CLASS: &str = "ad4m://AutoProcessor";
 /// setter accumulates class URIs instead of replacing them, and hydration
 /// returns them as an array. No `maxCount` is declared on it: the number of
 /// classes one processor materializes is open-ended.
-const AUTO_PROCESSOR_SDNA: &str = r#"{
-  "target_class":"ad4m://AutoProcessor",
-  "interpretation_hint":"An automatic interpretation processor: the content it watches, the classes it materializes, and its batching/claim timings.",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ad4m://processor_id","target":"placeholder"}],
-  "properties":[
-    {"path":"ad4m://processor_id","name":"processorId","identity":true,"min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://processor_id","target":"value"}]},
-    {"path":"ad4m://source_scope_query","name":"sourceScopeQuery","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://source_scope_query","target":"value"}]},
-    {"path":"ad4m://base_prefix","name":"basePrefix","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://base_prefix","target":"value"}]},
-    {"path":"ad4m://interpretation_class","name":"interpretationClasses","collection":true,"min_count":1,"setter":[{"action":"addLink","source":"this","predicate":"ad4m://interpretation_class","target":"value"}]},
-    {"path":"ad4m://debounce_ms","name":"debounceMs","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://debounce_ms","target":"value"}]},
-    {"path":"ad4m://batch_min","name":"batchMin","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://batch_min","target":"value"}]},
-    {"path":"ad4m://batch_max","name":"batchMax","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://batch_max","target":"value"}]},
-    {"path":"ad4m://max_wait_ms","name":"maxWaitMs","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://max_wait_ms","target":"value"}]},
-    {"path":"ad4m://claim_ttl_ms","name":"claimTtlMs","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://claim_ttl_ms","target":"value"}]},
-    {"path":"ad4m://source_window_ms","name":"sourceWindowMs","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://source_window_ms","target":"value"}]},
-    {"path":"ad4m://dedup_strategy","name":"dedupStrategy","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://dedup_strategy","target":"value"}]},
-    {"path":"ad4m://existing_scope","name":"existingScope","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://existing_scope","target":"value"}]},
-    {"path":"ad4m://mint_scope","name":"mintScope","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://mint_scope","target":"value"}]}
-  ]
-}"#;
+// Loaded from a JSON file so the TS parity test can read the SAME file and
+// build its expectations from IT — no hand-maintained parallel reference in
+// either language (2026-08-20 debug: hardcoded references in both tests
+// missed the property-name divergence entirely).
+const AUTO_PROCESSOR_SDNA: &str =
+    include_str!("../hardwired_sdna/auto_processor.json");
 
 /// Everything the executor watcher (P-B2) needs to schedule and run a single
 /// auto-processor pass over a source perspective.

@@ -26,19 +26,10 @@ const INTERP_RUN_TARGET_CLASS: &str = "ad4m://InterpretationRun";
 /// None of the scalars use `resolveLanguage` — they are deterministic
 /// `literal:string:` targets, which keeps provenance stable and cheaply
 /// decodable (no signed-envelope round-trip).
-const INTERP_RUN_SDNA: &str = r#"{
-  "target_class":"ad4m://InterpretationRun",
-  "interpretation_hint":"One interpretation pass: the model + prompt version that wrote a batch of inferred data.",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ad4m://interp/run_id","target":"placeholder"}],
-  "properties":[
-    {"path":"ad4m://interp/run_id","name":"runId","identity":true,"min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/run_id","target":"value"}]},
-    {"path":"ad4m://interp/model","name":"model","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/model","target":"value"}]},
-    {"path":"ad4m://interp/prompt_version","name":"promptVersion","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/prompt_version","target":"value"}]},
-    {"path":"ad4m://interp/ran_at","name":"ranAt","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/ran_at","target":"value"}]},
-    {"path":"ad4m://interp/processor","name":"processor","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/processor","target":"value"}]},
-    {"path":"ad4m://interp/sources","name":"sources","collection":true,"min_count":0,"setter":[{"action":"addLink","source":"this","predicate":"ad4m://interp/sources","target":"value"}]}
-  ]
-}"#;
+// See auto_processor::config for why the SDNA blobs are external JSON files
+// loaded via `include_str!`.
+const INTERP_RUN_SDNA: &str =
+    include_str!("../../hardwired_sdna/interpretation_run.json");
 
 /// AutoProcessor cursor extras on an [`InterpretationRun`]: the processor
 /// instance URI (`ad4m://autoprocessor/<id>`) and the turn IDs this pass
@@ -61,15 +52,8 @@ pub struct InterpretationRunCursor {
 /// as a plain link target rather than literal-encoded. The dynamic `inferred/<p>`
 /// links are NOT declared here — their predicates vary per instance, so they are
 /// written directly as parallel links (see [`super::write::write_overlay`]).
-const INTERP_OVERLAY_SDNA: &str = r#"{
-  "target_class":"ad4m://InterpretationOverlay",
-  "interpretation_hint":"Provenance overlay marking an instance as LLM-inferred, with the last-inferred value snapshot.",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ad4m://interp/kind","target":"create"}],
-  "properties":[
-    {"path":"ad4m://interp/kind","name":"kind","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/kind","target":"value"}]},
-    {"path":"ad4m://interp/run","name":"run","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/run","target":"value"}]}
-  ]
-}"#;
+const INTERP_OVERLAY_SDNA: &str =
+    include_str!("../../hardwired_sdna/interpretation_overlay.json");
 
 /// Identity + provenance for one interpretation pass — minted once per
 /// [`crate::perspectives::interpretation::run_interpretation`] call and threaded
