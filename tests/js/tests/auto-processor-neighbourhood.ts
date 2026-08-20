@@ -21,7 +21,7 @@
  * provides for the Rust e2e suite too. Model/endpoint are overridable via
  * INTERPRETATION_E2E_MODEL / INTERPRETATION_E2E_BASE_URL.
  */
-import { PerspectiveProxy, Perspective, Link } from "@coasys/ad4m";
+import { PerspectiveProxy, Perspective, Link, InterpretationRun } from "@coasys/ad4m";
 import type { AutoProcessorEvent } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
 import { sleep } from "../utils/utils";
@@ -190,6 +190,34 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         await waitUntil(() => retired().length >= 2, 240_000, "the first wave to be processed");
 
         const firstWave = retired();
+
+        // Register the InterpretationRun @Model class on Bob so we can query
+        // Bob's local graph for Alice's synced run — this doubles as the
+        // "wait for cursor sync" barrier before we author wave 2.
+        //
+        // The race we're closing: Alice's `processed` fires on her local
+        // event stream the instant she writes the run, but Bob only learns
+        // that w1a+w1b are retired once Alice's `InterpretationRun.sources`
+        // links Holochain-sync to Bob's copy of the perspective. Without
+        // this barrier, wave 2 lands on Bob while his watcher still thinks
+        // all 4 turns are new — Bob re-processes w1a+w1b, and `retired()`
+        // (which aggregates BOTH executors' local `processed` events)
+        // reports duplicates. The bare Alice-side `retired().length >= 2`
+        // wait is Alice-local; the assertion below is cross-peer.
+        await InterpretationRun.register(bobP);
+        await waitUntil(
+          async () => {
+            const bobRuns = await InterpretationRun.findAll(bobP);
+            return bobRuns.some(
+              (r) =>
+                Array.isArray(r.sources) &&
+                firstWave.every((id) => r.sources!.includes(id)),
+            );
+          },
+          120_000,
+          "wave-1 InterpretationRun.sources to sync to Bob before wave 2",
+        );
+
         await say(bobP, "msg://w2a", "Separately, the retro is moved to Thursday morning.");
         await say(bobP, "msg://w2b", "I'll book the room and send the invite.");
         await waitUntil(() => retired().length >= 4, 240_000, "the second wave to be processed");
