@@ -183,23 +183,36 @@ fn parse_literal_fn(args: &[Term]) -> Option<Term> {
     if args.len() != 1 {
         return None;
     }
-    // Extract the raw string from either kind of Term. Both a Literal
-    // (typed or xsd:string) and a NamedNode may carry `literal:string:` /
-    // `literal:json:` / typed-JSON payloads — before the RDF-1.2 typed-
-    // literal migration everything was NamedNode-encoded, after it same
-    // payloads land as Literals, and a query may still see either shape.
-    let (raw, datatype) = match &args[0] {
-        Term::Literal(l) => (
-            l.value().to_string(),
-            Some(l.datatype().as_str().to_string()),
-        ),
-        Term::NamedNode(n) => (n.as_str().to_string(), None),
-        _ => return Some(args[0].clone()),
-    };
-    if let Some(parsed) = decode_literal_payload(&raw, datatype.as_deref()) {
-        return Some(Literal::new_simple_literal(parsed).into());
+    match &args[0] {
+        Term::Literal(l) => {
+            let raw = l.value();
+            let datatype = l.datatype().as_str();
+            if let Some(parsed) = decode_literal_payload(raw, Some(datatype)) {
+                return Some(Literal::new_simple_literal(parsed).into());
+            }
+            // Typed-literal fallback: convert to a plain xsd:string with the
+            // same lexical form. Model-query WHERE clauses compare the result
+            // of `<ad4m://fn/parse_literal>(?var)` against a string constant
+            // (`"true"`, `"42"`, …) with SPARQL `=`, which is strict about
+            // datatypes — `"true"^^xsd:boolean = "true"` returns false. The
+            // pre-refactor code always did this simple-literal wrap for the
+            // xsd:* datatypes; without it, boolean/integer/decimal WHEREs
+            // silently return zero rows. Regression covered by
+            // model_query::integration_tests::
+            //   test_full_model_query_signed_expression_boolean_where
+            Some(Literal::new_simple_literal(raw).into())
+        }
+        Term::NamedNode(n) => {
+            let raw = n.as_str();
+            if let Some(parsed) = decode_literal_payload(raw, None) {
+                return Some(Literal::new_simple_literal(parsed).into());
+            }
+            // Not a `literal:` URI — hand back the NamedNode unchanged so
+            // callers can still work with e.g. `ad4m://` addresses.
+            Some(args[0].clone())
+        }
+        _ => Some(args[0].clone()),
     }
-    Some(args[0].clone())
 }
 
 /// Extract the "parsed value" from a raw literal payload, mirroring the
