@@ -181,7 +181,7 @@ const TIMEOUT_DURATION: Duration = Duration::from_secs(90);
 
 const APP_INSTALL_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
 
-#[op2(async)]
+#[op2(async(lazy))]
 async fn start_holochain_conductor(
     #[serde] config: LocalConductorConfig,
 ) -> Result<(), AnyhowWrapperError> {
@@ -189,7 +189,7 @@ async fn start_holochain_conductor(
     Ok(())
 }
 
-#[op2(async)]
+#[op2(async(lazy))]
 async fn log_dht_status() -> Result<(), AnyhowWrapperError> {
     let res = timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
@@ -205,7 +205,7 @@ async fn log_dht_status() -> Result<(), AnyhowWrapperError> {
     }
 }
 
-#[op2(async)]
+#[op2(async(lazy))]
 #[serde]
 async fn install_app(
     #[serde] install_app_payload: InstallAppPayload,
@@ -219,7 +219,7 @@ async fn install_app(
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy))]
 #[serde]
 async fn get_app_info(#[string] app_id: String) -> Result<Option<AppInfo>, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
@@ -233,7 +233,7 @@ async fn get_app_info(#[string] app_id: String) -> Result<Option<AppInfo>, Anyho
 
 //TODO
 //Have install app use lair to generate the membrane proof
-#[op2(async)]
+#[op2(async(lazy))]
 #[serde]
 async fn call_zome_function(
     #[string] app_id: String,
@@ -270,7 +270,7 @@ async fn call_zome_function(
     DecodedZomeCallResponse::from_zome_call_response(response)
 }
 
-#[op2(async)]
+#[op2(async(lazy))]
 #[serde]
 async fn agent_infos() -> Result<Vec<String>, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
@@ -282,7 +282,7 @@ async fn agent_infos() -> Result<Vec<String>, AnyhowWrapperError> {
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy))]
 async fn add_agent_infos(
     #[serde] agent_infos_payload: Vec<String>,
 ) -> Result<(), AnyhowWrapperError> {
@@ -295,7 +295,7 @@ async fn add_agent_infos(
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy))]
 async fn remove_app(#[string] app_id: String) -> Result<(), AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
@@ -306,7 +306,7 @@ async fn remove_app(#[string] app_id: String) -> Result<(), AnyhowWrapperError> 
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy))]
 #[serde]
 async fn sign_string(#[string] data: String) -> Result<Signature, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
@@ -318,7 +318,7 @@ async fn sign_string(#[string] data: String) -> Result<Signature, AnyhowWrapperE
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy))]
 async fn shutdown() -> Result<(), AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
@@ -329,7 +329,7 @@ async fn shutdown() -> Result<(), AnyhowWrapperError> {
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy))]
 #[serde]
 async fn get_agent_key() -> Result<HoloHash<Agent>, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
@@ -341,7 +341,7 @@ async fn get_agent_key() -> Result<HoloHash<Agent>, AnyhowWrapperError> {
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy))]
 #[string]
 async fn pack_dna(#[string] path: String) -> Result<String, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
@@ -353,7 +353,7 @@ async fn pack_dna(#[string] path: String) -> Result<String, AnyhowWrapperError> 
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy))]
 #[string]
 async fn unpack_dna(#[string] path: String) -> Result<String, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
@@ -365,7 +365,7 @@ async fn unpack_dna(#[string] path: String) -> Result<String, AnyhowWrapperError
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy))]
 #[string]
 async fn pack_happ(#[string] path: String) -> Result<String, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
@@ -377,7 +377,7 @@ async fn pack_happ(#[string] path: String) -> Result<String, AnyhowWrapperError>
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy))]
 #[string]
 async fn unpack_happ(#[string] path: String) -> Result<String, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {

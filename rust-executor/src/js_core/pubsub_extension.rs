@@ -2,7 +2,7 @@ use crate::js_core::error::AnyhowWrapperError;
 use crate::pubsub::get_global_pubsub;
 use deno_core::op2;
 
-#[op2(async)]
+#[op2(async(lazy))]
 async fn publish(
     #[string] topic: String,
     #[string] data: String,
