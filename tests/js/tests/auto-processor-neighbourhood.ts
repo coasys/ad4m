@@ -21,7 +21,7 @@
  * provides for the Rust e2e suite too. Model/endpoint are overridable via
  * INTERPRETATION_E2E_MODEL / INTERPRETATION_E2E_BASE_URL.
  */
-import { PerspectiveProxy, Perspective, Link, InterpretationRun } from "@coasys/ad4m";
+import { PerspectiveProxy, Perspective, Link, LinkQuery, InterpretationRun } from "@coasys/ad4m";
 import type { AutoProcessorEvent } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
 import { sleep } from "../utils/utils";
@@ -62,14 +62,16 @@ async function registerLlm(ad4m: any): Promise<void> {
 export default function autoProcessorNeighbourhoodTests(testContext: TestContext) {
   return () => {
     describe("Auto-processor across two executors", function () {
-      // Cumulative wait budget in the slowest test is 240s + 240s + 240s + 120s
-      // = 840s plus `sharedChannel` executor-boot and processor-sync time. A
-      // tighter suite timeout would fire on a slow-but-correct run just before
-      // the last `waitUntil` reports its own diagnostic — masking the real
-      // cause (CodeRabbit #881 review). Bumped from 900s to 1_200s to give
-      // the cross-peer cursor barrier its full 240s budget on Marvin runs
-      // where p-diff-sync gossip stalls (2026-08-20).
-      this.timeout(1_200_000);
+      // Cumulative wait budget in the slowest test:
+      //   sharedChannel gossip warm-up (up to 180s)
+      // + wave-1 processed (up to 240s)
+      // + wave-1 cursor synced to Bob (up to 300s)
+      // + wave-2 processed (up to 240s)
+      // + subgroups converge (up to 120s)
+      // = up to 1_080s. Suite timeout 1_500s gives every waitUntil budget
+      // enough head-room to report its own diagnostic before Mocha times
+      // out the whole test (CodeRabbit #881: never mask the real barrier).
+      this.timeout(1_500_000);
       /**
        * Alice publishes a neighbourhood, Bob joins, both register the class and
        * the LLM, and Alice registers one processor whose config syncs to Bob.
@@ -99,6 +101,31 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
 
         const aliceP = (await alice.perspective.byUUID(aliceHandle.uuid)) as PerspectiveProxy;
         const bobP = (await bob.perspective.byUUID(bobHandle.uuid)) as PerspectiveProxy;
+
+        // Explicit gossip warm-up: each `it` in this describe currently spins
+        // up a fresh neighbourhood (new language template, new publish/join),
+        // so p-diff-sync has to bootstrap its gossip peers from scratch on
+        // every test. If gossip isn't actually flowing yet, any subsequent
+        // cross-peer expectation (like the wave test's cursor barrier) will
+        // fail with a confusing timeout deep inside the test.
+        //
+        // Prove the sync path works at setup time: Alice writes a marker
+        // link, we wait until it reaches Bob. If gossip is broken we fail
+        // here with a clear diagnostic, not 4 minutes later on wave 2's
+        // barrier. If it's fine we proceed with confidence that further
+        // link writes will sync in bounded time (2026-08-20 Marvin flake).
+        const marker = `warmup://${uuidv4()}`;
+        await aliceP.add(
+          new Link({ source: marker, predicate: "ns://ping", target: "literal:string:ok" }),
+        );
+        await waitUntil(
+          async () => {
+            const links = await bobP.get(new LinkQuery({ source: marker }));
+            return links.length > 0;
+          },
+          180_000,
+          "gossip warm-up: Alice's marker link to reach Bob",
+        );
 
         await ConversationSubgroup.register(aliceP);
         await ConversationSubgroup.register(bobP);
@@ -206,13 +233,14 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         // reports duplicates. The bare Alice-side `retired().length >= 2`
         // wait is Alice-local; the assertion below is cross-peer.
         await InterpretationRun.register(bobP);
-        // 240s budget: matches the wave-processing waits. p-diff-sync gossip
-        // on Marvin under CI load can take >2 min to deliver a fresh
-        // revision (2026-08-20 CI logs show repeated `latest_revision result:
-        // null` polls for the full run), which is why the earlier 120s
-        // budget expired. If this expires too, the failure diagnostic
-        // ("wave-1 InterpretationRun.sources to sync to Bob") is still
-        // clearer than the pre-barrier "expected 4 got 6".
+        // 300s budget: p-diff-sync gossip on Marvin under CI load can take
+        // several minutes to deliver a fresh revision — the previous 120s
+        // and 240s budgets both timed out. The gossip warm-up in
+        // `sharedChannel` proves the SYNC PATH is up, but that doesn't
+        // bound per-link latency. If this still expires the failure
+        // diagnostic ("wave-1 InterpretationRun.sources to sync to Bob")
+        // points at the underlying p-diff-sync reliability rather than at
+        // our test.
         await waitUntil(
           async () => {
             const bobRuns = await InterpretationRun.findAll(bobP);
@@ -222,7 +250,7 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
                 firstWave.every((id) => r.sources!.includes(id)),
             );
           },
-          240_000,
+          300_000,
           "wave-1 InterpretationRun.sources to sync to Bob before wave 2",
         );
 
