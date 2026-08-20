@@ -37,7 +37,16 @@ export interface PluginConfig {
   multiUser?: boolean;
   /** Multi-user: the assistant's user email/identifier. Persisted by setup for re-authentication. */
   email?: string;
-  /** Multi-user: password for runtime re-authentication. NOT persisted by setup — provide via AD4M_PASSWORD env var or set manually for headless operation. */
+  /**
+   * Multi-user: password for signup/login. Resolved in this order:
+   *   1. `AD4M_PASSWORD` env var (recommended for headless/CI)
+   *   2. Interactive stdin prompt (only during `openclaw ad4m-setup`, TTY required)
+   *   3. This field (escape hatch — plaintext-at-rest, discouraged)
+   *
+   * Setup persists only the resulting JWT (`token`) and `email`; the password is
+   * discarded. To let the plugin re-authenticate at runtime when a JWT expires,
+   * export `AD4M_PASSWORD` in the environment that starts OpenClaw.
+   */
   password?: string;
 }
 

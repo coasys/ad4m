@@ -405,15 +405,28 @@ export default function ad4mPlugin(api: any) {
   /**
    * Obtain a JWT token from a running executor.
    *
-   * When email/password credentials exist in config, tries multi-user login
-   * first (login_email, with auto-signup on "user not found"). Falls back to
-   * the capability-request flow (6-digit code from launcher UI).
+   * When email/password credentials are available, tries multi-user login first
+   * (login_email, with auto-signup on "user not found"). Falls back to the
+   * capability-request flow (6-digit code from launcher UI).
+   *
+   * Password is resolved from `AD4M_PASSWORD` env var (preferred, headless-safe)
+   * or `providedConfig.password` (discouraged: plaintext-at-rest). At runtime we
+   * never prompt on stdin — the service starts headless.
    *
    * Returns the JWT string or empty string on failure.
    */
   async function obtainJwtFromExecutor(): Promise<string> {
     const email = providedConfig.email;
-    const password = providedConfig.password;
+    const password = process.env.AD4M_PASSWORD || providedConfig.password;
+    const multiUser = providedConfig.multiUser === true;
+
+    if (multiUser && email && !password) {
+      logger.warn(
+        `[ad4m] Multi-user re-auth needed for ${email} but no password available. ` +
+          `Export AD4M_PASSWORD in the environment that starts OpenClaw so the plugin ` +
+          `can obtain a fresh JWT when the current one expires.`,
+      );
+    }
 
     try {
       const initResp = await mcpInitialize(endpoint);

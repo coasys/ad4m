@@ -2436,6 +2436,72 @@ describe("ad4mPlugin", () => {
     mcpService!.stop();
   });
 
+  it("obtains JWT via email/password login using AD4M_PASSWORD env var (no plaintext in config)", async () => {
+    const registeredServices: Array<{
+      id: string;
+      start: Function;
+      stop: Function;
+    }> = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
+      const body = JSON.parse((opts as any).body as string);
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { serverInfo: { name: "ad4m" } } }),
+          { status: 200, headers: { "Content-Type": "application/json", "Mcp-Session-Id": "sess-env" } },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 200 });
+      }
+      if (body.method === "tools/call" && body.params?.name === "login_email") {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { content: [{ type: "text", text: JSON.stringify({ token: "jwt-from-env" }) }] },
+        });
+      }
+      if (body.method === "tools/list") {
+        return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: { tools: [] } });
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+
+    const priorEnv = process.env.AD4M_PASSWORD;
+    process.env.AD4M_PASSWORD = "env-secret";
+
+    try {
+      const mockApi = {
+        pluginConfig: {
+          mode: "external",
+          mcpEndpoint: "http://localhost:3001/mcp",
+          email: "bot@agent.local",
+          // NOTE: no `password` field — proves the env var alone is enough
+        },
+        logger: makeMockLogger(),
+        registerTool: vi.fn(),
+        registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+        registerCli: vi.fn(),
+      };
+
+      await ad4mPlugin(mockApi);
+      const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
+      await mcpService!.start(makeServiceCtx());
+
+      const loginCall = (globalThis.fetch as any).mock.calls.find((c: any[]) => {
+        const b = JSON.parse(c[1]?.body || "{}");
+        return b.method === "tools/call" && b.params?.name === "login_email";
+      });
+      expect(loginCall).toBeDefined();
+      expect(JSON.parse(loginCall[1].body).params.arguments.password).toBe("env-secret");
+
+      mcpService!.stop();
+    } finally {
+      if (priorEnv === undefined) delete process.env.AD4M_PASSWORD;
+      else process.env.AD4M_PASSWORD = priorEnv;
+    }
+  });
+
   it("obtains JWT via email/password login when multiUser config has credentials", async () => {
     const registeredServices: Array<{
       id: string;

@@ -61,7 +61,12 @@ export async function runSetup(
   // via signup/login rather than a capability against the node's base agent.
   const multiUser = pluginCfg.multiUser === true;
   const agentEmail = pluginCfg.email || `openclaw-${generateRandomPassphrase(8)}@agent.local`;
-  const agentPassword = pluginCfg.password || generateRandomPassphrase(24);
+  // Password resolves env var → config field → interactive stdin (setup only).
+  // Never generated: a randomly-generated password would be persisted nowhere
+  // and the user could never log in again after the first JWT expires.
+  const agentPassword = multiUser
+    ? await resolveMultiUserPassword(logger, pluginCfg.password)
+    : undefined;
 
   // ── Step 2: Find binary ──
   const binaryPath = findExecutorBinary();
@@ -379,6 +384,46 @@ function promptUser(question: string): Promise<string> {
       resolve(answer.trim());
     });
   });
+}
+
+/**
+ * Resolve the multi-user password without persisting it. Checks, in order:
+ *   1. `AD4M_PASSWORD` env var
+ *   2. `pluginCfg.password` (backwards-compat escape hatch; warns)
+ *   3. Interactive stdin prompt (only when a TTY is attached)
+ *
+ * Returns `undefined` when no source is available — callers should skip the
+ * multi-user login path and fall through to the capability flow.
+ */
+async function resolveMultiUserPassword(
+  logger: any,
+  configPassword?: string,
+): Promise<string | undefined> {
+  const envPass = process.env.AD4M_PASSWORD;
+  if (envPass) {
+    logger.info("[ad4m-setup] Using multi-user password from AD4M_PASSWORD env var.");
+    return envPass;
+  }
+  if (configPassword) {
+    logger.warn(
+      "[ad4m-setup] plugin config contains a plaintext `password` — this is discouraged. " +
+        "Prefer the AD4M_PASSWORD env var so the secret is not stored on disk.",
+    );
+    return configPassword;
+  }
+  if (process.stdin.isTTY) {
+    logger.info("[ad4m-setup] No AD4M_PASSWORD env var found; prompting on stdin.");
+    const entered = await promptUser(
+      "[ad4m-setup] Enter password for the multi-user account (blank to skip): ",
+    );
+    return entered || undefined;
+  }
+  logger.warn(
+    "[ad4m-setup] Multi-user mode requested but no password available " +
+      "(AD4M_PASSWORD unset and stdin is not a TTY). " +
+      "Skipping login; falling back to the capability-request flow.",
+  );
+  return undefined;
 }
 
 /**
