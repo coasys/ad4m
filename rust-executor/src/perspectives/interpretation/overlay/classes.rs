@@ -26,21 +26,10 @@ const INTERP_RUN_TARGET_CLASS: &str = "ad4m://InterpretationRun";
 /// None of the scalars use `resolveLanguage` — they are deterministic
 /// `literal:string:` targets, which keeps provenance stable and cheaply
 /// decodable (no signed-envelope round-trip).
-const INTERP_RUN_SDNA: &str = r#"{
-  "target_class":"ad4m://InterpretationRun",
-  "interpretation_hint":"One interpretation pass: the model + prompt version that wrote a batch of inferred data.",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ad4m://interp/run_id","target":"placeholder"}],
-  "properties":[
-    {"path":"ad4m://interp/run_id","name":"run_id","identity":true,"min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/run_id","target":"value"}]},
-    {"path":"ad4m://interp/model","name":"model","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/model","target":"value"}]},
-    {"path":"ad4m://interp/prompt_version","name":"prompt_version","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/prompt_version","target":"value"}]},
-    {"path":"ad4m://interp/ran_at","name":"ran_at","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/ran_at","target":"value"}]},
-    {"path":"ad4m://interp/processor","name":"processor","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/processor","target":"value"}]},
-    {"path":"ad4m://interp/sources","name":"sources","collection":true,"min_count":0,"setter":[{"action":"addLink","source":"this","predicate":"ad4m://interp/sources","target":"value"}]},
-    {"path":"ad4m://interp/debug_prompt","name":"debug_prompt","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/debug_prompt","target":"value"}]},
-    {"path":"ad4m://interp/debug_response","name":"debug_response","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/debug_response","target":"value"}]}
-  ]
-}"#;
+// See auto_processor::config for why the SDNA blobs are external JSON files
+// loaded via `include_str!`. #903 adds `debug_prompt` + `debug_response`
+// scalar properties to the JSON side of the parity pair.
+const INTERP_RUN_SDNA: &str = include_str!("../../hardwired_sdna/interpretation_run.json");
 
 /// AutoProcessor cursor extras on an [`InterpretationRun`]: the processor
 /// instance URI (`ad4m://autoprocessor/<id>`) and the turn IDs this pass
@@ -63,15 +52,7 @@ pub struct InterpretationRunCursor {
 /// as a plain link target rather than literal-encoded. The dynamic `inferred/<p>`
 /// links are NOT declared here — their predicates vary per instance, so they are
 /// written directly as parallel links (see [`super::write::write_overlay`]).
-const INTERP_OVERLAY_SDNA: &str = r#"{
-  "target_class":"ad4m://InterpretationOverlay",
-  "interpretation_hint":"Provenance overlay marking an instance as LLM-inferred, with the last-inferred value snapshot.",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ad4m://interp/kind","target":"create"}],
-  "properties":[
-    {"path":"ad4m://interp/kind","name":"kind","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/kind","target":"value"}]},
-    {"path":"ad4m://interp/run","name":"run","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/run","target":"value"}]}
-  ]
-}"#;
+const INTERP_OVERLAY_SDNA: &str = include_str!("../../hardwired_sdna/interpretation_overlay.json");
 
 /// Identity + provenance for one interpretation pass — minted once per
 /// [`crate::perspectives::interpretation::run_interpretation`] call and threaded
@@ -172,10 +153,10 @@ pub(crate) async fn mint_interpretation_run(
 ) -> anyhow::Result<String> {
     let run_uri = format!("ad4m://interp/run/{}", meta.run_id);
     let mut values = serde_json::json!({
-        "run_id": meta.run_id,
+        "runId": meta.run_id,
         "model": meta.model,
-        "prompt_version": meta.prompt_version,
-        "ran_at": meta.ran_at,
+        "promptVersion": meta.prompt_version,
+        "ranAt": meta.ran_at,
     });
     let mut rest_sources: Vec<String> = Vec::new();
     if let Some(c) = cursor {
@@ -232,97 +213,10 @@ pub(crate) async fn mint_interpretation_run(
     Ok(run_uri)
 }
 
-#[cfg(test)]
-mod sdna_parity_tests {
-    //! Parity guards: [`INTERP_RUN_SDNA`] and [`INTERP_OVERLAY_SDNA`] must
-    //! declare exactly the SHACL property `path` URIs the TS `@Model`
-    //! classes (`InterpretationRun`, `InterpretationOverlay` in
-    //! `core/src/perspectives/InterpretationModels.ts`) declare.
-    //!
-    //! Checked mirror-side in
-    //! `tests/js/tests/model/interpretation-models.test.ts`. Update BOTH
-    //! sides together when adding a hardwired property; a rename or
-    //! addition on one side silently forks the SDNA and makes
-    //! cross-language instances invisible to each other's readers.
-    use super::*;
-    use std::collections::BTreeSet;
-
-    fn parsed_paths(sdna: &str) -> BTreeSet<String> {
-        let parsed: serde_json::Value =
-            serde_json::from_str(sdna).expect("SDNA const must be valid JSON");
-        parsed["properties"]
-            .as_array()
-            .expect("`properties` must be an array")
-            .iter()
-            .map(|p| {
-                p["path"]
-                    .as_str()
-                    .expect("every property must declare a `path`")
-                    .to_string()
-            })
-            .collect()
-    }
-
-    fn parsed_target_class(sdna: &str) -> String {
-        let parsed: serde_json::Value =
-            serde_json::from_str(sdna).expect("SDNA const must be valid JSON");
-        parsed["target_class"]
-            .as_str()
-            .expect("SDNA must declare a `target_class`")
-            .to_string()
-    }
-
-    #[test]
-    fn interp_run_sdna_paths_match_ts_side() {
-        assert_eq!(
-            parsed_target_class(INTERP_RUN_SDNA),
-            "ad4m://InterpretationRun",
-            "target_class must match the TS @Model target"
-        );
-        let actual = parsed_paths(INTERP_RUN_SDNA);
-        let expected: BTreeSet<String> = [
-            "ad4m://interp/run_id",
-            "ad4m://interp/model",
-            "ad4m://interp/prompt_version",
-            "ad4m://interp/ran_at",
-            "ad4m://interp/processor",
-            "ad4m://interp/sources",
-            "ad4m://interp/debug_prompt",
-            "ad4m://interp/debug_response",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        assert_eq!(
-            actual, expected,
-            "Rust INTERP_RUN_SDNA property paths drifted from the TS parity spec. \
-             Update both sides together: this test AND \
-             `tests/js/tests/model/interpretation-models.test.ts` \
-             `InterpretationRun @Model shape matches …` reference set."
-        );
-    }
-
-    #[test]
-    fn interp_overlay_sdna_paths_match_ts_side() {
-        assert_eq!(
-            parsed_target_class(INTERP_OVERLAY_SDNA),
-            "ad4m://InterpretationOverlay",
-            "target_class must match the TS @Model target"
-        );
-        let actual = parsed_paths(INTERP_OVERLAY_SDNA);
-        // NOTE: the overlay class carries no `type` flag by design — the
-        // `kind` link IS the discriminator, so exactly two paths are
-        // expected.
-        let expected: BTreeSet<String> = ["ad4m://interp/kind", "ad4m://interp/run"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(
-            actual, expected,
-            "Rust INTERP_OVERLAY_SDNA property paths drifted from the TS parity spec. \
-             Update both sides together: this test AND \
-             `tests/js/tests/model/interpretation-models.test.ts` \
-             `InterpretationOverlay @Model shape matches …` reference set."
-        );
-    }
-}
+// SDNA-parity tests live TS-side in
+// `tests/js/tests/model/interpretation-models.test.ts` — they read the same
+// `hardwired_sdna/*.json` files this module `include_str!`s and compare the
+// (path, name) pairs against `@Model.generateSHACL().shape.properties`. A
+// hardcoded Rust-side reference set here would fork the source of truth
+// (2026-08-20 bug: paths matched, names diverged, both Rust and TS parity
+// tests passed while `create_subject` writes silently no-op'd).

@@ -7,21 +7,14 @@
  * language, so the claim and the processed-turn cursor have to coordinate
  * through the shared graph with real sync latency in between.
  *
- * Flow (mirrors ./neighbourhood.ts's publish/join pattern):
- *   1. Alice creates a perspective and publishes it as a neighbourhood.
- *   2. Bob joins → both share the graph, so claim + subgroup links sync.
- *   3. Both register the ConversationSubgroup class + the LLM; Alice registers
- *      one auto-processor (its config syncs to Bob).
- *   4. Messages are posted into the shared channel.
- *   5. Both executors' watch loops run and coordinate over the shared graph.
+ * Each `it` spins up its OWN fresh neighbourhood (new social-context language,
+ * new publish, new join) — clean-slate coordination per test, no cross-test
+ * carry-over.
  *
- * The neighbourhood is published and joined here, the same way ./neighbourhood.ts
- * does it, so this needs nothing from the environment beyond what the rest of
- * the integration suite already needs — plus a reachable LLM, which the runner
- * provides for the Rust e2e suite too. Model/endpoint are overridable via
- * INTERPRETATION_E2E_MODEL / INTERPRETATION_E2E_BASE_URL.
+ * Model/endpoint are overridable via INTERPRETATION_E2E_MODEL /
+ * INTERPRETATION_E2E_BASE_URL.
  */
-import { PerspectiveProxy, Perspective, Link } from "@coasys/ad4m";
+import { PerspectiveProxy, Perspective, Link, LinkQuery, InterpretationRun } from "@coasys/ad4m";
 import type { AutoProcessorEvent } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
 import { sleep } from "../utils/utils";
@@ -50,6 +43,13 @@ const SCOPE_QUERY = `SELECT ?speaker ?text ?timestamp WHERE {
 }
 ORDER BY ?timestamp`;
 
+// Under PR #874 typed literals, `mint_interpretation_run`'s string `sources`
+// land as typed `xsd:string`. Both `event.itemIds` (raw hex from
+// `PendingTurn.id`) and link targets read via `perspective.get` surface as
+// one of `"<hex>"` or `"literal:string:<hex>"`; normalise before comparing.
+const stripLiteral = (s: string): string =>
+  s.startsWith("literal:string:") ? s.slice("literal:string:".length) : s;
+
 async function registerLlm(ad4m: any): Promise<void> {
   const modelId = await ad4m.ai.addModel({
     name: "interpretation-llm",
@@ -62,17 +62,23 @@ async function registerLlm(ad4m: any): Promise<void> {
 export default function autoProcessorNeighbourhoodTests(testContext: TestContext) {
   return () => {
     describe("Auto-processor across two executors", function () {
-      // Cumulative wait budget in the slowest test is 240s + 240s + 120s = 600s
-      // plus `sharedChannel` executor-boot and processor-sync time. A 600s
-      // suite timeout would fire on a slow-but-correct run just before the
-      // last `waitUntil` reports its own diagnostic — masking the real cause
-      // (CodeRabbit #881 review). Give the suite enough head-room that a
-      // waitUntil budget expiry surfaces first.
-      this.timeout(900_000);
+      // Cumulative wait budget in the slowest test:
+      //   sharedChannel gossip warm-up (up to 180s)
+      // + wave-1 processed (up to 240s)
+      // + wave-1 InterpretationRun synced to the other peer (up to 240s)
+      // + wave-2 processed (up to 240s)
+      // + subgroups converge (up to 120s)
+      // = up to 1_060s. Suite timeout 1_500s gives every waitUntil budget
+      // enough head-room to report its own diagnostic before Mocha times
+      // out the whole test.
+      this.timeout(1_500_000);
+
       /**
-       * Alice publishes a neighbourhood, Bob joins, both register the class and
-       * the LLM, and Alice registers one processor whose config syncs to Bob.
-       * Returns both proxies plus the merged event stream from both executors.
+       * Fresh neighbourhood per test. Alice publishes, Bob joins, both
+       * register the class + the LLM, and Alice registers one processor
+       * whose config syncs to Bob. Explicit gossip warm-up verifies the
+       * sync path is live before anything critical runs. Returns both
+       * proxies plus the merged event stream from both executors.
        */
       async function sharedChannel(processorId: string, config: Record<string, unknown> = {}) {
         const alice = testContext.alice;
@@ -99,6 +105,23 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         const aliceP = (await alice.perspective.byUUID(aliceHandle.uuid)) as PerspectiveProxy;
         const bobP = (await bob.perspective.byUUID(bobHandle.uuid)) as PerspectiveProxy;
 
+        // Explicit gossip warm-up: prove the sync path is up BEFORE the
+        // watchers start firing. Fresh neighbourhood, cold gossip peers —
+        // without this, later cross-peer expectations time out on cold-start
+        // sync rather than reporting the actual state.
+        const marker = `warmup://${uuidv4()}`;
+        await aliceP.add(
+          new Link({ source: marker, predicate: "ns://ping", target: "literal:string:ok" }),
+        );
+        await waitUntil(
+          async () => {
+            const links = await bobP.get(new LinkQuery({ source: marker }));
+            return links.length > 0;
+          },
+          180_000,
+          "gossip warm-up: Alice's marker link to reach Bob",
+        );
+
         await ConversationSubgroup.register(aliceP);
         await ConversationSubgroup.register(bobP);
 
@@ -118,13 +141,21 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
           claimTtlMs: 60_000,
           ...config,
         } as any);
-        await sleep(2000);
+        // Give the AutoProcessorConfig time to sync to Bob so his watcher can
+        // load it — otherwise Bob has no scope query and never gathers turns.
+        await sleep(3000);
 
         return { aliceP, bobP, events };
       }
 
       async function say(p: PerspectiveProxy, uri: string, body: string) {
         await p.add(new Link({ source: uri, predicate: "ns://body", target: `literal:string:${body}` }));
+      }
+
+      /** DID of the agent behind a given executor client. */
+      async function agentDid(ad4m: any): Promise<string> {
+        const status = await ad4m.agent.status();
+        return status?.did || "unknown";
       }
 
       it("processes a shared channel exactly once (claim coordinates)", async () => {
@@ -178,18 +209,87 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
       it("divides successive waves between the executors without re-processing a turn", async () => {
         const { aliceP, bobP, events } = await sharedChannel("flux-waves", { batchMin: 2 });
 
+        const aliceDid = await agentDid(testContext.alice);
+        const bobDid = await agentDid(testContext.bob);
+
         const retired = () =>
           events.filter((e) => e.step === "processed").flatMap((e) => e.itemIds);
 
-        // Wave 1 is authored by Alice, wave 2 by Bob. Both land in the same
-        // shared channel, so each peer re-gathers the other's turns on every
-        // tick — only the claim and the cursor keep a turn from being
-        // interpreted twice, once per executor.
+        // Wave 1 authored by Alice, wave 2 by Bob. Both land in the same shared
+        // channel, so each peer re-gathers the other's turns on every tick —
+        // only the claim and the cursor keep a turn from being interpreted
+        // twice, once per executor.
         await say(aliceP, "msg://w1a", "Our webhook retries keep dropping during payment outages.");
         await say(aliceP, "msg://w1b", "Right, the payments queue cannot replay what got dropped.");
         await waitUntil(() => retired().length >= 2, 240_000, "the first wave to be processed");
 
         const firstWave = retired();
+
+        // Wave-1 must be attributable to exactly one peer. Failing here (not
+        // downstream) points at the claim mechanism directly.
+        const wave1Dids = new Set(
+          events
+            .filter((e) => e.step === "processed" && (e.itemIds ?? []).some((id) => firstWave.includes(id)))
+            .map((e) => e.agentDid),
+        );
+        expect(
+          wave1Dids.size,
+          `wave 1 must be processed by exactly ONE peer, got dids=${JSON.stringify(
+            [...wave1Dids],
+          )} (alice=${aliceDid} bob=${bobDid})`,
+        ).to.equal(1);
+
+        // Wait for wave-1's InterpretationRun to sync ACROSS to the OTHER
+        // peer — the one who didn't process wave 1. Only then does that peer's
+        // cursor know wave-1 is retired and can filter it out of a wave-2
+        // batch.
+        //
+        // Two subtleties (both from live CI evidence 2026-08-20):
+        //   (a) The OTHER peer may never have had `InterpretationRun` SHACL
+        //       registered — `ensure_interpretation_overlay_classes` fires
+        //       from the pass path, and if the peer's watcher hasn't run a
+        //       pass yet (backed off due to the claim, or the config hasn't
+        //       synced) the class is unknown. `InterpretationRun.findAll(p)`
+        //       throws "No SHACL shape stored for class 'InterpretationRun'".
+        //   (b) HasMany relation targets ride through as `literal:string:<id>`
+        //       under #874 typed literals (hydration keeps relation targets
+        //       in wire form), while `event.itemIds` is plain hex. Strip
+        //       before comparing.
+        // Both dodged by looking up the run on the AUTHOR peer (which
+        // definitely has SHACL — its pass registered it) and then polling
+        // the OTHER peer for the raw source-links (no SHACL required).
+        const wave1Author = [...wave1Dids][0];
+        const wave1AuthorP = wave1Author === aliceDid ? aliceP : bobP;
+        const otherPeer = wave1Author === aliceDid ? bobP : aliceP;
+        const otherLabel = wave1Author === aliceDid ? "Bob" : "Alice";
+
+        const authorRuns = await InterpretationRun.findAll(wave1AuthorP);
+        const wave1Run = authorRuns.find(
+          (r) =>
+            Array.isArray(r.sources) &&
+            firstWave.every((id) => r.sources!.map(stripLiteral).includes(id)),
+        );
+        if (!wave1Run) {
+          throw new Error(
+            `wave-1 run not found on author peer; runs=${JSON.stringify(
+              authorRuns.map((r) => ({ id: r.id, sources: r.sources })),
+            )} firstWave=${JSON.stringify(firstWave)}`,
+          );
+        }
+        const runUri = wave1Run.id;
+
+        await waitUntil(
+          async () => {
+            const links = await otherPeer.get(
+              new LinkQuery({ source: runUri, predicate: "ad4m://interp/sources" }),
+            );
+            const targets = new Set(links.map((l) => stripLiteral(l.data.target)));
+            return firstWave.every((id) => targets.has(id));
+          },
+          240_000,
+          `wave-1 sources for ${runUri} to sync to ${otherLabel}`,
+        );
+
         await say(bobP, "msg://w2a", "Separately, the retro is moved to Thursday morning.");
         await say(bobP, "msg://w2b", "I'll book the room and send the invite.");
         await waitUntil(() => retired().length >= 4, 240_000, "the second wave to be processed");

@@ -1,6 +1,6 @@
 use crate::perspectives::interpretation::types::{ExistingInstances, InstanceContext};
 use crate::perspectives::model_query::types::{ModelShape, ShapeProperty};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 mod read;
 mod write;
@@ -30,9 +30,10 @@ pub(crate) fn instances_by_class(
 /// set — the comparison basis for both dedup paths (the string path normalizes
 /// them, the semantic path embeds them). Deterministic order (by `id`) so the
 /// semantic embedding batch is stable.
+#[cfg(test)]
 pub(crate) fn identity_values_by_class(
     existing: &ExistingInstances,
-) -> HashMap<String, Vec<String>> {
+) -> std::collections::HashMap<String, Vec<String>> {
     instances_by_class(existing)
         .into_iter()
         .map(|(class, rows)| (class, rows.into_iter().map(|r| r.title.clone()).collect()))

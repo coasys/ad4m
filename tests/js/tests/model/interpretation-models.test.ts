@@ -20,10 +20,15 @@
  */
 
 import { expect } from "chai";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Ad4mClient, Link, PerspectiveProxy } from "@coasys/ad4m";
 import { AutoProcessorConfig, InterpretationOverlay, InterpretationRun } from "@coasys/ad4m";
 import { getSharedAgent } from "./hooks.js";
 import { startAgent } from "../../helpers/index.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @Model", function () {
   this.timeout(120_000);
@@ -160,7 +165,7 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
     await p.add(new Link({
       source: "ad4m://autoprocessor/my-proc",
       predicate: "ad4m://interpretation_class",
-      target: "literal:string:ad4m://Task",
+      target: "ad4m://Task",
     }));
 
     const configs = await AutoProcessorConfig.findAll(p);
@@ -173,86 +178,79 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
 
   // ── SDNA parity — TS @Model shape agrees with Rust hardwired SDNA ──────────
   //
-  // The three hardwired classes below carry TWO parallel SHACL declarations —
-  // one in Rust (`config::AUTO_PROCESSOR_SDNA`, `overlay::classes::
-  // INTERP_RUN_SDNA`, `INTERP_OVERLAY_SDNA`) and one on the TS side via the
-  // `@Model` decorators in `InterpretationModels.ts`. They MUST stay in sync
-  // or a TS-written instance becomes invisible / unreadable to the Rust
-  // watcher (and vice-versa). These tests pin the invariant by asserting the
-  // TS-generated shape's property PREDICATES match the Rust-declared set,
-  // property-by-property. If either side gains or renames a property, the
-  // corresponding test fails until both sides move together.
+  // The hardwired classes carry a SHACL declaration on both sides: the Rust
+  // executor `include_str!`s `rust-executor/src/perspectives/hardwired_sdna/
+  // *.json`; the TS side generates its shape from the `@Model` decorators in
+  // `InterpretationModels.ts`. They MUST agree — a TS-written instance that
+  // uses a different setter name from the Rust reader silently no-ops the
+  // write (2026-08-20 debug: paths matched, names diverged, and every earlier
+  // hardcoded-reference-set parity test happily passed).
   //
-  // The reference sets below are the source of truth. Update BOTH sides at
-  // once when adding a hardwired property.
+  // The tests below defend against that by loading the SAME JSON files the
+  // executor uses and comparing (path, name) pairs. Path = the RDF predicate
+  // on the link; name = the `create_subject({name: value})` setter lookup
+  // key. Both must match for a write to land.
+
+  const SDNA_DIR = path.resolve(
+    __dirname,
+    "../../../../rust-executor/src/perspectives/hardwired_sdna",
+  );
+
+  function loadSdnaPathNamePairs(fileName: string): Map<string, string> {
+    const raw = fs.readFileSync(path.join(SDNA_DIR, fileName), "utf-8");
+    const parsed = JSON.parse(raw) as {
+      properties: Array<{ path: string; name: string }>;
+    };
+    return new Map(parsed.properties.map((p) => [p.path, p.name]));
+  }
+
+  function loadSdnaTargetClass(fileName: string): string {
+    const raw = fs.readFileSync(path.join(SDNA_DIR, fileName), "utf-8");
+    return (JSON.parse(raw) as { target_class: string }).target_class;
+  }
 
   it("AutoProcessorConfig @Model shape matches Rust AUTO_PROCESSOR_SDNA", () => {
     const { shape } = (AutoProcessorConfig as any).generateSHACL();
-    const paths = new Set(shape.properties.map((p: any) => p.path));
+    const actual = new Map<string, string>(
+      shape.properties.map((p: any): [string, string] => [p.path, p.name]),
+    );
 
-    // Mirrors Rust `AUTO_PROCESSOR_SDNA` in rust-executor/src/perspectives/
-    // auto_processor/config.rs.
+    const expectedTargetClass = loadSdnaTargetClass("auto_processor.json");
+    const expected = loadSdnaPathNamePairs("auto_processor.json");
+
     expect(shape.targetClass, "target class must match Rust SDNA")
-      .to.equal("ad4m://AutoProcessor");
-    const expected = new Set([
-      "ad4m://processor_id",
-      "ad4m://source_scope_query",
-      "ad4m://base_prefix",
-      "ad4m://interpretation_class",
-      "ad4m://debounce_ms",
-      "ad4m://batch_min",
-      "ad4m://batch_max",
-      "ad4m://max_wait_ms",
-      "ad4m://claim_ttl_ms",
-      "ad4m://source_window_ms",
-      "ad4m://dedup_strategy",
-      "ad4m://existing_scope",
-      "ad4m://mint_scope",
-      "ad4m://debug_mode",
-    ]);
-
-    expect(paths, "TS shape must declare exactly the Rust SDNA property paths")
+      .to.equal(expectedTargetClass);
+    expect(actual, "TS shape must match Rust SDNA path→name pairs")
       .to.deep.equal(expected);
   });
 
   it("InterpretationRun @Model shape matches Rust INTERP_RUN_SDNA", () => {
     const { shape } = (InterpretationRun as any).generateSHACL();
-    const paths = new Set(shape.properties.map((p: any) => p.path));
+    const actual = new Map<string, string>(
+      shape.properties.map((p: any): [string, string] => [p.path, p.name]),
+    );
 
-    // Mirrors Rust `INTERP_RUN_SDNA` in rust-executor/src/perspectives/
-    // interpretation/overlay/classes.rs.
+    const expectedTargetClass = loadSdnaTargetClass("interpretation_run.json");
+    const expected = loadSdnaPathNamePairs("interpretation_run.json");
+
     expect(shape.targetClass, "target class must match Rust SDNA")
-      .to.equal("ad4m://InterpretationRun");
-    const expected = new Set([
-      "ad4m://interp/run_id",
-      "ad4m://interp/model",
-      "ad4m://interp/prompt_version",
-      "ad4m://interp/ran_at",
-      "ad4m://interp/processor",
-      "ad4m://interp/sources",
-      "ad4m://interp/debug_prompt",
-      "ad4m://interp/debug_response",
-    ]);
-
-    expect(paths, "TS shape must declare exactly the Rust SDNA property paths")
+      .to.equal(expectedTargetClass);
+    expect(actual, "TS shape must match Rust SDNA path→name pairs")
       .to.deep.equal(expected);
   });
 
   it("InterpretationOverlay @Model shape matches Rust INTERP_OVERLAY_SDNA", () => {
     const { shape } = (InterpretationOverlay as any).generateSHACL();
-    const paths = new Set(shape.properties.map((p: any) => p.path));
+    const actual = new Map<string, string>(
+      shape.properties.map((p: any): [string, string] => [p.path, p.name]),
+    );
 
-    // Mirrors Rust `INTERP_OVERLAY_SDNA` in rust-executor/src/perspectives/
-    // interpretation/overlay/classes.rs. NOTE: the overlay class carries no
-    // `type` flag by design — the `kind` link is the discriminator.
+    const expectedTargetClass = loadSdnaTargetClass("interpretation_overlay.json");
+    const expected = loadSdnaPathNamePairs("interpretation_overlay.json");
+
     expect(shape.targetClass, "target class must match Rust SDNA")
-      .to.equal("ad4m://InterpretationOverlay");
-    const expected = new Set([
-      "ad4m://interp/kind",
-      "ad4m://interp/run",
-    ]);
-
-    expect(paths, "TS shape must declare exactly the Rust SDNA property paths")
+      .to.equal(expectedTargetClass);
+    expect(actual, "TS shape must match Rust SDNA path→name pairs")
       .to.deep.equal(expected);
   });
 });
