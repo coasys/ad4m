@@ -58,17 +58,46 @@ export async function startLinkServer(readyTimeoutMs = 15000): Promise<LinkServe
     proc.stderr?.on("data", (b) => process.stderr.write(`[link-server:${port}] ${b}`));
 
     const url = `http://127.0.0.1:${port}`;
+
+    // Track exit so kill() can await it deterministically. `child.killed`
+    // flips as soon as the signal is delivered, not when the process
+    // actually exits — polling it can race with SQLite WAL flush.
+    let exited = false;
+    const exitPromise: Promise<void> = new Promise((resolve) => {
+        proc.once("exit", () => { exited = true; resolve(); });
+    });
+
+    async function killAndCleanup() {
+        if (!exited) {
+            proc.kill("SIGTERM");
+            const graceful = await Promise.race([
+                exitPromise.then(() => true),
+                sleep(2000).then(() => false),
+            ]);
+            if (!graceful && !exited) {
+                proc.kill("SIGKILL");
+                await exitPromise;
+            }
+        }
+        try { await fs.remove(dataDir); } catch { /* best-effort — CI cleans /tmp anyway */ }
+    }
+
+    // Readiness loop with a bounded per-request timeout so a hung fetch
+    // can't consume the entire outer budget. Fall through to killAndCleanup
+    // on timeout so we don't leak the process or its data dir.
     const deadline = Date.now() + readyTimeoutMs;
     let ready = false;
     while (Date.now() < deadline) {
         try {
-            const res = await fetch(`${url}/health`);
+            const res = await fetch(`${url}/health`, {
+                signal: AbortSignal.timeout(1000),
+            });
             if (res.ok) { ready = true; break; }
-        } catch { /* still starting */ }
+        } catch { /* still starting, or per-request timeout */ }
         await sleep(250);
     }
     if (!ready) {
-        proc.kill("SIGKILL");
+        await killAndCleanup();
         throw new Error(`link-server on port ${port} did not become ready within ${readyTimeoutMs}ms`);
     }
 
@@ -77,12 +106,6 @@ export async function startLinkServer(readyTimeoutMs = 15000): Promise<LinkServe
         port,
         dataDir,
         process: proc,
-        async kill() {
-            proc.kill("SIGTERM");
-            // Give it a moment to flush the SQLite WAL, then hard-kill if needed.
-            await sleep(500);
-            if (!proc.killed) proc.kill("SIGKILL");
-            try { await fs.remove(dataDir); } catch { /* best-effort */ }
-        },
+        kill: killAndCleanup,
     };
 }

@@ -1,7 +1,7 @@
 import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
 import { TestContext } from './integration.test'
 import { sleep } from "../utils/utils";
-import { LinkLangConfig, publishLinkLanguage } from "../utils/linkLangConfig";
+import { LinkLangConfig, publishLinkLanguage, pollUntil } from "../utils/linkLangConfig";
 import { expect } from "chai";
 
 let aliceP1: null | PerspectiveProxy = null;
@@ -377,8 +377,16 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     await aliceNH!.setOnlineStatus(testPerspective)
                     await bobNH!.setOnlineStatus(testPerspective)
 
-                    const aliceOnline = await aliceNH!.onlineAgents()
-                    const bobOnline = await bobNH!.onlineAgents()
+                    // Both sides need to see the peer's status. Polling avoids
+                    // racing propagation (fixed sleep here was Holochain-tuned).
+                    let aliceOnline = await aliceNH!.onlineAgents()
+                    let bobOnline = await bobNH!.onlineAgents()
+                    await pollUntil(async () => {
+                        aliceOnline = await aliceNH!.onlineAgents()
+                        bobOnline = await bobNH!.onlineAgents()
+                        return aliceOnline.length >= 1 && bobOnline.length >= 1
+                    }, { label: "alice + bob see each other's online status" })
+
                     expect(aliceOnline.length).to.be.equal(1)
                     expect(aliceOnline[0].did).to.be.equal(bobDID)
                     console.log(aliceOnline[0].status);
@@ -394,7 +402,13 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                         target: "test://target"
                     })))
 
-                    const bobOnline2 = await bobNH!.onlineAgents()
+                    // Poll until bob sees alice's UPDATED status (source == "test://source").
+                    let bobOnline2 = await bobNH!.onlineAgents()
+                    await pollUntil(async () => {
+                        bobOnline2 = await bobNH!.onlineAgents()
+                        return bobOnline2.length >= 1 &&
+                            bobOnline2[0]?.status?.data?.links?.[0]?.data?.source === "test://source"
+                    }, { label: "bob sees alice's updated online status" })
 
                     expect(bobOnline2.length).to.be.equal(1)
                     expect(bobOnline2[0].did).to.be.equal(aliceDID)
@@ -435,7 +449,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                     await aliceNH!.sendSignal(bobDID!, aliceSignal)
 
-                    await sleep(1000)
+                    await pollUntil(() => bobCalls >= 1, { label: "bob receives signal" })
 
                     expect(bobCalls).to.be.equal(1)
                     expect(aliceCalls).to.be.equal(0)
@@ -451,7 +465,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                     await bobNH!.sendBroadcastU(bobSignal)
 
-                    await sleep(1000)
+                    await pollUntil(() => aliceCalls >= 1, { label: "alice receives broadcast" })
 
                     expect(aliceCalls).to.be.equal(1)
 
@@ -483,7 +497,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     const aliceSignal = new PerspectiveUnsignedInput([link])
                     await aliceNH!.sendBroadcastU(aliceSignal)
 
-                    await sleep(1000)
+                    await pollUntil(() => bobCalls >= 1, { label: "bob receives non-loopback broadcast" })
 
                     expect(bobCalls).to.be.equal(1)
                     expect(aliceCalls).to.be.equal(0) // Alice shouldn't receive her own broadcast
@@ -502,7 +516,9 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     // @ts-ignore - Ignoring the type error since we know the implementation supports loopback
                     await aliceNH!.sendBroadcastU(aliceSignal2, true)
 
-                    await sleep(1000)
+                    // Loopback: BOTH counters must reach 1 — polling on just one
+                    // would race the other's assertion.
+                    await pollUntil(() => bobCalls >= 1 && aliceCalls >= 1, { label: "alice+bob receive loopback broadcast" })
 
                     expect(bobCalls).to.be.equal(1)
                     expect(aliceCalls).to.be.equal(1) // Alice should receive her own broadcast
@@ -517,7 +533,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     // @ts-ignore - Ignoring the type error since we know the implementation supports loopback
                     await bobNH!.sendBroadcastU(bobSignal, true)
 
-                    await sleep(1000)
+                    await pollUntil(() => bobCalls >= 2, { label: "bob receives own loopback broadcast" })
 
                     expect(bobCalls).to.be.equal(2) // Bob should receive his own broadcast
                     expect(aliceCalls).to.be.equal(2) // Alice should receive Bob's broadcast
