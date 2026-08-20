@@ -45,9 +45,50 @@ use axum::{
 };
 use futures::stream::StreamExt;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use crate::agent::capabilities::*;
 use crate::agent::{did_for_context, AgentContext};
+
+/// Cached DID for a single WebSocket subscription, with lazy re-resolution.
+///
+/// The DID for a session may resolve after the socket opens (a client that
+/// connects before `agent.generate()` completes has no DID yet). Caching
+/// `None` once and never retrying — the pre-#881-refresh behaviour — meant
+/// per-DID event filters (auto-processor, later others) silently dropped
+/// every event for the rest of the connection.
+///
+/// `LazyDid` seeds with the initial resolution and re-tries on every `get()`
+/// while the cache is still empty. Once a DID has been observed it is fixed
+/// for the lifetime of the socket — the auth token identifies one session,
+/// so a resolved DID cannot change without a fresh connection.
+///
+/// Fail-closed by construction: `get()` returning `None` means "we still
+/// don't know who this is" and filters must drop the event, not accept it.
+pub(crate) struct LazyDid {
+    cached: Mutex<Option<String>>,
+    auth_token: String,
+}
+
+impl LazyDid {
+    pub(crate) fn new(auth_token: String, initial: Option<String>) -> Self {
+        Self {
+            cached: Mutex::new(initial),
+            auth_token,
+        }
+    }
+
+    /// Return the cached DID, or attempt one resolution if we don't have
+    /// one yet. Cheap once resolved: subsequent calls hit the cache.
+    pub(crate) fn get(&self) -> Option<String> {
+        let mut guard = self.cached.lock().unwrap();
+        if guard.is_none() {
+            let ctx = AgentContext::from_auth_token(self.auth_token.clone());
+            *guard = did_for_context(&ctx).ok();
+        }
+        guard.clone()
+    }
+}
 use crate::pubsub::{
     get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, AI_MODEL_LOADING_STATUS,
     AI_TRANSCRIPTION_TEXT_TOPIC, APPS_CHANGED, AUTO_PROCESSOR_EVENT_TOPIC,
@@ -99,7 +140,9 @@ pub(crate) async fn build_event_stream(
     use tokio_stream::wrappers::BroadcastStream;
 
     // Resolve the DID once at subscription time — avoids repeated JWT decode +
-    // DB / AgentService lookups on every single event.
+    // DB / AgentService lookups on every single event. If the client connected
+    // before `agent.generate()` completed this returns `None`; the per-DID
+    // filters below fail closed on `None` until re-resolution succeeds.
     let resolved_did: Option<String> = {
         let ctx = AgentContext::from_auth_token(auth_token.clone());
         did_for_context(&ctx).ok()
@@ -118,7 +161,13 @@ pub(crate) async fn build_event_stream(
     let d_trans = resolved_did.clone();
     let d_notif = resolved_did.clone();
     let d_query_sub = resolved_did.clone();
-    let d_auto_processor = resolved_did;
+
+    // Auto-processor uses `LazyDid` instead of a captured `Option<String>` so
+    // a client that connected before `agent.generate()` can still receive its
+    // events once the DID resolves — the filter re-tries on every event while
+    // the cache is empty and stops trying once a DID is observed (CodeRabbit
+    // #881: "Resolve the DID after it becomes available").
+    let d_auto_processor = Arc::new(LazyDid::new(auth_token.clone(), resolved_did));
 
     let pubsub = get_global_pubsub().await;
 
@@ -362,20 +411,23 @@ pub(crate) async fn build_event_stream(
     // observability match reality. See
     // [`matches_auto_processor_pass_owner`] for the exact rule.
     //
-    // Inlined (not `did_stream!`) so the filter closure can capture
-    // `is_admin`. Ordinary sessions whose DID has not yet resolved
-    // (`did_for_context` failed at line 96 — Nico 2026-08-19) MUST NOT be
-    // silently treated as administrator; the filter fails closed in that
-    // case. Only an explicit admin credential grants the "see everything"
-    // escape hatch.
+    // Inlined (not `did_stream!`) so the filter closure can (a) capture
+    // `is_admin` and (b) call `LazyDid::get()` for per-event re-resolution.
+    // Ordinary sessions whose DID has not yet resolved MUST NOT be silently
+    // treated as administrator; the filter fails closed in that case. Only
+    // an explicit admin credential grants the "see everything" escape hatch.
+    // Once the DID resolves (agent.generate() completes on the same socket),
+    // subsequent events are delivered normally without a reconnect (CodeRabbit
+    // #881, follow-up).
     let s_auto_processor = {
         let rx = pubsub.subscribe(&AUTO_PROCESSOR_EVENT_TOPIC).await;
         let admin = is_admin;
         BroadcastStream::new(rx)
             .filter_map(|r| async { handle_broadcast_result(r) })
             .filter_map(move |result| {
-                let current_did = d_auto_processor.clone();
+                let did_cell = d_auto_processor.clone();
                 async move {
+                    let current_did = did_cell.get();
                     match result {
                         Ok(ref msg)
                             if matches_auto_processor_pass_owner(
@@ -769,4 +821,37 @@ mod auto_processor_filter_tests {
             false
         ));
     }
+}
+
+#[cfg(test)]
+mod lazy_did_tests {
+    //! `LazyDid` — CodeRabbit #881 follow-up: once the DID resolves on a
+    //! session that connected DID-less, subsequent events must be delivered
+    //! without a reconnect.
+    use super::LazyDid;
+
+    #[test]
+    fn resolved_at_construction_stays_resolved() {
+        // Happy path: the caller already had a DID at socket-open time.
+        // `get()` returns it verbatim, no re-resolution attempt needed.
+        let lazy = LazyDid::new("token".into(), Some("did:key:alice".into()));
+        assert_eq!(lazy.get().as_deref(), Some("did:key:alice"));
+        // Idempotent — repeated calls keep returning the same DID.
+        assert_eq!(lazy.get().as_deref(), Some("did:key:alice"));
+    }
+
+    // The `None` initial + fail-to-re-resolve branch requires an initialised
+    // `Ad4mDb` (`did_for_context` looks up user context from the DB), which
+    // isn't available in this unit-test module. That branch is exercised
+    // end-to-end by every session-open path in `tests/js` where the client
+    // sends no bearer token / an unresolved DID — all such flows must land
+    // on `matches_auto_processor_pass_owner(msg, None, false) => false`,
+    // covered by `unresolved_did_non_admin_fails_closed` above.
+    //
+    // The positive lazy-resolve path (started `None`, becomes `Some`
+    // mid-stream after `agent.generate()`) is exercised end-to-end by any
+    // integration test that opens the events-ws socket before generating an
+    // agent — reproducing it as a pure Rust unit test would require standing
+    // up an in-process `AgentContext` + `agent::generate()` + DB, which is
+    // what the integration suite already does.
 }
