@@ -201,7 +201,10 @@ getRuntime().emitSyncStateChange("LinkLanguageInstalledButNotSynced");
             },
         });
 
-        telepresenceModule.initTelepresence({ send: (msg) => wsClient!.send(msg) });
+        telepresenceModule.initTelepresence({
+            send: (msg) => wsClient!.send(msg),
+            getMyDid: () => myDid,
+        });
 
         try {
             await auth.authenticate();
