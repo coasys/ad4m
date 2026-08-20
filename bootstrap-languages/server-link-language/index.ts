@@ -226,6 +226,19 @@ getRuntime().emitSyncStateChange("LinkLanguageInstalledButNotSynced");
     },
 
     async teardown() {
+        // Drain any pending batched commits BEFORE we tear down auth/adapters.
+        // enqueueCommitBatched schedules a microtask flush that reads `deps()`
+        // (auth token, transport) at flush time — if teardown resets those
+        // first, the pending flush's POST fails and flushBatch drops the batch.
+        try {
+            await syncModule.drainCommitBatch();
+        } catch (err) {
+            console.error(
+                "[server-link-language] teardown: draining batched commits failed; " +
+                "some writes may not have reached the server:",
+                err,
+            );
+        }
         if (wsClient) {
             wsClient.close();
             wsClient = null;
