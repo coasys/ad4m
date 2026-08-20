@@ -135,9 +135,18 @@ export function buildSHACL(
         // i.e. resolveLanguage unset or "literal") gets a string datatype when
         // no initial value pins a more specific type. A custom resolveLanguage
         // yields an expression URI, not a literal.
+        //
+        // Skip auto-datatype for properties with a custom `getter` — those
+        // typically return URIs (e.g. `@Optional({ getter: "SELECT ?target ..." })`
+        // that hops through a link to another instance's URI). Autosetting
+        // `sh:datatype xsd:string` there would trip the hydration decode gate
+        // and silently transform `literal:string:<hex>` URIs into their inner
+        // plain-string form on read. Users who want a getter to return literal
+        // values can still opt in explicitly via the (currently getter-side)
+        // datatype conventions.
         const isLiteral =
             propMeta.resolveLanguage === undefined || propMeta.resolveLanguage === "literal";
-        if (propMeta.initial !== undefined || isLiteral) {
+        if ((propMeta.initial !== undefined || isLiteral) && !propMeta.getter) {
             const initialType = typeof obj[propName];
             if (initialType === "number") {
                 propShape.datatype = "xsd://integer";

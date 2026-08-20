@@ -53,7 +53,7 @@ export class AutoProcessorConfig extends Ad4mModel {
   basePrefix?: string;
 
   /** Class URIs (SHACL targetClass) to materialise each pass. */
-  @HasMany({ through: "ad4m://interpretation_class" })
+  @HasMany({ through: "ad4m://interpretation_class", datatype: "xsd:string" })
   interpretationClasses: string[] = [];
 
   /** Quiet-window (ms) after the last new item before a pass runs. */
@@ -145,9 +145,11 @@ export class InterpretationRun extends Ad4mModel {
   /**
    * Source item IDs consumed by this pass.
    * Stored as multiple links with the same predicate; the processed-turn
-   * cursor uses these to avoid re-interpreting a turn.
+   * cursor uses these to avoid re-interpreting a turn. Values are plain
+   * strings (turn hex), so the property opts into `sh:datatype`-gated
+   * literal decoding on hydration.
    */
-  @HasMany({ through: "ad4m://interp/sources" })
+  @HasMany({ through: "ad4m://interp/sources", datatype: "xsd:string" })
   sources: string[] = [];
 }
 
