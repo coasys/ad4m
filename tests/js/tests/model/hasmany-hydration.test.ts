@@ -29,15 +29,19 @@ class HydrationProbe extends Ad4mModel {
   @Property({ through: "test://probe/id", required: true, identity: true })
   id_: string = "";
 
-  // HasMany-of-URI: targets look like subject-instance URIs.
+  // HasMany-of-URI: targets look like subject-instance URIs. No
+  // `datatype` — the property opts out of literal decoding and
+  // targets pass through byte-for-byte, even those that happen to
+  // carry the reserved `literal:` prefix.
   @HasMany({ through: "test://probe/link" })
   refs: string[] = [];
 
-  // HasMany-of-string: targets stored as `literal:string:<value>` wire
-  // form. Same predicate would ordinarily point at URIs; this test
-  // seeds the wire-form fixture directly so we don't depend on the
-  // writer path also being fixed.
-  @HasMany({ through: "test://probe/tag" })
+  // HasMany-of-string: opts into literal decoding via `datatype`.
+  // Writers wrap plain strings as `literal:string:<value>` under
+  // PR #874 typed literals; hydration unwraps to the plain form so
+  // downstream comparisons against unencoded values (like the
+  // auto-processor's `event.itemIds`) line up.
+  @HasMany({ through: "test://probe/tag", datatype: "xsd:string" })
   tags: string[] = [];
 }
 

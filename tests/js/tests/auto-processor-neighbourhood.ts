@@ -43,13 +43,6 @@ const SCOPE_QUERY = `SELECT ?speaker ?text ?timestamp WHERE {
 }
 ORDER BY ?timestamp`;
 
-// Under PR #874 typed literals, `mint_interpretation_run`'s string `sources`
-// land as typed `xsd:string`. Both `event.itemIds` (raw hex from
-// `PendingTurn.id`) and link targets read via `perspective.get` surface as
-// one of `"<hex>"` or `"literal:string:<hex>"`; normalise before comparing.
-const stripLiteral = (s: string): string =>
-  s.startsWith("literal:string:") ? s.slice("literal:string:".length) : s;
-
 async function registerLlm(ad4m: any): Promise<void> {
   const modelId = await ad4m.ai.addModel({
     name: "interpretation-llm",
@@ -240,54 +233,34 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         ).to.equal(1);
 
         // Wait for wave-1's InterpretationRun to sync ACROSS to the OTHER
-        // peer — the one who didn't process wave 1. Only then does that peer's
-        // cursor know wave-1 is retired and can filter it out of a wave-2
-        // batch.
+        // peer — the one who didn't process wave 1. Only then does that
+        // peer's cursor know wave-1 is retired and can filter it out of a
+        // wave-2 batch.
         //
-        // Two subtleties (both from live CI evidence 2026-08-20):
-        //   (a) The OTHER peer may never have had `InterpretationRun` SHACL
-        //       registered — `ensure_interpretation_overlay_classes` fires
-        //       from the pass path, and if the peer's watcher hasn't run a
-        //       pass yet (backed off due to the claim, or the config hasn't
-        //       synced) the class is unknown. `InterpretationRun.findAll(p)`
-        //       throws "No SHACL shape stored for class 'InterpretationRun'".
-        //   (b) HasMany relation targets ride through as `literal:string:<id>`
-        //       under #874 typed literals (hydration keeps relation targets
-        //       in wire form), while `event.itemIds` is plain hex. Strip
-        //       before comparing.
-        // Both dodged by looking up the run on the AUTHOR peer (which
-        // definitely has SHACL — its pass registered it) and then polling
-        // the OTHER peer for the raw source-links (no SHACL required).
+        // Two engine fixes make this a straight `findAll` on the other
+        // peer:
+        //   (a) `get_shape_or_wait` — `model_query` polls for
+        //       `InterpretationRun`'s SHACL to arrive on the peer that
+        //       never ran a pass, so `findAll` no longer throws
+        //       "No SHACL shape stored".
+        //   (b) `sh:datatype`-gated hydration — `InterpretationRun.sources`
+        //       declares `xsd:string`, so `r.sources` comes back as the
+        //       plain turn-hex, matching `firstWave` directly.
         const wave1Author = [...wave1Dids][0];
-        const wave1AuthorP = wave1Author === aliceDid ? aliceP : bobP;
         const otherPeer = wave1Author === aliceDid ? bobP : aliceP;
         const otherLabel = wave1Author === aliceDid ? "Bob" : "Alice";
 
-        const authorRuns = await InterpretationRun.findAll(wave1AuthorP);
-        const wave1Run = authorRuns.find(
-          (r) =>
-            Array.isArray(r.sources) &&
-            firstWave.every((id) => r.sources!.map(stripLiteral).includes(id)),
-        );
-        if (!wave1Run) {
-          throw new Error(
-            `wave-1 run not found on author peer; runs=${JSON.stringify(
-              authorRuns.map((r) => ({ id: r.id, sources: r.sources })),
-            )} firstWave=${JSON.stringify(firstWave)}`,
-          );
-        }
-        const runUri = wave1Run.id;
-
         await waitUntil(
           async () => {
-            const links = await otherPeer.get(
-              new LinkQuery({ source: runUri, predicate: "ad4m://interp/sources" }),
+            const runs = await InterpretationRun.findAll(otherPeer);
+            return runs.some(
+              (r) =>
+                Array.isArray(r.sources) &&
+                firstWave.every((id) => r.sources!.includes(id)),
             );
-            const targets = new Set(links.map((l) => stripLiteral(l.data.target)));
-            return firstWave.every((id) => targets.has(id));
           },
           240_000,
-          `wave-1 sources for ${runUri} to sync to ${otherLabel}`,
+          `wave-1 InterpretationRun to sync to ${otherLabel} with all firstWave sources`,
         );
 
         await say(bobP, "msg://w2a", "Separately, the retro is moved to Thursday morning.");
