@@ -229,26 +229,72 @@ pub async fn write_processor(
             .map_err(|e| anyhow::anyhow!("write_processor: serialize mint_scope: {e:#}"))?;
         values["mint_scope"] = json.into();
     }
-    perspective
-        .create_subject(class_option(), node.clone(), Some(values), None, context)
-        .await
-        .map_err(|e| anyhow::anyhow!("write_processor: create_subject failed: {e:#}"))?;
 
-    // `create_subject` applies one value per property, so the remaining
-    // members of the `interpretation_class` collection go through the same
-    // `addLink` setter one at a time.
-    for class in more_classes {
+    // Batch the create_subject + follow-on update_subject calls so the whole
+    // AutoProcessorConfig instance lands as ONE `Shared` commit — instead of
+    // ~11 individual commits (one per property setter) from `execute_commands`.
+    // A single-class processor already blew past the per-perspective
+    // `IMMEDIATE_COMMITS_COUNT=20` immediate-commit throttle in
+    // `perspective_instance::commit` when combined with the other setup
+    // writes on a fresh neighbourhood — subsequent commits (including the
+    // wave-1 `InterpretationRun` cursor) landed in the pending-diff queue
+    // and only drained on the 3-second timer, well past any p-diff-sync
+    // gossip window that would have carried the cursor to peers before the
+    // next batch arrived (2026-08-20 Marvin flake root-cause).
+    let batch_id = perspective.create_batch().await;
+    let write_result: anyhow::Result<()> = async {
         perspective
-            .update_subject(
+            .create_subject(
                 class_option(),
                 node.clone(),
-                serde_json::json!({ "interpretation_class": class }),
-                None,
+                Some(values),
+                Some(batch_id.clone()),
                 context,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("write_processor: update_subject(class) failed: {e:#}"))?;
+            .map_err(|e| anyhow::anyhow!("write_processor: create_subject failed: {e:#}"))?;
+        // `create_subject` applies one value per property, so the remaining
+        // members of the `interpretation_class` collection go through the same
+        // `addLink` setter one at a time — still on the same batch so they
+        // commit atomically with the base instance.
+        for class in more_classes {
+            perspective
+                .update_subject(
+                    class_option(),
+                    node.clone(),
+                    serde_json::json!({ "interpretation_class": class }),
+                    Some(batch_id.clone()),
+                    context,
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("write_processor: update_subject(class) failed: {e:#}")
+                })?;
+        }
+        Ok(())
     }
+    .await;
+
+    if let Err(e) = write_result {
+        // Discard the pending batch so it doesn't linger in `batch_store` and
+        // never get committed. `discard_batch` is idempotent-ish (it returns
+        // an error if the id is unknown, which we intentionally ignore) so
+        // this is safe on both partial-write and never-wrote failures.
+        let _ = perspective.discard_batch(&batch_id).await;
+        return Err(e);
+    }
+
+    if let Err(e) = perspective.commit_batch(batch_id.clone(), context).await {
+        // Defense-in-depth: `commit_batch` already tries to remove the batch
+        // on failure per its contract, but drop it explicitly here too so a
+        // change to `commit_batch`'s control flow can't leave a stale batch
+        // in the store.
+        let _ = perspective.discard_batch(&batch_id).await;
+        return Err(anyhow::anyhow!(
+            "write_processor: commit_batch failed: {e:#}"
+        ));
+    }
+
     Ok(())
 }
 
