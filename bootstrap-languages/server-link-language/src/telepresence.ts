@@ -59,7 +59,15 @@ export async function setOnlineStatus(status: unknown): Promise<void> {
 }
 
 export async function getOnlineAgents(): Promise<OnlineAgent[]> {
-    return Array.from(onlineAgents.values());
+    // Filter out peers we've seen join but who haven't broadcast a status yet.
+    // The executor's OnlineAgent (rust-executor/src/types/domain.rs) requires a
+    // `status: PerspectiveExpression` field — non-optional. Returning a bare
+    // `{did}` (as we do internally for `peer-joined` before the peer calls
+    // `setOnlineStatus`) triggers `RpcError: RPC error 500: missing field
+    // \`status\`` on the executor side. Every `set-online-status` triggers an
+    // `online-agents` broadcast from the server (link-server/src/ws.ts), so
+    // status-less peers appear in this list as soon as they announce themselves.
+    return Array.from(onlineAgents.values()).filter((a) => a.status !== undefined);
 }
 
 export async function sendSignal(remoteAgentDid: DID, payload: unknown): Promise<object> {

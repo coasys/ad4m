@@ -130,7 +130,13 @@ async function commitWithRetry(diff: PerspectiveDiff): Promise<void> {
             "NOT synced to the server and will not be automatically retried.",
             err,
         );
-        getRuntime().emitSyncStateChange("NotSynced");
+        // PerspectiveState variant name — the executor deserialises this against
+// its enum (rust-executor/src/types/domain.rs::PerspectiveState) and rejects
+// anything it doesn't know. "NotSynced" is not a variant; the semantically
+// correct value for "we own the language, we know we're behind" is
+// LinkLanguageInstalledButNotSynced. The SCREAMING_SNAKE form is the
+// primary serde name, but the PascalCase alias is also accepted.
+getRuntime().emitSyncStateChange("LinkLanguageInstalledButNotSynced");
     }
 }
 
@@ -211,7 +217,13 @@ const language = defineLanguage({
                 },
                 onClose() {
                     telepresenceModule.clearOnlineAgents();
-                    getRuntime().emitSyncStateChange("NotSynced");
+                    // PerspectiveState variant name — the executor deserialises this against
+// its enum (rust-executor/src/types/domain.rs::PerspectiveState) and rejects
+// anything it doesn't know. "NotSynced" is not a variant; the semantically
+// correct value for "we own the language, we know we're behind" is
+// LinkLanguageInstalledButNotSynced. The SCREAMING_SNAKE form is the
+// primary serde name, but the PascalCase alias is also accepted.
+getRuntime().emitSyncStateChange("LinkLanguageInstalledButNotSynced");
                 },
                 onReconnecting(attempt, delayMs) {
                     console.log(
