@@ -171,10 +171,10 @@ pub(crate) async fn mint_interpretation_run(
     // could miss). Omitted when the caller left them `None` — the normal
     // non-debug pass.
     if let Some(prompt) = &meta.debug_prompt {
-        values["debug_prompt"] = prompt.clone().into();
+        values["debugPrompt"] = prompt.clone().into();
     }
     if let Some(response) = &meta.debug_response {
-        values["debug_response"] = response.clone().into();
+        values["debugResponse"] = response.clone().into();
     }
     perspective
         .create_subject(
