@@ -31,10 +31,10 @@ const INTERP_RUN_SDNA: &str = r#"{
   "interpretation_hint":"One interpretation pass: the model + prompt version that wrote a batch of inferred data.",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ad4m://interp/run_id","target":"placeholder"}],
   "properties":[
-    {"path":"ad4m://interp/run_id","name":"run_id","identity":true,"min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/run_id","target":"value"}]},
+    {"path":"ad4m://interp/run_id","name":"runId","identity":true,"min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/run_id","target":"value"}]},
     {"path":"ad4m://interp/model","name":"model","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/model","target":"value"}]},
-    {"path":"ad4m://interp/prompt_version","name":"prompt_version","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/prompt_version","target":"value"}]},
-    {"path":"ad4m://interp/ran_at","name":"ran_at","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/ran_at","target":"value"}]},
+    {"path":"ad4m://interp/prompt_version","name":"promptVersion","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/prompt_version","target":"value"}]},
+    {"path":"ad4m://interp/ran_at","name":"ranAt","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/ran_at","target":"value"}]},
     {"path":"ad4m://interp/processor","name":"processor","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/processor","target":"value"}]},
     {"path":"ad4m://interp/sources","name":"sources","collection":true,"min_count":0,"setter":[{"action":"addLink","source":"this","predicate":"ad4m://interp/sources","target":"value"}]}
   ]
@@ -160,10 +160,10 @@ pub(crate) async fn mint_interpretation_run(
 ) -> anyhow::Result<String> {
     let run_uri = format!("ad4m://interp/run/{}", meta.run_id);
     let mut values = serde_json::json!({
-        "run_id": meta.run_id,
+        "runId": meta.run_id,
         "model": meta.model,
-        "prompt_version": meta.prompt_version,
-        "ran_at": meta.ran_at,
+        "promptVersion": meta.prompt_version,
+        "ranAt": meta.ran_at,
     });
     let mut rest_sources: Vec<String> = Vec::new();
     if let Some(c) = cursor {

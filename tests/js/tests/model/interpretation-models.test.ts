@@ -186,70 +186,87 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
   // The reference sets below are the source of truth. Update BOTH sides at
   // once when adding a hardwired property.
 
+  // path→name reference sets are checked in BOTH directions:
+  //   - path MUST match: same predicate on both sides (link-store visibility).
+  //   - name MUST match: same SHACL property NAME on both sides. Rust callers
+  //     of `create_subject({name: value})` look up the setter by property NAME
+  //     (not path). If TS registers a shape whose name for the same path differs
+  //     (`runId` vs `run_id`), the Rust setter lookup fails and every write is
+  //     silently a no-op — the debug we did on 2026-08-20 caught this exact
+  //     regression (every InterpretationRun instance had runId="uninitialized"
+  //     because the Rust setter for property NAME "run_id" was never found on a
+  //     TS-registered shape that names it "runId").
+
   it("AutoProcessorConfig @Model shape matches Rust AUTO_PROCESSOR_SDNA", () => {
     const { shape } = (AutoProcessorConfig as any).generateSHACL();
-    const paths = new Set(shape.properties.map((p: any) => p.path));
+    const actual = new Map<string, string>(
+      shape.properties.map((p: any): [string, string] => [p.path, p.name]),
+    );
 
     // Mirrors Rust `AUTO_PROCESSOR_SDNA` in rust-executor/src/perspectives/
     // auto_processor/config.rs.
     expect(shape.targetClass, "target class must match Rust SDNA")
       .to.equal("ad4m://AutoProcessor");
-    const expected = new Set([
-      "ad4m://processor_id",
-      "ad4m://source_scope_query",
-      "ad4m://base_prefix",
-      "ad4m://interpretation_class",
-      "ad4m://debounce_ms",
-      "ad4m://batch_min",
-      "ad4m://batch_max",
-      "ad4m://max_wait_ms",
-      "ad4m://claim_ttl_ms",
-      "ad4m://source_window_ms",
-      "ad4m://dedup_strategy",
-      "ad4m://existing_scope",
-      "ad4m://mint_scope",
+    const expected = new Map<string, string>([
+      ["ad4m://processor_id", "processorId"],
+      ["ad4m://source_scope_query", "sourceScopeQuery"],
+      ["ad4m://base_prefix", "basePrefix"],
+      ["ad4m://interpretation_class", "interpretationClasses"],
+      ["ad4m://debounce_ms", "debounceMs"],
+      ["ad4m://batch_min", "batchMin"],
+      ["ad4m://batch_max", "batchMax"],
+      ["ad4m://max_wait_ms", "maxWaitMs"],
+      ["ad4m://claim_ttl_ms", "claimTtlMs"],
+      ["ad4m://source_window_ms", "sourceWindowMs"],
+      ["ad4m://dedup_strategy", "dedupStrategy"],
+      ["ad4m://existing_scope", "existingScope"],
+      ["ad4m://mint_scope", "mintScope"],
     ]);
 
-    expect(paths, "TS shape must declare exactly the Rust SDNA property paths")
+    expect(actual, "TS shape must declare exactly the Rust SDNA property path→name pairs")
       .to.deep.equal(expected);
   });
 
   it("InterpretationRun @Model shape matches Rust INTERP_RUN_SDNA", () => {
     const { shape } = (InterpretationRun as any).generateSHACL();
-    const paths = new Set(shape.properties.map((p: any) => p.path));
+    const actual = new Map<string, string>(
+      shape.properties.map((p: any): [string, string] => [p.path, p.name]),
+    );
 
     // Mirrors Rust `INTERP_RUN_SDNA` in rust-executor/src/perspectives/
     // interpretation/overlay/classes.rs.
     expect(shape.targetClass, "target class must match Rust SDNA")
       .to.equal("ad4m://InterpretationRun");
-    const expected = new Set([
-      "ad4m://interp/run_id",
-      "ad4m://interp/model",
-      "ad4m://interp/prompt_version",
-      "ad4m://interp/ran_at",
-      "ad4m://interp/processor",
-      "ad4m://interp/sources",
+    const expected = new Map<string, string>([
+      ["ad4m://interp/run_id", "runId"],
+      ["ad4m://interp/model", "model"],
+      ["ad4m://interp/prompt_version", "promptVersion"],
+      ["ad4m://interp/ran_at", "ranAt"],
+      ["ad4m://interp/processor", "processor"],
+      ["ad4m://interp/sources", "sources"],
     ]);
 
-    expect(paths, "TS shape must declare exactly the Rust SDNA property paths")
+    expect(actual, "TS shape must declare exactly the Rust SDNA property path→name pairs")
       .to.deep.equal(expected);
   });
 
   it("InterpretationOverlay @Model shape matches Rust INTERP_OVERLAY_SDNA", () => {
     const { shape } = (InterpretationOverlay as any).generateSHACL();
-    const paths = new Set(shape.properties.map((p: any) => p.path));
+    const actual = new Map<string, string>(
+      shape.properties.map((p: any): [string, string] => [p.path, p.name]),
+    );
 
     // Mirrors Rust `INTERP_OVERLAY_SDNA` in rust-executor/src/perspectives/
     // interpretation/overlay/classes.rs. NOTE: the overlay class carries no
     // `type` flag by design — the `kind` link is the discriminator.
     expect(shape.targetClass, "target class must match Rust SDNA")
       .to.equal("ad4m://InterpretationOverlay");
-    const expected = new Set([
-      "ad4m://interp/kind",
-      "ad4m://interp/run",
+    const expected = new Map<string, string>([
+      ["ad4m://interp/kind", "kind"],
+      ["ad4m://interp/run", "run"],
     ]);
 
-    expect(paths, "TS shape must declare exactly the Rust SDNA property paths")
+    expect(actual, "TS shape must declare exactly the Rust SDNA property path→name pairs")
       .to.deep.equal(expected);
   });
 });
