@@ -31,5 +31,22 @@ export interface PluginConfig {
   rustLog?: string;
   /** Where to send executor logs: "file" (default) = ~/.ad4m/ad4m.log only, "openclaw" = openclaw logs only, "both" = both. */
   executorLogTarget?: "file" | "openclaw" | "both";
+  /** Run Holochain in managed mode (default true). Set false to start the executor with `--run-holochain false` — no P2P/bootstrap egress, for isolated or offline nodes that do not need neighbourhood sync. */
+  runHolochain?: boolean;
+  /** External mode: on a multi-user node, provision the assistant's own user identity (signup + login) instead of requesting a capability against the node's base agent. */
+  multiUser?: boolean;
+  /** Multi-user: the assistant's user email/identifier. Persisted by setup for re-authentication. */
+  email?: string;
+  /**
+   * Multi-user: password for signup/login. Resolved in this order:
+   *   1. `AD4M_PASSWORD` env var (recommended for headless/CI)
+   *   2. Interactive stdin prompt (only during `openclaw ad4m-setup`, TTY required)
+   *   3. This field (escape hatch — plaintext-at-rest, discouraged)
+   *
+   * Setup persists only the resulting JWT (`token`) and `email`; the password is
+   * discarded. To let the plugin re-authenticate at runtime when a JWT expires,
+   * export `AD4M_PASSWORD` in the environment that starts OpenClaw.
+   */
+  password?: string;
 }
 

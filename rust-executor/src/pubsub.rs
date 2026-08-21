@@ -135,6 +135,7 @@ lazy_static::lazy_static! {
     pub static ref PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC: String = "perspective-query-subscription-topic".to_owned();
     pub static ref HOSTING_USER_INFO_CHANGED_TOPIC: String = "hosting-user-info-changed-topic".to_owned();
     pub static ref COMPUTE_LOG_UPDATED_TOPIC: String = "compute-log-updated-topic".to_owned();
+    pub static ref AUTO_PROCESSOR_EVENT_TOPIC: String = "auto-processor-event-topic".to_owned();
 }
 
 /// Per-user dirty set for batched credit change notifications.

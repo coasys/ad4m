@@ -144,14 +144,14 @@ describe("Integration tests", function () {
 
         describe('with Alice and Bob', () => {
         let bobExecutorProcess: ChildProcess | null = null
-        let bobGqlPort: number;
+        let bobApiPort: number;
         let bobHcAdminPort: number;
         let bobHcAppPort: number;
         before(async () => {
           const bobAppDataPath = path.join(TEST_DIR, 'agents', 'bob')
           const bobBootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-          [bobGqlPort, bobHcAdminPort, bobHcAppPort] = await getFreePorts(3);
-          registerPorts([bobGqlPort, bobHcAdminPort, bobHcAppPort]);
+          [bobApiPort, bobHcAdminPort, bobHcAppPort] = await getFreePorts(3);
+          registerPorts([bobApiPort, bobHcAdminPort, bobHcAppPort]);
 
           if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
             fs.mkdirSync(path.join(TEST_DIR, 'agents'))
@@ -159,9 +159,9 @@ describe("Integration tests", function () {
             fs.mkdirSync(bobAppDataPath)
 
           bobExecutorProcess = await startExecutor(bobAppDataPath, bobBootstrapSeedPath,
-            bobGqlPort, bobHcAdminPort, bobHcAppPort, false, undefined, proxyUrl!, bootstrapUrl!, relayUrl!);
+            bobApiPort, bobHcAdminPort, bobHcAppPort, false, undefined, proxyUrl!, bootstrapUrl!, relayUrl!);
 
-          testContext.bob = new Ad4mClient(baseUrl(bobGqlPort))
+          testContext.bob = new Ad4mClient(baseUrl(bobApiPort))
           testContext.bobCore = bobExecutorProcess
           await testContext.bob.agent.generate("passphrase")
 
@@ -183,9 +183,9 @@ describe("Integration tests", function () {
 
         after(async () => {
           if (bobExecutorProcess) {
-            await quitExecutor(bobExecutorProcess, bobGqlPort);
+            await quitExecutor(bobExecutorProcess, bobApiPort);
           }
-          deregisterPorts([bobGqlPort, bobHcAdminPort, bobHcAppPort]);
+          deregisterPorts([bobApiPort, bobHcAdminPort, bobHcAppPort]);
         })
 
         describe('Agent Language', agentLanguageTests(testContext))

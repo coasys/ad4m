@@ -47,21 +47,72 @@ export function parseSparqlCount(result: CountBinding[] | undefined | null): num
 /**
  * Decode a `Literal`-encoded SPARQL binding back to a plain string.
  *
- * Mirrors Flux's local `parseLit` helper. Returns `''` for `undefined`/empty
- * input. Falls through to the raw value if decoding fails (defensive — the
- * binding may already be a plain string for unwrapped properties).
+ * Returns `''` for `undefined`/empty input. Falls through to the raw value
+ * if decoding fails — bindings against properties resolved through a custom
+ * language are already raw URIs and should pass through unchanged.
+ *
+ * Signed-envelope literals
+ * ------------------------
+ * Properties declared with `resolveLanguage: 'literal'` are written through
+ * the built-in `literal` language, which wraps the value in a signed
+ * expression envelope (`{ author, timestamp, data, proof }`) and encodes
+ * the whole envelope as a `literal:json:` URL — see
+ * `rust-executor/src/languages/mod.rs::expression_create` (literal branch).
+ * On read, `parseLit` unwraps `.data` from that envelope so callers get the
+ * original scalar value instead of the envelope JSON.
+ *
+ * The Channel V refactor moved most scalar properties to deterministic
+ * typed XSD literals which no longer round-trip through this envelope — for
+ * those properties the SPARQL binding is already the lexical form and this
+ * helper decodes to the primitive.  Signed-envelope literals still exist
+ * for any property that opts back into `resolveLanguage: 'literal'` (e.g.
+ * per-message provenance for chat bodies), which is why the `.data` unwrap
+ * is preserved here.
+ *
+ * Non-envelope JSON objects (`literal:json:` payloads that are not signed
+ * envelopes) are JSON-stringified for display.
  */
 export function parseLit(val: string | undefined | null): string {
   if (val === undefined || val === null || val === '') return '';
+
+  // Fast-path 1: `literal:*` URLs from properties written through the built-in
+  // `literal` language.  On Channel V typed-XSD-literal properties, these
+  // decode straight to a primitive; on `resolveLanguage: 'literal'` properties
+  // (per-message provenance in chat/synergy) they decode to a signed-envelope
+  // object we unwrap via `.data`.
   try {
     const result = Literal.fromUrl(val).get();
-    if (result && typeof result === 'object') {
-      return (result as { data?: string }).data ?? JSON.stringify(result);
+    if (typeof result === 'object' && result !== null) {
+      const data = (result as { data?: unknown }).data;
+      if (typeof data === 'string') return data;
+      return JSON.stringify(result);
     }
     return String(result);
   } catch {
-    return val;
+    // fall through to plain-JSON envelope detection
   }
+
+  // Fast-path 2: envelope stored/returned as a bare JSON string rather than a
+  // `literal:json:*` URL.  Depending on the storage backend and query path,
+  // SPARQL bindings for `resolveLanguage: 'literal'` properties can surface
+  // the envelope object directly as its JSON serialisation (Oxigraph typed
+  // xsd:string of the JSON, or a Channel V pass-through) instead of the URL
+  // form.  Detect that shape by parsing the string and unwrapping `.data`
+  // when it looks like a signed envelope; anything else passes through
+  // unchanged so plain text (e.g. "just a string") is not corrupted.
+  if (val.length >= 2 && val.charCodeAt(0) === 0x7b /* '{' */) {
+    try {
+      const parsed = JSON.parse(val);
+      if (parsed && typeof parsed === 'object') {
+        const data = (parsed as { data?: unknown }).data;
+        if (typeof data === 'string') return data;
+      }
+    } catch {
+      // not JSON — fall through and return the raw value
+    }
+  }
+
+  return val;
 }
 
 /** Decode a `Literal`-encoded binding to a number. Returns 0 on empty/invalid input. */

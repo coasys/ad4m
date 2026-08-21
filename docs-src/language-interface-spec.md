@@ -565,7 +565,7 @@ runtime has enqueued the event for fan-out.
 > **Current limitation:** `emitSignal(data)` currently only delivers signals
 > whose payload can be deserialized as a `PerspectiveExpression`. Payloads
 > with other shapes are logged as warnings and dropped. A dedicated
-> `AD4M_SIGNAL_TOPIC` + GraphQL subscription is needed to support arbitrary
+> `AD4M_SIGNAL_TOPIC` subscription is needed to support arbitrary
 > signal payloads (tracked as a follow-up).
 
 ### 7.6 Raw file/blob storage (optional extension — `ad4m-language-fs` world)

@@ -176,14 +176,17 @@ where
     }
 }
 
-/// Parent scope for scoped queries.
+/// A named subgraph scope: a parent node + linking predicate.
 ///
-/// When a query targets instances that are children of a specific parent
-/// (e.g. "all Messages belonging to Channel X"), the parent scope constrains
-/// the SPARQL query with an additional triple pattern.
-#[derive(Debug, Clone, Deserialize)]
+/// Reusable across contexts that need to identify "the subtree under node X
+/// linked via predicate P": query-time filtering (e.g. "all Messages belonging
+/// to Channel X" as a `parent` filter on `ModelQueryInput`) AND write-time
+/// scoping (e.g. AutoProcessor's `existing_scope` / `mint_scope` fields — the
+/// former constrains dedup lookups; the latter turns each new mint into a
+/// child link under the given node).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum ParentScope {
+pub enum Scope {
     Model {
         model: String,
         id: String,
@@ -245,7 +248,7 @@ pub struct ProjectionInput {
 #[serde(rename_all = "camelCase")]
 pub struct ModelQueryInput {
     #[serde(default)]
-    pub parent: Option<ParentScope>,
+    pub parent: Option<Scope>,
     #[serde(default)]
     pub properties: Option<Vec<String>>,
     #[serde(default)]
@@ -391,6 +394,16 @@ pub struct ShapeProperty {
     pub(crate) is_flag: bool,
     pub(crate) is_required: bool,
     pub(crate) initial_value: Option<String>,
+    /// Language address used to resolve property values, and the sole
+    /// selector of storage mode:
+    ///   - `None`              → deterministic typed literal (POS-index
+    ///                           fast path — the default for a plain
+    ///                           `@Property()`).
+    ///   - `Some("literal")`   → signed-envelope on the built-in literal
+    ///                           language (`expression_create` produces a
+    ///                           `{author, timestamp, data, proof}` URI).
+    ///   - `Some(<addr>)`      → `expression_create` on that custom
+    ///                           language.
     pub(crate) resolve_language: Option<String>,
     pub(crate) datatype: Option<String>,
     pub(crate) direction: Option<String>, // "forward" or "reverse" for relation properties
@@ -408,6 +421,30 @@ pub struct ShapeProperty {
     /// Transform expression (SHACL-AF Node Expression).
     /// Applied in hydration for resolveLanguage properties.
     pub(super) transform: Option<TransformExpression>,
+    /// Natural-language hint describing this property's meaning, read back from
+    /// the `ad4m://interpretation_hint` link on the property node.  Surfaced so the
+    /// generic LLM extractor (and MCP tool-schema generation) can inject it as
+    /// semantic guidance.  `None` when the SDNA declared no hint.
+    pub(crate) interpretation_hint: Option<String>,
+    /// Whether this property is the class's dedup identity (its title-like
+    /// interpretation key), read back from the `ad4m://identity` link on the
+    /// property node.  `false` when the SDNA declared no identity — a class
+    /// with no identity property is never deduplicated.
+    pub(crate) identity: bool,
+}
+
+impl ShapeProperty {
+    /// True when the property's values are stored as deterministic typed
+    /// literals (POS-index friendly) rather than signed expression
+    /// envelopes or custom-language expressions. Derived from
+    /// `resolve_language` alone:
+    ///   - `None`             → deterministic (default fast path)
+    ///   - `Some("literal")`  → envelope (per-value provenance)
+    ///   - `Some(<other>)`    → custom-language expression (never
+    ///                          deterministic)
+    pub(crate) fn is_deterministic_literal(&self) -> bool {
+        self.resolve_language.is_none()
+    }
 }
 
 /// Enriched relation metadata for include (eager-loading) resolution.
@@ -444,6 +481,11 @@ pub struct ModelShape {
     /// Enriched relation metadata for include resolution, populated
     /// directly from the perspective's SHACL triples.
     pub(crate) include_relations: Vec<ShapeRelation>,
+    /// Class-level natural-language hint, read back from the
+    /// `ad4m://interpretation_hint` link on the shape node.  Steers the generic
+    /// LLM extractor toward what instances of this class represent.  `None`
+    /// when the SDNA declared no class hint.
+    pub(crate) interpretation_hint: Option<String>,
 }
 
 impl ModelShape {

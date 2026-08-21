@@ -46,6 +46,7 @@ import {
   extractMcpResultData,
   buildWakeMessage,
   postWake,
+  loginViaEmailVerification,
   type PluginConfig,
   type WakerSubscription,
   type McpTool,
@@ -363,6 +364,8 @@ function createFakeChildProcess() {
 describe("ensureExecutorRunning", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    mockSpawn.mockClear();
+    mockExecFileSync.mockClear();
   });
 
   it("returns 'already_running' when executor is already running", async () => {
@@ -709,6 +712,57 @@ describe("ensureExecutorRunning", () => {
     // Logger should mention the log file
     const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
     expect(msgs.some((m: string) => m.includes("ad4m.log"))).toBe(true);
+  }, 10000);
+
+  it("includes --run-holochain false in spawn args when runHolochain=false", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const fakeProc = createFakeChildProcess();
+    mockSpawn.mockClear();
+    mockSpawn.mockReturnValue(fakeProc as any);
+
+    const logger = makeMockLogger();
+    const resultPromise = ensureExecutorRunning(
+      "cred",
+      logger,
+      "http://localhost:3001/mcp",
+      "http://localhost:12000",
+      undefined,
+      undefined,
+      "file",
+      false,
+    );
+
+    setTimeout(() => {
+      fakeProc.emit("error", new Error("spawn ENOENT"));
+    }, 100);
+
+    await resultPromise;
+
+    const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+    const flagIndex = spawnArgs.indexOf("--run-holochain");
+    expect(flagIndex).toBeGreaterThan(-1);
+    expect(spawnArgs[flagIndex + 1]).toBe("false");
+  }, 10000);
+
+  it("omits --run-holochain from spawn args when runHolochain is true (default)", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const fakeProc = createFakeChildProcess();
+    mockSpawn.mockClear();
+    mockSpawn.mockReturnValue(fakeProc as any);
+
+    const logger = makeMockLogger();
+    const resultPromise = ensureExecutorRunning("cred", logger);
+
+    setTimeout(() => {
+      fakeProc.emit("error", new Error("spawn ENOENT"));
+    }, 100);
+
+    await resultPromise;
+
+    const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+    expect(spawnArgs).not.toContain("--run-holochain");
   }, 10000);
 });
 
@@ -1124,6 +1178,21 @@ describe("mcpRequest", () => {
       mcpRequest("http://localhost:3001/mcp", "tools/list"),
     ).rejects.toThrow("MCP HTTP 401");
   });
+
+  it("cancels the response body on non-OK status (no socket leak)", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: "Internal Server Error",
+      headers: new Headers(),
+      body: { cancel },
+    } as any);
+    await expect(
+      mcpRequest("http://localhost:3001/mcp", "tools/list"),
+    ).rejects.toThrow("MCP HTTP 500");
+    expect(cancel).toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1152,6 +1221,26 @@ describe("mcpNotify", () => {
     expect(body.jsonrpc).toBe("2.0");
     expect(body.method).toBe("notifications/initialized");
     expect(body.id).toBeUndefined();
+  });
+
+  it("cancels the response body even on an OK status (releases the connection)", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: new Headers(),
+      body: { cancel },
+    } as any);
+
+    await mcpNotify(
+      "http://localhost:3001/mcp",
+      "notifications/initialized",
+      {},
+      "session-123",
+    );
+
+    expect(cancel).toHaveBeenCalled();
   });
 });
 
@@ -1212,6 +1301,21 @@ describe("mcpInitialize", () => {
     await expect(mcpInitialize("http://localhost:3001/mcp")).rejects.toThrow(
       "MCP initialize error: Auth required",
     );
+  });
+
+  it("cancels the response body on non-OK status (no socket leak)", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false,
+      status: 503,
+      statusText: "Service Unavailable",
+      headers: new Headers(),
+      body: { cancel },
+    } as any);
+    await expect(mcpInitialize("http://localhost:3001/mcp")).rejects.toThrow(
+      "MCP initialize HTTP 503",
+    );
+    expect(cancel).toHaveBeenCalled();
   });
 });
 
@@ -1300,6 +1404,52 @@ describe("mcpCallTool", () => {
 // ---------------------------------------------------------------------------
 // extractMcpResultData
 // ---------------------------------------------------------------------------
+
+describe("loginViaEmailVerification (auth-both fallback)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("exchanges an email code for a JWT via verify_email_code", async () => {
+    let n = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      n++;
+      // 1: request_login_verification, 2: verify_email_code → token
+      const payload = n === 1 ? { success: true } : { token: "jwt-xyz" };
+      return fakeJsonResponse({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { content: [{ type: "text", text: JSON.stringify(payload) }] },
+      });
+    });
+    const token = await loginViaEmailVerification(
+      makeMockLogger(),
+      "http://localhost:3001/mcp",
+      "a@b.c",
+      "sess",
+      async () => "123456",
+    );
+    expect(token).toBe("jwt-xyz");
+    expect(n).toBe(2);
+  });
+
+  it("returns null when no code is entered (does not call verify_email_code)", async () => {
+    let n = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      n++;
+      return fakeJsonResponse({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "{}" }] } });
+    });
+    const token = await loginViaEmailVerification(
+      makeMockLogger(),
+      "http://localhost:3001/mcp",
+      "a@b.c",
+      "sess",
+      async () => "",
+    );
+    expect(token).toBeNull();
+    expect(n).toBe(1); // only request_login_verification, not verify_email_code
+  });
+});
 
 describe("extractMcpResultData", () => {
   it("extracts and parses JSON from content[0].text", () => {
@@ -1493,6 +1643,8 @@ describe("ad4mPlugin", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     _resetModuleState();
+    mockSpawn.mockClear();
+    mockExecFileSync.mockClear();
   });
 
   it("registers expected tools and services", async () => {
@@ -1616,6 +1768,109 @@ describe("ad4mPlugin", () => {
     const result = await refreshTool!.execute();
     // MCP unavailable, so "No new tools found"
     expect(result.content[0].text).toContain("No new tools found");
+  });
+
+  it("ad4m_subscribe_to_mentions reports 'Waker service not connected' when the waker isn't running", async () => {
+    const registeredTools: Array<{ name: string; execute: Function }> = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
+      const body = JSON.parse((opts as any).body as string);
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: { serverInfo: { name: "ad4m" } },
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Mcp-Session-Id": "sess-1",
+            },
+          },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 200 });
+      }
+      if (
+        body.method === "tools/call" &&
+        body.params?.name === "get_mention_waker_config"
+      ) {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  query: "SELECT * FROM link WHERE ...",
+                  names: ["TestAgent"],
+                  did: "did:key:zTest",
+                }),
+              },
+            ],
+          },
+        });
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+
+    const mockApi = {
+      pluginConfig: {
+        mode: "external",
+        mcpEndpoint: "http://localhost:3001/mcp",
+        token: "test-cred",
+      },
+      logger: makeMockLogger(),
+      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
+      registerService: vi.fn(),
+      registerCli: vi.fn(),
+    };
+
+    await ad4mPlugin(mockApi);
+
+    const subscribeTool = registeredTools.find(
+      (t) => t.name === "ad4m_subscribe_to_mentions",
+    );
+    expect(subscribeTool).toBeDefined();
+
+    const result = await subscribeTool!.execute("call-1", {
+      perspective_id: "persp-uuid-1",
+    });
+
+    expect(result.content[0].text).toBe(
+      "Error: Waker service not connected. Ensure ad4m-executor is running and wakerEnabled is true.",
+    );
+  });
+
+  it("ad4m_unsubscribe_from_mentions reports 'No mention subscription found' when nothing matches", async () => {
+    const registeredTools: Array<{ name: string; execute: Function }> = [];
+
+    const mockApi = {
+      pluginConfig: {},
+      logger: makeMockLogger(),
+      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
+      registerService: vi.fn(),
+      registerCli: vi.fn(),
+    };
+
+    ad4mPlugin(mockApi);
+
+    const unsubscribeTool = registeredTools.find(
+      (t) => t.name === "ad4m_unsubscribe_from_mentions",
+    );
+    expect(unsubscribeTool).toBeDefined();
+
+    const result = await unsubscribeTool!.execute("call-1", {
+      perspective_id: "persp-1",
+    });
+
+    expect(result.content[0].text).toBe(
+      "No mention subscription found for perspective persp-1.",
+    );
   });
 
   it("mcp-service start connects and registers MCP tools", async () => {
@@ -2083,6 +2338,465 @@ describe("ad4mPlugin", () => {
     expect(warningFound).toBe(true);
   });
 
+  it("obtains a JWT via request_capability/generate_jwt when external mode has no token", async () => {
+    const registeredServices: Array<{
+      id: string;
+      start: Function;
+      stop: Function;
+    }> = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
+      const body = JSON.parse((opts as any).body as string);
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: { serverInfo: { name: "ad4m" } },
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Mcp-Session-Id": "sess-1",
+            },
+          },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 200 });
+      }
+      if (
+        body.method === "tools/call" &&
+        body.params?.name === "request_capability"
+      ) {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ request_id: "req-1", code: "123456" }),
+              },
+            ],
+          },
+        });
+      }
+      if (
+        body.method === "tools/call" &&
+        body.params?.name === "generate_jwt"
+      ) {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            content: [
+              { type: "text", text: JSON.stringify({ token: "jwt-abc" }) },
+            ],
+          },
+        });
+      }
+      if (body.method === "tools/list") {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { tools: [] },
+        });
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+
+    const mockApi = {
+      pluginConfig: {
+        mode: "external",
+        mcpEndpoint: "http://localhost:3001/mcp",
+        // no token — forces JWT auto-auth via obtainJwtFromExecutor
+      },
+      logger: makeMockLogger(),
+      registerTool: vi.fn(),
+      registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+      registerCli: vi.fn(),
+    };
+
+    await ad4mPlugin(mockApi);
+
+    const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
+    expect(mcpService).toBeDefined();
+    await mcpService!.start(makeServiceCtx());
+
+    const infoMsgs = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
+    expect(infoMsgs.some((m: string) => m.includes("JWT obtained"))).toBe(
+      true,
+    );
+    expect(
+      infoMsgs.some((m: string) => m.includes("Auth token ready")),
+    ).toBe(true);
+
+    mcpService!.stop();
+  });
+
+  it("obtains JWT via email/password login using AD4M_PASSWORD env var (no plaintext in config)", async () => {
+    const registeredServices: Array<{
+      id: string;
+      start: Function;
+      stop: Function;
+    }> = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
+      const body = JSON.parse((opts as any).body as string);
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { serverInfo: { name: "ad4m" } } }),
+          { status: 200, headers: { "Content-Type": "application/json", "Mcp-Session-Id": "sess-env" } },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 200 });
+      }
+      if (body.method === "tools/call" && body.params?.name === "login_email") {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { content: [{ type: "text", text: JSON.stringify({ token: "jwt-from-env" }) }] },
+        });
+      }
+      if (body.method === "tools/list") {
+        return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: { tools: [] } });
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+
+    const priorEnv = process.env.AD4M_PASSWORD;
+    process.env.AD4M_PASSWORD = "env-secret";
+
+    try {
+      const mockApi = {
+        pluginConfig: {
+          mode: "external",
+          mcpEndpoint: "http://localhost:3001/mcp",
+          email: "bot@agent.local",
+          // NOTE: no `password` field — proves the env var alone is enough
+        },
+        logger: makeMockLogger(),
+        registerTool: vi.fn(),
+        registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+        registerCli: vi.fn(),
+      };
+
+      await ad4mPlugin(mockApi);
+      const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
+      await mcpService!.start(makeServiceCtx());
+
+      const loginCall = (globalThis.fetch as any).mock.calls.find((c: any[]) => {
+        const b = JSON.parse(c[1]?.body || "{}");
+        return b.method === "tools/call" && b.params?.name === "login_email";
+      });
+      expect(loginCall).toBeDefined();
+      expect(JSON.parse(loginCall[1].body).params.arguments.password).toBe("env-secret");
+
+      mcpService!.stop();
+    } finally {
+      if (priorEnv === undefined) delete process.env.AD4M_PASSWORD;
+      else process.env.AD4M_PASSWORD = priorEnv;
+    }
+  });
+
+  it("obtains JWT via email/password login when multiUser config has credentials", async () => {
+    const registeredServices: Array<{
+      id: string;
+      start: Function;
+      stop: Function;
+    }> = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
+      const body = JSON.parse((opts as any).body as string);
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: { serverInfo: { name: "ad4m" } },
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Mcp-Session-Id": "sess-mu",
+            },
+          },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 200 });
+      }
+      if (
+        body.method === "tools/call" &&
+        body.params?.name === "login_email"
+      ) {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            content: [
+              { type: "text", text: JSON.stringify({ token: "jwt-multiuser" }) },
+            ],
+          },
+        });
+      }
+      if (body.method === "tools/list") {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { tools: [] },
+        });
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+
+    const mockApi = {
+      pluginConfig: {
+        mode: "external",
+        mcpEndpoint: "http://localhost:3001/mcp",
+        // email + password → triggers multi-user login in obtainJwtFromExecutor
+        email: "bot@agent.local",
+        password: "secret-pass",
+        // no token — forces JWT auto-auth
+      },
+      logger: makeMockLogger(),
+      registerTool: vi.fn(),
+      registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+      registerCli: vi.fn(),
+    };
+
+    await ad4mPlugin(mockApi);
+
+    const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
+    expect(mcpService).toBeDefined();
+    await mcpService!.start(makeServiceCtx());
+
+    const infoMsgs = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
+    expect(infoMsgs.some((m: string) => m.includes("Email/password login successful"))).toBe(true);
+    expect(infoMsgs.some((m: string) => m.includes("Auth token ready"))).toBe(true);
+
+    // Verify login_email was called with the correct credentials
+    const fetchCalls = (globalThis.fetch as any).mock.calls;
+    const loginCall = fetchCalls.find((c: any[]) => {
+      const b = JSON.parse(c[1]?.body || "{}");
+      return b.method === "tools/call" && b.params?.name === "login_email";
+    });
+    expect(loginCall).toBeDefined();
+    const loginBody = JSON.parse(loginCall[1].body);
+    expect(loginBody.params.arguments.email).toBe("bot@agent.local");
+    expect(loginBody.params.arguments.password).toBe("secret-pass");
+
+    // Verify request_capability was NOT called (email/password took priority)
+    const capCall = fetchCalls.find((c: any[]) => {
+      const b = JSON.parse(c[1]?.body || "{}");
+      return b.method === "tools/call" && b.params?.name === "request_capability";
+    });
+    expect(capCall).toBeUndefined();
+
+    mcpService!.stop();
+  });
+
+  it("auto-signup and retry login when email/password login returns user-not-found", async () => {
+    const registeredServices: Array<{
+      id: string;
+      start: Function;
+      stop: Function;
+    }> = [];
+
+    let loginAttempt = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
+      const body = JSON.parse((opts as any).body as string);
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: { serverInfo: { name: "ad4m" } },
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Mcp-Session-Id": "sess-su",
+            },
+          },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 200 });
+      }
+      if (
+        body.method === "tools/call" &&
+        body.params?.name === "login_email"
+      ) {
+        loginAttempt++;
+        if (loginAttempt === 1) {
+          // First attempt: user not found
+          return fakeJsonResponse({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: {
+              content: [
+                { type: "text", text: JSON.stringify({ error: "User not found" }) },
+              ],
+            },
+          });
+        }
+        // Second attempt: success after signup
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            content: [
+              { type: "text", text: JSON.stringify({ token: "jwt-after-signup" }) },
+            ],
+          },
+        });
+      }
+      if (
+        body.method === "tools/call" &&
+        body.params?.name === "signup"
+      ) {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            content: [
+              { type: "text", text: JSON.stringify({ did: "did:key:z6Mk-new" }) },
+            ],
+          },
+        });
+      }
+      if (body.method === "tools/list") {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { tools: [] },
+        });
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+
+    const mockApi = {
+      pluginConfig: {
+        mode: "external",
+        mcpEndpoint: "http://localhost:3001/mcp",
+        email: "new-bot@agent.local",
+        password: "new-pass",
+      },
+      logger: makeMockLogger(),
+      registerTool: vi.fn(),
+      registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+      registerCli: vi.fn(),
+    };
+
+    await ad4mPlugin(mockApi);
+
+    const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
+    expect(mcpService).toBeDefined();
+    await mcpService!.start(makeServiceCtx());
+
+    const infoMsgs = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
+    expect(infoMsgs.some((m: string) => m.includes("User not found"))).toBe(true);
+    expect(infoMsgs.some((m: string) => m.includes("Signup successful"))).toBe(true);
+    expect(infoMsgs.some((m: string) => m.includes("Login after signup successful"))).toBe(true);
+
+    mcpService!.stop();
+  });
+
+  it("setup config snippet does NOT persist the password (security regression guard)", async () => {
+    const registeredClis: any[] = [];
+    const registeredServices: any[] = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
+      const body = JSON.parse((opts as any).body as string);
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: { serverInfo: { name: "ad4m" } },
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Mcp-Session-Id": "sess-sec",
+            },
+          },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 200 });
+      }
+      if (body.method === "tools/call" && body.params?.name === "signup") {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { content: [{ type: "text", text: JSON.stringify({ did: "did:key:z6Mkxyz" }) }] },
+        });
+      }
+      if (body.method === "tools/call" && body.params?.name === "login_email") {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { content: [{ type: "text", text: JSON.stringify({ token: "jwt-secret" }) }] },
+        });
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+
+    // Spy on isExecutorRunning to return 'mcp' so we enter the external setup flow
+    const executorMod = await import("./executor");
+    vi.spyOn(executorMod, "isExecutorRunning").mockResolvedValue("mcp");
+
+    const setupLogger = makeMockLogger();
+    const { runSetup } = await import("./setup");
+
+    await runSetup(
+      {
+        hooks: { token: "wake-tok" },
+        plugins: {
+          entries: {
+            ad4m: {
+              config: {
+                multiUser: true,
+                email: "bot@test.local",
+                password: "super-secret-pass",
+              },
+            },
+          },
+        },
+      },
+      setupLogger,
+      "http://localhost:3001/mcp",
+      "http://localhost:12000",
+    );
+
+    // Collect all logged messages
+    const allMsgs = [
+      ...setupLogger.info.mock.calls.map((c: any[]) => c[0]),
+      ...setupLogger.warn.mock.calls.map((c: any[]) => c[0]),
+    ];
+
+    // The config snippet should contain the token and email
+    expect(allMsgs.some((m: string) => m.includes("jwt-secret"))).toBe(true);
+    expect(allMsgs.some((m: string) => m.includes("bot@test.local"))).toBe(true);
+
+    // But MUST NOT contain the plaintext password
+    const snippetLines = allMsgs.filter((m: string) => m.includes("one line for copy"));
+    expect(snippetLines.length).toBeGreaterThan(0);
+    for (const line of snippetLines) {
+      expect(line).not.toContain("super-secret-pass");
+    }
+
+    vi.restoreAllMocks();
+  });
+
   it("logs setup hint when mode is not configured", async () => {
     const mockApi: any = {
       id: "ad4m",
@@ -2106,6 +2820,63 @@ describe("ad4mPlugin", () => {
     expect(
       infoMessages.some((m: string) => m.includes("openclaw ad4m-setup")),
     ).toBe(true);
+  });
+
+  it("captures stateDir via ctx.stateDir so the waker can see it (regression: guard used to check ctx._stateDir, which is never set)", async () => {
+    const registeredServices: Array<{
+      id: string;
+      start: Function;
+      stop: Function;
+    }> = [];
+
+    // Neither service should reach the network in this scenario — mode is
+    // unset (ad4m-mcp returns right after capturing stateDir) and wakeToken
+    // is unset (ad4m-waker returns right after logging the stateDir line).
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("fetch should not be called in this test"),
+    );
+
+    const mockApi: any = {
+      id: "ad4m",
+      pluginConfig: {},
+      logger: makeMockLogger(),
+      registerTool: vi.fn(),
+      registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+      registerCli: vi.fn(),
+      config: {},
+    };
+
+    ad4mPlugin(mockApi);
+
+    const tmpDir = makeTempDir();
+    try {
+      const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
+      const wakerService = registeredServices.find(
+        (s) => s.id === "ad4m-waker",
+      );
+      expect(mcpService).toBeDefined();
+      expect(wakerService).toBeDefined();
+
+      // ad4m-mcp starts first and captures ctx.stateDir into module state.
+      await mcpService!.start(makeServiceCtx(tmpDir));
+
+      // ad4m-waker starts with NO stateDir of its own — if ad4m-mcp had
+      // failed to capture ctx.stateDir (e.g. reverted to the ctx._stateDir
+      // bug), the waker would see "existing stateDir: N/A" below.
+      await wakerService!.start({});
+
+      const infoMsgs = mockApi.logger.info.mock.calls.map(
+        (c: any[]) => c[0],
+      );
+      const stateDirLog = infoMsgs.find((m: string) =>
+        m.includes("stateDir from ctx:"),
+      );
+      expect(stateDirLog).toBeDefined();
+      expect(stateDirLog).toContain(`existing stateDir: ${tmpDir}`);
+      expect(stateDirLog).not.toContain("existing stateDir: N/A");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it("registers ad4m-setup CLI command", () => {
@@ -2192,7 +2963,7 @@ describe("WakerSubscriptionManager", () => {
       }),
     };
     return {
-      ProxyClass: vi.fn(() => proxy),
+      ProxyClass: vi.fn(function () { return proxy; }),
       proxy,
       /** Simulate the subscription delivering a result */
       deliver: (result: any) => {

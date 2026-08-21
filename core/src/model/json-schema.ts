@@ -325,13 +325,7 @@ export function buildModelFromJSONSchema(
         
       } else {
         // Handle regular properties
-        let resolveLanguage = getPropertyOption(propertyName, propertySchema, options, 'resolveLanguage');
-        // If no specific resolveLanguage for this property, use the global one
-        if (!resolveLanguage && options.resolveLanguage) {
-          resolveLanguage = options.resolveLanguage;
-        }
         const local = getPropertyOption(propertyName, propertySchema, options, 'local');
-        // Determine readOnly: check PropertyOptions first, then x-ad4m.writable (inverted) for JSON Schema wire format
         let readOnly = getPropertyOption(propertyName, propertySchema, options, 'readOnly');
         if (readOnly === undefined) {
           const xWritable = propertySchema["x-ad4m"]?.writable;
@@ -339,26 +333,17 @@ export function buildModelFromJSONSchema(
         }
         const writable = !readOnly;
         let initial = getPropertyOption(propertyName, propertySchema, options, 'initial');
-        
-        // Handle nested objects by serializing to JSON
-        if (isObjectType(propertySchema) && !resolveLanguage) {
-          resolveLanguage = 'literal';
+
+        // Not defaulted — absence means "deterministic typed literal" (the
+        // perf default); an explicit `resolveLanguage: "literal"` selects the
+        // signed-envelope path; any other value selects a custom language.
+        // See effectiveLiteralStorage().
+        const resolveLanguage = getPropertyOption(propertyName, propertySchema, options, 'resolveLanguage');
+
+        if (isObjectType(propertySchema)) {
           console.warn(`Property "${propertyName}" is an object type. It will be stored as JSON. Consider flattening complex objects for better semantic querying.`);
         }
 
-        // Ensure numeric properties use literal language for correct typing
-        if ((resolveLanguage === undefined || resolveLanguage === null) && isNumericType(propertySchema)) {
-          resolveLanguage = 'literal';
-        }
-
-        // Default resolveLanguage to 'literal' for all remaining property types,
-        // matching the @Property decorator behaviour. Without this, string values
-        // stored as literal: URLs are returned unparsed.
-        if (resolveLanguage === undefined || resolveLanguage === null) {
-          resolveLanguage = 'literal';
-        }
-        
-        // If property is required, ensure it has an initial value
         if (isRequired && !initial) {
           if (isObjectType(propertySchema)) {
             initial = 'literal:json:{}';
@@ -366,12 +351,12 @@ export function buildModelFromJSONSchema(
             initial = "ad4m://undefined";
           }
         }
-        
+
         properties[propertyName] = {
           through: predicate,
           required: isRequired,
           writable: writable,
-          ...(resolveLanguage && { resolveLanguage }),
+          ...(resolveLanguage !== undefined && { resolveLanguage }),
           ...(local !== undefined && { local }),
           ...(initial && { initial })
         };

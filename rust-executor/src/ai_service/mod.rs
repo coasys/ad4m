@@ -347,7 +347,7 @@ impl AIService {
         let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![];
 
         if models.is_empty() {
-            // for integration tests, make sure we have Bert loaded
+            // No models configured — auto-load Bert for embedding support
             futures.push(Box::pin(
                 self.init_model(Model {
                     id: "bert-id".to_string(),
@@ -376,12 +376,25 @@ impl AIService {
         // Wait for all initialization futures in parallel
         futures::future::join_all(futures).await;
 
-        // Spawn tasks from the database
+        // Spawn tasks from the database. Individual failures (e.g. tasks that
+        // reference a model that has since been deleted, or per-model task
+        // rows keyed to a model id that no `add_model` call has yet
+        // registered) log and continue — one orphan task must not prevent
+        // other tasks from being registered with their LLM workers, or the
+        // race between `AIService::new()`'s background `load()` and any
+        // caller that just spawned a worker + Spawn'd a task into it can wipe
+        // that task_descriptions entry mid-flight when `load()` re-spawns
+        // the worker via `init_model` and then bails before re-registering.
         let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
-
         for task in tasks {
-            self.spawn_task(task).await?;
+            let task_name = task.name.clone();
+            let task_id = task.task_id.clone();
+            if let Err(e) = self.spawn_task(task).await {
+                log::warn!(
+                    "AIService::load: skipping task '{task_name}' (task_id={task_id}): {e:#}"
+                );
+            }
         }
 
         Ok(())
@@ -692,7 +705,6 @@ impl AIService {
 
                 let mut tasks = HashMap::<String, Task<Llama>>::new();
                 let mut task_descriptions = HashMap::<String, AITask>::new();
-                let idle_delay = Duration::from_millis(1);
 
                 rt.block_on(publish_model_status(
                     model_config.id.clone(),
@@ -706,16 +718,11 @@ impl AIService {
                     let _ = model_ready_sender.send(());
                 }
 
+                // Block on the channel — zero CPU while idle.
                 loop {
-                    match rt.block_on(async {
-                        tokio::select! {
-                            recv = llama_rx.recv() => Ok(recv),
-                            _ = tokio::time::sleep(idle_delay) => Err("timeout"),
-                        }
-                    }) {
-                        Err(_timeout) => std::thread::sleep(idle_delay * 5),
-                        Ok(None) => break,
-                        Ok(Some(task_request)) => match task_request {
+                    match rt.block_on(llama_rx.recv()) {
+                        None => break,
+                        Some(task_request) => match task_request {
                             LLMTaskRequest::Shutdown(shutdown_request) => {
                                 rt.block_on(publish_model_status(
                                     model_config.id.clone(),
@@ -1061,6 +1068,18 @@ impl AIService {
         })
     }
 
+    /// Register an already-persisted task row with its LLM worker.
+    ///
+    /// Public entry point for tasks minted outside [`AIService::add_task`] —
+    /// notably the generic interpretation task, which `ensure_interpretation_task`
+    /// inserts via `Ad4mDb::add_task` directly (to stay idempotent-by-name).
+    /// Without this, such a task sits in the DB unspawned until the next
+    /// executor restart's `load()` sweep, so its first `prompt` fails with
+    /// "Task not spawned". Callers spawn it right after creation instead.
+    pub async fn spawn_registered_task(&self, task: AITask) -> Result<()> {
+        self.spawn_task(task).await
+    }
+
     async fn spawn_task(&self, task: AITask) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let llm_channel = self.llm_channel.lock().await;
@@ -1401,17 +1420,11 @@ impl AIService {
                     })
                     .expect("couldn't build Bert model");
 
-                let idle_delay = Duration::from_millis(1);
+                // Block on the channel — zero CPU while idle.
                 loop {
-                    match rt.block_on(async {
-                        tokio::select! {
-                            recv = bert_rx.recv() => Ok(recv),
-                            _ = tokio::time::sleep(idle_delay) => Err("timeout"),
-                        }
-                    }) {
-                        Err(_timeout) => std::thread::sleep(idle_delay * 5),
-                        Ok(None) => break,
-                        Ok(Some(request)) => {
+                    match rt.block_on(bert_rx.recv()) {
+                        None => break,
+                        Some(request) => {
                             let result: Result<Vec<f32>> = rt
                                 .block_on(async { model.embed(request.prompt).await })
                                 .map(|tensor| tensor.to_vec())

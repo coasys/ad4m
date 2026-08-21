@@ -16,10 +16,30 @@
 use serde_json::Value;
 
 use super::types::{
-    InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, ParentScope, SortKey,
+    InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope, SortKey,
     SparqlPagination, WhereCondition,
 };
-use super::utils::{escape_sparql_string, validate_iri};
+use super::utils::{
+    escape_sparql_string, format_literal_number, looks_like_absolute_iri, validate_iri,
+};
+
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
+const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+
+/// Render a finite f64 as a typed-literal SPARQL term, mirroring the
+/// `xsd:integer` vs `xsd:decimal` split used by the storage layer.
+fn typed_number_literal(n: f64) -> Option<String> {
+    let s = format_literal_number(n)?;
+    let dt = if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
+        XSD_INTEGER
+    } else {
+        XSD_DECIMAL
+    };
+    Some(format!("\"{s}\"^^<{dt}>"))
+}
 
 /// Build a targeted reifier timestamp probe for the pagination sub-query.
 ///
@@ -160,6 +180,16 @@ pub(super) fn build_instance_sparql(
                 )
             }
             SortKey::Property(predicate) => {
+                // `parse_literal` yields the lexical form for a typed literal
+                // and the inner `data` for a signed envelope — sorting a
+                // `resolveLanguage:"literal"` property must compare on the
+                // value, not on the envelope JSON (which would sort by author
+                // and timestamp instead). Plain `STR()` would be enough for
+                // deterministic literals alone, but not for envelopes, and the
+                // ORDER BY sits inside a GROUP BY subquery over an already
+                // filtered set, so there is no index to lose here.
+                // The xsd:double cast yields the numeric sort key when the
+                // value parses as a number.
                 format!(
                     r#"SELECT DISTINCT ?source (SAMPLE(?_nv) AS ?_sort_num) (SAMPLE(?_sv) AS ?_sort_str) WHERE {{
 {conformance}
@@ -297,7 +327,7 @@ pub(super) fn build_query_patterns(
     // Parent filter
     if let Some(ref parent) = query.parent {
         match parent {
-            ParentScope::Raw { id, predicate } => {
+            Scope::Raw { id, predicate } => {
                 if let (Ok(safe_id), Ok(safe_pred)) = (validate_iri(id), validate_iri(predicate)) {
                     conformance_patterns.push(format!("    <{safe_id}> <{safe_pred}> ?source ."));
                 } else {
@@ -308,7 +338,7 @@ pub(super) fn build_query_patterns(
                     );
                 }
             }
-            ParentScope::Model { id, field, model } => {
+            Scope::Model { id, field, model } => {
                 let safe_id = match validate_iri(id) {
                     Ok(s) => s,
                     Err(_) => {
@@ -557,75 +587,152 @@ pub(super) fn build_query_patterns(
                     continue;
                 }
                 let safe_name = prop_name.replace(|c: char| !c.is_alphanumeric(), "_");
-                let is_literal_prop = prop.resolve_language.is_some();
+                let is_literal_prop = prop.is_deterministic_literal();
                 match condition {
                     WhereCondition::String(val) => {
                         if is_literal_prop {
+                            // Match the typed-literal storage form directly so
+                            // Oxigraph's POS index handles the lookup.  When
+                            // the value is itself a valid absolute IRI we keep
+                            // a UNION fallback so constructor-seeded raw URIs
+                            // on literal-resolveLanguage properties still
+                            // resolve.
+                            let escaped = escape_sparql_string(val);
+                            if looks_like_absolute_iri(val) {
+                                where_patterns.push(format!(
+                                    "    {{ ?source <{0}> \"{escaped}\"^^<{XSD_STRING}> . }} UNION {{ ?source <{0}> <{val}> . }}",
+                                    prop.predicate
+                                ));
+                            } else {
+                                where_patterns.push(format!(
+                                    "    ?source <{}> \"{escaped}\"^^<{XSD_STRING}> .",
+                                    prop.predicate
+                                ));
+                            }
+                        } else {
+                            // Expression-resolved storage (signed literal envelope
+                            // or custom resolveLanguage): the stored term is the
+                            // envelope/expression, never a NamedNode equal to
+                            // `val`. Unwrap with `fn/parse_literal` and compare on
+                            // the decoded value. (Emitting `<val>` here would also
+                            // be an invalid relative IRI for non-absolute values.)
                             let var = format!("?_pw_{safe_name}");
+                            let escaped = escape_sparql_string(val);
                             where_patterns
                                 .push(format!("    ?source <{}> {var} .", prop.predicate));
                             where_patterns.push(format!(
-                                "    FILTER(STR(<ad4m://fn/parse_literal>({var})) = \"{}\")",
-                                escape_sparql_string(val)
+                                "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{escaped}\")"
                             ));
-                        } else if validate_iri(val).is_ok() {
-                            where_patterns
-                                .push(format!("    ?source <{}> <{val}> .", prop.predicate));
+                        }
+                    }
+                    WhereCondition::Number(n) => {
+                        if is_literal_prop {
+                            if let Some(typed) = typed_number_literal(*n) {
+                                where_patterns
+                                    .push(format!("    ?source <{}> {typed} .", prop.predicate));
+                            } else {
+                                where_patterns.push("    FILTER(false)".to_string());
+                            }
                         } else {
                             let var = format!("?_pw_{safe_name}");
                             where_patterns
                                 .push(format!("    ?source <{}> {var} .", prop.predicate));
                             where_patterns.push(format!(
-                                "    FILTER(STR(<ad4m://fn/parse_literal>({var})) = \"{}\")",
-                                escape_sparql_string(val)
+                                "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{n}\")"
                             ));
                         }
                     }
-                    WhereCondition::Number(n) => {
-                        let var = format!("?_pw_{safe_name}");
-                        where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
-                        where_patterns.push(format!(
-                            "    FILTER(STR(<ad4m://fn/parse_literal>({var})) = \"{n}\")"
-                        ));
-                    }
                     WhereCondition::Bool(b) => {
-                        let var = format!("?_pw_{safe_name}");
-                        where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
-                        where_patterns.push(format!(
-                            "    FILTER(STR(<ad4m://fn/parse_literal>({var})) = \"{b}\")"
-                        ));
+                        if is_literal_prop {
+                            where_patterns.push(format!(
+                                "    ?source <{}> \"{b}\"^^<{XSD_BOOLEAN}> .",
+                                prop.predicate
+                            ));
+                        } else {
+                            let var = format!("?_pw_{safe_name}");
+                            where_patterns
+                                .push(format!("    ?source <{}> {var} .", prop.predicate));
+                            where_patterns.push(format!(
+                                "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{b}\")"
+                            ));
+                        }
                     }
                     WhereCondition::StringArray(vals) => {
-                        let values_list = vals
-                            .iter()
-                            .map(|v| format!("\"{}\"", escape_sparql_string(v)))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        let var = format!("?_pw_{safe_name}");
-                        where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
-                        where_patterns.push(format!(
-                            "    FILTER(STR(<ad4m://fn/parse_literal>({var})) IN ({values_list}))"
-                        ));
+                        if is_literal_prop {
+                            let mut items: Vec<String> = Vec::with_capacity(vals.len() * 2);
+                            for v in vals {
+                                let escaped = escape_sparql_string(v);
+                                items.push(format!("\"{escaped}\"^^<{XSD_STRING}>"));
+                                if looks_like_absolute_iri(v) {
+                                    items.push(format!("<{v}>"));
+                                }
+                            }
+                            let iv_var = format!("?_iv_{safe_name}");
+                            where_patterns
+                                .push(format!("    VALUES {iv_var} {{ {} }}", items.join(" ")));
+                            where_patterns
+                                .push(format!("    ?source <{}> {iv_var} .", prop.predicate));
+                        } else {
+                            let values_list = vals
+                                .iter()
+                                .map(|v| format!("\"{}\"", escape_sparql_string(v)))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let var = format!("?_pw_{safe_name}");
+                            where_patterns
+                                .push(format!("    ?source <{}> {var} .", prop.predicate));
+                            where_patterns.push(format!(
+                                "    FILTER(<ad4m://fn/parse_literal>({var}) IN ({values_list}))"
+                            ));
+                        }
                     }
                     WhereCondition::NumberArray(vals) => {
-                        let values_list = vals
-                            .iter()
-                            .map(|n| format!("\"{n}\""))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        let var = format!("?_pw_{safe_name}");
-                        where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
-                        where_patterns.push(format!(
-                            "    FILTER(STR(<ad4m://fn/parse_literal>({var})) IN ({values_list}))"
-                        ));
+                        if is_literal_prop {
+                            let items: Vec<String> = vals
+                                .iter()
+                                .filter_map(|n| typed_number_literal(*n))
+                                .collect();
+                            if items.is_empty() {
+                                where_patterns.push("    FILTER(false)".to_string());
+                            } else {
+                                let iv_var = format!("?_iv_{safe_name}");
+                                where_patterns
+                                    .push(format!("    VALUES {iv_var} {{ {} }}", items.join(" ")));
+                                where_patterns
+                                    .push(format!("    ?source <{}> {iv_var} .", prop.predicate));
+                            }
+                        } else {
+                            let values_list = vals
+                                .iter()
+                                .map(|n| format!("\"{n}\""))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let var = format!("?_pw_{safe_name}");
+                            where_patterns
+                                .push(format!("    ?source <{}> {var} .", prop.predicate));
+                            where_patterns.push(format!(
+                                "    FILTER(<ad4m://fn/parse_literal>({var}) IN ({values_list}))"
+                            ));
+                        }
                     }
                     WhereCondition::Ops(ops) => {
                         let var = format!("?_pw_{safe_name}");
                         let val_var = format!("?_pw_{safe_name}_v");
                         where_patterns.push(format!("    ?source <{}> {var} .", prop.predicate));
-                        where_patterns.push(format!(
-                            "    BIND(STR(<ad4m://fn/parse_literal>({var})) AS {val_var})"
-                        ));
+                        // Compare on the lexical string rather than on a typed
+                        // literal term: Oxigraph treats a simple literal and an
+                        // `xsd:string` literal as distinct terms, so `?v != "x"^^xsd:string`
+                        // silently fails to match values stored either way.
+                        //
+                        // Deterministic literals expose their value via `STR()`
+                        // directly; envelope / custom-language values need
+                        // `parse_literal` first to reach the inner `data`.
+                        let val_src = if is_literal_prop {
+                            var.clone()
+                        } else {
+                            format!("<ad4m://fn/parse_literal>({var})")
+                        };
+                        where_patterns.push(format!("    BIND(STR({val_src}) AS {val_var})"));
 
                         let mut filters = Vec::new();
 
@@ -687,9 +794,8 @@ pub(super) fn build_query_patterns(
 
                         if has_numeric {
                             let num_var = format!("?_pw_{safe_name}_num");
-                            where_patterns.push(format!(
-                                "    BIND(<http://www.w3.org/2001/XMLSchema#double>({val_var}) AS {num_var})"
-                            ));
+                            where_patterns
+                                .push(format!("    BIND(<{XSD_DOUBLE}>({val_var}) AS {num_var})"));
                             if let Some(gt) = ops.gt {
                                 filters.push(format!("{num_var} > {gt}"));
                             }

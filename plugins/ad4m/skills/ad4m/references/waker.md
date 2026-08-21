@@ -41,7 +41,7 @@ For mention subscriptions, the wake message includes per-message details with re
 
 ```json
 {
-  "text": "You were @mentioned in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: mention-abc\nEvent type: mention\n\nMentioned messages (1):\n  Message: literal://string:msg-123\n  Parents: literal://string:channel-1, literal://string:conv-thread-5",
+  "text": "You were @mentioned in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: mention-abc\nEvent type: mention\n\nMentioned messages (1):\n  Message: literal:string:msg-123\n  Parents: literal:string:channel-1, literal:string:conv-thread-5",
   "mode": "now"
 }
 ```
@@ -74,7 +74,11 @@ The plugin manages the MCP connection — just call AD4M tools directly after wa
 
 The waker tracks seen message addresses per subscription and only wakes for **new** messages. After restart, previously seen messages are restored from persisted state — no duplicate wakes.
 
-## OpenClaw Hooks Config
+## Wake Delivery
+
+How wake events reach your agent session depends on the platform (Sovereign, OpenClaw, etc.). The current waker sends wake payloads to `wakeUrl` with `wakeToken`; platforms may auto-provision these values, but they must be present for delivery.
+
+### OpenClaw Hooks Config
 
 The plugin reads the hooks token from OpenClaw's global config (`hooks.token`). The `openclaw ad4m-setup` command includes `wakeToken` in the generated config snippet if hooks are enabled.
 

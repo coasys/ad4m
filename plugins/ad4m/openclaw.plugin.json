@@ -67,6 +67,24 @@
         "enum": ["file", "openclaw", "both"],
         "default": "file",
         "description": "Where to send executor logs: 'file' = ~/.ad4m/ad4m.log only (default), 'openclaw' = OpenClaw logs only, 'both' = both destinations."
+      },
+      "runHolochain": {
+        "type": "boolean",
+        "default": true,
+        "description": "Managed mode: run Holochain (default true). Set false to start the executor with --run-holochain false — no P2P/bootstrap egress, for isolated or offline nodes that do not need neighbourhood sync."
+      },
+      "multiUser": {
+        "type": "boolean",
+        "default": false,
+        "description": "External mode: on a multi-user node, provision the assistant's own user identity (signup + login) instead of requesting a capability against the node's base agent."
+      },
+      "email": {
+        "type": "string",
+        "description": "Multi-user: the assistant's user email/identifier. Persisted by setup for re-authentication."
+      },
+      "password": {
+        "type": "string",
+        "description": "Multi-user: password for runtime re-authentication. NOT persisted by setup — provide via AD4M_PASSWORD env var or set manually for headless operation."
       }
     },
     "required": [],
