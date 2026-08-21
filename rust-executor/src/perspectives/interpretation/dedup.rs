@@ -116,7 +116,8 @@ pub(crate) async fn embed_via_ai_service(
     let mut out = Vec::with_capacity(texts.len());
     for text in texts {
         let embedded = service
-            .embed(model_id.to_string(), text.clone())
+            // Internal caller (SHACL dedup) — no user auth context; billing skipped.
+            .embed(model_id.to_string(), text.clone(), None)
             .await
             .map_err(|e| anyhow::anyhow!("semantic dedup: embed('{model_id}') failed: {e:#}"))?;
         out.push(embedded.embeddings);
