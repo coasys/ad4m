@@ -14,6 +14,7 @@ import languageTests from "./language";
 import expressionTests from "./expression";
 import neighbourhoodTests from "./neighbourhood";
 import autoProcessorNeighbourhoodTests from "./auto-processor-neighbourhood";
+import crossPeerShapeSyncTests from "./cross-peer-shape-sync";
 import runtimeTests from "./runtime";
 import flatLanguageTests from "./flat-language.test";
 //import { Crypto } from "@peculiar/webcrypto"
@@ -193,5 +194,6 @@ describe("Integration tests", function () {
         describe('Language', languageTests(testContext))
         describe('Neighbourhood', neighbourhoodTests(testContext))
         describe('Auto-processor (two executors)', autoProcessorNeighbourhoodTests(testContext))
+        describe('Cross-peer SHACL shape sync', crossPeerShapeSyncTests(testContext))
     })
 })
