@@ -66,9 +66,53 @@ static MAX_PENDING_SECONDS: u64 = 3;
 static IMMEDIATE_COMMITS_COUNT: usize = 20;
 static QUERY_SUBSCRIPTION_TIMEOUT: u64 = 60; // 1 minute in seconds (was 5 min)
 static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
+/// How long `model_query` will poll a shared perspective for a
+/// class's SHACL to arrive over p-diff-sync before erroring — see
+/// `PerspectiveInstance::get_shape_or_wait`. Deliberately shorter
+/// than the WS handler's `SPARQL_QUERY_TIMEOUT_SECS` (30s) so a run
+/// that spent most of its budget waiting still has headroom to
+/// execute the query itself before the outer WS timeout fires.
+/// Local-only perspectives never enter the wait path.
+const MODEL_QUERY_SHAPE_WAIT: Duration = Duration::from_secs(20);
 
 fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
+}
+
+/// True iff any addition or removal in the diff carries a triple
+/// that would alter a class's stored SHACL definition:
+///   * the `ad4m://` housekeeping triples emitted by `add_sdna`
+///     (`ad4m://has_subject_class`, `ad4m://sdna`, `ad4m://shape`),
+///   * a class-level `rdf://type ad4m://SubjectClass` marker (only
+///     that specific target — normal `rdf://type ns://SomeClass`
+///     application links must not flush the cache), or
+///   * any SHACL-vocabulary predicate (`sh://...`) which only
+///     appears on property-shape triples written by the SHACL
+///     writer, not on regular application data.
+///
+/// Used by `diff_from_link_language` to decide whether to
+/// invalidate the shape cache. The scan is one loop over
+/// (additions + removals) per inbound diff — cheap next to the
+/// SPARQL write. Kept intentionally narrow so that a chatty
+/// application (Flux message writes, etc.) doesn't churn the
+/// cache. `ad4m://resolveLanguage`, `getter`, `transform`,
+/// `interpretation_hint`, `identity` etc. also appear on live
+/// application data (a `@Property` decorator emits them onto every
+/// instance's property URI) and MUST NOT trigger invalidation.
+fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
+    let iter = diff.additions.iter().chain(diff.removals.iter());
+    for decorated in iter {
+        let predicate = decorated.data.predicate.as_deref().unwrap_or("");
+        if predicate.starts_with("sh://") {
+            return true;
+        }
+        match predicate {
+            "ad4m://has_subject_class" | "ad4m://sdna" | "ad4m://shape" => return true,
+            "rdf://type" if decorated.data.target == "ad4m://SubjectClass" => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn is_sparql_query(query: &str) -> bool {
@@ -87,6 +131,156 @@ fn is_sparql_query(query: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod inbound_touches_shacl_tests {
+    //! Regression guard for the shape-cache invalidation predicate. If
+    //! either the positive OR the negative set drifts, `diff_from_link_language`
+    //! either misses SHACL updates (stale cache) or thrashes the cache
+    //! on every application-data diff.
+    use super::*;
+    use crate::types::{DecoratedExpressionProof, LinkStatus};
+
+    fn link(source: &str, predicate: &str, target: &str) -> DecoratedLinkExpression {
+        DecoratedLinkExpression {
+            author: String::new(),
+            timestamp: String::new(),
+            data: Link {
+                source: source.into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            },
+            proof: DecoratedExpressionProof {
+                key: String::new(),
+                signature: String::new(),
+                valid: Some(true),
+                invalid: Some(false),
+            },
+            status: Some(LinkStatus::Shared),
+        }
+    }
+
+    fn diff(additions: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
+        DecoratedPerspectiveDiff {
+            additions,
+            removals: vec![],
+        }
+    }
+
+    #[test]
+    fn class_shape_assignment_triggers_invalidation() {
+        assert!(inbound_touches_shacl(&diff(vec![link(
+            "ad4m://InterpretationRun",
+            "ad4m://shape",
+            "ad4m://InterpretationRunShape",
+        )])));
+    }
+
+    #[test]
+    fn sdna_housekeeping_triggers_invalidation() {
+        for predicate in ["ad4m://has_subject_class", "ad4m://sdna"] {
+            assert!(
+                inbound_touches_shacl(&diff(vec![link(
+                    "ad4m://perspective",
+                    predicate,
+                    "some-target"
+                )])),
+                "predicate `{predicate}` should invalidate"
+            );
+        }
+    }
+
+    #[test]
+    fn class_marker_rdf_type_triggers_invalidation() {
+        assert!(inbound_touches_shacl(&diff(vec![link(
+            "ad4m://InterpretationRun",
+            "rdf://type",
+            "ad4m://SubjectClass",
+        )])));
+    }
+
+    #[test]
+    fn generic_rdf_type_on_application_data_does_not_invalidate() {
+        // A normal application instance's rdf://type link (e.g. a Flux
+        // message declaring its class) MUST NOT flush the cache — every
+        // message send would churn it.
+        assert!(!inbound_touches_shacl(&diff(vec![link(
+            "flux://message/abc",
+            "rdf://type",
+            "ns://Message",
+        )])));
+    }
+
+    #[test]
+    fn sh_vocabulary_triggers_invalidation() {
+        for predicate in [
+            "sh://property",
+            "sh://path",
+            "sh://datatype",
+            "sh://minCount",
+        ] {
+            assert!(
+                inbound_touches_shacl(&diff(vec![link(
+                    "ad4m://SomeShape.prop",
+                    predicate,
+                    "xsd:string"
+                )])),
+                "predicate `{predicate}` should invalidate"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_data_link_does_not_invalidate() {
+        // Application data — the common case, must not touch the cache.
+        assert!(!inbound_touches_shacl(&diff(vec![link(
+            "msg://hello",
+            "ns://body",
+            "literal:string:hi",
+        )])));
+    }
+
+    #[test]
+    fn ad4m_predicates_that_also_ride_application_data_do_not_invalidate() {
+        // `resolveLanguage`, `getter`, `interpretation_hint`, `identity`
+        // appear on live property URIs on real instances (a @Property
+        // decorator writes them per-instance). They must NOT invalidate
+        // the class-shape cache — the check keys off the SHACL writer's
+        // structural triples only.
+        for predicate in [
+            "ad4m://resolveLanguage",
+            "ad4m://getter",
+            "ad4m://interpretation_hint",
+            "ad4m://identity",
+            "ad4m://transform",
+        ] {
+            assert!(
+                !inbound_touches_shacl(&diff(vec![link(
+                    "flux://message/abc.body",
+                    predicate,
+                    "some-value"
+                )])),
+                "predicate `{predicate}` should NOT invalidate on plain instance data"
+            );
+        }
+    }
+
+    #[test]
+    fn removals_are_also_scanned() {
+        let mut diff = DecoratedPerspectiveDiff::default();
+        diff.removals.push(link(
+            "ad4m://InterpretationRun",
+            "ad4m://shape",
+            "ad4m://oldShape",
+        ));
+        assert!(inbound_touches_shacl(&diff));
+    }
+
+    #[test]
+    fn empty_diff_does_not_invalidate() {
+        assert!(!inbound_touches_shacl(&DecoratedPerspectiveDiff::default()));
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -379,6 +573,45 @@ impl PerspectiveInstance {
     /// (re-)written for the class so the next query re-parses fresh state.
     pub fn invalidate_shape(&self, class_name: &str) {
         self.shape_cache.write().unwrap().remove(class_name);
+    }
+
+    /// Like [`get_shape`], but for perspectives joined to a
+    /// neighbourhood (link language attached) it will poll for the
+    /// SHACL triples to arrive over p-diff-sync up to `budget`. Fixes
+    /// the cross-peer race where a peer that just joined a shared
+    /// perspective calls `findAll(ClassX)` before `ClassX`'s SDNA has
+    /// synced from the peer that registered it — the shape lives in
+    /// the shared graph, but it takes a moment to arrive.
+    ///
+    /// Local-only perspectives (no link language) behave identically
+    /// to `get_shape` — a missing class there is a genuine
+    /// caller bug, not a sync race, so we surface the error immediately.
+    pub async fn get_shape_or_wait(
+        &self,
+        class_name: &str,
+        budget: Duration,
+    ) -> Result<Arc<ModelShape>, AnyError> {
+        match self.get_shape(class_name) {
+            Ok(shape) => return Ok(shape),
+            Err(e) => {
+                if self.link_language.read().await.is_none() {
+                    return Err(e);
+                }
+            }
+        }
+        let deadline = Instant::now() + budget;
+        let poll = Duration::from_millis(100);
+        loop {
+            if Instant::now() >= deadline {
+                // Falls through with the original error message so
+                // callers see the same wording they did before.
+                return self.get_shape(class_name);
+            }
+            sleep(poll).await;
+            if let Ok(shape) = self.get_shape(class_name) {
+                return Ok(shape);
+            }
+        }
     }
 
     /// Borrow a cache-backed `ShapeResolver` for the lifetime of a single
@@ -1298,6 +1531,17 @@ impl PerspectiveInstance {
 
         // Write to SPARQL store (primary storage for links)
         self.persist_link_diff(&decorated_diff).await?;
+
+        // If any of the inbound links change a class's SHACL definition,
+        // drop that entry from the in-memory shape cache so the next
+        // `model_query` re-parses fresh state from the SPARQL store.
+        // Without this, a locally cached shape can shadow updates the
+        // remote registered (rename, added property, etc.); with it, a
+        // peer that has never registered a class locally still picks up
+        // the class the moment its SHACL arrives.
+        if inbound_touches_shacl(&decorated_diff) {
+            self.shape_cache.write().unwrap().clear();
+        }
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_diff.clone()).await;
@@ -3089,6 +3333,12 @@ impl PerspectiveInstance {
 
     /// Execute a model query — the executor-side replacement for
     /// SPARQL-build → hydrate → JS-filter → JS-sort → JS-paginate.
+    ///
+    /// If the perspective is joined to a neighbourhood and `class_name`'s
+    /// SHACL has not yet synced from a remote peer, waits up to
+    /// [`MODEL_QUERY_SHAPE_WAIT`] before erroring so cross-peer callers
+    /// can query classes registered by another peer without racing
+    /// p-diff-sync (see [`get_shape_or_wait`]).
     pub async fn model_query(
         &self,
         class_name: &str,
@@ -3097,6 +3347,17 @@ impl PerspectiveInstance {
         let query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
 
+        // Cross-peer safety: on a shared perspective we may be asked about
+        // a class whose SHACL hasn't synced yet. Poll briefly rather than
+        // fail immediately. The subsequent recursive resolves inside
+        // `execute_model_query` use the plain (non-waiting) resolver
+        // because at that point the top-level shape has been resolved so
+        // referenced target-classes are extremely likely to also be
+        // present already — a nested wait per relation would multiply
+        // latency for a case we haven't seen bite in practice.
+        let _ = self
+            .get_shape_or_wait(class_name, MODEL_QUERY_SHAPE_WAIT)
+            .await?;
         let resolver = self.shape_resolver();
         let shape = resolver.get_shape(class_name)?;
         let result = super::model_query::execute_model_query(
