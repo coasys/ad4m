@@ -1054,7 +1054,8 @@ mod tests {
             static V8_INIT: Once = Once::new();
             V8_INIT.call_once(|| {
                 deno_core::v8::V8::set_flags_from_string("--max-opt=0");
-                deno_core::JsRuntime::init_platform(None, false);
+                // deno v2.9: init_platform is 1-arg now (predictable bool dropped)
+                deno_core::JsRuntime::init_platform(None);
             });
         }
 
