@@ -142,7 +142,7 @@ export async function commit(diff: PerspectiveDiff): Promise<void> {
     const { config, getToken } = deps();
     const token = await getToken();
     await api.commitDiff(config, token, toWireDiff(diff));
-    deps().emitSyncState?.("Synced");
+    emitSyncStateSafe("Synced");
 }
 
 // ---------------------------------------------------------------------------
@@ -197,8 +197,20 @@ export function enqueueCommitBatched(diff: PerspectiveDiff): void {
         _flushScheduled = true;
         // Serialize flushes: each waits for the previous to finish before
         // starting, so we never have two overlapping POSTs stepping on
-        // sequence order.
-        _inflight = _inflight.then(() => flushBatch());
+        // sequence order. The terminal `.catch` is load-bearing: `_inflight`
+        // is a single reusable chain, and if a flush rejects (e.g. deps()
+        // throws because the module was torn down mid-microtask), every
+        // subsequent `.then(flushBatch)` would be skipped, silently killing
+        // all future commits. The catch swallows the rejection so the chain
+        // stays live.
+        _inflight = _inflight
+            .then(() => flushBatch())
+            .catch((err) => {
+                console.error(
+                    "[server-link-language] batch flush crashed; keeping the flush chain live for subsequent enqueues:",
+                    err,
+                );
+            });
     }
 }
 
@@ -227,9 +239,25 @@ async function flushBatch(): Promise<void> {
                 ` Local store already reflects all writes; server is behind. ` +
                 `The language has no automatic re-push path — a subsequent sync() only PULLS.`,
             );
-            deps().emitSyncState?.("LinkLanguageInstalledButNotSynced");
+            emitSyncStateSafe("LinkLanguageInstalledButNotSynced");
             return;
         }
+    }
+}
+
+/**
+ * `deps()` can throw once the language has been torn down (resetAdapters
+ * clears the module state), and a throwing `emitSyncState` (e.g. because
+ * getRuntime() no longer exists) would reject the entire flushBatch —
+ * poisoning `_inflight` if that rejection escapes the chain's terminal
+ * catch. Route every sync-state emission through this so an emit failure
+ * during teardown stays local instead of taking the flush chain with it.
+ */
+function emitSyncStateSafe(state: string): void {
+    try {
+        _deps?.emitSyncState?.(state);
+    } catch (err) {
+        console.error("[server-link-language] emitSyncState failed (likely post-teardown):", err);
     }
 }
 
@@ -313,15 +341,41 @@ function linkIdentity(link: LinkExpression): string {
     ]);
 }
 
-/** Test/teardown hook: await any in-flight flush + one pending flush so a
- * subsequent teardown or read sees a settled server state. Not called on
- * the hot path. */
+/** Test/teardown hook: await any in-flight flush + drain everything still
+ * queued so a subsequent teardown or read sees a settled server state. Not
+ * called on the hot path.
+ *
+ * Loops rather than making one pass: a diff enqueued during the final
+ * await (by a concurrent caller or by teardown code that itself commits)
+ * would otherwise stay unflushed. The bound is a runaway-loop guard, not
+ * an expected iteration count — a settled system exits after 1 or 2 laps.
+ * Enqueues are routed through the normal `enqueueCommitBatched` path so
+ * they land in `_inflight` — direct `flushBatch()` calls would break the
+ * serialisation invariant that other flushes rely on.
+ */
 export async function drainCommitBatch(): Promise<void> {
-    await _inflight;
-    if (_pendingQueue.length > 0) {
-        await flushBatch();
+    const MAX_LAPS = 100;
+    for (let lap = 0; lap < MAX_LAPS; lap++) {
+        await _inflight;
+        if (_pendingQueue.length === 0) return;
+        if (!_flushScheduled) {
+            // Nudge the chain to pick up the residual queue without
+            // duplicating scheduling logic here.
+            _flushScheduled = true;
+            _inflight = _inflight
+                .then(() => flushBatch())
+                .catch((err) => {
+                    console.error(
+                        "[server-link-language] batch flush crashed during drain:",
+                        err,
+                    );
+                });
+        }
     }
-    await _inflight;
+    console.error(
+        `[server-link-language] drainCommitBatch: bailed after ${MAX_LAPS} laps — ` +
+        `a caller is enqueuing commits faster than they can flush.`,
+    );
 }
 
 /** Test-only: clear all batch state without draining. Used by unit tests
@@ -378,7 +432,7 @@ export async function catchUp(): Promise<PerspectiveDiff> {
         store.setSequence(res.sequence);
     }
 
-    deps().emitSyncState?.("Synced");
+    emitSyncStateSafe("Synced");
     return last;
 }
 
@@ -392,7 +446,10 @@ export async function performSync(): Promise<PerspectiveDiff> {
         console.error("[server-link-language] sync failed:", err);
         // See index.ts comment on the same value — must be a valid
         // PerspectiveState variant on the executor side.
-        deps().emitSyncState?.("LinkLanguageInstalledButNotSynced");
+        // Route through emitSyncStateSafe to honour performSync's
+        // "never throws" contract even if the runtime torn down between
+        // catchUp() rejecting and this emit landing.
+        emitSyncStateSafe("LinkLanguageInstalledButNotSynced");
         return { additions: [], removals: [] };
     }
 }
