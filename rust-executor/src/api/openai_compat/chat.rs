@@ -15,7 +15,6 @@ use axum::{
 use futures::Stream;
 use uuid::Uuid;
 
-use super::billing_amounts;
 use super::errors::{OpenAIError, OpenAIJson, OpenAIResult};
 use super::model_selector::resolve_model;
 use super::types::{
@@ -26,7 +25,7 @@ use super::types::{
 use crate::agent::capabilities::{check_capability, AI_PROMPT_CAPABILITY};
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
-use crate::billing::{bill_compute, check_compute_credits};
+use crate::billing::check_compute_credits;
 use crate::types::ModelType;
 
 /// `POST /v1/chat/completions` — handles both streaming (`stream: true`)
@@ -254,19 +253,10 @@ async fn chat_stream(
                 Event::default().data(serde_json::to_string(&final_chunk).unwrap())
             ));
 
-            // Billing — flat charge per stream. Per-token billing requires
-            // tokenizer counts that the Kalosm backend doesn't expose yet.
-            // TODO: plumb token counts from Kalosm for proportional billing.
-            if let Some(email) = user_email(&auth_clone) {
-                if let Err(e) = bill_compute(
-                    &email,
-                    billing_amounts::stream_prompt_amount(),
-                    "ai_prompt",
-                    Some("v1/chat/completions[stream]"),
-                ) {
-                    log::warn!("Streaming billing failed: {e}");
-                }
-            }
+            // Billing lives in AIService::prompt_messages_stream now,
+            // charged when done_rx resolves with the final PromptResult
+            // (tokens known then). Handler used to double-bill here; that
+            // path is gone. Just wait for the LLM to signal completion.
             let _ = done_rx.await;
 
             // OpenAI SSE terminator.

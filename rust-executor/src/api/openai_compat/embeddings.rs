@@ -10,14 +10,13 @@ use axum::Json;
 
 use super::errors::OpenAIJson;
 
-use super::billing_amounts;
 use super::errors::{OpenAIError, OpenAIResult};
 use super::model_selector::resolve_model;
 use super::types::{EmbeddingItem, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage};
 use crate::agent::capabilities::{check_capability, AI_PROMPT_CAPABILITY};
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
-use crate::billing::{bill_compute, check_compute_credits};
+use crate::billing::check_compute_credits;
 use crate::types::ModelType;
 
 pub async fn embeddings(
@@ -66,8 +65,10 @@ pub async fn embeddings(
 
     if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
     {
-        let amount = billing_amounts::embedding_amount(data.len());
-        bill_compute(&email, amount, "ai_embedding", Some("v1/embeddings"))?;
+        // Billing now happens inside AIService::embed via bill_ai_operation
+        // (host_rates-based, shared with WS-RPC ai.embed). Handler used to
+        // double-bill here; that path is gone.
+        let _ = data.len(); // silence unused-var if data was only used for billing
     }
 
     Ok(Json(EmbeddingResponse {
