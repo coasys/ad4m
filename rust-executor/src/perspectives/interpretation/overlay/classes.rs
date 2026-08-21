@@ -18,25 +18,17 @@ const INTERP_OVERLAY_TARGET_CLASS: &str = "ad4m://InterpretationOverlay";
 /// Target-class URI of [`INTERP_RUN_CLASS`] — used to detect prior registration.
 const INTERP_RUN_TARGET_CLASS: &str = "ad4m://InterpretationRun";
 
-/// Hard-wired SDNA for the [`INTERP_RUN_CLASS`] subject class. Mirrors the
-/// interpretation SoA fixtures' SHACL shape: a `type` flag plus literal scalars.
+/// Hard-wired SDNA for the [`INTERP_RUN_CLASS`] subject class. No dedicated
+/// `ad4m://type` flag — Nico 2026-08-19: "type flags are an anti-pattern
+/// for subject classes; match over all the properties instead." Conformance
+/// is by the presence of `run_id` (identity), same pattern
+/// `InterpretationOverlay` already uses (`kind` is its discriminator).
 /// None of the scalars use `resolveLanguage` — they are deterministic
 /// `literal:string:` targets, which keeps provenance stable and cheaply
 /// decodable (no signed-envelope round-trip).
-const INTERP_RUN_SDNA: &str = r#"{
-  "target_class":"ad4m://InterpretationRun",
-  "interpretation_hint":"One interpretation pass: the model + prompt version that wrote a batch of inferred data.",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ad4m://type","target":"ad4m://interpretation-run"}],
-  "properties":[
-    {"path":"ad4m://type","name":"type","has_value":"ad4m://interpretation-run","min_count":1,"max_count":1},
-    {"path":"ad4m://interp/run_id","name":"run_id","identity":true,"min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/run_id","target":"value"}]},
-    {"path":"ad4m://interp/model","name":"model","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/model","target":"value"}]},
-    {"path":"ad4m://interp/prompt_version","name":"prompt_version","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/prompt_version","target":"value"}]},
-    {"path":"ad4m://interp/ran_at","name":"ran_at","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/ran_at","target":"value"}]},
-    {"path":"ad4m://interp/processor","name":"processor","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/processor","target":"value"}]},
-    {"path":"ad4m://interp/sources","name":"sources","collection":true,"min_count":0,"setter":[{"action":"addLink","source":"this","predicate":"ad4m://interp/sources","target":"value"}]}
-  ]
-}"#;
+// See auto_processor::config for why the SDNA blobs are external JSON files
+// loaded via `include_str!`.
+const INTERP_RUN_SDNA: &str = include_str!("../../hardwired_sdna/interpretation_run.json");
 
 /// AutoProcessor cursor extras on an [`InterpretationRun`]: the processor
 /// instance URI (`ad4m://autoprocessor/<id>`) and the turn IDs this pass
@@ -59,15 +51,7 @@ pub struct InterpretationRunCursor {
 /// as a plain link target rather than literal-encoded. The dynamic `inferred/<p>`
 /// links are NOT declared here — their predicates vary per instance, so they are
 /// written directly as parallel links (see [`super::write::write_overlay`]).
-const INTERP_OVERLAY_SDNA: &str = r#"{
-  "target_class":"ad4m://InterpretationOverlay",
-  "interpretation_hint":"Provenance overlay marking an instance as LLM-inferred, with the last-inferred value snapshot.",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ad4m://interp/kind","target":"create"}],
-  "properties":[
-    {"path":"ad4m://interp/kind","name":"kind","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/kind","target":"value"}]},
-    {"path":"ad4m://interp/run","name":"run","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://interp/run","target":"value"}]}
-  ]
-}"#;
+const INTERP_OVERLAY_SDNA: &str = include_str!("../../hardwired_sdna/interpretation_overlay.json");
 
 /// Identity + provenance for one interpretation pass — minted once per
 /// [`crate::perspectives::interpretation::run_interpretation`] call and threaded
@@ -158,10 +142,10 @@ pub(crate) async fn mint_interpretation_run(
 ) -> anyhow::Result<String> {
     let run_uri = format!("ad4m://interp/run/{}", meta.run_id);
     let mut values = serde_json::json!({
-        "run_id": meta.run_id,
+        "runId": meta.run_id,
         "model": meta.model,
-        "prompt_version": meta.prompt_version,
-        "ran_at": meta.ran_at,
+        "promptVersion": meta.prompt_version,
+        "ranAt": meta.ran_at,
     });
     let mut rest_sources: Vec<String> = Vec::new();
     if let Some(c) = cursor {
@@ -207,3 +191,11 @@ pub(crate) async fn mint_interpretation_run(
     }
     Ok(run_uri)
 }
+
+// SDNA-parity tests live TS-side in
+// `tests/js/tests/model/interpretation-models.test.ts` — they read the same
+// `hardwired_sdna/*.json` files this module `include_str!`s and compare the
+// (path, name) pairs against `@Model.generateSHACL().shape.properties`. A
+// hardcoded Rust-side reference set here would fork the source of truth
+// (2026-08-20 bug: paths matched, names diverged, both Rust and TS parity
+// tests passed while `create_subject` writes silently no-op'd).

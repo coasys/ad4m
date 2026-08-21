@@ -627,6 +627,32 @@ describe('SHACLShape', () => {
       expect(prop.wherePredicates).toEqual({ status: 'ns://status' });
       expect(prop.filter).toBe(false);
     });
+
+    // Regression: identity is the interpretation-engine dedup key. If it goes
+    // missing on the ORM registration path (Ad4mModel.registerAll → toJSON),
+    // the interpreter loses "already exists" awareness and re-mints instances
+    // on every pass — very costly for AutoProcessor watches. toLinks/fromLinks
+    // already carry identity; toJSON/fromJSON must too.
+    it('preserves identity through toJSON() → fromJSON()', () => {
+      const original = new SHACLShape('ns://Task');
+      original.addProperty({
+        name: 'title',
+        path: 'ns://title',
+        datatype: 'xsd:string',
+        identity: true,
+      });
+      original.addProperty({
+        name: 'body',
+        path: 'ns://body',
+        datatype: 'xsd:string',
+      });
+
+      const json = original.toJSON();
+      const reconstructed = SHACLShape.fromJSON(json);
+
+      expect(reconstructed.properties[0].identity).toBe(true);
+      expect(reconstructed.properties[1].identity).toBeUndefined();
+    });
   });
 
   describe('transform property emission', () => {

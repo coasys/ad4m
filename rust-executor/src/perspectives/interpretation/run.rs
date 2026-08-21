@@ -1,5 +1,5 @@
 use super::{
-    apply_with_overlay, build_interpretation_input, class_local_name,
+    apply_with_overlay, build_interpretation_input, class_label,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
     identity_property, parse_interpretation_response, plan_interpretation_ops_resolved,
     resolve_already_present_with_strategy, DedupStrategy, InterpretationOp,
@@ -96,7 +96,7 @@ pub async fn strip_noop_updates(
         };
         if shapes
             .iter()
-            .all(|s| class_local_name(&s.target_class) != class)
+            .all(|s| class_label(&s.target_class, shapes) != *class)
         {
             kept.push(op);
             continue;
@@ -385,12 +385,7 @@ pub async fn run_interpretation_with_strategy_and_model(
     let identity_props: HashMap<String, String> = shapes
         .iter()
         .filter_map(|s| {
-            identity_property(s).map(|idp| {
-                (
-                    class_local_name(&s.target_class).to_string(),
-                    idp.name.clone(),
-                )
-            })
+            identity_property(s).map(|idp| (class_label(&s.target_class, shapes), idp.name.clone()))
         })
         .collect();
     let prompt = build_interpretation_input(shapes, transcript, &existing_ctx);

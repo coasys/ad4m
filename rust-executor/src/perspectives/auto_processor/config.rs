@@ -42,35 +42,25 @@ const AUTO_PROCESSOR_TARGET_CLASS: &str = "ad4m://AutoProcessor";
 
 /// Hard-wired SDNA for the [`AUTO_PROCESSOR_CLASS`] subject class.
 ///
-/// The `type` flag is the class discriminator (and, with the other
-/// `min_count: 1` properties, the `model_query` conformance pattern: a
-/// half-synced node missing a required scalar simply is not an instance yet).
+/// No dedicated `rdf://type` flag by design (Nico 2026-08-19: "type flags
+/// are an anti-pattern for subject classes; match over all the properties
+/// instead"). Conformance is entirely by the presence of the required
+/// scalars: a node with `processor_id` + `source_scope_query` +
+/// `interpretation_class` + `debounce_ms` + `batch_max` + `claim_ttl_ms`
+/// IS an AutoProcessor. A half-synced node missing any of them is simply
+/// not an instance yet. Same pattern the `InterpretationOverlay` class
+/// already uses (`kind` is its discriminator).
+///
 /// `interpretation_class` is declared `collection` — the marker the shape
 /// reader keys on for a multi-valued *literal* property — so its `addLink`
 /// setter accumulates class URIs instead of replacing them, and hydration
 /// returns them as an array. No `maxCount` is declared on it: the number of
 /// classes one processor materializes is open-ended.
-const AUTO_PROCESSOR_SDNA: &str = r#"{
-  "target_class":"ad4m://AutoProcessor",
-  "interpretation_hint":"An automatic interpretation processor: the content it watches, the classes it materializes, and its batching/claim timings.",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"rdf://type","target":"ad4m://AutoProcessor"}],
-  "properties":[
-    {"path":"rdf://type","name":"type","has_value":"ad4m://AutoProcessor","min_count":1,"max_count":1},
-    {"path":"ad4m://processor_id","name":"processor_id","identity":true,"min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://processor_id","target":"value"}]},
-    {"path":"ad4m://source_scope_query","name":"source_scope_query","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://source_scope_query","target":"value"}]},
-    {"path":"ad4m://base_prefix","name":"base_prefix","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://base_prefix","target":"value"}]},
-    {"path":"ad4m://interpretation_class","name":"interpretation_class","collection":true,"min_count":1,"setter":[{"action":"addLink","source":"this","predicate":"ad4m://interpretation_class","target":"value"}]},
-    {"path":"ad4m://debounce_ms","name":"debounce_ms","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://debounce_ms","target":"value"}]},
-    {"path":"ad4m://batch_min","name":"batch_min","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://batch_min","target":"value"}]},
-    {"path":"ad4m://batch_max","name":"batch_max","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://batch_max","target":"value"}]},
-    {"path":"ad4m://max_wait_ms","name":"max_wait_ms","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://max_wait_ms","target":"value"}]},
-    {"path":"ad4m://claim_ttl_ms","name":"claim_ttl_ms","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://claim_ttl_ms","target":"value"}]},
-    {"path":"ad4m://source_window_ms","name":"source_window_ms","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://source_window_ms","target":"value"}]},
-    {"path":"ad4m://dedup_strategy","name":"dedup_strategy","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://dedup_strategy","target":"value"}]},
-    {"path":"ad4m://existing_scope","name":"existing_scope","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://existing_scope","target":"value"}]},
-    {"path":"ad4m://mint_scope","name":"mint_scope","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://mint_scope","target":"value"}]}
-  ]
-}"#;
+// Loaded from a JSON file so the TS parity test can read the SAME file and
+// build its expectations from IT — no hand-maintained parallel reference in
+// either language (2026-08-20 debug: hardcoded references in both tests
+// missed the property-name divergence entirely).
+const AUTO_PROCESSOR_SDNA: &str = include_str!("../hardwired_sdna/auto_processor.json");
 
 /// Everything the executor watcher (P-B2) needs to schedule and run a single
 /// auto-processor pass over a source perspective.
@@ -193,57 +183,108 @@ pub async fn write_processor(
     ensure_auto_processor_class(perspective, context).await?;
 
     let node = processor_node(&cfg.processor_id);
+    // Keys MUST match the camelCase property names in AUTO_PROCESSOR_SDNA above
+    // (which in turn match the TS @Model field names). The setter lookup in
+    // `create_subject` keys on the SDNA property name, not on the path — a
+    // snake_case key here means "no setter found, keep the placeholder"
+    // (2026-08-20 debug: exact bug we hit).
     let mut values = serde_json::json!({
-        "processor_id": cfg.processor_id,
-        "source_scope_query": cfg.source_scope_query,
-        "interpretation_class": first_class,
-        "debounce_ms": cfg.debounce_ms.to_string(),
-        "batch_min": cfg.batch_min.to_string(),
-        "batch_max": cfg.batch_max.to_string(),
-        "claim_ttl_ms": cfg.claim_ttl_ms.to_string(),
+        "processorId": cfg.processor_id,
+        "sourceScopeQuery": cfg.source_scope_query,
+        "interpretationClasses": first_class,
+        "debounceMs": cfg.debounce_ms.to_string(),
+        "batchMin": cfg.batch_min.to_string(),
+        "batchMax": cfg.batch_max.to_string(),
+        "claimTtlMs": cfg.claim_ttl_ms.to_string(),
     });
     if let Some(base_prefix) = &cfg.base_prefix {
-        values["base_prefix"] = base_prefix.clone().into();
+        values["basePrefix"] = base_prefix.clone().into();
     }
     if let Some(max_wait_ms) = cfg.max_wait_ms {
-        values["max_wait_ms"] = max_wait_ms.to_string().into();
+        values["maxWaitMs"] = max_wait_ms.to_string().into();
     }
     if let Some(dedup) = &cfg.dedup_strategy_json {
-        values["dedup_strategy"] = dedup.clone().into();
+        values["dedupStrategy"] = dedup.clone().into();
     }
     if let Some(source_window_ms) = cfg.source_window_ms {
-        values["source_window_ms"] = source_window_ms.to_string().into();
+        values["sourceWindowMs"] = source_window_ms.to_string().into();
     }
     if let Some(existing_scope) = &cfg.existing_scope {
         let json = serde_json::to_string(existing_scope)
             .map_err(|e| anyhow::anyhow!("write_processor: serialize existing_scope: {e:#}"))?;
-        values["existing_scope"] = json.into();
+        values["existingScope"] = json.into();
     }
     if let Some(mint_scope) = &cfg.mint_scope {
         let json = serde_json::to_string(mint_scope)
             .map_err(|e| anyhow::anyhow!("write_processor: serialize mint_scope: {e:#}"))?;
-        values["mint_scope"] = json.into();
+        values["mintScope"] = json.into();
     }
-    perspective
-        .create_subject(class_option(), node.clone(), Some(values), None, context)
-        .await
-        .map_err(|e| anyhow::anyhow!("write_processor: create_subject failed: {e:#}"))?;
 
-    // `create_subject` applies one value per property, so the remaining
-    // members of the `interpretation_class` collection go through the same
-    // `addLink` setter one at a time.
-    for class in more_classes {
+    // Batch the create_subject + follow-on update_subject calls so the whole
+    // AutoProcessorConfig instance lands as ONE `Shared` commit — instead of
+    // ~11 individual commits (one per property setter) from `execute_commands`.
+    // A single-class processor already blew past the per-perspective
+    // `IMMEDIATE_COMMITS_COUNT=20` immediate-commit throttle in
+    // `perspective_instance::commit` when combined with the other setup
+    // writes on a fresh neighbourhood — subsequent commits (including the
+    // wave-1 `InterpretationRun` cursor) landed in the pending-diff queue
+    // and only drained on the 3-second timer, well past any p-diff-sync
+    // gossip window that would have carried the cursor to peers before the
+    // next batch arrived (2026-08-20 Marvin flake root-cause).
+    let batch_id = perspective.create_batch().await;
+    let write_result: anyhow::Result<()> = async {
         perspective
-            .update_subject(
+            .create_subject(
                 class_option(),
                 node.clone(),
-                serde_json::json!({ "interpretation_class": class }),
-                None,
+                Some(values),
+                Some(batch_id.clone()),
                 context,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("write_processor: update_subject(class) failed: {e:#}"))?;
+            .map_err(|e| anyhow::anyhow!("write_processor: create_subject failed: {e:#}"))?;
+        // `create_subject` applies one value per property, so the remaining
+        // members of the `interpretation_class` collection go through the same
+        // `addLink` setter one at a time — still on the same batch so they
+        // commit atomically with the base instance.
+        for class in more_classes {
+            perspective
+                .update_subject(
+                    class_option(),
+                    node.clone(),
+                    serde_json::json!({ "interpretationClasses": class }),
+                    Some(batch_id.clone()),
+                    context,
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("write_processor: update_subject(class) failed: {e:#}")
+                })?;
+        }
+        Ok(())
     }
+    .await;
+
+    if let Err(e) = write_result {
+        // Discard the pending batch so it doesn't linger in `batch_store` and
+        // never get committed. `discard_batch` is idempotent-ish (it returns
+        // an error if the id is unknown, which we intentionally ignore) so
+        // this is safe on both partial-write and never-wrote failures.
+        let _ = perspective.discard_batch(&batch_id).await;
+        return Err(e);
+    }
+
+    if let Err(e) = perspective.commit_batch(batch_id.clone(), context).await {
+        // Defense-in-depth: `commit_batch` already tries to remove the batch
+        // on failure per its contract, but drop it explicitly here too so a
+        // change to `commit_batch`'s control flow can't leave a stale batch
+        // in the store.
+        let _ = perspective.discard_batch(&batch_id).await;
+        return Err(anyhow::anyhow!(
+            "write_processor: commit_batch failed: {e:#}"
+        ));
+    }
+
     Ok(())
 }
 
@@ -268,12 +309,14 @@ pub async fn load_processors(
     if !subject_class_registered(perspective, AUTO_PROCESSOR_TARGET_CLASS).await? {
         return Ok(Vec::new());
     }
+    // Property names MUST match the camelCase names in AUTO_PROCESSOR_SDNA
+    // above — model_query keys results by property name.
     let query = serde_json::json!({
         "properties": [
-            "processor_id", "source_scope_query", "base_prefix",
-            "interpretation_class", "debounce_ms", "batch_min", "batch_max",
-            "max_wait_ms", "claim_ttl_ms", "dedup_strategy", "source_window_ms",
-            "existing_scope", "mint_scope",
+            "processorId", "sourceScopeQuery", "basePrefix",
+            "interpretationClasses", "debounceMs", "batchMin", "batchMax",
+            "maxWaitMs", "claimTtlMs", "dedupStrategy", "sourceWindowMs",
+            "existingScope", "mintScope",
         ]
     })
     .to_string();
@@ -311,7 +354,7 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
     // the config shape), since neither store order nor sync order is
     // guaranteed.
     let mut interpretation_classes: Vec<String> = instance
-        .get("interpretation_class")?
+        .get("interpretationClasses")?
         .as_array()?
         .iter()
         .filter_map(|v| v.as_str().map(str::to_string))
@@ -322,35 +365,35 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         return None;
     }
 
-    // Optional thresholds. Absent `batch_min` → 1 (original behaviour). An
-    // absent `max_wait_ms` → `None` (wait indefinitely). A *present but
+    // Optional thresholds. Absent `batchMin` → 1 (original behaviour). An
+    // absent `maxWaitMs` → `None` (wait indefinitely). A *present but
     // unparseable* value is a config error, so we bail (`None`) exactly like
     // the required fields rather than silently defaulting.
-    let batch_min = match scalar("batch_min") {
-        Some(_) => count("batch_min")?.max(1),
+    let batch_min = match scalar("batchMin") {
+        Some(_) => count("batchMin")?.max(1),
         None => 1,
     };
-    let max_wait_ms = match scalar("max_wait_ms") {
-        Some(_) => Some(number("max_wait_ms")?),
+    let max_wait_ms = match scalar("maxWaitMs") {
+        Some(_) => Some(number("maxWaitMs")?),
         None => None,
     };
 
     // Timings must be in range or the batch/claim primitives misbehave: a
-    // `batch_max` of 0 drains nothing (empty passes forever), a non-positive
-    // `claim_ttl_ms` makes each peer's own claim expire the moment it is
+    // `batchMax` of 0 drains nothing (empty passes forever), a non-positive
+    // `claimTtlMs` makes each peer's own claim expire the moment it is
     // written (so every peer reads an empty holder set and processes the same
-    // batch), and a *negative* `max_wait_ms` makes the oldest-item deadline
-    // "expire" immediately, silently bypassing `batch_min` on every pass. Treat
+    // batch), and a *negative* `maxWaitMs` makes the oldest-item deadline
+    // "expire" immediately, silently bypassing `batchMin` on every pass. Treat
     // an out-of-range value like an unparseable one — the processor is simply
     // not loaded (and a warn is logged by the caller).
-    let debounce_ms = number("debounce_ms")?;
-    let batch_max = count("batch_max")?;
-    let claim_ttl_ms = number("claim_ttl_ms")?;
+    let debounce_ms = number("debounceMs")?;
+    let batch_max = count("batchMax")?;
+    let claim_ttl_ms = number("claimTtlMs")?;
     if debounce_ms < 0 || batch_max < 1 || claim_ttl_ms <= 0 || max_wait_ms.is_some_and(|w| w < 0) {
         return None;
     }
-    let source_window_ms = match scalar("source_window_ms") {
-        Some(_) => Some(number("source_window_ms")?),
+    let source_window_ms = match scalar("sourceWindowMs") {
+        Some(_) => Some(number("sourceWindowMs")?),
         None => None,
     };
     if source_window_ms.is_some_and(|w| w <= 0) {
@@ -359,21 +402,21 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
 
     // Scope JSON blobs — a present-but-unparseable value is a config error
     // (bail, same policy as other required-shape fields). Absent → None.
-    let existing_scope = match scalar("existing_scope") {
+    let existing_scope = match scalar("existingScope") {
         Some(json) => match serde_json::from_str::<Scope>(&json) {
             Ok(scope) => Some(scope),
             Err(e) => {
-                log::warn!("config_from_instance: existing_scope parse failed: {e:#}");
+                log::warn!("config_from_instance: existingScope parse failed: {e:#}");
                 return None;
             }
         },
         None => None,
     };
-    let mint_scope = match scalar("mint_scope") {
+    let mint_scope = match scalar("mintScope") {
         Some(json) => match serde_json::from_str::<Scope>(&json) {
             Ok(scope) => Some(scope),
             Err(e) => {
-                log::warn!("config_from_instance: mint_scope parse failed: {e:#}");
+                log::warn!("config_from_instance: mintScope parse failed: {e:#}");
                 return None;
             }
         },
@@ -381,16 +424,16 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
     };
 
     Some(AutoProcessorConfig {
-        processor_id: scalar("processor_id")?,
-        source_scope_query: scalar("source_scope_query")?,
-        base_prefix: scalar("base_prefix"),
+        processor_id: scalar("processorId")?,
+        source_scope_query: scalar("sourceScopeQuery")?,
+        base_prefix: scalar("basePrefix"),
         interpretation_classes,
         debounce_ms,
         batch_min,
         batch_max,
         max_wait_ms,
         claim_ttl_ms,
-        dedup_strategy_json: scalar("dedup_strategy"),
+        dedup_strategy_json: scalar("dedupStrategy"),
         source_window_ms,
         existing_scope,
         mint_scope,
@@ -402,6 +445,15 @@ mod tests {
     use super::*;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
     use crate::types::{Link, LinkQuery, LinkStatus};
+
+    // SDNA parity is checked TS-side in
+    // `tests/js/tests/model/interpretation-models.test.ts`, which reads the
+    // same `hardwired_sdna/auto_processor.json` this module `include_str!`s
+    // and compares (path, name) pairs against
+    // `AutoProcessorConfig.generateSHACL().shape`. A hardcoded Rust-side
+    // reference set would fork the source of truth (2026-08-20 bug: paths
+    // matched, names diverged, both sides' parity tests passed while
+    // `create_subject` writes silently no-op'd).
 
     fn sample_config(id: &str) -> AutoProcessorConfig {
         AutoProcessorConfig {
@@ -585,7 +637,7 @@ mod tests {
         p.update_subject(
             class_option(),
             processor_node("garbled-scope"),
-            serde_json::json!({ "mint_scope": "not-json {" }),
+            serde_json::json!({ "mintScope": "not-json {" }),
             None,
             &ctx,
         )
@@ -641,7 +693,7 @@ mod tests {
         p.update_subject(
             class_option(),
             processor_node("garbled-2"),
-            serde_json::json!({ "debounce_ms": "not-a-number" }),
+            serde_json::json!({ "debounceMs": "not-a-number" }),
             None,
             &ctx,
         )
@@ -671,7 +723,7 @@ mod tests {
         p.update_subject(
             class_option(),
             processor_node("zero-ttl"),
-            serde_json::json!({ "claim_ttl_ms": "0" }),
+            serde_json::json!({ "claimTtlMs": "0" }),
             None,
             &ctx,
         )
@@ -698,7 +750,7 @@ mod tests {
         p.update_subject(
             class_option(),
             processor_node("neg-wait"),
-            serde_json::json!({ "max_wait_ms": "-1" }),
+            serde_json::json!({ "maxWaitMs": "-1" }),
             None,
             &ctx,
         )

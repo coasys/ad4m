@@ -30,9 +30,14 @@ pub fn turn_in_source_window(timestamp: &str, now_ms: i64, window_ms: i64) -> bo
 /// `xsd:integer` FILTER does not apply to it.
 fn processed_ids_query(processor_id: &str) -> String {
     let node = processor_node(processor_id);
+    // No `ad4m://type` filter — `InterpretationRun` dropped its type
+    // discriminator (Nico 2026-08-19: type flags are an anti-pattern).
+    // We require the identity property `interp/run_id` so a bare node with
+    // only `interp/processor` + `interp/sources` cannot masquerade as a run
+    // and silently suppress source IDs (CodeRabbit #881, 2026-08-19).
     format!(
         r#"SELECT ?id ?ran_at WHERE {{
-  ?run <ad4m://type> <ad4m://interpretation-run> .
+  ?run <ad4m://interp/run_id> ?run_id .
   ?run <ad4m://interp/processor> <{node}> .
   ?run <ad4m://interp/sources> ?id .
   OPTIONAL {{ ?run <ad4m://interp/ran_at> ?ran_at }}
@@ -223,8 +228,14 @@ mod tests {
         let source_target = Literal::from_string("ddd444".to_string())
             .to_url()
             .expect("literal url");
+        // No `ad4m://type` seed — `InterpretationRun` dropped its type
+        // discriminator; the cursor SPARQL matches on `interp/run_id`
+        // (identity) + `interp/processor` + `interp/sources`.
+        let run_id_literal = Literal::from_string("no-ran-at".to_string())
+            .to_url()
+            .expect("literal url");
         for (predicate, target) in [
-            ("ad4m://type", "ad4m://interpretation-run".to_string()),
+            ("ad4m://interp/run_id", run_id_literal),
             ("ad4m://interp/processor", processor_node("proc-a")),
             ("ad4m://interp/sources", source_target),
         ] {
