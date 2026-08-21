@@ -81,6 +81,11 @@ async fn create_subject_roundtrips_soa_instance() {
 /// Intention + Belief: an intent with an owner and a claim.
 #[tokio::test]
 async fn e2e_intention_and_belief() {
+    // gemma3:12b occasionally files the belief-shaped utterance as another
+    // intention (and vice-versa) on a single sample — mirrors the LLM-flake
+    // guard used by upsert/selector neighbours. Retry with a fresh perspective
+    // until both classes land, or fall through to the same asserts on the last
+    // attempt so a genuine regression still surfaces detailed diagnostics.
     let (p, shapes, bases) = run_e2e_until(
         &[("Belief", BELIEF_SDNA), ("Intention", INTENTION_SDNA)],
         &[
@@ -94,9 +99,9 @@ async fn e2e_intention_and_belief() {
             ),
         ],
         3,
-        |c| {
-            c.get("intention").copied().unwrap_or(0) >= 1
-                && c.get("belief").copied().unwrap_or(0) >= 1
+        |counts| {
+            counts.get("intention").copied().unwrap_or(0) >= 1
+                && counts.get("belief").copied().unwrap_or(0) >= 1
         },
     )
     .await;

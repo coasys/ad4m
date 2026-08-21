@@ -223,6 +223,11 @@ export interface SHACLPropertyShape {
    *  as an `ad4m://interpretation_hint` link on the property shape node and
    *  surfaced on `ShapeProperty.interpretation_hint` by the Rust model query. */
   interpretationHint?: string;
+
+  /** AD4M-specific: marks this property as the class's identity (dedup key)
+   *  for the generic LLM interpreter. Emitted as an `ad4m://identity` link
+   *  (`literal:string:true`) and read back on `ShapeProperty.identity`. */
+  identity?: boolean;
 }
 
 /**
@@ -375,11 +380,19 @@ export class SHACLShape {
       if (prop.local !== undefined) {
         turtle += `    ad4m:local ${prop.local} ;\n`;
       }
-      
+
       if (prop.writable !== undefined) {
         turtle += `    ad4m:writable ${prop.writable} ;\n`;
       }
-      
+
+      // Interpreter dedup key: `toLinks()` and `toJSON()` preserve
+      // `identity`; a Turtle export must too or the round-trip through
+      // Turtle silently drops the interpretation-dedup marker
+      // (CodeRabbit #881 review).
+      if (prop.identity !== undefined) {
+        turtle += `    ad4m:identity ${prop.identity} ;\n`;
+      }
+
       // Remove trailing semicolon and close bracket
       turtle = turtle.slice(0, -2) + '\n';
       turtle += isLast ? `  ] .\n` : `  ] ;\n`;
@@ -672,6 +685,14 @@ export class SHACLShape {
           source: propShapeId,
           predicate: "ad4m://interpretation_hint",
           target: `literal:string:${prop.interpretationHint}`
+        });
+      }
+
+      if (prop.identity) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://identity",
+          target: `literal:string:true`
         });
       }
     }
@@ -993,6 +1014,14 @@ export class SHACLShape {
         );
       }
 
+      const identityLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://identity"
+      );
+      if (identityLink) {
+        prop.identity =
+          identityLink.target.replace(/^literal:\/\/string:|^literal:string:/, '') === 'true';
+      }
+
       const transformLink = links.find(l =>
         l.source === propShapeId && l.predicate === "ad4m://transform"
       );
@@ -1061,6 +1090,7 @@ export class SHACLShape {
         filter: p.filter,
         transform: p.transform,
         interpretation_hint: p.interpretationHint,
+        identity: p.identity,
       })),
       constructor_actions: this.constructor_actions,
       destructor_actions: this.destructor_actions,
@@ -1112,6 +1142,7 @@ export class SHACLShape {
         filter: p.filter,
         transform: p.transform,
         interpretationHint: p.interpretation_hint,
+        identity: p.identity,
       });
     }
 

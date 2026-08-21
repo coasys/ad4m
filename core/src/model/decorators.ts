@@ -48,6 +48,15 @@ export interface RelationMetadataEntry {
      * Overrides auto-derived conformance when set.
      */
     where?: Where;
+    /**
+     * SHACL `sh:datatype` for the relation's target values. Set when the
+     * relation holds encoded literal values (e.g. `"xsd:string"` for a
+     * `HasMany<string>` that stores plain strings). Emitted into SHACL
+     * so the executor knows to decode `literal:<type>:<value>` wire form
+     * on hydration. Omit for URI relations that point at other model
+     * instances — those pass through byte-for-byte.
+     */
+    datatype?: string;
 }
 
 /** Registry of property metadata keyed by constructor → { propName → metadata } */
@@ -353,6 +362,28 @@ export interface PropertyOptions {
      * extractor prompt can quote it verbatim.
      */
     interpretationHint?: string;
+
+    /**
+     * Marks this property as the class's **identity** (dedup key) for the
+     * generic LLM interpreter: on re-runs, two proposed instances of the same
+     * class with an equal (normalized/semantic) value on the identity property
+     * are treated as the same instance rather than duplicated. Emitted as an
+     * `ad4m://identity` link on the property shape and read back by the Rust
+     * model query (`ShapeProperty.identity`). At most one property per class
+     * should set this.
+     */
+    identity?: boolean;
+
+    /**
+     * Explicit SHACL `sh:datatype` for the property value. When set, this
+     * overrides auto-inference and — importantly — lets custom `getter`
+     * properties opt into typed-literal decoding. Auto-inference is disabled
+     * for properties with a `getter` (see `shacl-gen.ts`) because such
+     * getters typically return URIs; setting `datatype` explicitly declares
+     * that this getter returns literal values of the given XSD type
+     * (e.g. `"xsd://string"`) and enables the hydration decode gate.
+     */
+    datatype?: string;
 }
 
 
@@ -816,6 +847,20 @@ export interface RelationOptions {
      * ```
      */
     where?: Where;
+    /**
+     * SHACL `sh:datatype` for the relation's target values. Set when the
+     * relation holds encoded literal values (e.g. `"xsd:string"` for a
+     * `HasMany<string>` that stores plain strings). The executor uses
+     * this to decode `literal:<type>:<value>` wire form on hydration.
+     * Omit for URI relations that point at other model instances.
+     *
+     * @example
+     * ```typescript
+     * @HasMany({ through: "run://source", datatype: "xsd:string" })
+     * sources: string[] = [];
+     * ```
+     */
+    datatype?: string;
 }
 
 /**
@@ -942,6 +987,7 @@ export function HasMany(
             ...(opts.getter && { getter: opts.getter }),
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
+            ...(opts.datatype && { datatype: opts.datatype }),
         };
 
         const relKey = key as string;
@@ -1005,6 +1051,7 @@ export function HasOne(
             local: opts.local,
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
+            ...(opts.datatype && { datatype: opts.datatype }),
         };
 
         const relKey = key as string;
@@ -1075,6 +1122,7 @@ export function BelongsToOne(
             local: opts.local,
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
+            ...(opts.datatype && { datatype: opts.datatype }),
         };
 
         if (opts.through) {
@@ -1133,6 +1181,7 @@ export function BelongsToMany(
             ...(opts.getter && { getter: opts.getter }),
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
+            ...(opts.datatype && { datatype: opts.datatype }),
         };
 
         // @BelongsToMany is the inverse/read-only side — do NOT generate add*/remove*/set*
