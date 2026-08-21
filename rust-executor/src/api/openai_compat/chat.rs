@@ -16,7 +16,7 @@ use futures::Stream;
 use uuid::Uuid;
 
 use super::billing_amounts;
-use super::errors::{OpenAIError, OpenAIResult};
+use super::errors::{OpenAIError, OpenAIJson, OpenAIResult};
 use super::model_selector::resolve_model;
 use super::types::{
     ChatChoice, ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest,
@@ -33,7 +33,7 @@ use crate::types::ModelType;
 /// and non-streaming responses.
 pub async fn chat_completions(
     auth: AuthContext,
-    Json(req): Json<ChatCompletionRequest>,
+    OpenAIJson(req): OpenAIJson<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, OpenAIError> {
     check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
 
@@ -65,7 +65,7 @@ pub async fn chat_completions(
 /// single user message with no system prompt.
 pub async fn completions(
     auth: AuthContext,
-    Json(req): Json<CompletionRequest>,
+    OpenAIJson(req): OpenAIJson<CompletionRequest>,
 ) -> OpenAIResult<Json<CompletionResponse>> {
     check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
 

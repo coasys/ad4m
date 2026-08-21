@@ -8,6 +8,8 @@
 
 use axum::Json;
 
+use super::errors::OpenAIJson;
+
 use super::billing_amounts;
 use super::errors::{OpenAIError, OpenAIResult};
 use super::model_selector::resolve_model;
@@ -20,7 +22,7 @@ use crate::types::ModelType;
 
 pub async fn embeddings(
     auth: AuthContext,
-    Json(req): Json<EmbeddingRequest>,
+    OpenAIJson(req): OpenAIJson<EmbeddingRequest>,
 ) -> OpenAIResult<Json<EmbeddingResponse>> {
     check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
 

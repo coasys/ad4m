@@ -6,13 +6,20 @@
 //! ```json
 //! { "error": { "message": "...", "type": "...", "param": null, "code": "..." } }
 //! ```
+//!
+//! [`OpenAIJson`] is a drop-in replacement for [`axum::Json`] that
+//! converts axum's default plain-text/422 rejection body into the
+//! OpenAI-envelope 400 that clients actually expect. All handlers
+//! accepting JSON bodies use this so `Missing required field` etc.
+//! parse-time errors reach the client through the correct wire shape.
 
 use axum::{
+    extract::{rejection::JsonRejection, FromRequest, Request},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
 
 #[derive(Debug, Serialize)]
 pub struct OpenAIError {
@@ -135,6 +142,42 @@ impl From<crate::billing::BillingError> for OpenAIError {
                 OpenAIError::internal("Billing operation failed")
             }
         }
+    }
+}
+
+impl From<JsonRejection> for OpenAIError {
+    /// Map axum's Json extractor rejection to the OpenAI 400 envelope.
+    /// Without this, malformed / missing-field JSON returns axum's
+    /// default plain-text 422, which OpenAI SDK clients can't parse.
+    fn from(rej: JsonRejection) -> Self {
+        OpenAIError::invalid_request(rej.body_text())
+    }
+}
+
+/// Drop-in replacement for [`axum::Json`] that converts extraction
+/// errors into the OpenAI error envelope with the correct status code.
+///
+/// Use `OpenAIJson<T>` in every /v1 handler that would otherwise write
+/// `Json<T>`, so parse errors reach the client as:
+///
+/// ```json
+/// { "error": { "message": "...", "type": "invalid_request_error", "code": "invalid_request" } }
+/// ```
+///
+/// with HTTP 400 (matching OpenAI's own behaviour) instead of axum's
+/// default plain-text `422 Unprocessable Entity`.
+pub struct OpenAIJson<T>(pub T);
+
+impl<T, S> FromRequest<S> for OpenAIJson<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = OpenAIError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let Json(value) = Json::<T>::from_request(req, state).await?;
+        Ok(OpenAIJson(value))
     }
 }
 

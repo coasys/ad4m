@@ -25,7 +25,7 @@
 use axum::{extract::Multipart, http::header, response::IntoResponse, response::Response, Json};
 
 use super::billing_amounts;
-use super::errors::{OpenAIError, OpenAIResult};
+use super::errors::{OpenAIError, OpenAIJson, OpenAIResult};
 use super::model_selector::resolve_model;
 use super::tts_passthrough;
 use super::types::{SpeechRequest, TranscriptionResponse};
@@ -118,7 +118,7 @@ pub async fn transcriptions(
 
 pub async fn speech(
     auth: AuthContext,
-    Json(req): Json<SpeechRequest>,
+    OpenAIJson(req): OpenAIJson<SpeechRequest>,
 ) -> Result<Response, OpenAIError> {
     check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
 
