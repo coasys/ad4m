@@ -451,6 +451,20 @@ describe("sync: coalesceDiffs (batch merge safety)", () => {
         assert.equal(segments.length, 2, "signature-less links must still collide by canonical fields");
     });
 
+    it("collides regardless of whether one side has a signature and the other doesn't", () => {
+        // Locks in the identity invariant across the mixed-signature case:
+        // remove(unsigned copy) then add(signed copy) of the same logical
+        // link must still split into two segments, because canonical
+        // identity ignores the signature entirely.
+        const signed = link({ source: "x", sig: "sig-X" });
+        const unsigned = link({ source: "x", sig: "" });
+        const segments = syncModule.coalesceDiffs([
+            { additions: [], removals: [unsigned] },
+            { additions: [signed], removals: [] },
+        ]);
+        assert.equal(segments.length, 2, "same link identity must split regardless of signature presence");
+    });
+
     it("distinguishes links whose fields would collide under naïve pipe-serialisation", () => {
         // author="a|b" timestamp="t" vs author="a" timestamp="b|t" would
         // collide under `${author}|${timestamp}`. JSON serialisation
@@ -575,6 +589,68 @@ describe("sync: enqueueCommitBatched", () => {
         assert.equal(calls, 3, "must retry up to MAX_COMMIT_ATTEMPTS on transient failure");
         assert.ok(!syncStates.includes("LinkLanguageInstalledButNotSynced"),
             "successful retry should not emit the not-synced state");
+    });
+
+    it("a throwing emitSyncState during a failed flush does not poison the flush chain", async () => {
+        // Regression: _inflight is a single promise chain. If a flush
+        // rejects (e.g. because emitSyncState throws after resetAdapters),
+        // every subsequent `_inflight.then(flushBatch)` would be skipped
+        // and no future enqueue would ever POST. The terminal `.catch()`
+        // on the chain — plus emitSyncStateSafe wrapping the emit — must
+        // keep the chain live.
+        const transport = new MockTransport();
+        const posts: any[] = [];
+        let shouldFail = true;
+        transport.route(
+            (url, method) => method === "POST" && url.endsWith("/commit"),
+            (_url, _method, body) => {
+                posts.push(JSON.parse(body));
+                if (shouldFail) return { status: 500, headers: {}, body: "hard failure" };
+                return { status: 200, headers: {}, body: "{}" };
+            },
+        );
+        resetAdapters();
+        syncModule._resetBatchStateForTests();
+        initStorage(new MockStorage());
+        initTransport(transport);
+        initConfig(config);
+        store.initStore(simpleHash);
+        emittedDiffs = [];
+        syncStates = [];
+        roomKey = null;
+        // Throw from emitSyncState — simulates a torn-down runtime.
+        syncModule.initSync({
+            config,
+            getToken: async () => "test-token",
+            emitDiff: (diff) => emittedDiffs.push(diff),
+            emitSyncState: () => { throw new Error("runtime torn down"); },
+            getRoomKey: () => roomKey,
+        });
+
+        // First flush: hard-fails all retries → tries to emit → emitter throws.
+        const X: LinkExpression = {
+            author: "did:key:zAuthor",
+            timestamp: "2026-01-01T00:00:00.000Z",
+            data: { source: "x", target: "t", predicate: "p" },
+            proof: { signature: "sig-X", key: "k" },
+        };
+        syncModule.enqueueCommitBatched({ additions: [X], removals: [] });
+        await syncModule.drainCommitBatch();
+        assert.equal(posts.length, 3, "first flush must attempt all 3 retries");
+
+        // Now the server recovers. The chain must still be live — the
+        // next enqueue must actually POST.
+        shouldFail = false;
+        const Y: LinkExpression = {
+            author: "did:key:zAuthor",
+            timestamp: "2026-01-01T00:00:00.001Z",
+            data: { source: "y", target: "t", predicate: "p" },
+            proof: { signature: "sig-Y", key: "k" },
+        };
+        syncModule.enqueueCommitBatched({ additions: [Y], removals: [] });
+        await syncModule.drainCommitBatch();
+        assert.equal(posts.length, 4, "chain must still be live after the poisoning attempt");
+        assert.deepEqual(posts[3].additions[0].data, Y.data);
     });
 
     it("aborts the queue tail when a segment fails all retries", async () => {
