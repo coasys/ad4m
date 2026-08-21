@@ -252,12 +252,19 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
 
         await waitUntil(
           async () => {
-            const runs = await InterpretationRun.findAll(otherPeer);
-            return runs.some(
-              (r) =>
-                Array.isArray(r.sources) &&
-                firstWave.every((id) => r.sources!.includes(id)),
-            );
+            try {
+              const runs = await InterpretationRun.findAll(otherPeer);
+              return runs.some(
+                (r) =>
+                  Array.isArray(r.sources) &&
+                  firstWave.every((id) => r.sources!.includes(id)),
+              );
+            } catch {
+              // `findAll` can throw while the InterpretationRun SHACL is
+              // still syncing to the other peer. Swallow and keep polling
+              // against the 240s budget instead of aborting on first error.
+              return false;
+            }
           },
           240_000,
           `wave-1 InterpretationRun to sync to ${otherLabel} with all firstWave sources`,
