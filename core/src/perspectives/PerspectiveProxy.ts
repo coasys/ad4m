@@ -106,12 +106,28 @@ export class QuerySubscriptionProxy {
     }
 
     async subscribe() {
+        // Remove any prior reconnect listener FIRST — before we touch
+        // `#unsubscribe`. Rationale: `#unsubscribe()` calls into
+        // `ApiClient.subscribe()`'s deleter, which closes the WebSocket
+        // whenever this query owned the last `_wsCallbacks` entry (and no
+        // RPCs are pending). The subsequent `subscribeQuery()` below then
+        // re-opens a fresh socket, and that fresh `onopen` fires the
+        // reconnect callback set. If the OLD reconnect listener is still
+        // in that set, it re-enters this method, closes the socket again,
+        // reopens again … an endless resubscribe loop. Clearing the
+        // listener up-front breaks the cycle; a fresh listener is
+        // installed at the end of a successful subscribe().
+        if (this.#reconnectUnsub) {
+            this.#reconnectUnsub();
+            this.#reconnectUnsub = undefined;
+        }
+
         // Clean up previous subscription attempt if retrying
         if (this.#unsubscribe) {
             this.#unsubscribe();
             this.#unsubscribe = undefined;
         }
-        
+
         // Clear any existing timeout
         if (this.#initTimeoutId) {
             clearTimeout(this.#initTimeoutId);
@@ -222,10 +238,9 @@ export class QuerySubscriptionProxy {
 
         // Register for reconnect notification — on WebSocket reconnect,
         // immediately re-subscribe instead of waiting up to 30s for the
-        // keepalive to fail and trigger resubscription.
-        if (this.#reconnectUnsub) {
-            this.#reconnectUnsub();
-        }
+        // keepalive to fail and trigger resubscription. Any prior listener
+        // was already removed at the top of this method (see the note there
+        // for why cleanup must run before `#unsubscribe`, not here).
         if (this.#client.onReconnect) {
             this.#reconnectUnsub = this.#client.onReconnect(() => {
                 if (this.#disposed) return;

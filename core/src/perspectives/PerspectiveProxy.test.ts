@@ -224,4 +224,98 @@ describe('QuerySubscriptionProxy', () => {
     subscription.dispose();
     expect(unsubReconnect).toHaveBeenCalledTimes(1);
   });
+
+  // Regression for CodeRabbit review on PR #899:
+  //   "Prevent re-entrant reconnect resubscription."
+  //
+  // The failure mode: when this query owns the FINAL `_wsCallbacks` entry
+  // in ApiClient, calling `#unsubscribe` inside `subscribe()` closes the
+  // WebSocket (ApiClient.subscribe()'s deleter: "if no more callbacks and
+  // no pending calls, close the socket"). The subsequent `subscribeQuery`
+  // opens a fresh socket, whose `onopen` fires every registered reconnect
+  // callback. If the query's OLD reconnect listener is still in that set,
+  // it re-enters `subscribe()`, which closes the socket again, which
+  // reopens it again, which fires the listener again — endless loop.
+  //
+  // The fix removes the reconnect listener at the TOP of `subscribe()`,
+  // before `#unsubscribe` can close the socket. A fresh listener is
+  // installed at the end. This test simulates the exact "final subscriber
+  // closes the socket, subscribeQuery reopens it and fires reconnect
+  // callbacks" flow, and asserts subscribe() runs a bounded number of
+  // times (once initial + once per real reconnect) — NOT recursively.
+  it('does not re-enter subscribe() when this query owned the last WS callback (regression)', async () => {
+    // The reconnect-callback set the ApiClient would hold — a real Set is
+    // essential so the test observes the listener replacement.
+    const reconnectCallbacks = new Set<() => void>();
+
+    // Model ApiClient.subscribeToQueryUpdates's deleter behaviour:
+    // when this query's callback goes away, we're the "final subscriber",
+    // so a follow-up subscribeQuery() will simulate the fresh socket's
+    // onopen by firing every registered reconnect callback.
+    let simulateReconnectOnNextSubscribeQuery = false;
+    const unsubscribeCallback = jest.fn(() => {
+      // "Last callback removed → close the socket" — next subscribeQuery
+      // will need to reopen it, which fires the reconnect callbacks.
+      simulateReconnectOnNextSubscribeQuery = true;
+    });
+
+    let subscribeQueryCount = 0;
+    const mockClient = {
+      subscribeQuery: jest.fn(async (_uuid: string, _query: string) => {
+        subscribeQueryCount++;
+        // Reopen path: fire all currently-registered reconnect callbacks
+        // synchronously, exactly as ApiClient's onopen loop would.
+        if (simulateReconnectOnNextSubscribeQuery) {
+          simulateReconnectOnNextSubscribeQuery = false;
+          for (const cb of Array.from(reconnectCallbacks)) cb();
+        }
+        return {
+          subscriptionId: `sub-${subscribeQueryCount}`,
+          result: [{ s: 'a', p: 'b', o: 'c' }],
+        };
+      }),
+      subscribeToQueryUpdates: jest.fn().mockReturnValue(unsubscribeCallback),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+      onReconnect: jest.fn((cb: () => void) => {
+        reconnectCallbacks.add(cb);
+        return () => { reconnectCallbacks.delete(cb); };
+      }),
+    } as any;
+
+    const subscription = new QuerySubscriptionProxy(
+      'perspective-1',
+      'SELECT ?x WHERE { ?x ?p ?o }',
+      mockClient,
+    );
+
+    // Initial subscribe — installs the first reconnect listener.
+    await subscription.subscribe();
+    expect(subscribeQueryCount).toBe(1);
+    expect(reconnectCallbacks.size).toBe(1);
+
+    // Trigger a genuine reconnect (as ApiClient's onopen would). The
+    // query's handler will call subscribe() again, which will #unsubscribe
+    // (closing the socket) and then subscribeQuery (reopening, which our
+    // mock uses as the trigger to re-fire reconnect callbacks — the exact
+    // loop scenario CodeRabbit warned about).
+    for (const cb of Array.from(reconnectCallbacks)) cb();
+
+    // Let all queued microtasks + the async subscribe() chain settle.
+    await new Promise((r) => setTimeout(r, 20));
+
+    // BEFORE the fix: subscribeQueryCount would grow without bound (each
+    // reopen re-fires the old listener). AFTER the fix: exactly two calls
+    // — the initial subscribe(), plus the single reconnect-driven one.
+    // The fresh listener installed at the end of the reconnect-driven
+    // subscribe() should NOT itself have been called by that same call's
+    // reopen, because the OLD listener was cleared FIRST.
+    expect(subscribeQueryCount).toBe(2);
+    // Exactly one active reconnect listener at rest — the fresh one.
+    expect(reconnectCallbacks.size).toBe(1);
+
+    subscription.dispose();
+    // Dispose must also drop the fresh listener.
+    expect(reconnectCallbacks.size).toBe(0);
+  });
 });
