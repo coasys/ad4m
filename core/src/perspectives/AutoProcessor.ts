@@ -80,10 +80,13 @@ export interface AutoProcessorEvent {
   bases: string[];
   /** Free-form context for the step (a holder/elected DID, an error, …). */
   detail?: string;
-  /** Raw LLM prompt this pass fed the model. Present on `processed` only
-   *  when the processor was configured with `debugMode: true`. */
+  /** Raw LLM prompt this pass fed the model. Present ONLY on
+   *  `llmRequestSent` events, and only when the processor was configured
+   *  with `debugMode: true`. Never carried on `processed`. */
   llmInput?: string;
-  /** Raw LLM response this pass received. Same rules as `llmInput`. */
+  /** Raw LLM response this pass received. Present ONLY on
+   *  `llmResponseReceived` events, and only when the processor was
+   *  configured with `debugMode: true`. Never carried on `processed`. */
   llmOutput?: string;
 }
 

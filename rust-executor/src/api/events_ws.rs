@@ -730,6 +730,20 @@ pub(crate) fn matches_auto_processor_neighbourhood_state_reader(
     current_did: Option<&str>,
     is_admin: bool,
 ) -> bool {
+    matches_auto_processor_neighbourhood_state_reader_with(
+        msg,
+        current_did,
+        is_admin,
+        perspective_is_owned_by,
+    )
+}
+
+fn matches_auto_processor_neighbourhood_state_reader_with(
+    msg: &str,
+    current_did: Option<&str>,
+    is_admin: bool,
+    owned_check: impl Fn(&str, &str) -> bool,
+) -> bool {
     if is_admin {
         return true;
     }
@@ -746,13 +760,22 @@ pub(crate) fn matches_auto_processor_neighbourhood_state_reader(
         Some(serde_json::Value::String(u)) => u.as_str(),
         _ => return false,
     };
-    perspective_is_owned_by(uuid, did)
+    owned_check(uuid, did)
 }
 
 pub(crate) fn matches_auto_processor_pass_owner(
     msg: &str,
     current_did: Option<&str>,
     is_admin: bool,
+) -> bool {
+    matches_auto_processor_pass_owner_with(msg, current_did, is_admin, perspective_is_owned_by)
+}
+
+fn matches_auto_processor_pass_owner_with(
+    msg: &str,
+    current_did: Option<&str>,
+    is_admin: bool,
+    owned_check: impl Fn(&str, &str) -> bool,
 ) -> bool {
     if is_admin {
         return true;
@@ -771,7 +794,7 @@ pub(crate) fn matches_auto_processor_pass_owner(
         Some(serde_json::Value::String(u)) => u.as_str(),
         _ => return false,
     };
-    if !perspective_is_owned_by(uuid, did) {
+    if !owned_check(uuid, did) {
         return false;
     }
     // Agent-DID filter: only the DID whose pass produced this event sees it.
@@ -787,6 +810,11 @@ pub(crate) fn matches_auto_processor_pass_owner(
 
 fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
     use crate::perspectives::get_perspective;
+    // Fail closed when we cannot verify ownership. Previously this returned
+    // `true` for a missing perspective / lock contention, which let non-admin
+    // sessions receive events (notably auto-processor neighbourhood-state,
+    // CodeRabbit #903 fix) without a successful access check. Intentionally
+    // public unowned perspectives still deliver via the `is_unowned()` branch.
     match get_perspective(uuid) {
         Some(instance) => match instance.persisted.try_lock() {
             Ok(handle) => {
@@ -796,9 +824,9 @@ fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
                     handle.is_owned_by(did)
                 }
             }
-            Err(_) => true,
+            Err(_) => false,
         },
-        None => true,
+        None => false,
     }
 }
 
@@ -809,21 +837,39 @@ mod auto_processor_filter_tests {
     //! it, so a hosting agent's session never sees events for a managed
     //! user's pass. `is_admin` (from `AuthContext.is_admin_credential`) is
     //! the only escape hatch — an unresolved DID is NOT silently promoted.
-    //! `perspective_is_owned_by` short-circuits to `true` when the
-    //! perspective is not in the global registry (this test setup), so
-    //! these cases exercise the DID-attribution portion in isolation.
-    use super::matches_auto_processor_pass_owner;
+    //!
+    //! `perspective_is_owned_by` now fails closed when the perspective is not
+    //! in the global registry or the lock is contended (CodeRabbit #903);
+    //! these tests inject a stub `owned_check` so we exercise the
+    //! DID-attribution portion in isolation. `perspective_is_owned_by`
+    //! itself is covered separately in `perspective_is_owned_by_tests`.
+    use super::matches_auto_processor_pass_owner_with;
+
+    /// Stub owner-check: always grants access. Isolates the DID-attribution
+    /// logic from the perspective-registry lookup.
+    fn owns(_uuid: &str, _did: &str) -> bool {
+        true
+    }
+
+    /// Stub owner-check: always denies access. Simulates the fail-closed path
+    /// when the perspective is missing or the lock is contended.
+    fn owns_nothing(_uuid: &str, _did: &str) -> bool {
+        false
+    }
 
     #[test]
     fn admin_sees_every_event_regardless_of_did() {
         let msg = r#"{"perspectiveUuid":"p","agentDid":"did:key:alice"}"#;
         // Admin + no resolved DID: still delivers (the explicit escape hatch).
-        assert!(matches_auto_processor_pass_owner(msg, None, true));
+        assert!(matches_auto_processor_pass_owner_with(
+            msg, None, true, owns
+        ));
         // Admin + some other DID: still delivers.
-        assert!(matches_auto_processor_pass_owner(
+        assert!(matches_auto_processor_pass_owner_with(
             msg,
             Some("did:key:bob"),
-            true
+            true,
+            owns,
         ));
     }
 
@@ -835,26 +881,30 @@ mod auto_processor_filter_tests {
         // as administrator. Previously `None => true` leaked every event
         // to that session; now it drops.
         let msg = r#"{"perspectiveUuid":"p","agentDid":"did:key:alice"}"#;
-        assert!(!matches_auto_processor_pass_owner(msg, None, false));
+        assert!(!matches_auto_processor_pass_owner_with(
+            msg, None, false, owns,
+        ));
     }
 
     #[test]
     fn matching_agent_did_delivers() {
         let msg = r#"{"perspectiveUuid":"p","agentDid":"did:key:alice"}"#;
-        assert!(matches_auto_processor_pass_owner(
+        assert!(matches_auto_processor_pass_owner_with(
             msg,
             Some("did:key:alice"),
-            false
+            false,
+            owns,
         ));
     }
 
     #[test]
     fn mismatched_agent_did_drops() {
         let msg = r#"{"perspectiveUuid":"p","agentDid":"did:key:alice"}"#;
-        assert!(!matches_auto_processor_pass_owner(
+        assert!(!matches_auto_processor_pass_owner_with(
             msg,
             Some("did:key:bob"),
-            false
+            false,
+            owns,
         ));
     }
 
@@ -862,34 +912,53 @@ mod auto_processor_filter_tests {
     fn missing_agent_did_fails_closed() {
         // Malformed / no attribution → do not leak to every observer.
         let msg = r#"{"perspectiveUuid":"p"}"#;
-        assert!(!matches_auto_processor_pass_owner(
+        assert!(!matches_auto_processor_pass_owner_with(
             msg,
             Some("did:key:alice"),
-            false
+            false,
+            owns,
         ));
     }
 
     #[test]
     fn missing_perspective_uuid_fails_closed() {
         let msg = r#"{"agentDid":"did:key:alice"}"#;
-        assert!(!matches_auto_processor_pass_owner(
+        assert!(!matches_auto_processor_pass_owner_with(
             msg,
             Some("did:key:alice"),
-            false
+            false,
+            owns,
         ));
     }
 
     #[test]
     fn malformed_json_fails_closed() {
-        assert!(!matches_auto_processor_pass_owner(
+        assert!(!matches_auto_processor_pass_owner_with(
             "not json",
             Some("did:key:alice"),
-            false
+            false,
+            owns,
         ));
-        assert!(!matches_auto_processor_pass_owner(
+        assert!(!matches_auto_processor_pass_owner_with(
             "[]",
             Some("did:key:alice"),
-            false
+            false,
+            owns,
+        ));
+    }
+
+    /// Regression for CodeRabbit #903 CR #2: even when the DID-attribution
+    /// check would pass (agent-did matches session-did), a failing ownership
+    /// check MUST drop the event. Simulates a stale/missing perspective or
+    /// lock contention.
+    #[test]
+    fn perspective_ownership_denied_drops_event() {
+        let msg = r#"{"perspectiveUuid":"missing","agentDid":"did:key:alice"}"#;
+        assert!(!matches_auto_processor_pass_owner_with(
+            msg,
+            Some("did:key:alice"),
+            false,
+            owns_nothing,
         ));
     }
 }
@@ -903,21 +972,32 @@ mod auto_processor_neighbourhood_state_tests {
     //! is the only escape hatch for `None DID`; an unresolved-DID
     //! ordinary session is treated as fail-closed (CodeRabbit
     //! second-round #881).
-    //! `perspective_is_owned_by` short-circuits to `true` when the
-    //! perspective is not in the global registry (this test setup), so
-    //! these cases exercise the parse + missing-field checks in isolation.
-    use super::matches_auto_processor_neighbourhood_state_reader;
+    //!
+    //! `perspective_is_owned_by` now fails closed for missing perspectives
+    //! and lock contention (CodeRabbit #903 CR #2); these tests inject a
+    //! stub `owned_check` to exercise the parse + missing-field portion
+    //! in isolation.
+    use super::matches_auto_processor_neighbourhood_state_reader_with;
+
+    fn owns(_uuid: &str, _did: &str) -> bool {
+        true
+    }
+
+    fn owns_nothing(_uuid: &str, _did: &str) -> bool {
+        false
+    }
 
     #[test]
     fn admin_sees_every_event_regardless_of_did() {
         let msg = r#"{"perspectiveUuid":"p","claimantDid":"did:key:alice","phase":"claimed"}"#;
-        assert!(matches_auto_processor_neighbourhood_state_reader(
-            msg, None, true
+        assert!(matches_auto_processor_neighbourhood_state_reader_with(
+            msg, None, true, owns,
         ));
-        assert!(matches_auto_processor_neighbourhood_state_reader(
+        assert!(matches_auto_processor_neighbourhood_state_reader_with(
             msg,
             Some("did:key:bob"),
-            true
+            true,
+            owns,
         ));
     }
 
@@ -928,8 +1008,8 @@ mod auto_processor_neighbourhood_state_tests {
         // before `agent.generate()` completes) must NOT be silently
         // treated as administrator.
         let msg = r#"{"perspectiveUuid":"p","claimantDid":"did:key:alice","phase":"claimed"}"#;
-        assert!(!matches_auto_processor_neighbourhood_state_reader(
-            msg, None, false
+        assert!(!matches_auto_processor_neighbourhood_state_reader_with(
+            msg, None, false, owns,
         ));
     }
 
@@ -938,35 +1018,85 @@ mod auto_processor_neighbourhood_state_tests {
         // Broadcast semantics (once DID is resolved): not filtered by
         // claimant. Bob observes Alice's pass on the same executor.
         let msg = r#"{"perspectiveUuid":"p","claimantDid":"did:key:alice","phase":"claimed"}"#;
-        assert!(matches_auto_processor_neighbourhood_state_reader(
+        assert!(matches_auto_processor_neighbourhood_state_reader_with(
             msg,
             Some("did:key:bob"),
-            false
+            false,
+            owns,
         ));
     }
 
     #[test]
     fn missing_perspective_uuid_fails_closed() {
         let msg = r#"{"claimantDid":"did:key:alice","phase":"claimed"}"#;
-        assert!(!matches_auto_processor_neighbourhood_state_reader(
+        assert!(!matches_auto_processor_neighbourhood_state_reader_with(
             msg,
             Some("did:key:alice"),
-            false
+            false,
+            owns,
         ));
     }
 
     #[test]
     fn malformed_json_fails_closed() {
-        assert!(!matches_auto_processor_neighbourhood_state_reader(
+        assert!(!matches_auto_processor_neighbourhood_state_reader_with(
             "not json",
             Some("did:key:alice"),
-            false
+            false,
+            owns,
         ));
-        assert!(!matches_auto_processor_neighbourhood_state_reader(
+        assert!(!matches_auto_processor_neighbourhood_state_reader_with(
             "[]",
             Some("did:key:alice"),
-            false
+            false,
+            owns,
         ));
+    }
+
+    /// Regression for CodeRabbit #903 CR #2: perspective missing from the
+    /// registry / lock contended → fail closed instead of delivering. Before
+    /// the fix, `perspective_is_owned_by` returned `true` in both cases,
+    /// which let non-admin readers receive neighbourhood-state events for
+    /// perspectives they can't access.
+    #[test]
+    fn ownership_check_denied_drops_event() {
+        let msg =
+            r#"{"perspectiveUuid":"missing","claimantDid":"did:key:alice","phase":"claimed"}"#;
+        assert!(!matches_auto_processor_neighbourhood_state_reader_with(
+            msg,
+            Some("did:key:bob"),
+            false,
+            owns_nothing,
+        ));
+    }
+}
+
+#[cfg(test)]
+mod perspective_is_owned_by_tests {
+    //! Regression for CodeRabbit #903 CR #2. The prod `perspective_is_owned_by`
+    //! must fail closed when the perspective is not in the global registry
+    //! or when the try_lock fails. This unit test covers the missing branch
+    //! directly (the global `PERSPECTIVES` registry is empty in this test
+    //! context, so `get_perspective(uuid)` returns None); the lock-contention
+    //! branch is exercised by the same code path — both `Err(_)` and `None`
+    //! return `false` — and end-to-end by any tests that hold a persisted
+    //! lock while events fire.
+    use super::perspective_is_owned_by;
+
+    #[test]
+    fn missing_perspective_returns_false() {
+        assert!(!perspective_is_owned_by(
+            "not-a-registered-perspective-uuid",
+            "did:key:alice"
+        ));
+    }
+
+    #[test]
+    fn missing_perspective_returns_false_for_any_did() {
+        // No DID is special here — even one that looks admin-like fails
+        // closed when the perspective can't be looked up.
+        assert!(!perspective_is_owned_by("missing", ""));
+        assert!(!perspective_is_owned_by("missing", "did:key:admin"));
     }
 }
 

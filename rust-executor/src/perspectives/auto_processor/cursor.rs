@@ -337,7 +337,7 @@ mod tests {
             mint_scope: None,
             debug_mode: false,
         };
-        write_processor(&mut p, &cfg, &ctx)
+        write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
 
@@ -415,7 +415,7 @@ mod tests {
             mint_scope: None,
             debug_mode: false,
         };
-        write_processor(&mut p, &cfg, &ctx)
+        write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
 
@@ -505,7 +505,7 @@ mod tests {
             mint_scope: None,
             debug_mode: false,
         };
-        write_processor(&mut p, &cfg, &ctx)
+        write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
 
@@ -563,7 +563,7 @@ mod tests {
             mint_scope: None,
             debug_mode: false,
         };
-        write_processor(&mut p, &cfg, &ctx)
+        write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
 
@@ -636,7 +636,7 @@ mod tests {
             mint_scope: None,
             debug_mode: false,
         };
-        write_processor(&mut p, &cfg, &ctx)
+        write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
         let loaded = load_processors(&p).await.expect("load");
@@ -693,7 +693,7 @@ mod tests {
             mint_scope: None,
             debug_mode: false,
         };
-        write_processor(&mut p, &cfg, &ctx)
+        write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
 

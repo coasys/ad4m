@@ -88,13 +88,19 @@ pub struct AutoProcessorEvent {
     /// Free-form context for the step (a holder/elected DID, an error, …).
     #[serde(default)]
     pub detail: Option<String>,
-    /// Live-debug raw LLM prompt for this pass. Present on `Processed` only
-    /// when the processor was configured with `AutoProcessorConfig.debug_mode
-    /// = true`. Absent (`None`) in the normal path — LLM prompts are 10s of
-    /// KB and would otherwise inflate every event.
+    /// Live-debug raw LLM prompt for this pass. Present ONLY on
+    /// [`AutoProcessorStep::LlmRequestSent`] events, and only when the
+    /// processor was configured with `AutoProcessorConfig.debug_mode = true`.
+    /// Never carried on `Processed` (which carries `bases` only). Absent
+    /// (`None`) in the normal path — LLM prompts are 10s of KB and would
+    /// otherwise inflate every event.
     #[serde(default)]
     pub llm_input: Option<String>,
-    /// Live-debug raw LLM response for this pass. Same rules as `llm_input`.
+    /// Live-debug raw LLM response for this pass. Present ONLY on
+    /// [`AutoProcessorStep::LlmResponseReceived`] events, and only when
+    /// the processor was configured with
+    /// `AutoProcessorConfig.debug_mode = true`. Never carried on
+    /// `Processed`. Same size / privacy rules as `llm_input`.
     #[serde(default)]
     pub llm_output: Option<String>,
 }
