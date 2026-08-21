@@ -85,17 +85,12 @@ pub async fn completions(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let result = service
-        .prompt_messages(model_id, messages)
+        .prompt_messages(model_id, messages, Some(auth.auth_token.clone()))
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
-    if let Some(email) = user_email(&auth) {
-        let amount = billing_amounts::chat_or_completion_amount(
-            result.prompt_tokens,
-            result.completion_tokens,
-        );
-        bill_compute(&email, amount, "ai_prompt", Some("v1/completions"))?;
-    }
+    // Billing is now inside AIService::prompt_messages via bill_ai_operation
+    // (host_rates-based, shared with WS-RPC path). No handler-level bill_compute here.
 
     Ok(Json(CompletionResponse {
         id: format!("cmpl-{}", Uuid::new_v4()),
@@ -133,17 +128,11 @@ async fn chat_oneshot(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let result = service
-        .prompt_messages(model_id, messages)
+        .prompt_messages(model_id, messages, Some(auth.auth_token.clone()))
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
-    if let Some(email) = user_email(&auth) {
-        let amount = billing_amounts::chat_or_completion_amount(
-            result.prompt_tokens,
-            result.completion_tokens,
-        );
-        bill_compute(&email, amount, "ai_prompt", Some("v1/chat/completions"))?;
-    }
+    // Billing is now inside AIService::prompt_messages via bill_ai_operation.
 
     let body = ChatCompletionResponse {
         id: format!("chatcmpl-{}", Uuid::new_v4()),
@@ -182,7 +171,7 @@ async fn chat_stream(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let (token_rx, done_rx) = service
-        .prompt_messages_stream(model_id, messages)
+        .prompt_messages_stream(model_id, messages, Some(auth.auth_token.clone()))
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 

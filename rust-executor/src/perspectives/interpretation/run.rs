@@ -400,7 +400,8 @@ pub async fn run_interpretation_with_strategy_and_model(
         let prompt = prompt.clone();
         async move {
             let result = service
-                .prompt(task_id, prompt)
+                // Internal caller (interpretation runner) — no user auth context; billing skipped.
+                .prompt(task_id, prompt, None)
                 .await
                 .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
             Ok(result.text)

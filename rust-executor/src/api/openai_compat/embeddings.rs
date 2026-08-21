@@ -53,7 +53,7 @@ pub async fn embeddings(
 
     for (index, text) in inputs.into_iter().enumerate() {
         let result = service
-            .embed(model_id.clone(), text)
+            .embed(model_id.clone(), text, Some(auth.auth_token.clone()))
             .await
             .map_err(|e| OpenAIError::internal(e.to_string()))?;
         total_tokens += result.token_count as u64;
