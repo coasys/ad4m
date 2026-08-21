@@ -237,17 +237,68 @@ export class QuerySubscriptionProxy {
         this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
 
         // Register for reconnect notification — on WebSocket reconnect,
-        // immediately re-subscribe instead of waiting up to 30s for the
-        // keepalive to fail and trigger resubscription. Any prior listener
-        // was already removed at the top of this method (see the note there
-        // for why cleanup must run before `#unsubscribe`, not here).
+        // immediately re-establish a fresh server-side subscription instead
+        // of waiting up to 30s for the keepalive to fail.
+        //
+        // We deliberately do NOT call `this.subscribe()` here. Full subscribe
+        // runs `#unsubscribe` first, which delegates to `ApiClient.subscribe`'s
+        // deleter — that closes the WebSocket when this query owned the LAST
+        // `_wsCallbacks` entry. The subsequent `subscribeQuery` reopens the
+        // socket, whose fresh `onopen` fires every registered reconnect
+        // callback again → recursion (CodeRabbit's original finding). And
+        // during that close→reopen gap, RPCs in flight from OTHER proxies
+        // fail with `503 WebSocket not connected` (observed in
+        // integration-tests-mcp `should fire onWake when mention uses agent DID`
+        // after PR #899's initial fix — the WakerSubscriptionManager tests
+        // share a wakerClient across cases, so any dying reconnect handler
+        // interferes with sibling subscriptions).
+        //
+        // The correct shape is a swap-in-place: get a new server-side
+        // subscription ID via `subscribeQuery`, register a new client-side
+        // callback FIRST, and only then unsubscribe the old one. That way
+        // `_wsCallbacks.size` never dips to 0 during the transition, so the
+        // socket doesn't close, no reconnect loop, and no cross-proxy 503s.
+        // Any prior listener was already removed at the top of this method
+        // (see the note there for why cleanup must run before `#unsubscribe`,
+        // not here).
         if (this.#client.onReconnect) {
-            this.#reconnectUnsub = this.#client.onReconnect(() => {
+            this.#reconnectUnsub = this.#client.onReconnect(async () => {
                 if (this.#disposed) return;
-                console.log('WebSocket reconnected — resubscribing query:', this.#query);
-                this.subscribe().catch(error => {
-                    console.error('Error resubscribing after reconnect:', error);
-                });
+                console.log(
+                    'WebSocket reconnected — re-establishing server subscription for query:',
+                    this.#query,
+                );
+                try {
+                    const newInitial = await this.#client.subscribeQuery(this.#uuid, this.#query);
+                    if (this.#disposed) return;
+                    const newSubId = newInitial.subscriptionId;
+
+                    // Register the NEW client-side callback BEFORE removing the
+                    // old one — keeps `_wsCallbacks.size >= 1` across the swap.
+                    const newUnsub = this.#client.subscribeToQueryUpdates(
+                        newSubId,
+                        (updateResult) => {
+                            this.#latestResult = updateResult;
+                            this.#notifyCallbacks(updateResult);
+                        },
+                    );
+                    const oldUnsub = this.#unsubscribe;
+                    this.#unsubscribe = newUnsub;
+                    this.#subscriptionId = newSubId;
+                    if (oldUnsub) oldUnsub();
+
+                    // Deliver the fresh initial result if the server included one
+                    // (matches the eager-delivery path in the main subscribe() body).
+                    if (newInitial.result !== undefined) {
+                        this.#latestResult = newInitial.result;
+                        this.#notifyCallbacks(newInitial.result);
+                    }
+                } catch (error) {
+                    console.error(
+                        'Error re-establishing subscription after reconnect:',
+                        error,
+                    );
+                }
             });
         }
     }
