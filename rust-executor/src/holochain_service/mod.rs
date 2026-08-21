@@ -21,7 +21,7 @@ use holochain::test_utils::itertools::Either;
 use holochain_types::dna::ValidatedDnaManifest;
 use holochain_types::websocket::AllowedOrigins;
 use kitsune_p2p_types::dependencies::url2::Url2;
-use log::{error, info};
+use log::{error, info, warn};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::select;
@@ -489,6 +489,22 @@ impl HolochainService {
         let conductor_yaml_path =
             std::path::Path::new(&local_config.conductor_path).join("conductor_config.yaml");
         let mut config = if conductor_yaml_path.exists() {
+            // CodeRabbit review PR #907 finding #3: Holochain 0.7 tightened
+            // conductor-config deserialization and now rejects obsolete
+            // network.signal_url and network.webrtc_config fields. Users
+            // upgrading from HC 0.6 in place will have those in their existing
+            // on-disk conductor_config.yaml and hit a deser error before we
+            // even reach the new relay_url/space_overrides logic below.
+            //
+            // Migrate the file in place before load_yaml() sees it. Idempotent:
+            // if the fields aren't there, we no-op.
+            if let Err(e) = migrate_legacy_conductor_config(&conductor_yaml_path).await {
+                warn!(
+                    "Could not migrate legacy conductor_config.yaml at {:?}: {} \
+                     — load_yaml may still succeed if the file is already 0.7-clean.",
+                    conductor_yaml_path, e
+                );
+            }
             ConductorConfig::load_yaml(&conductor_yaml_path)?
         } else {
             let mut config = ConductorConfig::default();
@@ -509,27 +525,38 @@ impl HolochainService {
             // concept was folded into bootstrap+relay. Old AD4M code set
             // signal_url to a WS URL for direct peer signaling; under 0.7
             // this responsibility moved to the iroh relay (relay_url).
-            // The use_proxy toggle now falls through to the relay_url block
-            // below, since "proxy" and "relay" mean the same thing in the
-            // new topology. Preserving the local_config.proxy_url semantic
-            // by overriding relay_url when use_proxy is set.
-            if local_config.use_proxy {
-                network_config.relay_url = Url2::parse(local_config.proxy_url.as_str());
-            }
-
-            if let Some(relay_url) = local_config.relay_url {
-                network_config.relay_url = Url2::parse(relay_url.as_str());
+            //
+            // Precedence (matches pre-0.7 semantics):
+            //   1. use_proxy=true + non-empty proxy_url → use proxy_url as relay
+            //   2. explicit relay_url (from launcher config)         → use it
+            //   3. hard-coded default (public AD4M bootstrap relay)  → fallback
+            //
+            // Earlier draft had these as three independent `if`s, which meant
+            // any `Some(relay_url)` unconditionally clobbered the proxy branch.
+            // CodeRabbit review PR #907 finding #4.
+            let resolved_relay_url = if local_config.use_proxy && !local_config.proxy_url.is_empty()
+            {
+                local_config.proxy_url.clone()
+            } else if let Some(ref relay_url) = local_config.relay_url {
+                relay_url.clone()
             } else {
-                network_config.relay_url = Url2::parse("http://bootstrap.ad4m.dev:4433/relay");
-            }
+                "http://bootstrap.ad4m.dev:4433/relay".to_string()
+            };
+            network_config.relay_url = Url2::parse(resolved_relay_url.as_str());
 
             config.network = network_config;
 
             config
         };
 
-        // Apply unyt space override: the unyt DNA gets its own bootstrap, signal,
+        // Apply unyt space override: the unyt DNA gets its own bootstrap,
         // relay, and auth material. All other DNAs use the AD4M defaults above.
+        //
+        // HC 0.7.0: SpaceNetworkOverride no longer carries signal_url — the
+        // signal-server responsibility moved to the iroh relay. We drop that
+        // field and keep bootstrap_url + relay_url + base64_auth_material.
+        // UNYT_SIGNAL_URL is intentionally ignored (legacy WS signaller,
+        // not part of the 0.7 topology).
         let dna_hash_opt = crate::db::Ad4mDb::global_instance()
             .lock()
             .ok()
@@ -539,27 +566,34 @@ impl HolochainService {
                     .and_then(|db| db.get_setting("unyt_dna_hash").ok().flatten())
             });
         if let Some(dna_hash) = dna_hash_opt {
-            //if let Ok(Some(auth_material)) =
-            //    crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
-            //{
-            info!("Applying unyt space override for DNA {}", dna_hash);
-            // HC 0.7.0: SpaceNetworkOverride no longer has signal_url — the
-            // signal-server responsibility moved to the iroh relay. We drop
-            // that field and keep bootstrap_url + relay_url + auth material.
-            // UNYT_SIGNAL_URL is intentionally ignored here (it was pointing
-            // at a legacy websocket signaller that isn't part of the 0.7
-            // topology). If Unyt needs a distinct relay endpoint from the
-            // one implied by UNYT_RELAY_URL, that's a Unyt-side concern to
-            // reconfigure post-migration.
+            // Grab the auth material stashed by setup_bootstrap_auth().
+            // Without this the authenticated Unyt bootstrap will refuse the
+            // connection. CodeRabbit review PR #907 finding #5.
+            let auth_material =
+                crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
+                    .ok()
+                    .flatten();
+            if auth_material.is_none() {
+                info!(
+                    "Applying unyt space override for DNA {} (no auth material \
+                     stashed yet — first-run bootstrap; setup_bootstrap_auth \
+                     will populate it)",
+                    dna_hash
+                );
+            } else {
+                info!(
+                    "Applying unyt space override for DNA {} with base64 auth material",
+                    dna_hash
+                );
+            }
             config.network.space_overrides.insert(
                 dna_hash,
                 SpaceNetworkOverride {
                     bootstrap_url: Some(Url2::parse(crate::unyt_service::UNYT_BOOTSTRAP_URL)),
-                    base64_auth_material: None,
+                    base64_auth_material: auth_material,
                     relay_url: Some(Url2::parse(crate::unyt_service::UNYT_RELAY_URL)),
                 },
             );
-            //}
         }
 
         info!("Starting holochain conductor with config: {:#?}", config);
@@ -854,40 +888,70 @@ impl HolochainService {
 
     pub async fn add_agent_infos(&self, agent_infos: Vec<String>) -> Result<(), AnyError> {
         // Add agent infos individually. K2 spaces should already be available
-        // since install_app awaits cell network join completion.
-        // If an agent info is for a space we haven't joined (e.g., another
-        // agent's unique DNA), it will be skipped.
-        let mut success_count = 0;
-        let mut skipped_count = 0;
+        // since install_app awaits cell network join completion — but under HC
+        // 0.7's cell-init races, the space is occasionally still spinning up
+        // when the first burst of agent-info gossip arrives.
+        //
+        // CodeRabbit review PR #907 finding #2: earlier version swallowed
+        // every error into the `skipped` bucket, hiding real problems. New
+        // shape:
+        //   - transient K2SpaceNotFound  → short retry with backoff, then skip
+        //     if it still doesn't come up (space genuinely isn't ours to join)
+        //   - other errors               → keep going but log at ERROR and
+        //     surface via failure_count in the summary line, so a real
+        //     conductor bug doesn't fall off silently
+        const K2_SPACE_RETRIES: usize = 3;
+        const K2_SPACE_RETRY_BASE_MS: u64 = 200;
+
+        let mut success_count = 0usize;
+        let mut skipped_count = 0usize;
+        let mut failure_count = 0usize;
 
         for agent_info in agent_infos {
-            match self
-                .conductor
-                .add_agent_infos(vec![agent_info.clone()])
-                .await
-            {
-                Ok(()) => {
-                    success_count += 1;
-                }
-                Err(e) => {
-                    let error_str = format!("{:?}", e);
-                    if error_str.contains("K2SpaceNotFound")
-                        || (error_str.contains("K2 Space") && error_str.contains("does not exist"))
-                    {
-                        // Space we haven't joined - expected for other agent's unique DNAs
-                        skipped_count += 1;
-                    } else {
-                        error!("Failed to add agent info: {:?}", e);
-                        skipped_count += 1;
+            let mut attempt = 0usize;
+            loop {
+                match self
+                    .conductor
+                    .add_agent_infos(vec![agent_info.clone()])
+                    .await
+                {
+                    Ok(()) => {
+                        success_count += 1;
+                        break;
+                    }
+                    Err(e) => {
+                        let error_str = format!("{:?}", e);
+                        let is_space_not_found = error_str.contains("K2SpaceNotFound")
+                            || (error_str.contains("K2 Space")
+                                && error_str.contains("does not exist"));
+
+                        if is_space_not_found && attempt < K2_SPACE_RETRIES {
+                            // Space may still be initialising. Back off exponentially
+                            // (200ms, 400ms, 800ms) and try again.
+                            let delay_ms = K2_SPACE_RETRY_BASE_MS * (1u64 << attempt as u32);
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                            attempt += 1;
+                            continue;
+                        }
+
+                        if is_space_not_found {
+                            // Still not there after retries — assume genuinely
+                            // not-our-DNA and skip quietly.
+                            skipped_count += 1;
+                        } else {
+                            error!("Failed to add agent info: {:?}", e);
+                            failure_count += 1;
+                        }
+                        break;
                     }
                 }
             }
         }
 
-        if skipped_count > 0 {
+        if skipped_count > 0 || failure_count > 0 {
             info!(
-                "Added {} agent infos, skipped {} (spaces not available)",
-                success_count, skipped_count
+                "Added {} agent infos, skipped {} (K2 space unavailable), failed {} (other errors)",
+                success_count, skipped_count, failure_count
             );
         }
 
@@ -1036,6 +1100,59 @@ pub async fn run_local_hc_services() -> Result<(), AnyError> {
         false,
     );
     ops.run().await;
+    Ok(())
+}
+
+/// Migrate a Holochain 0.6-era `conductor_config.yaml` in place by stripping
+/// fields that Holochain 0.7's stricter deserializer now rejects.
+///
+/// HC 0.7 dropped `network.signal_url` (folded into the iroh relay) and
+/// `network.webrtc_config` (WebRTC transport is gone). If either field is
+/// still present in an existing config file, `ConductorConfig::load_yaml`
+/// fails with a serde error before we ever get to the new relay_url /
+/// space_overrides logic in `HolochainService::new`.
+///
+/// This helper reads the file, parses it as a generic YAML mapping, removes
+/// the obsolete keys under `network`, and writes it back. Idempotent: if
+/// neither key is present, the file is left untouched (no rewrite, no mtime
+/// change).
+///
+/// CodeRabbit review PR #907 finding #3.
+async fn migrate_legacy_conductor_config(path: &std::path::Path) -> Result<(), AnyError> {
+    let raw = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| anyhow!("read conductor_config.yaml: {}", e))?;
+
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&raw)
+        .map_err(|e| anyhow!("parse conductor_config.yaml as YAML: {}", e))?;
+
+    let mut removed: Vec<&'static str> = Vec::new();
+    if let Some(network) = doc.get_mut("network").and_then(|n| n.as_mapping_mut()) {
+        for legacy_key in ["signal_url", "webrtc_config"] {
+            if network
+                .remove(serde_yaml::Value::String(legacy_key.to_string()))
+                .is_some()
+            {
+                removed.push(legacy_key);
+            }
+        }
+    }
+
+    if removed.is_empty() {
+        // Nothing to migrate; leave the file untouched to preserve mtime.
+        return Ok(());
+    }
+
+    let out = serde_yaml::to_string(&doc)
+        .map_err(|e| anyhow!("re-serialize migrated conductor_config.yaml: {}", e))?;
+    tokio::fs::write(path, out)
+        .await
+        .map_err(|e| anyhow!("write migrated conductor_config.yaml: {}", e))?;
+
+    info!(
+        "Migrated conductor_config.yaml at {:?}: stripped obsolete network.* keys: {:?}",
+        path, removed
+    );
     Ok(())
 }
 
