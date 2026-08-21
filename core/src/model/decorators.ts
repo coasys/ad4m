@@ -373,6 +373,17 @@ export interface PropertyOptions {
      * should set this.
      */
     identity?: boolean;
+
+    /**
+     * Explicit SHACL `sh:datatype` for the property value. When set, this
+     * overrides auto-inference and — importantly — lets custom `getter`
+     * properties opt into typed-literal decoding. Auto-inference is disabled
+     * for properties with a `getter` (see `shacl-gen.ts`) because such
+     * getters typically return URIs; setting `datatype` explicitly declares
+     * that this getter returns literal values of the given XSD type
+     * (e.g. `"xsd://string"`) and enables the hydration decode gate.
+     */
+    datatype?: string;
 }
 
 

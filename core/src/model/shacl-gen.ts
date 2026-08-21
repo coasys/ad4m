@@ -142,18 +142,23 @@ export function buildSHACL(
         // `sh:datatype xsd:string` there would trip the hydration decode gate
         // and silently transform `literal:string:<hex>` URIs into their inner
         // plain-string form on read. Users who want a getter to return literal
-        // values can still opt in explicitly via the (currently getter-side)
-        // datatype conventions.
-        const isLiteral =
-            propMeta.resolveLanguage === undefined || propMeta.resolveLanguage === "literal";
-        if ((propMeta.initial !== undefined || isLiteral) && !propMeta.getter) {
-            const initialType = typeof obj[propName];
-            if (initialType === "number") {
-                propShape.datatype = "xsd://integer";
-            } else if (initialType === "boolean") {
-                propShape.datatype = "xsd://boolean";
-            } else if (initialType === "string" || isLiteral) {
-                propShape.datatype = "xsd://string";
+        // values can opt in explicitly by setting `datatype` on the property
+        // options (handled below).
+        if (propMeta.datatype) {
+            // Explicit opt-in from PropertyOptions always wins over inference.
+            propShape.datatype = propMeta.datatype;
+        } else {
+            const isLiteral =
+                propMeta.resolveLanguage === undefined || propMeta.resolveLanguage === "literal";
+            if ((propMeta.initial !== undefined || isLiteral) && !propMeta.getter) {
+                const initialType = typeof obj[propName];
+                if (initialType === "number") {
+                    propShape.datatype = "xsd://integer";
+                } else if (initialType === "boolean") {
+                    propShape.datatype = "xsd://boolean";
+                } else if (initialType === "string" || isLiteral) {
+                    propShape.datatype = "xsd://string";
+                }
             }
         }
 
