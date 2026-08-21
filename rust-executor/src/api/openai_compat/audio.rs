@@ -24,6 +24,7 @@
 
 use axum::{extract::Multipart, http::header, response::IntoResponse, response::Response, Json};
 
+use super::billing_amounts;
 use super::errors::{OpenAIError, OpenAIResult};
 use super::model_selector::resolve_model;
 use super::tts_passthrough;
@@ -125,7 +126,7 @@ pub async fn speech(
     {
         check_compute_credits(&email)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
-        let amount = (req.input.chars().count() as f64 / 1000.0).max(1.0);
+        let amount = billing_amounts::speech_amount(req.input.chars().count());
         bill_compute(&email, amount, "ai_tts", Some("v1/audio/speech"))?;
     }
 

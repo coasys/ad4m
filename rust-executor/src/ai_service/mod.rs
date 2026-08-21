@@ -51,7 +51,16 @@ pub struct EmbedResult {
 /// Rough token count estimation (~4 chars per token for English text).
 /// Used by the Kalosum backend to populate PromptResult/EmbedResult.
 /// Will be replaced by exact counts when Ollama is integrated.
-fn estimate_token_count(text: &str) -> usize {
+///
+/// TODO(billing accuracy): materially off for non-English scripts (CJK,
+/// Arabic, Hindi tend to ~1 token/char → billing under-estimated ~4×),
+/// code/JSON (~2 chars/token → under-estimated ~2×), and repetitive text
+/// (BPE compresses well → over-estimated). Plumb real Kalosm token counts
+/// when the backend exposes them, or apply a per-model correction factor.
+///
+/// `pub(crate)` so `api::openai_compat::tests` can lock in the current
+/// formula and catch accidental changes.
+pub(crate) fn estimate_token_count(text: &str) -> usize {
     let chars = text.chars().count();
     (chars + 3) / 4
 }

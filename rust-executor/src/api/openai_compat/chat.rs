@@ -15,6 +15,7 @@ use axum::{
 use futures::Stream;
 use uuid::Uuid;
 
+use super::billing_amounts;
 use super::errors::{OpenAIError, OpenAIResult};
 use super::model_selector::resolve_model;
 use super::types::{
@@ -89,7 +90,10 @@ pub async fn completions(
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
     if let Some(email) = user_email(&auth) {
-        let amount = ((result.prompt_tokens + result.completion_tokens) as f64 / 1000.0).max(0.001);
+        let amount = billing_amounts::chat_or_completion_amount(
+            result.prompt_tokens,
+            result.completion_tokens,
+        );
         bill_compute(&email, amount, "ai_prompt", Some("v1/completions"))?;
     }
 
@@ -134,7 +138,10 @@ async fn chat_oneshot(
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
     if let Some(email) = user_email(&auth) {
-        let amount = ((result.prompt_tokens + result.completion_tokens) as f64 / 1000.0).max(0.001);
+        let amount = billing_amounts::chat_or_completion_amount(
+            result.prompt_tokens,
+            result.completion_tokens,
+        );
         bill_compute(&email, amount, "ai_prompt", Some("v1/chat/completions"))?;
     }
 
@@ -264,7 +271,7 @@ async fn chat_stream(
             if let Some(email) = user_email(&auth_clone) {
                 if let Err(e) = bill_compute(
                     &email,
-                    1.0,
+                    billing_amounts::stream_prompt_amount(),
                     "ai_prompt",
                     Some("v1/chat/completions[stream]"),
                 ) {

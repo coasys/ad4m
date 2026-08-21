@@ -23,6 +23,7 @@
 //! `{ "error": { message, type, param, code } }` envelope.
 
 pub mod audio;
+pub(crate) mod billing_amounts;
 pub mod chat;
 pub mod embeddings;
 pub mod errors;

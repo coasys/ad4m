@@ -8,6 +8,7 @@
 
 use axum::Json;
 
+use super::billing_amounts;
 use super::errors::{OpenAIError, OpenAIResult};
 use super::model_selector::resolve_model;
 use super::types::{EmbeddingItem, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage};
@@ -63,7 +64,7 @@ pub async fn embeddings(
 
     if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
     {
-        let amount = data.len().max(1) as f64;
+        let amount = billing_amounts::embedding_amount(data.len());
         bill_compute(&email, amount, "ai_embedding", Some("v1/embeddings"))?;
     }
 
