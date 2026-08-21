@@ -488,17 +488,32 @@ impl HolochainService {
     pub async fn new(local_config: LocalConductorConfig) -> Result<HolochainService, AnyError> {
         let conductor_yaml_path =
             std::path::Path::new(&local_config.conductor_path).join("conductor_config.yaml");
+
+        // Resolve the relay_url once so both the new-config branch (below)
+        // and the legacy-migration branch (above) share the same value.
+        // Precedence: use_proxy → explicit relay_url → default.
+        // CodeRabbit review PR #907 finding #4 (proxy/relay precedence).
+        let resolved_relay_url = resolve_relay_url(&local_config);
+
         let mut config = if conductor_yaml_path.exists() {
             // CodeRabbit review PR #907 finding #3: Holochain 0.7 tightened
-            // conductor-config deserialization and now rejects obsolete
-            // network.signal_url and network.webrtc_config fields. Users
-            // upgrading from HC 0.6 in place will have those in their existing
-            // on-disk conductor_config.yaml and hit a deser error before we
-            // even reach the new relay_url/space_overrides logic below.
+            // conductor-config deserialization and now:
+            //   - rejects obsolete network.signal_url and
+            //     network.webrtc_config fields
+            //   - REQUIRES network.relay_url
+            // Users upgrading from HC 0.6 in place have both problems (their
+            // file has obsolete fields AND lacks relay_url), so load_yaml
+            // fails either way. Migrate the file in place before load_yaml()
+            // sees it. Idempotent: fields already-clean / already-present are
+            // left untouched (no rewrite, no mtime change).
             //
-            // Migrate the file in place before load_yaml() sees it. Idempotent:
-            // if the fields aren't there, we no-op.
-            if let Err(e) = migrate_legacy_conductor_config(&conductor_yaml_path).await {
+            // CodeRabbit round-2 finding @508: also inject resolved relay_url
+            // when absent, otherwise load_yaml fails on the required-field
+            // check for a migrated file.
+            if let Err(e) =
+                migrate_legacy_conductor_config(&conductor_yaml_path, Some(&resolved_relay_url))
+                    .await
+            {
                 warn!(
                     "Could not migrate legacy conductor_config.yaml at {:?}: {} \
                      — load_yaml may still succeed if the file is already 0.7-clean.",
@@ -526,22 +541,9 @@ impl HolochainService {
             // signal_url to a WS URL for direct peer signaling; under 0.7
             // this responsibility moved to the iroh relay (relay_url).
             //
-            // Precedence (matches pre-0.7 semantics):
-            //   1. use_proxy=true + non-empty proxy_url → use proxy_url as relay
-            //   2. explicit relay_url (from launcher config)         → use it
-            //   3. hard-coded default (public AD4M bootstrap relay)  → fallback
-            //
-            // Earlier draft had these as three independent `if`s, which meant
-            // any `Some(relay_url)` unconditionally clobbered the proxy branch.
-            // CodeRabbit review PR #907 finding #4.
-            let resolved_relay_url = if local_config.use_proxy && !local_config.proxy_url.is_empty()
-            {
-                local_config.proxy_url.clone()
-            } else if let Some(ref relay_url) = local_config.relay_url {
-                relay_url.clone()
-            } else {
-                "http://bootstrap.ad4m.dev:4433/relay".to_string()
-            };
+            // Precedence resolution is factored into resolve_relay_url() at
+            // the top of this function so the legacy-migration path can share
+            // the same value. CodeRabbit review PR #907 finding #4.
             network_config.relay_url = Url2::parse(resolved_relay_url.as_str());
 
             config.network = network_config;
@@ -900,12 +902,49 @@ impl HolochainService {
         //   - other errors               → keep going but log at ERROR and
         //     surface via failure_count in the summary line, so a real
         //     conductor bug doesn't fall off silently
+        //
+        // CodeRabbit round-2 finding @949: the dispatcher wraps this whole
+        // fn in a 30s timeout. Per-item retries of 200+400+800ms = 1.4s
+        // each; ~21 items for an unavailable K2 space burn the full budget
+        // and the caller gets a Timeout instead of the skip summary. Fix:
+        // once we've exhausted retries for a given K2SpaceNotFound error
+        // fingerprint, cache it and short-circuit further items whose error
+        // matches — no sleep, straight to `skipped`. The K2SpaceNotFound
+        // error string embeds the space id/hash, so distinct spaces have
+        // distinct fingerprints.
         const K2_SPACE_RETRIES: usize = 3;
         const K2_SPACE_RETRY_BASE_MS: u64 = 200;
 
         let mut success_count = 0usize;
         let mut skipped_count = 0usize;
         let mut failure_count = 0usize;
+        let mut exhausted_spaces: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        /// Extract a stable per-space fingerprint from the K2SpaceNotFound
+        /// error string. The error typically formats as
+        /// `K2SpaceNotFound(<hex-space-id>)` — slicing the whole `{:?}` is
+        /// good enough as a set key: distinct spaces give distinct debug
+        /// strings; identical errors give identical strings.
+        fn space_fingerprint(err_str: &str) -> String {
+            // Trim to the substring starting at K2SpaceNotFound (or K2 Space)
+            // so trailing context that varies per-call doesn't defeat the cache.
+            if let Some(idx) = err_str.find("K2SpaceNotFound") {
+                err_str[idx..]
+                    .split(&[',', ')', '\n'][..])
+                    .next()
+                    .unwrap_or(err_str)
+                    .to_string()
+            } else if let Some(idx) = err_str.find("K2 Space") {
+                err_str[idx..]
+                    .split(&['\n'][..])
+                    .next()
+                    .unwrap_or(err_str)
+                    .to_string()
+            } else {
+                err_str.to_string()
+            }
+        }
 
         for agent_info in agent_infos {
             let mut attempt = 0usize;
@@ -925,23 +964,37 @@ impl HolochainService {
                             || (error_str.contains("K2 Space")
                                 && error_str.contains("does not exist"));
 
-                        if is_space_not_found && attempt < K2_SPACE_RETRIES {
-                            // Space may still be initialising. Back off exponentially
-                            // (200ms, 400ms, 800ms) and try again.
-                            let delay_ms = K2_SPACE_RETRY_BASE_MS * (1u64 << attempt as u32);
-                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                            attempt += 1;
-                            continue;
+                        if is_space_not_found {
+                            let fp = space_fingerprint(&error_str);
+                            if exhausted_spaces.contains(&fp) {
+                                // Same space we already gave up on — skip
+                                // immediately, no sleep. This keeps the whole
+                                // batch within the 30s dispatcher budget even
+                                // if hundreds of agent infos target the same
+                                // never-going-to-arrive space.
+                                skipped_count += 1;
+                                break;
+                            }
+                            if attempt < K2_SPACE_RETRIES {
+                                // First-in-space — try backoff. Space may
+                                // still be initialising.
+                                let delay_ms = K2_SPACE_RETRY_BASE_MS * (1u64 << attempt as u32);
+                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
+                                    .await;
+                                attempt += 1;
+                                continue;
+                            }
+                            // Retries exhausted for THIS space — cache the
+                            // fingerprint so subsequent items with the same
+                            // failure short-circuit.
+                            exhausted_spaces.insert(fp);
+                            skipped_count += 1;
+                            break;
                         }
 
-                        if is_space_not_found {
-                            // Still not there after retries — assume genuinely
-                            // not-our-DNA and skip quietly.
-                            skipped_count += 1;
-                        } else {
-                            error!("Failed to add agent info: {:?}", e);
-                            failure_count += 1;
-                        }
+                        // Not a K2 space error — real problem, surface it.
+                        error!("Failed to add agent info: {:?}", e);
+                        failure_count += 1;
                         break;
                     }
                 }
@@ -950,8 +1003,12 @@ impl HolochainService {
 
         if skipped_count > 0 || failure_count > 0 {
             info!(
-                "Added {} agent infos, skipped {} (K2 space unavailable), failed {} (other errors)",
-                success_count, skipped_count, failure_count
+                "Added {} agent infos, skipped {} (K2 space unavailable across {} distinct \
+                 space(s)), failed {} (other errors)",
+                success_count,
+                skipped_count,
+                exhausted_spaces.len(),
+                failure_count
             );
         }
 
@@ -1103,22 +1160,51 @@ pub async fn run_local_hc_services() -> Result<(), AnyError> {
     Ok(())
 }
 
-/// Migrate a Holochain 0.6-era `conductor_config.yaml` in place by stripping
-/// fields that Holochain 0.7's stricter deserializer now rejects.
+/// Resolve the relay_url that HC 0.7's NetworkConfig requires.
 ///
-/// HC 0.7 dropped `network.signal_url` (folded into the iroh relay) and
-/// `network.webrtc_config` (WebRTC transport is gone). If either field is
-/// still present in an existing config file, `ConductorConfig::load_yaml`
-/// fails with a serde error before we ever get to the new relay_url /
-/// space_overrides logic in `HolochainService::new`.
+/// Precedence (matches pre-0.7 AD4M semantics):
+///   1. `use_proxy=true` + non-empty `proxy_url` → use `proxy_url` as relay
+///   2. explicit `relay_url` (from launcher config)          → use it
+///   3. hard-coded default (public AD4M bootstrap relay)     → fallback
 ///
-/// This helper reads the file, parses it as a generic YAML mapping, removes
-/// the obsolete keys under `network`, and writes it back. Idempotent: if
-/// neither key is present, the file is left untouched (no rewrite, no mtime
-/// change).
+/// Factored out of `HolochainService::new` so the same resolution can be
+/// applied both to fresh configs and to migrated legacy configs (see
+/// `migrate_legacy_conductor_config`).
 ///
-/// CodeRabbit review PR #907 finding #3.
-async fn migrate_legacy_conductor_config(path: &std::path::Path) -> Result<(), AnyError> {
+/// CodeRabbit review PR #907 finding #4.
+fn resolve_relay_url(local_config: &LocalConductorConfig) -> String {
+    if local_config.use_proxy && !local_config.proxy_url.is_empty() {
+        local_config.proxy_url.clone()
+    } else if let Some(ref relay_url) = local_config.relay_url {
+        relay_url.clone()
+    } else {
+        "http://bootstrap.ad4m.dev:4433/relay".to_string()
+    }
+}
+
+/// Migrate a Holochain 0.6-era `conductor_config.yaml` in place so that
+/// Holochain 0.7's stricter deserializer accepts it.
+///
+/// Two changes are needed:
+///   1. **Strip obsolete keys** (HC 0.7 rejects unknown fields):
+///      `network.signal_url` (folded into the iroh relay) and
+///      `network.webrtc_config` (WebRTC transport is gone).
+///   2. **Inject `network.relay_url`** if absent — HC 0.7 makes this field
+///      REQUIRED. A file migrated by (1) alone still fails `load_yaml` on
+///      the missing-field check. The caller passes in the resolved URL
+///      (from `resolve_relay_url`) so precedence stays centralised.
+///
+/// The helper reads the file, parses it as a generic YAML mapping, applies
+/// the changes, and writes it back. Idempotent: if the file is already
+/// 0.7-clean (no obsolete keys, `relay_url` already present), it is left
+/// untouched (no rewrite, no mtime change).
+///
+/// CodeRabbit review PR #907 finding #3 (strip obsolete keys) + round-2
+/// finding @508 (inject relay_url).
+async fn migrate_legacy_conductor_config(
+    path: &std::path::Path,
+    resolved_relay_url: Option<&str>,
+) -> Result<(), AnyError> {
     let raw = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| anyhow!("read conductor_config.yaml: {}", e))?;
@@ -1127,18 +1213,47 @@ async fn migrate_legacy_conductor_config(path: &std::path::Path) -> Result<(), A
         .map_err(|e| anyhow!("parse conductor_config.yaml as YAML: {}", e))?;
 
     let mut removed: Vec<&'static str> = Vec::new();
-    if let Some(network) = doc.get_mut("network").and_then(|n| n.as_mapping_mut()) {
-        for legacy_key in ["signal_url", "webrtc_config"] {
-            if network
-                .remove(serde_yaml::Value::String(legacy_key.to_string()))
-                .is_some()
-            {
-                removed.push(legacy_key);
-            }
+    let mut injected_relay = false;
+
+    // Ensure a `network:` mapping exists so we can operate on it uniformly.
+    // If the file has no network section at all, create an empty one.
+    let doc_map = doc
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow!("conductor_config.yaml root is not a mapping"))?;
+    let network_key = serde_yaml::Value::String("network".to_string());
+    if !doc_map.contains_key(&network_key) {
+        doc_map.insert(
+            network_key.clone(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+    }
+    let network = doc_map
+        .get_mut(&network_key)
+        .and_then(|n| n.as_mapping_mut())
+        .ok_or_else(|| anyhow!("conductor_config.yaml `network` is not a mapping"))?;
+
+    for legacy_key in ["signal_url", "webrtc_config"] {
+        if network
+            .remove(serde_yaml::Value::String(legacy_key.to_string()))
+            .is_some()
+        {
+            removed.push(legacy_key);
         }
     }
 
-    if removed.is_empty() {
+    // Round-2 finding @508: inject the resolved relay_url when absent.
+    // We only inject when the caller gave us one AND the file doesn't
+    // already have one. If the file HAS a relay_url we honour it (users
+    // may have hand-tuned it).
+    let relay_key = serde_yaml::Value::String("relay_url".to_string());
+    if !network.contains_key(&relay_key) {
+        if let Some(url) = resolved_relay_url {
+            network.insert(relay_key, serde_yaml::Value::String(url.to_string()));
+            injected_relay = true;
+        }
+    }
+
+    if removed.is_empty() && !injected_relay {
         // Nothing to migrate; leave the file untouched to preserve mtime.
         return Ok(());
     }
@@ -1149,10 +1264,18 @@ async fn migrate_legacy_conductor_config(path: &std::path::Path) -> Result<(), A
         .await
         .map_err(|e| anyhow!("write migrated conductor_config.yaml: {}", e))?;
 
-    info!(
-        "Migrated conductor_config.yaml at {:?}: stripped obsolete network.* keys: {:?}",
-        path, removed
-    );
+    let mut summary = format!("Migrated conductor_config.yaml at {:?}:", path);
+    if !removed.is_empty() {
+        summary.push_str(&format!(" stripped obsolete network.* keys: {:?}", removed));
+    }
+    if injected_relay {
+        summary.push_str(&format!(
+            "{} injected required network.relay_url = {}",
+            if removed.is_empty() { "" } else { ";" },
+            resolved_relay_url.unwrap_or("")
+        ));
+    }
+    info!("{}", summary);
     Ok(())
 }
 
