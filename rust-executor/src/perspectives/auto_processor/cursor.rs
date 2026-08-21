@@ -335,9 +335,10 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
-            debug_mode: false,
+            persist_debug: false,
+            emit_debug_events: false,
         };
-        write_processor(&mut p, &cfg, Some(false), &ctx)
+        write_processor(&mut p, &cfg, Some(false), Some(false), &ctx)
             .await
             .expect("write_processor");
 
@@ -413,9 +414,10 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
-            debug_mode: false,
+            persist_debug: false,
+            emit_debug_events: false,
         };
-        write_processor(&mut p, &cfg, Some(false), &ctx)
+        write_processor(&mut p, &cfg, Some(false), Some(false), &ctx)
             .await
             .expect("write_processor");
 
@@ -503,9 +505,10 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
-            debug_mode: false,
+            persist_debug: false,
+            emit_debug_events: false,
         };
-        write_processor(&mut p, &cfg, Some(false), &ctx)
+        write_processor(&mut p, &cfg, Some(false), Some(false), &ctx)
             .await
             .expect("write_processor");
 
@@ -561,9 +564,10 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
-            debug_mode: false,
+            persist_debug: false,
+            emit_debug_events: false,
         };
-        write_processor(&mut p, &cfg, Some(false), &ctx)
+        write_processor(&mut p, &cfg, Some(false), Some(false), &ctx)
             .await
             .expect("write_processor");
 
@@ -634,9 +638,10 @@ mod tests {
             source_window_ms: Some(1), // 1ms — anything not stamped this millisecond is old
             existing_scope: None,
             mint_scope: None,
-            debug_mode: false,
+            persist_debug: false,
+            emit_debug_events: false,
         };
-        write_processor(&mut p, &cfg, Some(false), &ctx)
+        write_processor(&mut p, &cfg, Some(false), Some(false), &ctx)
             .await
             .expect("write_processor");
         let loaded = load_processors(&p).await.expect("load");
@@ -691,9 +696,10 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
-            debug_mode: false,
+            persist_debug: false,
+            emit_debug_events: false,
         };
-        write_processor(&mut p, &cfg, Some(false), &ctx)
+        write_processor(&mut p, &cfg, Some(false), Some(false), &ctx)
             .await
             .expect("write_processor");
 

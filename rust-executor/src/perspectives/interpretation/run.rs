@@ -359,9 +359,10 @@ pub async fn run_interpretation_with_strategy(
 /// already uses, so behaviour is unchanged for all non-processor callers.
 /// Optional live-debug capture for a single interpretation pass — the raw
 /// prompt fed to the LLM and its response, verbatim. Populated only when the
-/// caller opts in via `debug_mode` (e.g. AutoProcessor `debug_mode: true`).
-/// Kept out of the base `Vec<String>` return so a normal pass does not carry
-/// tens of KB of prompt text through every call site.
+/// caller opts in via `persist_debug` (e.g. AutoProcessor
+/// `persist_debug: true`). Kept out of the base `Vec<String>` return so a
+/// normal pass does not carry tens of KB of prompt text through every call
+/// site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterpretationDebug {
     pub prompt: String,
@@ -390,12 +391,18 @@ pub async fn run_interpretation_with_strategy_and_model(
     model_override: Option<&str>,
     scope: Option<&Scope>,
     cursor: Option<&InterpretationRunCursor>,
-    debug_mode: bool,
-    // When `debug_mode` is on and this is `Some`, the engine emits
-    // `LlmRequestSent` (with the prompt) right before the LLM call and
-    // `LlmResponseReceived` (with the response) right after — mid-pass
-    // events so a UI can render "waiting on LLM" between them, not just
-    // one lump payload at `Processed`. Nico 2026-08-20 ask.
+    // Persist the raw LLM prompt + response on the pass's `InterpretationRun`
+    // node for retrospective inspection. Independent of `emit_ctx` below (the
+    // two switches were split on Nico's PR #903 ask): a caller can persist
+    // without emitting mid-pass events (post-hoc only), or emit without
+    // persisting (live observability, no graph-sync payload).
+    persist_debug: bool,
+    // When this is `Some`, the engine emits `LlmRequestSent` (with the
+    // prompt) right before the LLM call and `LlmResponseReceived` (with
+    // the response) right after — mid-pass events so a UI can render
+    // "waiting on LLM" between them, not just one lump payload at
+    // `Processed`. `None` skips the emits. Presence alone gates the emits
+    // — the watcher gates presence on `cfg.emit_debug_events`.
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
 ) -> anyhow::Result<InterpretationOutcome> {
     // Returns a task already spawned into its LLM worker, so `prompt` can use it
@@ -447,27 +454,24 @@ pub async fn run_interpretation_with_strategy_and_model(
         let task_id = task.task_id.clone();
         let prompt = prompt.clone();
         let capture = debug_response_capture.clone();
-        let want_debug = debug_mode && emit_ctx.is_some();
         let emit_ctx_cloned = emit_ctx.cloned();
         async move {
             use crate::perspectives::auto_processor::events::{
                 emit, AutoProcessorEvent, AutoProcessorStep,
             };
 
-            if want_debug {
-                if let Some(ctx) = emit_ctx_cloned.as_ref() {
-                    emit(
-                        AutoProcessorEvent::new(
-                            &ctx.perspective_uuid,
-                            &ctx.processor_id,
-                            AutoProcessorStep::LlmRequestSent,
-                        )
-                        .with_agent_did(&ctx.agent_did)
-                        .with_items(&ctx.item_ids)
-                        .with_llm_input(prompt.clone()),
+            if let Some(ctx) = emit_ctx_cloned.as_ref() {
+                emit(
+                    AutoProcessorEvent::new(
+                        &ctx.perspective_uuid,
+                        &ctx.processor_id,
+                        AutoProcessorStep::LlmRequestSent,
                     )
-                    .await;
-                }
+                    .with_agent_did(&ctx.agent_did)
+                    .with_items(&ctx.item_ids)
+                    .with_llm_input(prompt.clone()),
+                )
+                .await;
             }
 
             let result = service
@@ -475,23 +479,21 @@ pub async fn run_interpretation_with_strategy_and_model(
                 .await
                 .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
 
-            if want_debug {
-                if let Some(ctx) = emit_ctx_cloned.as_ref() {
-                    emit(
-                        AutoProcessorEvent::new(
-                            &ctx.perspective_uuid,
-                            &ctx.processor_id,
-                            AutoProcessorStep::LlmResponseReceived,
-                        )
-                        .with_agent_did(&ctx.agent_did)
-                        .with_items(&ctx.item_ids)
-                        .with_llm_output(result.text.clone()),
+            if let Some(ctx) = emit_ctx_cloned.as_ref() {
+                emit(
+                    AutoProcessorEvent::new(
+                        &ctx.perspective_uuid,
+                        &ctx.processor_id,
+                        AutoProcessorStep::LlmResponseReceived,
                     )
-                    .await;
-                }
+                    .with_agent_did(&ctx.agent_did)
+                    .with_items(&ctx.item_ids)
+                    .with_llm_output(result.text.clone()),
+                )
+                .await;
             }
 
-            if debug_mode {
+            if persist_debug {
                 if let Ok(mut slot) = capture.lock() {
                     *slot = Some(result.text.clone());
                 }
@@ -537,7 +539,7 @@ pub async fn run_interpretation_with_strategy_and_model(
     // Build the debug capture struct once so the shared cell's contents live
     // exactly one hop: extracted here, cloned into the meta persisted on the
     // run node, and returned to the caller for the live event.
-    let debug = if debug_mode {
+    let debug = if persist_debug {
         let response = debug_response_capture
             .lock()
             .ok()

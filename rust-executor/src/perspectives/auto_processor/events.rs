@@ -45,15 +45,15 @@ pub enum AutoProcessorStep {
     /// Running the LLM interpretation over the gathered transcript.
     RunningInterpretation,
     /// The LLM prompt has been built and dispatched — the pass is now
-    /// waiting on the model. Emitted only when the processor is in
-    /// `debug_mode`; carries the prompt on `llm_input`. Paired with
-    /// [`AutoProcessorStep::LlmResponseReceived`] so a UI can render a
-    /// "waiting on LLM" state between the two events (LLM calls take
-    /// seconds-to-minutes on local models).
+    /// waiting on the model. Emitted only when the processor has
+    /// `emit_debug_events: true`; carries the prompt on `llm_input`.
+    /// Paired with [`AutoProcessorStep::LlmResponseReceived`] so a UI
+    /// can render a "waiting on LLM" state between the two events (LLM
+    /// calls take seconds-to-minutes on local models).
     LlmRequestSent,
     /// The LLM response has arrived — the pass is about to plan and
-    /// commit writes. Emitted only when the processor is in `debug_mode`;
-    /// carries the response on `llm_output`.
+    /// commit writes. Emitted only when the processor has
+    /// `emit_debug_events: true`; carries the response on `llm_output`.
     LlmResponseReceived,
     /// The pass completed and wrote `bases` (the created/updated instance
     /// URIs; may be empty if the model proposed nothing new).
@@ -90,16 +90,17 @@ pub struct AutoProcessorEvent {
     pub detail: Option<String>,
     /// Live-debug raw LLM prompt for this pass. Present ONLY on
     /// [`AutoProcessorStep::LlmRequestSent`] events, and only when the
-    /// processor was configured with `AutoProcessorConfig.debug_mode = true`.
-    /// Never carried on `Processed` (which carries `bases` only). Absent
-    /// (`None`) in the normal path — LLM prompts are 10s of KB and would
-    /// otherwise inflate every event.
+    /// processor was configured with
+    /// `AutoProcessorConfig.emit_debug_events = true`. Never carried on
+    /// `Processed` (which carries `bases` only). Absent (`None`) in the
+    /// normal path — LLM prompts are 10s of KB and would otherwise
+    /// inflate every event.
     #[serde(default)]
     pub llm_input: Option<String>,
     /// Live-debug raw LLM response for this pass. Present ONLY on
     /// [`AutoProcessorStep::LlmResponseReceived`] events, and only when
     /// the processor was configured with
-    /// `AutoProcessorConfig.debug_mode = true`. Never carried on
+    /// `AutoProcessorConfig.emit_debug_events = true`. Never carried on
     /// `Processed`. Same size / privacy rules as `llm_input`.
     #[serde(default)]
     pub llm_output: Option<String>,
@@ -136,9 +137,9 @@ impl AutoProcessorEvent {
         self
     }
     /// Attach live-debug LLM I/O — only set from a pass whose
-    /// `AutoProcessorConfig.debug_mode` is `true`. Payload sizes are large
-    /// (10s of KB); the wire-level DID filter (Nico's 2026-08-19 call) keeps
-    /// this from leaking to observers who did not run the pass.
+    /// `AutoProcessorConfig.emit_debug_events` is `true`. Payload sizes are
+    /// large (10s of KB); the wire-level DID filter (Nico's 2026-08-19 call)
+    /// keeps this from leaking to observers who did not run the pass.
     pub fn with_llm_io(mut self, input: String, output: String) -> Self {
         self.llm_input = Some(input);
         self.llm_output = Some(output);
@@ -309,8 +310,8 @@ pub async fn subscribe_neighbourhood_state() -> broadcast::Receiver<String> {
 /// Everything the interpretation engine needs to emit its own
 /// `AutoProcessorEvent`s (`LlmRequestSent`, `LlmResponseReceived`) without
 /// pulling in the watcher's context. Populated by the watcher and passed
-/// down when a processor is in `debug_mode`; `None` skips all engine-side
-/// emissions.
+/// down when a processor has `emit_debug_events: true`; `None` skips all
+/// engine-side emissions.
 ///
 /// The engine emits directly here (via [`emit`]) rather than via a
 /// callback / channel to avoid the sync/async closure gymnastics — the

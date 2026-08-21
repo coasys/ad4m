@@ -140,18 +140,29 @@ pub struct AutoProcessorConfig {
     /// May differ from [`Self::existing_scope`] — a watcher can read from a
     /// broader subtree than it writes into, or vice-versa.
     pub mint_scope: Option<Scope>,
-    /// Live debug knob for UI observability. When `true`, each pass:
-    /// * enriches the `Processed` [`super::events::AutoProcessorEvent`] with
-    ///   the raw LLM prompt and response strings, so a subscribed client can
-    ///   render "what the model actually saw and returned" in real time; and
-    /// * persists the same prompt+response on the [`InterpretationRun`]
-    ///   subject class as `debug_prompt`/`debug_response`, so a UI can look
-    ///   the pass up historically even if it missed the WS event.
-    /// Default: `false`. Off saves both wire and graph-sync payload — LLM
-    /// prompts + responses are large (10s of KB), and every enabled peer
-    /// would sync them for every pass. Turn on per-processor when you need
-    /// to introspect a specific run.
-    pub debug_mode: bool,
+    /// Persist the raw LLM prompt + response on the pass's
+    /// [`super::super::interpretation::overlay::classes::InterpretationRunMeta`]
+    /// node (`debugPrompt`/`debugResponse` on the InterpretationRun subject
+    /// class), so a UI can look the pass up historically. Independent of
+    /// [`Self::emit_debug_events`] — a caller can persist without emitting
+    /// (post-hoc inspection only) or emit without persisting (live
+    /// observability, no graph-sync payload). Both were originally coupled
+    /// under a single `debug_mode` flag; split on Nico's ask (PR #903
+    /// review) to separate the two orthogonal concerns.
+    ///
+    /// Default: `false`. Prompts + responses are large (10s of KB) and
+    /// every enabled peer syncs them for every pass — turn on
+    /// per-processor when you need to introspect a specific run.
+    pub persist_debug: bool,
+    /// Emit `LlmRequestSent` and `LlmResponseReceived`
+    /// [`super::events::AutoProcessorEvent`]s mid-pass, so a subscribed UI
+    /// can render "waiting on LLM" between prompt-send and response-receive
+    /// instead of a single lump payload at `Processed`. Independent of
+    /// [`Self::persist_debug`] — see that field's docs.
+    ///
+    /// Default: `false`. Off saves wire payload when a UI does not listen
+    /// for the mid-pass events.
+    pub emit_debug_events: bool,
 }
 
 /// Deterministic node URI for an AutoProcessor. Deterministic in
@@ -182,18 +193,30 @@ pub async fn ensure_auto_processor_class(
 /// are `setSingleTarget`) and appends its interpretation classes (deduplicated
 /// on read by [`load_processors`]).
 ///
-/// `debug_mode_write` is a tri-state intent — resolved at the API boundary
-/// from the request's `debugMode: Option<bool>`. `Some(true)` writes the link
-/// as `"true"`; `Some(false)` writes it as `"false"` (which
-/// [`load_processors`] parses to disabled — the previous behaviour of
-/// omitting the value when `false` left an existing `"true"` link stale,
-/// see CodeRabbit #903 CR #3). `None` omits the value entirely, so the
-/// setter is not called and any pre-existing debug link is preserved
-/// verbatim.
+/// `persist_debug_write` and `emit_debug_events_write` are tri-state intents,
+/// resolved at the API boundary from the request's `Option<bool>` fields.
+/// Each independently:
+/// * `Some(true)` writes the link as `"true"`.
+/// * `Some(false)` writes the link as `"false"` — actively overwriting any
+///   pre-existing `"true"` link on an updated processor via `setSingleTarget`
+///   (CodeRabbit #903 CR #3: omitting on false previously left the stale
+///   link in place, silently keeping the flag on).
+/// * `None` omits the value entirely — the setter is not called and any
+///   pre-existing link is preserved verbatim (used when the WS layer wants to
+///   toggle only one of the two switches without disturbing the other).
+///
+/// The legacy `debugMode` scalar is intentionally **not written** here.
+/// [`load_processors`] still reads it as a fallback for pre-split configs
+/// (a peer that wrote `debugMode: true` before the split gets both switches
+/// on at load time), but the new API expresses debug state through the two
+/// specific fields. Old-client requests that carry `debugMode: Some(v)` are
+/// expanded at the WS boundary into `persist_debug_write=Some(v)` and
+/// `emit_debug_events_write=Some(v)`.
 pub async fn write_processor(
     perspective: &mut PerspectiveInstance,
     cfg: &AutoProcessorConfig,
-    debug_mode_write: Option<bool>,
+    persist_debug_write: Option<bool>,
+    emit_debug_events_write: Option<bool>,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
     let Some((first_class, more_classes)) = cfg.interpretation_classes.split_first() else {
@@ -241,18 +264,20 @@ pub async fn write_processor(
             .map_err(|e| anyhow::anyhow!("write_processor: serialize mint_scope: {e:#}"))?;
         values["mintScope"] = json.into();
     }
-    // Persist `debug_mode` according to the caller's explicit tri-state
-    // intent. Some(true) writes the "true" link; Some(false) writes an
-    // explicit "false" link so an existing "true" link on an updated
-    // processor is overwritten via `setSingleTarget` (CodeRabbit #903 CR #3:
-    // omitting on false previously left the stale link in place, silently
-    // keeping debug on). None omits the value entirely so the setter is
-    // not called — the pre-existing debug link, if any, is preserved.
-    // Key stays camelCase to match the SDNA property name (`debugMode` —
-    // see AUTO_PROCESSOR_SDNA and the 2026-08-20 debug note on snake_case-
-    // key silent no-ops).
-    if let Some(v) = debug_mode_write {
-        values["debugMode"] = v.to_string().into();
+    // Persist the two debug switches per the caller's explicit tri-state
+    // intent (see the module docstring on `write_processor`). Keys stay
+    // camelCase to match the SDNA property names (`persistDebug`,
+    // `emitDebugEvents` — see AUTO_PROCESSOR_SDNA; snake_case keys silently
+    // no-op through `create_subject`).
+    //
+    // The legacy `debugMode` scalar is not written by this path — it lives
+    // only as a load-time backwards-compat fallback for peers that wrote it
+    // before the split.
+    if let Some(v) = persist_debug_write {
+        values["persistDebug"] = v.to_string().into();
+    }
+    if let Some(v) = emit_debug_events_write {
+        values["emitDebugEvents"] = v.to_string().into();
     }
 
     // Batch the create_subject + follow-on update_subject calls so the whole
@@ -351,7 +376,11 @@ pub async fn load_processors(
             "processorId", "sourceScopeQuery", "basePrefix",
             "interpretationClasses", "debounceMs", "batchMin", "batchMax",
             "maxWaitMs", "claimTtlMs", "dedupStrategy", "sourceWindowMs",
-            "existingScope", "mintScope", "debugMode",
+            "existingScope", "mintScope",
+            // `debugMode` is queried as a legacy fallback only — new writes
+            // go through `persistDebug` + `emitDebugEvents`. See
+            // `config_from_instance` for the resolution rule.
+            "debugMode", "persistDebug", "emitDebugEvents",
         ]
     })
     .to_string();
@@ -458,20 +487,34 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         None => None,
     };
 
-    // Absent `debug_mode` → default `false`. Present-but-unparseable is a
-    // config error (bail, same policy as the other scalars): a hand-edited
-    // typo shouldn't silently run without debug telemetry when the caller
-    // asked for it.
-    let debug_mode = match scalar("debugMode") {
-        Some(s) => match s.parse::<bool>() {
-            Ok(v) => v,
-            Err(_) => {
-                log::warn!("config_from_instance: debugMode is not `true`/`false`");
-                return None;
-            }
-        },
-        None => false,
+    // Debug switches: the specific fields (`persistDebug`, `emitDebugEvents`)
+    // take precedence when present. When absent, fall back to the legacy
+    // `debugMode` scalar (which coupled both concerns) so a pre-split peer's
+    // config still loads with the same behaviour. When all three are absent
+    // → both switches default to `false`.
+    //
+    // Present-but-unparseable is a config error (bail, same policy as the
+    // other scalars): a hand-edited typo shouldn't silently run without
+    // debug telemetry when the caller asked for it.
+    let parse_bool = |name: &str| -> Option<Option<bool>> {
+        match scalar(name) {
+            Some(s) => match s.parse::<bool>() {
+                Ok(v) => Some(Some(v)),
+                Err(_) => {
+                    log::warn!("config_from_instance: {name} is not `true`/`false`");
+                    None
+                }
+            },
+            None => Some(None),
+        }
     };
+    let legacy_debug_mode = parse_bool("debugMode")?;
+    let persist_debug = parse_bool("persistDebug")?
+        .or(legacy_debug_mode)
+        .unwrap_or(false);
+    let emit_debug_events = parse_bool("emitDebugEvents")?
+        .or(legacy_debug_mode)
+        .unwrap_or(false);
 
     Some(AutoProcessorConfig {
         processor_id: scalar("processorId")?,
@@ -487,7 +530,8 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         source_window_ms,
         existing_scope,
         mint_scope,
-        debug_mode,
+        persist_debug,
+        emit_debug_events,
     })
 }
 
@@ -527,7 +571,8 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
-            debug_mode: false,
+            persist_debug: false,
+            emit_debug_events: false,
         }
     }
 
@@ -536,7 +581,7 @@ mod tests {
     async fn write_then_load_roundtrip() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let cfg = sample_config("summariser");
-        write_processor(&mut p, &cfg, Some(false), &ctx)
+        write_processor(&mut p, &cfg, Some(false), Some(false), &ctx)
             .await
             .expect("write_processor");
         let loaded = load_processors(&p).await.expect("load_processors");
@@ -549,9 +594,15 @@ mod tests {
     #[tokio::test]
     async fn write_creates_shared_links() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        write_processor(&mut p, &sample_config("shared"), Some(false), &ctx)
-            .await
-            .expect("write_processor");
+        write_processor(
+            &mut p,
+            &sample_config("shared"),
+            Some(false),
+            Some(false),
+            &ctx,
+        )
+        .await
+        .expect("write_processor");
         let links = p
             .get_links(&LinkQuery {
                 source: Some(processor_node("shared")),
@@ -588,7 +639,7 @@ mod tests {
         // write in reverse-alphabetical order to prove sort is by the field,
         // not by write order.
         for id in ["z-tagger", "a-summariser", "m-classifier"] {
-            write_processor(&mut p, &sample_config(id), Some(false), &ctx)
+            write_processor(&mut p, &sample_config(id), Some(false), Some(false), &ctx)
                 .await
                 .expect("write");
         }
@@ -608,7 +659,7 @@ mod tests {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let mut cfg = sample_config("minimal");
         cfg.dedup_strategy_json = None;
-        write_processor(&mut p, &cfg, Some(false), &ctx)
+        write_processor(&mut p, &cfg, Some(false), Some(false), &ctx)
             .await
             .expect("write");
         let loaded = load_processors(&p).await.expect("load");
@@ -625,7 +676,7 @@ mod tests {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let mut cfg = sample_config("windowed");
         cfg.source_window_ms = Some(42);
-        write_processor(&mut p, &cfg, Some(false), &ctx)
+        write_processor(&mut p, &cfg, Some(false), Some(false), &ctx)
             .await
             .expect("write");
         let loaded = load_processors(&p).await.expect("load");
@@ -642,7 +693,7 @@ mod tests {
 
         // Case 1: both scopes absent (baseline).
         let bare = sample_config("bare");
-        write_processor(&mut p, &bare, Some(false), &ctx)
+        write_processor(&mut p, &bare, Some(false), Some(false), &ctx)
             .await
             .expect("write");
 
@@ -657,7 +708,7 @@ mod tests {
             id: "soa://project/42/backlog".into(),
             predicate: "ad4m://has_child".into(),
         });
-        write_processor(&mut p, &raw, Some(false), &ctx)
+        write_processor(&mut p, &raw, Some(false), Some(false), &ctx)
             .await
             .expect("write");
 
@@ -671,7 +722,7 @@ mod tests {
             field: Some("tasks".into()),
         });
         model.mint_scope = None;
-        write_processor(&mut p, &model, Some(false), &ctx)
+        write_processor(&mut p, &model, Some(false), Some(false), &ctx)
             .await
             .expect("write");
 
@@ -690,12 +741,24 @@ mod tests {
     #[tokio::test]
     async fn load_skips_node_with_unparseable_scope() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        write_processor(&mut p, &sample_config("good-scope"), Some(false), &ctx)
-            .await
-            .expect("write");
-        write_processor(&mut p, &sample_config("garbled-scope"), Some(false), &ctx)
-            .await
-            .expect("write");
+        write_processor(
+            &mut p,
+            &sample_config("good-scope"),
+            Some(false),
+            Some(false),
+            &ctx,
+        )
+        .await
+        .expect("write");
+        write_processor(
+            &mut p,
+            &sample_config("garbled-scope"),
+            Some(false),
+            Some(false),
+            &ctx,
+        )
+        .await
+        .expect("write");
         p.update_subject(
             class_option(),
             processor_node("garbled-scope"),
@@ -719,9 +782,15 @@ mod tests {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         // A complete one first, so the class is registered and we prove the
         // partial is skipped while the valid one still comes through.
-        write_processor(&mut p, &sample_config("complete"), Some(false), &ctx)
-            .await
-            .expect("write complete");
+        write_processor(
+            &mut p,
+            &sample_config("complete"),
+            Some(false),
+            Some(false),
+            &ctx,
+        )
+        .await
+        .expect("write complete");
         p.add_links(
             vec![Link {
                 source: processor_node("partial"),
@@ -746,12 +815,24 @@ mod tests {
     #[tokio::test]
     async fn load_skips_node_with_unparseable_numeric() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        write_processor(&mut p, &sample_config("garbled"), Some(false), &ctx)
-            .await
-            .expect("write");
-        write_processor(&mut p, &sample_config("garbled-2"), Some(false), &ctx)
-            .await
-            .expect("write");
+        write_processor(
+            &mut p,
+            &sample_config("garbled"),
+            Some(false),
+            Some(false),
+            &ctx,
+        )
+        .await
+        .expect("write");
+        write_processor(
+            &mut p,
+            &sample_config("garbled-2"),
+            Some(false),
+            Some(false),
+            &ctx,
+        )
+        .await
+        .expect("write");
         p.update_subject(
             class_option(),
             processor_node("garbled-2"),
@@ -776,12 +857,24 @@ mod tests {
     #[tokio::test]
     async fn load_skips_node_with_zero_claim_ttl() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        write_processor(&mut p, &sample_config("good"), Some(false), &ctx)
-            .await
-            .expect("write good");
-        write_processor(&mut p, &sample_config("zero-ttl"), Some(false), &ctx)
-            .await
-            .expect("write zero-ttl");
+        write_processor(
+            &mut p,
+            &sample_config("good"),
+            Some(false),
+            Some(false),
+            &ctx,
+        )
+        .await
+        .expect("write good");
+        write_processor(
+            &mut p,
+            &sample_config("zero-ttl"),
+            Some(false),
+            Some(false),
+            &ctx,
+        )
+        .await
+        .expect("write zero-ttl");
         p.update_subject(
             class_option(),
             processor_node("zero-ttl"),
@@ -803,12 +896,24 @@ mod tests {
     #[tokio::test]
     async fn load_skips_node_with_negative_max_wait() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        write_processor(&mut p, &sample_config("good"), Some(false), &ctx)
-            .await
-            .expect("write good");
-        write_processor(&mut p, &sample_config("neg-wait"), Some(false), &ctx)
-            .await
-            .expect("write neg-wait");
+        write_processor(
+            &mut p,
+            &sample_config("good"),
+            Some(false),
+            Some(false),
+            &ctx,
+        )
+        .await
+        .expect("write good");
+        write_processor(
+            &mut p,
+            &sample_config("neg-wait"),
+            Some(false),
+            Some(false),
+            &ctx,
+        )
+        .await
+        .expect("write neg-wait");
         p.update_subject(
             class_option(),
             processor_node("neg-wait"),
@@ -838,7 +943,7 @@ mod tests {
             "ns://Observation".into(),
             "ns://Question".into(),
         ];
-        write_processor(&mut p, &cfg, Some(false), &ctx)
+        write_processor(&mut p, &cfg, Some(false), Some(false), &ctx)
             .await
             .expect("write");
         let loaded = load_processors(&p).await.expect("load");
@@ -866,7 +971,7 @@ mod tests {
             "ns://Task".into(),
             "ns://Question".into(),
         ];
-        write_processor(&mut p, &cfg, Some(false), &ctx)
+        write_processor(&mut p, &cfg, Some(false), Some(false), &ctx)
             .await
             .expect("write");
         let loaded = load_processors(&p).await.expect("load");
@@ -884,7 +989,7 @@ mod tests {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let mut cfg = sample_config("empty");
         cfg.interpretation_classes.clear();
-        let err = write_processor(&mut p, &cfg, Some(false), &ctx)
+        let err = write_processor(&mut p, &cfg, Some(false), Some(false), &ctx)
             .await
             .expect_err("must reject empty interpretation_classes");
         assert!(
@@ -893,51 +998,151 @@ mod tests {
         );
     }
 
-    /// CodeRabbit #903 CR #3 regression. The tri-state `debug_mode_write` intent:
+    /// CodeRabbit #903 CR #3 regression, applied per-switch. Each of
+    /// `persist_debug_write` and `emit_debug_events_write` carries the same
+    /// tri-state intent:
     ///
-    /// - `Some(true)` writes `"true"` — processor loads with debug ON.
-    /// - `Some(false)` after `Some(true)` writes `"false"` — processor loads
-    ///   with debug OFF (the CR bug: previously the setter was omitted, so
-    ///   the stale `"true"` link survived and debug stayed on).
-    /// - `None` after `Some(true)` skips the setter — the existing `"true"`
-    ///   link is preserved, processor loads with debug still ON.
+    /// - `Some(true)` writes `"true"` — the corresponding field loads ON.
+    /// - `Some(false)` after `Some(true)` writes `"false"` — the field
+    ///   loads OFF (the CR bug: previously omitting the setter left the
+    ///   stale `"true"` link in place, silently keeping the flag on).
+    /// - `None` after `Some(true)` skips the setter — the existing
+    ///   `"true"` link is preserved and the field loads ON.
     #[tokio::test]
-    async fn debug_mode_toggle_off_overwrites_existing_true_link() {
+    async fn debug_switches_tri_state_write_and_preserve() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let cfg = sample_config("debug-toggle");
 
-        // Enable debug — link becomes "true".
-        write_processor(&mut p, &cfg, Some(true), &ctx)
+        // Enable both — links become "true".
+        write_processor(&mut p, &cfg, Some(true), Some(true), &ctx)
             .await
-            .expect("write on");
-        let loaded = load_processors(&p).await.expect("load-on");
+            .expect("write both on");
+        let loaded = load_processors(&p).await.expect("load-both-on");
+        assert!(loaded[0].persist_debug, "persist_debug must load enabled");
         assert!(
-            loaded[0].debug_mode,
-            "debug should load enabled after Some(true)"
+            loaded[0].emit_debug_events,
+            "emit_debug_events must load enabled"
         );
 
-        // Explicitly disable — link must become "false" (or be removed);
-        // load must observe debug OFF.
-        write_processor(&mut p, &cfg, Some(false), &ctx)
+        // Explicitly disable both — links must become "false".
+        write_processor(&mut p, &cfg, Some(false), Some(false), &ctx)
             .await
-            .expect("write off");
-        let loaded = load_processors(&p).await.expect("load-off");
+            .expect("write both off");
+        let loaded = load_processors(&p).await.expect("load-both-off");
         assert!(
-            !loaded[0].debug_mode,
-            "debug MUST load disabled after Some(false) — CR #903 CR #3 regression"
+            !loaded[0].persist_debug,
+            "persist_debug MUST load disabled after Some(false) — CR #903 CR #3 regression"
+        );
+        assert!(
+            !loaded[0].emit_debug_events,
+            "emit_debug_events MUST load disabled after Some(false) — CR #903 CR #3 regression"
         );
 
-        // Re-enable, then update with None: existing "true" link is preserved.
-        write_processor(&mut p, &cfg, Some(true), &ctx)
+        // Re-enable both, then update with (None, None): existing links preserved.
+        write_processor(&mut p, &cfg, Some(true), Some(true), &ctx)
             .await
-            .expect("write on again");
-        write_processor(&mut p, &cfg, None, &ctx)
+            .expect("write both on again");
+        write_processor(&mut p, &cfg, None, None, &ctx)
             .await
             .expect("write no-touch");
         let loaded = load_processors(&p).await.expect("load-preserve");
         assert!(
-            loaded[0].debug_mode,
-            "debug MUST stay enabled when the caller omits debug_mode (tri-state preserve)"
+            loaded[0].persist_debug,
+            "persist_debug MUST stay enabled when the caller omits it (tri-state preserve)"
+        );
+        assert!(
+            loaded[0].emit_debug_events,
+            "emit_debug_events MUST stay enabled when the caller omits it (tri-state preserve)"
+        );
+    }
+
+    /// The two switches are independent — a caller can toggle one without
+    /// disturbing the other, in either direction. Guards against the
+    /// pre-split coupling where "debug" was a single knob.
+    #[tokio::test]
+    async fn debug_switches_are_independent() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let cfg = sample_config("independent");
+
+        // Persist on, emit off — retrospective debugging without live wire chatter.
+        write_processor(&mut p, &cfg, Some(true), Some(false), &ctx)
+            .await
+            .expect("write persist-only");
+        let loaded = load_processors(&p).await.expect("load persist-only");
+        assert!(loaded[0].persist_debug);
+        assert!(!loaded[0].emit_debug_events);
+
+        // Flip: emit on, persist off — live UI observability without graph-sync payload.
+        write_processor(&mut p, &cfg, Some(false), Some(true), &ctx)
+            .await
+            .expect("write events-only");
+        let loaded = load_processors(&p).await.expect("load events-only");
+        assert!(!loaded[0].persist_debug);
+        assert!(loaded[0].emit_debug_events);
+
+        // Toggle just persist, leave emit untouched (None): emit stays on.
+        write_processor(&mut p, &cfg, Some(true), None, &ctx)
+            .await
+            .expect("write persist-flip");
+        let loaded = load_processors(&p).await.expect("load persist-flip");
+        assert!(loaded[0].persist_debug);
+        assert!(
+            loaded[0].emit_debug_events,
+            "emit_debug_events must be untouched by a persist-only write"
+        );
+    }
+
+    /// Legacy backwards-compat: a peer that wrote the pre-split `debugMode`
+    /// scalar (before this PR split it into `persistDebug`/`emitDebugEvents`)
+    /// must still load with both switches carrying the same value, so the
+    /// coupled behaviour it originally requested is preserved. The specific
+    /// fields take precedence when present.
+    #[tokio::test]
+    async fn legacy_debug_mode_scalar_is_fallback_for_both_switches() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        // Ensure the class is registered by writing a config first (so
+        // subsequent hand-rolled `update_subject` calls target a known node).
+        let cfg = sample_config("legacy");
+        write_processor(&mut p, &cfg, None, None, &ctx)
+            .await
+            .expect("write baseline");
+
+        // Simulate a pre-split write: only the legacy `debugMode` scalar set,
+        // both new-field scalars absent. Both switches must load `true`.
+        p.update_subject(
+            class_option(),
+            processor_node("legacy"),
+            serde_json::json!({ "debugMode": "true" }),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed legacy debugMode=true");
+        let loaded = load_processors(&p).await.expect("load legacy-both-on");
+        assert!(
+            loaded[0].persist_debug,
+            "persist_debug must fall back to legacy debugMode when the specific field is absent"
+        );
+        assert!(
+            loaded[0].emit_debug_events,
+            "emit_debug_events must fall back to legacy debugMode when the specific field is absent"
+        );
+
+        // New-field write takes precedence over the still-present legacy
+        // scalar — a caller migrating off the coupled flag can flip one
+        // switch independently even when `debugMode=true` is still on the graph.
+        write_processor(&mut p, &cfg, Some(false), None, &ctx)
+            .await
+            .expect("write persist-off");
+        let loaded = load_processors(&p).await.expect("load precedence");
+        assert!(
+            !loaded[0].persist_debug,
+            "explicit persistDebug=false must override legacy debugMode=true"
+        );
+        assert!(
+            loaded[0].emit_debug_events,
+            "emit_debug_events must still fall back to legacy debugMode=true (specific field absent)"
         );
     }
 }

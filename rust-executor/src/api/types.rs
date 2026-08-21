@@ -637,11 +637,27 @@ pub struct AddAutoProcessorRequest {
     /// at watch time.
     #[serde(default)]
     pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
-    /// Live debug knob for UI observability. When `true`, each pass enriches
-    /// the `Processed` `auto-processor-event` with the raw LLM prompt +
-    /// response, and persists them on the corresponding `InterpretationRun`
-    /// (`debug_prompt` / `debug_response`). Default `false` — LLM I/O is
-    /// large and blows the wire + shared-graph sync when always on.
+    /// Persist the raw LLM prompt + response on the pass's
+    /// `InterpretationRun` node (`debugPrompt`/`debugResponse`). Independent
+    /// of `emit_debug_events`; both were originally coupled under a single
+    /// `debug_mode` flag, split on Nico's PR #903 ask so a caller can
+    /// persist without emitting mid-pass events (post-hoc inspection only)
+    /// or emit without persisting (live observability with no graph-sync
+    /// payload). Default `false` — prompts + responses are 10s of KB and
+    /// every enabled peer syncs them for every pass.
+    #[serde(default)]
+    pub persist_debug: Option<bool>,
+    /// Emit `LlmRequestSent` and `LlmResponseReceived`
+    /// `auto-processor-event`s mid-pass, so a subscribed UI can render
+    /// "waiting on LLM" between prompt-send and response-receive. See
+    /// `persist_debug` for the split rationale. Default `false`.
+    #[serde(default)]
+    pub emit_debug_events: Option<bool>,
+    /// Legacy backwards-compat alias — pre-split callers set `debug_mode`
+    /// as a single coupled flag. When present and both `persist_debug` +
+    /// `emit_debug_events` are absent, its value is expanded to both. The
+    /// two specific fields take precedence when present. Prefer the split
+    /// fields; this alias is retained so pre-split clients still work.
     #[serde(default)]
     pub debug_mode: Option<bool>,
 }

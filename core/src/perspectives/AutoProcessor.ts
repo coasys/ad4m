@@ -17,7 +17,7 @@ export type RawScope = { id: string; predicate: string };
 /**
  * One step in an auto-processor pass (serde camelCase of the Rust enum).
  *
- * ## Lifecycle (winning peer, debug_mode: true)
+ * ## Lifecycle (winning peer, emitDebugEvents: true)
  *
  * A pass on the winning executor emits, in order:
  *
@@ -26,10 +26,10 @@ export type RawScope = { id: string; predicate: string };
  *  3. `gatheringTranscript`    — pulling the batch's transcript turns
  *  4. `runningInterpretation`  — about to invoke the LLM
  *  5. `llmRequestSent`         — prompt built + dispatched; carries `llmInput`
- *                                (only when `debug_mode: true`)
+ *                                (only when `emitDebugEvents: true`)
  *  6. `llmResponseReceived`    — LLM response arrived; carries `llmOutput`
- *                                (only when `debug_mode: true`) — the UI can
- *                                render "waiting on LLM" between steps 5 and 6
+ *                                (only when `emitDebugEvents: true`) — the UI
+ *                                can render "waiting on LLM" between steps 5-6
  *  7. `processed`              — pass complete; carries `bases[]` (new/updated
  *                                instance URIs)
  *
@@ -82,11 +82,11 @@ export interface AutoProcessorEvent {
   detail?: string;
   /** Raw LLM prompt this pass fed the model. Present ONLY on
    *  `llmRequestSent` events, and only when the processor was configured
-   *  with `debugMode: true`. Never carried on `processed`. */
+   *  with `emitDebugEvents: true`. Never carried on `processed`. */
   llmInput?: string;
   /** Raw LLM response this pass received. Present ONLY on
    *  `llmResponseReceived` events, and only when the processor was
-   *  configured with `debugMode: true`. Never carried on `processed`. */
+   *  configured with `emitDebugEvents: true`. Never carried on `processed`. */
   llmOutput?: string;
 }
 
@@ -194,13 +194,28 @@ export interface AddAutoProcessorConfig {
    */
   mintScope?: RawScope;
   /**
-   * Live debug knob for UI observability. When `true`, each pass enriches
-   * the `processed` `auto-processor-event` with the raw LLM prompt +
-   * response, and persists the same strings on the pass's
-   * `InterpretationRun` (`debugPrompt` / `debugResponse`) so a UI can look
-   * them up post-hoc even if it missed the live event. Default `false` —
-   * LLM I/O is large (tens of KB) and would otherwise inflate every event
-   * and every shared-graph sync.
+   * Persist the raw LLM prompt + response on the pass's `InterpretationRun`
+   * (`debugPrompt` / `debugResponse`) so a UI can look them up post-hoc.
+   * Independent of `emitDebugEvents` — Nico's PR #903 split so a caller
+   * can persist without emitting mid-pass events (retrospective inspection
+   * only) or emit without persisting (live observability, no graph-sync
+   * payload). Default `false` — LLM I/O is 10s of KB per pass and every
+   * enabled peer syncs it.
+   */
+  persistDebug?: boolean;
+  /**
+   * Emit `LlmRequestSent` and `LlmResponseReceived` `auto-processor-event`s
+   * mid-pass, so a subscribed UI can render "waiting on LLM" between
+   * prompt-send and response-receive. See `persistDebug` for the split
+   * rationale. Default `false`.
+   */
+  emitDebugEvents?: boolean;
+  /**
+   * Legacy backwards-compat alias — pre-split callers set `debugMode` as a
+   * single coupled flag. When present and both `persistDebug` +
+   * `emitDebugEvents` are absent, its value is expanded to both. The two
+   * specific fields take precedence when present. Prefer the split fields;
+   * this alias is retained so pre-split clients still work.
    */
   debugMode?: boolean;
 }

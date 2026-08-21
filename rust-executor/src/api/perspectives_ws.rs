@@ -1238,15 +1238,18 @@ async fn add_auto_processor_handler(
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
-    // Tri-state debug_mode intent (CodeRabbit #903 CR #3): preserve the
-    // caller's `Option<bool>` verbatim across the write path. `None`
-    // (omitted) leaves any existing debug link alone; `Some(v)` writes
-    // the link explicitly, so a `Some(false)` on an already-debugging
-    // processor actively toggles it off instead of silently no-op'ing.
-    // The in-memory `cfg.debug_mode` is only used for the current call —
-    // the watcher re-reads state via `load_processors`, so unwrapping to
-    // `false` here does not clobber the runtime state.
-    let debug_mode_write = body.debug_mode;
+    // Tri-state per-switch intent (CodeRabbit #903 CR #3 applied per-switch;
+    // Nico's PR #903 split): each `Option<bool>` is preserved verbatim across
+    // the write path. `None` leaves the existing link alone; `Some(v)` writes
+    // it explicitly, so a `Some(false)` on an already-debugging processor
+    // actively toggles it off instead of silently no-op'ing.
+    //
+    // Legacy alias: pre-split clients send only `debug_mode`. When the
+    // corresponding specific field is absent, its value is used as fallback
+    // — the coupled pre-split semantics. When the specific field is set,
+    // the alias is ignored for that field (specific wins).
+    let persist_debug_write = body.persist_debug.or(body.debug_mode);
+    let emit_debug_events_write = body.emit_debug_events.or(body.debug_mode);
     let cfg = AutoProcessorConfig {
         processor_id: body.processor_id.clone(),
         source_scope_query: body.source_scope_query,
@@ -1261,11 +1264,21 @@ async fn add_auto_processor_handler(
         source_window_ms: body.source_window_ms,
         existing_scope: body.existing_scope,
         mint_scope: body.mint_scope,
-        debug_mode: debug_mode_write.unwrap_or(false),
+        // In-memory scratch — the watcher re-reads state via `load_processors`
+        // on every tick, so unwrapping to `false` here does not clobber
+        // runtime state.
+        persist_debug: persist_debug_write.unwrap_or(false),
+        emit_debug_events: emit_debug_events_write.unwrap_or(false),
     };
-    write_processor(&mut perspective, &cfg, debug_mode_write, &agent_context)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    write_processor(
+        &mut perspective,
+        &cfg,
+        persist_debug_write,
+        emit_debug_events_write,
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(body.processor_id)?)
 }
