@@ -1,0 +1,11 @@
+{
+  "target_class": "ad4m://InterpretationOverlay",
+  "interpretation_hint": "Provenance overlay marking an instance as LLM-inferred, with the last-inferred value snapshot.",
+  "constructor_actions": [
+    {"action": "addLink", "source": "this", "predicate": "ad4m://interp/kind", "target": "create"}
+  ],
+  "properties": [
+    {"path": "ad4m://interp/kind", "name": "kind", "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://interp/kind", "target": "value"}]},
+    {"path": "ad4m://interp/run",  "name": "run",  "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://interp/run",  "target": "value"}]}
+  ]
+}

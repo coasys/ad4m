@@ -79,7 +79,7 @@ export {
 export { buildWakeMessage, postWake } from "./wakerHelpers";
 export { WakerSubscriptionManager } from "./wakerSubscriptionManager";
 export type { WakerSubscriptionManagerOptions, WakerLogger } from "./wakerSubscriptionManager";
-export { runSetup } from "./setup";
+export { runSetup, loginViaEmailVerification } from "./setup";
 
 // ---------------------------------------------------------------------------
 // MCP HTTP Client (Streamable HTTP with SSE support)
@@ -394,12 +394,91 @@ export default function ad4mPlugin(api: any) {
   }
 
   /**
-   * Obtain a JWT token from a running executor via MCP capability request.
+   * Helper: detect "user not found" errors from the executor.
+   */
+  function isUserNotFoundError(error: string | undefined): boolean {
+    if (!error) return false;
+    const lower = error.toLowerCase();
+    return lower.includes("user not found") || lower.includes("user does not exist") || lower.includes("account not found");
+  }
+
+  /**
+   * Obtain a JWT token from a running executor.
+   *
+   * When email/password credentials are available, tries multi-user login first
+   * (login_email, with auto-signup on "user not found"). Falls back to the
+   * capability-request flow (6-digit code from launcher UI).
+   *
+   * Password is resolved from `AD4M_PASSWORD` env var (preferred, headless-safe)
+   * or `providedConfig.password` (discouraged: plaintext-at-rest). At runtime we
+   * never prompt on stdin — the service starts headless.
+   *
    * Returns the JWT string or empty string on failure.
    */
   async function obtainJwtFromExecutor(): Promise<string> {
+    const email = providedConfig.email;
+    const password = process.env.AD4M_PASSWORD || providedConfig.password;
+    const multiUser = providedConfig.multiUser === true;
+
+    if (multiUser && email && !password) {
+      logger.warn(
+        `[ad4m] Multi-user re-auth needed for ${email} but no password available. ` +
+          `Export AD4M_PASSWORD in the environment that starts OpenClaw so the plugin ` +
+          `can obtain a fresh JWT when the current one expires.`,
+      );
+    }
+
     try {
       const initResp = await mcpInitialize(endpoint);
+
+      // Multi-user: try email/password login first
+      if (email && password) {
+        logger.info(`[ad4m] Attempting email/password login for ${email}...`);
+
+        const loginResult = await mcpCallTool(
+          endpoint,
+          "login_email",
+          { email, password },
+          initResp.sessionId,
+        );
+        const loginData = extractMcpResultData(loginResult);
+
+        if (loginData?.token) {
+          logger.info("[ad4m] Email/password login successful!");
+          return loginData.token;
+        }
+
+        // User doesn't exist — signup then retry login
+        if (isUserNotFoundError(loginData?.error)) {
+          logger.info("[ad4m] User not found. Attempting signup...");
+          const signupResult = await mcpCallTool(
+            endpoint,
+            "signup",
+            { email, password },
+            initResp.sessionId,
+          );
+          const signupData = extractMcpResultData(signupResult);
+          if (signupData?.did) {
+            logger.info(`[ad4m] Signup successful! DID: ${signupData.did}`);
+            const retryLogin = await mcpCallTool(
+              endpoint,
+              "login_email",
+              { email, password },
+              initResp.sessionId,
+            );
+            const retryData = extractMcpResultData(retryLogin);
+            if (retryData?.token) {
+              logger.info("[ad4m] Login after signup successful!");
+              return retryData.token;
+            }
+          }
+        }
+
+        logger.warn(`[ad4m] Email login failed: ${JSON.stringify(loginData?.error ?? loginData)}`);
+        return "";
+      }
+
+      // Default: capability request flow (6-digit code from launcher UI)
       const capResult = await mcpCallTool(
         endpoint,
         "request_capability",
@@ -498,8 +577,9 @@ Notes:
   async function subscribeToMentionsForPerspective(
     perspectiveId: string,
   ): Promise<string> {
-    // Skip if already subscribed
-    const existingId = `mention-${perspectiveId.substring(0, 8)}`;
+    // Skip if already subscribed. Must match the executor's build_mention_sub_id
+    // (`mention-${perspective_id}`) so the dedup guard is effective.
+    const existingId = `mention-${perspectiveId}`;
     if (_subscriptionManager?.has(existingId)) {
       return `Already subscribed to mentions in perspective ${perspectiveId}.`;
     }
@@ -850,8 +930,10 @@ Notes:
   api.registerService({
     id: "ad4m-mcp",
     async start(ctx: any) {
-      // Capture _stateDir from service context
-      if (ctx?._stateDir) {
+      // Capture the state dir from the service context. The field is `stateDir`
+      // (the guard used to check `_stateDir`, which the context never sets, so
+      // the dir was never captured and waker state never persisted).
+      if (ctx?.stateDir) {
         _stateDir = ctx.stateDir;
       }
 
@@ -912,6 +994,7 @@ Notes:
           binaryPath,
           config.rustLog,
           config.executorLogTarget ?? "file",
+          config.runHolochain ?? true,
         );
         if (!executorStartResult) {
           logger.error(
@@ -1020,8 +1103,9 @@ Notes:
       logger.info("[ad4m-waker] ── Waker service start() ──");
       logger.info(`[ad4m-waker] stateDir from ctx: ${ctx?.stateDir ?? "N/A"}, existing stateDir: ${_stateDir || "N/A"}`);
 
-      // Capture _stateDir from service context (in case mcp service didn't set it)
-      if (ctx?._stateDir && !_stateDir) {
+      // Capture the state dir from the service context (in case the mcp service
+      // didn't set it). The field is `stateDir`, not `_stateDir`.
+      if (ctx?.stateDir && !_stateDir) {
         _stateDir = ctx.stateDir;
       }
 
