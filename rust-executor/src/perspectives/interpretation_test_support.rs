@@ -13,9 +13,10 @@
 
 use super::interpretation::{
     apply_interpretation_ops, class_local_name, existing_instance_context,
-    plan_interpretation_ops_with_context, run_interpretation, run_interpretation_with_strategy,
-    DedupStrategy, ExistingInstances, ExistingLinks, InstanceContext, InterpretationOp,
-    ProposedInstance, TranscriptTurn,
+    plan_interpretation_ops_with_context, run_interpretation,
+    run_interpretation_with_harness_and_model, run_interpretation_with_strategy, DedupStrategy,
+    ExistingInstances, ExistingLinks, InstanceContext, InterpretationOp, ProposedInstance,
+    TranscriptTurn,
 };
 use super::model_query::shape::load_shape;
 use super::model_query::types::{ModelShape, Scope};
@@ -426,6 +427,90 @@ pub(crate) async fn run_interpretation_e2e_scoped(
     let placements = read_back_placements(perspective, &bases).await;
     print_placements(&placements);
     bases
+}
+
+/// Run the tool-calling harness interpretation path against the real LLM,
+/// returning affected bases with their written links (parallel to
+/// [`run_interpretation_e2e`], but through the harness dispatch — the LLM
+/// drives extraction by tool calls rather than one big JSON blob).
+pub(crate) async fn run_interpretation_harness_e2e(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[(&str, &str)],
+    ctx: &AgentContext,
+    max_tool_calls: u32,
+) -> Vec<(String, Vec<Link>)> {
+    let transcript: Vec<TranscriptTurn> = transcript
+        .iter()
+        .map(|(s, t)| TranscriptTurn::from_speaker_text(*s, *t))
+        .collect();
+    let bases = run_interpretation_with_harness_and_model(
+        perspective,
+        shapes,
+        &transcript,
+        "soa://ext/",
+        ctx,
+        None,
+        None,
+        None,
+        max_tool_calls,
+        None,
+    )
+    .await
+    .expect("run_interpretation_with_harness against real LLM to succeed");
+    let placements = read_back_placements(perspective, &bases).await;
+    print_placements(&placements);
+    placements
+}
+
+/// Set up + drive the harness path in one call. Same shape as [`run_e2e`], but
+/// the LLM sees the tool surface and writes via `_propose_*` calls buffered
+/// into an overlay-applied `InterpretationRun`.
+pub(crate) async fn run_harness_e2e(
+    class_sdnas: &[(&str, &str)],
+    transcript: &[(&str, &str)],
+    max_tool_calls: u32,
+) -> (
+    PerspectiveInstance,
+    Vec<ModelShape>,
+    Vec<(String, Vec<Link>)>,
+) {
+    let (mut perspective, shapes, ctx) = setup_interpretation_e2e(class_sdnas).await;
+    let placements =
+        run_interpretation_harness_e2e(&mut perspective, &shapes, transcript, &ctx, max_tool_calls)
+            .await;
+    (perspective, shapes, placements)
+}
+
+/// [`run_harness_e2e`] with retry: LLM tool-calling is more variable than the
+/// single-shot path (occasionally emits an answer without ever calling
+/// `_propose_*`), so give it up to `attempts` fresh perspectives until the
+/// `ok` predicate holds on `graph_count_by_type`.
+pub(crate) async fn run_harness_e2e_until(
+    class_sdnas: &[(&str, &str)],
+    transcript: &[(&str, &str)],
+    max_tool_calls: u32,
+    attempts: u8,
+    ok: impl Fn(&HashMap<String, usize>) -> bool,
+) -> (
+    PerspectiveInstance,
+    Vec<ModelShape>,
+    Vec<(String, Vec<Link>)>,
+) {
+    let mut last = None;
+    for i in 1..=attempts {
+        let (p, shapes, placements) =
+            run_harness_e2e(class_sdnas, transcript, max_tool_calls).await;
+        let counts = graph_count_by_type(&p, &shapes).await;
+        if ok(&counts) {
+            return (p, shapes, placements);
+        }
+        eprintln!(
+            "[harness-e2e] attempt {i}/{attempts} did not satisfy retry guard (got {counts:?}); retrying"
+        );
+        last = Some((p, shapes, placements));
+    }
+    last.expect("run_harness_e2e_until: attempts must be >= 1")
 }
 
 /// Convenience for the simple single-shot tests: set up + run in one call.
