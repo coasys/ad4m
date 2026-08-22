@@ -1479,6 +1479,7 @@ async fn auto_processor_pass_lands_interpretation_instance() {
         source_window_ms: None,
         existing_scope: None,
         mint_scope: None,
+        max_tool_calls: None,
     };
     write_processor(&mut perspective, &cfg, &ctx)
         .await
@@ -1677,6 +1678,7 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         source_window_ms: None,
         existing_scope: None,
         mint_scope: None,
+        max_tool_calls: None,
     };
     let task_cfg = AutoProcessorConfig {
         processor_id: "pc-task-proc".into(),
@@ -1692,6 +1694,7 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         source_window_ms: None,
         existing_scope: None,
         mint_scope: None,
+        max_tool_calls: None,
     };
 
     write_processor(&mut perspective, &intent_cfg, &ctx)
@@ -1935,6 +1938,7 @@ async fn auto_processor_high_level_signal_driven_pass() {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
         };
         write_processor(&mut perspective, &cfg, &ctx)
             .await
@@ -2113,6 +2117,7 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
         };
         write_processor(&mut perspective, &cfg, &ctx_main)
             .await
@@ -2256,6 +2261,7 @@ async fn auto_processor_election_only_online_participants_process() {
         source_window_ms: None,
         existing_scope: None,
         mint_scope: None,
+        max_tool_calls: None,
     };
 
     // Case 1 — a batch authored by carol (offline) then bob (online), in that

@@ -790,6 +790,7 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
         }
     }
 

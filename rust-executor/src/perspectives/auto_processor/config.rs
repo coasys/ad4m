@@ -140,6 +140,19 @@ pub struct AutoProcessorConfig {
     /// May differ from [`Self::existing_scope`] — a watcher can read from a
     /// broader subtree than it writes into, or vice-versa.
     pub mint_scope: Option<Scope>,
+    /// Interpretation-pass tool-call budget. `None` or `Some(0)` = the
+    /// original single-shot LLM path (no tools). `Some(N)` with `N > 0` =
+    /// engage the tool-calling harness (see [`crate::ai_service::harness`])
+    /// and let the LLM make up to `N` tool calls per pass before being
+    /// forced to answer. The cap prevents a stuck or adversarial model
+    /// from DoS'ing the extraction pass.
+    ///
+    /// This field is plumbed through config but NOT yet consumed by
+    /// [`crate::perspectives::interpretation::run_interpretation`]; the
+    /// engine wiring lands in a follow-up commit (v3 §6). Callers that
+    /// set this today get the field round-tripped through the SDNA but
+    /// no behavioural change.
+    pub max_tool_calls: Option<u32>,
 }
 
 /// Deterministic node URI for an AutoProcessor. Deterministic in
@@ -218,6 +231,9 @@ pub async fn write_processor(
         let json = serde_json::to_string(mint_scope)
             .map_err(|e| anyhow::anyhow!("write_processor: serialize mint_scope: {e:#}"))?;
         values["mintScope"] = json.into();
+    }
+    if let Some(max_tool_calls) = cfg.max_tool_calls {
+        values["maxToolCalls"] = max_tool_calls.to_string().into();
     }
 
     // Batch the create_subject + follow-on update_subject calls so the whole
@@ -316,7 +332,7 @@ pub async fn load_processors(
             "processorId", "sourceScopeQuery", "basePrefix",
             "interpretationClasses", "debounceMs", "batchMin", "batchMax",
             "maxWaitMs", "claimTtlMs", "dedupStrategy", "sourceWindowMs",
-            "existingScope", "mintScope",
+            "existingScope", "mintScope", "maxToolCalls",
         ]
     })
     .to_string();
@@ -423,6 +439,14 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         None => None,
     };
 
+    // `maxToolCalls`: absent → `None` (single-shot, no harness). Present but
+    // unparseable → bail like the other required-shape fields; silently
+    // defaulting to "no tool calls" on a typo would mask the config bug.
+    let max_tool_calls = match scalar("maxToolCalls") {
+        Some(s) => Some(s.parse::<u32>().ok()?),
+        None => None,
+    };
+
     Some(AutoProcessorConfig {
         processor_id: scalar("processorId")?,
         source_scope_query: scalar("sourceScopeQuery")?,
@@ -437,6 +461,7 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         source_window_ms,
         existing_scope,
         mint_scope,
+        max_tool_calls,
     })
 }
 
@@ -476,6 +501,7 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
         }
     }
 

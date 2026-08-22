@@ -105,6 +105,18 @@ export class AutoProcessorConfig extends Ad4mModel {
   @Optional({ through: "ad4m://mint_scope" })
   mintScope?: string;
 
+  /**
+   * Tool-call budget for the interpretation-pass harness. Absent (or `"0"`)
+   * = the original single-shot LLM path — one prompt, one parse, no tools.
+   * `"N"` (positive integer) = engage the tool-calling harness and let the
+   * LLM issue up to N tool calls per pass (query/list/get/propose_create/
+   * propose_link_child) before being forced to answer. Stored as a decimal
+   * string because SHACL properties carry no numeric type; the Rust
+   * watcher parses it back to `u32`.
+   */
+  @Optional({ through: "ad4m://max_tool_calls" })
+  maxToolCalls?: string;
+
   // No `@Flag` type discriminator (Nico 2026-08-19: "type flags are an
   // anti-pattern for subject classes; match over all the properties
   // instead"). Conformance is by the presence of `processorId` +

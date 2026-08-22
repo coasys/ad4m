@@ -637,6 +637,12 @@ pub struct AddAutoProcessorRequest {
     /// at watch time.
     #[serde(default)]
     pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Tool-call budget for the interpretation-pass harness. Omit or `0` =
+    /// single-shot LLM path (original behaviour). Positive `N` = engage the
+    /// tool-calling harness and cap it at `N` calls per pass. Round-tripped
+    /// through the SDNA today; engine wiring lands in a follow-up commit.
+    #[serde(default)]
+    pub max_tool_calls: Option<u32>,
 }
 
 /// `perspective.acceptInterpretation` / `perspective.rejectInterpretation` —
