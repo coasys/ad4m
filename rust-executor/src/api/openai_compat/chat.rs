@@ -175,7 +175,12 @@ async fn chat_oneshot(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let result = service
-        .prompt_messages(model_id, messages, Some(auth.auth_token.clone()), constraint)
+        .prompt_messages(
+            model_id,
+            messages,
+            Some(auth.auth_token.clone()),
+            constraint,
+        )
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
@@ -243,7 +248,12 @@ async fn chat_stream(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let (token_rx, done_rx) = service
-        .prompt_messages_stream(model_id, messages, Some(auth.auth_token.clone()), constraint)
+        .prompt_messages_stream(
+            model_id,
+            messages,
+            Some(auth.auth_token.clone()),
+            constraint,
+        )
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 

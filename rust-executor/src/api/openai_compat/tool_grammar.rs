@@ -229,7 +229,9 @@ fn value_parser(schema: &Value) -> ArcParser<()> {
         Some("integer") => IntegerParser::new(i128::MIN..=i128::MAX)
             .map_output(|_| ())
             .boxed(),
-        Some("number") => FloatParser::new(f64::MIN..=f64::MAX).map_output(|_| ()).boxed(),
+        Some("number") => FloatParser::new(f64::MIN..=f64::MAX)
+            .map_output(|_| ())
+            .boxed(),
         Some("boolean") => bool_parser(),
         Some("null") => lit("null"),
         Some("array") => array_parser(schema),
@@ -262,7 +264,9 @@ fn array_parser(schema: &Value) -> ArcParser<()> {
 fn any_value_parser() -> ArcParser<()> {
     or_all(vec![
         string_value_parser(),
-        FloatParser::new(f64::MIN..=f64::MAX).map_output(|_| ()).boxed(),
+        FloatParser::new(f64::MIN..=f64::MAX)
+            .map_output(|_| ())
+            .boxed(),
         bool_parser(),
         lit("null"),
     ])
@@ -535,12 +539,18 @@ mod tests {
     fn parse_tool_choice_variants() {
         assert_eq!(parse_tool_choice(&None, true), ToolChoice::Auto);
         assert_eq!(parse_tool_choice(&None, false), ToolChoice::None);
-        assert_eq!(parse_tool_choice(&Some(json!("none")), true), ToolChoice::None);
+        assert_eq!(
+            parse_tool_choice(&Some(json!("none")), true),
+            ToolChoice::None
+        );
         assert_eq!(
             parse_tool_choice(&Some(json!("required")), true),
             ToolChoice::Required
         );
-        assert_eq!(parse_tool_choice(&Some(json!("auto")), true), ToolChoice::Auto);
+        assert_eq!(
+            parse_tool_choice(&Some(json!("auto")), true),
+            ToolChoice::Auto
+        );
         assert_eq!(
             parse_tool_choice(
                 &Some(json!({ "type": "function", "function": { "name": "foo" } })),
