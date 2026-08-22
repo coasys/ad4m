@@ -18,8 +18,8 @@
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
-    run_interpretation_with_strategy_and_model, DedupStrategy, InterpretationRunCursor,
-    TranscriptTurn,
+    run_interpretation_with_harness_and_model, run_interpretation_with_strategy_and_model,
+    DedupStrategy, InterpretationRunCursor, TranscriptTurn,
 };
 use crate::perspectives::model_query::load_shape_from_store;
 use crate::perspectives::model_query::types::Scope;
@@ -660,25 +660,54 @@ pub async fn run_one_pass(
         HashSet::new()
     };
 
-    let bases = run_interpretation_with_strategy_and_model(
-        perspective,
-        &shapes,
-        &transcript,
-        &base_prefix,
-        context,
-        &dedup,
-        None,
-        // Existing-instance scope: constrains dedup to a subtree when the
-        // processor config specifies one, e.g. "existing Task instances that
-        // live under project X." `None` keeps the whole-perspective existing
-        // set — the pre-scope-config behaviour.
-        cfg.existing_scope.as_ref(),
-        Some(&InterpretationRunCursor {
-            processor: super::config::processor_node(&cfg.processor_id),
-            sources: item_ids.clone(),
-        }),
-    )
-    .await?;
+    let cursor = InterpretationRunCursor {
+        processor: super::config::processor_node(&cfg.processor_id),
+        sources: item_ids.clone(),
+    };
+    // Fork: harness-dispatched pass when the operator opted in via
+    // `AutoProcessorConfig.max_tool_calls > 0`; otherwise the classic
+    // single-shot LLM+parse+plan pipeline. The two paths converge on the
+    // same overlay-writing gate (`apply_with_overlay`), so downstream
+    // provenance + processed signalling is identical.
+    let bases = match cfg.max_tool_calls {
+        Some(n) if n > 0 => {
+            run_interpretation_with_harness_and_model(
+                perspective,
+                &shapes,
+                &transcript,
+                &base_prefix,
+                context,
+                None,
+                cfg.existing_scope.as_ref(),
+                Some(&cursor),
+                n,
+                // Auto-processor is an internal caller — no per-pass user
+                // token to bill. MCP admin credential (if configured) is
+                // read from env inside the harness path.
+                None,
+            )
+            .await?
+        }
+        _ => {
+            run_interpretation_with_strategy_and_model(
+                perspective,
+                &shapes,
+                &transcript,
+                &base_prefix,
+                context,
+                &dedup,
+                None,
+                // Existing-instance scope: constrains dedup to a subtree
+                // when the processor config specifies one, e.g. "existing
+                // Task instances that live under project X." `None` keeps
+                // the whole-perspective existing set — the pre-scope-config
+                // behaviour.
+                cfg.existing_scope.as_ref(),
+                Some(&cursor),
+            )
+            .await?
+        }
+    };
 
     // Mint-scope child links: if the processor declares a `mint_scope`, wire
     // every **freshly created** base as a child under the target node via the

@@ -6,10 +6,16 @@ use super::{
     InterpretationRunCursor, ProposedInstance, TranscriptTurn,
 };
 use crate::agent::AgentContext;
+use crate::ai_service::harness::propose::{
+    class_propose_shape_from_shacl, ProposalBuffer, ProposeWritesProvider,
+};
+use crate::ai_service::harness::provider::ToolProvider;
+use crate::ai_service::harness::{run_with_tools, HarnessConfig};
 use crate::perspectives::model_query::types::{ModelShape, Scope};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::LinkStatus;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Max attempts for [`retry_interpretation_parse`]. Mirrors Flux's `LLMutils`
 /// retry-×5 loop: local models occasionally emit half-valid JSON, so we ask
@@ -456,6 +462,160 @@ pub async fn run_interpretation_with_strategy_and_model(
 
     // The affected instance base URIs (created, updated, or given new
     // relations). Links are owned by `create_subject` / `update_subject`.
+    Ok(bases)
+}
+
+/// Harness-dispatched interpretation pass — the tool-calling alternative to
+/// [`run_interpretation_with_strategy_and_model`]. Same inputs/outputs, but
+/// the LLM sees a live tool surface (`{Class}_query`, `{Class}_get`,
+/// `{Class}_propose_create`, `{Class}_propose_link_child`, …) and drives the
+/// extraction by tool calls rather than by emitting one big JSON blob.
+///
+/// Design v3 §6: writes only cross the overlay gate at pass boundary — the
+/// LLM's `_propose_*` calls buffer [`InterpretationOp`]s; when the harness
+/// loop terminates (plain answer or budget exhausted), the buffer drains
+/// straight into [`apply_with_overlay`] with the same run-id + task threading
+/// the single-shot path uses.
+///
+/// The single-shot path's dedup/planning safety net does NOT run here — the
+/// harness expects the LLM to have used its query tools to check for
+/// existing state before proposing writes. This is deliberate (design v3):
+/// the tool surface is powerful enough that the LLM should be trusted to
+/// query-first. If this proves wrong in practice we can add a lightweight
+/// collapse-identical-Create pass on the drained buffer before handoff, but
+/// for MVP the buffer flows straight through.
+///
+/// The final answer text from the harness is discarded — the LLM already
+/// wrote via tools, and any narrative it emits is not consumed by the
+/// interpretation pipeline. (If we later want a try-parse-as-fallback, it
+/// hooks in here.)
+///
+/// `max_tool_calls` = 0 is treated as "no harness path"; callers should
+/// route to [`run_interpretation_with_strategy_and_model`] instead of
+/// calling this with 0.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_interpretation_with_harness_and_model(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    model_override: Option<&str>,
+    scope: Option<&Scope>,
+    cursor: Option<&InterpretationRunCursor>,
+    max_tool_calls: u32,
+    auth_token: Option<String>,
+) -> anyhow::Result<Vec<String>> {
+    // Same task-row selection as the single-shot path so the model + system
+    // prompt + few-shots + billing meta come from the same row the operator
+    // configured — the harness pass is just a different loop, not a
+    // different LLM identity.
+    let task = ensure_interpretation_task_for_model(model_override).await?;
+
+    // Same existing-instance snapshot as the single-shot path: goes into the
+    // prompt so the LLM has context (and can name existing `id`s in
+    // propose_link_child) even before its first query tool call.
+    let existing_ctx = existing_instance_context(perspective, shapes, scope).await?;
+    // Existing relation links: not consumed by the harness path directly
+    // (there's no planner to compare against), but pulling them here matches
+    // the single-shot path's data-gathering shape — a later dedup pass on the
+    // drained buffer would need them. Kept for symmetry + future-use.
+    let _existing_links = existing_relation_links(perspective, shapes).await?;
+
+    let prompt = build_interpretation_input(shapes, transcript, &existing_ctx);
+
+    // Build per-class propose shapes from the perspective's SHACL classes,
+    // filtered to the class-name set the caller passed as `shapes`. Any
+    // class in `shapes` that isn't a registered SHACL subject class is
+    // skipped — the propose-write surface only makes sense for classes
+    // with constructors + setters.
+    let all_shacl_classes = crate::mcp::shacl::load_classes(perspective).await;
+    let requested_class_names: HashMap<String, ()> = shapes
+        .iter()
+        .map(|s| (class_label(&s.target_class, shapes), ()))
+        .collect();
+    let propose_shapes: Vec<_> = all_shacl_classes
+        .iter()
+        .filter(|c| requested_class_names.contains_key(&c.name))
+        .map(class_propose_shape_from_shacl)
+        .collect();
+
+    // The AD4M MCP handler is the read-tool surface. Constructed here with a
+    // pass-scoped McpContext — admin-credential from env (matches the /v1
+    // openai-compat path) + a fresh per-pass auth-token slot. Every existing
+    // MCP tool (`query_*`, `get_*`, subject/perspective tools) becomes
+    // visible to the LLM through `Ad4mToolProvider`.
+    let mcp_context = crate::mcp::server::McpContext {
+        admin_credential: std::env::var("AD4M_ADMIN_CREDENTIAL").ok(),
+        auth_token: Arc::new(tokio::sync::RwLock::new(auth_token.clone())),
+    };
+    let mcp_handler = Arc::new(crate::mcp::tools::Ad4mMcpHandler::new(mcp_context));
+    let ad4m_provider = Arc::new(crate::mcp::tools::provider_impl::Ad4mToolProvider::new(
+        mcp_handler,
+    ));
+
+    // Wrap in ProposeWritesProvider so the LLM also sees the two synthetic
+    // per-class writers whose side-effect is "queue an InterpretationOp",
+    // not "mutate the graph." The buffer is drained after the loop.
+    let buffer = ProposalBuffer::new();
+    let provider: Arc<dyn ToolProvider> = Arc::new(ProposeWritesProvider::new(
+        ad4m_provider,
+        propose_shapes,
+        buffer.clone(),
+        base_prefix.to_string(),
+    ));
+
+    // OpenAI-compat bridge: real CompletionSource that talks to AIService
+    // via the tool-grammar constrained-decoding path Josh cherry-picked
+    // into /v1. Local + remote models both go through this one seam.
+    let service = crate::ai_service::AIService::global_instance()
+        .await
+        .map_err(|e| anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}"))?;
+    let bridge = Arc::new(
+        crate::api::openai_compat::harness_bridge::OpenAiCompatBridge::new(
+            Arc::new(service),
+            auth_token,
+        ),
+    );
+
+    // Single user message carrying the entire interpretation prompt —
+    // OpenAiCompatBridge prepends the tools-system-prompt automatically
+    // when tools are advertised, so we don't split system-vs-user here.
+    let initial_messages = vec![serde_json::json!({
+        "role": "user",
+        "content": prompt,
+    })];
+
+    // Drive the loop. The returned text is discarded — the LLM wrote via
+    // propose_* tools, which populated `buffer`. If the LLM emitted a final
+    // narrative it's not consumed here (see doc comment above).
+    let _final_text = run_with_tools(
+        &task.model_id,
+        initial_messages,
+        provider,
+        bridge,
+        HarnessConfig { max_tool_calls },
+    )
+    .await?;
+
+    // Drain the buffered ops into apply_with_overlay — same overlay gate,
+    // same run-id/ran-at threading, same task-row provenance as the
+    // single-shot path uses. No dedup / planner pass in between.
+    let ops = buffer.drain();
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let ran_at = chrono::Utc::now().timestamp_millis().to_string();
+    let bases = apply_with_overlay(
+        perspective,
+        shapes,
+        ops,
+        &task,
+        run_id,
+        ran_at,
+        context,
+        cursor,
+    )
+    .await?;
+
     Ok(bases)
 }
 
