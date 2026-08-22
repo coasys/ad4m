@@ -24,6 +24,7 @@
 //! `ai_service::prompt_messages_with_tools`; the tool surface lives behind
 //! `ToolProvider`. Both are seams a test can double.
 
+pub mod propose;
 pub mod provider;
 
 use anyhow::Result;
