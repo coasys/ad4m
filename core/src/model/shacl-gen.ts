@@ -45,6 +45,13 @@ export function buildSHACL(
      * directly (e.g. from a one-off SDNA build tool).
      */
     seedCache?: (partial: { shape: SHACLShape; name: string }) => void,
+    /**
+     * Natural-language hint declared on the `@Model` decorator that
+     * steers the generic LLM extractor when producing instances of
+     * this class.  Attached to the SHACL shape node and re-emitted as
+     * an `ad4m://interpretation_hint` link by `SHACLShape.toLinks()`.
+     */
+    interpretationHint?: string,
 ): { shape: SHACLShape; name: string } {
     const obj = target.prototype;
 
@@ -76,6 +83,9 @@ export function buildSHACL(
     const shapeUri = `${namespace}${subjectName}Shape`;
     const targetClass = `${namespace}${subjectName}`;
     const shape = new SHACLShape(shapeUri, targetClass);
+    if (interpretationHint) {
+        shape.interpretationHint = interpretationHint;
+    }
 
     // ── Seed the memoisation cache while we keep building ──────────────
     // Any subsequent `target.generateSHACL()` call from inside this
@@ -119,17 +129,36 @@ export function buildSHACL(
             path: propMeta.through,
         };
 
-        // Determine datatype from initial value or resolveLanguage
-        if (propMeta.resolveLanguage === "literal") {
-            propShape.datatype = "xsd://string";
-        } else if (propMeta.initial) {
-            const initialType = typeof obj[propName];
-            if (initialType === "number") {
-                propShape.datatype = "xsd://integer";
-            } else if (initialType === "boolean") {
-                propShape.datatype = "xsd://boolean";
-            } else if (initialType === "string") {
-                propShape.datatype = "xsd://string";
+        // Determine datatype from JS field value type; the resolve* options
+        // control storage mode (deterministic vs envelope), not scalar type.
+        // A value stored on the literal language (deterministic or envelope,
+        // i.e. resolveLanguage unset or "literal") gets a string datatype when
+        // no initial value pins a more specific type. A custom resolveLanguage
+        // yields an expression URI, not a literal.
+        //
+        // Skip auto-datatype for properties with a custom `getter` — those
+        // typically return URIs (e.g. `@Optional({ getter: "SELECT ?target ..." })`
+        // that hops through a link to another instance's URI). Autosetting
+        // `sh:datatype xsd:string` there would trip the hydration decode gate
+        // and silently transform `literal:string:<hex>` URIs into their inner
+        // plain-string form on read. Users who want a getter to return literal
+        // values can opt in explicitly by setting `datatype` on the property
+        // options (handled below).
+        if (propMeta.datatype) {
+            // Explicit opt-in from PropertyOptions always wins over inference.
+            propShape.datatype = propMeta.datatype;
+        } else {
+            const isLiteral =
+                propMeta.resolveLanguage === undefined || propMeta.resolveLanguage === "literal";
+            if ((propMeta.initial !== undefined || isLiteral) && !propMeta.getter) {
+                const initialType = typeof obj[propName];
+                if (initialType === "number") {
+                    propShape.datatype = "xsd://integer";
+                } else if (initialType === "boolean") {
+                    propShape.datatype = "xsd://boolean";
+                } else if (initialType === "string" || isLiteral) {
+                    propShape.datatype = "xsd://string";
+                }
             }
         }
 
@@ -174,6 +203,18 @@ export function buildSHACL(
         // Serializable transform expression (SHACL-AF Node Expression)
         if (propMeta.transform) {
             propShape.transform = propMeta.transform;
+        }
+
+        // Natural-language interpretation hint (read by the generic LLM
+        // extractor via ShapeProperty.interpretation_hint).
+        if (propMeta.interpretationHint) {
+            propShape.interpretationHint = propMeta.interpretationHint;
+        }
+
+        // Declared-identity dedup key for the generic LLM interpreter
+        // (emitted as `ad4m://identity` by SHACLShape.toLinks()).
+        if (propMeta.identity) {
+            propShape.identity = true;
         }
 
         // ── Setter actions ──────────────────────────────────────────────
@@ -239,8 +280,18 @@ export function buildSHACL(
             path: synthesizedPath,
         };
 
-        // Relations typically contain IRIs
-        relShape.nodeKind = 'IRI';
+        // A relation with a declared `datatype` holds encoded literal
+        // values (e.g. `HasMany<string>` with `datatype: "xsd:string"`).
+        // Everything else is a URI relation pointing at another
+        // instance. The executor uses `sh:datatype` on hydration to
+        // decide whether to decode `literal:<type>:<value>` wire form
+        // (yes for literals, no for URIs).
+        if (relMeta.datatype) {
+            relShape.datatype = relMeta.datatype;
+            relShape.nodeKind = 'Literal';
+        } else {
+            relShape.nodeKind = 'IRI';
+        }
 
         // Encode relation kind so the executor can derive direction and
         // scalar-vs-collection rendering without consulting the JS class.

@@ -298,8 +298,10 @@ describe("Prolog + Literals", () => {
                 //@ts-ignore
                 let links = await perspective!.get(new LinkQuery({source: todo.id, predicate: "todo://has_title"}))
                 expect(links.length).to.equal(1)
-                let literal = Literal.fromUrl(links[0].data.target).get()
-                expect(literal.data).to.equal("new title")
+                // resolveLanguage:"literal" → signed expression envelope; the raw
+                // target's inner .data is the value (the model read above unwraps it).
+                let envelope: any = Literal.fromUrl(links[0].data.target).get()
+                expect(envelope.data).to.equal("new title")
             })
 
             it("can easily be initialized with PerspectiveProxy.ensureSDNASubjectClass()", async () => {
@@ -359,8 +361,13 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("can constrain collection entries through 'where' clause", async () => {
-                    let root = Literal.from("Collection where test").toUrl()
-                    let messageEntry = Literal.from("test message").toUrl()
+                    // IDs use a dedicated `ad4m://test/` scheme so that the
+                    // typed-literal storage layer keeps them as NamedNode IRIs
+                    // — `literal:string:X` URIs would otherwise be stripped to
+                    // `"X"^^xsd:string` typed literals, which can't be subjects
+                    // for the subsequent `?target <type> <…>` conformance probe.
+                    let root = "ad4m://test/collection-where-test"
+                    let messageEntry = "ad4m://test/collection-where-test-msg"
                     
                     // Create todo with entries already set
                     let todo = new Todo(perspective!, root)
@@ -602,11 +609,15 @@ describe("Prolog + Literals", () => {
                     // Wait for SHACL metadata to be indexed
                     await sleep(500);
 
-                    let root = Literal.from("Active record SPARQL condition test").toUrl();
+                    // See note on the SPARQL collection-where test above —
+                    // use a NamedNode-friendly `ad4m://test/` ID scheme so the
+                    // typed-literal storage doesn't strip these to xsd:string
+                    // literals when they appear as link targets.
+                    let root = "ad4m://test/sparql-condition-root";
                     const recipe = new RecipeWithSparqlFilter(perspective!, root);
 
-                    let entry1 = Literal.from("entry with ingredient").toUrl();
-                    let entry2 = Literal.from("entry without ingredient").toUrl();
+                    let entry1 = "ad4m://test/sparql-condition-entry1";
+                    let entry2 = "ad4m://test/sparql-condition-entry2";
 
                     recipe.entries = [entry1, entry2];
                     recipe.name = "Condition test";
@@ -645,8 +656,11 @@ describe("Prolog + Literals", () => {
                     //@ts-ignore
                     let links = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://resolve"}))
                     expect(links.length).to.equal(1)
-                    let literal = Literal.fromUrl(links[0].data.target).get()
-                    expect(literal.data).to.equal(recipe.resolve)
+                    // resolveLanguage:"literal" stores a signed expression envelope;
+                    // the raw target decodes to {author,timestamp,data,proof} whose
+                    // .data is the value. The model read (recipe3) unwraps it.
+                    let envelope: any = Literal.fromUrl(links[0].data.target).get()
+                    expect(envelope.data).to.equal(recipe.resolve)
 
                     const recipe3 = new Recipe(perspective!, root);
                     await recipe3.get();
@@ -694,6 +708,58 @@ describe("Prolog + Literals", () => {
                     expect(recipe2.image).to.equal(`data:image/png;base64,${testImageData.data_base64}`);
                 })
 
+                it("resolveLanguage:'literal' stores signed-expression envelopes and reads back the JSON object (Flux message case)", async () => {
+                    // Mirrors what Flux does for message atoms: a property declared
+                    // with `resolveLanguage: "literal"` and nothing else. The value
+                    // must be stored as a *signed expression* on the literal language
+                    // (envelope with author/timestamp/proof) — provenance Flux relies
+                    // on — and read back as the original JSON object.
+                    @Model({ name: "FluxMessageAtom" })
+                    class FluxMessageAtom extends Ad4mModel {
+                        @Property({ through: "flux://content", resolveLanguage: "literal" })
+                        content: any = null;
+                    }
+                    await perspective!.ensureSDNASubjectClass(FluxMessageAtom);
+
+                    const payload = { body: "hello flux", mentions: ["did:key:zABC"] };
+
+                    const root1 = Literal.from("flux atom 1").toUrl();
+                    const m1 = new FluxMessageAtom(perspective!, root1);
+                    m1.content = payload;
+                    await m1.save();
+
+                    // Raw stored target must be a SIGNED envelope, not a plain
+                    // deterministic literal:json: of the value.
+                    const links1 = await perspective!.get(new LinkQuery({ source: root1, predicate: "flux://content" }));
+                    expect(links1.length).to.equal(1);
+                    const target1 = links1[0].data.target;
+                    expect(target1).to.match(/^literal:json:/);
+                    const envelope1 = JSON.parse(decodeURIComponent(target1.replace(/^literal:json:/, "")));
+                    expect(envelope1).to.have.property("author");
+                    expect(envelope1).to.have.property("timestamp");
+                    expect(envelope1).to.have.property("proof");
+                    expect(envelope1.data).to.deep.equal(payload);
+
+                    // Read back through the model → the JSON object (envelope unwrapped).
+                    const all = await FluxMessageAtom.findAll(perspective!);
+                    const got: any = all.find((m: any) => m.id === root1);
+                    expect(got).to.not.be.undefined;
+                    expect(got.content).to.be.an("object");
+                    expect(got.content).to.deep.equal(payload);
+
+                    // Each message is a distinct signed expression: identical content
+                    // yields a DIFFERENT envelope (per-expression provenance), not a
+                    // deduped deterministic literal.
+                    const root2 = Literal.from("flux atom 2").toUrl();
+                    const m2 = new FluxMessageAtom(perspective!, root2);
+                    m2.content = payload;
+                    await m2.save();
+                    const links2 = await perspective!.get(new LinkQuery({ source: root2, predicate: "flux://content" }));
+                    const target2 = links2[0].data.target;
+                    expect(target2).to.match(/^literal:json:/);
+                    expect(target2).to.not.equal(target1);
+                })
+
                 it("works with very long property values", async() => {
                     let root = Literal.from("Active record implementation test long value").toUrl()
                     const recipe = new Recipe(perspective!, root)
@@ -707,8 +773,9 @@ describe("Prolog + Literals", () => {
 
                     let linksResolve = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://resolve"}))
                     expect(linksResolve.length).to.equal(1)
-                    let expression = Literal.fromUrl(linksResolve[0].data.target).get()
-                    expect(expression.data).to.equal(longName)
+                    // resolveLanguage:"literal" → signed envelope; check the inner .data.
+                    let envelope: any = Literal.fromUrl(linksResolve[0].data.target).get()
+                    expect(envelope.data).to.equal(longName)
 
                     const recipe2 = new Recipe(perspective!, root)
                     await recipe2.get()
@@ -2206,10 +2273,20 @@ describe("Prolog + Literals", () => {
                         await model.save();
                         const saveTime = Date.now();
 
-                        // Poll until callback called
+                        // Poll until callback called. 60s upper bound matches
+                        // the surrounding waitForCondition timeouts in this
+                        // suite. Even with the previous 5s ceiling the test
+                        // still flaked on integration-tests-js #17171 after
+                        // the dev merge pulled in the lazy-load resolveLanguage
+                        // change (#848), which adds first-fetch latency on a
+                        // freshly registered SDNA class. Steady-state
+                        // subscription latency is still logged via
+                        // `subscriptionLatency`, so a real regression would
+                        // surface as a slow log line rather than be hidden by
+                        // the bumped ceiling.
                         while (!subscriptionCallback.called) {
                             await sleep(10);
-                            if (Date.now() - saveTime > 5000) throw new Error("Timeout waiting for subscription update");
+                            if (Date.now() - saveTime > 60000) throw new Error("Timeout waiting for subscription update");
                         }
 
                         const saveLatency = saveTime - start;
@@ -2803,10 +2880,14 @@ describe("Prolog + Literals", () => {
                 });
 
                 it("should filter collection by type with class reference", async () => {
-                    const articleRoot = Literal.from("Article for isInstance test").toUrl();
-                    const validComment1 = Literal.from("Valid comment 1").toUrl();
-                    const validComment2 = Literal.from("Valid comment 2").toUrl();
-                    const invalidItem = Literal.from("Invalid item").toUrl();
+                    // See note above — IDs use `ad4m://test/` so the
+                    // typed-literal storage doesn't turn link targets into
+                    // xsd:string literals that can't be subjects under the
+                    // type-filter conformance probe.
+                    const articleRoot = "ad4m://test/typefilter-article-class-ref";
+                    const validComment1 = "ad4m://test/typefilter-valid-comment-1";
+                    const validComment2 = "ad4m://test/typefilter-valid-comment-2";
+                    const invalidItem = "ad4m://test/typefilter-invalid-item";
 
                     const article = new Article(perspective!, articleRoot);
                     article.title = "Test Article";
@@ -2854,9 +2935,9 @@ describe("Prolog + Literals", () => {
                 });
 
                 it("should filter collection by type with string class name", async () => {
-                    const articleRoot = Literal.from("Article for string isInstance test").toUrl();
-                    const validComment = Literal.from("Valid comment").toUrl();
-                    const invalidItem = Literal.from("Invalid item").toUrl();
+                    const articleRoot = "ad4m://test/typefilter-article-string-name";
+                    const validComment = "ad4m://test/typefilter-valid-comment-strname";
+                    const invalidItem = "ad4m://test/typefilter-invalid-item-strname";
 
                     const article = new ArticleWithString(perspective!, articleRoot);
                     article.title = "Test Article with String";
@@ -2892,14 +2973,15 @@ describe("Prolog + Literals", () => {
                 });
 
                 it("should filter results in findAll() by type", async () => {
-                    // Create two articles
-                    const article1Root = Literal.from("Article 1 for findAll isInstance").toUrl();
-                    const article2Root = Literal.from("Article 2 for findAll isInstance").toUrl();
-                    
-                    const comment1 = Literal.from("Comment 1").toUrl();
-                    const invalid1 = Literal.from("Invalid 1").toUrl();
-                    const comment2 = Literal.from("Comment 2").toUrl();
-                    const invalid2 = Literal.from("Invalid 2").toUrl();
+                    // Create two articles — IDs use `ad4m://test/` so
+                    // typed-literal storage keeps them as NamedNode IRIs.
+                    const article1Root = "ad4m://test/typefilter-findall-article-1";
+                    const article2Root = "ad4m://test/typefilter-findall-article-2";
+
+                    const comment1 = "ad4m://test/typefilter-findall-comment-1";
+                    const invalid1 = "ad4m://test/typefilter-findall-invalid-1";
+                    const comment2 = "ad4m://test/typefilter-findall-comment-2";
+                    const invalid2 = "ad4m://test/typefilter-findall-invalid-2";
 
                     // Create articles
                     const article1 = new Article(perspective!, article1Root);
