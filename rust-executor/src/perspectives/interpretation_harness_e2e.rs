@@ -46,7 +46,7 @@ async fn harness_read_only_transcript_produces_no_writes() {
         &[("Task", TASK_SDNA)],
         &[("Nico", "Good morning everyone."), ("James", "Morning.")],
         8,
-        5,
+        8,
         |counts| counts.get("task").copied().unwrap_or(0) == 0,
     )
     .await;
@@ -97,7 +97,7 @@ async fn harness_propose_writes_land_typed_tasks() {
             ),
         ],
         16,
-        3,
+        8,
         |c| (2..=4).contains(&c.get("task").copied().unwrap_or(0)),
     )
     .await;
