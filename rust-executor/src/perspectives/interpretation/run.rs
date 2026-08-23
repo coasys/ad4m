@@ -9,7 +9,9 @@ use crate::agent::AgentContext;
 use crate::ai_service::harness::propose::{
     class_propose_shape_from_shacl, ProposalBuffer, ProposeWritesProvider,
 };
-use crate::ai_service::harness::provider::ToolProvider;
+use crate::ai_service::harness::provider::{
+    is_read_only, FilteredProvider, ToolProvider, ToolSchema,
+};
 use crate::ai_service::harness::{run_with_tools, HarnessConfig};
 use crate::perspectives::model_query::types::{ModelShape, Scope};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
@@ -554,13 +556,37 @@ pub async fn run_interpretation_with_harness_and_model(
         mcp_handler,
     ));
 
+    // Narrow the Ad4m tool surface to (a) class-scoped tools for the offered
+    // classes only, and (b) read verbs only. Rationale: a smaller local LLM
+    // like `gemma3:12b` faced with 60+ generic tools (`add_perspective`,
+    // neighbourhood/agent/runtime helpers, dynamic write verbs on every
+    // registered class) tends to hallucinate simpler tool names and skips
+    // the propose-write path — observed in CI job 22252 on `5c34ed868`,
+    // where the LLM called dynamic `extintention_create` (bypassing the
+    // overlay) and never touched `extintention_propose_create`. Filtering
+    // down to the ~2 classes × ~3 read verbs the pass actually needs
+    // forces the LLM through the propose-write wrappers below.
+    let allowed_class_prefixes: Vec<String> = propose_shapes
+        .iter()
+        .map(|s| format!("{}_", s.class_name.to_lowercase()))
+        .collect();
+    let ad4m_filtered: Arc<dyn ToolProvider> = Arc::new(FilteredProvider::new(
+        ad4m_provider,
+        move |t: &ToolSchema| {
+            if !is_read_only(t) {
+                return false;
+            }
+            allowed_class_prefixes.iter().any(|p| t.name.starts_with(p))
+        },
+    ));
+
     // Wrap in ProposeWritesProvider so the LLM also sees the two synthetic
     // per-class writers whose side-effect is "queue an InterpretationOp",
     // not "mutate the graph." The buffer is drained after the loop.
     let buffer = ProposalBuffer::new();
     let classes_offered = propose_shapes.len();
     let provider: Arc<dyn ToolProvider> = Arc::new(ProposeWritesProvider::new(
-        ad4m_provider,
+        ad4m_filtered,
         propose_shapes,
         buffer.clone(),
         base_prefix.to_string(),
