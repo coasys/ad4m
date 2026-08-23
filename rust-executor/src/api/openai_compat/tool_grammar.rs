@@ -355,6 +355,8 @@ pub fn extract_tool_calls(text: &str) -> Vec<ExtractedToolCall> {
         let trimmed = text.trim();
         if let Some(arr) = parse_tool_call_json_array(trimmed) {
             calls.extend(arr);
+        } else if let Some(wrapped) = parse_tool_calls_wrapper(trimmed) {
+            calls.extend(wrapped);
         } else if let Some(call) = parse_tool_call_json(trimmed) {
             calls.push(call);
         }
@@ -395,10 +397,34 @@ fn extract_fenced(text: &str, out: &mut Vec<ExtractedToolCall>) {
         let block = body_rest[..end].trim();
         if let Some(arr) = parse_tool_call_json_array(block) {
             out.extend(arr);
+        } else if let Some(wrapped) = parse_tool_calls_wrapper(block) {
+            out.extend(wrapped);
         } else if let Some(call) = parse_tool_call_json(block) {
             out.push(call);
         }
         rest = &body_rest[end + FENCE.len()..];
+    }
+}
+
+/// Parse `candidate` as an OpenAI-style response object `{"tool_calls":[…]}`.
+/// Small models (Gemma-3) sometimes echo back the response wrapper shape
+/// even though the prompt asks for the singleton `<tool_call>` form —
+/// observed 1/8 attempts on CI job 22282. Returns None when the input
+/// isn't an object with a `tool_calls` array or any element fails to parse.
+fn parse_tool_calls_wrapper(candidate: &str) -> Option<Vec<ExtractedToolCall>> {
+    let value: Value = serde_json::from_str(candidate).ok()?;
+    let arr = value.get("tool_calls")?.as_array()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        // Support both `{name, arguments}` (Ollama/Hermes) and
+        // `{function: {name, arguments}}` (OpenAI Chat Completions).
+        let call = value_to_call(v).or_else(|| v.get("function").and_then(value_to_call))?;
+        out.push(call);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
     }
 }
 
@@ -723,6 +749,56 @@ mod tests {
     fn extract_tool_calls_ignores_fence_without_valid_call() {
         // A fenced snippet that isn't a tool-call shape → skipped, no panic.
         assert!(extract_tool_calls("```json\n{\"note\": \"nothing\"}\n```").is_empty());
+    }
+
+    #[test]
+    fn extract_tool_calls_recovers_fenced_response_wrapper() {
+        // Gemma-3 sometimes echoes the OpenAI Chat Completions response
+        // shape: `{"tool_calls": [{"name":..,"arguments":..}, ..]}`.
+        // Observed on CI job 22282 attempt 6 (integration-tests-model on
+        // `64465fe17`) — the pass produced 0 ops because the extractor
+        // couldn't recognise this shape.
+        let calls = extract_tool_calls(
+            "```json\n\
+             {\n\
+               \"tool_calls\": [\n\
+                 {\"name\": \"a\", \"arguments\": {\"x\": 1}},\n\
+                 {\"name\": \"b\", \"arguments\": {\"y\": 2}}\n\
+               ]\n\
+             }\n\
+             ```",
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[1].name, "b");
+    }
+
+    #[test]
+    fn extract_tool_calls_recovers_bare_response_wrapper() {
+        // Same wrapper shape but without any fence.
+        let calls = extract_tool_calls(
+            r#"{"tool_calls":[{"name":"a","arguments":{}},{"name":"b","arguments":{}}]}"#,
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[1].name, "b");
+    }
+
+    #[test]
+    fn extract_tool_calls_recovers_openai_function_wrapper() {
+        // Full OpenAI Chat Completions shape:
+        // `{"tool_calls": [{"id":..,"type":"function","function":{"name":..,"arguments":..}}]}`.
+        // Argument value on `function.arguments` is typically a JSON string per
+        // OpenAI's wire — handle both shapes for robustness.
+        let calls = extract_tool_calls(
+            r#"{"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{\"x\":1}"}}]}"#,
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "f");
+        // OpenAI's `function.arguments` is a JSON *string*; `value_to_call`
+        // pulls the inner value out (unquoted), matching how the harness
+        // downstream JSON-parses `arguments` back to a value.
+        assert_eq!(calls[0].arguments, r#"{"x":1}"#);
     }
 
     #[test]

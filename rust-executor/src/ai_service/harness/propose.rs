@@ -222,6 +222,42 @@ where
             log::warn!("harness: aliasing hallucinated tool `{name}` → `{lower}_propose_create`");
             return self.handle_propose_create(&lower, args);
         }
+        // Second alias family: `<class>_add_<relation>` (e.g.
+        // `extintention_add_basedon`). CI job 22282 attempts 1-4 showed
+        // gemma3:12b reaching for this shape when it wants to attach a
+        // relation, because that's how a CRUD API would name it. The
+        // real tool is `<class>_propose_link_child` — but a filter-not-
+        // found error left the LLM confused and it bailed in plain text.
+        // Return an actionable redirect naming the correct tool + the
+        // predicate hint the LLM likely intended (derived from the tail).
+        for c in &self.classes {
+            let lower = c.class_name.to_lowercase();
+            let add_prefix = format!("{lower}_add_");
+            let Some(relation_tail) = name_lc.strip_prefix(&add_prefix) else {
+                continue;
+            };
+            if relation_tail.is_empty() {
+                continue;
+            }
+            let inner_has_name = self
+                .inner
+                .tools()
+                .await
+                .into_iter()
+                .any(|t| t.name.eq_ignore_ascii_case(name));
+            if inner_has_name {
+                break;
+            }
+            return Err(anyhow!(
+                "tool `{name}` is not available. To link a {class} to a related \
+                 instance, call `{lower}_propose_link_child` with `parent` = the \
+                 {class} URI, `predicate` = the relation IRI (e.g. `soa://{relation_tail}` \
+                 if that matches the class definition), and `child` = the target URI. \
+                 Discover real URIs with the target class's `_query` tool first — \
+                 never invent placeholder URIs.",
+                class = c.class_name
+            ));
+        }
         self.inner.call(name, args).await
     }
 }
@@ -328,6 +364,29 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
             .ok_or_else(|| anyhow!("propose_link_child: missing `child` (URI of child)"))?
             .to_string();
 
+        // Bounce placeholder URIs (`ad4m://obj/unknown`, `.../placeholder`,
+        // `.../example`, `.../...`) — small models tend to invent these when
+        // they skip the query step. Observed on CI job 22282 attempts 5/7/8
+        // where the LLM called `_propose_link_child` with `ad4m://obj/unknown`
+        // instead of first calling `<class>_query` to get real URIs. Failing
+        // fast with a specific redirect gives the LLM an actionable next step.
+        if let Some(bad) = placeholder_uri(&parent) {
+            return Err(anyhow!(
+                "propose_link_child: `parent` looks like a placeholder ({bad}). \
+                 Do NOT invent URIs. First call the class-specific `_query` tool \
+                 (e.g. `{lower_class}_query`) to discover real URIs, then pass the \
+                 URI returned by the query verbatim as `parent`."
+            ));
+        }
+        if let Some(bad) = placeholder_uri(&child) {
+            return Err(anyhow!(
+                "propose_link_child: `child` looks like a placeholder ({bad}). \
+                 Do NOT invent URIs. First call the class-specific `_query` tool \
+                 for the child's class to discover real URIs, then pass the URI \
+                 returned by the query verbatim as `child`."
+            ));
+        }
+
         // AddLinks carries the source separately from each Link.source so the
         // overlay's downstream apply path can batch links per-source; keep
         // both fields in sync here so a future single-source refactor is a
@@ -353,6 +412,41 @@ fn strip_class_suffix(name: &str, suffix: &str) -> Option<String> {
     name.strip_suffix(suffix)
         .filter(|prefix| !prefix.is_empty())
         .map(|s| s.to_lowercase())
+}
+
+/// If `uri` matches an obvious placeholder pattern the LLM might invent
+/// when it skips a query step, return the offending token. Returns None
+/// for real-looking URIs (which is not a proof of existence — just that
+/// the URI is worth attempting).
+///
+/// Recognised: empty string, trailing `unknown` / `placeholder` /
+/// `example` / `...` / `xxx` / `todo` (case-insensitive) — the tail after
+/// the last `/` or `:` is checked so `ad4m://obj/unknown` and plain
+/// `unknown` both bounce.
+fn placeholder_uri(uri: &str) -> Option<&'static str> {
+    let trimmed = uri.trim();
+    if trimmed.is_empty() {
+        return Some("empty");
+    }
+    let tail = trimmed
+        .rsplit(|c: char| c == '/' || c == ':')
+        .next()
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase();
+    for bad in &["unknown", "placeholder", "example", "...", "xxx", "todo"] {
+        if tail == *bad {
+            return Some(match *bad {
+                "unknown" => "unknown",
+                "placeholder" => "placeholder",
+                "example" => "example",
+                "..." => "...",
+                "xxx" => "xxx",
+                "todo" => "todo",
+                _ => "placeholder",
+            });
+        }
+    }
+    None
 }
 
 // ── tool schemas ──────────────────────────────────────────────────────────
@@ -390,8 +484,15 @@ fn propose_create_schema(c: &ClassProposeShape) -> ToolSchema {
     ToolSchema {
         name: format!("{}_propose_create", c.class_name.to_lowercase()),
         description: format!(
-            "Propose creating a new {} instance. The proposal is buffered — it becomes visible in the perspective (subject to the overlay's human-divergence gate) after the interpretation pass completes.",
-            c.class_name
+            "Propose creating a new {class} instance. The proposal is buffered — \
+             it becomes visible in the perspective (subject to the overlay's \
+             human-divergence gate) after the interpretation pass completes.\n\
+             \n\
+             The response is `proposed create: <uri>` — save that URI verbatim \
+             if you need to pass it as `parent` to a follow-up \
+             `{lower}_propose_link_child` call in the same pass.",
+            class = c.class_name,
+            lower = c.class_name.to_lowercase()
         ),
         parameters,
     }
@@ -403,15 +504,15 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
         "properties": {
             "parent": {
                 "type": "string",
-                "description": "URI of the parent instance the child is being linked under.",
+                "description": "URI of the parent instance. MUST be a real URI: either one returned by a `_query` tool in this same pass, or one just returned by `_propose_create` (its `proposed create: <uri>` result). NEVER invent a URI like `ad4m://obj/unknown` — placeholders are rejected.",
             },
             "predicate": {
                 "type": "string",
-                "description": "Predicate IRI for the link (e.g. rdfs:member, ad4m://has_child).",
+                "description": "Predicate IRI for the link (e.g. `soa://basedOn`, `rdfs:member`). Use the exact predicate name from the class relationship definition; it appears in the class description as `<predicate>` → <Target>.",
             },
             "child": {
                 "type": "string",
-                "description": "URI of the child instance being linked.",
+                "description": "URI of the child instance. Same rules as `parent`: use a URI returned by `_query` or a URI you just created via `_propose_create`. NEVER invent placeholder URIs.",
             },
         },
         "required": ["parent", "predicate", "child"],
@@ -420,8 +521,12 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
     ToolSchema {
         name: format!("{}_propose_link_child", c.class_name.to_lowercase()),
         description: format!(
-            "Propose a parent → child link under a {} instance. Buffered until the pass completes.",
-            c.class_name
+            "Propose a parent → child link under a {class} instance. Buffered until the pass completes.\n\
+             \n\
+             **Workflow — always in this order:**\n\
+             1. Call `<class>_query` for each side to discover real URIs (or use a URI from a prior `_propose_create` in this same pass).\n\
+             2. Call this tool with those real URIs. Placeholders like `ad4m://obj/unknown` are rejected — the pass makes no progress if you invent URIs.",
+            class = c.class_name
         ),
         parameters,
     }
@@ -649,6 +754,89 @@ mod tests {
             out, "inner:stranger_create",
             "unknown-class verb should fall through to inner"
         );
+        assert_eq!(buf.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn propose_link_child_bounces_placeholder_parent_and_child() {
+        // Small models (gemma3:12b) invent placeholder URIs when they
+        // skip the query step — observed on CI job 22282 attempts 5/7/8.
+        // Rejecting these with a specific redirect (naming the class-
+        // specific `_query` tool) gives the LLM an actionable next step.
+        for bad in [
+            "ad4m://obj/unknown",
+            "unknown",
+            "ad4m://obj/PLACEHOLDER",
+            "ad4m://obj/example",
+            "ad4m://obj/...",
+            "",
+        ] {
+            let (p, buf) = provider(vec![task_shape()]);
+            let err = p
+                .call(
+                    "task_propose_link_child",
+                    json!({
+                        "parent": bad,
+                        "predicate": "rdfs:member",
+                        "child": "ns://real/child",
+                    }),
+                )
+                .await
+                .unwrap_err();
+            let s = err.to_string();
+            assert!(s.contains("placeholder"), "parent={bad}: {s}");
+            assert!(s.contains("_query"), "parent={bad}: {s}");
+            assert_eq!(buf.len(), 0, "buffer must not accumulate on placeholder");
+        }
+
+        for bad in ["ad4m://obj/unknown", "unknown", ""] {
+            let (p, buf) = provider(vec![task_shape()]);
+            let err = p
+                .call(
+                    "task_propose_link_child",
+                    json!({
+                        "parent": "ns://real/parent",
+                        "predicate": "rdfs:member",
+                        "child": bad,
+                    }),
+                )
+                .await
+                .unwrap_err();
+            let s = err.to_string();
+            assert!(s.contains("placeholder"), "child={bad}: {s}");
+            assert_eq!(buf.len(), 0, "buffer must not accumulate on placeholder");
+        }
+    }
+
+    #[tokio::test]
+    async fn hallucinated_add_relation_verb_returns_actionable_redirect() {
+        // gemma3:12b reaches for `<class>_add_<relation>` (e.g.
+        // `extintention_add_basedon`) when it wants to attach a relation.
+        // CI job 22282 attempts 1-4 stalled on this shape because the
+        // filtered-inner error was too generic. Redirect must name the
+        // real tool + a plausible predicate hint.
+        let (p, buf) = provider(vec![task_shape()]);
+        let err = p
+            .call("task_add_owner", json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("task_propose_link_child"),
+            "redirect must name the real tool: {err}"
+        );
+        assert!(err.contains("soa://owner"), "predicate hint missing: {err}");
+        assert!(err.contains("_query"), "must guide toward query: {err}");
+        assert_eq!(buf.len(), 0, "redirect must not touch the buffer");
+    }
+
+    #[tokio::test]
+    async fn hallucinated_add_relation_verb_for_unknown_class_falls_through() {
+        // If the add-shape verb doesn't match any offered class, delegate
+        // to inner — otherwise we'd shadow real tool calls.
+        let (p, buf) = provider(vec![task_shape()]);
+        let out = p.call("stranger_add_thing", json!({})).await.unwrap();
+        assert_eq!(out, "inner:stranger_add_thing");
         assert_eq!(buf.len(), 0);
     }
 }
