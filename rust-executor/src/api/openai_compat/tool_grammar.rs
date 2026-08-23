@@ -112,7 +112,11 @@ pub fn parse_tool_choice(value: &Option<Value>, has_tools: bool) -> ToolChoice {
 pub fn render_tools_system_prompt(tools: &[ToolDef]) -> String {
     let mut out = String::from(
         "# Tools\n\nYou may call one or more functions to assist with the user query.\n\n\
-         You are provided with function signatures within <tools></tools> XML tags:\n<tools>\n",
+         You are provided with function signatures within <tools></tools> XML tags. \
+         You MUST only call functions whose names appear exactly in the <tools> \
+         block below (spelling and case). Do NOT invent function names, and do \
+         NOT rely on your prior knowledge of any other API. If none of the listed \
+         functions fits, answer in plain text instead of guessing a call.\n<tools>\n",
     );
     for tool in tools {
         if let Ok(json) = serde_json::to_string(tool) {
@@ -327,38 +331,103 @@ pub struct ExtractedToolCall {
     pub arguments: String,
 }
 
-/// Pull every `<tool_call>…</tool_call>` block out of `text` and parse the
-/// inner JSON.  Works for both constrained output (the text *is* the
-/// block(s)) and auto-mode output (blocks embedded in prose).  Falls back
-/// to treating the whole trimmed text as a single bare JSON call.
+/// Pull every tool-call block out of `text` and parse the inner JSON.
+///
+/// Handles three shapes, in order:
+///   1. `<tool_call>…</tool_call>` XML tags (Hermes/Qwen convention — what
+///      our system prompt asks for).
+///   2. ` ``` `-fenced code blocks (` ```json `, ` ```xml `, or bare
+///      ` ``` `) whose body parses as a single `{name,arguments}` object —
+///      observed in the wild from Gemma-3, which tends to reach for a
+///      code-fence even when the prompt asks for XML tags.
+///   3. Fallback: treat the whole trimmed text as a single bare JSON call
+///      (the constrained-decoding path emits exactly this).
+///
+/// Anything not matching any of the above returns an empty vec — the
+/// harness reads that as "the model is done".
 pub fn extract_tool_calls(text: &str) -> Vec<ExtractedToolCall> {
-    const OPEN: &str = "<tool_call>";
-    const CLOSE: &str = "</tool_call>";
-
     let mut calls = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find(OPEN) {
-        let after = &rest[start + OPEN.len()..];
-        let (block, next) = match after.find(CLOSE) {
-            Some(end) => (&after[..end], &after[end + CLOSE.len()..]),
-            None => (after, ""),
-        };
-        if let Some(call) = parse_tool_call_json(block.trim()) {
-            calls.push(call);
-        }
-        rest = next;
-    }
-
+    extract_delimited(text, "<tool_call>", "</tool_call>", &mut calls);
     if calls.is_empty() {
-        if let Some(call) = parse_tool_call_json(text.trim()) {
+        extract_fenced(text, &mut calls);
+    }
+    if calls.is_empty() {
+        let trimmed = text.trim();
+        if let Some(arr) = parse_tool_call_json_array(trimmed) {
+            calls.extend(arr);
+        } else if let Some(call) = parse_tool_call_json(trimmed) {
             calls.push(call);
         }
     }
     calls
 }
 
+fn extract_delimited(text: &str, open: &str, close: &str, out: &mut Vec<ExtractedToolCall>) {
+    let mut rest = text;
+    while let Some(start) = rest.find(open) {
+        let after = &rest[start + open.len()..];
+        let (block, next) = match after.find(close) {
+            Some(end) => (&after[..end], &after[end + close.len()..]),
+            None => (after, ""),
+        };
+        if let Some(call) = parse_tool_call_json(block.trim()) {
+            out.push(call);
+        }
+        rest = next;
+    }
+}
+
+/// Scan for `\`\`\`[lang]\n…\n\`\`\`` blocks and try each one as a tool call.
+/// Recognises `json`, `xml`, and bare fences (no language tag). Anything
+/// inside a fence that doesn't parse as `{name, arguments}` is skipped
+/// silently — model may fence-quote unrelated snippets.
+fn extract_fenced(text: &str, out: &mut Vec<ExtractedToolCall>) {
+    const FENCE: &str = "```";
+    let mut rest = text;
+    while let Some(start) = rest.find(FENCE) {
+        let after = &rest[start + FENCE.len()..];
+        // Skip optional language tag up to the first newline.
+        let body_start = after.find('\n').map(|i| i + 1).unwrap_or(0);
+        let body_rest = &after[body_start..];
+        let Some(end) = body_rest.find(FENCE) else {
+            break;
+        };
+        let block = body_rest[..end].trim();
+        if let Some(arr) = parse_tool_call_json_array(block) {
+            out.extend(arr);
+        } else if let Some(call) = parse_tool_call_json(block) {
+            out.push(call);
+        }
+        rest = &body_rest[end + FENCE.len()..];
+    }
+}
+
 fn parse_tool_call_json(candidate: &str) -> Option<ExtractedToolCall> {
     let value: Value = serde_json::from_str(candidate).ok()?;
+    value_to_call(&value)
+}
+
+/// Parse `candidate` as a JSON array; if every element is a valid tool-call
+/// object, return them. Returns `None` when the input is not a JSON array or
+/// any element fails to parse — the caller can then fall through to the
+/// singleton form. Small-model bailout: Gemma-3 sometimes fences an array
+/// of calls (`[{name,arguments}, …]`) even when the prompt asks for the
+/// singleton XML tag form.
+fn parse_tool_call_json_array(candidate: &str) -> Option<Vec<ExtractedToolCall>> {
+    let value: Value = serde_json::from_str(candidate).ok()?;
+    let arr = value.as_array()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        out.push(value_to_call(v)?);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn value_to_call(value: &Value) -> Option<ExtractedToolCall> {
     let name = value.get("name")?.as_str()?.to_string();
     let arguments = match value.get("arguments") {
         Some(Value::String(s)) => s.clone(),
@@ -587,6 +656,73 @@ mod tests {
 
         // plain prose ⇒ nothing
         assert!(extract_tool_calls("I cannot help with that.").is_empty());
+    }
+
+    #[test]
+    fn extract_tool_calls_recovers_json_fence() {
+        // Model ignored the XML-tag protocol and fenced the call as ```json.
+        // Observed live from Gemma-3 12B via Ollama.
+        let one = extract_tool_calls(
+            "Sure, here's the call:\n\
+             ```json\n\
+             {\"name\": \"f\", \"arguments\": {\"a\": 1}}\n\
+             ```\n\
+             Let me know if you need anything else.",
+        );
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].name, "f");
+        assert_eq!(one[0].arguments, r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn extract_tool_calls_recovers_xml_fence() {
+        // Same failure mode but the model picks ```xml as its language tag.
+        let one = extract_tool_calls(
+            "```xml\n<tool_call>\n{\"name\": \"g\", \"arguments\": {}}\n</tool_call>\n```",
+        );
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].name, "g");
+    }
+
+    #[test]
+    fn extract_tool_calls_recovers_bare_fence() {
+        // Model dropped the language tag on the fence.
+        let one = extract_tool_calls("```\n{\"name\": \"h\", \"arguments\": {\"n\": 2}}\n```");
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].name, "h");
+    }
+
+    #[test]
+    fn extract_tool_calls_recovers_fenced_json_array() {
+        // Gemma-3 sometimes fences an ARRAY of call objects instead of one.
+        let calls = extract_tool_calls(
+            "Here are the calls:\n\
+             ```json\n\
+             [\n\
+               {\"name\": \"a\", \"arguments\": {\"x\": 1}},\n\
+               {\"name\": \"b\", \"arguments\": {\"y\": 2}}\n\
+             ]\n\
+             ```",
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[1].name, "b");
+    }
+
+    #[test]
+    fn extract_tool_calls_recovers_bare_json_array() {
+        // Same array form but without any fence at all.
+        let calls =
+            extract_tool_calls(r#"[{"name":"a","arguments":{}},{"name":"b","arguments":{}}]"#);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[1].name, "b");
+    }
+
+    #[test]
+    fn extract_tool_calls_ignores_fence_without_valid_call() {
+        // A fenced snippet that isn't a tool-call shape → skipped, no panic.
+        assert!(extract_tool_calls("```json\n{\"note\": \"nothing\"}\n```").is_empty());
     }
 
     #[test]

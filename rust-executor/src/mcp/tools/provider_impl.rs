@@ -44,6 +44,29 @@ impl ToolProvider for Ad4mToolProvider {
     }
 
     async fn call(&self, name: &str, args: Value) -> Result<String> {
-        self.handler.call_tool_by_name(name, args).await
+        // Case-insensitive fallback: some models (e.g. Gemma-3 12B) lowercase
+        // tool names even when the surface spells them `Task_propose_create`.
+        // Try the exact name first (fast path, avoids listing tools); on a
+        // miss, scan the current tool list for a case-insensitive hit and
+        // dispatch with the canonical spelling.
+        match self.handler.call_tool_by_name(name, args.clone()).await {
+            Ok(text) => Ok(text),
+            Err(e) => {
+                let tools = self.handler.list_tool_schemas().await;
+                if let Some(canonical) = tools
+                    .iter()
+                    .find(|t| t.name.eq_ignore_ascii_case(name))
+                    .map(|t| t.name.clone())
+                {
+                    if canonical != name {
+                        self.handler.call_tool_by_name(&canonical, args).await
+                    } else {
+                        Err(e)
+                    }
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 }
