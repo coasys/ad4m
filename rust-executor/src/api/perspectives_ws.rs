@@ -1185,6 +1185,150 @@ async fn run_interpretation_handler(
     Ok(serde_json::to_value(bases)?)
 }
 
+/// Harness-dispatched interpretation pass over WS-RPC — the tool-calling
+/// counterpart to `perspective.runInterpretation`. Wraps
+/// [`run_interpretation_with_harness_and_model`] with the same guardrails
+/// (capability + credit checks, class resolution, timeout, credit
+/// reservation). The LLM sees a live tool surface (`{Class}_query`,
+/// `{Class}_propose_create`, `{Class}_propose_link_child`, …) and drives
+/// the extraction by tool calls; buffered proposals drain through the
+/// same overlay gate the single-shot path uses.
+async fn run_interpretation_with_harness_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    check_credits(&ctx.user_email)?;
+
+    let body: RunInterpretationWithHarnessRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    // `max_tool_calls == 0` would collapse the harness loop to a no-op
+    // final-answer step. Callers wanting the classic path should use
+    // `perspective.runInterpretation` instead — bounce it here so the
+    // mistake surfaces at the boundary.
+    if body.max_tool_calls == 0 {
+        return Err(WsRpcError::bad_request(
+            "`maxToolCalls` must be > 0; use `perspective.runInterpretation` for the single-shot path",
+        ));
+    }
+
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+
+    // Class resolution mirrors `run_interpretation_handler`: explicit
+    // selection if provided, otherwise every registered subject class in
+    // the perspective. Explicit-selection failure surfaces the actual
+    // cause rather than the "no subject classes" default-path message.
+    let explicit_selection = matches!(&body.classes, Some(sel) if !sel.is_empty());
+    let class_names = match &body.classes {
+        Some(sel) if !sel.is_empty() => sel.clone(),
+        _ => perspective
+            .get_subject_classes_from_shacl()
+            .await
+            .map_err(|e| WsRpcError::internal(e.to_string()))?,
+    };
+    let mut shapes = Vec::with_capacity(class_names.len());
+    let mut unresolved: Vec<String> = Vec::new();
+    for name in &class_names {
+        match perspective.get_shape(name) {
+            Ok(shape) => shapes.push((*shape).clone()),
+            Err(e) => {
+                log::warn!(
+                    "runInterpretationWithHarness: skipping class '{}': {}",
+                    name,
+                    e
+                );
+                unresolved.push(name.clone());
+            }
+        }
+    }
+    if explicit_selection && !unresolved.is_empty() && shapes.is_empty() {
+        return Err(WsRpcError::bad_request(format!(
+            "runInterpretationWithHarness: none of the requested classes could be resolved: [{}]",
+            unresolved.join(", ")
+        )));
+    }
+    if shapes.is_empty() {
+        return Err(WsRpcError::bad_request(
+            "perspective has no subject classes to extract into",
+        ));
+    }
+
+    // Same as the single-shot path: WS turns carry speaker + text only.
+    let transcript: Vec<crate::perspectives::interpretation::TranscriptTurn> = body
+        .transcript
+        .into_iter()
+        .map(|t| {
+            crate::perspectives::interpretation::TranscriptTurn::from_speaker_text(
+                t.speaker, t.text,
+            )
+        })
+        .collect();
+
+    // Thread the caller's auth token into the harness so `Ad4mMcpHandler`'s
+    // tool dispatch executes with the caller's capabilities — same
+    // principle as the `/v1` openai-compat path. Empty string means an
+    // unauthenticated caller: don't propagate that as a phantom token
+    // (Ad4mMcpHandler treats `None` as "no user session; fall back to
+    // admin credential if configured").
+    let auth_token = if ctx.auth_token.is_empty() {
+        None
+    } else {
+        Some(ctx.auth_token.clone())
+    };
+
+    let bases = match tokio::time::timeout(
+        Duration::from_secs(RUN_INTERPRETATION_TIMEOUT_SECS),
+        crate::perspectives::interpretation::run_interpretation_with_harness_and_model(
+            &mut perspective,
+            &shapes,
+            &transcript,
+            &body.base_prefix,
+            &agent_context,
+            body.model_override.as_deref(),
+            body.existing_scope.as_ref(),
+            None,
+            body.max_tool_calls,
+            auth_token,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(bases)) => bases,
+        Ok(Err(e)) => return Err(WsRpcError::internal(e.to_string())),
+        Err(_) => {
+            log::warn!(
+                "run_interpretation_with_harness timed out after {}s",
+                RUN_INTERPRETATION_TIMEOUT_SECS
+            );
+            return Err(WsRpcError {
+                code: 408,
+                message: format!(
+                    "runInterpretationWithHarness timed out after {}s",
+                    RUN_INTERPRETATION_TIMEOUT_SECS
+                ),
+            });
+        }
+    };
+
+    if !bases.is_empty() {
+        if let Err(e) = reserve_credits(&ctx.user_email, bases.len() as f64 * DEFAULT_LINK_WRITE) {
+            log::warn!(
+                "Credit deduction failed for runInterpretationWithHarness (operation already committed): {}",
+                e
+            );
+        }
+    }
+
+    Ok(serde_json::to_value(bases)?)
+}
+
 /// Register a neighbourhood auto-processor on a perspective. Writes the
 /// `AutoProcessorConfig` into the shared graph; the executor watch loop reads it
 /// back and starts running interpretation automatically over new source items,
@@ -1380,6 +1524,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.modelSubscribe", model_subscribe_handler);
     map.register("perspective.evaluateGetters", evaluate_getters_handler);
     map.register("perspective.runInterpretation", run_interpretation_handler);
+    map.register(
+        "perspective.runInterpretationWithHarness",
+        run_interpretation_with_harness_handler,
+    );
     map.register("perspective.addAutoProcessor", add_auto_processor_handler);
     map.register(
         "perspective.acceptInterpretation",

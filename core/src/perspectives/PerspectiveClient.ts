@@ -285,6 +285,38 @@ export class PerspectiveClient {
     }
 
     /**
+     * Tool-calling counterpart to {@link runInterpretation}. The LLM sees a
+     * live per-class tool surface (`{Class}_query`, `{Class}_propose_create`,
+     * `{Class}_propose_link_child`, …) and drives the extraction via tool
+     * calls; buffered proposals drain through the same overlay gate the
+     * single-shot path uses.
+     *
+     * `maxToolCalls` bounds the loop and MUST be > 0 — zero would collapse
+     * the harness to a no-op final-answer step; use {@link runInterpretation}
+     * for the classic single-shot path.
+     *
+     * Same 20-minute RPC timeout as the single-shot path — an LLM loop
+     * that calls several tools can legitimately take longer than one plain
+     * generation.
+     */
+    async runInterpretationWithHarness(
+        uuid: string,
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        maxToolCalls: number,
+        classes?: string[],
+        modelOverride?: string,
+        existingScope?: RawScope,
+    ): Promise<string[]> {
+        const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
+        return this.#apiClient.call<string[]>(
+            'perspective.runInterpretationWithHarness',
+            { uuid, transcript, basePrefix, maxToolCalls, classes, modelOverride, existingScope },
+            RUN_INTERPRETATION_TIMEOUT_MS,
+        )
+    }
+
+    /**
      * Register a neighbourhood auto-processor on this perspective. The executor's
      * watch loop then runs interpretation automatically over new source items
      * (like Flux per channel), coordinating which peer processes each batch via

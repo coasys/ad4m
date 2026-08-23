@@ -7,7 +7,7 @@
  * for dedup.
  */
 
-import { Ad4mModel, Flag, Model, Property } from "@coasys/ad4m";
+import { Ad4mModel, Flag, HasMany, Model, Property } from "@coasys/ad4m";
 
 @Model({
   name: "ExtTask",
@@ -47,4 +47,24 @@ export class ExtQuestion extends Ad4mModel {
 
   @Property({ through: "soa://title", required: true, identity: true, interpretationHint: "The question, phrased as a question." })
   title: string = "";
+}
+
+@Model({
+  name: "ExtIntention",
+  interpretationHint:
+    "An intention someone forms that follows from — and is grounded in — one or more existing beliefs. Not a raw task; not a bare belief. If the transcript expresses a course of action justified by beliefs already in the perspective, extract the intention and link it to the beliefs it rests on.",
+})
+export class ExtIntention extends Ad4mModel {
+  @Flag({ through: "soa://type", value: "soa://intention" })
+  type = "soa://intention";
+
+  @Property({ through: "soa://title", required: true, identity: true, interpretationHint: "One-sentence statement of the intention (what someone intends to do or bring about)." })
+  title: string = "";
+
+  // TODO: relation-level `interpretationHint` is not on `RelationOptions` yet
+  // (only Property + Model carry it). The class-level hint above therefore
+  // has to name the `basedOn` relation explicitly so the LLM knows to link
+  // existing beliefs it discovered via `ExtBelief_query`.
+  @HasMany(() => ExtBelief, { through: "soa://basedOn" })
+  basedOn: ExtBelief[] = [];
 }

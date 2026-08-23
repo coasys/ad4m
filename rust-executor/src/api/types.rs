@@ -571,6 +571,39 @@ pub struct RunInterpretationRequest {
     pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
 }
 
+/// Run harness-dispatched LLM interpretation over a transcript. Mirrors
+/// [`RunInterpretationRequest`] but takes the tool-calling path — the LLM
+/// sees a live `{Class}_query` / `{Class}_propose_create` /
+/// `{Class}_propose_link_child` tool surface (design v3 §6) and drives the
+/// extraction by tool calls rather than by emitting one big JSON blob.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RunInterpretationWithHarnessRequest {
+    pub uuid: String,
+    pub transcript: Vec<TranscriptTurn>,
+    /// URI namespace new instance identities are minted under, e.g. `soa://ext/`.
+    pub base_prefix: String,
+    /// Local names of the subject classes to extract into (e.g. `["Task","Belief"]`).
+    /// `None`/empty selects all subject classes registered in the perspective.
+    pub classes: Option<Vec<String>>,
+    /// Upper bound on tool calls the harness will make in one pass. Reaching
+    /// the bound forces a final-answer step (no more tools). Must be > 0 —
+    /// zero would collapse the loop to the classic single-shot path and
+    /// should be routed there instead.
+    pub max_tool_calls: u32,
+    /// Optional model override — same semantics as the auto-processor's
+    /// `modelOverride`. `None` uses the default LLM.
+    #[serde(default)]
+    #[ts(optional)]
+    pub model_override: Option<String>,
+    /// Optional parent-scope filter for existing-instance context (fed into
+    /// the pre-loop prompt). Same semantics as `RunInterpretationRequest`.
+    #[serde(default)]
+    #[ts(optional, type = "any")]
+    pub existing_scope: Option<crate::perspectives::model_query::types::Scope>,
+}
+
 /// Register a neighbourhood auto-processor on a perspective. The executor's
 /// watch loop then runs LLM interpretation automatically over new source items
 /// (mirrors what Flux does per channel), coordinating which peer processes each
