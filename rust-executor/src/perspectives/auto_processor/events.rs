@@ -82,6 +82,20 @@ pub struct AutoProcessorEvent {
     /// The batch's source item ids (present from `BatchReady` onward).
     #[serde(default)]
     pub item_ids: Vec<String>,
+    /// Content hash of the batch — the same
+    /// [`super::claim::batch_key`] value the perspective-scoped
+    /// [`AutoProcessorNeighbourhoodState`] carries.
+    ///
+    /// Present from `BatchReady` onward, and it is what makes the two
+    /// streams joinable. Without it a consumer holding both has no way to
+    /// say "this `LlmRequestSent` belongs to the row I opened on that
+    /// `Claimed`" — the fine-grained stream carries `item_ids` and the
+    /// neighbourhood stream carries only the hash of them, so correlating
+    /// meant re-implementing this hash client-side and matching the Rust
+    /// serialization exactly. A consumer that merges a peer's coarse
+    /// phases with its own fine ones needs one shared key, and this is it.
+    #[serde(default)]
+    pub batch_key: Option<String>,
     /// Instance base URIs written by the pass (present on `Processed`).
     #[serde(default)]
     pub bases: Vec<String>,
@@ -114,6 +128,7 @@ impl AutoProcessorEvent {
             agent_did: None,
             step,
             item_ids: Vec::new(),
+            batch_key: None,
             bases: Vec::new(),
             detail: None,
             llm_input: None,
@@ -126,6 +141,15 @@ impl AutoProcessorEvent {
     }
     pub fn with_items(mut self, item_ids: &[String]) -> Self {
         self.item_ids = item_ids.to_vec();
+        self
+    }
+    /// Tag this event with the batch it belongs to, so a consumer can join
+    /// it to the perspective-scoped neighbourhood stream. Callers pass the
+    /// [`super::claim::batch_key`] of the same `item_ids` — derived once
+    /// per pass rather than recomputed per event, since the hash is over a
+    /// set that does not change mid-pass.
+    pub fn with_batch_key(mut self, batch_key: &str) -> Self {
+        self.batch_key = Some(batch_key.to_string());
         self
     }
     pub fn with_bases(mut self, bases: &[String]) -> Self {
@@ -323,4 +347,10 @@ pub struct InterpretationEmitContext {
     pub processor_id: String,
     pub agent_did: String,
     pub item_ids: Vec<String>,
+    /// The pass's batch key, so the mid-pass LLM events join to the same
+    /// row as the watcher's own signals. Carried here rather than
+    /// recomputed from `item_ids` because the caller already has it, and
+    /// because the one-shot path (which has no claim and no batch) supplies
+    /// a synthetic key instead — see `run_interpretation_handler`.
+    pub batch_key: String,
 }

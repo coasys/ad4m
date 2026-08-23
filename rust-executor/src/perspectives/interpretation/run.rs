@@ -469,6 +469,7 @@ pub async fn run_interpretation_with_strategy_and_model(
                     )
                     .with_agent_did(&ctx.agent_did)
                     .with_items(&ctx.item_ids)
+                    .with_batch_key(&ctx.batch_key)
                     .with_llm_input(prompt.clone()),
                 )
                 .await;
@@ -488,6 +489,7 @@ pub async fn run_interpretation_with_strategy_and_model(
                     )
                     .with_agent_did(&ctx.agent_did)
                     .with_items(&ctx.item_ids)
+                    .with_batch_key(&ctx.batch_key)
                     .with_llm_output(result.text.clone()),
                 )
                 .await;

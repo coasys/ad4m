@@ -43,7 +43,8 @@ export type RawScope = { id: string; predicate: string };
  *
  * ## Payload fields per step
  *
- * All steps carry `perspectiveUuid`, `processorId`, `agentDid`, `itemIds[]`.
+ * All steps carry `perspectiveUuid`, `processorId`, `agentDid`, `itemIds[]`
+ * and `batchKey` (the join key to the neighbourhood-state stream).
  * Additional payload:
  *
  * - `backedOff`, `notCandidate`         → `detail` = holder / elected-author DID
@@ -76,6 +77,24 @@ export interface AutoProcessorEvent {
   step: AutoProcessorStep;
   /** The batch's source item ids (present from `batchReady` onward). */
   itemIds: string[];
+  /**
+   * Content hash of the batch — the same value
+   * {@link AutoProcessorNeighbourhoodStateEvent.batchKey} carries, and the
+   * key that joins the two streams.
+   *
+   * A UI that renders one row per pass subscribes to both: the
+   * perspective-scoped neighbourhood stream opens the row (and names the
+   * claimant), while this DID-scoped stream fills in the fine-grained
+   * steps and LLM I/O for the pass this agent is running. Matching them on
+   * `processorId` alone breaks as soon as a processor runs a second pass;
+   * matching on `itemIds` means re-implementing the Rust SHA-256 and its
+   * exact serialization. So both streams carry the same key.
+   *
+   * Present from `batchReady` onward. Optional on the type because a
+   * pre-#903 executor does not send it — treat its absence as "cannot
+   * correlate", not as an error.
+   */
+  batchKey?: string;
   /** Instance base URIs written by the pass (present on `processed`). */
   bases: string[];
   /** Free-form context for the step (a holder/elected DID, an error, …). */

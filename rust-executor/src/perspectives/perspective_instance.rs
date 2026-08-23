@@ -5726,11 +5726,17 @@ impl PerspectiveInstance {
             let Some(batch) = watcher.drain_ready_batch(cfg, now_ms) else {
                 continue;
             };
+            // Hoisted above the `BatchReady` emit so that signal can carry the batch key too.
+            // It is the first event of a pass, so a consumer that could not key it would have to
+            // buffer everything until the pass's second event told it what row to open.
+            let item_ids: Vec<String> = batch.iter().map(|t| t.id.clone()).collect();
+            let batch_id = crate::perspectives::auto_processor::claim::batch_key(&item_ids);
             // Signal the batch is ready before the pass runs, so listeners
             // (tests, the WS layer) can await "processing started".
             emit(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, AutoProcessorStep::BatchReady)
-                    .with_items(&batch.iter().map(|t| t.id.clone()).collect::<Vec<_>>()),
+                    .with_items(&item_ids)
+                    .with_batch_key(&batch_id),
             )
             .await;
             let mut perspective_clone = self.clone();
@@ -5738,8 +5744,6 @@ impl PerspectiveInstance {
             // elected author past `claim_ttl_ms`, escalate past election straight
             // to the claim (the min-DID claim still prevents doubles among peers
             // that escalate together).
-            let item_ids: Vec<String> = batch.iter().map(|t| t.id.clone()).collect();
-            let batch_id = crate::perspectives::auto_processor::claim::batch_key(&item_ids);
             let escalate = watcher.should_escalate(&batch_id, now_ms, cfg.claim_ttl_ms);
             let outcome = match run_one_pass(
                 &mut perspective_clone,
