@@ -88,12 +88,12 @@ pub trait ToolProvider: Send + Sync {
 /// Kept generic (predicate on `&ToolSchema`) rather than a hard-coded
 /// allowlist so callers can filter by name prefix, by description content,
 /// or by structural properties of the schema — whatever the use case wants.
-pub struct FilteredProvider<P: ToolProvider> {
+pub struct FilteredProvider<P: ToolProvider + ?Sized> {
     inner: Arc<P>,
     predicate: Arc<dyn Fn(&ToolSchema) -> bool + Send + Sync>,
 }
 
-impl<P: ToolProvider> FilteredProvider<P> {
+impl<P: ToolProvider + ?Sized> FilteredProvider<P> {
     pub fn new(
         inner: Arc<P>,
         predicate: impl Fn(&ToolSchema) -> bool + Send + Sync + 'static,
@@ -106,7 +106,7 @@ impl<P: ToolProvider> FilteredProvider<P> {
 }
 
 #[async_trait::async_trait]
-impl<P: ToolProvider + 'static> ToolProvider for FilteredProvider<P> {
+impl<P: ToolProvider + ?Sized + 'static> ToolProvider for FilteredProvider<P> {
     async fn tools(&self) -> Vec<ToolSchema> {
         self.inner
             .tools()
@@ -133,6 +133,91 @@ impl<P: ToolProvider + 'static> ToolProvider for FilteredProvider<P> {
             anyhow::bail!("tool `{name}` is not in the current provider's filtered surface");
         }
         self.inner.call(name, args).await
+    }
+}
+
+/// Auto-inject a fixed set of argument values on every dispatch, and hide
+/// those parameters from the schemas the LLM sees.
+///
+/// Purpose: when the caller has context (e.g. "the perspective this pass is
+/// running on") that a tool wants as an argument, but the LLM has no way to
+/// know it, this decorator makes the tool call succeed without the LLM
+/// guessing. CI job 22287 on `dcaeba21b` failed 8/8 attempts because the
+/// dynamic `extbelief_query` / `extintention_propose_create` schemas listed
+/// `perspective_id` as required — gemma3:12b hallucinated the string
+/// `"ad4m"`, hit "Perspective not found", and gave up in plain text.
+///
+/// Behaviour:
+/// - `tools()` — for each inner schema, strip the bound parameter names from
+///   `properties` and `required`. Non-object schemas pass through unchanged.
+/// - `call()` — merge the bound values into `args` (bound values do NOT
+///   override an argument the LLM already supplied; the strip step keeps the
+///   LLM from seeing them, so this is defense-in-depth) and delegate.
+pub struct BoundArgsProvider<P: ToolProvider + ?Sized> {
+    inner: Arc<P>,
+    bindings: std::collections::BTreeMap<String, Value>,
+}
+
+impl<P: ToolProvider + ?Sized> BoundArgsProvider<P> {
+    pub fn new(inner: Arc<P>, bindings: std::collections::BTreeMap<String, Value>) -> Self {
+        Self { inner, bindings }
+    }
+}
+
+#[async_trait::async_trait]
+impl<P> ToolProvider for BoundArgsProvider<P>
+where
+    P: ToolProvider + ?Sized + Send + Sync + 'static,
+{
+    async fn tools(&self) -> Vec<ToolSchema> {
+        self.inner
+            .tools()
+            .await
+            .into_iter()
+            .map(|mut t| {
+                strip_bound_from_schema(&mut t.parameters, &self.bindings);
+                t
+            })
+            .collect()
+    }
+
+    async fn call(&self, name: &str, mut args: Value) -> Result<String> {
+        merge_bound_into_args(&mut args, &self.bindings);
+        self.inner.call(name, args).await
+    }
+}
+
+fn strip_bound_from_schema(
+    schema: &mut Value,
+    bindings: &std::collections::BTreeMap<String, Value>,
+) {
+    let Value::Object(map) = schema else {
+        return;
+    };
+    if let Some(Value::Object(props)) = map.get_mut("properties") {
+        for k in bindings.keys() {
+            props.remove(k);
+        }
+    }
+    if let Some(Value::Array(req)) = map.get_mut("required") {
+        req.retain(|v| match v {
+            Value::String(s) => !bindings.contains_key(s),
+            _ => true,
+        });
+    }
+}
+
+fn merge_bound_into_args(args: &mut Value, bindings: &std::collections::BTreeMap<String, Value>) {
+    // Small local models occasionally send `null` or an unwrapped scalar when
+    // the (post-strip) schema is empty; coerce to an object so injection can
+    // land regardless of the caller's shape.
+    if !args.is_object() {
+        *args = Value::Object(serde_json::Map::new());
+    }
+    if let Value::Object(map) = args {
+        for (k, v) in bindings {
+            map.entry(k.clone()).or_insert_with(|| v.clone());
+        }
     }
 }
 
@@ -336,5 +421,139 @@ mod tests {
         assert!(err
             .to_string()
             .contains("not in the current provider's filtered surface"));
+    }
+
+    fn perspective_id_bound() -> std::collections::BTreeMap<String, Value> {
+        std::collections::BTreeMap::from([(
+            "perspective_id".to_string(),
+            Value::String("uuid-under-test".to_string()),
+        )])
+    }
+
+    fn schema_with_perspective_id() -> ToolSchema {
+        ToolSchema {
+            name: "extbelief_query".into(),
+            description: "Query beliefs".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "perspective_id": {"type": "string", "description": "Perspective UUID"},
+                    "limit": {"type": "integer"}
+                },
+                "required": ["perspective_id"],
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn bound_args_strips_param_from_schema_properties_and_required() {
+        let inner = Arc::new(MockProvider::new(vec![schema_with_perspective_id()]));
+        let bound = BoundArgsProvider::new(inner, perspective_id_bound());
+        let out = bound.tools().await;
+        assert_eq!(out.len(), 1);
+        let props = &out[0].parameters["properties"];
+        assert!(props.get("perspective_id").is_none());
+        assert!(props.get("limit").is_some());
+        let required: Vec<&str> = out[0].parameters["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(!required.contains(&"perspective_id"));
+    }
+
+    #[tokio::test]
+    async fn bound_args_injects_value_on_call_when_llm_omits_it() {
+        let inner = Arc::new(MockProvider::new(vec![schema_with_perspective_id()]));
+        let recorder = inner.clone();
+        let bound = BoundArgsProvider::new(inner, perspective_id_bound());
+        // LLM sees the post-strip schema, so it only sends the visible arg.
+        let out = bound.call("extbelief_query", json!({"limit": 5})).await;
+        assert!(out.is_ok(), "call should succeed: {out:?}");
+        let calls = recorder.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1["perspective_id"], "uuid-under-test");
+        assert_eq!(calls[0].1["limit"], 5);
+    }
+
+    #[tokio::test]
+    async fn bound_args_promotes_non_object_args_to_object_before_inject() {
+        let inner = Arc::new(MockProvider::new(vec![schema_with_perspective_id()]));
+        let recorder = inner.clone();
+        let bound = BoundArgsProvider::new(inner, perspective_id_bound());
+        // gemma3:12b sometimes sends `null` for a zero-arg tool call; the
+        // decorator must still land the injected binding.
+        let out = bound.call("extbelief_query", Value::Null).await;
+        assert!(out.is_ok(), "call should succeed on null args: {out:?}");
+        let calls = recorder.recorded_calls();
+        assert_eq!(calls[0].1["perspective_id"], "uuid-under-test");
+    }
+
+    #[tokio::test]
+    async fn bound_args_does_not_override_llm_supplied_value() {
+        // Defense-in-depth: the schema hides the param, but if an out-of-band
+        // arg smuggles it in, respect the LLM's value rather than clobbering.
+        let inner = Arc::new(MockProvider::new(vec![schema_with_perspective_id()]));
+        let recorder = inner.clone();
+        let bound = BoundArgsProvider::new(inner, perspective_id_bound());
+        let out = bound
+            .call(
+                "extbelief_query",
+                json!({"perspective_id": "override", "limit": 1}),
+            )
+            .await;
+        assert!(out.is_ok());
+        let calls = recorder.recorded_calls();
+        assert_eq!(calls[0].1["perspective_id"], "override");
+    }
+
+    #[tokio::test]
+    async fn bound_args_leaves_unrelated_schemas_untouched() {
+        let inner = Arc::new(MockProvider::new(vec![
+            schema_with_perspective_id(),
+            ToolSchema::zero_arg("noop", "does nothing"),
+        ]));
+        let bound = BoundArgsProvider::new(inner, perspective_id_bound());
+        let out = bound.tools().await;
+        assert_eq!(out.len(), 2);
+        // Zero-arg schema retains its shape (no perspective_id to remove).
+        assert_eq!(out[1].parameters["type"], "object");
+        assert!(out[1].parameters["properties"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn bound_args_composes_under_filtered_provider() {
+        // Compose exactly the way `run_interpretation_with_harness_and_model`
+        // does: BoundArgsProvider(Ad4mToolProvider) → FilteredProvider. The
+        // strip must apply BEFORE the filter, so downstream layers already
+        // see the perspective-clean schema.
+        let inner = Arc::new(MockProvider::new(vec![
+            schema_with_perspective_id(),
+            ToolSchema::zero_arg("add_link", "write verb"),
+        ]));
+        let bound: Arc<dyn ToolProvider> = Arc::new(BoundArgsProvider::new(
+            inner.clone(),
+            perspective_id_bound(),
+        ));
+        let filtered = FilteredProvider::new(bound, is_read_only);
+        let visible: Vec<_> = filtered.tools().await;
+        // Read tool survives, write tool drops.
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].name, "extbelief_query");
+        // Perspective id is gone from what the LLM sees.
+        assert!(visible[0].parameters["properties"]
+            .get("perspective_id")
+            .is_none());
+        // Dispatch through the filter still injects.
+        filtered
+            .call("extbelief_query", json!({"limit": 3}))
+            .await
+            .expect("call succeeds");
+        let calls = inner.recorded_calls();
+        assert_eq!(calls[0].1["perspective_id"], "uuid-under-test");
     }
 }

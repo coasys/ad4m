@@ -10,7 +10,7 @@ use crate::ai_service::harness::propose::{
     class_propose_shape_from_shacl, ProposalBuffer, ProposeWritesProvider,
 };
 use crate::ai_service::harness::provider::{
-    is_read_only, FilteredProvider, ToolProvider, ToolSchema,
+    is_read_only, BoundArgsProvider, FilteredProvider, ToolProvider, ToolSchema,
 };
 use crate::ai_service::harness::{run_with_tools, HarnessConfig};
 use crate::perspectives::model_query::types::{ModelShape, Scope};
@@ -556,6 +556,23 @@ pub async fn run_interpretation_with_harness_and_model(
         mcp_handler,
     ));
 
+    // Bind `perspective_id` to the pass's own perspective UUID: strip it from
+    // every schema (LLM never sees it) and auto-inject on every dispatch.
+    // Rationale: every dynamic per-class tool (`extbelief_query`,
+    // `extintention_propose_create`, `_get`, `_list`, collection ops) declares
+    // `perspective_id` as required, but the LLM has no reliable way to know
+    // the UUID. CI job 22287 on `dcaeba21b` failed 8/8 because gemma3:12b
+    // hallucinated the string `"ad4m"`, hit "Perspective not found", and
+    // bailed in plain text. Binding closes that gap without any tool-schema
+    // migration work.
+    let ad4m_bound: Arc<dyn ToolProvider> = Arc::new(BoundArgsProvider::new(
+        ad4m_provider,
+        std::collections::BTreeMap::from([(
+            "perspective_id".to_string(),
+            serde_json::Value::String(perspective.uuid.clone()),
+        )]),
+    ));
+
     // Narrow the Ad4m tool surface to (a) class-scoped tools for the offered
     // classes only, and (b) read verbs only. Rationale: a smaller local LLM
     // like `gemma3:12b` faced with 60+ generic tools (`add_perspective`,
@@ -570,15 +587,13 @@ pub async fn run_interpretation_with_harness_and_model(
         .iter()
         .map(|s| format!("{}_", s.class_name.to_lowercase()))
         .collect();
-    let ad4m_filtered: Arc<dyn ToolProvider> = Arc::new(FilteredProvider::new(
-        ad4m_provider,
-        move |t: &ToolSchema| {
+    let ad4m_filtered: Arc<dyn ToolProvider> =
+        Arc::new(FilteredProvider::new(ad4m_bound, move |t: &ToolSchema| {
             if !is_read_only(t) {
                 return false;
             }
             allowed_class_prefixes.iter().any(|p| t.name.starts_with(p))
-        },
-    ));
+        }));
 
     // Wrap in ProposeWritesProvider so the LLM also sees the two synthetic
     // per-class writers whose side-effect is "queue an InterpretationOp",
