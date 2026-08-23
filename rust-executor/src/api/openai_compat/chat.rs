@@ -483,11 +483,22 @@ fn flatten_message(m: &ChatMessage) -> (String, String) {
                     if !text.is_empty() {
                         text.push('\n');
                     }
-                    let args = call.function.arguments.trim();
-                    let args = if args.is_empty() { "{}" } else { args };
+                    let args_trimmed = call.function.arguments.trim();
+                    // Validate that `args` is real JSON before splicing it in
+                    // verbatim; drop to `{}` on garbage upstream.
+                    let args = if args_trimmed.is_empty()
+                        || serde_json::from_str::<serde_json::Value>(args_trimmed).is_err()
+                    {
+                        "{}".to_string()
+                    } else {
+                        args_trimmed.to_string()
+                    };
+                    // Encode name via serde_json so quotes/backslashes/newlines
+                    // can't produce a malformed block.
+                    let name_encoded = serde_json::to_string(&call.function.name)
+                        .unwrap_or_else(|_| "\"\"".to_string());
                     text.push_str(&format!(
-                        "<tool_call>\n{{\"name\": \"{}\", \"arguments\": {}}}\n</tool_call>",
-                        call.function.name, args
+                        "<tool_call>\n{{\"name\": {name_encoded}, \"arguments\": {args}}}\n</tool_call>"
                     ));
                 }
             }

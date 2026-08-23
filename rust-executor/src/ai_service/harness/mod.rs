@@ -115,8 +115,13 @@ pub async fn run_with_tools(
     config: HarnessConfig,
 ) -> Result<String> {
     let mut messages = initial_messages;
+    // Budget is enforced per *dispatched tool call*, not per round: a single
+    // completion may return multiple tool_calls, and we don't want one round
+    // to blow through the caller's per-pass budget (which downstream drives
+    // how many propose_* ops the interpretation overlay accepts).
+    let mut calls_used: usize = 0;
 
-    for _ in 0..config.max_tool_calls {
+    while calls_used < config.max_tool_calls as usize {
         let tools = provider.tools().await;
         let completion = completions.complete(model_id, &messages, tools).await?;
 
@@ -128,12 +133,23 @@ pub async fn run_with_tools(
         // Append the assistant tool_calls turn AND one tool-result message
         // per call, in the OpenAI-mandated shape. The tool_calls entry must
         // precede its results so the model sees the correlation on the next
-        // turn.
+        // turn. OpenAI requires one tool-result per tool_call from the same
+        // assistant turn; when the budget runs out mid-round we still emit
+        // matching results (with a truthful "budget exhausted" body) so the
+        // message shape stays valid.
         messages.push(assistant_tool_calls_message(&completion));
         for tc in &completion.tool_calls {
-            let result = match provider.call(&tc.name, tc.arguments.clone()).await {
-                Ok(text) => text,
-                Err(e) => format!("error: {e}"),
+            let result = if calls_used < config.max_tool_calls as usize {
+                calls_used += 1;
+                match provider.call(&tc.name, tc.arguments.clone()).await {
+                    Ok(text) => text,
+                    Err(e) => format!("error: {e}"),
+                }
+            } else {
+                format!(
+                    "error: tool call budget of {} exhausted mid-round",
+                    config.max_tool_calls
+                )
             };
             messages.push(tool_result_message(&tc.id, &result));
         }
@@ -430,6 +446,74 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Tool budget of 3 calls exhausted"));
+    }
+
+    #[tokio::test]
+    async fn max_tool_calls_is_enforced_per_dispatched_call_not_per_round() {
+        // A single completion returning 5 tool_calls with a budget of 3
+        // MUST dispatch only 3 of them and reject the last 2 with a budget
+        // marker (matching results still emitted so the OpenAI message
+        // shape stays valid). Regression guard for CodeRabbit finding on
+        // this branch — pre-fix the loop counted rounds, so a single
+        // burst-round could exceed the budget.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountingProvider {
+            calls: AtomicUsize,
+            tools: Vec<ToolSchema>,
+        }
+        #[async_trait::async_trait]
+        impl ToolProvider for CountingProvider {
+            async fn tools(&self) -> Vec<ToolSchema> {
+                self.tools.clone()
+            }
+            async fn call(&self, _name: &str, _args: Value) -> Result<String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok("ok".into())
+            }
+        }
+
+        let burst = HarnessCompletion {
+            content: String::new(),
+            tool_calls: (0..5)
+                .map(|i| HarnessToolCall {
+                    id: format!("c{i}"),
+                    name: "t".into(),
+                    arguments: json!({}),
+                })
+                .collect(),
+        };
+        let script = vec![burst, plain_answer("done")];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let provider = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+            tools: vec![ToolSchema::zero_arg("t", "")],
+        });
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("go")],
+            provider.clone(),
+            llm.clone(),
+            HarnessConfig { max_tool_calls: 3 },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "done");
+        // Provider called 3× (budget), NOT 5×.
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+        // 5 tool-result messages still queued (one per tool_call in the
+        // burst) so the OpenAI shape is preserved.
+        let msgs = llm.nth_messages(1);
+        let tool_results: Vec<&Value> = msgs.iter().filter(|m| m["role"] == "tool").collect();
+        assert_eq!(tool_results.len(), 5);
+        // The last 2 must carry the budget-exhausted marker.
+        for r in &tool_results[3..] {
+            let c = r["content"].as_str().unwrap();
+            assert!(
+                c.contains("budget of 3 exhausted"),
+                "expected budget-exhausted marker, got: {c}"
+            );
+        }
     }
 
     #[tokio::test]

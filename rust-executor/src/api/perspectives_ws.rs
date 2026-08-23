@@ -541,6 +541,15 @@ const SPARQL_QUERY_TIMEOUT_SECS: u64 = 30;
 /// forever (a slot held past this bound returns a 408 to the caller).
 const RUN_INTERPRETATION_TIMEOUT_SECS: u64 = 300;
 
+/// Longer server budget for the harness (tool-calling) path. A single
+/// harness pass is N tool round-trips plus a final answer, so it
+/// legitimately takes longer than a single-shot generation. Matches the
+/// 20-minute RPC timeout the client (`PerspectiveClient
+/// .runInterpretationWithHarness`) sets on this method; if the server
+/// budget were shorter, slow local models would 408 on the server while
+/// the client still waited.
+const RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS: u64 = 1200;
+
 async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -1284,7 +1293,7 @@ async fn run_interpretation_with_harness_handler(
     };
 
     let bases = match tokio::time::timeout(
-        Duration::from_secs(RUN_INTERPRETATION_TIMEOUT_SECS),
+        Duration::from_secs(RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS),
         crate::perspectives::interpretation::run_interpretation_with_harness_and_model(
             &mut perspective,
             &shapes,
@@ -1305,13 +1314,13 @@ async fn run_interpretation_with_harness_handler(
         Err(_) => {
             log::warn!(
                 "run_interpretation_with_harness timed out after {}s",
-                RUN_INTERPRETATION_TIMEOUT_SECS
+                RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS
             );
             return Err(WsRpcError {
                 code: 408,
                 message: format!(
                     "runInterpretationWithHarness timed out after {}s",
-                    RUN_INTERPRETATION_TIMEOUT_SECS
+                    RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS
                 ),
             });
         }

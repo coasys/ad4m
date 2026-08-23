@@ -209,13 +209,27 @@ fn flatten_json_message(m: &Value) -> Result<(String, String)> {
                     .and_then(|f| f.get("arguments"))
                     .and_then(|a| a.as_str())
                     .unwrap_or("{}");
-                let args = args_str.trim();
-                let args = if args.is_empty() { "{}" } else { args };
+                let args_trimmed = args_str.trim();
+                // Validate that `args` is real JSON before splicing it into
+                // the block verbatim. An invalid arguments string from an
+                // upstream provider would otherwise produce an unparseable
+                // <tool_call> block that the LLM sees on its next turn.
+                let args = if args_trimmed.is_empty()
+                    || serde_json::from_str::<serde_json::Value>(args_trimmed).is_err()
+                {
+                    "{}".to_string()
+                } else {
+                    args_trimmed.to_string()
+                };
+                // Encode `name` via serde_json so a name containing `"`, `\`,
+                // or a newline can't produce a malformed block.
+                let name_encoded =
+                    serde_json::to_string(name).unwrap_or_else(|_| "\"\"".to_string());
                 if !text.is_empty() {
                     text.push('\n');
                 }
                 text.push_str(&format!(
-                    "<tool_call>\n{{\"name\": \"{name}\", \"arguments\": {args}}}\n</tool_call>"
+                    "<tool_call>\n{{\"name\": {name_encoded}, \"arguments\": {args}}}\n</tool_call>"
                 ));
             }
             Ok(("assistant".to_string(), text))

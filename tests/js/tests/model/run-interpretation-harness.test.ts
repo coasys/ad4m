@@ -64,7 +64,22 @@ describe("perspective.runInterpretationWithHarness (WS + real LLM)", function ()
   let p: PerspectiveProxy;
   let seededBeliefUris: Set<string>;
 
-  before(async () => {
+  before(async function () {
+    // LLM availability gate — see file header. The test needs a reachable
+    // OpenAI-compatible endpoint at BASE_URL (Ollama on Marvin locally; a
+    // tunnel from a dev box). Skip cleanly on runners without it so the
+    // whole suite doesn't fail on environments that just don't have the
+    // hardware.
+    try {
+      const probe = await fetch(BASE_URL.replace(/\/v1\/?$/, "") + "/v1/models", {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!probe.ok) throw new Error(`probe ${probe.status}`);
+    } catch (e) {
+      console.log(`Skipping harness e2e — LLM endpoint ${BASE_URL} unreachable: ${(e as Error).message}`);
+      this.skip();
+    }
+
     const agent = await startAgent("run-interpretation-harness");
     ad4m = agent.client;
     stop = agent.stop;
