@@ -148,11 +148,16 @@ impl<P: ToolProvider + 'static> ToolProvider for FilteredProvider<P> {
 /// behaviour.
 pub fn is_read_only(t: &ToolSchema) -> bool {
     const WRITE_PREFIXES: &[&str] = &["add_", "remove_", "delete_", "create_", "update_", "set_"];
-    // Per-class dynamic write verbs (see mcp::tools::dynamic): `<class>_delete`,
-    // `<class>_set_<prop>`, `<class>_add_to_<coll>`, `<class>_remove_from_<coll>`.
-    const WRITE_INFIXES: &[&str] = &["_delete", "_set_", "_add_to_", "_remove_from_"];
+    // Per-class dynamic write verbs (see mcp::tools::dynamic): `<class>_create`,
+    // `<class>_delete`, `<class>_set_<prop>`, `<class>_add_to_<coll>`,
+    // `<class>_remove_from_<coll>`.
+    const WRITE_SUFFIXES: &[&str] = &["_create", "_delete"];
+    const WRITE_INFIXES: &[&str] = &["_set_", "_add_to_", "_remove_from_"];
 
     if WRITE_PREFIXES.iter().any(|p| t.name.starts_with(p)) {
+        return false;
+    }
+    if WRITE_SUFFIXES.iter().any(|s| t.name.ends_with(s)) {
         return false;
     }
     if WRITE_INFIXES.iter().any(|i| t.name.contains(i)) {
@@ -216,8 +221,10 @@ mod tests {
                 }),
             },
             ToolSchema::zero_arg("add_link", "Add a link to a perspective"),
+            ToolSchema::zero_arg("Task_create", "Create a Task instance"),
             ToolSchema::zero_arg("Task_delete", "Delete a Task instance"),
             ToolSchema::zero_arg("Task_set_title", "Set the title of a Task"),
+            ToolSchema::zero_arg("Task_add_to_tags", "Add tag to Task's tags"),
             ToolSchema::zero_arg("Channel_children_via_messages", "Read"),
         ]
     }
@@ -257,8 +264,10 @@ mod tests {
                 "list_perspectives",
                 "query_links",
                 "add_link",
+                "Task_create",
                 "Task_delete",
                 "Task_set_title",
+                "Task_add_to_tags",
                 "Channel_children_via_messages",
             ],
             "tools() must preserve declaration order for reproducible tests"
@@ -293,8 +302,17 @@ mod tests {
         assert!(kept.contains(&"Channel_children_via_messages".to_string()));
         // Writes drop.
         assert!(!kept.contains(&"add_link".to_string()), "add_ prefix");
-        assert!(!kept.contains(&"Task_delete".to_string()), "_delete infix");
+        // AD4M dynamic `<class>_create` — the CI regression that motivated this
+        // test case. When `_create` was neither a suffix nor an infix in the
+        // filter, `extintention_create` slipped through, defeating the
+        // propose-writes decorator and bouncing gemma3:12b on `perspective_uuid`.
+        assert!(!kept.contains(&"Task_create".to_string()), "_create suffix");
+        assert!(!kept.contains(&"Task_delete".to_string()), "_delete suffix");
         assert!(!kept.contains(&"Task_set_title".to_string()), "_set_ infix");
+        assert!(
+            !kept.contains(&"Task_add_to_tags".to_string()),
+            "_add_to_ infix"
+        );
     }
 
     #[tokio::test]
@@ -305,6 +323,7 @@ mod tests {
         // tools() is narrowed.
         let visible: Vec<_> = f.tools().await.into_iter().map(|t| t.name).collect();
         assert!(!visible.contains(&"add_link".to_string()));
+        assert!(!visible.contains(&"Task_create".to_string()));
         assert!(!visible.contains(&"Task_delete".to_string()));
 
         // call() on an allowed tool passes through.
