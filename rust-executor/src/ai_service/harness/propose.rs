@@ -181,19 +181,33 @@ where
         if let Some(class_name) = strip_class_suffix(name, "_propose_create") {
             return self.handle_propose_create(&class_name, args);
         }
-        // Small local models (gemma3:12b in CI) often lowercase-hallucinate a
-        // dynamic write verb like `extintention_create` instead of the
-        // exposed `extintention_propose_create`. FilteredProvider blocks the
-        // dispatch, but its generic "not in filtered surface" error is too
-        // opaque for a small model to recover from — it typically gives up
-        // and answers in plain text. Detect the case here (name is prefixed
-        // by an offered class but not present in the inner surface) and
-        // return a very specific redirection error naming the two propose_*
-        // wrappers so the LLM can retry against the right tool.
+        // Small local models (gemma3:12b in CI) reliably hallucinate the
+        // dynamic CRUD verbs from AD4M's MCP surface — `<class>_create`,
+        // `add_<class>`, `<class>_add` — because that's what a CRUD API
+        // "should" look like. Even when we filter those tools out and
+        // publish the explicit `<class>_propose_create` name, gemma3
+        // reaches for the shorter familiar form and, when it hits an
+        // error, gives up in plain text instead of retrying with the
+        // longer name (observed 8/8 attempts in CI job 22266 on
+        // `45a363b94` — a helpful redirect message didn't rescue it).
+        //
+        // Fix: alias the hallucinated forms transparently. If the LLM
+        // calls a class-prefixed create-shaped verb that is NOT in the
+        // inner (filtered) surface, dispatch to handle_propose_create
+        // for that class. Overlay semantics are preserved — the buffer
+        // still queues an InterpretationOp gated by the human-divergence
+        // check on apply. Small models get their "obvious" verb; the
+        // extraction pass proceeds without stalling.
         let name_lc = name.to_lowercase();
         for c in &self.classes {
-            let prefix = format!("{}_", c.class_name.to_lowercase());
-            if !name_lc.starts_with(&prefix) {
+            let lower = c.class_name.to_lowercase();
+            let matches_alias = name_lc == format!("{lower}_create")
+                || name_lc == format!("create_{lower}")
+                || name_lc == format!("{lower}_new")
+                || name_lc == format!("new_{lower}")
+                || name_lc == format!("add_{lower}")
+                || name_lc == format!("{lower}_add");
+            if !matches_alias {
                 continue;
             }
             let inner_has_name = self
@@ -205,17 +219,8 @@ where
             if inner_has_name {
                 break;
             }
-            let lower = c.class_name.to_lowercase();
-            return Err(anyhow!(
-                "tool `{name}` is not available. Direct writes are disabled during \
-                interpretation passes. To create a new {} instance, call \
-                `{}_propose_create` with the required fields. To attach an \
-                existing instance as a child via a class relation, call \
-                `{}_propose_link_child` with `parent_base` and `child_base`.",
-                c.class_name,
-                lower,
-                lower
-            ));
+            log::warn!("harness: aliasing hallucinated tool `{name}` → `{lower}_propose_create`");
+            return self.handle_propose_create(&lower, args);
         }
         self.inner.call(name, args).await
     }
@@ -603,32 +608,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn class_scoped_write_verb_returns_propose_redirect() {
-        let (p, buf) = provider(vec![task_shape()]);
-        let err = p
-            .call("task_create", json!({"title": "x"}))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("task_propose_create") && err.contains("task_propose_link_child"),
-            "expected redirect to propose_* wrappers, got: {err}"
-        );
-        assert!(err.contains("Direct writes are disabled"), "{err}");
-        assert_eq!(buf.len(), 0, "redirect must not touch the buffer");
+    async fn hallucinated_create_verb_is_aliased_to_propose_create() {
+        // gemma3:12b reaches for `task_create` (not `task_propose_create`)
+        // — the harness should transparently dispatch to propose_create so
+        // the pass makes progress instead of stalling on tool-not-found.
+        for verb in [
+            "task_create",
+            "create_task",
+            "task_new",
+            "new_task",
+            "add_task",
+            "task_add",
+        ] {
+            let (p, buf) = provider(vec![task_shape()]);
+            let out = p
+                .call(verb, json!({"title": "x"}))
+                .await
+                .unwrap_or_else(|e| panic!("verb `{verb}` should have aliased through: {e}"));
+            assert!(out.contains("proposed create"), "verb `{verb}`: {out}");
+            assert_eq!(buf.len(), 1, "verb `{verb}` should have queued 1 op");
+        }
     }
 
     #[tokio::test]
-    async fn class_scoped_write_verb_is_case_insensitive() {
-        let (p, _) = provider(vec![task_shape()]);
-        let err = p
-            .call("Task_Add_Member", json!({}))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("task_propose_create"),
-            "expected redirect for uppercase spelling, got: {err}"
+    async fn hallucinated_create_verb_is_case_insensitive() {
+        let (p, buf) = provider(vec![task_shape()]);
+        let out = p.call("Task_Create", json!({"title": "x"})).await.unwrap();
+        assert!(out.contains("proposed create"), "{out}");
+        assert_eq!(buf.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn hallucinated_verb_for_unknown_class_falls_through() {
+        // If the create-shaped verb doesn't match any offered class, it
+        // must delegate to the inner provider — otherwise we'd silently
+        // swallow real tool calls.
+        let (p, buf) = provider(vec![task_shape()]);
+        let out = p.call("stranger_create", json!({})).await.unwrap();
+        assert_eq!(
+            out, "inner:stranger_create",
+            "unknown-class verb should fall through to inner"
         );
+        assert_eq!(buf.len(), 0);
     }
 }
