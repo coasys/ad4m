@@ -38,6 +38,13 @@ const BASE_PREFIX = "soa://ext/";
 // Harness needs enough headroom for query + propose_create + N propose_link_child
 // plus the final answer. 15 is a comfortable ceiling for this transcript.
 const MAX_TOOL_CALLS = 15;
+// LLM tool-calling is more variable than the single-shot path: the model
+// occasionally emits an answer without ever calling `_propose_*`, or forgets
+// the link step. This mirrors the Rust e2e's 8-attempt guard in
+// `interpretation_test_support::run_harness_e2e_until` — the harness *can*
+// produce the target graph state; we just don't require it on the first draw
+// against a small local model at Ollama-default temperature.
+const HARNESS_E2E_MAX_ATTEMPTS = Number(process.env.HARNESS_E2E_MAX_ATTEMPTS ?? "8");
 
 async function targetsOf(p: PerspectiveProxy, source: string, predicate: string): Promise<string[]> {
   const links = await p.get(new LinkQuery({ source, predicate }));
@@ -53,6 +60,26 @@ async function titleOf(p: PerspectiveProxy, base: string): Promise<string | unde
     return decodeURIComponent(body);
   } catch {
     return body;
+  }
+}
+
+/**
+ * Remove all ExtIntention instances (and any links they carry) from `p`.
+ * Beliefs seeded in `before()` are left in place — they're the reference
+ * state the LLM is supposed to discover on the next attempt.
+ */
+async function purgeIntentions(p: PerspectiveProxy): Promise<void> {
+  const intentions = await ExtIntention.findAll(p);
+  for (const intent of intentions) {
+    const outgoing = await p.get(new LinkQuery({ source: intent.id }));
+    for (const link of outgoing) {
+      try {
+        await p.remove(link);
+      } catch {
+        // Best-effort cleanup — a stale link that fails to remove will just
+        // be ignored on the next attempt (the assertions look at fresh state).
+      }
+    }
   }
 }
 
@@ -126,69 +153,93 @@ describe("perspective.runInterpretationWithHarness (WS + real LLM)", function ()
       { speaker: "Nico", text: "Let's make it the intention going into the sprint." },
     ];
 
-    const bases = await p.runInterpretationWithHarness(
-      transcript,
-      BASE_PREFIX,
-      MAX_TOOL_CALLS,
-      ["ExtBelief", "ExtIntention"],
-    );
+    let lastError: any = null;
+    for (let attempt = 1; attempt <= HARNESS_E2E_MAX_ATTEMPTS; attempt++) {
+      if (attempt > 1) {
+        // Clear any intentions the previous attempt landed so this attempt
+        // sees the same starting state (seeded beliefs only). Mirrors the
+        // Rust helper's "fresh perspective per attempt" property.
+        await purgeIntentions(p);
+      }
 
-    // Something landed under our prefix.
-    expect(bases.length, "harness pass must produce at least one instance").to.be.greaterThan(0);
-    for (const base of bases) {
-      expect(base.startsWith(BASE_PREFIX), `base ${base}`).to.be.true;
+      try {
+        const bases = await p.runInterpretationWithHarness(
+          transcript,
+          BASE_PREFIX,
+          MAX_TOOL_CALLS,
+          ["ExtBelief", "ExtIntention"],
+        );
+
+        // Something landed under our prefix.
+        expect(bases.length, "harness pass must produce at least one instance").to.be.greaterThan(0);
+        for (const base of bases) {
+          expect(base.startsWith(BASE_PREFIX), `base ${base}`).to.be.true;
+        }
+
+        // At least one ExtIntention was materialized (not a bare belief).
+        const intentions = await ExtIntention.findAll(p);
+        expect(
+          intentions.length,
+          `expected the harness to materialize at least one ExtIntention (found ${intentions.length}) — bases returned: ${JSON.stringify(bases)}`,
+        ).to.be.greaterThan(0);
+        for (const intent of intentions) {
+          expect(intent.title, "every intention needs a non-empty title").to.be.a("string");
+          expect(intent.title.length).to.be.greaterThan(0);
+        }
+
+        // At least one intention must be linked back to at least one SEEDED belief
+        // via the `basedOn` HasMany relation. This is the key harness assertion:
+        // it proves the LLM used a query tool to discover the existing URIs and
+        // then a propose_link_child tool to attach them — the graph state the
+        // harness path is meant to produce.
+        let intentionsWithBackedBelief = 0;
+        for (const intent of intentions) {
+          const linkedBeliefs = await targetsOf(p, intent.id, "soa://basedOn");
+          const anyLinkedIsSeeded = linkedBeliefs.some((uri) => seededBeliefUris.has(uri));
+          if (anyLinkedIsSeeded) intentionsWithBackedBelief += 1;
+        }
+        expect(
+          intentionsWithBackedBelief,
+          `expected at least one ExtIntention to link back (via soa://basedOn) to a SEEDED belief URI. Seeded: ${JSON.stringify([
+            ...seededBeliefUris,
+          ])}. Intentions: ${JSON.stringify(
+            await Promise.all(
+              intentions.map(async (i) => ({
+                id: i.id,
+                title: await titleOf(p, i.id),
+                basedOn: await targetsOf(p, i.id, "soa://basedOn"),
+              })),
+            ),
+          )}.`,
+        ).to.be.greaterThan(0);
+
+        // No belief with a seeded title should have been recreated (dedup check).
+        const seededTitles = new Set(
+          await Promise.all([...seededBeliefUris].map((uri) => titleOf(p, uri))),
+        );
+        const beliefsNow = await ExtBelief.findAll(p);
+        const dupTitles = beliefsNow
+          .map((b) => b.title)
+          .filter((t) => seededTitles.has(t))
+          .filter((t, idx, arr) => arr.indexOf(t) !== idx);
+        expect(
+          dupTitles.length,
+          `harness must not recreate an existing belief by title; duplicates: ${JSON.stringify(dupTitles)}`,
+        ).to.equal(0);
+
+        // All assertions passed — done.
+        console.log(`[harness-ts-e2e] passed on attempt ${attempt}/${HARNESS_E2E_MAX_ATTEMPTS}`);
+        return;
+      } catch (e) {
+        lastError = e;
+        console.log(
+          `[harness-ts-e2e] attempt ${attempt}/${HARNESS_E2E_MAX_ATTEMPTS} did not satisfy retry guard: ${(e as Error).message}`,
+        );
+      }
     }
 
-    // At least one ExtIntention was materialized (not a bare belief).
-    const intentions = await ExtIntention.findAll(p);
-    expect(
-      intentions.length,
-      `expected the harness to materialize at least one ExtIntention (found ${intentions.length}) — bases returned: ${JSON.stringify(bases)}`,
-    ).to.be.greaterThan(0);
-    for (const intent of intentions) {
-      expect(intent.title, "every intention needs a non-empty title").to.be.a("string");
-      expect(intent.title.length).to.be.greaterThan(0);
-    }
-
-    // At least one intention must be linked back to at least one SEEDED belief
-    // via the `basedOn` HasMany relation. This is the key harness assertion:
-    // it proves the LLM used a query tool to discover the existing URIs and
-    // then a propose_link_child tool to attach them — the graph state the
-    // harness path is meant to produce.
-    let intentionsWithBackedBelief = 0;
-    for (const intent of intentions) {
-      const linkedBeliefs = await targetsOf(p, intent.id, "soa://basedOn");
-      const anyLinkedIsSeeded = linkedBeliefs.some((uri) => seededBeliefUris.has(uri));
-      if (anyLinkedIsSeeded) intentionsWithBackedBelief += 1;
-    }
-    expect(
-      intentionsWithBackedBelief,
-      `expected at least one ExtIntention to link back (via soa://basedOn) to a SEEDED belief URI. Seeded: ${JSON.stringify([
-        ...seededBeliefUris,
-      ])}. Intentions: ${JSON.stringify(
-        await Promise.all(
-          intentions.map(async (i) => ({
-            id: i.id,
-            title: await titleOf(p, i.id),
-            basedOn: await targetsOf(p, i.id, "soa://basedOn"),
-          })),
-        ),
-      )}.`,
-    ).to.be.greaterThan(0);
-
-    // No belief with a seeded title should have been recreated (dedup check).
-    const seededTitles = new Set(
-      await Promise.all([...seededBeliefUris].map((uri) => titleOf(p, uri))),
-    );
-    const beliefsNow = await ExtBelief.findAll(p);
-    const dupTitles = beliefsNow
-      .map((b) => b.title)
-      .filter((t) => seededTitles.has(t))
-      .filter((t, idx, arr) => arr.indexOf(t) !== idx);
-    expect(
-      dupTitles.length,
-      `harness must not recreate an existing belief by title; duplicates: ${JSON.stringify(dupTitles)}`,
-    ).to.equal(0);
+    // All attempts exhausted — surface the last failure.
+    throw lastError;
   });
 
   it("bounces maxToolCalls=0 as a boundary error", async () => {
