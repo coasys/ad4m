@@ -181,6 +181,42 @@ where
         if let Some(class_name) = strip_class_suffix(name, "_propose_create") {
             return self.handle_propose_create(&class_name, args);
         }
+        // Small local models (gemma3:12b in CI) often lowercase-hallucinate a
+        // dynamic write verb like `extintention_create` instead of the
+        // exposed `extintention_propose_create`. FilteredProvider blocks the
+        // dispatch, but its generic "not in filtered surface" error is too
+        // opaque for a small model to recover from — it typically gives up
+        // and answers in plain text. Detect the case here (name is prefixed
+        // by an offered class but not present in the inner surface) and
+        // return a very specific redirection error naming the two propose_*
+        // wrappers so the LLM can retry against the right tool.
+        let name_lc = name.to_lowercase();
+        for c in &self.classes {
+            let prefix = format!("{}_", c.class_name.to_lowercase());
+            if !name_lc.starts_with(&prefix) {
+                continue;
+            }
+            let inner_has_name = self
+                .inner
+                .tools()
+                .await
+                .into_iter()
+                .any(|t| t.name.eq_ignore_ascii_case(name));
+            if inner_has_name {
+                break;
+            }
+            let lower = c.class_name.to_lowercase();
+            return Err(anyhow!(
+                "tool `{name}` is not available. Direct writes are disabled during \
+                interpretation passes. To create a new {} instance, call \
+                `{}_propose_create` with the required fields. To attach an \
+                existing instance as a child via a class relation, call \
+                `{}_propose_link_child` with `parent_base` and `child_base`.",
+                c.class_name,
+                lower,
+                lower
+            ));
+        }
         self.inner.call(name, args).await
     }
 }
@@ -564,5 +600,35 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no registered class"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn class_scoped_write_verb_returns_propose_redirect() {
+        let (p, buf) = provider(vec![task_shape()]);
+        let err = p
+            .call("task_create", json!({"title": "x"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("task_propose_create") && err.contains("task_propose_link_child"),
+            "expected redirect to propose_* wrappers, got: {err}"
+        );
+        assert!(err.contains("Direct writes are disabled"), "{err}");
+        assert_eq!(buf.len(), 0, "redirect must not touch the buffer");
+    }
+
+    #[tokio::test]
+    async fn class_scoped_write_verb_is_case_insensitive() {
+        let (p, _) = provider(vec![task_shape()]);
+        let err = p
+            .call("Task_Add_Member", json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("task_propose_create"),
+            "expected redirect for uppercase spelling, got: {err}"
+        );
     }
 }
