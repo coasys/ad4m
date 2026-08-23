@@ -53,7 +53,8 @@ pub struct MentionWakerConfigParams {
 /// string literal. Mention terms come from profile names / `name_override`
 /// — untrusted input, potentially attacker-controlled in a shared
 /// neighbourhood — so without this, a `"` or `\` breaks out of the literal
-/// and can inject arbitrary SPARQL into the mention-matching FILTER.
+/// and can inject arbitrary SPARQL into the mention-matching FILTER. Also
+/// escapes CR/LF/TAB, which SPARQL STRING_LITERAL2 forbids raw.
 fn escape_sparql_literal(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -242,35 +243,6 @@ impl Ad4mMcpHandler {
 
         let perspective_id = &params.0.perspective_id;
 
-        // Build the SPARQL query using CONTAINS for mention matching.
-        //
-        // The SPARQL CONTAINS function performs substring matching on the target IRI/literal.
-        // Case-insensitive matching via LCASE().
-        // Search terms are lowercased in Rust before embedding in the query.
-        let all_terms: Vec<String> = names
-            .iter()
-            .map(|n| n.to_lowercase())
-            .chain(std::iter::once(did.to_lowercase()))
-            .collect();
-
-        // Build CONTAINS conditions for mention matching.
-        // The message body may be stored either as a deterministic literal or as
-        // a signed expression envelope (resolveLanguage:"literal"). Match on the
-        // decoded value via `fn/parse_literal` so substring matching sees the
-        // message text only — NOT the author/proof DIDs inside an envelope, which
-        // would otherwise produce false-positive mentions.
-        let mention_conditions: Vec<String> = all_terms
-            .iter()
-            .map(|t| {
-                format!(
-                    "CONTAINS(LCASE(STR(<ad4m://fn/parse_literal>(?target))), \"{}\")",
-                    escape_sparql_literal(t)
-                )
-            })
-            .collect();
-
-        let mention_predicate = format!("({})", mention_conditions.join(" || "));
-
         // Discover the body property predicate from SHACL to scope the query.
         // Without this, the query scans ALL links which is very slow on large perspectives.
         let perspective = self
@@ -288,20 +260,12 @@ impl Ad4mMcpHandler {
             None
         };
 
-        let query = if let Some(ref pred) = body_predicate {
-            format!(
-                "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) = \"{}\") FILTER({}) }}",
-                pred, mention_predicate
-            )
-        } else {
-            log::warn!("get_mention_waker_config: no body predicate found in SHACL for Message class, falling back to unscoped query");
-            format!(
-                "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER({}) }}",
-                mention_predicate
-            )
-        };
+        if body_predicate.is_none() {
+            log::warn!("get_mention_waker_config: no body predicate found in SHACL for Message class, falling back to unscoped (but ontology-excluded) query");
+        }
+        let query = build_mention_query(&names, &did, body_predicate.as_deref());
 
-        let sub_id = format!("mention-{}", &did[did.len().saturating_sub(12)..]);
+        let sub_id = build_mention_sub_id(perspective_id);
 
         let subscription = json!({
             "id": sub_id,
@@ -331,9 +295,149 @@ impl Ad4mMcpHandler {
     }
 }
 
+/// Build the SPARQL mention-detection query for the waker.
+///
+/// CONTAINS does case-insensitive substring matching on the parsed literal
+/// target, so a message body containing any profile name or the agent DID
+/// matches. `body_predicate` scopes the scan to the message-body predicate when
+/// SHACL resolves it (much faster on large perspectives).
+///
+/// Both the scoped and the unscoped-fallback query exclude `ad4m://ontology/*`
+/// predicates (author DID, timestamp, proofKey — see `sparql_store`). Without
+/// that exclusion the DID search term matches every link the agent itself
+/// authored (its own author-DID proof metadata), so the agent would wake on its
+/// own writes rather than on real mentions.
+///
+/// Search terms (profile names, DID) are interpolated into the query, so each is
+/// escaped as a SPARQL string literal — a name containing `"` or `\` would
+/// otherwise break out of the CONTAINS literal and could inject query syntax.
+///
+/// Pure over its inputs, so it unit-tests without an agent or perspective.
+pub fn build_mention_query(names: &[String], did: &str, body_predicate: Option<&str>) -> String {
+    let all_terms: Vec<String> = names
+        .iter()
+        .map(|n| n.to_lowercase())
+        .chain(std::iter::once(did.to_lowercase()))
+        .collect();
+    let mention_conditions: Vec<String> = all_terms
+        .iter()
+        .map(|t| {
+            format!(
+                "CONTAINS(LCASE(STR(<ad4m://fn/parse_literal>(?target))), \"{}\")",
+                escape_sparql_literal(t)
+            )
+        })
+        .collect();
+    let mention_predicate = format!("({})", mention_conditions.join(" || "));
+    // Never match proof metadata, else the DID term self-matches authored links.
+    let ontology_guard = "FILTER(!STRSTARTS(STR(?predicate), \"ad4m://ontology/\"))";
+    match body_predicate {
+        Some(pred) => format!(
+            "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) = \"{}\") {} FILTER({}) }}",
+            pred, ontology_guard, mention_predicate
+        ),
+        None => format!(
+            "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) {} FILTER({}) }}",
+            ontology_guard, mention_predicate
+        ),
+    }
+}
+
+/// Build a mention-subscription id keyed on the perspective.
+///
+/// Deriving the id from the agent DID alone made it identical across every
+/// neighbourhood the agent joined; the waker's dispose-by-id then evicted a
+/// prior perspective's subscription when the agent subscribed in a second one,
+/// so an agent in N neighbourhoods only woke in the most-recent. Keying on the
+/// full perspective id gives distinct ids for distinct perspectives with no
+/// truncation collision, and matches the plugin's `mention-${perspectiveId}`
+/// dedup guard so a repeat subscribe on the same perspective is skipped.
+pub fn build_mention_sub_id(perspective_id: &str) -> String {
+    format!("mention-{}", perspective_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_query_excludes_ontology_proof_metadata() {
+        let q = build_mention_query(
+            &["alice".to_string()],
+            "did:key:zAgent",
+            Some("ad4m://message_body"),
+        );
+        assert!(
+            q.contains("ad4m://message_body"),
+            "scoped to the body predicate"
+        );
+        assert!(
+            q.contains("FILTER(!STRSTARTS(STR(?predicate), \"ad4m://ontology/\"))"),
+            "excludes ontology proof metadata"
+        );
+    }
+
+    #[test]
+    fn unscoped_fallback_still_excludes_ontology_proof_metadata() {
+        // Regression: the fallback (no body predicate) used to be fully unscoped,
+        // so the DID term matched the agent's own ad4m://ontology/author links.
+        let q = build_mention_query(&["alice".to_string()], "did:key:zAgent", None);
+        assert!(
+            q.contains("FILTER(!STRSTARTS(STR(?predicate), \"ad4m://ontology/\"))"),
+            "fallback must still exclude proof metadata"
+        );
+    }
+
+    #[test]
+    fn query_matches_names_and_did_case_insensitively() {
+        let q = build_mention_query(
+            &["Alice".to_string(), "Bob".to_string()],
+            "did:key:zABC",
+            None,
+        );
+        assert!(q.contains("\"alice\""), "name lowercased");
+        assert!(q.contains("\"bob\""), "second name lowercased");
+        assert!(q.contains("\"did:key:zabc\""), "DID lowercased + included");
+        assert!(q.contains("parse_literal"), "decodes literal targets");
+    }
+
+    #[test]
+    fn query_escapes_quotes_and_backslashes_in_terms() {
+        // A term containing a double-quote or backslash must not break out of the
+        // CONTAINS string literal (SPARQL injection guard).
+        let q = build_mention_query(&["a\"b\\c".to_string()], "did:key:zX", None);
+        assert!(q.contains("a\\\"b\\\\c"), "quote + backslash escaped: {q}");
+        assert!(
+            !q.contains("\"a\"b"),
+            "raw unescaped quote must not appear: {q}"
+        );
+    }
+
+    #[test]
+    fn query_escapes_control_characters_in_terms() {
+        // SPARQL STRING_LITERAL2 forbids raw CR/LF/TAB; a term carrying them must
+        // be escaped, not embedded raw, or the query fails to parse.
+        let q = build_mention_query(&["a\nb\tc\rd".to_string()], "did:key:zX", None);
+        assert!(q.contains("a\\nb\\tc\\rd"), "control chars escaped: {q:?}");
+        assert!(!q.contains('\n'), "no raw newline in the query: {q:?}");
+        assert!(!q.contains('\t'), "no raw tab in the query: {q:?}");
+    }
+
+    #[test]
+    fn sub_id_is_perspective_scoped_not_did_scoped() {
+        // Two perspectives, same agent → distinct ids (no cross-neighbourhood
+        // eviction). Uses the full perspective id (no truncation collision) and
+        // matches the plugin's mention-${perspectiveId} dedup guard.
+        let a = build_mention_sub_id("c41dfd35-769e-474f-a2e6-4e5d580615c8");
+        let b = build_mention_sub_id("8432bdcb-410e-48e2-b1e1-2bb3f831d067");
+        assert_ne!(a, b, "distinct perspectives must yield distinct sub ids");
+        assert_eq!(a, "mention-c41dfd35-769e-474f-a2e6-4e5d580615c8");
+        // Repeat subscribe on the same perspective → same id (dedup fires).
+        assert_eq!(
+            a,
+            build_mention_sub_id("c41dfd35-769e-474f-a2e6-4e5d580615c8")
+        );
+    }
 
     #[test]
     fn test_escape_sparql_literal_neutralizes_quote_breakout() {

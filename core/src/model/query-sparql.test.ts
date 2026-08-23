@@ -1,4 +1,5 @@
-import { buildSPARQLQuery, buildPaginationSubquery, hasJsOnlyWhereFilters } from './query-sparql';
+import { buildSPARQLQuery, buildPaginationSubquery, hasJsOnlyWhereFilters, looksLikeUri, valueToLiteralIri } from './query-sparql';
+import { Literal } from '../Literal';
 
 // Minimal stubs for ModelMetadata
 const emptyMetadata: any = { properties: {}, relations: {} };
@@ -524,5 +525,101 @@ describe('buildSPARQLQuery — OR/AND/NOT not emitted as SPARQL (handled Rust-si
     };
     const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
     expect(sparql).not.toContain('LIMIT');
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// valueToLiteralIri — object/array encoding parity with Rust
+// ──────────────────────────────────────────────────────────
+
+describe('valueToLiteralIri', () => {
+  it('encodes plain objects as literal:json:* and round-trips', () => {
+    const url = valueToLiteralIri({ a: 1 });
+    expect(url.startsWith('literal:json:')).toBe(true);
+    // Regression: previously fell through to String(value) → "[object Object]"
+    expect(url).not.toContain('object%20Object');
+    expect(Literal.fromUrl(url).get()).toEqual({ a: 1 });
+  });
+
+  it('encodes arrays as literal:json:* and round-trips', () => {
+    const url = valueToLiteralIri([1, 2, 3]);
+    expect(url.startsWith('literal:json:')).toBe(true);
+    // Regression: previously stringified to "1,2,3"
+    expect(url).not.toBe('literal:string:1%2C2%2C3');
+    expect(Literal.fromUrl(url).get()).toEqual([1, 2, 3]);
+  });
+
+  it('encodes nested objects and round-trips', () => {
+    const url = valueToLiteralIri({ nested: { b: 2 } });
+    expect(url.startsWith('literal:json:')).toBe(true);
+    expect(Literal.fromUrl(url).get()).toEqual({ nested: { b: 2 } });
+  });
+
+  it('preserves string encoding (non-URI)', () => {
+    const url = valueToLiteralIri('hello world');
+    expect(url).toBe('literal:string:hello%20world');
+    expect(Literal.fromUrl(url).get()).toBe('hello world');
+  });
+
+  it('returns URI-like strings unchanged', () => {
+    expect(valueToLiteralIri('https://example.com/thing')).toBe('https://example.com/thing');
+  });
+
+  it('encodes numbers as literal:number:*', () => {
+    const url = valueToLiteralIri(42);
+    expect(url).toBe('literal:number:42');
+    expect(Literal.fromUrl(url).get()).toBe(42);
+  });
+
+  it('encodes booleans as literal:boolean:*', () => {
+    const url = valueToLiteralIri(true);
+    expect(url).toBe('literal:boolean:true');
+    expect(Literal.fromUrl(url).get()).toBe(true);
+  });
+
+  it('encodes null via the String() fallthrough as literal:string:null', () => {
+    // `null` is `typeof 'object'` in JS, but `Literal.from(null).toUrl()`
+    // throws on the empty-literal check, so the `value !== null` guard
+    // deliberately keeps `null` on the historical fallthrough path.
+    const url = valueToLiteralIri(null);
+    expect(url).toBe('literal:string:null');
+    expect(Literal.fromUrl(url).get()).toBe('null');
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// looksLikeUri — shared write-side predicate that MUST agree with the
+// Rust-side `is_safe_iri_target` / `looks_like_absolute_iri`. See the
+// doc comment on `looksLikeUri` for why drift produces silent no-match
+// reads (PR #874).
+// ---------------------------------------------------------------------------
+describe('looksLikeUri', () => {
+  it('accepts well-formed absolute IRIs', () => {
+    expect(looksLikeUri('did:key:z6Mk123')).toBe(true);
+    expect(looksLikeUri('literal:string:hello')).toBe(true);
+    expect(looksLikeUri('http://example.com/foo')).toBe(true);
+  });
+
+  it('rejects scheme-lookalike prose that would fail Rust validate_iri', () => {
+    expect(looksLikeUri('Note: buy milk')).toBe(false);
+    expect(looksLikeUri('Re: standup')).toBe(false);
+    expect(looksLikeUri('TODO: fix this')).toBe(false);
+  });
+
+  it('rejects control chars, whitespace, and SPARQL-breaking chars', () => {
+    expect(looksLikeUri('tag:2025:new\nline')).toBe(false);
+    expect(looksLikeUri('tag:2025:tab\there')).toBe(false);
+    expect(looksLikeUri('http://example.com/foo bar')).toBe(false);
+    expect(looksLikeUri('foo:<bar>')).toBe(false);
+    expect(looksLikeUri('foo:{bar}')).toBe(false);
+    expect(looksLikeUri('foo:"quoted')).toBe(false);
+  });
+
+  it('rejects non-IRI shapes', () => {
+    expect(looksLikeUri('just plain text')).toBe(false);
+    expect(looksLikeUri('42')).toBe(false);
+    expect(looksLikeUri(':no-scheme')).toBe(false);
+    expect(looksLikeUri('1abc:foo')).toBe(false);
   });
 });

@@ -77,6 +77,22 @@ pub(super) fn looks_like_absolute_iri(s: &str) -> bool {
     first.is_ascii_alphabetic()
 }
 
+/// Predicate used by write paths to decide whether a string can be stored as
+/// a raw `NamedNode` target instead of being wrapped in a `literal:*` URI.
+///
+/// Kept in sync with the query-side [`looks_like_absolute_iri`] so a value
+/// that would round-trip through a raw-IRI store is also matched by SPARQL
+/// `UNION` IRI probes.  If write and query disagree on what a "safe IRI" is,
+/// values like `"Note: buy milk"` slip through the write regex (matches the
+/// scheme shape) but fail the query-side [`validate_iri`] gate — the
+/// resulting `NamedNode` is invalid, the query only probes the
+/// `xsd:string` arm, and the write becomes a silent no-match.
+///
+/// Mirrors the TypeScript `looksLikeUri` in `core/src/model/query-sparql.ts`.
+pub fn is_safe_iri_target(s: &str) -> bool {
+    looks_like_absolute_iri(s)
+}
+
 /// Validate a value for use inside an IRI `<…>`.  Rejects characters that
 /// would break or inject into a SPARQL IRI token, including all control and
 /// whitespace characters (e.g. `\n`, `\r`, `\t`, U+00A0) which `validate_iri`
@@ -103,7 +119,7 @@ pub(super) const MAX_INCLUDE_DEPTH: u8 = 8;
 
 /// Parse a `literal:` URI into a typed JSON value, or return the input as a
 /// string when it is not a literal URI.
-pub(super) fn parse_literal_value(uri: &str) -> Value {
+pub(crate) fn parse_literal_value(uri: &str) -> Value {
     let body = if let Some(rest) = uri.strip_prefix("literal:") {
         rest
     } else {
@@ -302,5 +318,50 @@ mod tests {
         assert!(validate_iri("has spaces").is_err());
         assert!(validate_iri("has\"quotes").is_err());
         assert!(validate_iri("has{braces}").is_err());
+    }
+
+    // ---------------------------------------------------------------------
+    // is_safe_iri_target — shared write-side predicate that MUST agree with
+    // the query-side `looks_like_absolute_iri` gate.  A value that returns
+    // true here is stored as a raw `NamedNode` on the write path and probed
+    // via the SPARQL `UNION` IRI arm on the query path; a value that returns
+    // false falls through to `Literal::from_string` and is stored as a
+    // `literal:string:*` typed literal.  Any drift between the two produces
+    // silent no-match reads (see issue reported on PR #874).
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn is_safe_iri_target_accepts_well_formed_iris() {
+        assert!(is_safe_iri_target("did:key:z6Mk123"));
+        assert!(is_safe_iri_target("literal:string:hello"));
+        assert!(is_safe_iri_target("http://example.com/foo"));
+    }
+
+    #[test]
+    fn is_safe_iri_target_rejects_scheme_lookalike_prose() {
+        // These all match the scheme-shape regex the write path used to rely
+        // on (`^[a-zA-Z][a-zA-Z0-9+\-._]*:`) but contain characters that
+        // `validate_iri` — and therefore the query-side gate — rejects.
+        assert!(!is_safe_iri_target("Note: buy milk"));
+        assert!(!is_safe_iri_target("Re: standup"));
+        assert!(!is_safe_iri_target("TODO: fix this"));
+    }
+
+    #[test]
+    fn is_safe_iri_target_rejects_control_chars_and_whitespace() {
+        assert!(!is_safe_iri_target("tag:2025:new\nline"));
+        assert!(!is_safe_iri_target("tag:2025:tab\there"));
+        assert!(!is_safe_iri_target("http://example.com/foo bar"));
+    }
+
+    #[test]
+    fn is_safe_iri_target_rejects_non_iri_shapes() {
+        // No colon at all — fails the scheme check.
+        assert!(!is_safe_iri_target("just plain text"));
+        assert!(!is_safe_iri_target("42"));
+        // Leading colon — no scheme prefix.
+        assert!(!is_safe_iri_target(":no-scheme"));
+        // Starts with a digit — not a valid scheme first char.
+        assert!(!is_safe_iri_target("1abc:foo"));
     }
 }

@@ -81,10 +81,32 @@ export function hasJsOnlyWhereFilters(
 }
 
 /**
- * Check if a string value looks like a URI (has a scheme).
+ * Check whether a string value is a well-formed absolute IRI that can be
+ * stored verbatim as a link target (raw `NamedNode`) instead of being
+ * wrapped in a `literal:string:*` URI.
+ *
+ * This mirrors the Rust `is_safe_iri_target` /
+ * `looks_like_absolute_iri` predicate in
+ * `rust-executor/src/perspectives/model_query/utils.rs` and is
+ * **load-bearing**: a value that returns `true` here MUST also be safely
+ * queryable on the Rust side (`validate_iri` gate on the SPARQL
+ * `UNION { ?s <pred> <val> }` IRI arm), otherwise scheme-lookalike prose
+ * such as `"Note: buy milk"`, `"Re: standup"`, `"TODO: fix this"` slips
+ * through the write regex, is stored as an invalid `NamedNode`, and
+ * becomes a silent no-match on read.
+ *
+ * Fast-path scheme check (`^[a-zA-Z][a-zA-Z0-9+\-._]*:`) followed by the
+ * same rejection set the Rust `validate_iri` applies: any Unicode
+ * whitespace, C0/C1 control chars, and the SPARQL-breaking characters
+ * `< > { } "`.
  */
-function looksLikeUri(value: string): boolean {
-  return /^[a-zA-Z][a-zA-Z0-9+\-._]*:/.test(value);
+export function looksLikeUri(value: string): boolean {
+  if (!/^[a-zA-Z][a-zA-Z0-9+\-._]*:/.test(value)) return false;
+  // Reject anything the Rust-side `validate_iri` rejects so the two
+  // predicates stay in sync. `\s` covers ASCII whitespace *and*
+  // U+00A0/other Unicode whitespace under the default JS regex semantics.
+  if (/[\s<>{}"\u0000-\u001F\u007F-\u009F]/.test(value)) return false;
+  return true;
 }
 
 /**
@@ -98,6 +120,12 @@ function looksLikeUri(value: string): boolean {
  * `queryToSPARQL()` filters against — otherwise the same value can be
  * stored as `<literal:string:https%3A...>` from one path while WHERE
  * builders probe `<https://example.com>` from the other.
+ *
+ * The object/array arm mirrors Rust's `Literal::from_json` in
+ * `perspective_instance.rs::resolve_property_value` (which routes
+ * `Value::Object | Value::Array` through JSON encoding). Without it, JS
+ * would fall through to `String(value)` and turn `{a: 1}` into
+ * `"[object Object]"` and `[1, 2, 3]` into `"1,2,3"` before wrapping.
  */
 export function valueToLiteralIri(value: any): string {
   if (typeof value === 'string') {
@@ -108,6 +136,18 @@ export function valueToLiteralIri(value: any): string {
     return Literal.from(value).toUrl();
   }
   if (typeof value === 'boolean') {
+    return Literal.from(value).toUrl();
+  }
+  // Objects and arrays: route through Literal.from so we emit
+  // `literal:json:*` (mirrors Rust `Literal::from_json`). Without this
+  // arm we fall through to `String(value)` which turns objects into
+  // `"[object Object]"` and arrays into `"1,2"` — silently storing the
+  // wrong shape and breaking equality filters (`findAll({ where:
+  // { config: {...} } })` would match against `"[object Object]"`).
+  // The `value !== null` guard preserves the historical fallthrough for
+  // `null` (→ `literal:string:null`), since `Literal.from(null).toUrl()`
+  // throws on the empty-literal check.
+  if (value !== null && typeof value === 'object') {
     return Literal.from(value).toUrl();
   }
   return Literal.from(String(value)).toUrl();
