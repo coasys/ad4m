@@ -120,10 +120,31 @@ pub async fn run_with_tools(
     // to blow through the caller's per-pass budget (which downstream drives
     // how many propose_* ops the interpretation overlay accepts).
     let mut calls_used: usize = 0;
+    let mut round: usize = 0;
 
     while calls_used < config.max_tool_calls as usize {
+        round += 1;
         let tools = provider.tools().await;
+        let tool_count = tools.len();
         let completion = completions.complete(model_id, &messages, tools).await?;
+
+        // CI-visible diagnostic for silent-empty passes: shows which tools were
+        // on offer, whether the LLM chose to call any, and what it said
+        // otherwise. Priced at warn! because harness runs are expensive and
+        // diagnostic reproduction cost from an info-level flood is nil at 1-2
+        // rounds per pass.
+        let names: Vec<&str> = completion
+            .tool_calls
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        let preview: String = completion.content.chars().take(240).collect();
+        log::warn!(
+            "harness: round={round} calls_used={calls_used}/{cap} tools_offered={tool_count} tool_calls={:?} content_preview={:?}",
+            names,
+            preview,
+            cap = config.max_tool_calls,
+        );
 
         if completion.tool_calls.is_empty() {
             // Model returned a plain answer — done.

@@ -558,6 +558,7 @@ pub async fn run_interpretation_with_harness_and_model(
     // per-class writers whose side-effect is "queue an InterpretationOp",
     // not "mutate the graph." The buffer is drained after the loop.
     let buffer = ProposalBuffer::new();
+    let classes_offered = propose_shapes.len();
     let provider: Arc<dyn ToolProvider> = Arc::new(ProposeWritesProvider::new(
         ad4m_provider,
         propose_shapes,
@@ -602,6 +603,17 @@ pub async fn run_interpretation_with_harness_and_model(
     // same run-id/ran-at threading, same task-row provenance as the
     // single-shot path uses. No dedup / planner pass in between.
     let ops = buffer.drain();
+    // CI-visible diagnostic: pairs with the per-round log in `run_with_tools`.
+    // When the harness silently returns zero bases it's almost always because
+    // the LLM chose to answer instead of tool-calling, so the buffer is empty
+    // — surfacing that here turns a mysterious empty result into an obvious
+    // "LLM refused to write" data point.
+    log::warn!(
+        "harness: pass complete, ops_buffered={} classes_offered={} model={}",
+        ops.len(),
+        classes_offered,
+        task.model_id,
+    );
     let run_id = uuid::Uuid::new_v4().to_string();
     let ran_at = chrono::Utc::now().timestamp_millis().to_string();
     let bases = apply_with_overlay(
@@ -615,6 +627,8 @@ pub async fn run_interpretation_with_harness_and_model(
         cursor,
     )
     .await?;
+
+    log::warn!("harness: apply_with_overlay produced {} bases", bases.len());
 
     Ok(bases)
 }
