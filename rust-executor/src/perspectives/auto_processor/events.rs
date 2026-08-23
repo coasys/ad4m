@@ -63,6 +63,16 @@ pub enum AutoProcessorStep {
     ShapesMissing,
     /// Won the claim, but the batch transcript was empty — nothing to interpret.
     EmptyTranscript,
+    /// The pass ran and did not complete: the model errored, the provider
+    /// timed out, or a write failed. `detail` carries the reason.
+    ///
+    /// Distinct from [`AutoProcessorStep::EmptyTranscript`] and
+    /// [`AutoProcessorStep::ShapesMissing`], which are the pass correctly
+    /// deciding there is nothing to do. Those are answers; this is a
+    /// failure, and a UI reporting "nothing to extract" when the LLM
+    /// endpoint was unreachable sends someone looking at their transcript
+    /// instead of at their model configuration.
+    Failed,
 }
 
 /// A single step-signal from one auto-processor pass on one perspective.

@@ -40,6 +40,25 @@ export type RawScope = { id: string; predicate: string };
  * - `batchReady` → `notCandidate`    — this peer stood down for an earlier author
  * - `claimed` → `shapesMissing`      — a configured class shape hasn't synced
  * - `claimed` → `emptyTranscript`    — the batch drained empty
+ * - any → `failed`                   — the model errored or timed out;
+ *   `detail` carries why. Distinct from the two above, which are the pass
+ *   correctly finding nothing to do — reporting "nothing to extract" when
+ *   the LLM endpoint was unreachable points someone at their transcript
+ *   instead of at their model settings.
+ *
+ * ## Lifecycle (one-shot `runInterpretation`)
+ *
+ * A one-shot pass emits nothing unless the caller passes `observe` (see
+ * {@link PerspectiveProxy.runInterpretation}). With it:
+ *
+ * `runningInterpretation` → [`llmRequestSent` → `llmResponseReceived`] →
+ * `processed` | `failed`
+ *
+ * — plus `claimed` → `finished`/`abandoned` on the neighbourhood stream, so
+ * one-shot and watch passes render through the same consumer code. There is
+ * no `batchReady`, `gatheringTranscript` or claim: the caller supplied the
+ * transcript, and `processorId`/`batchKey` both carry the caller's own
+ * `observationId`.
  *
  * ## Payload fields per step
  *
@@ -49,6 +68,7 @@ export type RawScope = { id: string; predicate: string };
  *
  * - `backedOff`, `notCandidate`         → `detail` = holder / elected-author DID
  * - `shapesMissing`                     → `detail` = comma-joined missing class URIs
+ * - `failed`                            → `detail` = the error
  * - `llmRequestSent`                    → `llmInput` = raw prompt
  * - `llmResponseReceived`               → `llmOutput` = raw LLM response
  * - `processed`                         → `bases[]` = new/updated instance URIs
@@ -65,7 +85,8 @@ export type AutoProcessorStep =
   | "llmResponseReceived"
   | "processed"
   | "shapesMissing"
-  | "emptyTranscript";
+  | "emptyTranscript"
+  | "failed";
 
 /** A single step-signal from one auto-processor pass on one perspective. */
 export interface AutoProcessorEvent {
@@ -139,6 +160,37 @@ export interface AutoProcessorNeighbourhoodStateEvent {
    *  for the same key to render a single row in a UI. */
   batchKey: string;
   phase: NeighbourhoodPhase;
+}
+
+/**
+ * Opt a one-shot `runInterpretation` call into the same event streams a
+ * standing watch produces.
+ *
+ * Without it the call is silent until it resolves — which, on a local model,
+ * is minutes of a UI having nothing to say. With it the pass reports
+ * `runningInterpretation` → `processed`/`failed` on the DID-scoped stream and
+ * `claimed` → `finished`/`abandoned` on the perspective-scoped one.
+ */
+export interface RunInterpretationObserveOptions {
+  /**
+   * The caller's own id for this pass, echoed back as both `processorId` and
+   * `batchKey` on every event it emits.
+   *
+   * Supplied by the caller rather than minted by the executor because
+   * `runInterpretation` is a single blocking call: there is no earlier
+   * response that could hand back a server-side id, so the events would
+   * arrive with nothing to match them against. Any value unique among this
+   * client's in-flight passes will do.
+   */
+  observationId: string;
+  /**
+   * Also emit `llmRequestSent` / `llmResponseReceived` with the raw prompt
+   * and response. Default `false`. These never persist on a one-shot pass —
+   * there is no `AutoProcessorConfig` to carry a `persistDebug` opt-in, and
+   * writing tens of KB of prompt into the shared graph on every button press
+   * is not a default worth having.
+   */
+  emitDebugEvents?: boolean;
 }
 
 /** Configuration for `perspective.addAutoProcessor` (everything but `uuid`). */

@@ -315,6 +315,51 @@ pub async fn run_interpretation(
     .await
 }
 
+/// [`run_interpretation`] with live mid-pass telemetry.
+///
+/// Identical pipeline and defaults to [`run_interpretation`]; the only
+/// difference is that `emit_ctx`, when `Some`, makes the engine emit
+/// `LlmRequestSent` (with the prompt) and `LlmResponseReceived` (with the
+/// response) around the model call.
+///
+/// Exists because the one-shot WS path had no way to reach that plumbing.
+/// The parameters already existed on
+/// [`run_interpretation_with_strategy_and_model`], but reaching them meant a
+/// call site spelling out eleven arguments — nine of which are the defaults
+/// [`run_interpretation`] already picks — so the handler either duplicated
+/// those defaults (and drifted from them) or the one-shot path stayed silent.
+/// It stayed silent, which is why pressing Extract produced no observable
+/// progress at all while a standing watch produced a full step stream.
+pub async fn run_interpretation_observed(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    scope: Option<&Scope>,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+) -> anyhow::Result<Vec<String>> {
+    run_interpretation_with_strategy_and_model(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        &DedupStrategy::default(),
+        None,
+        scope,
+        None,
+        // Never persists. A one-shot pass has no `AutoProcessorConfig` to
+        // carry a `persist_debug` opt-in, and defaulting it on would write
+        // tens of KB of prompt into the shared graph — syncing to every peer,
+        // permanently — every time somebody pressed a button.
+        false,
+        emit_ctx,
+    )
+    .await
+    .map(|out| out.bases)
+}
+
 /// [`run_interpretation`] with an explicit [`DedupStrategy`] — same pipeline,
 /// but the identity-dedup safety net switches between normalized-string
 /// matching (default) and semantic (embedding-based) matching per call.
