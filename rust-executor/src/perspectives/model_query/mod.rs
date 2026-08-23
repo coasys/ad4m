@@ -91,18 +91,24 @@ mod query;
 mod relations;
 #[cfg(test)]
 mod round_trip_tests;
-mod shape;
+pub(crate) mod shape;
 mod sparql_builder;
 #[cfg(test)]
 mod test_helpers;
 pub(crate) mod types;
-mod utils;
+pub(crate) mod utils;
 
 pub use getters::evaluate_getters_batch;
 pub use query::execute_model_query;
 pub use relations::resolve_reverse_relations;
 pub(crate) use shape::load_shape_from_store;
 pub use types::{
-    IncludeValue, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, ParentScope,
-    ProjectionInput, ShapeResolver, WhereCondition, WhereOps,
+    IncludeValue, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, ProjectionInput,
+    Scope, ShapeResolver, WhereCondition, WhereOps,
 };
+/// Re-export the shared IRI-safety predicate so write-side callers
+/// (e.g. `perspective_instance::resolve_property_value`,
+/// `mcp::tools::create_property_expression`) can gate raw-`NamedNode`
+/// storage on the same rule the SPARQL query builder uses.  See
+/// [`utils::is_safe_iri_target`] for the full contract.
+pub use utils::is_safe_iri_target;

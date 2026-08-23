@@ -182,10 +182,15 @@ async fn holochain_signal_receiver() {
                     }
                 }
             } else {
-                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+                // stream_receiver.recv() returned None — channel closed.
+                // Back off before re-acquiring the service; this rarely
+                // happens in normal operation.
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         } else {
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            // Holochain service not yet available (still booting or
+            // disabled). 500ms between readiness checks.
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
     }
 }

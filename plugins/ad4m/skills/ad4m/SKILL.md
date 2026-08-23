@@ -76,6 +76,8 @@ Almost always, work on the level of **CLASSES**. AD4M provides a type-system on 
 
 **For you, that means: to CREATE and MODIFY INSTANCES OF MESSAGES, TASKS, CHANNELS — ALWAYS USE DYNAMIC MCP TOOLS like `ad4m_message_create` or `ad4m_channel_set_name`.** Unless you have good reason to write links directly. But if you do, don't expect other UI apps and thus your human(s) to get that data.
 
+**Why this matters beyond compatibility: raw links don't give you uniqueness.** `addLink`/`ad4m_add_link` writes exactly the triple you give it — it has no concept of "this one particular message" versus "this text." Link directly against content (e.g. using a message's text as the link's source/target) instead of going through a subject class, and two entities with identical content become indistinguishable — there's no separate node to tell them apart. Reifier-based signing doesn't fix this either: it authenticates *who claimed this link and when*, not *which entity this is*. Subject classes fix it because every instance gets its own randomly-generated, content-independent ID (`ad4m://obj/<id>`) the moment it's created — that ID, not the property values, is what makes the instance unique. Full explanation in `references/architecture.md`.
+
 ### 6. expression_address is now optional
 
 When creating any subject instance (`message_create`, etc.), you can now **omit** the `expression_address` — a random address is automatically generated for you. Only provide it if you need a specific ID.
@@ -210,7 +212,7 @@ Use `ad4m_list_waker_subscriptions()` to see active subscriptions, and `ad4m_uns
 
 ## Model base expressions / IDs
 
-Model instances are constructed around a base node (called base expression, also ID). Usually those are random literal strings (`literal:string:xyz`). Their properties hang off of that base node with predicates as defined by the class.
+Model instances are constructed around a base node (called base expression, also ID) — a freshly generated, random `ad4m://obj/<id>` IRI, independent of any property content. Their properties hang off of that base node with predicates as defined by the class. This is also what keeps two instances with identical property values (e.g. two messages with the same text) distinct and independently addressable — see rule 5 and `references/architecture.md`.
 
 ## Tree structure
 
