@@ -110,11 +110,10 @@ describe("MCP mcporter Integration Tests", function() {
                 executorProcess.kill('SIGKILL');
             }
         }
-        killByPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        // Exit before killByPorts: lsof includes the test process's own
+        // client connections, so killByPorts would SIGTERM mocha itself
+        // (exit 143). cleanup.js between test files handles residual ports.
         deregisterPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
-        // Force-exit: open handles keep the Node event loop alive after
-        // all tests pass, causing CI SIGTERM (exit 143).
-        await pollUntil(() => false, { timeoutMs: 500 }).catch(() => {});
         process.exit(0);
     });
 

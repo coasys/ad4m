@@ -227,15 +227,10 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 executorProcess.kill('SIGKILL');
             }
         }
-        // Port-based kill as safety net
-        killByPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        // Exit before killByPorts: lsof includes the test process's own
+        // client connections, so killByPorts would SIGTERM mocha itself
+        // (exit 143). cleanup.js between test files handles residual ports.
         deregisterPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
-        // Force-exit: WakerSubscriptionManager WebSocket handles and the
-        // global EventSource polyfill keep the Node event loop alive after
-        // all tests pass. mocha --exit should handle this, but the CI
-        // runner's step timeout fires first and SIGTERMs the process
-        // (exit 143). Explicit exit avoids the race.
-        await sleep(500);
         process.exit(0);
     });
 
