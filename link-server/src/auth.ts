@@ -132,7 +132,7 @@ function toBytes(message: string | Uint8Array): Uint8Array {
  * first.
  */
 export function hashMessageForVerify(message: string): Uint8Array {
-  return createHash("sha256").update(message).digest();
+  return new Uint8Array(createHash("sha256").update(message).digest());
 }
 
 export async function signHex(

@@ -62,7 +62,7 @@ export function encryptRoomKeyForDid(
   const ephemeralPub = x25519.getPublicKey(ephemeralPriv);
   const shared = x25519.getSharedSecret(ephemeralPriv, recipientPub);
   const symKey = kdf(shared);
-  const nonce = nodeRandomBytes(12);
+  const nonce = new Uint8Array(nodeRandomBytes(12));
   const ciphertext = gcm(symKey, nonce).encrypt(roomKey);
   return {
     ephemeralPublicKey: bytesToHex(ephemeralPub),
@@ -87,7 +87,7 @@ export function decryptRoomKeyForDid(
 
 /** Encrypts a link's {source,predicate,target} with the room's AES-256-GCM key. */
 export function encryptLinkData(roomKey: Uint8Array, data: LinkData): EncryptedLinkData {
-  const nonce = nodeRandomBytes(12);
+  const nonce = new Uint8Array(nodeRandomBytes(12));
   const plaintext = new TextEncoder().encode(JSON.stringify(data));
   const ciphertext = gcm(roomKey, nonce).encrypt(plaintext);
   return { ciphertext: bytesToHex(ciphertext), nonce: bytesToHex(nonce) };
